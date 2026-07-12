@@ -54,6 +54,7 @@ pub mod converter;
 mod error;
 pub mod exec;
 pub mod lexer;
+pub mod multi_pattern;
 pub mod parser;
 
 pub use ast::*;

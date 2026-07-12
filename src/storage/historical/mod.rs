@@ -1090,15 +1090,23 @@ impl HistoricalStorage {
                 }
             }
 
-            // Update temporal adjacency index to reflect closed valid time
+            // #3504: the superseded version's OWN valid interval now stays open
+            // (append-only) -- close_previous_version_intervals no longer closes
+            // it. Mirror the version chain's masking in the denormalized temporal
+            // adjacency index by closing the prior entry's TRANSACTION time (the
+            // tx-close that still happens on supersession and that hides the
+            // superseded version from current-state reads) instead of its valid
+            // time. This keeps a deleted/updated edge from reappearing in
+            // traversals while preserving snapshot isolation for reads anchored
+            // before the supersession (an earlier-tx query still sees the entry).
             if let Some(ref adj_index) = self.temporal_adjacency_index {
                 let new_temporal = *prev.temporal();
-                if old_temporal.valid_time().end() != new_temporal.valid_time().end() {
-                    adj_index.close_edge_valid_time(
+                if old_temporal.transaction_time().end() != new_temporal.transaction_time().end() {
+                    adj_index.close_edge_transaction_time(
                         edge_id,
                         source,
                         target,
-                        new_temporal.valid_time().end(),
+                        new_temporal.transaction_time().end(),
                     );
                 }
             }
@@ -2983,11 +2991,18 @@ impl HistoricalStorage {
         // Work on a local copy, apply modifications, then write back
         let mut prev_temporal = *prev_version.temporal();
 
-        if prev_temporal.is_currently_valid()
-            && new_temporal.valid_time().start() > prev_temporal.valid_time().start()
-        {
-            prev_temporal = prev_temporal.close_valid_time(new_temporal.valid_time().start())?;
-        }
+        // #3504: The superseded version's valid-time interval must stay
+        // append-only -- we deliberately do NOT close it here. The version
+        // chain is a transaction-time partition: every write/replay path
+        // unconditionally tx-closes the prior head (below), so at any tx
+        // coordinate at most one version is visible and current-state reads
+        // already skip the superseded version. Closing its valid_to in place at
+        // the successor's valid_from would retroactively shrink an interval that
+        // earlier-tx-time read snapshots still observe (the prior version's
+        // transaction-time window remains open to them), making a node that was
+        // alive at snapshot time disappear -- a snapshot-isolation violation on
+        // the valid dimension (residual of #3435; #3437 fixed the tx-time half).
+        // The tx-close alone is both necessary and sufficient.
 
         if prev_temporal.is_currently_recorded()
             && new_temporal.transaction_time().start() > prev_temporal.transaction_time().start()

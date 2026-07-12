@@ -48,6 +48,11 @@ pub use config::{
     ServerConfig, ServerConfigBuilder,
 };
 pub use error::AletheiaHttpError;
+// exposed for autumn-web migration spike (Issue #3524): the isolated
+// `aletheia-autumn-spike` crate reuses the exact node → JSON serializer the
+// `POST /query` GetNode path uses, so its parity assertion is a true
+// byte-equality check. Only the one fn is exposed (not the whole module).
+pub use converters::node_to_query_json;
 pub use handlers::{ApiResponse, QueryRequest, handle_query, health_check};
 pub use server::{build_test_router, build_test_router_with_auth, run_server};
 pub use state::AppState;

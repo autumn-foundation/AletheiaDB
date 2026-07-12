@@ -13,6 +13,22 @@ readme = "README.md"
 keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations", "data-structures"]
 
+# Workspace root (added for the autumn-web 0.5.0 migration spike, Issue #3524).
+# `aletheia-autumn-spike` is an isolated member crate that depends on
+# autumn-web 0.5 UNRENAMED (so its proc-macros' hard-coded `::autumn_web`
+# paths resolve) — see docs/spikes/autumn-web-migration-spike.md for why an
+# isolated crate is required. `default-members = ["."]` keeps bare
+# `cargo build/test/clippy` scoped to the root `aletheiadb` package only, so
+# the existing CI gates are entirely unaffected; the spike gets its own gates
+# (`cargo … -p aletheia-autumn-spike`, `just spike-check`).
+[workspace]
+members = ["crates/autumn-spike"]
+default-members = ["."]
+# `python/` and `fuzz/` are independent crates with their own manifests (the
+# Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
+# this workspace so those workflows still resolve.
+exclude = ["python", "fuzz"]
+
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
@@ -125,6 +141,11 @@ aws-sdk-kms = { version = "1.106.0", optional = true }
 
 # Constant-time equality for API-key digest comparison (Issue #3350).
 subtle = "2.6"
+
+# Per-platform O_NOFOLLOW for hardened key-file writes (Issue #3351). Already
+# present transitively; pinned as a direct dep so the audit signing path can name
+# the correct constant instead of hardcoding a platform-specific integer.
+libc = "0.2"
 
 # Ed25519 asymmetric signatures for signed audit-export artifacts (Issue #3358).
 # Chosen over HMAC so third parties verify offline with ONLY the signer's public
@@ -420,6 +441,12 @@ required-features = []
 name = "durability_modes"
 harness = false
 path = "benches/durability_modes.rs"
+
+# Provenance hash chain write-throughput overhead (Issue #3351)
+[[bench]]
+name = "provenance_chain"
+harness = false
+path = "benches/provenance_chain.rs"
 
 [[bench]]
 name = "checkpoints"

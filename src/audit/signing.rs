@@ -103,8 +103,17 @@ impl AuditSigningKey {
     /// The file is created with restrictive permissions from the start so the
     /// secret is never briefly world-readable.
     ///
+    /// # Security (Issue #3351)
+    /// The file is created with `create_new(true)` (`O_CREAT | O_EXCL`), so the
+    /// call **fails if the path already exists** — an attacker cannot pre-plant a
+    /// symlink or a sensitive file for us to follow and truncate. On unix we also
+    /// add `O_NOFOLLOW` as defense-in-depth so the final path component is never a
+    /// followed symlink. The previous `create(true).truncate(true)` behavior
+    /// silently followed symlinks and truncated whatever it found.
+    ///
     /// # Errors
-    /// Returns [`AuditError::Io`] on write failure.
+    /// Returns [`AuditError::Io`] on write failure, including when the target path
+    /// already exists (write over refused) or is a symlink.
     pub fn write_to_file(&self, path: impl AsRef<Path>) -> AuditResult<()> {
         let path = path.as_ref();
         let seed = Zeroizing::new(self.inner.to_bytes());
@@ -112,15 +121,23 @@ impl AuditSigningKey {
 
         use std::io::Write as _;
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        // create_new => O_CREAT | O_EXCL: refuse to open a pre-existing path
+        // (regular file OR symlink), so we never follow/truncate attacker-planted
+        // content. No truncate flag: we only ever create fresh.
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
+            // Belt-and-suspenders: also refuse to follow a symlink at the final
+            // component. libc supplies the correct per-platform O_NOFOLLOW value.
+            options.custom_flags(libc::O_NOFOLLOW);
         }
-        let mut file = options
-            .open(path)
-            .map_err(|e| AuditError::Io(format!("creating signing key file: {e}")))?;
+        let mut file = options.open(path).map_err(|e| {
+            AuditError::Io(format!(
+                "creating signing key file (refused: path must not already exist and must not be a symlink): {e}"
+            ))
+        })?;
         file.write_all(hex_seed.as_bytes())
             .map_err(|e| AuditError::Io(format!("writing signing key file: {e}")))?;
         file.write_all(b"\n")

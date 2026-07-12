@@ -10,6 +10,9 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(feature = "serde")]
+use aletheiadb::provenance_chain::ChainHead;
+use aletheiadb::provenance_chain::{ChainVerification, EntityKind};
 use aletheiadb::{
     AletheiaDB, Edge, EdgeId, GLOBAL_INTERNER, Node, NodeId, PitrTarget, PropertyMap,
     PropertyMapBuilder, PropertyValue, Timestamp,
@@ -53,6 +56,7 @@ fn run() -> Result<(), String> {
         Some("daemon") => handle_daemon(args.collect()),
         Some("backup") => handle_backup(args.collect()),
         Some("restore") => handle_restore(args.collect()),
+        Some("verify") => handle_verify(args.collect()),
         // A single `import` verb serves both formats; `handle_import` reads `--format`
         // and dispatches to the neo4j-csv (Issue #3356) or parquet (Issue #3364) path.
         // `handle_import` is always defined (a stub when the `import` feature is off).
@@ -91,7 +95,8 @@ Usage:\n\
   aletheia daemon status [--pid-file PATH]\n\
   aletheia backup <output_path>\n\
   aletheia restore <input_path>\n\
-  aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n> | --latest] [--dry-run]"
+  aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n> | --latest] [--dry-run]\n\
+  aletheia verify [--entity <node|edge>:<id>] [--export-head PATH] [--against PATH] [--json]"
     );
     // The neo4j-csv import verb is gated behind the `import` feature; only advertise it
     // when it is compiled in.
@@ -131,6 +136,15 @@ Usage:\n\
             tail; an explicit target above the tail is an error. --dry-run\n\
             reports the achievable window and the count of transactions\n\
             discarded, without restoring.\n\
+\nProvenance hash chain (Issue #3351):\n\
+  verify  — Verify the tamper-evident provenance hash chain over recorded history.\n\
+            Default: full-chain verify. --entity <node|edge>:<id> scopes to one entity.\n\
+            --export-head PATH writes the current head anchor (JSON) for offsite storage.\n\
+            --against PATH verifies the chain append-only-extends a previously exported\n\
+            head (fork/rollback detection). --json emits machine-readable output.\n\
+            Requires the chain to be enabled for the opened data dir (via an\n\
+            ALETHEIADB_CONFIG TOML carrying `[chain] enabled = true`); exits non-zero\n\
+            if the chain is disabled or verification fails.\n\
 \nImport (Issue #3356):\n\
   import  — Load a Neo4j CSV export (neo4j-admin / apoc.export.csv typed headers)\n\
             into the database, emitting a machine-readable fidelity report.\n\
@@ -325,6 +339,208 @@ fn parse_cli_timestamp(s: &str) -> Result<Timestamp, String> {
     Err(format!(
         "invalid timestamp '{s}': expected ISO 8601 (e.g. 2024-01-15T10:00:00Z) or microseconds since epoch"
     ))
+}
+
+/// `aletheia verify` — verify the tamper-evident provenance hash chain
+/// (Issue #3351).
+///
+/// Modes, resolved in precedence order:
+/// - `--export-head PATH`: export the current chain head anchor as JSON to
+///   `PATH` (for offsite storage; feed it back later via `--against`).
+/// - `--against PATH`: load a previously exported head and prove the current
+///   chain append-only-extends it (rollback/fork detection).
+/// - `--entity <node|edge>:<id>`: verify only one entity's contribution.
+/// - (default): full-chain verify from genesis.
+///
+/// `--json` emits machine-readable output. Verification failure (or a
+/// disabled chain) exits non-zero.
+///
+/// The database is opened via [`open_db`], which honours `ALETHEIADB_CONFIG`
+/// (a TOML file that can enable the chain with `[chain] enabled = true`) or
+/// `ALETHEIADB_DATA_DIR`. Note that opening by data dir alone does NOT enable
+/// the chain — a chain-enabled TOML config is required for `verify` to have a
+/// chain to check.
+fn handle_verify(args: Vec<String>) -> Result<(), String> {
+    let json = args.iter().any(|a| a == "--json");
+    let db = open_db()?;
+
+    // Export-head mode takes precedence: it is an explicit export action.
+    // Exporting/importing a chain head anchor serializes `ChainHead` via
+    // `serde_json`, so it is only available when the `serde` feature is
+    // compiled in.
+    #[cfg(feature = "serde")]
+    if let Some(path) = arg_value(&args, "--export-head") {
+        let head = db.export_chain_head().map_err(chain_error_hint)?;
+        write_chain_head(&head, &path)?;
+        println!("{}", render_head_export(&head, &path, json)?);
+        return Ok(());
+    }
+
+    // Against-anchor mode: prove append-only extension of a stored head.
+    #[cfg(feature = "serde")]
+    if let Some(path) = arg_value(&args, "--against") {
+        let anchor = read_chain_head(&path)?;
+        let result = db.verify_chain_against(&anchor).map_err(chain_error_hint)?;
+        return finish_verification(&result, "anchor", json);
+    }
+
+    // Without `serde`, the chain-head export/compare CLI is unavailable. Report
+    // a clean error (non-zero exit via `Err`) instead of silently ignoring the
+    // flags or leaving a compile error, mirroring how other feature-gated CLI
+    // paths surface unavailability. The plain `verify` path below still works.
+    #[cfg(not(feature = "serde"))]
+    if arg_value(&args, "--export-head").is_some() || arg_value(&args, "--against").is_some() {
+        return Err(
+            "chain head export/compare requires the `serde` feature (rebuild with \
+             --features serde)"
+                .to_string(),
+        );
+    }
+
+    // Entity-scoped mode.
+    if let Some(spec) = arg_value(&args, "--entity") {
+        let (kind, id) = parse_entity_arg(&spec)?;
+        let result = db.verify_entity_chain(kind, id).map_err(chain_error_hint)?;
+        return finish_verification(&result, "entity", json);
+    }
+
+    // Default: full-chain verify.
+    let result = db.verify_chain().map_err(chain_error_hint)?;
+    finish_verification(&result, "full", json)
+}
+
+/// Turn a chain API error (notably "chain not enabled") into a CLI-friendly
+/// message with remediation guidance.
+fn chain_error_hint(e: impl std::fmt::Display) -> String {
+    format!(
+        "{e}\n\
+         hint: `aletheia verify` requires the provenance hash chain to be enabled for the \
+         opened database. Open it via ALETHEIADB_CONFIG pointing at a TOML config that \
+         carries a `[chain]` section with `enabled = true`."
+    )
+}
+
+/// Parse an `--entity <node|edge>:<id>` argument into its kind and id.
+fn parse_entity_arg(spec: &str) -> Result<(EntityKind, u64), String> {
+    let (kind_str, id_str) = spec.split_once(':').ok_or_else(|| {
+        format!("invalid --entity '{spec}': expected '<node|edge>:<id>' (e.g. node:42)")
+    })?;
+    let kind = match kind_str.trim().to_ascii_lowercase().as_str() {
+        "node" => EntityKind::Node,
+        "edge" => EntityKind::Edge,
+        other => {
+            return Err(format!(
+                "invalid --entity kind '{other}': expected 'node' or 'edge'"
+            ));
+        }
+    };
+    let id = id_str
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| format!("invalid --entity id '{id_str}': {e}"))?;
+    Ok((kind, id))
+}
+
+/// Render a verification result and return non-zero (via `Err`) on failure.
+///
+/// The full result is printed to stdout in both success and failure cases so a
+/// caller always sees the details; on failure a terse `Err` drives the
+/// process exit code to non-zero (main prints it to stderr).
+fn finish_verification(result: &ChainVerification, scope: &str, json: bool) -> Result<(), String> {
+    println!("{}", render_verification(result, scope, json)?);
+    if result.passed {
+        Ok(())
+    } else {
+        Err(format!(
+            "provenance chain verification FAILED ({scope}){}",
+            result
+                .earliest_broken_seq
+                .map(|s| format!(" at seq {s}"))
+                .unwrap_or_default()
+        ))
+    }
+}
+
+/// Render a [`ChainVerification`] as human-readable text or JSON.
+fn render_verification(
+    result: &ChainVerification,
+    scope: &str,
+    json: bool,
+) -> Result<String, String> {
+    if json {
+        let value = serde_json::json!({
+            "scope": scope,
+            "passed": result.passed,
+            "head_seq": result.head_seq,
+            "head_digest": result.head_digest_hex,
+            "earliest_broken_seq": result.earliest_broken_seq,
+            "reason": result.reason,
+            "transactions_checked": result.transactions_checked,
+        });
+        return serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("failed to render JSON output: {e}"));
+    }
+
+    let status = if result.passed { "PASS" } else { "FAIL" };
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Provenance chain verification: {status} (scope: {scope})\n"
+    ));
+    out.push_str(&format!("  head seq:             {}\n", result.head_seq));
+    out.push_str(&format!(
+        "  head digest:          {}\n",
+        result.head_digest_hex
+    ));
+    out.push_str(&format!(
+        "  transactions checked: {}",
+        result.transactions_checked
+    ));
+    if !result.passed {
+        if let Some(seq) = result.earliest_broken_seq {
+            out.push_str(&format!("\n  earliest broken seq:  {seq}"));
+        }
+        if let Some(reason) = &result.reason {
+            out.push_str(&format!("\n  reason:               {reason}"));
+        }
+    }
+    Ok(out)
+}
+
+/// Render the confirmation for an `--export-head` action.
+#[cfg(feature = "serde")]
+fn render_head_export(head: &ChainHead, path: &str, json: bool) -> Result<String, String> {
+    if json {
+        let value = serde_json::json!({
+            "ok": true,
+            "path": path,
+            "seq": head.seq,
+            "digest": aletheiadb::provenance_chain::to_hex(&head.digest),
+        });
+        return serde_json::to_string(&value)
+            .map_err(|e| format!("failed to render JSON output: {e}"));
+    }
+    Ok(format!(
+        "Exported chain head anchor to {path}\n  seq:    {}\n  digest: {}",
+        head.seq,
+        aletheiadb::provenance_chain::to_hex(&head.digest)
+    ))
+}
+
+/// Serialize a [`ChainHead`] to a JSON file (pretty, digests as hex).
+#[cfg(feature = "serde")]
+fn write_chain_head(head: &ChainHead, path: &str) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(head)
+        .map_err(|e| format!("failed to serialize chain head: {e}"))?;
+    fs::write(path, bytes).map_err(|e| format!("failed to write chain head to '{path}': {e}"))
+}
+
+/// Load a [`ChainHead`] previously exported to a JSON file.
+#[cfg(feature = "serde")]
+fn read_chain_head(path: &str) -> Result<ChainHead, String> {
+    let bytes =
+        fs::read(path).map_err(|e| format!("failed to read chain head from '{path}': {e}"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("'{path}' is not a valid exported chain head: {e}"))
 }
 
 /// `aletheia import` — load an external graph export.
@@ -1796,6 +2012,126 @@ mod tests {
             serde_json::json!(win_path.display().to_string()),
             "data_dir must round-trip exactly through JSON escaping"
         );
+    }
+
+    // ========================================================================
+    // Issue #3351 — `aletheia verify` helper unit tests.
+    // ========================================================================
+
+    fn sample_verification(passed: bool) -> ChainVerification {
+        ChainVerification {
+            passed,
+            head_seq: 7,
+            head_digest_hex: "abcd".to_string(),
+            earliest_broken_seq: if passed { None } else { Some(3) },
+            reason: if passed {
+                None
+            } else {
+                Some("recomputed chain digest differs from sealed digest".to_string())
+            },
+            transactions_checked: 7,
+        }
+    }
+
+    #[test]
+    fn parse_entity_arg_accepts_node_and_edge() {
+        let (kind, id) = parse_entity_arg("node:42").unwrap();
+        assert!(matches!(kind, EntityKind::Node));
+        assert_eq!(id, 42);
+        let (kind, id) = parse_entity_arg("EDGE:7").unwrap();
+        assert!(matches!(kind, EntityKind::Edge));
+        assert_eq!(id, 7);
+    }
+
+    #[test]
+    fn parse_entity_arg_rejects_missing_colon() {
+        let err = parse_entity_arg("node42").unwrap_err();
+        assert!(err.contains("expected"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_entity_arg_rejects_unknown_kind() {
+        let err = parse_entity_arg("vertex:1").unwrap_err();
+        assert!(err.contains("expected 'node' or 'edge'"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_entity_arg_rejects_non_numeric_id() {
+        let err = parse_entity_arg("node:abc").unwrap_err();
+        assert!(err.contains("invalid --entity id"), "got: {err}");
+    }
+
+    #[test]
+    fn render_verification_human_pass_reports_status_and_head() {
+        let out = render_verification(&sample_verification(true), "full", false).unwrap();
+        assert!(out.contains("PASS"), "got: {out}");
+        assert!(out.contains("scope: full"), "got: {out}");
+        assert!(out.contains("head seq:             7"), "got: {out}");
+        // A clean pass must NOT print a broken seq / reason line.
+        assert!(!out.contains("earliest broken seq"), "got: {out}");
+    }
+
+    #[test]
+    fn render_verification_human_fail_reports_broken_seq_and_reason() {
+        let out = render_verification(&sample_verification(false), "entity", false).unwrap();
+        assert!(out.contains("FAIL"), "got: {out}");
+        assert!(out.contains("earliest broken seq:  3"), "got: {out}");
+        assert!(out.contains("differs from sealed digest"), "got: {out}");
+    }
+
+    #[test]
+    fn render_verification_json_is_machine_readable() {
+        let out = render_verification(&sample_verification(false), "anchor", true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(value["scope"], serde_json::json!("anchor"));
+        assert_eq!(value["passed"], serde_json::json!(false));
+        assert_eq!(value["earliest_broken_seq"], serde_json::json!(3));
+        assert_eq!(value["head_seq"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn finish_verification_returns_err_on_failure() {
+        // Failure must map to a non-zero exit (Err), success to Ok.
+        assert!(finish_verification(&sample_verification(false), "full", true).is_err());
+        assert!(finish_verification(&sample_verification(true), "full", true).is_ok());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn chain_head_round_trips_through_file() {
+        let head = ChainHead::genesis(5, 1234);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("head.json");
+        let path_str = path.to_str().unwrap();
+        write_chain_head(&head, path_str).unwrap();
+        let loaded = read_chain_head(path_str).unwrap();
+        assert_eq!(head, loaded);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn read_chain_head_rejects_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        fs::write(&path, b"not a chain head").unwrap();
+        let err = read_chain_head(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            err.contains("not a valid exported chain head"),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn render_head_export_human_and_json() {
+        let head = ChainHead::genesis(9, 42);
+        let human = render_head_export(&head, "/tmp/x.json", false).unwrap();
+        assert!(human.contains("Exported chain head anchor to /tmp/x.json"));
+        assert!(human.contains("seq:    0"));
+        let json = render_head_export(&head, "/tmp/x.json", true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(value["seq"], serde_json::json!(0));
     }
 
     #[test]

@@ -4717,6 +4717,114 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Handle the `verify_chain` tool (Issue #3351): verify the tamper-evident
+    /// provenance hash chain — full, entity-scoped, or against an exported
+    /// anchor. Read-only; when the chain is not enabled the request is a
+    /// structured `FAILED_PRECONDITION` (never a silent empty pass).
+    fn handle_verify_chain(&self, args: serde_json::Value) -> CallToolResult {
+        let args = if args.is_null() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            args
+        };
+        let req: VerifyChainRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Precedence: anchor extension > entity-scoped > full.
+        let (verification, scope) = if let Some(anchor_value) = req.against {
+            let anchor: crate::provenance_chain::ChainHead =
+                match serde_json::from_value(anchor_value) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        return self.invalid_argument(&format!(
+                            "`against` is not a valid exported chain head (as returned by \
+                             export_chain_head): {e}"
+                        ));
+                    }
+                };
+            match self.db.verify_chain_against(&anchor) {
+                Ok(v) => (v, "anchor"),
+                Err(e) => return self.chain_not_enabled(e),
+            }
+        } else if req.entity_kind.is_some() || req.id.is_some() {
+            let kind = match req.entity_kind.as_deref() {
+                Some(k) => match k.trim().to_ascii_lowercase().as_str() {
+                    "node" => crate::provenance_chain::EntityKind::Node,
+                    "edge" => crate::provenance_chain::EntityKind::Edge,
+                    other => {
+                        return self.invalid_argument(&format!(
+                            "entity_kind must be 'node' or 'edge', got '{other}'"
+                        ));
+                    }
+                },
+                None => {
+                    return self.invalid_argument("entity_kind is required when `id` is supplied");
+                }
+            };
+            let id = match req.id {
+                Some(id) => id,
+                None => {
+                    return self
+                        .invalid_argument("`id` is required when `entity_kind` is supplied");
+                }
+            };
+            match self.db.verify_entity_chain(kind, id) {
+                Ok(v) => (v, "entity"),
+                Err(e) => return self.chain_not_enabled(e),
+            }
+        } else {
+            match self.db.verify_chain() {
+                Ok(v) => (v, "full"),
+                Err(e) => return self.chain_not_enabled(e),
+            }
+        };
+
+        self.success_json(json!({
+            "scope": scope,
+            "passed": verification.passed,
+            "head_seq": verification.head_seq,
+            "head_digest": verification.head_digest_hex,
+            "earliest_broken_seq": verification.earliest_broken_seq,
+            "reason": verification.reason,
+            "transactions_checked": verification.transactions_checked,
+        }))
+    }
+
+    /// Handle the `export_chain_head` tool (Issue #3351): export the current
+    /// chain head as an external anchor for offline storage and later
+    /// fork/rollback detection via `verify_chain`'s `against` argument.
+    fn handle_export_chain_head(&self, args: serde_json::Value) -> CallToolResult {
+        let args = if args.is_null() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            args
+        };
+        let _req: ExportChainHeadRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        match self.db.export_chain_head() {
+            Ok(head) => match serde_json::to_value(&head) {
+                Ok(value) => self.success_json(value),
+                Err(e) => self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    format!("Failed to serialize chain head: {}", e),
+                )),
+            },
+            Err(e) => self.chain_not_enabled(e),
+        }
+    }
+
+    /// Map the "chain not enabled" database error (Issue #3351) to a structured
+    /// `FAILED_PRECONDITION` so a caller learns the chain must be enabled for
+    /// this data dir rather than misreading a bare failure.
+    fn chain_not_enabled(&self, e: crate::core::error::Error) -> CallToolResult {
+        self.failed_precondition(&e.to_string())
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -5016,22 +5124,13 @@ impl AletheiaMcpServer {
     /// through `node_to_response`/`edge_to_response`, which would pay a
     /// per-entity version-metadata lookup just to discard the result
     /// (Issue #3391).
-    fn query_row_to_json(&self, row: crate::query::executor::QueryRow) -> serde_json::Value {
-        // Computed/aggregate row (e.g. `RETURN count(*)`, `RETURN n.dept,
-        // count(*)`): the meaningful payload lives in `row.columns`, not
-        // `row.entity` (which is `EntityResult::Null`). Render each named column
-        // via `property_value_to_json` so an LLM sees the aggregate/group value
-        // instead of a lossy `entity: null`. Closes the #558 MCP-surface
-        // follow-up. `include_vectors: true` -- computed aggregate values are
-        // not stored embeddings, so nothing should be elided.
-        if let Some(columns) = row.columns {
-            let mut obj = serde_json::Map::with_capacity(columns.len());
-            for (name, value) in columns {
-                obj.insert(name, self.property_value_to_json(&value, true));
-            }
-            return serde_json::Value::Object(obj);
-        }
-        let entity = match row.entity {
+    /// Serialize a single query-result entity (node/edge/id/null) to JSON.
+    ///
+    /// Shared by the single-entity row path and the multi-variable binding path
+    /// (#549) so both render nodes/edges identically. `include_vectors: true` --
+    /// query rows carry stored properties; vector elision is not applied here.
+    fn query_entity_to_json(&self, entity: &EntityResult) -> serde_json::Value {
+        match entity {
             EntityResult::Node(node) => json!({
                 "type": "node",
                 "id": node.id.as_u64(),
@@ -5051,7 +5150,46 @@ impl AletheiaMcpServer {
             // Null binding from an unmatched OPTIONAL MATCH pattern: surface
             // as JSON null so an LLM/caller sees the preserved row explicitly.
             EntityResult::Null => serde_json::Value::Null,
-        };
+        }
+    }
+
+    fn query_row_to_json(&self, row: crate::query::executor::QueryRow) -> serde_json::Value {
+        // Multi-variable binding row (#549): `MATCH (a),(b) RETURN a,b` binds
+        // several variables, which the single `entity` field cannot represent
+        // (its `entity` is `EntityResult::Null`). Serialize each bound variable
+        // under its name, MERGED with any scalar `columns` (property/alias
+        // projections). Checked BEFORE the columns-only branch because a binding
+        // row can also carry columns. Without this, the row would render as a
+        // lossy `{"entity": null}` and drop every bound entity.
+        if let Some(bindings) = row.bindings {
+            let mut obj = serde_json::Map::with_capacity(
+                bindings.len() + row.columns.as_ref().map_or(0, Vec::len),
+            );
+            for (name, entity) in bindings {
+                obj.insert(name, self.query_entity_to_json(&entity));
+            }
+            if let Some(columns) = row.columns {
+                for (name, value) in columns {
+                    obj.insert(name, self.property_value_to_json(&value, true));
+                }
+            }
+            return serde_json::Value::Object(obj);
+        }
+        // Computed/aggregate row (e.g. `RETURN count(*)`, `RETURN n.dept,
+        // count(*)`): the meaningful payload lives in `row.columns`, not
+        // `row.entity` (which is `EntityResult::Null`). Render each named column
+        // via `property_value_to_json` so an LLM sees the aggregate/group value
+        // instead of a lossy `entity: null`. Closes the #558 MCP-surface
+        // follow-up. `include_vectors: true` -- computed aggregate values are
+        // not stored embeddings, so nothing should be elided.
+        if let Some(columns) = row.columns {
+            let mut obj = serde_json::Map::with_capacity(columns.len());
+            for (name, value) in columns {
+                obj.insert(name, self.property_value_to_json(&value, true));
+            }
+            return serde_json::Value::Object(obj);
+        }
+        let entity = self.query_entity_to_json(&row.entity);
         json!({
             "entity": entity,
             "score": row.score,
@@ -5270,15 +5408,28 @@ impl AletheiaMcpServer {
         // column schema in projection order. Ordinary entity rows leave this
         // `None`, so the static entity/score/path/timestamp schema is retained
         // byte-for-byte.
+        // A multi-variable binding row (#549) advertises its columns
+        // dynamically too: the bound variable names (in binding order) followed
+        // by any scalar projection columns -- mirroring how aggregate rows
+        // derive their dynamic schema -- so a caller can map row keys to
+        // columns instead of seeing the static entity/score/path schema.
         let mut computed_columns: Option<Vec<String>> = None;
         let rows: Vec<serde_json::Value> = collected
             .into_iter()
             .take(limit)
             .map(|row| {
-                if computed_columns.is_none()
-                    && let Some(cols) = &row.columns
-                {
-                    computed_columns = Some(cols.iter().map(|(name, _)| name.clone()).collect());
+                if computed_columns.is_none() {
+                    if let Some(bindings) = &row.bindings {
+                        let mut names: Vec<String> =
+                            bindings.iter().map(|(name, _)| name.clone()).collect();
+                        if let Some(cols) = &row.columns {
+                            names.extend(cols.iter().map(|(name, _)| name.clone()));
+                        }
+                        computed_columns = Some(names);
+                    } else if let Some(cols) = &row.columns {
+                        computed_columns =
+                            Some(cols.iter().map(|(name, _)| name.clone()).collect());
+                    }
                 }
                 self.query_row_to_json(row)
             })
@@ -5459,6 +5610,8 @@ impl AletheiaMcpServer {
             "lineage_downstream" => self.handle_lineage_downstream(args),
             "audit_export" => self.handle_audit_export(args),
             "database_stats" => self.handle_database_stats(args),
+            "verify_chain" => self.handle_verify_chain(args),
+            "export_chain_head" => self.handle_export_chain_head(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
                     .details(json!({ "tool": name })),
@@ -6081,6 +6234,31 @@ fn tool_definitions() -> Vec<Tool> {
              for per-label breakdowns use get_schema.",
             make_input_schema::<DatabaseStatsRequest>(),
         ),
+        Tool::new(
+            "verify_chain",
+            "Verify the tamper-evident provenance hash chain (Issue #3351) — proof that the \
+             recorded bi-temporal history has not been altered. Three modes: (1) FULL (no \
+             arguments) walks the whole chain from genesis and, on tamper, reports the \
+             `earliest_broken_seq`; (2) ENTITY-SCOPED (pass `entity_kind` 'node'|'edge' and \
+             `id`) recomputes only that entity's contribution; (3) ANCHOR EXTENSION (pass \
+             `against`, a previously exported chain head from export_chain_head) proves the \
+             current chain append-only-extends that anchor, detecting rollback (truncation) \
+             and fork (divergence). Read-only. Returns {scope, passed, head_seq, head_digest, \
+             earliest_broken_seq, reason, transactions_checked}. Requires the chain to be \
+             enabled for this database; if it is not, returns a FAILED_PRECONDITION error \
+             (never a silent empty pass).",
+            make_input_schema::<VerifyChainRequest>(),
+        ),
+        Tool::new(
+            "export_chain_head",
+            "Export the current provenance hash chain head as an external anchor (Issue \
+             #3351). Store the returned checkpoint offsite; later pass it back as \
+             verify_chain's `against` argument to prove the chain has only been appended to \
+             (detecting rollback and fork). No arguments. Returns the chain head {seq, digest, \
+             commit_ts, anchor_lsn, genesis_digest} with digests as lowercase hex. Requires \
+             the chain to be enabled; otherwise returns a FAILED_PRECONDITION error.",
+            make_input_schema::<ExportChainHeadRequest>(),
+        ),
     ];
 
     // Advertise the Issue #3353 token budget on every budgetable read tool by
@@ -6439,5 +6617,116 @@ mod server_unit_tests {
         );
         assert!(value["score"].is_null());
         assert!(value["path"].is_null());
+    }
+
+    // --- #549 MCP surface: multi-variable binding rows serialize each bound
+    // entity under its variable name (never a lossy `entity: null`).
+
+    #[test]
+    fn query_row_to_json_bindings_serializes_each_entity() {
+        use crate::core::graph::Node;
+        use crate::core::id::VersionId;
+        use crate::core::{GLOBAL_INTERNER, PropertyMapBuilder};
+
+        let server = make_server();
+        let mk = |id: u64, name: &str| {
+            let label = GLOBAL_INTERNER.intern("Person").unwrap();
+            Node::new(
+                NodeId::new(id).unwrap(),
+                label,
+                PropertyMapBuilder::new().insert("name", name).build(),
+                VersionId::new(1).unwrap(),
+            )
+        };
+        let row = QueryRow::from_bindings(
+            vec![
+                ("a".to_string(), EntityResult::Node(mk(1, "Alice"))),
+                ("b".to_string(), EntityResult::Node(mk(2, "Bob"))),
+            ],
+            None,
+        );
+        let json = server.query_row_to_json(row);
+        let obj = json
+            .as_object()
+            .expect("bindings row must be a JSON object");
+        // Both variables surface as node objects, NOT a lossy null.
+        assert_eq!(obj["a"]["type"].as_str(), Some("node"), "got: {json}");
+        assert_eq!(obj["a"]["id"].as_u64(), Some(1), "got: {json}");
+        assert_eq!(
+            obj["a"]["properties"]["name"].as_str(),
+            Some("Alice"),
+            "got: {json}"
+        );
+        assert_eq!(obj["b"]["type"].as_str(), Some("node"), "got: {json}");
+        assert_eq!(obj["b"]["id"].as_u64(), Some(2), "got: {json}");
+    }
+
+    #[test]
+    fn query_row_to_json_bindings_merged_with_columns() {
+        use crate::core::graph::Node;
+        use crate::core::id::VersionId;
+        use crate::core::{GLOBAL_INTERNER, PropertyMapBuilder};
+
+        let server = make_server();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(7).unwrap(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            VersionId::new(1).unwrap(),
+        );
+        let row = QueryRow::from_bindings(
+            vec![("a".to_string(), EntityResult::Node(node))],
+            Some(vec![(
+                "a.name".to_string(),
+                PropertyValue::String("Alice".into()),
+            )]),
+        );
+        let json = server.query_row_to_json(row);
+        // The bound entity and the scalar column are both present, merged.
+        assert_eq!(json["a"]["type"].as_str(), Some("node"), "got: {json}");
+        assert_eq!(json["a.name"].as_str(), Some("Alice"), "got: {json}");
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_multi_pattern_returns_non_null_bindings() {
+        use crate::core::PropertyMapBuilder;
+        let server = make_server();
+        server
+            .db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        server
+            .db
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
+        let result = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (a:Person),(b:Company) RETURN a,b"
+        }));
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let rows = val["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 1, "got: {val}");
+        assert_eq!(rows[0]["a"]["type"].as_str(), Some("node"), "got: {val}");
+        assert_eq!(rows[0]["b"]["type"].as_str(), Some("node"), "got: {val}");
+        // The response columns are derived dynamically from the binding names.
+        let cols: Vec<String> = val["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            cols.contains(&"a".to_string()) && cols.contains(&"b".to_string()),
+            "columns must name the bound variables: {val}"
+        );
     }
 }

@@ -1226,6 +1226,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide
 - **[docs/query-language-design.md](docs/query-language-design.md)** - Query language grammar and semantics
 - **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Derivation lineage between facts (Issue #3371)
+- **[docs/guides/provenance-hash-chain.md](docs/guides/provenance-hash-chain.md)** - Tamper-evident provenance hash chain: `aletheia verify`, `verify_chain`/`export_chain_head` MCP tools, external anchoring (Issue #3351)
 
 ### User Guides
 - **[docs/guides/vector-search-integration.md](docs/guides/vector-search-integration.md)** - Complete vector search API

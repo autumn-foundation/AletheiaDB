@@ -168,8 +168,40 @@ pub(crate) const WAL_VERSION_DESTRUCTIVE_PROVENANCE: u8 = 11;
 /// [`WAL_VERSION_DESTRUCTIVE_PROVENANCE`]).
 pub(crate) const WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE: u8 = 12;
 
+/// WAL format version that serializes node/edge/constraint **label** strings as
+/// length-prefixed UTF-8 (`[len: u32-LE][utf8 bytes]`) and re-interns them on
+/// read, instead of persisting a raw [`InternedString`] id (Issue #3506).
+///
+/// A strict superset of [`WAL_VERSION_DESTRUCTIVE_PROVENANCE`]: it keeps every
+/// prior field (tx framing, tombstone/retraction `version_id`, destructive-op
+/// provenance) and only changes how the label field of `CreateNode`,
+/// `CreateEdge`, `UpdateNode`, `UpdateEdge`, `DeclareUniqueConstraint`, and
+/// `DropUniqueConstraint` is encoded. Prior versions wrote the label as a raw
+/// 4-byte interner id and replayed it via [`InternedString::from_raw`] WITHOUT
+/// re-interning the underlying string — correct only when the replaying
+/// process reproduced the exact id→string layout of the writer. In a
+/// non-identity interner layout (multiple `AletheiaDB` instances sharing the
+/// process-global interner, repeated open/close, or the WAL-only replay path
+/// that performs no interner restore) a raw-id label silently resolved to the
+/// wrong string. v13+ segments carry the string itself, so labels are correct
+/// under any interner layout, exactly as property keys/values already are.
+///
+/// The [`carries_string_labels`] gate is an independent monotonic `>=` boolean
+/// on the same version byte, composing with the framing/delete-version-id/
+/// destructive-provenance gates. ≤v12 segments keep the raw-id decode path
+/// (best-effort, identity-layout only — we cannot retroactively recover a
+/// string that was never written); v13+ segments are unconditionally correct.
+/// Bumping the header version makes an older reader reject the file cleanly
+/// rather than mis-length the variable-width label payload, following the
+/// #3224/#3406/#3413/#3427 precedent.
+pub(crate) const WAL_VERSION_STRING_LABELS: u8 = 13;
+
+/// WAL format version for encrypted segments whose decrypted payload uses the
+/// string-label entry format (i.e. [`WAL_VERSION_STRING_LABELS`], Issue #3506).
+pub(crate) const WAL_VERSION_ENCRYPTED_STRING_LABELS: u8 = 14;
+
 /// Maximum supported WAL version (inclusive).
-const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE;
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_STRING_LABELS;
 
 /// Returns `true` if `version` denotes an encrypted segment (the original
 /// encrypted format or one of its provenance/framing-carrying successors).
@@ -181,6 +213,7 @@ fn is_encrypted_version(version: u8) -> bool {
         || version == WAL_VERSION_ENCRYPTED_TX_FRAMING
         || version == WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID
         || version == WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE
+        || version == WAL_VERSION_ENCRYPTED_STRING_LABELS
 }
 
 /// Returns `true` if `version` (a plaintext/payload version) supports the
@@ -215,6 +248,17 @@ fn carries_destructive_provenance(version: u8) -> bool {
     version >= WAL_VERSION_DESTRUCTIVE_PROVENANCE
 }
 
+/// Returns `true` if `version` (a plaintext/payload version) serializes labels
+/// as length-prefixed UTF-8 and re-interns them on read (Issue #3506).
+///
+/// Independent of the framing/delete-version-id/destructive-provenance gates:
+/// all are monotonic `>=` predicates on the same version byte, so v13/v14
+/// segments carry every prior field AND string labels.
+#[inline]
+fn carries_string_labels(version: u8) -> bool {
+    version >= WAL_VERSION_STRING_LABELS
+}
+
 /// Map a segment/container format version to the logical *payload* version
 /// used to gate field parsing (e.g. `version >= WAL_VERSION_PROVENANCE`).
 ///
@@ -230,6 +274,7 @@ fn payload_version(version: u8) -> u8 {
         WAL_VERSION_ENCRYPTED_TX_FRAMING => WAL_VERSION_TX_FRAMING,
         WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID => WAL_VERSION_DELETE_VERSION_ID,
         WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE => WAL_VERSION_DESTRUCTIVE_PROVENANCE,
+        WAL_VERSION_ENCRYPTED_STRING_LABELS => WAL_VERSION_STRING_LABELS,
         v => v,
     }
 }
@@ -250,7 +295,7 @@ fn payload_version(version: u8) -> u8 {
 /// and fails the entry checksum.
 ///
 /// History of the newest plaintext version: #3224→3, #3421→5, #3413→7,
-/// #3406→9, #3427→11. Bump on every WAL plaintext format increase.
+/// #3406→9, #3427→11, #3506→13. Bump on every WAL plaintext format increase.
 #[inline]
 // Only referenced by the fuzz-only `crate::fuzzing` module, so it is compiled
 // only under `any(fuzzing, feature = "fuzzing")`; on non-fuzzing builds it is
@@ -1378,17 +1423,40 @@ fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Opt
     Ok(Some(provenance))
 }
 
-/// Read a 4-byte InternedString label ID from `buffer` at `offset`, advancing `offset` by 4.
+/// Read a label from `buffer` at `offset`, advancing `offset` past it.
+///
+/// For v13+ segments ([`carries_string_labels`], Issue #3506) the label is a
+/// length-prefixed UTF-8 string (`[len: u32-LE][utf8 bytes]`) which is
+/// re-interned into the process-global interner on read, so it resolves to the
+/// correct string under ANY interner layout (byte-identical to the property-key
+/// codec). For ≤v12 segments the label is a raw 4-byte [`InternedString`] id
+/// wrapped via [`InternedString::from_raw`] — correct only when the replaying
+/// process reproduces the writer's interner layout (the pre-#3506 behavior,
+/// preserved for backward compatibility).
 #[inline]
 fn read_label(
     buffer: &[u8],
     offset: &mut usize,
+    version: u8,
     context: &str,
 ) -> Result<crate::core::interning::InternedString> {
-    require_bytes(buffer, *offset, 4, context)?;
-    let label_id = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap());
-    advance(offset, 4)?;
-    Ok(crate::core::interning::InternedString::from_raw(label_id))
+    if carries_string_labels(version) {
+        require_bytes(buffer, *offset, 4, context)?;
+        let len = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap()) as usize;
+        advance(offset, 4)?;
+        require_bytes(buffer, *offset, len, context)?;
+        let s = std::str::from_utf8(&buffer[*offset..*offset + len]).map_err(|e| {
+            StorageError::CorruptedData(format!("Invalid UTF-8 in WAL label ({context}): {e}"))
+        })?;
+        let interned = crate::core::interning::GLOBAL_INTERNER.intern(s)?;
+        advance(offset, len)?;
+        Ok(interned)
+    } else {
+        require_bytes(buffer, *offset, 4, context)?;
+        let label_id = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap());
+        advance(offset, 4)?;
+        Ok(crate::core::interning::InternedString::from_raw(label_id))
+    }
 }
 
 /// Read a PropertyMap and valid_from HybridTimestamp for version 1+ entries.
@@ -1420,7 +1488,7 @@ fn parse_create_node_op(
 ) -> Result<WalOperation> {
     let node_id = deserialize_node_id(buffer, *offset, "CreateNode")?;
     advance(offset, 8)?;
-    let label = read_label(buffer, offset, "CreateNode label")?;
+    let label = read_label(buffer, offset, version, "CreateNode label")?;
     let (properties, valid_from) =
         read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
     let provenance = read_provenance(buffer, offset, version)?;
@@ -1445,7 +1513,7 @@ fn parse_create_edge_op(
     advance(offset, 8)?;
     let target = deserialize_node_id(buffer, *offset, "CreateEdge target")?;
     advance(offset, 8)?;
-    let label = read_label(buffer, offset, "CreateEdge label")?;
+    let label = read_label(buffer, offset, version, "CreateEdge label")?;
     let (properties, valid_from) =
         read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
     let provenance = read_provenance(buffer, offset, version)?;
@@ -1471,7 +1539,7 @@ fn parse_update_node_op(
     let version_id = deserialize_version_id(buffer, *offset, "UpdateNode")?;
     advance(offset, 8)?;
     let (label, properties, valid_from) = if version >= WAL_VERSION {
-        let label = read_label(buffer, offset, "UpdateNode label")?;
+        let label = read_label(buffer, offset, version, "UpdateNode label")?;
         let (props, valid_from) = read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
         (label, props, valid_from)
     } else {
@@ -1501,14 +1569,21 @@ fn parse_update_edge_op(
     // Upfront check is required: for V1 it pre-validates EdgeId+VersionId+LabelId (20 bytes)
     // as a unit, producing the "UpdateEdge" error message that tests assert on.
     // Removing it would shift the failure to read_label with a different message.
-    let required = if version >= WAL_VERSION { 20 } else { 16 };
+    // For v13+ (Issue #3506) the label is a variable-width UTF-8 string, so the
+    // fixed 4-byte label slot no longer exists — pre-validate only the fixed
+    // EdgeId+VersionId (16 bytes) and let read_label validate the label bytes.
+    let required = if version >= WAL_VERSION && !carries_string_labels(version) {
+        20
+    } else {
+        16
+    };
     require_bytes(buffer, *offset, required, "UpdateEdge")?;
     let edge_id = deserialize_edge_id(buffer, *offset, "UpdateEdge")?;
     advance(offset, 8)?;
     let version_id = deserialize_version_id(buffer, *offset, "UpdateEdge")?;
     advance(offset, 8)?;
     let (label, properties, valid_from) = if version >= WAL_VERSION {
-        let label = read_label(buffer, offset, "UpdateEdge label")?;
+        let label = read_label(buffer, offset, version, "UpdateEdge label")?;
         let (props, valid_from) = read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
         (label, props, valid_from)
     } else {
@@ -1787,13 +1862,18 @@ pub(crate) fn parse_entry_at(
         OP_RETRACT_EDGE => parse_retract_edge_op(buffer, &mut cur, version)?,
         OP_CHECKPOINT => parse_checkpoint_op(buffer, &mut cur)?,
         OP_DECLARE_UNIQUE_CONSTRAINT => {
-            let label = read_label(buffer, &mut cur, "DeclareUniqueConstraint.label")?;
-            let property = read_label(buffer, &mut cur, "DeclareUniqueConstraint.property")?;
+            let label = read_label(buffer, &mut cur, version, "DeclareUniqueConstraint.label")?;
+            let property = read_label(
+                buffer,
+                &mut cur,
+                version,
+                "DeclareUniqueConstraint.property",
+            )?;
             WalOperation::DeclareUniqueConstraint { label, property }
         }
         OP_DROP_UNIQUE_CONSTRAINT => {
-            let label = read_label(buffer, &mut cur, "DropUniqueConstraint.label")?;
-            let property = read_label(buffer, &mut cur, "DropUniqueConstraint.property")?;
+            let label = read_label(buffer, &mut cur, version, "DropUniqueConstraint.label")?;
+            let property = read_label(buffer, &mut cur, version, "DropUniqueConstraint.property")?;
             WalOperation::DropUniqueConstraint { label, property }
         }
         OP_BEGIN_TX => parse_begin_tx_op(buffer, &mut cur)?,
@@ -1907,6 +1987,199 @@ mod tests {
         assert!(entries.is_empty());
     }
 
+    /// Issue #3506 (review) — the load-bearing corruption-proof test. Under a
+    /// deliberately NON-IDENTITY interner layout, the pre-#3506 raw-id label
+    /// encoding decodes a `CreateNode` label to the WRONG string, while the v13
+    /// string-label encoding decodes it to the RIGHT string. This is the test
+    /// that would FAIL on the pre-#3506 raw-id decode and PASSES with the string
+    /// decode — unlike the WAL-only reopen smoke test in
+    /// `tests/wal_string_labels_recovery.rs`, which passes on both codecs because
+    /// the process-global interner never reassigns ids in-process.
+    #[test]
+    fn raw_id_decode_corrupts_under_nonidentity_layout_string_decode_does_not() {
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+
+        // The foreign writer's raw id for "PersonTarget3506" happens to mean
+        // "DecoyMeaning3506" in THIS process's interner layout (non-identity):
+        // we store `decoy`'s id as the raw-id label, standing in for a foreign
+        // id whose numeric value resolves to a different string in this process.
+        let target = GLOBAL_INTERNER.intern("PersonTarget3506").unwrap();
+        let decoy = GLOBAL_INTERNER.intern("DecoyMeaning3506").unwrap();
+        assert_ne!(target.as_u32(), decoy.as_u32());
+
+        let node_id = NodeId::new(3506).unwrap();
+        let valid_from = time::now();
+
+        // Build a CreateNode entry whose label portion is written by `write_label`;
+        // the surrounding framing (header, node id, props, valid_from, provenance,
+        // CRC) is identical to a real entry. Only the label codec differs between
+        // the two variants below.
+        let build_entry = |write_label: &dyn Fn(&mut Vec<u8>)| -> Vec<u8> {
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&LSN(3506).0.to_le_bytes());
+            valid_from.serialize_into(&mut buffer);
+            let cs = buffer.len();
+            buffer.extend_from_slice(&[0u8; 4]); // checksum placeholder
+            buffer.push(OP_CREATE_NODE);
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            write_label(&mut buffer);
+            PropertyMap::new().serialize_into(&mut buffer).unwrap();
+            valid_from.serialize_into(&mut buffer);
+            buffer.push(0u8); // provenance: absent
+            let mut h = crc32fast::Hasher::new();
+            h.update(&buffer[0..20]);
+            h.update(&buffer[cs + 4..]);
+            buffer[cs..cs + 4].copy_from_slice(&h.finalize().to_le_bytes());
+            buffer
+        };
+
+        // ---- Old format (v11 raw id): stores decoy's raw id as the label. ----
+        let old = build_entry(&|buf| buf.extend_from_slice(&decoy.as_u32().to_le_bytes()));
+        let (old_entry, _) = parse_entry_at(&old, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        let old_label = match old_entry.operation {
+            WalOperation::CreateNode { label, .. } => label,
+            other => panic!("expected CreateNode, got {other:?}"),
+        };
+        // THE BUG: the raw-id decode resolves to the DECOY string, not the
+        // intended target — the corruption the raw-id encoding caused under a
+        // non-identity interner layout.
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(old_label, |s| s == "DecoyMeaning3506")
+                .unwrap(),
+            "pre-#3506 raw-id decode must corrupt the label to \"DecoyMeaning3506\""
+        );
+
+        // ---- New format (v13 string): stores the STRING "PersonTarget3506". ----
+        let new = build_entry(&|buf| {
+            let bytes = "PersonTarget3506".as_bytes();
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        });
+        let (new_entry, _) = parse_entry_at(&new, 0, WAL_VERSION_STRING_LABELS).unwrap();
+        let new_label = match new_entry.operation {
+            WalOperation::CreateNode { label, .. } => label,
+            other => panic!("expected CreateNode, got {other:?}"),
+        };
+        // THE FIX: the string decode re-interns and resolves to the intended
+        // target string under ANY interner layout.
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(new_label, |s| s == "PersonTarget3506")
+                .unwrap(),
+            "v13 string decode must recover the correct label \"PersonTarget3506\""
+        );
+    }
+
+    /// Issue #3506 — crash-recovery corruption path: a v13+ label whose
+    /// length-prefixed bytes are not valid UTF-8 must be rejected as
+    /// `CorruptedData` (not silently mis-decoded), so a torn/garbled segment
+    /// fails the replay loudly instead of interning a bogus label.
+    #[test]
+    fn read_label_v13_rejects_invalid_utf8() {
+        // [len = 2][0xFF, 0xFF] — 0xFF 0xFF is never valid UTF-8.
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&2u32.to_le_bytes());
+        buffer.extend_from_slice(&[0xFF, 0xFF]);
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateNode label",
+        )
+        .expect_err("invalid UTF-8 label bytes must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("Invalid UTF-8 in WAL label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — crash-recovery corruption path: a v13+ label whose declared
+    /// length overruns the remaining buffer must fail `require_bytes` with a
+    /// `CorruptedData` error naming the read context, rather than slicing out of
+    /// bounds or allocating on a crafted length.
+    #[test]
+    fn read_label_v13_rejects_length_overrun() {
+        // [len = 100] but zero label bytes follow.
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&100u32.to_le_bytes());
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateEdge label",
+        )
+        .expect_err("length-overrun label must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("CreateEdge label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — crash-recovery corruption path: a v13+ segment truncated
+    /// mid-way through the 4-byte label length prefix must fail the initial
+    /// `require_bytes` guard rather than reading past the buffer end.
+    #[test]
+    fn read_label_v13_rejects_truncated_length_prefix() {
+        // Only 2 of the 4 length-prefix bytes are present.
+        let buffer = [0x01u8, 0x00];
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "UpdateNode label",
+        )
+        .expect_err("truncated label length prefix must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("UpdateNode label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — happy-path unit coverage for the v13 label decode in
+    /// isolation: a well-formed `[len][utf8]` label re-interns to the exact
+    /// string and advances `offset` past the whole field.
+    #[test]
+    fn read_label_v13_round_trips_and_advances_offset() {
+        let label_str = "Straße3506"; // multi-byte to exercise len != char count
+        let bytes = label_str.as_bytes();
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(bytes);
+        buffer.push(0xAB); // trailing sentinel: offset must stop before this
+        let mut offset = 0usize;
+        let interned = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateNode label",
+        )
+        .expect("well-formed v13 label must decode");
+        assert_eq!(
+            offset,
+            4 + bytes.len(),
+            "offset must advance past [len][utf8]"
+        );
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(interned, |s| s == label_str)
+                .unwrap(),
+            "decoded label must re-intern to the original string"
+        );
+    }
+
     /// Issue #3413: `CommitTx` serializes and parses back byte-for-byte under
     /// the transaction-framing version, and the parsed entry is flagged
     /// `framed`.
@@ -1948,16 +2221,31 @@ mod tests {
     /// `framed == false`, keeping them on the legacy immediate-apply path.
     #[test]
     fn test_pre_framing_version_not_flagged_framed() {
-        let op = WalOperation::CreateNode {
-            node_id: NodeId::new(1).unwrap(),
-            label: GLOBAL_INTERNER.intern("Legacy").unwrap(),
-            properties: PropertyMap::new(),
-            valid_from: time::now(),
-            provenance: None,
-        };
-        let entry = WalEntry::new(LSN(1), op);
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+        // Hand-build a genuine v6 (pre-framing) CreateNode carrying a RAW 4-byte
+        // interner-id label — the pre-#3506 label encoding. The modern
+        // serializer writes string labels only at v13+, so we cannot use it to
+        // produce a v6-parseable entry; the framing flag under test is a pure
+        // function of the segment version, independent of the label codec.
+        let label = GLOBAL_INTERNER.intern("Legacy").unwrap();
+        let node_id = NodeId::new(1).unwrap();
+        let valid_from = time::now();
         let mut buffer = Vec::new();
-        serialize_entry_into(&entry, &mut buffer).unwrap();
+        buffer.extend_from_slice(&LSN(1).0.to_le_bytes());
+        valid_from.serialize_into(&mut buffer);
+        let cs = buffer.len();
+        buffer.extend_from_slice(&[0u8; 4]);
+        buffer.push(OP_CREATE_NODE);
+        buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        buffer.extend_from_slice(&label.as_u32().to_le_bytes()); // raw id label
+        PropertyMap::new().serialize_into(&mut buffer).unwrap();
+        valid_from.serialize_into(&mut buffer);
+        buffer.push(0u8); // provenance: absent (v6 blob presence byte)
+        let mut h = crc32fast::Hasher::new();
+        h.update(&buffer[0..20]);
+        h.update(&buffer[cs + 4..]);
+        buffer[cs..cs + 4].copy_from_slice(&h.finalize().to_le_bytes());
+
         let (parsed, _) = parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).unwrap();
         assert!(
             !parsed.framed,
@@ -1998,7 +2286,7 @@ mod tests {
             let segment_path = dir.path().join(format!("{}.log", seg_id));
             let mut file = File::create(&segment_path).unwrap();
             file.write_all(&WAL_MAGIC).unwrap();
-            file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+            file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
             for lsn in *lsns {
                 let operation = WalOperation::CreateNode {
                     node_id: NodeId::new(*lsn).unwrap(),
@@ -2029,7 +2317,7 @@ mod tests {
         use std::io::Write;
         let mut file = File::create(path).unwrap();
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
         let mut last_entry_bytes = Vec::new();
         for lsn in lsns {
             let operation = WalOperation::CreateNode {
@@ -2356,7 +2644,7 @@ mod tests {
         use std::io::Write;
         let mut file = File::create(path).unwrap();
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID])
+        file.write_all(&[WAL_VERSION_ENCRYPTED_STRING_LABELS])
             .unwrap();
         file.sync_all().unwrap();
     }
@@ -2377,6 +2665,21 @@ mod tests {
             .expect("encrypted final-segment torn tail must be tolerated");
         let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
         assert_eq!(lsns, vec![5, 7]);
+
+        // Issue #3506: the decrypted v14 (encrypted string-label) entries must
+        // recover their label STRING, not just their LSNs — the string-label
+        // survival across the encrypted decode path is asserted explicitly.
+        for entry in &entries {
+            match &entry.operation {
+                WalOperation::CreateNode { label, .. } => assert!(
+                    GLOBAL_INTERNER
+                        .resolve_with(*label, |s| s == "TornTail3433")
+                        .unwrap(),
+                    "decrypted v14 CreateNode label must resolve to \"TornTail3433\""
+                ),
+                other => panic!("expected CreateNode, got {other:?}"),
+            }
+        }
     }
 
     /// #3433 must-hard-error (b): in an encrypted final segment, an undecodable
@@ -2527,7 +2830,7 @@ mod tests {
         // payload shape now (Issue #3224), so parsing must use the matching
         // version to consume the same bytes that were written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(1));
@@ -2572,7 +2875,7 @@ mod tests {
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         assert_eq!(parsed_entry.lsn, LSN(5));
         assert_eq!(bytes_consumed, buffer.len());
@@ -2593,32 +2896,40 @@ mod tests {
     /// their own payload version with `principal: None`.
     #[test]
     fn test_parse_pre_v5_provenance_bytes_yields_no_principal() {
-        // Build genuine v3-format bytes. Start from the current (v5)
-        // serializer with `principal: None` -- whose only difference from
-        // v3 is a single trailing absent-principal presence byte -- drop
-        // that byte, and re-stamp the CRC (bytes 20..24, computed over
-        // LSN+timestamp and the operation data).
-        let operation = WalOperation::CreateNode {
-            node_id: NodeId::new(9).unwrap(),
-            label: GLOBAL_INTERNER.intern("Doc").unwrap(),
-            properties: PropertyMap::new(),
-            valid_from: time::now(),
-            provenance: Some(Provenance::builder().source("importer").build().unwrap()),
-        };
-        let entry = WalEntry::new(LSN(9), operation);
+        // Hand-build genuine v3-format bytes: a CreateNode with a RAW 4-byte
+        // interner-id label (the pre-#3506 encoding) and a v3 provenance
+        // bundle that ends at `correlation_id` (no principal slot). The modern
+        // serializer writes string labels + a principal slot (v13), so we
+        // assemble the v3 shape by hand and stamp its CRC.
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+        let label = GLOBAL_INTERNER.intern("Doc").unwrap();
+        let node_id = NodeId::new(9).unwrap();
+        let valid_from = time::now();
         let mut buffer = Vec::new();
-        serialize_entry_into(&entry, &mut buffer).unwrap();
-        assert_eq!(
-            *buffer.last().unwrap(),
-            0,
-            "v5 buffer must end with the absent-principal presence byte"
-        );
-        buffer.pop(); // v3 bundles end at correlation_id
+        buffer.extend_from_slice(&LSN(9).0.to_le_bytes());
+        valid_from.serialize_into(&mut buffer);
+        let cs = buffer.len();
+        buffer.extend_from_slice(&[0u8; 4]);
+        buffer.push(OP_CREATE_NODE);
+        buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        buffer.extend_from_slice(&label.as_u32().to_le_bytes()); // raw id label
+        PropertyMap::new().serialize_into(&mut buffer).unwrap();
+        valid_from.serialize_into(&mut buffer);
+        // v3 provenance blob: presence(1) + source("importer") + confidence(absent)
+        // + note(absent) + correlation_id(absent). NO trailing principal slot.
+        buffer.push(1); // provenance present
+        let src = b"importer";
+        buffer.push(1); // source present
+        buffer.extend_from_slice(&(src.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(src);
+        buffer.push(0); // confidence absent
+        buffer.push(0); // note absent
+        buffer.push(0); // correlation_id absent
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&buffer[0..20]);
-        hasher.update(&buffer[24..]);
+        hasher.update(&buffer[cs + 4..]);
         let checksum = hasher.finalize();
-        buffer[20..24].copy_from_slice(&checksum.to_le_bytes());
+        buffer[cs..cs + 4].copy_from_slice(&checksum.to_le_bytes());
 
         let (parsed_entry, bytes_consumed) =
             parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
@@ -2663,7 +2974,7 @@ mod tests {
         // payload shape now (Issue #3224), so parsing must use the matching
         // version to consume the same bytes that were written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(2));
@@ -3371,7 +3682,7 @@ mod tests {
         // payload shape now (Issue #3224), so parsing must use the matching
         // version to consume the same bytes that were written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(3));
@@ -3414,7 +3725,7 @@ mod tests {
         // payload shape now (Issue #3224), so parsing must use the matching
         // version to consume the same bytes that were written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(4));
@@ -3595,7 +3906,7 @@ mod tests {
         // provenance-carrying payload shape now (Issue #3224), so parsing
         // must use the matching version to consume the same bytes written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, offset1_end, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, offset1_end, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(2));
@@ -3748,8 +4059,10 @@ mod tests {
         // Corrupt the checksum (bytes 20-24)
         buffer[20] ^= 0xFF; // Flip all bits in first checksum byte
 
-        // Should return error for checksum mismatch
-        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        // Should return error for checksum mismatch. Parse at the version the
+        // serializer stamps (v13 string labels) so the op parses cleanly and
+        // the failure is the corrupted checksum, not a label-misalignment.
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS);
         assert!(result.is_err());
         if let Err(e) = result {
             let error_msg = format!("{}", e);
@@ -3868,7 +4181,7 @@ mod tests {
         // (always-provenance-carrying) format, so the header must declare
         // WAL_VERSION_PROVENANCE for the reader to parse them correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
 
         // Create and write many entries to simulate a large segment
         // We'll create 1000 entries, which should be several MB
@@ -3929,7 +4242,7 @@ mod tests {
             // declare WAL_VERSION_PROVENANCE for the reader to parse them
             // correctly.
             file.write_all(&WAL_MAGIC).unwrap();
-            file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+            file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
 
             // Write entries for this segment
             for i in 0..entries_per_segment {
@@ -3983,7 +4296,7 @@ mod tests {
         // (always-provenance-carrying) format, so the header must declare
         // WAL_VERSION_PROVENANCE for the reader to parse them correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
 
         // Write 100 entries with LSN 1-100
         for i in 1..=100 {
@@ -4061,7 +4374,7 @@ mod tests {
         // (always-provenance-carrying) format, so the header must declare
         // WAL_VERSION_PROVENANCE for the reader to parse it correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
 
         // Write one complete entry
         let operation = WalOperation::CreateNode {
@@ -4667,6 +4980,9 @@ mod fuzz_tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::temporal::time;
+    use crate::storage::wal::serialization::serialize_entry_into;
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
@@ -4792,5 +5108,274 @@ mod sentry_tests {
             "⚡ Bolt: Vector should be pre-allocated with capacity based on file size. Capacity was {}",
             entries.capacity()
         );
+    }
+
+    // =====================================================================
+    // Issue #3506 — labels serialized as UTF-8 + re-interned on read (v13/v14)
+    // =====================================================================
+
+    /// T1: every label-bearing operation round-trips its label STRING through a
+    /// v13 serialize → parse. The parsed label must resolve to the original
+    /// string.
+    #[test]
+    fn v13_roundtrip_preserves_all_labels() {
+        use crate::core::id::VersionId;
+        use crate::core::property::PropertyMap;
+        use crate::core::{EdgeId, NodeId};
+
+        let node_label = GLOBAL_INTERNER.intern("PersonV13").unwrap();
+        let edge_label = GLOBAL_INTERNER.intern("KNOWS_V13").unwrap();
+        let c_label = GLOBAL_INTERNER.intern("CustomerV13").unwrap();
+        let c_prop = GLOBAL_INTERNER.intern("emailV13").unwrap();
+
+        let ops = vec![
+            WalOperation::CreateNode {
+                node_id: NodeId::new(1).unwrap(),
+                label: node_label,
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+            WalOperation::CreateEdge {
+                edge_id: EdgeId::new(1).unwrap(),
+                source: NodeId::new(1).unwrap(),
+                target: NodeId::new(2).unwrap(),
+                label: edge_label,
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+            WalOperation::UpdateNode {
+                node_id: NodeId::new(1).unwrap(),
+                version_id: VersionId::new(1).unwrap(),
+                label: node_label,
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+            WalOperation::UpdateEdge {
+                edge_id: EdgeId::new(1).unwrap(),
+                version_id: VersionId::new(1).unwrap(),
+                label: edge_label,
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+            WalOperation::DeclareUniqueConstraint {
+                label: c_label,
+                property: c_prop,
+            },
+            WalOperation::DropUniqueConstraint {
+                label: c_label,
+                property: c_prop,
+            },
+        ];
+
+        for op in ops {
+            let entry = WalEntry::new(LSN(1), op.clone());
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            let (parsed, consumed) = parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
+            assert_eq!(consumed, buffer.len(), "must consume whole entry: {op:?}");
+
+            let (got_label, got_extra) = match parsed.operation {
+                WalOperation::CreateNode { label, .. } | WalOperation::UpdateNode { label, .. } => {
+                    (label, None)
+                }
+                WalOperation::CreateEdge { label, .. } | WalOperation::UpdateEdge { label, .. } => {
+                    (label, None)
+                }
+                WalOperation::DeclareUniqueConstraint { label, property }
+                | WalOperation::DropUniqueConstraint { label, property } => (label, Some(property)),
+                other => panic!("unexpected parsed op: {other:?}"),
+            };
+            let expected_label = match &op {
+                WalOperation::CreateNode { label, .. }
+                | WalOperation::UpdateNode { label, .. }
+                | WalOperation::CreateEdge { label, .. }
+                | WalOperation::UpdateEdge { label, .. }
+                | WalOperation::DeclareUniqueConstraint { label, .. }
+                | WalOperation::DropUniqueConstraint { label, .. } => *label,
+                other => panic!("unexpected op: {other:?}"),
+            };
+            // The re-interned label resolves to the same string, hence the same
+            // id in this append-only process interner.
+            let resolve = |s| GLOBAL_INTERNER.resolve_with(s, |v| v.to_owned());
+            assert_eq!(
+                resolve(got_label),
+                resolve(expected_label),
+                "label string must round-trip for {op:?}"
+            );
+            if let Some(p) = got_extra {
+                assert_eq!(
+                    resolve(p),
+                    resolve(c_prop),
+                    "constraint property string must round-trip"
+                );
+            }
+        }
+    }
+
+    /// A v13 buffer (variable-width UTF-8 label) must NOT parse at a ≤v12
+    /// version: the old raw-id decoder reads the label's 4-byte length prefix
+    /// as an id and misaligns the rest, so the entry checksum fails. This
+    /// proves the on-disk format genuinely changed at v13 (not a silent
+    /// same-bytes overlap).
+    #[test]
+    fn v13_buffer_rejected_at_v12() {
+        use crate::core::NodeId;
+        use crate::core::property::PropertyMap;
+
+        // A label whose UTF-8 length is large enough that the raw-id
+        // misinterpretation shifts the parse.
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(7).unwrap(),
+            label: GLOBAL_INTERNER.intern("SufficientlyLongLabel3506").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: None,
+        };
+        let entry = WalEntry::new(LSN(3), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Correct at v13.
+        assert!(parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).is_ok());
+        // Misparsed / checksum failure at v12 (encrypted-container payload maps
+        // to v11 raw-id decode).
+        assert!(
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).is_err(),
+            "a v13 string-label buffer must not silently parse at v11 (raw id)"
+        );
+    }
+
+    /// T2: a hand-built ≤v12 (v11) CreateNode with a RAW 4-byte interner-id
+    /// label must still parse via the `from_raw` path — the identity-layout
+    /// backward-compat contract. Bytes are fully consumed, no over-read.
+    #[test]
+    fn v11_raw_id_label_still_parses() {
+        use crate::core::NodeId;
+        use crate::core::property::PropertyMap;
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+
+        let label = GLOBAL_INTERNER.intern("LegacyRawLabel3506").unwrap();
+        let node_id = NodeId::new(11).unwrap();
+        let valid_from = time::now();
+
+        // Assemble a v11-shaped entry by hand: the label is a raw 4-byte id
+        // (the pre-#3506 encoding), everything else identical to the current
+        // create-node payload (props, valid_from, absent-provenance byte).
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&LSN(9).0.to_le_bytes()); // LSN (8)
+        valid_from.serialize_into(&mut buffer); // entry timestamp (12)
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&[0u8; 4]); // checksum placeholder (4)
+
+        // Payload:
+        buffer.push(OP_CREATE_NODE);
+        buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        buffer.extend_from_slice(&label.as_u32().to_le_bytes()); // RAW id label
+        PropertyMap::new().serialize_into(&mut buffer).unwrap();
+        valid_from.serialize_into(&mut buffer);
+        buffer.push(0u8); // provenance: absent (v11 blob)
+
+        // CRC over LSN+timestamp (bytes 0..20) + payload (bytes 24..).
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..20]);
+        hasher.update(&buffer[checksum_offset + 4..]);
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        assert_eq!(
+            consumed,
+            buffer.len(),
+            "v11 buffer fully consumed, no over-read"
+        );
+        match parsed.operation {
+            WalOperation::CreateNode { label: got, .. } => {
+                // raw-id path: the decoded label is the same raw id, which in
+                // this identity-layout process resolves to the original string.
+                assert_eq!(got.as_u32(), label.as_u32());
+                assert_eq!(
+                    GLOBAL_INTERNER.resolve_with(got, |v| v.to_owned()),
+                    GLOBAL_INTERNER.resolve_with(label, |v| v.to_owned())
+                );
+            }
+            other => panic!("expected CreateNode, got {other:?}"),
+        }
+    }
+
+    /// T4: a mixed-version WAL directory (one v11 raw-id segment + one v13
+    /// string-label segment) replays correctly together — each segment header
+    /// carries its own version, threaded independently into every parse.
+    #[test]
+    fn mixed_version_segments_replay_together() {
+        use crate::core::NodeId;
+        use crate::core::property::PropertyMap;
+
+        let dir = TempDir::new().unwrap();
+
+        // --- Segment 1: v13 (string labels), written via the real serializer. ---
+        let op_new = WalOperation::CreateNode {
+            node_id: NodeId::new(100).unwrap(),
+            label: GLOBAL_INTERNER.intern("NewSegLabel3506").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: None,
+        };
+        let mut seg1 = Vec::new();
+        seg1.extend_from_slice(&WAL_MAGIC);
+        seg1.push(WAL_VERSION_STRING_LABELS);
+        let entry_new = WalEntry::new(LSN(2), op_new);
+        let mut body = Vec::new();
+        serialize_entry_into(&entry_new, &mut body).unwrap();
+        seg1.extend_from_slice(&body);
+        let mut f1 = std::fs::File::create(dir.path().join("000001.log")).unwrap();
+        f1.write_all(&seg1).unwrap();
+        f1.sync_all().unwrap();
+
+        // --- Segment 2: v11 (raw id label), hand-built. ---
+        let label_old = GLOBAL_INTERNER.intern("OldSegLabel3506").unwrap();
+        let node_old = NodeId::new(50).unwrap();
+        let valid_from = time::now();
+        let mut seg2 = Vec::new();
+        seg2.extend_from_slice(&WAL_MAGIC);
+        seg2.push(WAL_VERSION_DESTRUCTIVE_PROVENANCE);
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&LSN(1).0.to_le_bytes());
+        valid_from.serialize_into(&mut entry);
+        let cs_off = entry.len();
+        entry.extend_from_slice(&[0u8; 4]);
+        entry.push(crate::storage::wal::serialization::OP_CREATE_NODE);
+        entry.extend_from_slice(&node_old.as_u64().to_le_bytes());
+        entry.extend_from_slice(&label_old.as_u32().to_le_bytes());
+        PropertyMap::new().serialize_into(&mut entry).unwrap();
+        valid_from.serialize_into(&mut entry);
+        entry.push(0u8);
+        let mut h = crc32fast::Hasher::new();
+        h.update(&entry[0..20]);
+        h.update(&entry[cs_off + 4..]);
+        entry[cs_off..cs_off + 4].copy_from_slice(&h.finalize().to_le_bytes());
+        seg2.extend_from_slice(&entry);
+        let mut f2 = std::fs::File::create(dir.path().join("000002.log")).unwrap();
+        f2.write_all(&seg2).unwrap();
+        f2.sync_all().unwrap();
+
+        let entries = read_entries_from_dir(dir.path(), LSN(0)).unwrap();
+        assert_eq!(entries.len(), 2, "both segments must replay");
+
+        let mut labels: Vec<String> = entries
+            .iter()
+            .map(|e| match &e.operation {
+                WalOperation::CreateNode { label, .. } => GLOBAL_INTERNER
+                    .resolve_with(*label, |v| v.to_string())
+                    .unwrap(),
+                other => panic!("unexpected op: {other:?}"),
+            })
+            .collect();
+        labels.sort();
+        assert_eq!(labels, vec!["NewSegLabel3506", "OldSegLabel3506"]);
     }
 }

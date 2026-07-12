@@ -355,6 +355,17 @@ impl AletheiaDB {
         let result = (|| {
             let durability_mode = config.wal.durability_mode;
 
+            // Capture provenance-chain settings before `config.wal.wal_dir` is
+            // moved into the WAL system config. The chain lives under the data
+            // dir (the parent of the WAL dir) unless an explicit override is set.
+            let chain_config = config.chain.clone();
+            let chain_data_dir: std::path::PathBuf = config
+                .wal
+                .wal_dir
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+
             // Create encryption manager if encryption is enabled
             let encryption_manager = if config.encryption.enabled {
                 let manager = crate::encryption::EncryptionManager::from_config(&config.encryption)
@@ -474,6 +485,7 @@ impl AletheiaDB {
                 encryption_manager: encryption_manager.clone(),
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
+                chain: None,
                 _tempdir: None,
             };
 
@@ -736,6 +748,38 @@ impl AletheiaDB {
 
             seed_startup_current_timestamp(&db)?;
 
+            // Wire the opt-in provenance hash chain (Issue #3351). Constructed
+            // after WAL replay + state restore so the genesis anchors the
+            // post-recovery LSN and the tail rebuild can fold every restored
+            // transaction. Nothing here runs (and no chain dir is created) when
+            // the chain is disabled — the default — preserving byte-identical
+            // behavior.
+            if chain_config.enabled {
+                let source: Arc<dyn crate::provenance_chain::VersionSource + Send + Sync> =
+                    Arc::new(crate::db::chain_source::DbVersionSource::new(Arc::clone(
+                        &db.historical,
+                    )));
+                let genesis_lsn = db.wal.current_lsn().0;
+                let genesis_ts = time::now().wallclock();
+                let chain = crate::provenance_chain::ProvenanceChain::open(
+                    &chain_config,
+                    &chain_data_dir,
+                    genesis_lsn,
+                    genesis_ts,
+                    source,
+                )
+                .map_err(|e| {
+                    crate::core::error::Error::Other(format!(
+                        "provenance hash chain open failed: {e}"
+                    ))
+                })?;
+                // Rebuild the unsealed tail from replayed history, then start the
+                // background sealer for live commits.
+                db.rebuild_chain_tail(&chain);
+                chain.start();
+                db.chain = Some(chain);
+            }
+
             Ok(db)
         })();
         result.record_error_metric()
@@ -803,6 +847,7 @@ impl AletheiaDB {
                 encryption_manager: None,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
+                chain: None,
                 _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;

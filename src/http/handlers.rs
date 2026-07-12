@@ -167,7 +167,14 @@ pub struct ApiResponse {
 }
 
 impl ApiResponse {
-    pub(crate) fn success(data: Value) -> Self {
+    /// Build a `{success: true, data}` success envelope.
+    ///
+    /// Exposed for the autumn-web migration spike (Issue #3524): the isolated
+    /// `aletheia-autumn-spike` crate wraps its `GET /nodes/{id}` node in this
+    /// exact envelope so its response is byte-identical to `POST /query`.
+    /// Widening from `pub(crate)` to `pub` is additive and changes no behavior.
+    #[must_use]
+    pub fn success(data: Value) -> Self {
         Self {
             success: true,
             data: Some(data),
@@ -292,13 +299,9 @@ async fn handle_get_node(
         let node = db
             .get_node(nid)
             .map_err(|_| AletheiaHttpError::NotFound(format!("Node {node_id} not found")))?;
-        let props_json =
-            property_map_to_json(&node.properties).map_err(AletheiaHttpError::Internal)?;
-        Ok(json!({
-            "id": node.id.as_u64(),
-            "label": interned_to_string(node.label),
-            "properties": props_json,
-        }))
+        // Issue #3524: reuse the shared serializer so the migration-spike's
+        // `GET /nodes/{id}` produces byte-identical output. Behavior unchanged.
+        crate::http::converters::node_to_query_json(&node).map_err(AletheiaHttpError::Internal)
     })
     .await
 }

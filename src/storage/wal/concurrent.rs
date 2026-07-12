@@ -1081,17 +1081,18 @@ mod sentry_tests {
         // Calculate size needed for payload
         // CreateNode overhead:
         // Fixed: 24 bytes (LSN + Time + Checksum)
-        // Variable: 1 (op) + 8 (node_id) + 4 (label) + 12 (time) = 25 bytes
+        // Variable: 1 (op) + 8 (node_id) + 8 (label [len:4]["Test":4], #3506)
+        //           + 12 (time) = 29 bytes
         // PropertyMap overhead:
         // 4 (count) + 4 (key_len) + key_bytes + 1 (tag_string) + 4 (val_len) + val_bytes
 
         // Let's use a key "k" (1 byte)
-        // Overhead = 24 + 25 + 4 + 4 + 1 + 1 + 4 + 1 (provenance presence byte) = 64 bytes
-        // Total = 64 + val_bytes
+        // Overhead = 24 + 29 + 4 + 4 + 1 + 1 + 4 + 1 (provenance presence byte) = 68 bytes
+        // Total = 68 + val_bytes
         // Target = MAX_WAL_ENTRY_SIZE
-        // val_bytes = MAX_WAL_ENTRY_SIZE - 64
+        // val_bytes = MAX_WAL_ENTRY_SIZE - 68
 
-        let overhead = 64;
+        let overhead = 68;
         let target_val_len = MAX_WAL_ENTRY_SIZE - overhead;
 
         // Create a string of target length
@@ -1135,7 +1136,7 @@ mod sentry_tests {
         let wal = ConcurrentWal::new(config).unwrap();
 
         // Use same calculation as above but +1 byte
-        let overhead = 64;
+        let overhead = 68;
         let target_val_len = MAX_WAL_ENTRY_SIZE - overhead + 1;
 
         let big_string = "x".repeat(target_val_len);

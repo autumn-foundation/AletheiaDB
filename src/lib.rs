@@ -62,6 +62,9 @@ pub mod db;
 /// Encryption at rest (ADR-0028).
 pub mod encryption;
 pub mod index;
+/// Tamper-evident provenance hash chain (Issue #3351): canonical version
+/// encoder, append-only sidecar store, and offline verification.
+pub mod provenance_chain;
 pub mod query;
 pub mod storage;
 // Semantic search cohort (graduated from "Nova" in 0.1).
