@@ -24,8 +24,11 @@ use autumn_web::prelude::{Json, Path, get};
 ///
 /// Cross-cutting concerns preserved on the slice: bearer auth (constant-time,
 /// on-by-default), RBAC ([`AccessClass::Read`]), the existing structured flat
-/// error envelope, and off-executor DB access via `spawn_blocking`. Success and
-/// error bodies are byte-identical to `POST /query {"operation":"get_node"}`.
+/// error envelope, off-executor DB access via `spawn_blocking`, and — under the
+/// `observability` feature — an OTel/tracing request span mirroring
+/// `src/http/trace.rs` (Issue #3376), compiled out to a no-op when the feature
+/// is off. Success and error bodies are byte-identical to
+/// `POST /query {"operation":"get_node"}`.
 ///
 /// The id is taken as `Path<String>` (not `Path<u64>`) so a non-numeric id
 /// (`/nodes/abc`) renders the [`AletheiaHttpError::BadRequest`] envelope rather
@@ -36,6 +39,50 @@ pub async fn get_node(
     auth: SpikeAuth,
     state: SpikeState,
     Path(id): Path<String>,
+) -> Result<Json<ApiResponse>, AletheiaHttpError> {
+    // Feature off → zero overhead, identical behavior.
+    #[cfg(not(feature = "observability"))]
+    {
+        get_node_impl(auth, state, id).await
+    }
+    // Feature on → wrap the handler in an HTTP request root span (method +
+    // route + operation) so the DB's own child spans nest underneath it, and
+    // record the outcome (result count on success, error code on failure) —
+    // exactly the attributes `src/http/trace.rs` records.
+    #[cfg(feature = "observability")]
+    {
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(
+            "http.request",
+            "http.request.method" = "GET",
+            "http.route" = "/nodes/{id}",
+            operation = "get_node",
+            result_count = tracing::field::Empty,
+            "otel.status_code" = tracing::field::Empty,
+            "error.code" = tracing::field::Empty,
+        );
+        let outcome = get_node_impl(auth, state, id)
+            .instrument(span.clone())
+            .await;
+        match &outcome {
+            Ok(_) => {
+                span.record("result_count", 1_i64);
+            }
+            Err(e) => {
+                span.record("otel.status_code", "ERROR");
+                span.record("error.code", error_code(e));
+            }
+        }
+        outcome
+    }
+}
+
+/// The slice's actual logic, kept separate so the public [`get_node`] can wrap
+/// it in a feature-gated span without duplicating the body.
+async fn get_node_impl(
+    auth: SpikeAuth,
+    state: SpikeState,
+    id: String,
 ) -> Result<Json<ApiResponse>, AletheiaHttpError> {
     // Authorization before any work (mirrors the /query dispatch order).
     auth.authorize(AccessClass::Read)?;
@@ -62,4 +109,18 @@ pub async fn get_node(
     // Reuse the exact `{success, data}` envelope the `POST /query` path emits,
     // so the response body is byte-identical (Issue #3524 parity).
     Ok(Json(ApiResponse::success(value)))
+}
+
+/// The Issue #3234 structured code for the variants this slice produces, for
+/// span error recording (mirrors `AletheiaHttpError::code_str`, which is
+/// `pub(crate)`; a full port would expose it and drop this helper).
+#[cfg(feature = "observability")]
+fn error_code(e: &AletheiaHttpError) -> &'static str {
+    match e {
+        AletheiaHttpError::BadRequest(_) => "INVALID_ARGUMENT",
+        AletheiaHttpError::NotFound(_) => "NOT_FOUND",
+        AletheiaHttpError::Unauthorized => "UNAUTHENTICATED",
+        AletheiaHttpError::PermissionDenied(_) => "PERMISSION_DENIED",
+        _ => "INTERNAL",
+    }
 }

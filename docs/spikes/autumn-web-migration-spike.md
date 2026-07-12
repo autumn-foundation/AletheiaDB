@@ -74,6 +74,15 @@ crates/autumn-spike/
   `.secure_mcp(RequireApiToken::new(...))` in `Required` mode — so the MCP
   catalog is **not** anonymously reachable (auth-on-by-default parity;
   `Anonymous` mode skips the gate deliberately).
+- **OTel span, preserved.** Under the crate's `observability` feature the
+  handler wraps its work in a `tracing` request root span (method + route +
+  `operation`, recording `result_count`/`error.code`/`otel.status_code`),
+  mirroring `src/http/trace.rs` (Issue #3376) and enabling `aletheiadb`'s own
+  `observability` so DB child spans nest underneath. Off by default → compiled
+  out to a no-op, so handler behavior and the 12 tests are identical either way
+  (both feature states are gated and tested). A full port would layer the
+  W3C-`traceparent` propagation (the `otel`-gated half of `trace.rs`) on top —
+  the extractor pattern carries over unchanged.
 
 ## Risks → tests (all pass)
 
@@ -272,6 +281,7 @@ for routing upstream.)*
 | `cargo fmt --all --check` | pass |
 | `cargo clippy -p aletheia-autumn-spike --all-targets -- -D warnings` | pass |
 | `cargo test -p aletheia-autumn-spike` | 12 passed |
+| `cargo clippy/test -p aletheia-autumn-spike --features observability` | pass · 12 passed (OTel span compiles + no-ops correctly) |
 | `cargo check -p aletheiadb --no-default-features --tests --features http-server` | pass (widening didn't break standalone) |
 | `cargo clippy -p aletheiadb --features "config-toml,mcp-server,sharding-rpc,simulation" --all-targets -- -D warnings` | pass (root CI set unaffected) |
 | `cd python && cargo metadata` · `cd fuzz && cargo metadata` | pass (workspace `exclude` keeps them independent) |
