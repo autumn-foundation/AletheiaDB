@@ -630,14 +630,18 @@ impl MultiEval<'_> {
                 let Some(needle) = self.eval_value(expr, binding)? else {
                     return Ok(Tri::Null);
                 };
+                // Three-valued IN (openCypher): a match short-circuits to True;
+                // otherwise a null list element makes the result Null (not
+                // False), so `5 IN [1, null]` is Null and drops under NOT.
+                let mut saw_null = false;
                 for candidate in values {
-                    if let Some(v) = self.eval_value(candidate, binding)?
-                        && loosely_equal(&needle, &v)
-                    {
-                        return Ok(Tri::True);
+                    match self.eval_value(candidate, binding)? {
+                        Some(v) if loosely_equal(&needle, &v) => return Ok(Tri::True),
+                        Some(_) => {}
+                        None => saw_null = true,
                     }
                 }
-                Ok(Tri::False)
+                Ok(if saw_null { Tri::Null } else { Tri::False })
             }
             // String predicates with a null/non-string subject are Null.
             CypherExpr::Contains { expr, substring } => {

@@ -5681,6 +5681,71 @@ mod multi_pattern {
         }
     }
 
+    /// A db with a node `a` carrying `x = 5` (and NO `y` property), plus a
+    /// plain node `b`. Used to exercise three-valued `IN` over a null list
+    /// element.
+    fn in_prop_db() -> AletheiaDB {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("x", 5i64)
+                .build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn test_where_not_in_with_null_element_drops_row() {
+        // a.x = 5, list is [1, a.y] where a.y is absent => null element.
+        // `5 IN [1, null]` is Null (openCypher), so `NOT Null` is Null and the
+        // row is DROPPED. Every candidate `a` either has needle 5 (matches no
+        // non-null element, but a null element makes it Null) or a null needle
+        // (Null directly), so ALL rows drop => 0 rows.
+        let db = in_prop_db();
+        let rows = run(&db, "MATCH (a),(b) WHERE NOT (a.x IN [1, a.y]) RETURN a,b");
+        assert_eq!(
+            rows.len(),
+            0,
+            "NOT (5 IN [1, null]) is NOT Null = Null => row dropped: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn test_where_in_matches_still_true() {
+        // `5 IN [5, 99]` is True regardless of any null: a matching element
+        // short-circuits to True. Only rows where `a` is the x=5 node survive
+        // (the other candidate has a null needle => dropped): 1 such `a` x 2
+        // `b` candidates = 2 rows.
+        let db = in_prop_db();
+        let rows = run(&db, "MATCH (a),(b) WHERE a.x IN [5, 99] RETURN a,b");
+        assert_eq!(rows.len(), 2, "5 IN [5, 99] is True => rows kept: {rows:?}");
+        for row in &rows {
+            assert_eq!(node_prop(bound(row, "a"), "name").unwrap(), "Alice");
+        }
+    }
+
+    #[test]
+    fn test_where_in_no_match_no_null_drops() {
+        // `5 IN [1, 2]` is False (no match, no null element) => row dropped.
+        // The other candidate `a` has a null needle => Null => also dropped.
+        // Unchanged two-valued behavior: 0 rows.
+        let db = in_prop_db();
+        let rows = run(&db, "MATCH (a),(b) WHERE a.x IN [1, 2] RETURN a,b");
+        assert_eq!(
+            rows.len(),
+            0,
+            "5 IN [1, 2] is False (no null element) => row dropped: {rows:?}"
+        );
+    }
+
     // ---- FIX 4: router last_node_variable skips unnamed terminal ----------
 
     #[test]
