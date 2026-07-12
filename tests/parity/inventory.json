@@ -1,0 +1,222 @@
+{
+  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 40 — have only their name + access class pinned via the golden set. Live drift detection of the full 44-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
+  "generated_for": "framework port parity harness",
+  "totals": {
+    "http_routes": 5,
+    "mcp_tools": 44,
+    "mcp_budgetable_read_tools": 13
+  },
+  "http": {
+    "surface_files": ["src/http/mod.rs", "src/http/server.rs", "src/http/handlers.rs", "src/http/admin.rs", "src/http/auth.rs", "src/http/error.rs", "src/http/config.rs"],
+    "parity_suite": "tests/parity_http.rs",
+    "route_inventory_source": "src/http/handlers.rs::all_routes()",
+    "error_envelope": {
+      "shape": "{success:false, error:<string>, code?, retriable?, details?, trace_id?}",
+      "additive_fields_note": "code/retriable/details are present ONLY for auth (401/403) and resource-limit (413/422/429) variants; plain 400/404/500 keep the minimal {success,error} shape.",
+      "trace_id_note": "trace_id body field + x-trace-id header are populated only under the observability/otel features (pinned by tests/http_otel_tracing.rs). Absent otherwise.",
+      "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT"],
+      "vocabulary_asymmetry_vs_mcp": "HTTP uses RESOURCE_EXHAUSTED for limit errors; MCP has no such code. HTTP emits `code` only on auth+limit variants; MCP emits `code` on every error."
+    },
+    "routes": [
+      {
+        "method": "GET",
+        "path": "/status",
+        "handler": "health_check",
+        "handler_loc": "src/http/handlers.rs:65",
+        "access_class": "metrics",
+        "success_status": 200,
+        "success_body": "{\"status\":\"healthy\"}",
+        "error_statuses": [401],
+        "pinned_by": ["tests/parity_http.rs::status_success_shape", "tests/parity_http.rs::status_requires_credential_in_required_mode", "tests/parity_http.rs::route_inventory_is_the_known_five"]
+      },
+      {
+        "method": "POST",
+        "path": "/query",
+        "handler": "handle_query",
+        "handler_loc": "src/http/handlers.rs:838",
+        "access_class": "per-operation (query_access_class): read for find_node/get_node/bulk_get_nodes/find_neighbors; write for create/bulk_create/bulk_update/bulk_delete; execute_query/bulk_execute_query read iff no mutating clause",
+        "success_status": 200,
+        "success_body": "{success:true, data?, truncated?}",
+        "error_statuses": [400, 401, 403, 404, 413, 422, 429, 500],
+        "pinned_by": [
+          "tests/parity_http.rs::query_success_envelope_shape",
+          "tests/parity_http.rs::query_not_found_minimal_error_envelope",
+          "tests/parity_http.rs::query_malformed_payload_is_400_not_500",
+          "tests/parity_http.rs::query_error_envelope_has_no_trace_id_without_observability",
+          "tests/parity_http.rs::query_missing_credential_is_uniform_401",
+          "tests/parity_http.rs::query_reader_write_is_403_permission_denied",
+          "tests/parity_http.rs::query_row_cap_reject_is_413_resource_exhausted",
+          "tests/parity_http.rs::query_byte_cap_is_413_resource_exhausted",
+          "tests/parity_http.rs::query_over_ceiling_override_is_422_invalid_argument",
+          "tests/parity_http.rs::query_auth_precedes_limit_validation"
+        ],
+        "referenced": {
+          "429_wall_clock_timeout": "not forceable deterministically over the wire; pinned by enforce_query_limits unit tests in src/http/handlers.rs (see tests/http_query_limits.rs header). RESOURCE_EXHAUSTED + Retry-After:1, retriable:true for reads.",
+          "413_request_body_limit": "tests/parity_http.rs::run_server_enforces_request_body_413 (real-socket production run_server stack, Issue #3426)",
+          "otel_trace_id": "tests/http_otel_tracing.rs (observability/otel features)"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/admin/keys",
+        "handler": "create_key",
+        "handler_loc": "src/http/admin.rs:40",
+        "access_class": "admin",
+        "success_status": 200,
+        "success_body": "{success:true, data:{key (plaintext once, aletheia_sk_ prefix), id, role}}",
+        "error_statuses": [400, 401, 403],
+        "pinned_by": ["tests/parity_http.rs::admin_create_key_success_shape", "tests/parity_http.rs::admin_create_key_non_admin_is_403", "tests/parity_http.rs::admin_create_key_invalid_name_is_400"]
+      },
+      {
+        "method": "GET",
+        "path": "/admin/keys",
+        "handler": "list_keys",
+        "handler_loc": "src/http/admin.rs:69",
+        "access_class": "admin",
+        "success_status": 200,
+        "success_body": "{success:true, data:{keys:[{id, key_prefix, role, ...}]}} — never full key material",
+        "error_statuses": [401, 403],
+        "pinned_by": ["tests/parity_http.rs::admin_list_keys_masks_material", "tests/parity_http.rs::admin_list_keys_non_admin_is_403"]
+      },
+      {
+        "method": "POST",
+        "path": "/admin/keys/revoke",
+        "handler": "revoke_key",
+        "handler_loc": "src/http/admin.rs:93",
+        "access_class": "admin",
+        "success_status": 200,
+        "success_body": "{success:true, data:{revoked:true, id}}",
+        "error_statuses": [401, 403, 404],
+        "pinned_by": ["tests/parity_http.rs::admin_revoke_key_success_and_immediate_effect", "tests/parity_http.rs::admin_revoke_unknown_id_is_404", "tests/parity_http.rs::admin_revoke_non_admin_is_403"]
+      }
+    ],
+    "cross_route_invariants": {
+      "uniform_401": "tests/parity_http.rs::every_route_uniform_401_without_credential — every route returns a byte-identical 401 body + WWW-Authenticate: Bearer when no credential is presented in required mode.",
+      "route_inventory_fixed": "tests/parity_http.rs::route_inventory_is_the_known_five"
+    }
+  },
+  "mcp": {
+    "surface_files": ["src/mcp/mod.rs", "src/mcp/server.rs", "src/mcp/auth.rs", "src/mcp/error.rs", "src/mcp/tools.rs", "src/mcp/batch.rs", "src/mcp/budget.rs", "src/mcp/cursor.rs"],
+    "parity_suite": "tests/parity_mcp.rs",
+    "access_class_source": "src/mcp/auth.rs::TOOL_ACCESS_CLASSES",
+    "advertised_tool_source": "src/mcp/server.rs::tool_definitions()",
+    "error_envelope": {
+      "shape": "{error:{code, message, retriable, details?}, <legacy top-level fields>?}",
+      "code_enum": ["NOT_FOUND", "INVALID_ARGUMENT", "CONSTRAINT_VIOLATION", "FAILED_PRECONDITION", "CONFLICT", "UNAVAILABLE", "INTERNAL", "UNAUTHENTICATED", "PERMISSION_DENIED"],
+      "retriable_true_only_for": ["CONFLICT", "UNAVAILABLE"],
+      "pinned_by": "tests/parity_mcp.rs::error_code_vocabulary_is_stable"
+    },
+    "success_envelope": {
+      "shape": "bare entity JSON (no wrapper) with a `temporal` block on read responses",
+      "temporal_block": "{valid_from, transaction_from (RFC3339), valid_to, transaction_to (null when open), is_current}",
+      "pinned_by": "tests/parity_mcp.rs::success_envelope_and_temporal_block"
+    },
+    "vector_elision": {
+      "default": "{type:'vector', dim, elided:true} (or {type:'sparse_vector', dim, nnz, elided:true})",
+      "opt_out": "include_vectors:true returns full array",
+      "pinned_by": "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable"
+    },
+    "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable (external mirror — internal-consistency only)",
+    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 44 pairs — the authoritative drift detector)",
+    "budgetable_read_tools": ["get_node", "list_nodes", "get_edge", "list_edges", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "hybrid_query", "query", "find_nodes_at_time", "get_node_history", "get_schema"],
+    "tools": [
+      {"name": "get_node", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::not_found_structured_error", "tests/parity_mcp.rs::out_of_range_id_is_non_retriable_structured_error", "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable", "tests/parity_mcp.rs::success_envelope_and_temporal_block"]},
+      {"name": "create_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::success_envelope_and_temporal_block", "tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"]},
+      {"name": "update_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "delete_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "retract_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "retract_edge", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "delete_node_cascade", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "list_nodes", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "count_nodes", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_edge", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "create_edge", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"]},
+      {"name": "update_edge", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "delete_edge", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "apply_batch", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "src/mcp/tests.rs apply_batch suite"},
+      {"name": "list_edges", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "count_edges", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_outgoing_edges", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_incoming_edges", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "traverse", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"]},
+      {"name": "find_similar", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "enable_vector_index", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "list_vector_indexes", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "enable_unique_constraint", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "list_unique_constraints", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_node_at_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_edge_at_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "find_nodes_at_time", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "list_changes", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_node_at_valid_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_node_at_transaction_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_node_history", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "diff_node_versions", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_edge_at_valid_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_edge_at_transaction_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_edge_history", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "diff_edge_versions", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "hybrid_query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_schema", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "temporal_extent", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "lineage_upstream", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "lineage_downstream", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "audit_export", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "database_stats", "access_class": "metrics", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]}
+    ]
+  },
+  "coverage_gaps": [
+    {
+      "id": "mcp-registry-sweep-not-external",
+      "area": "MCP advertised-tool dispatch sweep",
+      "status": "partially closed",
+      "why": "tool_definitions()/list_tools_for_test()/dispatch_tool are pub(crate); the rmcp ServerHandler list_tools/call_tool entry is not reachable from an external test crate (rmcp is not a dev-dependency and is not re-exported). Per house rules we do not add pub to production code.",
+      "closed_part": "Full 44-name/class DRIFT DETECTION is now closed: the in-crate golden src/mcp/auth_tests.rs::live_tool_inventory_matches_golden reads the live registry and fails on any tool added/removed/renamed/reclassified. The external tests/parity_mcp.rs::tool_inventory_golden_is_stable mirrors that constant cross-crate.",
+      "remaining_gap": "What stays external-unreachable is per-tool RUNTIME BEHAVIOR for the 40 non-behavior-tested tools: only the 4 behavior-pinned tools (get_node, create_node, create_edge, traverse) have black-box runtime assertions in tests/parity_mcp.rs; the other 40 are name/class-pinned only. Their dispatch/error-on-invalid-args behavior remains enforced in-crate.",
+      "referenced_test": "src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments (~line 9257); src/mcp/auth_tests.rs::live_tool_inventory_matches_golden"
+    },
+    {
+      "id": "mcp-rbac-not-external",
+      "area": "MCP RBAC enforcement (UNAUTHENTICATED / PERMISSION_DENIED)",
+      "why": "auth is enforced only inside dispatch_tool (pub(crate)); the public per-tool typed methods bypass the auth gate, so role enforcement cannot be exercised black-box through the public API.",
+      "mitigation": "Error-code vocabulary for UNAUTHENTICATED/PERMISSION_DENIED is pinned via the public McpErrorCode enum (error_code_vocabulary_is_stable).",
+      "referenced_test": "src/mcp/auth_tests.rs::every_advertised_tool_has_a_classification (~line 89) + the role x tool matrix and uniform-UNAUTHENTICATED sweep in the same file"
+    },
+    {
+      "id": "mcp-token-budget-not-external",
+      "area": "MCP token-budget degradation ladder (Issue #3353)",
+      "why": "apply_budget/shape_response run inside dispatch_tool; the public per-tool methods bypass budget shaping, so the elided_properties -> entity_summaries -> counts_and_handles ladder is not reachable black-box.",
+      "mitigation": "None external; budgetable-tool set documented above.",
+      "referenced_test": "src/mcp/tests.rs budget suite (see BUDGETABLE_READ_TOOLS conformance tests ~tests.rs:13971/13986)"
+    },
+    {
+      "id": "mcp-cursor-not-external",
+      "area": "MCP cursor continuation (Issue #3360)",
+      "why": "cursor paging is applied in the dispatch path, not in the public per-tool methods.",
+      "mitigation": "Cursorable tools documented; behavior remains enforced in-crate.",
+      "referenced_test": "src/mcp/tests.rs cursor suite + src/mcp/cursor.rs unit tests"
+    },
+    {
+      "id": "http-429-not-forced",
+      "area": "HTTP 429 wall-clock timeout",
+      "why": "a real slow query cannot be forced deterministically over the wire; the row/byte caps (413) and override ceiling (422) are the deterministic limit paths pinned here.",
+      "mitigation": "429 RESOURCE_EXHAUSTED + Retry-After:1 + retriable:true(reads)/false(writes) is pinned by enforce_query_limits unit tests.",
+      "referenced_test": "src/http/handlers.rs enforce_query_limits unit tests; tests/http_query_limits.rs (header note)"
+    },
+    {
+      "id": "http-otel-trace-id-gated",
+      "area": "HTTP trace_id body field / x-trace-id header",
+      "why": "populated only under the observability/otel features; under the parity suite's feature set the field is absent (pinned as absent).",
+      "mitigation": "Absence pinned by query_error_envelope_has_no_trace_id_without_observability.",
+      "referenced_test": "tests/http_otel_tracing.rs, tests/http_otel_parent_sampling.rs, tests/http_otel_sampled_out.rs"
+    },
+    {
+      "id": "http-500-internal-shape-indirect",
+      "area": "HTTP 500 / INTERNAL error-envelope shape",
+      "why": "The 500 (Internal/StateMissing) path cannot be triggered deterministically over the black-box surface without injecting a fault, so its {success:false, error} envelope is NOT positively pinned. It is only asserted INDIRECTLY, as a negative: the malformed-payload path is pinned to 400 ('4xx/400, never 500') by query_malformed_payload_is_400_not_500, and the error_envelope.additive_fields_note documents that plain 500 keeps the minimal {success,error} shape (code_str maps Internal/StateMissing -> INTERNAL for the trace span only, never the body).",
+      "mitigation": "The Internal-variant body shape (minimal {success,error}, no code) is covered in-crate by the src/http/error.rs IntoResponse unit tests; over the wire it is asserted only as 'not 500' on the malformed path.",
+      "referenced_test": "src/http/error.rs IntoResponse unit tests (~error.rs:403 BadRequest/NotFound body_json cases); tests/parity_http.rs::query_malformed_payload_is_400_not_500 (indirect)"
+    }
+  ]
+}
