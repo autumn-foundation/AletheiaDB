@@ -805,6 +805,302 @@ fn valid_from_property_backdates() {
     assert!(db.get_node_at_valid_time(a, ts_2019).is_err());
 }
 
+// ---- Conformance fixes (review) --------------------------------------------
+
+// #1: boolean == Boolean.parseBoolean — `true` iff case-insensitively "true".
+#[test]
+fn boolean_parse_matches_neo4j() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        ":ID,:LABEL,b:boolean\n\
+         one,Person,1\n\
+         yes,Person,yes\n\
+         banana,Person,banana\n\
+         upper,Person,TRUE\n\
+         no,Person,false\n",
+    );
+    let mut importer = db.import();
+    importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect("import");
+    let get = |id: &str| {
+        db.get_node(resolve(&importer, "", id))
+            .unwrap()
+            .properties
+            .get("b")
+            .cloned()
+    };
+    assert_eq!(get("one"), Some(PropertyValue::Bool(false))); // "1" is not "true"
+    assert_eq!(get("yes"), Some(PropertyValue::Bool(false))); // "yes" is not "true"
+    assert_eq!(get("banana"), Some(PropertyValue::Bool(false)));
+    assert_eq!(get("upper"), Some(PropertyValue::Bool(true))); // case-insensitive
+    assert_eq!(get("no"), Some(PropertyValue::Bool(false)));
+}
+
+// #2: multi-character `char` is a clean row error; single char is fine.
+#[test]
+fn char_requires_exactly_one_character() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let bad = write_file(&files, "bad.csv", ":ID,:LABEL,c:char\na,Person,AB\n");
+    let mut importer = db.import();
+    let err = importer
+        .neo4j_nodes_from_csv(&bad, &Neo4jCsvOptions::new())
+        .expect_err("multi-char char should error");
+    let msg = err.to_string();
+    assert!(msg.contains("row 1"), "was: {msg}");
+    assert!(
+        msg.contains("char") && msg.contains("exactly 1"),
+        "was: {msg}"
+    );
+
+    let ok = write_file(&files, "ok.csv", ":ID,:LABEL,c:char\na,Person,A\n");
+    let (_tmp2, db2) = create_test_db().unwrap();
+    let mut importer2 = db2.import();
+    importer2
+        .neo4j_nodes_from_csv(&ok, &Neo4jCsvOptions::new())
+        .expect("single char imports");
+    let node = db2
+        .get_node(importer2.resolve_key(&nkey("", "a")).unwrap())
+        .unwrap();
+    assert_eq!(node.properties.get("c"), Some(&PropertyValue::string("A")));
+}
+
+// #3: out-of-range `short` (and `byte`) rejected; in-range become Int.
+#[test]
+fn short_out_of_range_rejected() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        ":ID,:LABEL,tiny:short\na,Person,99999\n",
+    );
+    let mut importer = db.import();
+    let err = importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect_err("out-of-range short should error");
+    let msg = err.to_string();
+    assert!(msg.contains("row 1") && msg.contains("short"), "was: {msg}");
+}
+
+#[test]
+fn byte_out_of_range_rejected() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(&files, "nodes.csv", ":ID,:LABEL,b:byte\na,Person,200\n");
+    let mut importer = db.import();
+    let err = importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect_err("out-of-range byte should error");
+    assert!(err.to_string().contains("byte"), "was: {err}");
+}
+
+// #4: quoted array element containing the array delimiter is not mis-split.
+#[test]
+fn quoted_array_element_with_delimiter() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    // CSV cell after unquoting is: "a;b";c  ->  ["a;b", "c"]
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        ":ID,:LABEL,tags:string[]\na,Person,\"\"\"a;b\"\";c\"\n",
+    );
+    let mut importer = db.import();
+    importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect("import");
+    let node = db.get_node(resolve(&importer, "", "a")).unwrap();
+    assert_eq!(
+        node.properties.get("tags"),
+        Some(&PropertyValue::array(vec![
+            PropertyValue::string("a;b"),
+            PropertyValue::string("c"),
+        ]))
+    );
+}
+
+// #5: datetime with a trailing bracketed IANA zone id parses.
+#[test]
+fn datetime_named_zone_id_stripped() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        ":ID,:LABEL,born:datetime\n\
+         zoned,Person,2015-06-24T12:50:35.556+01:00[Europe/London]\n\
+         plain,Person,2015-06-24T12:50:35.556+01:00\n",
+    );
+    let mut importer = db.import();
+    importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect("import");
+    let zoned = db.get_node(resolve(&importer, "", "zoned")).unwrap();
+    let plain = db.get_node(resolve(&importer, "", "plain")).unwrap();
+    let z = zoned.properties.get("born").cloned();
+    assert!(matches!(z, Some(PropertyValue::Int(_))), "was: {z:?}");
+    // The bracketed zone id names the same instant as the bare offset.
+    assert_eq!(z, plain.properties.get("born").cloned());
+}
+
+// #6: non-finite float (overflow) is rejected, not stored as inf.
+#[test]
+fn non_finite_float_rejected() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(&files, "nodes.csv", ":ID,:LABEL,x:double\na,Person,1e400\n");
+    let mut importer = db.import();
+    let err = importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect_err("non-finite float should error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("row 1") && msg.contains("non-finite"),
+        "was: {msg}"
+    );
+}
+
+// #7: multi-file skipped/unresolved errors name the offending file.
+#[test]
+fn multi_file_errors_name_the_file() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let n1 = write_file(&files, "good.csv", ":ID,:LABEL\na,Person\n");
+    // Second node file has a malformed row (empty :ID).
+    let n2 = write_file(&files, "broken.csv", ":ID,:LABEL\n,Person\n");
+    let rels = write_file(
+        &files,
+        "links.csv",
+        ":START_ID,:END_ID,:TYPE\na,ghost,KNOWS\n",
+    );
+
+    let mut importer = db.import().failure_mode(FailureMode::SkipAndReport);
+    let report = importer
+        .neo4j_import_csv(&[n1, n2], &[rels], &Neo4jCsvOptions::new())
+        .expect("import");
+
+    let skipped = report
+        .skipped
+        .iter()
+        .find(|e| e.file.as_deref() == Some("broken.csv"))
+        .expect("skipped row attributed to broken.csv");
+    assert!(skipped.to_string().contains("broken.csv"), "was: {skipped}");
+
+    let unresolved = &report.unresolved_endpoints[0];
+    assert_eq!(unresolved.file.as_deref(), Some("links.csv"));
+    assert!(
+        unresolved.to_string().contains("links.csv"),
+        "was: {unresolved}"
+    );
+}
+
+// #9: duplicate header columns are rejected (would silently collapse).
+#[test]
+fn duplicate_header_rejected() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(&files, "nodes.csv", ":ID,:ID,:LABEL\na,b,Person\n");
+    let mut importer = db.import();
+    let err = importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect_err("duplicate header should error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("duplicate header") && msg.contains(":ID"),
+        "was: {msg}"
+    );
+}
+
+// #10: skip mode — mapping counts reflect only imported rows, not skipped ones.
+#[test]
+fn skip_mode_type_mapping_matches_imported() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(&files, "nodes.csv", ":ID,:LABEL\na,Person\nb,Person\n");
+    // One resolvable edge + one dangling edge, same :TYPE.
+    let rels = write_file(
+        &files,
+        "rels.csv",
+        ":START_ID,:END_ID,:TYPE\na,b,KNOWS\na,ghost,KNOWS\n",
+    );
+    let mut importer = db.import().failure_mode(FailureMode::SkipAndReport);
+    importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect("nodes");
+    let report = importer
+        .neo4j_edges_from_csv(&rels, &Neo4jCsvOptions::new())
+        .expect("edges");
+    assert_eq!(report.relationships_imported, 1);
+    let knows = report
+        .type_mapping
+        .iter()
+        .find(|t| t.neo4j_type == "KNOWS")
+        .expect("KNOWS type mapping");
+    // The dangling row must NOT be counted in the mapping.
+    assert_eq!(knows.count, report.relationships_imported);
+    assert_eq!(knows.count, 1);
+}
+
+// #11: an array column's coercion counts once per row, not per element.
+#[test]
+fn array_coercion_counts_per_row() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        ":ID,:LABEL,grades:char[]\na,Person,A;B;C\n",
+    );
+    let mut importer = db.import();
+    let report = importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect("import");
+    let note = report
+        .coerced
+        .iter()
+        .find(|c| c.column == "grades:char[]" && c.kind == "char_to_string")
+        .expect("char coercion recorded");
+    // One row, three elements -> counted once (not three times).
+    assert_eq!(note.count, 1);
+}
+
+// #12: unknown reserved header + malformed id-space report precise errors.
+#[test]
+fn unknown_reserved_header_error() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(&files, "nodes.csv", ":ID,:LABEL,:FOO\na,Person,x\n");
+    let mut importer = db.import();
+    let err = importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect_err("unknown reserved header should error");
+    assert!(
+        err.to_string().contains("unknown reserved header"),
+        "was: {err}"
+    );
+}
+
+#[test]
+fn malformed_id_space_error() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(&files, "nodes.csv", ":ID(,:LABEL\na,Person\n");
+    let mut importer = db.import();
+    let err = importer
+        .neo4j_nodes_from_csv(&nodes, &Neo4jCsvOptions::new())
+        .expect_err("malformed id-space should error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("malformed id-space") && msg.contains("unclosed"),
+        "was: {msg}"
+    );
+}
+
 // ---- Scale (AC7) -----------------------------------------------------------
 
 // 10K-node / ~30K-edge smoke: zero-loss report.

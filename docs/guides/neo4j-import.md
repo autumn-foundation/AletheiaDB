@@ -61,10 +61,14 @@ aletheia import --format neo4j-csv \
   --valid-from-property joined
 ```
 
-Result: `alice` becomes a `Person` node (label `Person`, with
-`_labels = ["Person","Employee"]`), `skills` becomes a string array, `joined`
-sets each node's `valid_from` (so `AS OF VALID_TIME '2020-03-01'` sees Alice),
-and every version carries `provenance.source = "neo4j-import::people.csv"`.
+Here `--valid-from-property joined` names the **property** `joined` — the part
+before the `:type` in the `joined:datetime` header of `people.csv` above — so
+that column must exist in the node files. Result: `alice` becomes a `Person`
+node (label `Person`, with `_labels = ["Person","Employee"]`), `skills` becomes
+a string array, `joined` sets each node's `valid_from` (so
+`AS OF VALID_TIME '2020-03-01'` sees Alice) and is consumed as valid time rather
+than stored as a property, and every version carries
+`provenance.source = "neo4j-import::people.csv"`.
 
 ## Rust API
 
@@ -118,13 +122,15 @@ endpoints resolve).
 | Neo4j type | Maps to | Notes |
 |---|---|---|
 | `string`, untyped | `String` | |
-| `int`, `long`, `short`, `byte` (scalar) | `Int` (i64) | all fit i64, no loss |
-| `float`, `double` | `Float` (f64) | |
-| `boolean` | `Bool` | |
-| `char` | 1-char `String` | recorded as a `char_to_string` coercion |
-| `date`, `datetime`, `localdatetime` | `Int` (epoch microseconds) | recorded as `temporal_to_micros` |
+| `int`, `long` | `Int` (i64) | |
+| `short` (scalar) | `Int` (i64) | range-checked via `i16`; out-of-range is a clean row error. Recorded as a `short_to_int` coercion |
+| `byte` (scalar) | `Int` (i64) | range-checked via `i8`; out-of-range is a clean row error. Recorded as a `byte_to_int` coercion |
+| `float`, `double` | `Float` (f64) | a non-finite value (e.g. `1e400` overflowing to `inf`) is a clean row error, never stored as `inf` |
+| `boolean` | `Bool` | matches Neo4j's `Boolean.parseBoolean`: `true` **only** when the value case-insensitively equals `"true"`; every other value (`1`, `yes`, `t`, ...) is `false`, never an error |
+| `char` | 1-char `String` | requires **exactly one** character (`"AB"` is a clean row error); recorded as a `char_to_string` coercion |
+| `date`, `datetime`, `localdatetime` | `Int` (epoch microseconds) | recorded as `temporal_to_micros`; a trailing bracketed IANA zone id (`...+01:00[Europe/London]`) is stripped before parsing |
 | `time`, `localtime` | `String` | no epoch anchor; recorded as `time_to_string` |
-| `T[]` (any supported scalar) | `Array` | split on `--array-delimiter` (default `;`) |
+| `T[]` (any supported scalar) | `Array` | split on `--array-delimiter` (default `;`), **quote-aware**: an element quoted with the CSV quote char may itself contain the delimiter (`"a;b";c` → `["a;b","c"]`) |
 | numeric `T[]` **+ `--vector-property`** | `Vector` | explicit opt-in only, **never silent** |
 | **`duration`** | **rejected** | reported under `unsupported` with a count |
 | **`point` / spatial** | **rejected** | reported under `unsupported` with a count |
@@ -165,13 +171,22 @@ reported-and-counted skip.
 The importer honors the #3211 contract:
 
 - `--on-error abort` (default): the first malformed row / unresolved endpoint
-  returns an error with a precise `row N: <message>` location; already-committed
-  chunks persist.
+  returns an error with a precise location; already-committed chunks persist.
 - `--on-error skip`: malformed rows and unresolved endpoints are collected in
   the report (`skipped`, `unresolved_endpoints`) and the import continues.
 - **Header / structural errors** (missing `:ID`, missing `:START_ID`/`:END_ID`/
-  `:TYPE`, missing header row, or a `--strict-types` unsupported type) are hard
-  errors regardless of failure mode — they happen before any transaction opens.
+  `:TYPE`, missing header row, a **duplicate header column**, an **unknown
+  reserved header** like `:FOO`, a **malformed id-space** like `:ID(`, or a
+  `--strict-types` unsupported type) are hard errors regardless of failure mode
+  — they happen before any transaction opens.
+
+**Multi-file error attribution.** Row numbering restarts at 1 for each file, so
+across a multi-file import an error names the **source file** as well as the
+row: `broken.csv row 3: id column ':ID' is empty` /
+`links.csv row 5: unresolved target key 'ghost'`. Both `RowError` and
+`UnresolvedEndpoint` carry an optional `file` field (serialized only when
+present); the single-file generic CSV/JSONL importers leave it unset and render
+as `row N: ...` exactly as before.
 
 ## Fidelity report
 
@@ -185,9 +200,28 @@ The importer honors the #3211 contract:
 | `type_mapping` | neo4j-rel-type → edge-label table with counts |
 | `skipped` | malformed rows (skip mode) with `row N:` messages |
 | `unresolved_endpoints` | edges whose endpoints didn't resolve (skip mode) |
-| `coerced` | value transformations (char, temporal, multi-label) with counts |
+| `coerced` | value transformations (char, byte/short, temporal, multi-label) with counts (one per (row, column)) |
 | `unsupported` | dropped columns (`duration`, `point`, `byte[]`) with counts |
 | `zero_loss` | `true` iff `skipped`, `unresolved_endpoints`, and `unsupported` are all empty |
+
+Counts in `label_mapping`, `type_mapping`, `coerced`, and `unsupported` reflect
+**only rows that were actually imported** — in `--on-error skip` a row that is
+later skipped (bad `:ID`) or has an unresolved endpoint contributes nothing to
+these tables. A `coerced` entry counts **rows affected**, so an array column
+whose every element is coerced still counts once per row.
+
+### What `zero_loss` means (precisely)
+
+`zero_loss` reports whether any **rows or columns were dropped or rejected** —
+it is `true` iff `skipped`, `unresolved_endpoints`, and `unsupported` are all
+empty. It is deliberately **not** affected by lossy *type* coercions: a `char`
+stored as a 1-character string, a `date`/`datetime` stored as epoch
+microseconds (`temporal_to_micros`), a `time` stored as a string
+(`time_to_string`), and a `byte`/`short` widened to a 64-bit `Int`
+(`byte_to_int` / `short_to_int`) are all surfaced in the `coerced` table for
+auditability but do **not** flip `zero_loss` to `false`. Every input row and
+column was imported; only its representation changed. Inspect `coerced` when you
+need to know which type transformations were applied.
 
 ## Unsupported inputs and follow-ups
 

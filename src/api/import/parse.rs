@@ -204,10 +204,10 @@ pub(crate) fn csv_rows_with(path: &Path, delimiter: u8, quote: u8) -> Result<Row
                     cells,
                 })
             }
-            Err(e) => Err(ImportError::Row(RowError {
-                row: row_num,
-                message: format!("CSV parse error: {e}"),
-            })),
+            Err(e) => Err(ImportError::Row(RowError::new(
+                row_num,
+                format!("CSV parse error: {e}"),
+            ))),
         }
     });
 
@@ -265,20 +265,20 @@ pub(crate) fn jsonl_rows(path: &Path) -> Result<RowIter, ImportError> {
                             cells,
                         }))
                     }
-                    Ok(_) => Some(Err(ImportError::Row(RowError {
-                        row: line_num,
-                        message: "JSONL line is not a JSON object".to_string(),
-                    }))),
-                    Err(e) => Some(Err(ImportError::Row(RowError {
-                        row: line_num,
-                        message: format!("invalid JSON: {e}"),
-                    }))),
+                    Ok(_) => Some(Err(ImportError::Row(RowError::new(
+                        line_num,
+                        "JSONL line is not a JSON object".to_string(),
+                    )))),
+                    Err(e) => Some(Err(ImportError::Row(RowError::new(
+                        line_num,
+                        format!("invalid JSON: {e}"),
+                    )))),
                 }
             }
-            Err(e) => Some(Err(ImportError::Row(RowError {
-                row: line_num,
-                message: format!("IO error reading line: {e}"),
-            }))),
+            Err(e) => Some(Err(ImportError::Row(RowError::new(
+                line_num,
+                format!("IO error reading line: {e}"),
+            )))),
         }
     });
 

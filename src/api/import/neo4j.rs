@@ -315,6 +315,63 @@ impl Neo4jFidelityReport {
             });
         }
     }
+
+    /// Fold a successfully-imported row's [`RowNotes`] into the report. Called
+    /// only once the row is known to commit, so skipped/unresolved rows never
+    /// inflate the mapping / coercion / unsupported counts (Issue #3356).
+    fn commit_row(&mut self, notes: RowNotes) {
+        if let Some((neo4j_labels, aletheia_label)) = notes.label {
+            self.note_label(&neo4j_labels, &aletheia_label);
+        }
+        if let Some(edge_type) = notes.edge_type {
+            self.note_type(&edge_type);
+        }
+        for (column, kind) in notes.coercions {
+            self.note_coercion(&column, &kind, coercion_detail(&kind));
+        }
+        for (column, neo4j_type) in notes.unsupported {
+            self.note_unsupported(&column, &neo4j_type);
+        }
+        self.properties_imported += notes.properties_imported;
+    }
+}
+
+/// Per-row scratch accumulator for fidelity notes. Notes are recorded here while
+/// a row is being prepared and only folded into the [`Neo4jFidelityReport`] via
+/// [`Neo4jFidelityReport::commit_row`] once the row is known to import — so a row
+/// that is later skipped or has an unresolved endpoint contributes nothing
+/// (Issue #3356, over-count fix). Coercions and unsupported columns are deduped
+/// per (row, column) so an array column counts once per row, not per element.
+#[derive(Default)]
+struct RowNotes {
+    label: Option<(String, String)>,
+    edge_type: Option<String>,
+    coercions: Vec<(String, String)>,
+    unsupported: Vec<(String, String)>,
+    properties_imported: usize,
+}
+
+impl RowNotes {
+    fn note_label(&mut self, neo4j_labels: &str, aletheia_label: &str) {
+        self.label = Some((neo4j_labels.to_string(), aletheia_label.to_string()));
+    }
+
+    fn note_type(&mut self, edge_type: &str) {
+        self.edge_type = Some(edge_type.to_string());
+    }
+
+    fn note_coercion(&mut self, column: &str, kind: &str) {
+        if !self.coercions.iter().any(|(c, k)| c == column && k == kind) {
+            self.coercions.push((column.to_string(), kind.to_string()));
+        }
+    }
+
+    fn note_unsupported(&mut self, column: &str, neo4j_type: &str) {
+        if !self.unsupported.iter().any(|(c, _)| c == column) {
+            self.unsupported
+                .push((column.to_string(), neo4j_type.to_string()));
+        }
+    }
 }
 
 // ---- Header model ----------------------------------------------------------
@@ -324,8 +381,12 @@ impl Neo4jFidelityReport {
 enum NeoScalar {
     /// `string` and untyped columns.
     Str,
-    /// `int`, `long`, `short`, `byte` (scalar).
+    /// `int`, `long`.
     Int,
+    /// `byte` (scalar) — range-checked via `i8`, then widened to `Int`.
+    Byte,
+    /// `short` — range-checked via `i16`, then widened to `Int`.
+    Short,
     /// `float`, `double`.
     Float,
     /// `boolean`.
@@ -392,12 +453,13 @@ fn split_type_token(token: &str) -> (String, Option<String>, bool) {
 fn classify_scalar(base_lower: &str, is_array: bool) -> Option<NeoScalar> {
     match base_lower {
         "string" | "" => Some(NeoScalar::Str),
-        "int" | "long" | "short" => Some(NeoScalar::Int),
+        "int" | "long" => Some(NeoScalar::Int),
+        "short" => Some(NeoScalar::Short),
         "byte" => {
             if is_array {
                 None // byte[] is unsupported (AC8)
             } else {
-                Some(NeoScalar::Int)
+                Some(NeoScalar::Byte)
             }
         }
         "float" | "double" => Some(NeoScalar::Float),
@@ -427,6 +489,15 @@ fn parse_column(header: &str) -> std::result::Result<ColKind, String> {
         }
     };
 
+    // A reserved id-space header (`:ID(space)`, `:START_ID(space)`, ...) with an
+    // unbalanced parenthesis is malformed; report it precisely rather than
+    // letting it fall through to a misleading "missing a name" property error.
+    if type_part.matches('(').count() != type_part.matches(')').count() {
+        return Err(format!(
+            "malformed id-space in '{header}' (unclosed parenthesis)"
+        ));
+    }
+
     let (base, group, is_array) = split_type_token(type_part);
     match base.to_ascii_uppercase().as_str() {
         "ID" => Ok(ColKind::Id {
@@ -445,6 +516,14 @@ fn parse_column(header: &str) -> std::result::Result<ColKind, String> {
         _ => {
             // A property column: name is required.
             if name_part.is_empty() {
+                // An empty-name colon header that looks reserved (`:FOO`, all
+                // upper-case, no lower-case letters) is an unknown reserved
+                // token, not a nameless property.
+                let looks_reserved =
+                    !base.is_empty() && base.chars().all(|c| !c.is_ascii_lowercase());
+                if looks_reserved {
+                    return Err(format!("unknown reserved header '{header}'"));
+                }
                 return Err(format!("property column '{header}' is missing a name"));
             }
             let base_lower = base.to_ascii_lowercase();
@@ -471,7 +550,7 @@ fn parse_columns(headers: &[String]) -> std::result::Result<Vec<Column>, String>
     if headers.is_empty() || (headers.len() == 1 && headers[0].trim().is_empty()) {
         return Err("missing header row".to_string());
     }
-    headers
+    let columns: Vec<Column> = headers
         .iter()
         .map(|h| {
             parse_column(h).map(|kind| Column {
@@ -479,7 +558,27 @@ fn parse_columns(headers: &[String]) -> std::result::Result<Vec<Column>, String>
                 kind,
             })
         })
-        .collect()
+        .collect::<std::result::Result<_, _>>()?;
+    check_duplicate_headers(&columns)?;
+    Ok(columns)
+}
+
+/// Reject duplicate header fields. The CSV reader keys cells by header string,
+/// so two identical data-bearing headers (`:ID` twice, `name:string` twice, a
+/// second `:LABEL`/`:TYPE`) would silently collapse and lose data (Issue #3356).
+/// `:IGNORE` columns are exempt — they read no cell, so duplicates are harmless.
+fn check_duplicate_headers(columns: &[Column]) -> std::result::Result<(), String> {
+    let mut seen = HashSet::new();
+    for col in columns {
+        if matches!(col.kind, ColKind::Ignore) {
+            continue;
+        }
+        let key = col.header.trim();
+        if !seen.insert(key) {
+            return Err(format!("duplicate header column '{key}'"));
+        }
+    }
+    Ok(())
 }
 
 /// If strict types is on, reject the first unsupported column as a hard error.
@@ -503,12 +602,49 @@ fn namespaced_key(group: Option<&str>, id: &str) -> String {
 
 // ---- Value coercion --------------------------------------------------------
 
-fn parse_bool(s: &str) -> Option<bool> {
-    match s.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "t" => Some(true),
-        "false" | "0" | "no" | "f" => Some(false),
-        _ => None,
+/// Strip a trailing bracketed IANA zone id from a Neo4j `datetime` string
+/// (`2015-06-24T12:50:35.556+01:00[Europe/London]` -> `...+01:00`), which the
+/// shared RFC-3339 parser does not understand. A string without a trailing
+/// `[...]` is returned unchanged.
+fn strip_zone_id(s: &str) -> &str {
+    if s.ends_with(']')
+        && let Some(open) = s.rfind('[')
+    {
+        return s[..open].trim_end();
     }
+    s
+}
+
+/// Split a Neo4j array cell on `delim`, honoring `quote`-quoted elements so an
+/// element that itself contains the delimiter survives (`"a;b";c` -> `a;b`,
+/// `c`). Doubled quotes inside a quoted element escape a literal quote.
+fn split_array_quoted(raw: &str, delim: char, quote: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c == quote {
+                if chars.peek() == Some(&quote) {
+                    cur.push(quote);
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                cur.push(c);
+            }
+        } else if c == quote {
+            in_quotes = true;
+        } else if c == delim {
+            parts.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    parts.push(cur);
+    parts
 }
 
 /// Coerce one scalar element string per its [`NeoScalar`] type. Returns `Ok(None)`
@@ -536,37 +672,68 @@ fn coerce_scalar<F: FnMut(&str)>(
                 .map(|v| Some(PropertyValue::Int(v)))
                 .map_err(|_| format!("cannot coerce '{raw}' to Int"))
         }
+        NeoScalar::Byte => {
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            // Neo4j's ByteExtractor rejects values outside i8 range.
+            on_coerce("byte_to_int");
+            trimmed
+                .parse::<i8>()
+                .map(|v| Some(PropertyValue::Int(v as i64)))
+                .map_err(|_| format!("cannot coerce '{raw}' to byte (expected -128..=127)"))
+        }
+        NeoScalar::Short => {
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            // Neo4j's ShortExtractor rejects values outside i16 range.
+            on_coerce("short_to_int");
+            trimmed
+                .parse::<i16>()
+                .map(|v| Some(PropertyValue::Int(v as i64)))
+                .map_err(|_| format!("cannot coerce '{raw}' to short (expected -32768..=32767)"))
+        }
         NeoScalar::Float => {
             if trimmed.is_empty() {
                 return Ok(None);
             }
-            trimmed
+            let v = trimmed
                 .parse::<f64>()
-                .map(|v| Some(PropertyValue::Float(v)))
-                .map_err(|_| format!("cannot coerce '{raw}' to Float"))
+                .map_err(|_| format!("cannot coerce '{raw}' to Float"))?;
+            if !v.is_finite() {
+                return Err(format!("cannot coerce '{raw}' to Float (non-finite)"));
+            }
+            Ok(Some(PropertyValue::Float(v)))
         }
         NeoScalar::Bool => {
+            // Neo4j CSV `boolean` == `Boolean.parseBoolean`: `true` iff the value
+            // case-insensitively equals "true"; every other string is `false`,
+            // and it never errors. Empty stays absent.
             if trimmed.is_empty() {
                 return Ok(None);
             }
-            parse_bool(trimmed)
-                .map(|v| Some(PropertyValue::Bool(v)))
-                .ok_or_else(|| format!("cannot coerce '{raw}' to Bool"))
+            Ok(Some(PropertyValue::Bool(raw.eq_ignore_ascii_case("true"))))
         }
         NeoScalar::Char => {
             if raw.is_empty() {
                 return Ok(None);
             }
+            // Neo4j's `char` requires exactly one character and throws otherwise.
+            if raw.chars().count() != 1 {
+                return Err(format!(
+                    "cannot coerce '{raw}' to char (expected exactly 1 character)"
+                ));
+            }
             on_coerce("char_to_string");
-            let ch = raw.chars().next().expect("non-empty");
-            Ok(Some(PropertyValue::string(ch.to_string())))
+            Ok(Some(PropertyValue::string(raw)))
         }
         NeoScalar::DateTime => {
             if trimmed.is_empty() {
                 return Ok(None);
             }
             on_coerce("temporal_to_micros");
-            let ts = parse::parse_valid_time(trimmed)?;
+            let ts = parse::parse_valid_time(strip_zone_id(trimmed))?;
             Ok(Some(PropertyValue::Int(ts.wallclock())))
         }
         NeoScalar::TimeString => {
@@ -586,6 +753,7 @@ fn coerce_property<F: FnMut(&str)>(
     ty: NeoScalar,
     is_array: bool,
     array_delim: char,
+    quote: char,
     as_vector: bool,
     on_coerce: &mut F,
 ) -> std::result::Result<Option<PropertyValue>, String> {
@@ -595,10 +763,10 @@ fn coerce_property<F: FnMut(&str)>(
     if raw.trim().is_empty() {
         return Ok(None);
     }
-    let parts: Vec<&str> = raw.split(array_delim).collect();
+    let parts = split_array_quoted(raw, array_delim, quote);
     if as_vector && matches!(ty, NeoScalar::Int | NeoScalar::Float) {
         let mut floats = Vec::with_capacity(parts.len());
-        for part in parts {
+        for part in &parts {
             let t = part.trim();
             let v = t
                 .parse::<f32>()
@@ -608,7 +776,7 @@ fn coerce_property<F: FnMut(&str)>(
         return Ok(Some(PropertyValue::vector(&floats)));
     }
     let mut values = Vec::with_capacity(parts.len());
-    for part in parts {
+    for part in &parts {
         if let Some(v) = coerce_scalar(part, ty, on_coerce)? {
             values.push(v);
         }
@@ -618,23 +786,110 @@ fn coerce_property<F: FnMut(&str)>(
 
 // ---- Node / edge preparation -----------------------------------------------
 
+/// A validated node import plan built once per file from the parsed header, so
+/// the required `:ID` / `:LABEL` columns are non-optional by construction and
+/// the per-row hot path needs no `expect`/`unreachable!` (Issue #3356).
+struct NodePlan<'a> {
+    columns: &'a [Column],
+    id_header: &'a str,
+    id_group: Option<String>,
+    id_property_name: Option<String>,
+    label_header: &'a str,
+}
+
+impl<'a> NodePlan<'a> {
+    fn build(columns: &'a [Column]) -> std::result::Result<Self, String> {
+        let mut id: Option<(&str, Option<String>, Option<String>)> = None;
+        let mut label_header: Option<&str> = None;
+        for col in columns {
+            match &col.kind {
+                ColKind::Id {
+                    group,
+                    property_name,
+                } if id.is_none() => {
+                    id = Some((col.header.as_str(), group.clone(), property_name.clone()));
+                }
+                ColKind::Label if label_header.is_none() => {
+                    label_header = Some(col.header.as_str());
+                }
+                _ => {}
+            }
+        }
+        let (id_header, id_group, id_property_name) =
+            id.ok_or_else(|| "node file has no :ID column".to_string())?;
+        let label_header =
+            label_header.ok_or_else(|| "node file has no :LABEL column".to_string())?;
+        Ok(NodePlan {
+            columns,
+            id_header,
+            id_group,
+            id_property_name,
+            label_header,
+        })
+    }
+}
+
+/// A validated relationship import plan (the edge counterpart to [`NodePlan`]).
+struct EdgePlan<'a> {
+    columns: &'a [Column],
+    type_header: &'a str,
+    start_header: &'a str,
+    end_header: &'a str,
+    start_group: Option<String>,
+    end_group: Option<String>,
+}
+
+impl<'a> EdgePlan<'a> {
+    fn build(columns: &'a [Column]) -> std::result::Result<Self, String> {
+        let mut type_header: Option<&str> = None;
+        let mut start: Option<(&str, Option<String>)> = None;
+        let mut end: Option<(&str, Option<String>)> = None;
+        for col in columns {
+            match &col.kind {
+                ColKind::Type if type_header.is_none() => {
+                    type_header = Some(col.header.as_str());
+                }
+                ColKind::StartId { group } if start.is_none() => {
+                    start = Some((col.header.as_str(), group.clone()));
+                }
+                ColKind::EndId { group } if end.is_none() => {
+                    end = Some((col.header.as_str(), group.clone()));
+                }
+                _ => {}
+            }
+        }
+        let (start_header, start_group) =
+            start.ok_or_else(|| "relationship file has no :START_ID column".to_string())?;
+        let (end_header, end_group) =
+            end.ok_or_else(|| "relationship file has no :END_ID column".to_string())?;
+        let type_header =
+            type_header.ok_or_else(|| "relationship file has no :TYPE column".to_string())?;
+        Ok(EdgePlan {
+            columns,
+            type_header,
+            start_header,
+            end_header,
+            start_group,
+            end_group,
+        })
+    }
+}
+
 fn prepare_node(
     row: &Row,
-    columns: &[Column],
+    plan: &NodePlan<'_>,
     opts: &Neo4jCsvOptions,
-    report: &mut Neo4jFidelityReport,
+    notes: &mut RowNotes,
+    file: &str,
 ) -> std::result::Result<PreparedNode, RowError> {
     let row_err = |message: String| RowError {
         row: row.index,
         message,
+        file: Some(file.to_string()),
     };
 
     // --- label ---
-    let label_col = columns
-        .iter()
-        .find(|c| matches!(c.kind, ColKind::Label))
-        .expect("node plan validated to have :LABEL");
-    let raw_label = row.get_str(&label_col.header).map_err(&row_err)?;
+    let raw_label = row.get_str(plan.label_header).map_err(&row_err)?;
     let labels: Vec<String> = raw_label
         .split(opts.array_delimiter)
         .map(|s| s.trim())
@@ -648,16 +903,12 @@ fn prepare_node(
         LabelStrategy::Concat => labels.join("_"),
         LabelStrategy::First | LabelStrategy::Property => labels[0].clone(),
     };
-    report.note_label(
+    notes.note_label(
         &labels.join(&opts.array_delimiter.to_string()),
         &chosen_label,
     );
     if labels.len() > 1 {
-        report.note_coercion(
-            ":LABEL",
-            "multi_label_flattened",
-            "multi-label node flattened; full set kept in _labels",
-        );
+        notes.note_coercion(":LABEL", "multi_label_flattened");
     }
 
     let mut builder = PropertyMapBuilder::new();
@@ -679,23 +930,12 @@ fn prepare_node(
     }
 
     // --- id / key ---
-    let id_col = columns
-        .iter()
-        .find(|c| matches!(c.kind, ColKind::Id { .. }))
-        .expect("node plan validated to have :ID");
-    let (group, property_name) = match &id_col.kind {
-        ColKind::Id {
-            group,
-            property_name,
-        } => (group.clone(), property_name.clone()),
-        _ => unreachable!(),
-    };
-    let raw_id = row.get_str(&id_col.header).map_err(&row_err)?;
+    let raw_id = row.get_str(plan.id_header).map_err(&row_err)?;
     if raw_id.trim().is_empty() {
         return Err(row_err("id column ':ID' is empty".to_string()));
     }
-    let key = namespaced_key(group.as_deref(), raw_id.trim());
-    if let Some(pname) = &property_name {
+    let key = namespaced_key(plan.id_group.as_deref(), raw_id.trim());
+    if let Some(pname) = &plan.id_property_name {
         builder = builder
             .try_insert(pname, PropertyValue::string(raw_id.trim()))
             .map_err(|e| row_err(e.to_string()))?;
@@ -704,7 +944,7 @@ fn prepare_node(
 
     // --- valid_from + properties ---
     let mut valid_from = None;
-    for col in columns {
+    for col in plan.columns {
         match &col.kind {
             ColKind::Property { name, ty, is_array } => {
                 // Consume the valid-from column as valid time, not a property.
@@ -719,14 +959,13 @@ fn prepare_node(
                 }
                 let raw = row.get_str(&col.header).map_err(&row_err)?;
                 let as_vector = opts.vector_properties.contains(name);
-                let mut on_coerce = |kind: &str| {
-                    report.note_coercion(&col.header, kind, coercion_detail(kind));
-                };
+                let mut on_coerce = |kind: &str| notes.note_coercion(&col.header, kind);
                 let value = coerce_property(
                     &raw,
                     *ty,
                     *is_array,
                     opts.array_delimiter,
+                    opts.quote as char,
                     as_vector,
                     &mut on_coerce,
                 )
@@ -741,14 +980,14 @@ fn prepare_node(
             ColKind::Unsupported { type_str, .. } => {
                 let raw = row.get_str(&col.header).map_err(&row_err)?;
                 if !raw.trim().is_empty() {
-                    report.note_unsupported(&col.header, type_str);
+                    notes.note_unsupported(&col.header, type_str);
                 }
             }
             _ => {}
         }
     }
 
-    report.properties_imported += prop_count;
+    notes.properties_imported = prop_count;
     Ok(PreparedNode {
         key,
         label: chosen_label,
@@ -760,49 +999,37 @@ fn prepare_node(
 fn prepare_edge(
     key_to_id: &std::collections::HashMap<String, NodeId>,
     row: &Row,
-    columns: &[Column],
-    start_group: Option<&str>,
-    end_group: Option<&str>,
+    plan: &EdgePlan<'_>,
     opts: &Neo4jCsvOptions,
-    report: &mut Neo4jFidelityReport,
+    notes: &mut RowNotes,
+    file: &str,
 ) -> std::result::Result<PreparedEdge, EdgePrepError> {
     let row_err = |message: String| {
         EdgePrepError::Row(RowError {
             row: row.index,
             message,
+            file: Some(file.to_string()),
         })
     };
 
-    let type_col = columns
-        .iter()
-        .find(|c| matches!(c.kind, ColKind::Type))
-        .expect("edge plan validated to have :TYPE");
-    let raw_type = row.get_str(&type_col.header).map_err(&row_err)?;
+    let raw_type = row.get_str(plan.type_header).map_err(&row_err)?;
     if raw_type.trim().is_empty() {
         return Err(row_err("type column ':TYPE' is empty".to_string()));
     }
     let label = raw_type.trim().to_string();
-    report.note_type(&label);
+    notes.note_type(&label);
 
-    let start_col = columns
-        .iter()
-        .find(|c| matches!(c.kind, ColKind::StartId { .. }))
-        .expect("edge plan validated to have :START_ID");
-    let end_col = columns
-        .iter()
-        .find(|c| matches!(c.kind, ColKind::EndId { .. }))
-        .expect("edge plan validated to have :END_ID");
-
-    let raw_src = row.get_str(&start_col.header).map_err(&row_err)?;
-    let raw_dst = row.get_str(&end_col.header).map_err(&row_err)?;
-    let src_key = namespaced_key(start_group, raw_src.trim());
-    let dst_key = namespaced_key(end_group, raw_dst.trim());
+    let raw_src = row.get_str(plan.start_header).map_err(&row_err)?;
+    let raw_dst = row.get_str(plan.end_header).map_err(&row_err)?;
+    let src_key = namespaced_key(plan.start_group.as_deref(), raw_src.trim());
+    let dst_key = namespaced_key(plan.end_group.as_deref(), raw_dst.trim());
 
     let source = key_to_id.get(&src_key).copied().ok_or_else(|| {
         EdgePrepError::Unresolved(UnresolvedEndpoint {
             row: row.index,
             key: raw_src.trim().to_string(),
             side: Endpoint::Source,
+            file: Some(file.to_string()),
         })
     })?;
     let target = key_to_id.get(&dst_key).copied().ok_or_else(|| {
@@ -810,13 +1037,14 @@ fn prepare_edge(
             row: row.index,
             key: raw_dst.trim().to_string(),
             side: Endpoint::Target,
+            file: Some(file.to_string()),
         })
     })?;
 
     let mut builder = PropertyMapBuilder::new();
     let mut prop_count = 0usize;
     let mut valid_from = None;
-    for col in columns {
+    for col in plan.columns {
         match &col.kind {
             ColKind::Property { name, ty, is_array } => {
                 if opts.valid_from_property.as_deref() == Some(name.as_str()) {
@@ -830,14 +1058,13 @@ fn prepare_edge(
                 }
                 let raw = row.get_str(&col.header).map_err(&row_err)?;
                 let as_vector = opts.vector_properties.contains(name);
-                let mut on_coerce = |kind: &str| {
-                    report.note_coercion(&col.header, kind, coercion_detail(kind));
-                };
+                let mut on_coerce = |kind: &str| notes.note_coercion(&col.header, kind);
                 let value = coerce_property(
                     &raw,
                     *ty,
                     *is_array,
                     opts.array_delimiter,
+                    opts.quote as char,
                     as_vector,
                     &mut on_coerce,
                 )
@@ -852,14 +1079,14 @@ fn prepare_edge(
             ColKind::Unsupported { type_str, .. } => {
                 let raw = row.get_str(&col.header).map_err(&row_err)?;
                 if !raw.trim().is_empty() {
-                    report.note_unsupported(&col.header, type_str);
+                    notes.note_unsupported(&col.header, type_str);
                 }
             }
             _ => {}
         }
     }
 
-    report.properties_imported += prop_count;
+    notes.properties_imported = prop_count;
     Ok(PreparedEdge {
         source,
         target,
@@ -869,9 +1096,19 @@ fn prepare_edge(
     })
 }
 
+/// The source-file label (basename) used to attribute row/endpoint errors in a
+/// multi-file import (Issue #3356), mirroring the provenance basename.
+fn file_label_for(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
 fn coercion_detail(kind: &str) -> &'static str {
     match kind {
         "char_to_string" => "char coerced to a 1-char string",
+        "byte_to_int" => "byte widened to a 64-bit integer",
+        "short_to_int" => "short widened to a 64-bit integer",
         "temporal_to_micros" => "date/datetime coerced to epoch microseconds",
         "time_to_string" => "time-of-day stored as a string (no epoch anchor)",
         "multi_label_flattened" => "multi-label node flattened; full set kept in _labels",
@@ -897,6 +1134,19 @@ impl<'a> Importer<'a> {
     /// Parses the self-describing header, derives a coercion plan, and streams
     /// rows through the shared chunked-commit path, stamping
     /// `neo4j-import::<file>` provenance. Returns the fidelity report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened/read; the header is
+    /// missing or malformed (no `:ID` or `:LABEL` column, a duplicate header
+    /// column, an unknown reserved header, or a malformed id-space); an
+    /// unsupported type is present and `strict_types` is set; or — in the
+    /// default [`FailureMode::Abort`](super::FailureMode::Abort) — the first
+    /// malformed row/value (a bad `:ID`, an out-of-range `byte`/`short`, a
+    /// multi-character `char`, a non-finite float, an unparseable temporal
+    /// value, ...). In [`SkipAndReport`](super::FailureMode::SkipAndReport)
+    /// mode row-level failures are collected in the report instead. Error
+    /// messages name the offending file and row.
     pub fn neo4j_nodes_from_csv(
         &mut self,
         path: impl AsRef<Path>,
@@ -912,6 +1162,19 @@ impl<'a> Importer<'a> {
     ///
     /// Endpoints resolve against nodes imported earlier in this session (call
     /// [`neo4j_nodes_from_csv`](Self::neo4j_nodes_from_csv) first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened/read; the header is
+    /// missing or malformed (no `:START_ID`, `:END_ID`, or `:TYPE` column, a
+    /// duplicate header column, an unknown reserved header, or a malformed
+    /// id-space); an unsupported type is present and `strict_types` is set;
+    /// or — in the default [`FailureMode::Abort`](super::FailureMode::Abort) —
+    /// the first malformed row, bad value, or unresolved endpoint (a
+    /// `:START_ID`/`:END_ID` key with no matching imported node). In
+    /// [`SkipAndReport`](super::FailureMode::SkipAndReport) mode those
+    /// row-level failures are collected in the report instead. Error messages
+    /// name the offending file and row.
     pub fn neo4j_edges_from_csv(
         &mut self,
         path: impl AsRef<Path>,
@@ -926,6 +1189,18 @@ impl<'a> Importer<'a> {
     /// Import a multi-file Neo4j CSV dataset: all node files first (building the
     /// business-key map), then all relationship files. Returns one merged
     /// fidelity report (Issue #3356).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same conditions as
+    /// [`neo4j_nodes_from_csv`](Self::neo4j_nodes_from_csv) (for each node
+    /// file) and [`neo4j_edges_from_csv`](Self::neo4j_edges_from_csv) (for each
+    /// relationship file): I/O failure, a missing/malformed header, a
+    /// strict-types violation, or — in the default
+    /// [`FailureMode::Abort`](super::FailureMode::Abort) — the first malformed
+    /// row/value or unresolved endpoint. Node files are processed before
+    /// relationship files so endpoints resolve. Error messages name the
+    /// offending file so a failure is locatable across the multi-file input.
     pub fn neo4j_import_csv(
         &mut self,
         nodes: &[std::path::PathBuf],
@@ -951,26 +1226,37 @@ impl<'a> Importer<'a> {
     ) -> Result<()> {
         let headers = parse::read_csv_header(path, opts.delimiter, opts.quote)?;
         let columns = parse_columns(&headers).map_err(Error::other)?;
-        if !columns.iter().any(|c| matches!(c.kind, ColKind::Id { .. })) {
-            return Err(Error::other("node file has no :ID column".to_string()));
-        }
-        if !columns.iter().any(|c| matches!(c.kind, ColKind::Label)) {
-            return Err(Error::other("node file has no :LABEL column".to_string()));
-        }
+        let plan = NodePlan::build(&columns).map_err(Error::other)?;
         if opts.strict_types {
             enforce_strict_types(&columns).map_err(Error::other)?;
         }
 
+        let file_label = file_label_for(path);
         let rows = parse::csv_rows_with(path, opts.delimiter, opts.quote)?;
         let prev_prov = self.config.provenance.take();
         self.config.provenance = Some(provenance_for(path)?);
 
-        let columns_ref = &columns;
-        let result =
-            self.import_nodes_with(rows, |row| prepare_node(row, columns_ref, opts, report));
+        let plan_ref = &plan;
+        let file_ref = file_label.as_str();
+        let result = self.import_nodes_with(rows, |row| {
+            // Notes are folded into the report only on success, so skipped rows
+            // never inflate the mapping/coercion/unsupported counts (Issue #3356).
+            let mut notes = RowNotes::default();
+            let prepared = prepare_node(row, plan_ref, opts, &mut notes, file_ref)?;
+            report.commit_row(notes);
+            Ok(prepared)
+        });
 
         self.config.provenance = prev_prov;
-        let import_report = result?;
+        let mut import_report = result?;
+
+        // Attribute any row/parse errors that weren't already stamped (e.g. a
+        // malformed-CSV error surfaced by the reader) to this file.
+        for e in &mut import_report.skipped {
+            if e.file.is_none() {
+                e.file = Some(file_label.clone());
+            }
+        }
 
         report.rows_read += import_report.rows_read;
         report.nodes_imported += import_report.nodes_imported;
@@ -989,61 +1275,38 @@ impl<'a> Importer<'a> {
     ) -> Result<()> {
         let headers = parse::read_csv_header(path, opts.delimiter, opts.quote)?;
         let columns = parse_columns(&headers).map_err(Error::other)?;
-
-        let start_group = columns.iter().find_map(|c| match &c.kind {
-            ColKind::StartId { group } => Some(group.clone()),
-            _ => None,
-        });
-        let end_group = columns.iter().find_map(|c| match &c.kind {
-            ColKind::EndId { group } => Some(group.clone()),
-            _ => None,
-        });
-        let start_group = match start_group {
-            Some(g) => g,
-            None => {
-                return Err(Error::other(
-                    "relationship file has no :START_ID column".to_string(),
-                ));
-            }
-        };
-        let end_group = match end_group {
-            Some(g) => g,
-            None => {
-                return Err(Error::other(
-                    "relationship file has no :END_ID column".to_string(),
-                ));
-            }
-        };
-        if !columns.iter().any(|c| matches!(c.kind, ColKind::Type)) {
-            return Err(Error::other(
-                "relationship file has no :TYPE column".to_string(),
-            ));
-        }
+        let plan = EdgePlan::build(&columns).map_err(Error::other)?;
         if opts.strict_types {
             enforce_strict_types(&columns).map_err(Error::other)?;
         }
 
+        let file_label = file_label_for(path);
         let rows = parse::csv_rows_with(path, opts.delimiter, opts.quote)?;
         let prev_prov = self.config.provenance.take();
         self.config.provenance = Some(provenance_for(path)?);
 
-        let columns_ref = &columns;
-        let start_group_ref = start_group.as_deref();
-        let end_group_ref = end_group.as_deref();
+        let plan_ref = &plan;
+        let file_ref = file_label.as_str();
         let result = self.import_edges_with(rows, |key_to_id, row| {
-            prepare_edge(
-                key_to_id,
-                row,
-                columns_ref,
-                start_group_ref,
-                end_group_ref,
-                opts,
-                report,
-            )
+            let mut notes = RowNotes::default();
+            let prepared = prepare_edge(key_to_id, row, plan_ref, opts, &mut notes, file_ref)?;
+            report.commit_row(notes);
+            Ok(prepared)
         });
 
         self.config.provenance = prev_prov;
-        let import_report = result?;
+        let mut import_report = result?;
+
+        for e in &mut import_report.skipped {
+            if e.file.is_none() {
+                e.file = Some(file_label.clone());
+            }
+        }
+        for e in &mut import_report.unresolved_endpoints {
+            if e.file.is_none() {
+                e.file = Some(file_label.clone());
+            }
+        }
 
         report.rows_read += import_report.rows_read;
         report.relationships_imported += import_report.edges_imported;
