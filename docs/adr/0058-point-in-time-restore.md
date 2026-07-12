@@ -115,6 +115,38 @@ mapped at the MCP boundary (`src/mcp/error.rs`) to `FAILED_PRECONDITION`
 (non-retriable), mirroring the #3234 structured-error contract; the message
 names the window.
 
+Above-window rejection is deliberate (F2): an explicit target past the tail
+almost always means the operator misjudged the retained window, and silently
+full-replaying would hide that. The legitimate "restore to the tail" intent is
+expressed by supplying **no target** (the CLI's bare `--wal-archive`, or the
+explicit `--latest` alias), which resolves to the latest reachable coordinate
+(itself in-window) and performs a full replay. In-window target → partial
+restore; no target / `--latest` → full replay to the tail; above-window explicit
+target → error.
+
+### Interner vocabulary-change guard
+
+The WAL stores node/edge labels and property keys as **raw `u32` interner ids**,
+and the base `.albk` only carries the interner as of `source_lsn`. A post-backup
+transaction that introduces a **brand-new label or property key** has an id
+`>= K` (the restored interner's string count). Replaying that id verbatim is
+**silent data corruption**, not a mere failed lookup: it first dangles, then —
+because the restored interner's `next_id` equals `K` — the first genuinely-new
+string a later write interns collides with the dangling id, so a replayed
+node/edge is **mislabeled** or its property dropped.
+
+PITR therefore scans the included band prefix and the constraint-declaration
+slice for any interner id `>= K` **before materializing anything** and, if found,
+fails with a structured
+
+```rust
+BackupError::WindowCrossesVocabularyChange { first_unresolved_id, restored_interner_count }
+```
+
+also mapped to `FAILED_PRECONDITION`. This converts silent mislabeling/dropping
+into a clean, honest failure. The remediation is to take a fresh base backup
+that includes the new vocabulary, or to target a coordinate before the change.
+
 ## Consequences
 
 - **RDBMS-grade DR.** PITR to any coordinate in the retained window with
@@ -126,10 +158,13 @@ names the window.
   (rather than truncating after checkpoint/cold-migration) is an
   operator-managed prerequisite in v1; an integrated retention policy is a
   follow-up.
-- **Interner vocabulary caveat.** The WAL stores labels and property keys as
-  interner ids (property *values* are self-contained). The base backup carries
-  the interner as of `source_lsn`, so a post-backup transaction introducing a
-  brand-new label or property key cannot be resolved after replay. Keeping the
+- **Interner vocabulary caveat (guarded, not silent).** The WAL stores labels
+  and property keys as interner ids (property *values* are self-contained). The
+  base backup carries the interner as of `source_lsn`, so a post-backup
+  transaction introducing a brand-new label or property key cannot be resolved
+  after replay — and replaying it verbatim would **silently mislabel or drop
+  data**, not merely fail to resolve. PITR detects this before materializing and
+  fails cleanly with `WindowCrossesVocabularyChange` (see above). Keeping the
   label/key vocabulary stable across the window is required in v1; a durable
   interner archive is a follow-up.
 - **Cold-tier caveat.** As with `temporal_extent` (#3238), a restored

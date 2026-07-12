@@ -119,6 +119,36 @@ pub enum BackupError {
         /// The latest reachable coordinate (the archived WAL tail).
         latest: String,
     },
+    /// A point-in-time restore (PITR, Issue #3374) window crosses a **vocabulary
+    /// change**: a transaction at-or-before the target references an interner id
+    /// (a node/edge label or a property key) that the base backup's interner
+    /// does not define, because that label/key was introduced *after* the base
+    /// backup was taken.
+    ///
+    /// The WAL stores labels and property keys as raw `u32` interner ids, not
+    /// strings, and the base `.albk` only carries the interner as of
+    /// `source_lsn`. Replaying an out-of-range id would first dangle (resolve to
+    /// nothing) and then, because the restored interner's `next_id` equals the
+    /// base string count, silently **collide** with the first genuinely-new
+    /// string a later write interns — mislabeling or dropping data. PITR refuses
+    /// instead of corrupting: take a fresh base backup that includes the new
+    /// vocabulary, or target a coordinate before the vocabulary change.
+    #[error(
+        "point-in-time restore window crosses a vocabulary change: a transaction \
+         at-or-before the target references interner id {first_unresolved_id}, but \
+         the base backup's interner only defines ids 0..{restored_interner_count} \
+         (a label or property key introduced after the base backup). Replaying it \
+         would silently mislabel or drop data. Take a fresh base backup that \
+         includes the new vocabulary, or choose a target before the change."
+    )]
+    WindowCrossesVocabularyChange {
+        /// The first out-of-range interner id encountered (references a string
+        /// the base snapshot's interner does not contain).
+        first_unresolved_id: u32,
+        /// The number of strings the base backup's interner defines; valid ids
+        /// are `0..restored_interner_count`.
+        restored_interner_count: u32,
+    },
 }
 
 // ============================================================================

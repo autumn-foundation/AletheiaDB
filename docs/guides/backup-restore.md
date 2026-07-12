@@ -328,9 +328,11 @@ uncompressed are rejected with `BackupError::Corrupt`.
   follow-up.
 - **Band-granularity stop.** The stop coordinate resolves to a whole transaction boundary
   (inclusive at-or-before); PITR never splits a transaction.
-- **Interner vocabulary.** The WAL stores node/edge labels and property keys as interner ids
-  (property *values* are self-contained). The base backup carries the interner as of
-  `source_lsn`, so a post-backup transaction that introduces a **brand-new label or property
-  key** cannot be resolved after replay. Keep the label/key vocabulary stable across the window;
-  a durable interner archive is a follow-up.
+- **Interner vocabulary (guarded).** The WAL stores node/edge labels and property keys as interner
+  ids (property *values* are self-contained). The base backup carries the interner as of
+  `source_lsn`, so a post-backup transaction that introduces a **brand-new label or property key**
+  cannot be resolved after replay — and replaying it verbatim would *silently mislabel or drop
+  data*. PITR guards against this: it scans the window before materializing and fails cleanly with
+  `WindowCrossesVocabularyChange` rather than corrupting. Keep the label/key vocabulary stable
+  across the window (or take a fresh base backup); a durable interner archive is a follow-up.
 - **Encrypted WAL archives** are not yet supported by the PITR reader (plaintext segments only).

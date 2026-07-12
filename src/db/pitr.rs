@@ -26,14 +26,29 @@
 //! the coordinate: every transaction committed at-or-before the target is
 //! present, every transaction after it is absent.
 //!
-//! # Interner caveat (v1)
+//! # Interner vocabulary guard (v1)
 //!
-//! The WAL stores node/edge **labels** and **property keys** as interner ids
-//! (not strings); property *values* are self-contained. The base backup carries
-//! the interner as of `source_lsn`, so a post-backup transaction that
-//! introduces a **brand-new label or property key** cannot be resolved after a
-//! PITR replay. Keep the label/key vocabulary stable across the window (a
-//! durable interner archive is a follow-up).
+//! The WAL stores node/edge **labels** and **property keys** as raw `u32`
+//! interner ids (not strings); property *values* are self-contained. The base
+//! backup carries the interner as of `source_lsn`, so a post-backup transaction
+//! that introduces a **brand-new label or property key** has an id `>= K`, where
+//! `K` is the restored interner's string count. Replaying such an id verbatim is
+//! **silent data corruption**, not a mere failed lookup: the id first dangles,
+//! then — because the restored interner's `next_id` equals `K` — the first
+//! genuinely-new string a later write interns collides with the dangling id, so
+//! a replayed node/edge is **mislabeled** (e.g. "Manager" becomes the user's new
+//! "Department") or its property silently dropped.
+//!
+//! PITR therefore **refuses** such a window: before materializing anything, it
+//! scans the included band prefix and constraint-declaration slice for any
+//! interner id that references a string the base snapshot does not contain and,
+//! if found, fails with
+//! [`BackupError::WindowCrossesVocabularyChange`](crate::storage::backup::BackupError::WindowCrossesVocabularyChange)
+//! (mapped to `FAILED_PRECONDITION` at the MCP boundary). This converts silent
+//! mislabeling/dropping into a clean, honest error. Keep the label/key
+//! vocabulary stable across the window, take a fresh base backup that includes
+//! the new vocabulary, or target a coordinate before the change (a durable
+//! interner archive is a follow-up).
 
 use std::path::Path;
 
@@ -121,6 +136,63 @@ struct FilteredBands {
     discarded: u64,
     /// The coordinate of the last included transaction band, if any.
     resolved_stop: Option<PitrCoord>,
+}
+
+/// Scan a WAL operation's **label / property-key** positions for the first
+/// interner id that is `>= restored_count` — i.e. references a string the base
+/// backup's interner (ids `0..restored_count`) does not contain. Property
+/// *values* are self-contained (never interned) and are deliberately excluded.
+///
+/// A `Some` result means this operation would replay a dangling id and silently
+/// mislabel/drop data (see the module-level vocabulary guard); `None` means every
+/// id it references resolves against the base interner.
+fn first_out_of_range_id(op: &WalOperation, restored_count: u32) -> Option<u32> {
+    let check = |id: crate::core::interning::InternedString| -> Option<u32> {
+        let raw = id.as_u32();
+        (raw >= restored_count).then_some(raw)
+    };
+    let check_keys = |properties: &crate::core::property::PropertyMap| -> Option<u32> {
+        properties
+            .keys()
+            .map(|k| k.as_u32())
+            .find(|&raw| raw >= restored_count)
+    };
+    match op {
+        // Create/update of nodes and edges all carry a `label` and a
+        // `properties` map whose KEYS are interned (values are inline).
+        WalOperation::CreateNode {
+            label, properties, ..
+        }
+        | WalOperation::UpdateNode {
+            label, properties, ..
+        }
+        | WalOperation::CreateEdge {
+            label, properties, ..
+        }
+        | WalOperation::UpdateEdge {
+            label, properties, ..
+        } => check(*label).or_else(|| check_keys(properties)),
+        // Constraint declarations reference an interned label + property key.
+        WalOperation::DeclareUniqueConstraint { label, property }
+        | WalOperation::DropUniqueConstraint { label, property } => {
+            check(*label).or_else(|| check(*property))
+        }
+        // Deletes/retracts carry only ids/timestamps; control/framing markers
+        // carry no vocabulary.
+        _ => None,
+    }
+}
+
+/// Return the first interner id, across all `entries`, that references a string
+/// the base backup's interner does not define (`>= restored_count`), or `None`
+/// if the whole stream resolves against the base vocabulary.
+fn first_unresolved_interned_id<'a>(
+    entries: impl IntoIterator<Item = &'a WalEntry>,
+    restored_count: u32,
+) -> Option<u32> {
+    entries
+        .into_iter()
+        .find_map(|e| first_out_of_range_id(&e.operation, restored_count))
 }
 
 /// Is this a data-bearing operation (as opposed to a control/framing marker)?
