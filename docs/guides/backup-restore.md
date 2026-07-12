@@ -260,17 +260,33 @@ Every committed transaction is one atomic `[BeginTx .. CommitTx]` band in the WA
 the prefix of **whole bands** committed **at-or-before** the target and never a partial band. A
 target that falls **between** two transactions lands on the earlier one (inclusive tie-break):
 everything committed at-or-before the coordinate is present, everything after it is absent. An
-incomplete trailing band (a crash-torn tail) is dropped. A target **above** the archived tail
-resolves to a full replay ("everything at-or-before the target"); a target **below** the base
-backup fails (see next).
+incomplete trailing band (a crash-torn tail) is dropped. To replay *everything*, pass **no
+target** / `--latest` (a full replay to the tail); an explicit target **above** the archived tail
+is an error, and a target **below** the base backup fails (see next). Band selection parses whole
+`[BeginTx .. CommitTx]` frames from the full WAL stream, so even if the base backup's `source_lsn`
+lands *inside* a transaction frame, that frame is included or excluded whole — never split into
+mis-timed singleton ops.
 
 ### Target outside the window
 
 The achievable window is bounded **below** by the base backup — PITR cannot reconstruct a
 coordinate before the backup from base + forward replay — and **above** by the archived WAL tail.
-A target below the window fails with a structured `BackupError::TargetOutsideWindow` naming the
-window (`earliest`/`latest`); on the MCP surface this maps to `FAILED_PRECONDITION`. Run
-`--dry-run` first to pick a reachable coordinate.
+A target **outside** the window in either direction (below the base backup, or above the archived
+tail) fails with a structured `BackupError::TargetOutsideWindow` naming the window
+(`earliest`/`latest`); on the MCP surface this maps to `FAILED_PRECONDITION`. An above-tail target
+is a deliberate error (not a silent full replay): to restore to the tail, pass **no target** or
+`--latest`. Run `--dry-run` first to pick a reachable coordinate.
+
+### Window crosses a vocabulary change
+
+The WAL stores labels and property keys as raw interner ids, and the base `.albk` only carries the
+interner as of `source_lsn`. If a transaction at-or-before the target introduced a **brand-new
+label or property key** (an id the base interner does not define), PITR cannot resolve it — and
+replaying it verbatim would **silently mislabel or drop data**, because the restored interner's
+next id collides with the dangling one. PITR detects this before materializing anything and fails
+with a structured `BackupError::WindowCrossesVocabularyChange { first_unresolved_id,
+restored_interner_count }` (MCP `FAILED_PRECONDITION`). Take a fresh base backup that includes the
+new vocabulary, or target a coordinate before the change.
 
 ### Side-by-side restore-then-switch flow
 

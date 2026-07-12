@@ -344,18 +344,35 @@ fn band_within(band: &Band, target: &PitrTarget) -> bool {
     }
 }
 
-/// Filter an LSN-sorted WAL entry stream to the prefix of whole transaction
-/// bands committed at-or-before `target` (inclusive tie-break).
+/// Filter an LSN-sorted **full** WAL entry stream (from `LSN::initial()`, not a
+/// floor-cut read) to the prefix of whole transaction bands committed
+/// at-or-before `target` (inclusive tie-break), restricted to bands at or above
+/// the base backup's replay floor `source_lsn`.
+///
+/// Parsing whole bands from the full stream, rather than from a read that starts
+/// at `LSN(source_lsn)`, structurally eliminates **band-straddle** (Issue #3374,
+/// F5): if `source_lsn` ever lands INSIDE a `[BeginTx .. CommitTx]` frame, that
+/// frame is still parsed as one whole band — stamped with its authoritative
+/// `CommitTx` coordinate — and is either wholly included or wholly excluded,
+/// never split into mis-timed singleton data ops. A band whose commit LSN is
+/// below `source_lsn` is already captured by the base snapshot and is skipped
+/// (differential replay). The straddling band's sub-`source_lsn` data ops are
+/// re-touched on replay, which is safe under the #3419 idempotent
+/// re-application guards.
 ///
 /// Never includes a partial band; drops an incomplete trailing band (torn
 /// tail); returns the flattened prefix (markers preserved for replay), the
-/// applied/discarded transaction counts, and the resolved stop coordinate.
-fn filter_bands(entries: Vec<WalEntry>, target: &PitrTarget) -> FilteredBands {
+/// applied/discarded transaction counts (relative to post-`source_lsn`
+/// transactions), and the resolved stop coordinate.
+fn filter_bands(entries: Vec<WalEntry>, target: &PitrTarget, source_lsn: u64) -> FilteredBands {
     let bands = parse_bands(entries);
 
+    // Post-backup transaction bands are those whose commit LSN is at or above
+    // the replay floor; bands fully below `source_lsn` live in the base snapshot
+    // and are neither replayed nor counted.
     let total_transactions = bands
         .iter()
-        .filter(|b| b.complete && b.is_transaction)
+        .filter(|b| b.complete && b.is_transaction && b.stop_lsn.0 >= source_lsn)
         .count() as u64;
 
     let mut out: Vec<WalEntry> = Vec::new();
@@ -366,6 +383,9 @@ fn filter_bands(entries: Vec<WalEntry>, target: &PitrTarget) -> FilteredBands {
     for band in bands {
         if !band.complete {
             continue; // torn tail: excluded, never counted
+        }
+        if band.stop_lsn.0 < source_lsn {
+            continue; // already in the base snapshot (differential replay floor)
         }
         if stopped {
             continue; // prefix already closed; remaining bands are discarded
@@ -378,6 +398,16 @@ fn filter_bands(entries: Vec<WalEntry>, target: &PitrTarget) -> FilteredBands {
             }
             out.extend(band.entries);
         } else {
+            // Monotonicity assumption (F6): the stream is LSN-sorted, and the
+            // WAL's HLC <-> LSN contract makes commit timestamps monotonic with
+            // commit LSN — a later-committing transaction has BOTH a strictly
+            // greater `CommitTx` LSN and a strictly greater commit timestamp.
+            // So once a band's stop coordinate exceeds the target, every later
+            // band's does too: closing the prefix at the first out-of-range band
+            // is correct for an `AsOf` (timestamp) target exactly as it is for an
+            // `Lsn` target. If that contract were ever violated, a later band
+            // committing at a smaller timestamp could be wrongly included; the
+            // WAL write path upholds it.
             stopped = true;
         }
     }
@@ -488,11 +518,13 @@ fn compute_window(all: &[WalEntry], source_lsn: u64) -> PitrWindow {
     }
 }
 
-/// Count complete transaction bands in a stream (for the no-target dry-run).
-fn count_transactions(entries: &[WalEntry]) -> u64 {
+/// Count complete post-backup transaction bands in a full stream (for the
+/// no-target dry-run / to-latest full replay). Bands whose commit LSN is below
+/// `source_lsn` live in the base snapshot and are not counted.
+fn count_transactions(entries: &[WalEntry], source_lsn: u64) -> u64 {
     parse_bands(entries.to_vec())
         .iter()
-        .filter(|b| b.complete && b.is_transaction)
+        .filter(|b| b.complete && b.is_transaction && b.stop_lsn.0 >= source_lsn)
         .count() as u64
 }
 
@@ -698,7 +730,8 @@ impl AletheiaDB {
     ///
     /// # Errors
     ///
-    /// - [`BackupError::TargetOutsideWindow`] — `target` is below the window.
+    /// - [`BackupError::TargetOutsideWindow`] — `target` is outside the window
+    ///   (below the base backup or above the archived WAL tail).
     /// - Artifact/WAL read failures propagate as [`Error`].
     pub fn inspect_pitr(
         albk: &Path,
@@ -708,18 +741,20 @@ impl AletheiaDB {
         let source_lsn = read_artifact(albk).map_err(Error::Backup)?.source_lsn;
         let all = read_entries_from_dir_with_options(wal_archive, LSN::initial(), None, true)?;
         let window = compute_window(&all, source_lsn);
-        let post = read_entries_from_dir_with_options(wal_archive, LSN(source_lsn), None, true)?;
 
         let (resolved_stop, applied, discarded) = match &target {
             Some(t) => {
                 window.validate(t)?;
-                let f = filter_bands(post, t);
+                // Band selection is over the full stream with a `source_lsn`
+                // differential floor (F5); parsing whole bands is straddle-safe.
+                let f = filter_bands(all, t, source_lsn);
                 (f.resolved_stop, f.applied, f.discarded)
             }
             None => {
-                // No target: report the full window; a full replay applies
-                // every reachable post-backup transaction, discarding none.
-                let total = count_transactions(&post);
+                // No target: report the full window; a full replay to the tail
+                // applies every reachable post-backup transaction, discarding
+                // none.
+                let total = count_transactions(&all, source_lsn);
                 (Some(window.latest_coord()), total, 0)
             }
         };
@@ -805,7 +840,7 @@ mod band_filter_tests {
         // Two transactions committing at t=100 and t=200; target exactly 100
         // keeps the first, drops the second.
         let entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
-        let f = filter_bands(entries, &PitrTarget::AsOf(ts(100)));
+        let f = filter_bands(entries, &PitrTarget::AsOf(ts(100)), 0);
         assert_eq!(f.applied, 1);
         assert_eq!(f.discarded, 1);
         assert_eq!(f.resolved_stop.as_ref().unwrap().timestamp_micros, 100);
@@ -817,7 +852,7 @@ mod band_filter_tests {
     fn asof_between_transactions_takes_at_or_before() {
         // Commits at 100 and 200; target 150 keeps only the first.
         let entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
-        let f = filter_bands(entries, &PitrTarget::AsOf(ts(150)));
+        let f = filter_bands(entries, &PitrTarget::AsOf(ts(150)), 0);
         assert_eq!(f.applied, 1);
         assert_eq!(f.discarded, 1);
         assert_eq!(f.resolved_stop.unwrap().timestamp_micros, 100);
@@ -826,7 +861,7 @@ mod band_filter_tests {
     #[test]
     fn target_before_all_yields_empty_prefix() {
         let entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
-        let f = filter_bands(entries, &PitrTarget::AsOf(ts(50)));
+        let f = filter_bands(entries, &PitrTarget::AsOf(ts(50)), 0);
         assert_eq!(f.applied, 0);
         assert_eq!(f.discarded, 2);
         assert!(f.resolved_stop.is_none());
@@ -836,7 +871,7 @@ mod band_filter_tests {
     #[test]
     fn target_after_all_yields_full_prefix() {
         let entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
-        let f = filter_bands(entries, &PitrTarget::AsOf(ts(9999)));
+        let f = filter_bands(entries, &PitrTarget::AsOf(ts(9999)), 0);
         assert_eq!(f.applied, 2);
         assert_eq!(f.discarded, 0);
         assert_eq!(f.resolved_stop.unwrap().timestamp_micros, 200);
@@ -847,7 +882,7 @@ mod band_filter_tests {
     fn lsn_target_stops_at_commit_lsn() {
         // First band commits at LSN 3, second at LSN 6.
         let entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
-        let f = filter_bands(entries, &PitrTarget::Lsn(3));
+        let f = filter_bands(entries, &PitrTarget::Lsn(3), 0);
         assert_eq!(f.applied, 1);
         assert_eq!(f.discarded, 1);
         assert_eq!(f.resolved_stop.unwrap().lsn, 3);
@@ -855,7 +890,7 @@ mod band_filter_tests {
         // A target between the two commit LSNs (4 or 5) still keeps only the
         // first whole band — never a partial second band.
         let entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
-        let f = filter_bands(entries, &PitrTarget::Lsn(5));
+        let f = filter_bands(entries, &PitrTarget::Lsn(5), 0);
         assert_eq!(f.applied, 1);
         assert_eq!(f.entries.len(), 3);
     }
@@ -866,7 +901,7 @@ mod band_filter_tests {
         let mut entries = tx(1, 1, 1, ts(100));
         entries.push(framed(4, WalOperation::BeginTx { tx_id: 2 }, ts(0)));
         entries.push(framed(5, create_node_op(5), ts(0)));
-        let f = filter_bands(entries, &PitrTarget::AsOf(ts(9999)));
+        let f = filter_bands(entries, &PitrTarget::AsOf(ts(9999)), 0);
         assert_eq!(f.applied, 1, "only the complete band is applied");
         assert_eq!(
             f.discarded, 0,
@@ -880,12 +915,12 @@ mod band_filter_tests {
         // A legacy (pre-v7) data op at t=50, then a framed tx at t=150.
         let mut entries = vec![legacy(1, create_node_op(1), ts(50))];
         entries.extend(tx(2, 1, 1, ts(150)));
-        let f = filter_bands(entries.clone(), &PitrTarget::AsOf(ts(100)));
+        let f = filter_bands(entries.clone(), &PitrTarget::AsOf(ts(100)), 0);
         assert_eq!(f.applied, 1, "only the legacy op is at-or-before 100");
         assert_eq!(f.discarded, 1);
         assert_eq!(f.resolved_stop.unwrap().timestamp_micros, 50);
 
-        let f = filter_bands(entries, &PitrTarget::AsOf(ts(200)));
+        let f = filter_bands(entries, &PitrTarget::AsOf(ts(200)), 0);
         assert_eq!(f.applied, 2);
         assert_eq!(f.discarded, 0);
     }
@@ -905,7 +940,7 @@ mod band_filter_tests {
         let mut entries = tx(1, 1, 1, ts(100));
         entries.push(decl);
         entries.extend(tx(5, 2, 1, ts(200)));
-        let f = filter_bands(entries, &PitrTarget::AsOf(ts(150)));
+        let f = filter_bands(entries, &PitrTarget::AsOf(ts(150)), 0);
         assert_eq!(f.applied, 1, "one transaction band before 150");
         assert_eq!(f.discarded, 1);
         // Begin+data+Commit (3) + the declaration (1) = 4 entries carried.
@@ -913,19 +948,54 @@ mod band_filter_tests {
     }
 
     #[test]
-    fn window_lower_bound_rejects_target_below_base() {
-        // Base at source_lsn=10 with a pre-backup commit at t=500 (lsn 3).
+    fn window_rejects_targets_outside_bounds() {
+        // Base at source_lsn=10 with a pre-backup commit at t=500 (lsn 3) and a
+        // post-backup commit at t=800 (begin 10, data 11, commit lsn 12).
         let all = all_of(vec![tx(1, 1, 1, ts(500)), tx(10, 2, 1, ts(800))]);
         let window = compute_window(&all, 10);
-        // A timestamp before the base's latest commit is unreachable.
+        // A timestamp before the base's latest commit is unreachable (below).
         assert!(window.validate(&PitrTarget::AsOf(ts(400))).is_err());
         // At-or-after the base is fine.
         assert!(window.validate(&PitrTarget::AsOf(ts(500))).is_ok());
-        // An LSN below source_lsn is unreachable.
+        // An LSN below source_lsn is unreachable (below).
         assert!(window.validate(&PitrTarget::Lsn(3)).is_err());
         assert!(window.validate(&PitrTarget::Lsn(10)).is_ok());
+        // The latest coordinate itself is in-window (a to-tail full replay).
+        assert!(window.validate(&PitrTarget::AsOf(ts(800))).is_ok());
+        assert!(window.validate(&PitrTarget::Lsn(12)).is_ok());
+        // F2: an explicit target ABOVE the archived tail is an error, not a
+        // silent full replay.
+        assert!(window.validate(&PitrTarget::AsOf(ts(801))).is_err());
+        assert!(window.validate(&PitrTarget::Lsn(13)).is_err());
         // The window bounds are reported.
         assert_eq!(window.earliest_coord().lsn, 10);
+        assert_eq!(window.latest_coord().lsn, 12);
         assert_eq!(window.latest_coord().timestamp_micros, 800);
+    }
+
+    #[test]
+    fn source_lsn_inside_a_band_selects_whole_band() {
+        // F5 regression: `source_lsn` lands INSIDE the second band
+        // (begin lsn 4 < source_lsn 5 <= commit lsn 6). Parsing whole bands from
+        // the full stream must select that band ENTIRE — with its authoritative
+        // CommitTx timestamp — never split it into mis-timed singletons, and must
+        // skip the first band, which lives fully below the floor (in the base).
+        let entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
+        let f = filter_bands(entries, &PitrTarget::AsOf(ts(9999)), 5);
+
+        assert_eq!(f.applied, 1, "only the straddling band is post-backup");
+        assert_eq!(f.discarded, 0);
+        // Begin(lsn4) + data(lsn5) + Commit(lsn6) = 3 whole-band entries.
+        assert_eq!(f.entries.len(), 3, "whole band, not split singletons");
+        assert!(
+            matches!(f.entries[0].operation, WalOperation::BeginTx { .. }),
+            "band prefix begins with its BeginTx marker"
+        );
+        let stop = f.resolved_stop.expect("a band was applied");
+        assert_eq!(
+            stop.timestamp_micros, 200,
+            "band carries its CommitTx timestamp, not a data op's"
+        );
+        assert_eq!(stop.lsn, 6, "stop is the CommitTx LSN");
     }
 }
