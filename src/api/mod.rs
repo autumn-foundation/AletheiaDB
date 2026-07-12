@@ -95,6 +95,10 @@ pub mod transaction;
 #[cfg(feature = "import")]
 pub mod import;
 
+/// Columnar Parquet export of the graph for analytics interoperability (Issue #3364).
+#[cfg(feature = "parquet")]
+pub mod export;
+
 // Re-export commonly used types
 pub use transaction::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
 
@@ -105,3 +109,6 @@ pub use import::{
     Neo4jFidelityReport, NodeMapping, PropertyMapping, RowError, TypeMapEntry, UnresolvedEndpoint,
     UnsupportedNote,
 };
+
+#[cfg(feature = "parquet")]
+pub use export::{ExportConfig, ExportReport, Exporter};

@@ -70,6 +70,7 @@ check-features:
     @echo "=== encryption (standalone) ===" && cargo check --no-default-features --tests --features encryption
     @echo "=== encryption-vault (standalone) ===" && cargo check --no-default-features --tests --features encryption-vault
     @echo "=== encryption-aws-kms (standalone) ===" && cargo check --no-default-features --tests --features encryption-aws-kms
+    @echo "=== parquet (standalone) ===" && cargo check --no-default-features --tests --features parquet
 
 # Format code
 fmt:
