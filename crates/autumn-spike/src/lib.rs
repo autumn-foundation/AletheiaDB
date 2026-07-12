@@ -29,12 +29,14 @@
 
 pub mod app;
 pub mod auth;
-pub mod error;
 pub mod handler;
 pub mod state;
 
 pub use app::{DEMO_MIDDLEWARE_HEADER, build_spike_client, build_spike_testapp};
 pub use auth::{AuthStoreTokenAdapter, SpikeAuth, SpikeAuthState};
-pub use error::SpikeError;
 pub use handler::get_node;
 pub use state::SpikeState;
+
+/// The spike reuses AletheiaDB's existing HTTP error envelope verbatim, so its
+/// error responses are byte-identical to the current `POST /query` surface.
+pub use aletheiadb::http::AletheiaHttpError;

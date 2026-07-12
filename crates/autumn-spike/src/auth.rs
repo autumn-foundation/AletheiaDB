@@ -18,8 +18,8 @@
 //!    store. Demonstrates that the sealed-`IntoAppLayer` limitation of 0.4
 //!    (ADR 0055) is lifted in 0.5.
 
-use crate::error::SpikeError;
 use aletheiadb::auth::{AccessClass, AuthMode, AuthStore, Principal};
+use aletheiadb::http::AletheiaHttpError;
 use autumn_web::prelude::AppState;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -71,20 +71,21 @@ impl SpikeAuth {
     ///
     /// # Errors
     ///
-    /// Returns [`SpikeError::PermissionDenied`] (carrying `required_class` +
-    /// `principal_role`) when the principal's role does not allow the class.
-    /// Anonymous identities are allowed everything.
-    pub fn authorize(&self, class: AccessClass) -> Result<(), SpikeError> {
+    /// Returns [`AletheiaHttpError::PermissionDenied`] (HTTP 403) when the
+    /// principal's role does not allow the class — with the **same** message
+    /// the existing `/query` surface produces (`src/http/auth.rs`), so the body
+    /// is byte-identical. Anonymous identities are allowed everything.
+    pub fn authorize(&self, class: AccessClass) -> Result<(), AletheiaHttpError> {
         match &self.identity {
             Identity::Anonymous => Ok(()),
             Identity::Principal(p) => {
                 if p.role.allows(class) {
                     Ok(())
                 } else {
-                    Err(SpikeError::PermissionDenied {
-                        required_class: class,
-                        principal_role: p.role,
-                    })
+                    Err(AletheiaHttpError::PermissionDenied(format!(
+                        "role '{}' does not permit {} access",
+                        p.role, class
+                    )))
                 }
             }
         }
@@ -129,7 +130,7 @@ fn extract_credential(parts: &Parts) -> Option<String> {
 }
 
 impl FromRequestParts<AppState> for SpikeAuth {
-    type Rejection = SpikeError;
+    type Rejection = AletheiaHttpError;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -138,7 +139,7 @@ impl FromRequestParts<AppState> for SpikeAuth {
         let auth = state
             .extension::<SpikeAuthState>()
             .map(|arc| (*arc).clone())
-            .ok_or_else(|| SpikeError::Internal("auth state not installed".to_owned()))?;
+            .ok_or(AletheiaHttpError::StateMissing)?;
 
         match auth.mode {
             AuthMode::Anonymous => Ok(Self {
@@ -146,12 +147,14 @@ impl FromRequestParts<AppState> for SpikeAuth {
             }),
             AuthMode::Required => {
                 // Uniform failure: missing / malformed / unknown / revoked are
-                // indistinguishable to the caller.
-                let credential = extract_credential(parts).ok_or(SpikeError::Unauthenticated)?;
+                // indistinguishable to the caller (byte-identical 401 to the
+                // existing surface).
+                let credential =
+                    extract_credential(parts).ok_or(AletheiaHttpError::Unauthorized)?;
                 let principal = auth
                     .store
                     .verify(&credential)
-                    .ok_or(SpikeError::Unauthenticated)?;
+                    .ok_or(AletheiaHttpError::Unauthorized)?;
                 Ok(Self {
                     identity: Identity::Principal(principal),
                 })
@@ -198,8 +201,7 @@ impl autumn_web::auth::ApiTokenStore for AuthStoreTokenAdapter {
         raw_token: &'a str,
     ) -> Pin<Box<dyn Future<Output = autumn_web::AutumnResult<Option<String>>> + Send + 'a>> {
         // Constant-time verify via the shared store; return the principal id.
-        let result = self.store.verify(raw_token).map(|p| p.id);
-        Box::pin(async move { Ok(result) })
+        Box::pin(async move { Ok(self.store.verify(raw_token).map(|p| p.id)) })
     }
 
     fn revoke<'a>(

@@ -24,6 +24,10 @@ categories = ["database-implementations", "data-structures"]
 [workspace]
 members = ["crates/autumn-spike"]
 default-members = ["."]
+# `python/` and `fuzz/` are independent crates with their own manifests (the
+# Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
+# this workspace so those workflows still resolve.
+exclude = ["python", "fuzz"]
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }

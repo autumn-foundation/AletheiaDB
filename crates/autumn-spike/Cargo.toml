@@ -22,12 +22,11 @@ autumn-web = { version = "0.5.0", default-features = false, features = ["maud", 
 # GetNode node serializer, get_node, NodeId).
 aletheiadb = { path = "../..", features = ["http-server"] }
 axum = { version = "0.8" }
-tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["set-header"] }
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# `tower::ServiceExt::oneshot` drives the existing 0.4 router in parity tests.
 tower = { version = "0.5", features = ["util"] }

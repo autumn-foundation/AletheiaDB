@@ -7,8 +7,8 @@
 //! extension pattern the existing 0.4 server uses, confirming it carries
 //! forward to 0.5 unchanged.
 
-use crate::error::SpikeError;
 use aletheiadb::AletheiaDB;
+use aletheiadb::http::AletheiaHttpError;
 use autumn_web::prelude::AppState;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -35,15 +35,17 @@ impl SpikeState {
 }
 
 impl FromRequestParts<AppState> for SpikeState {
-    type Rejection = SpikeError;
+    type Rejection = AletheiaHttpError;
 
     async fn from_request_parts(
         _parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // `StateMissing` (HTTP 500) is exactly what the existing server returns
+        // for an uninstalled extension — a boot-time invariant.
         state
             .extension::<SpikeState>()
             .map(|arc| (*arc).clone())
-            .ok_or_else(|| SpikeError::Internal("application state not installed".to_owned()))
+            .ok_or(AletheiaHttpError::StateMissing)
     }
 }
