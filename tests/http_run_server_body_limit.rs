@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Production-stack integration test: the `413 Payload Too Large` body-size
 //! limit is enforced through the REAL `run_server` / autumn layer stack, over
 //! a real TCP socket.
