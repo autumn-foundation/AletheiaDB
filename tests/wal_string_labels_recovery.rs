@@ -83,13 +83,19 @@ fn crash_recovery_preserves_node_edge_and_constraint_labels() {
     );
 }
 
-/// Two databases in the same process share the process-global interner, so the
-/// second `open()` shifts the interner layout relative to the first. Recovering
-/// the first database from its WAL under that shifted layout must still resolve
-/// labels to the correct strings — the exact non-identity-layout scenario the
-/// raw-id encoding got wrong.
+/// WAL-only reopen smoke test: a durable database dropped **without** persisting
+/// its indexes must recover its node labels purely from WAL replay (the
+/// drop-index → WAL-replay path). A second database is opened in between to
+/// exercise a reopen under a process-global interner whose id space has advanced
+/// since the writer ran. This test exercises the reopen/replay pipeline
+/// end-to-end; it is a smoke test and does NOT by itself prove the v13 string
+/// encoding fixes raw-id label corruption (the process-global interner never
+/// reassigns ids in-process, so this would also pass on the pre-#3506 raw-id
+/// code). The deterministic corruption-proof lives in the
+/// `raw_id_decode_corrupts_under_nonidentity_layout_string_decode_does_not` unit
+/// test in `src/storage/wal/segment_reader.rs`.
 #[test]
-fn crash_recovery_correct_under_shifted_interner_layout() {
+fn crash_recovery_wal_only_reopen_preserves_labels() {
     let tmp_a = tempfile::tempdir().expect("tempdir A");
     let dir_a = tmp_a.path().join("db_a");
 

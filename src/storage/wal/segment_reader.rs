@@ -1987,6 +1987,90 @@ mod tests {
         assert!(entries.is_empty());
     }
 
+    /// Issue #3506 (review) — the load-bearing corruption-proof test. Under a
+    /// deliberately NON-IDENTITY interner layout, the pre-#3506 raw-id label
+    /// encoding decodes a `CreateNode` label to the WRONG string, while the v13
+    /// string-label encoding decodes it to the RIGHT string. This is the test
+    /// that would FAIL on the pre-#3506 raw-id decode and PASSES with the string
+    /// decode — unlike the WAL-only reopen smoke test in
+    /// `tests/wal_string_labels_recovery.rs`, which passes on both codecs because
+    /// the process-global interner never reassigns ids in-process.
+    #[test]
+    fn raw_id_decode_corrupts_under_nonidentity_layout_string_decode_does_not() {
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+
+        // The foreign writer's raw id for "PersonTarget3506" happens to mean
+        // "DecoyMeaning3506" in THIS process's interner layout (non-identity):
+        // we store `decoy`'s id as the raw-id label, standing in for a foreign
+        // id whose numeric value resolves to a different string in this process.
+        let target = GLOBAL_INTERNER.intern("PersonTarget3506").unwrap();
+        let decoy = GLOBAL_INTERNER.intern("DecoyMeaning3506").unwrap();
+        assert_ne!(target.as_u32(), decoy.as_u32());
+
+        let node_id = NodeId::new(3506).unwrap();
+        let valid_from = time::now();
+
+        // Build a CreateNode entry whose label portion is written by `write_label`;
+        // the surrounding framing (header, node id, props, valid_from, provenance,
+        // CRC) is identical to a real entry. Only the label codec differs between
+        // the two variants below.
+        let build_entry = |write_label: &dyn Fn(&mut Vec<u8>)| -> Vec<u8> {
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&LSN(3506).0.to_le_bytes());
+            valid_from.serialize_into(&mut buffer);
+            let cs = buffer.len();
+            buffer.extend_from_slice(&[0u8; 4]); // checksum placeholder
+            buffer.push(OP_CREATE_NODE);
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            write_label(&mut buffer);
+            PropertyMap::new().serialize_into(&mut buffer).unwrap();
+            valid_from.serialize_into(&mut buffer);
+            buffer.push(0u8); // provenance: absent
+            let mut h = crc32fast::Hasher::new();
+            h.update(&buffer[0..20]);
+            h.update(&buffer[cs + 4..]);
+            buffer[cs..cs + 4].copy_from_slice(&h.finalize().to_le_bytes());
+            buffer
+        };
+
+        // ---- Old format (v11 raw id): stores decoy's raw id as the label. ----
+        let old = build_entry(&|buf| buf.extend_from_slice(&decoy.as_u32().to_le_bytes()));
+        let (old_entry, _) = parse_entry_at(&old, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        let old_label = match old_entry.operation {
+            WalOperation::CreateNode { label, .. } => label,
+            other => panic!("expected CreateNode, got {other:?}"),
+        };
+        // THE BUG: the raw-id decode resolves to the DECOY string, not the
+        // intended target — the corruption the raw-id encoding caused under a
+        // non-identity interner layout.
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(old_label, |s| s == "DecoyMeaning3506")
+                .unwrap(),
+            "pre-#3506 raw-id decode must corrupt the label to \"DecoyMeaning3506\""
+        );
+
+        // ---- New format (v13 string): stores the STRING "PersonTarget3506". ----
+        let new = build_entry(&|buf| {
+            let bytes = "PersonTarget3506".as_bytes();
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        });
+        let (new_entry, _) = parse_entry_at(&new, 0, WAL_VERSION_STRING_LABELS).unwrap();
+        let new_label = match new_entry.operation {
+            WalOperation::CreateNode { label, .. } => label,
+            other => panic!("expected CreateNode, got {other:?}"),
+        };
+        // THE FIX: the string decode re-interns and resolves to the intended
+        // target string under ANY interner layout.
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(new_label, |s| s == "PersonTarget3506")
+                .unwrap(),
+            "v13 string decode must recover the correct label \"PersonTarget3506\""
+        );
+    }
+
     /// Issue #3413: `CommitTx` serializes and parses back byte-for-byte under
     /// the transaction-framing version, and the parsed entry is flagged
     /// `framed`.
@@ -2472,6 +2556,21 @@ mod tests {
             .expect("encrypted final-segment torn tail must be tolerated");
         let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
         assert_eq!(lsns, vec![5, 7]);
+
+        // Issue #3506: the decrypted v14 (encrypted string-label) entries must
+        // recover their label STRING, not just their LSNs — the string-label
+        // survival across the encrypted decode path is asserted explicitly.
+        for entry in &entries {
+            match &entry.operation {
+                WalOperation::CreateNode { label, .. } => assert!(
+                    GLOBAL_INTERNER
+                        .resolve_with(*label, |s| s == "TornTail3433")
+                        .unwrap(),
+                    "decrypted v14 CreateNode label must resolve to \"TornTail3433\""
+                ),
+                other => panic!("expected CreateNode, got {other:?}"),
+            }
+        }
     }
 
     /// #3433 must-hard-error (b): in an encrypted final segment, an undecodable
