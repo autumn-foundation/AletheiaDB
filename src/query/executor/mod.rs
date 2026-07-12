@@ -1097,6 +1097,92 @@ mod tests {
         assert_eq!(rows[0].entity.node_id(), Some(bob));
     }
 
+    // ==================== Profiling (PROFILE) Tests ====================
+
+    #[test]
+    fn test_execute_profiled_records_per_operator_rows() {
+        let (current, historical, alice, bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        // Limit (count well above input) over a NodeLookup of two ids, so both
+        // operators forward both rows.
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![alice, bob],
+                }),
+                count: 100,
+                offset: 0,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let (results, registry) = executor
+            .execute_profiled(&plan)
+            .expect("Profiled execution failed");
+
+        // The registry is seeded in plan-tree pre-order: [Limit, NodeLookup].
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry[0].op_name(), "Limit");
+        assert_eq!(registry[0].depth(), 0);
+        assert_eq!(registry[1].op_name(), "NodeLookup");
+        assert_eq!(registry[1].depth(), 1);
+
+        // Stats are only meaningful after the (lazy) stream is drained.
+        assert_eq!(
+            registry[0].actual_rows(),
+            0,
+            "no rows counted before draining"
+        );
+
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+        assert_eq!(rows.len(), 2);
+
+        // Both operators emitted the two rows.
+        assert_eq!(registry[1].actual_rows(), 2, "NodeLookup emitted 2 rows");
+        assert_eq!(registry[0].actual_rows(), 2, "Limit forwarded 2 rows");
+    }
+
+    #[test]
+    fn test_execute_profiled_annotations_align_with_explain() {
+        let (current, historical, alice, _bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![alice],
+                }),
+                count: 10,
+                offset: 0,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let (results, registry) = executor
+            .execute_profiled(&plan)
+            .expect("Profiled execution failed");
+        let _ = results.collect_all().expect("Collection failed");
+
+        // Feed the per-operator annotations back into the plan renderer and
+        // confirm each operator line carries its own stats, in order.
+        let annotations: Vec<String> = registry.iter().map(|p| p.annotation()).collect();
+        let explained = plan.explain_annotated(&annotations);
+        let lines: Vec<&str> = explained.lines().collect();
+        // Header + 2 operator lines.
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("Limit"));
+        assert!(lines[1].contains("actual rows: 1"));
+        assert!(lines[2].contains("NodeLookup"));
+        assert!(lines[2].contains("actual rows: 1"));
+    }
+
     // ==================== SimilarTo Tests ====================
 
     #[test]

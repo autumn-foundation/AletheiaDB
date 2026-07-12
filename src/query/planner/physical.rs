@@ -2026,6 +2026,117 @@ mod tests {
         assert!(lines[3].starts_with("    └─ NodeLookup"));
     }
 
+    // ==================== explain_annotated (PROFILE) Tests ====================
+
+    fn nested_unary_plan() -> PhysicalPlan {
+        PhysicalPlan {
+            root: PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::Filter {
+                    input: Box::new(PhysicalOp::NodeLookup {
+                        node_ids: vec![NodeId::new(1).unwrap()],
+                    }),
+                    predicate: Predicate::True,
+                }),
+                count: 10,
+                offset: 0,
+            },
+            estimated_cost: Cost::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        }
+    }
+
+    #[test]
+    fn test_explain_annotated_appends_in_preorder() {
+        let plan = nested_unary_plan();
+        // Pre-order operator positions: [Limit, Filter, NodeLookup].
+        let annotations = vec![
+            " | actual rows: 10, time: 5µs (incl. children)".to_string(),
+            " | actual rows: 20, time: 3µs (incl. children)".to_string(),
+            " | actual rows: 1, time: 1µs (incl. children)".to_string(),
+        ];
+
+        let explained = plan.explain_annotated(&annotations);
+        let lines: Vec<&str> = explained.lines().collect();
+        // Header + 3 operator lines.
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("Limit"));
+        assert!(lines[1].ends_with("actual rows: 10, time: 5µs (incl. children)"));
+        assert!(lines[2].contains("Filter"));
+        assert!(lines[2].ends_with("actual rows: 20, time: 3µs (incl. children)"));
+        assert!(lines[3].contains("NodeLookup"));
+        assert!(lines[3].ends_with("actual rows: 1, time: 1µs (incl. children)"));
+
+        // The plain (unannotated) render carries none of the stats.
+        let plain = plan.explain();
+        assert!(!plain.contains("actual rows"));
+    }
+
+    #[test]
+    fn test_explain_annotated_short_slice_leaves_later_ops_unannotated() {
+        let plan = nested_unary_plan();
+        // Only the root operator has an annotation; the shorter slice must not
+        // panic and must leave later operators bare.
+        let annotations = vec![" | actual rows: 10, time: 5µs (incl. children)".to_string()];
+
+        let explained = plan.explain_annotated(&annotations);
+        let lines: Vec<&str> = explained.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("Limit"));
+        assert!(lines[1].contains("actual rows: 10"));
+        // Filter and NodeLookup had no annotation slot.
+        assert!(!lines[2].contains("actual rows"));
+        assert!(!lines[3].contains("actual rows"));
+
+        // An empty slice annotates nothing but still renders every operator.
+        let none = plan.explain_annotated(&[]);
+        assert!(!none.contains("actual rows"));
+        assert!(none.contains("Limit"));
+        assert!(none.contains("Filter"));
+        assert!(none.contains("NodeLookup"));
+    }
+
+    #[test]
+    fn test_explain_annotated_binary_preorder() {
+        // Binary operator: pre-order visits parent, then left, then right, so
+        // the annotation indices must follow that order.
+        let plan = PhysicalPlan {
+            root: PhysicalOp::HashJoin {
+                left: Box::new(PhysicalOp::NodeScan {
+                    label: Some("Person".to_string()),
+                    estimated_rows: 100,
+                }),
+                right: Box::new(PhysicalOp::NodeScan {
+                    label: Some("Company".to_string()),
+                    estimated_rows: 50,
+                }),
+                left_key: "id".to_string(),
+                right_key: "person_id".to_string(),
+            },
+            estimated_cost: Cost::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+        let annotations = vec![
+            " | actual rows: 7, time: 9µs (incl. children)".to_string(),
+            " | actual rows: 100, time: 4µs (incl. children)".to_string(),
+            " | actual rows: 50, time: 2µs (incl. children)".to_string(),
+        ];
+
+        let explained = plan.explain_annotated(&annotations);
+        let lines: Vec<&str> = explained.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("HashJoin"));
+        assert!(lines[1].contains("actual rows: 7"));
+        // Left child (Person) is visited before the right child (Company).
+        assert!(lines[2].contains("Person"));
+        assert!(lines[2].contains("actual rows: 100"));
+        assert!(lines[3].contains("Company"));
+        assert!(lines[3].contains("actual rows: 50"));
+    }
+
     #[test]
     fn test_explain_with_temporal_context() {
         let plan = PhysicalPlan {
