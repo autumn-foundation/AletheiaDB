@@ -407,11 +407,22 @@ pub enum CypherTemporal {
 /// An intermediate `WITH` projection clause.
 ///
 /// `WITH` acts like a sub-`RETURN` that pipes results into subsequent clauses,
-/// optionally filtering with a `WHERE`.
+/// optionally filtering with a `WHERE`. Per openCypher the clause body mirrors
+/// a `RETURN` body -- `WITH [DISTINCT] items [ORDER BY ...] [SKIP n] [LIMIT n]`
+/// -- followed by an optional trailing `WHERE` that filters the *projected*
+/// rows (Issue #556).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CypherWith {
+    /// Whether `DISTINCT` was specified to deduplicate the projected rows.
+    pub distinct: bool,
     /// The items to project through the `WITH`.
     pub items: Vec<CypherReturnItem>,
+    /// Zero or more `ORDER BY` items ordering the projected rows.
+    pub order_by: Vec<CypherOrderItem>,
+    /// An optional `SKIP n` offset applied to the projected rows.
+    pub skip: Option<usize>,
+    /// An optional `LIMIT n` cap applied to the projected rows.
+    pub limit: Option<usize>,
     /// An optional `WHERE` clause that filters after projection.
     pub where_clause: Option<CypherExpr>,
 }

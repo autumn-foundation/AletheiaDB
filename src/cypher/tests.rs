@@ -4070,6 +4070,469 @@ fn test_e2e_transaction_time_between_rejected() {
 }
 
 // ============================================================================
+// WITH clause semantics (Issue #556): projection, scoping, ORDER BY/SKIP/LIMIT
+// ============================================================================
+
+mod with_clause {
+    use super::*;
+    use crate::query::ir::QueryOp;
+
+    /// Alice(30), Bob(40), Carol(50), Dave(60); Alice-KNOWS->Bob, Bob-KNOWS->Carol.
+    fn db() -> AletheiaDB {
+        optional_match_test_db()
+    }
+
+    /// Ordered list of `name` values across the result rows (pipeline order).
+    fn names_in_order(db: &AletheiaDB, query: &str) -> Vec<String> {
+        collect_rows(db.execute_cypher(query).unwrap())
+            .iter()
+            .filter_map(row_name)
+            .collect()
+    }
+
+    /// Sorted list of `name` values (order-insensitive assertions).
+    fn names_sorted(db: &AletheiaDB, query: &str) -> Vec<String> {
+        let mut names = names_in_order(db, query);
+        names.sort();
+        names
+    }
+
+    // ---- supported: WHERE after WITH filters projected rows (AC2) ----------
+
+    #[test]
+    fn with_where_filters_projected_rows() {
+        let db = db();
+        assert_eq!(
+            names_sorted(&db, "MATCH (a:Person) WITH a WHERE a.age > 45 RETURN a"),
+            vec!["Carol".to_string(), "Dave".to_string()]
+        );
+    }
+
+    // ---- supported: multiple WITH clauses chain (AC4) ----------------------
+
+    #[test]
+    fn multiple_with_clauses_chain() {
+        let db = db();
+        assert_eq!(
+            names_sorted(
+                &db,
+                "MATCH (a:Person) WITH a WHERE a.age > 35 WITH a WHERE a.age < 55 RETURN a",
+            ),
+            vec!["Bob".to_string(), "Carol".to_string()]
+        );
+    }
+
+    // ---- supported: aliasing renames the carried binding (AC1) -------------
+
+    #[test]
+    fn with_alias_renames_binding_and_downstream_where_uses_new_name() {
+        let db = db();
+        assert_eq!(
+            names_sorted(
+                &db,
+                "MATCH (a:Person) WITH a AS p WHERE p.age > 45 RETURN p"
+            ),
+            vec!["Carol".to_string(), "Dave".to_string()]
+        );
+    }
+
+    #[test]
+    fn with_alias_feeds_subsequent_optional_match() {
+        // `WITH x AS y` makes `y` the current binding for a following
+        // OPTIONAL MATCH that continues from it.
+        let db = db();
+        let rows = collect_rows(
+            db.execute_cypher(
+                "MATCH (a:Person {name: 'Alice'}) WITH a AS p OPTIONAL MATCH (p)-[:KNOWS]->(x) RETURN x",
+            )
+            .unwrap(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(row_name(&rows[0]).as_deref(), Some("Bob"));
+    }
+
+    // ---- supported: ORDER BY / SKIP / LIMIT after WITH (AC3) ---------------
+
+    #[test]
+    fn with_order_by_skip_limit_pages_projected_rows() {
+        let db = db();
+        // Ages asc [30,40,50,60] -> SKIP 1 -> [40,50,60] -> LIMIT 2 -> [40,50].
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age SKIP 1 LIMIT 2 RETURN a",
+            ),
+            vec!["Bob".to_string(), "Carol".to_string()]
+        );
+    }
+
+    #[test]
+    fn with_order_by_desc_limit_selects_top_window() {
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age DESC LIMIT 2 RETURN a"
+            ),
+            vec!["Dave".to_string(), "Carol".to_string()]
+        );
+    }
+
+    #[test]
+    fn with_bare_order_by_is_observable_when_not_overridden() {
+        // A WITH ORDER BY with no later ordering carries its order to output.
+        let db = db();
+        assert_eq!(
+            names_in_order(&db, "MATCH (a:Person) WITH a ORDER BY a.age DESC RETURN a"),
+            vec![
+                "Dave".to_string(),
+                "Carol".to_string(),
+                "Bob".to_string(),
+                "Alice".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn return_order_by_overrides_intermediate_with_order_by() {
+        // The fold-hazard case: `WITH ... ORDER BY age` followed by
+        // `RETURN ... ORDER BY name`. The intermediate ordering is overridden
+        // and must NOT fold into a multi-key sort; final order is by name.
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age DESC RETURN a ORDER BY a.name",
+            ),
+            vec![
+                "Alice".to_string(),
+                "Bob".to_string(),
+                "Carol".to_string(),
+                "Dave".to_string()
+            ]
+        );
+    }
+
+    // ---- supported: WITH * carries everything ------------------------------
+
+    #[test]
+    fn with_star_carries_all_and_where_filters() {
+        let db = db();
+        assert_eq!(
+            names_sorted(&db, "MATCH (a:Person) WITH * WHERE a.age > 55 RETURN a"),
+            vec!["Dave".to_string()]
+        );
+    }
+
+    // ---- supported: DISTINCT deduplicates projected rows -------------------
+
+    #[test]
+    fn with_distinct_deduplicates() {
+        // Two people KNOW the same target: `b` binds to Target twice.
+        let db = AletheiaDB::new().unwrap();
+        let p1 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "P1").build(),
+            )
+            .unwrap();
+        let p2 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "P2").build(),
+            )
+            .unwrap();
+        let target = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Target").build(),
+            )
+            .unwrap();
+        db.create_edge(p1, target, "KNOWS", CorePropertyMap::new())
+            .unwrap();
+        db.create_edge(p2, target, "KNOWS", CorePropertyMap::new())
+            .unwrap();
+
+        // Without DISTINCT: Target appears once per incoming edge (2 rows).
+        let without = collect_rows(
+            db.execute_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH b RETURN b")
+                .unwrap(),
+        );
+        assert_eq!(without.len(), 2);
+
+        // With DISTINCT: a single Target row.
+        let with = collect_rows(
+            db.execute_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH DISTINCT b RETURN b")
+                .unwrap(),
+        );
+        assert_eq!(with.len(), 1);
+        assert_eq!(row_name(&with[0]).as_deref(), Some("Target"));
+    }
+
+    // ---- supported: composes with a leading AS OF (bi-temporal) ------------
+
+    #[test]
+    fn with_composes_with_leading_as_of() {
+        // A leading temporal qualifier before the WITH pipeline: conversion
+        // yields a temporal context AND lowers the WITH ... WHERE to a Filter.
+        let q = parse_cypher(
+            "AS OF TIMESTAMP '2020-01-01T00:00:00Z' MATCH (a:Person) WITH a WHERE a.age > 45 RETURN a",
+        )
+        .unwrap();
+        assert!(
+            q.temporal_context.is_some(),
+            "AS OF before WITH must set a temporal context"
+        );
+        assert!(
+            q.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))),
+            "WITH ... WHERE must lower to a Filter op"
+        );
+    }
+
+    // ---- rejected: projections the positional pipeline cannot carry --------
+
+    #[test]
+    fn with_multiple_items_rejected() {
+        let err = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH a, b RETURN b").unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(_)),
+            "multi-item WITH must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn with_property_projection_rejected() {
+        let err = parse_cypher("MATCH (n:Person) WITH n.age AS x RETURN x").unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(_)),
+            "expression/property projection in WITH must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn with_aggregate_projection_rejected() {
+        let err = parse_cypher("MATCH (n:Person) WITH count(n) AS c RETURN c").unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(_)),
+            "aggregate projection in WITH must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn with_reprojecting_noncurrent_variable_rejected() {
+        // Pipeline is positioned on `b`; `WITH a` cannot reposition to `a`.
+        let err = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH a RETURN a").unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(_)),
+            "re-projecting a non-current variable must be rejected, got {err:?}"
+        );
+    }
+
+    // ---- rejected: references to a variable a WITH dropped (AC5) -----------
+
+    #[test]
+    fn return_referencing_dropped_variable_rejected() {
+        let err = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH b RETURN a").unwrap_err();
+        assert!(
+            matches!(err, CypherError::SemanticError(_)),
+            "RETURN of a dropped variable must be a scope error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn with_where_referencing_dropped_variable_rejected() {
+        let err = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH b WHERE a.age > 5 RETURN b")
+            .unwrap_err();
+        assert!(
+            matches!(err, CypherError::SemanticError(_)),
+            "WITH ... WHERE referencing a dropped variable must be a scope error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn return_order_by_referencing_dropped_variable_rejected() {
+        let err = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH b RETURN b ORDER BY a.age")
+            .unwrap_err();
+        assert!(
+            matches!(err, CypherError::SemanticError(_)),
+            "ORDER BY of a dropped variable must be a scope error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn projected_variable_stays_in_scope() {
+        // The projected variable itself remains referenceable downstream.
+        let db = db();
+        assert_eq!(
+            names_sorted(&db, "MATCH (a:Person) WITH a WHERE a.age > 55 RETURN a"),
+            vec!["Dave".to_string()]
+        );
+    }
+
+    // ---- depth / robustness (do not regress the #3404 cap) -----------------
+
+    #[test]
+    fn many_chained_with_clauses_do_not_overflow() {
+        // WITH parts are parsed iteratively (no per-clause recursion), so a
+        // long chain must parse+convert without overflowing the stack.
+        let query = format!("MATCH (n:Person) {} RETURN n", "WITH n ".repeat(500));
+        let result = parse_cypher(&query);
+        assert!(
+            result.is_ok(),
+            "500 chained WITH clauses should convert cleanly, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_with_where_expression_errors_gracefully() {
+        // A deeply nested expression in a WITH's WHERE shares the parser's
+        // expression-depth cap and must yield a ParseError, not a crash.
+        let query = format!(
+            "MATCH (n:Person) WITH n WHERE {}n.age > 1{} RETURN n",
+            "(".repeat(5000),
+            ")".repeat(5000)
+        );
+        let result = CypherParser::parse(&query);
+        assert!(
+            matches!(result, Err(CypherError::ParseError { .. })),
+            "deeply nested WITH WHERE must be a ParseError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn with_order_by_skip_limit_parses_into_ast() {
+        // The extended WITH body (DISTINCT/ORDER BY/SKIP/LIMIT/WHERE) is
+        // captured on the AST.
+        let ast = CypherParser::parse(
+            "MATCH (a:Person) WITH DISTINCT a ORDER BY a.age DESC SKIP 1 LIMIT 2 WHERE a.age > 10 RETURN a",
+        )
+        .unwrap();
+        let CypherStatement::Match { with_clauses, .. } = ast else {
+            panic!("expected a MATCH statement");
+        };
+        assert_eq!(with_clauses.len(), 1);
+        let with = &with_clauses[0];
+        assert!(with.distinct);
+        assert_eq!(with.order_by.len(), 1);
+        assert!(with.order_by[0].descending);
+        assert_eq!(with.skip, Some(1));
+        assert_eq!(with.limit, Some(2));
+        assert!(with.where_clause.is_some());
+    }
+
+    // ---- intermediate ORDER BY: drop only when overridden with no window ---
+
+    #[test]
+    fn intermediate_order_by_observable_when_later_limit_intervenes() {
+        // BLOCKER regression: the intermediate `ORDER BY a.age DESC` is
+        // consumed by a LATER clause's `LIMIT 2` before the final re-sort, so
+        // it MUST be emitted. Top-2 by age desc = {Dave(60), Carol(50)}, then
+        // RETURN ORDER BY name -> [Carol, Dave]. Dropping the age sort would
+        // wrongly page {Alice, Bob} and return [Alice, Bob].
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age DESC WITH a LIMIT 2 RETURN a ORDER BY a.name",
+            ),
+            vec!["Carol".to_string(), "Dave".to_string()]
+        );
+    }
+
+    #[test]
+    fn intermediate_order_by_observable_when_later_skip_intervenes() {
+        // As above but a later `SKIP 2` consumes the ordering: age desc
+        // [Dave,Carol,Bob,Alice] -> SKIP 2 -> [Bob,Alice] -> RETURN ORDER BY
+        // name -> [Alice, Bob]. Dropping the age sort would skip an arbitrary
+        // pair and return the wrong rows.
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age DESC WITH a SKIP 2 RETURN a ORDER BY a.name",
+            ),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn consecutive_bare_with_order_bys_collapse_to_last() {
+        // Override-safe case (no intervening window): a later bare `ORDER BY`
+        // fully replaces the earlier one, so only the last sort is emitted.
+        // Final order is by age (the second re-sort), ascending.
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.name DESC WITH a ORDER BY a.age RETURN a",
+            ),
+            vec![
+                "Alice".to_string(),
+                "Bob".to_string(),
+                "Carol".to_string(),
+                "Dave".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn consecutive_bare_with_order_bys_emit_single_sort() {
+        // Structural guard: the overridden first ORDER BY is dropped, so the
+        // pipeline holds exactly one Sort (no multi-key fold hazard).
+        let q = parse_cypher(
+            "MATCH (a:Person) WITH a ORDER BY a.name DESC WITH a ORDER BY a.age RETURN a",
+        )
+        .unwrap();
+        let sorts = q
+            .ops
+            .iter()
+            .filter(|op| matches!(op, QueryOp::Sort { .. }))
+            .count();
+        assert_eq!(
+            sorts, 1,
+            "override-safe consecutive sorts must collapse to one"
+        );
+    }
+
+    #[test]
+    fn same_clause_with_order_by_limit_still_selects_window() {
+        // Over-correction guard: a same-clause window keeps working exactly as
+        // before (top-2 by age desc, in age-desc order).
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age DESC LIMIT 2 RETURN a"
+            ),
+            vec!["Dave".to_string(), "Carol".to_string()]
+        );
+    }
+
+    // ---- rejected: `WITH *` with more than one variable visible ------------
+
+    #[test]
+    fn with_star_rejected_when_multiple_variables_visible() {
+        // Two variables (`a`, `b`) are in scope; `WITH *` cannot faithfully
+        // carry both through the single-entity positional pipeline.
+        let err = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH * RETURN a").unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(_)),
+            "WITH * with >1 visible variable must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn with_star_ok_when_single_variable_visible() {
+        // Exactly one variable in scope: `WITH *` is a faithful no-op.
+        let db = db();
+        assert_eq!(
+            names_sorted(&db, "MATCH (a:Person) WITH * WHERE a.age > 55 RETURN a"),
+            vec!["Dave".to_string()]
+        );
+    }
+}
+
+// ============================================================================
 // UNWIND clause (Issue #559)
 // ============================================================================
 
