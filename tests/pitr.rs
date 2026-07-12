@@ -944,3 +944,89 @@ fn pitr_large_stream_restores_exact_prefix() {
         }
     }
 }
+
+// ============================================================================
+// #3387: PITR HLC seed folds restored CLOSED transaction-time ends
+// ============================================================================
+
+#[test]
+#[serial]
+fn pitr_hlc_seed_stays_monotonic_over_restored_closed_tx_end() {
+    // Guards the Issue #3387 invariant through the PITR path: when a post-backup
+    // transaction SUPERSEDES an earlier version, that earlier version's
+    // transaction-time interval is CLOSED at the superseding transaction's commit
+    // timestamp. The restored database's HLC seed must fold that closed tx end in
+    // (via the shared startup seed helper), so the first write on the restored DB
+    // is stamped strictly ABOVE it — never regressing to a stale timestamp that
+    // would break transaction-time monotonicity.
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let db = AletheiaDB::with_unified_config(source_config(&wal)).unwrap();
+
+    // Pre-backup: create node A (v1) using the base vocabulary, then back up.
+    let a = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "alice")
+                .insert("phase", "v1")
+                .build(),
+        )
+        .unwrap();
+    db.backup(&tmp.path().join("base.albk")).unwrap();
+
+    // Post-backup: UPDATE A (v2). This supersedes v1, closing v1's
+    // transaction-time interval at v2's commit timestamp — the closed tx end.
+    db.update_node_with_valid_time(
+        a,
+        PropertyMapBuilder::new()
+            .insert("name", "alice")
+            .insert("phase", "v2")
+            .build(),
+        None,
+    )
+    .unwrap();
+    // v2's commit timestamp equals the restored closed tx end of v1 (replay
+    // reproduces the update op verbatim), so it is the coordinate the HLC seed
+    // must clear.
+    let closed_tx_end = db.get_node(a).unwrap().metadata.commit_timestamp.unwrap();
+
+    let archive = tmp.path().join("archive");
+    copy_wal_dir(&wal, &archive);
+    drop(db);
+
+    // Restore to a target that INCLUDES the superseding update, so the restored
+    // history carries v1's closed transaction-time interval.
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+    let restored = AletheiaDB::restore_to_data_dir_at(
+        &tmp.path().join("base.albk"),
+        &archive,
+        PitrTarget::AsOf(closed_tx_end),
+        &data_dir,
+    )
+    .unwrap();
+
+    // A fresh write on the restored DB must be stamped strictly above the closed
+    // tx end (HLC seed stayed monotonic — no regression to a stale timestamp).
+    let fresh = restored
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "bob")
+                .insert("phase", "post-restore")
+                .build(),
+        )
+        .unwrap();
+    let fresh_ts = restored
+        .get_node(fresh)
+        .unwrap()
+        .metadata
+        .commit_timestamp
+        .unwrap();
+    assert!(
+        fresh_ts > closed_tx_end,
+        "restored HLC seed must clear the restored closed tx end \
+         (fresh {fresh_ts:?} must exceed closed end {closed_tx_end:?})"
+    );
+}

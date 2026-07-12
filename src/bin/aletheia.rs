@@ -164,11 +164,7 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
 
     // Plain (#3217) restore: no PITR flags at all.
     if wal_archive.is_none() && as_of.is_none() && lsn.is_none() && !latest && !dry_run {
-        let data_dir = env::var("ALETHEIADB_DATA_DIR")
-            .map(PathBuf::from)
-            .map_err(|_| {
-                "ALETHEIADB_DATA_DIR must be set to restore into a durable directory".to_string()
-            })?;
+        let data_dir = required_data_dir()?;
         AletheiaDB::restore_to_data_dir(albk, &data_dir)
             .map_err(|e| format!("restore failed: {e}"))?;
         println!("{}", restore_success_json(&data_dir)?);
@@ -203,11 +199,7 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     }
 
-    let data_dir = env::var("ALETHEIADB_DATA_DIR")
-        .map(PathBuf::from)
-        .map_err(|_| {
-            "ALETHEIADB_DATA_DIR must be set to restore into a durable directory".to_string()
-        })?;
+    let data_dir = required_data_dir()?;
 
     match target {
         // In-window target: partial restore, stopping at-or-before the target.
@@ -256,6 +248,15 @@ fn parse_pitr_target(
         }
         (None, None) => Ok(None),
     }
+}
+
+/// Resolve the mandatory `ALETHEIADB_DATA_DIR` target directory for a restore.
+fn required_data_dir() -> Result<PathBuf, String> {
+    env::var("ALETHEIADB_DATA_DIR")
+        .map(PathBuf::from)
+        .map_err(|_| {
+            "ALETHEIADB_DATA_DIR must be set to restore into a durable directory".to_string()
+        })
 }
 
 /// Parse a CLI timestamp: RFC 3339 / ISO 8601, or microseconds since the epoch.

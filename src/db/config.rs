@@ -72,7 +72,7 @@ fn bootstrap_timestamp(
     max_timestamp
 }
 
-fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
+pub(crate) fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
     let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
     let mut current_timestamp = db.current_timestamp.lock().map_err(|_| {
         crate::core::error::Error::Storage(StorageError::LockPoisoned {

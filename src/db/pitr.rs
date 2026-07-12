@@ -224,6 +224,16 @@ struct Band {
     complete: bool,
 }
 
+impl Band {
+    /// Whether this band is a complete, post-backup transaction counted in the
+    /// applied/discarded stats: a durable data transaction whose commit LSN is
+    /// at or above the base backup's replay floor (bands fully below
+    /// `source_lsn` already live in the base snapshot).
+    fn is_post_backup_transaction(&self, source_lsn: u64) -> bool {
+        self.complete && self.is_transaction && self.stop_lsn.0 >= source_lsn
+    }
+}
+
 /// Group an LSN-sorted WAL entry stream into whole transaction bands.
 ///
 /// A framed `[BeginTx .. CommitTx]` frame is one band stamped with the
@@ -372,7 +382,7 @@ fn filter_bands(entries: Vec<WalEntry>, target: &PitrTarget, source_lsn: u64) ->
     // and are neither replayed nor counted.
     let total_transactions = bands
         .iter()
-        .filter(|b| b.complete && b.is_transaction && b.stop_lsn.0 >= source_lsn)
+        .filter(|b| b.is_post_backup_transaction(source_lsn))
         .count() as u64;
 
     let mut out: Vec<WalEntry> = Vec::new();
@@ -524,7 +534,7 @@ fn compute_window(all: &[WalEntry], source_lsn: u64) -> PitrWindow {
 fn count_transactions(entries: &[WalEntry], source_lsn: u64) -> u64 {
     parse_bands(entries.to_vec())
         .iter()
-        .filter(|b| b.complete && b.is_transaction && b.stop_lsn.0 >= source_lsn)
+        .filter(|b| b.is_post_backup_transaction(source_lsn))
         .count() as u64
 }
 
@@ -535,59 +545,6 @@ fn entry_at_or_before(entry: &WalEntry, target: &PitrTarget) -> bool {
         PitrTarget::AsOf(t) => entry.timestamp <= *t,
         PitrTarget::Lsn(n) => entry.lsn.0 <= *n,
     }
-}
-
-/// Recompute the HLC seed from restored state (mirrors the startup bootstrap),
-/// so writes to the returned database stay monotonic above every replayed
-/// transaction time.
-fn reseed_current_timestamp(db: &AletheiaDB) -> Result<()> {
-    let mut max_ts = crate::core::temporal::time::now();
-
-    for node in db.current.all_nodes() {
-        if let Some(ts) = node.metadata.commit_timestamp
-            && ts > max_ts
-        {
-            max_ts = ts;
-        }
-    }
-    for edge in db.current.all_edges() {
-        if let Some(ts) = edge.metadata.commit_timestamp
-            && ts > max_ts
-        {
-            max_ts = ts;
-        }
-    }
-    {
-        let hist = db.historical.read();
-        for v in hist.get_node_versions().values() {
-            let tt = v.temporal.transaction_time();
-            if tt.start() > max_ts {
-                max_ts = tt.start();
-            }
-            if !tt.is_current() && tt.end() > max_ts {
-                max_ts = tt.end();
-            }
-        }
-        for v in hist.get_edge_versions().values() {
-            let tt = v.temporal.transaction_time();
-            if tt.start() > max_ts {
-                max_ts = tt.start();
-            }
-            if !tt.is_current() && tt.end() > max_ts {
-                max_ts = tt.end();
-            }
-        }
-    }
-
-    let mut ct = db.current_timestamp.lock().map_err(|_| {
-        Error::Storage(crate::core::error::StorageError::LockPoisoned {
-            resource: "current_timestamp".to_string(),
-        })
-    })?;
-    if max_ts > *ct {
-        *ct = max_ts;
-    }
-    Ok(())
 }
 
 impl AletheiaDB {
@@ -753,8 +710,13 @@ impl AletheiaDB {
         }
 
         // Wire the replayed versions into the temporal index and reseed the HLC.
+        // Reuse the startup seed helper (Issue #3387 closed-tx-end folding lives
+        // there): on a freshly-opened restored DB the recomputed bootstrap value
+        // is always >= the value `open()` already seeded (same `now()` floor over
+        // a superset of versions), so the helper's unconditional set is identical
+        // to the previous `if max_ts > *ct` guard.
         db.historical.write().rebuild_temporal_index_from_versions();
-        reseed_current_timestamp(&db)?;
+        crate::db::config::seed_startup_current_timestamp(&db)?;
 
         // Record the net constraint declarations in the target WAL so a later
         // reopen recovers them (index snapshots do not carry constraints), then
