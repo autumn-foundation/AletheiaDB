@@ -100,6 +100,25 @@ pub enum BackupError {
     /// The backup artifact is corrupt (bad checksum, truncated, or invalid data).
     #[error("Corrupt backup data: {0}")]
     Corrupt(String),
+    /// A point-in-time restore (PITR, Issue #3374) target lies outside the
+    /// achievable recovery window (base backup + archived WAL chain).
+    ///
+    /// The window is bounded below by the base backup's coordinate — PITR can
+    /// only stop at-or-after the backup, never before it — and reported so the
+    /// operator can pick a reachable target.
+    #[error(
+        "point-in-time restore target {requested} is outside the achievable window \
+         [earliest={earliest}, latest={latest}]. PITR can only reach a coordinate \
+         at-or-after the base backup and at-or-before the archived WAL tail."
+    )]
+    TargetOutsideWindow {
+        /// The requested target coordinate, as a human-readable string.
+        requested: String,
+        /// The earliest reachable coordinate (the base backup).
+        earliest: String,
+        /// The latest reachable coordinate (the archived WAL tail).
+        latest: String,
+    },
 }
 
 // ============================================================================

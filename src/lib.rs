@@ -134,9 +134,9 @@ pub use core::error::{
 pub use db::{
     AletheiaDB, BackupSummary, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats,
     DatabaseStats, EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent,
-    LabelSchema, LineageView, LineageViewEntry, SchemaInstant, SimilarityQuery, SimilaritySource,
-    TemporalExtent, TierAccessStats, TimeBounds, UniqueConstraintBuilder, VectorIndexBuilder,
-    WalStateStats,
+    LabelSchema, LineageView, LineageViewEntry, PitrCoord, PitrPlan, PitrTarget, SchemaInstant,
+    SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds,
+    UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
 };
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,

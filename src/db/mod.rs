@@ -33,6 +33,8 @@ pub mod graph_view;
 pub mod lineage;
 /// Basic graph operations (CRUD).
 pub mod ops;
+/// Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374).
+pub mod pitr;
 /// Query builder and executor hooks.
 pub mod query;
 /// Graph schema discovery (labels, edge types, property keys).
@@ -58,6 +60,7 @@ pub use constraint_builder::UniqueConstraintBuilder;
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
 pub use lineage::{FactStatus, LineageView, LineageViewEntry};
 pub use ops::NodesAtTime;
+pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use stats::{
