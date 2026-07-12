@@ -26,7 +26,7 @@ use std::path::Path;
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
     GraphIndexData, PersistedPropertyMap, PersistedPropertyValue, PersistedVersionType,
-    StringInternerData, TemporalIndexData,
+    StringInternerData, TemporalAdjacencyData, TemporalIndexData,
 };
 use super::{INTERNER_MAGIC, MANIFEST_VERSION};
 
@@ -52,13 +52,30 @@ const UNMAPPABLE_FILE_ID: u32 = u32::MAX;
 /// records the strings in that id order (position `i` == the string that had
 /// interner id `i` at save time).
 ///
-/// On reload the live interner is generally **not** pristine: WAL replay
-/// re-interns every property key (in hash-iteration order) *before* the saved
-/// interner file is restored, so re-interning the saved strings yields
-/// *different* live ids than the file positions they were saved at. The old
-/// restore path asserted positional identity and aborted with an
-/// `InternerMismatch`, which was swallowed to a warning and silently abandoned
-/// the whole graph index — dropping data.
+/// On reload the live interner is generally **not** pristine, so re-interning
+/// the saved strings yields *different* live ids than the file positions they
+/// were saved at. Two mechanisms make the live interner diverge from the saved
+/// file order before [`restore_string_interner`] runs:
+///
+/// 1. **WAL bootstrap deserialization.** During startup, `wal.read_from`
+///    (`src/db/config.rs`) deserializes the on-disk WAL entries, and
+///    `PropertyMap::deserialize` (`src/core/property/map.rs`) interns every
+///    property **key** it decodes into the process-global interner. This
+///    happens *before* the saved interner file is restored, so the keys land at
+///    whatever ids the interner hands out next — not the ids they had when the
+///    interner file was written. (WAL bootstrap is a raw deserialize, not a
+///    differential replay: the differential WAL replay proper runs *after*
+///    `load_indexes_startup`, and it does not intern.)
+/// 2. **The interner is a process-global singleton.** `GLOBAL_INTERNER` is
+///    shared across every `AletheiaDB` instance and every `open()` in the
+///    process, so any prior or concurrent population (earlier opens, other
+///    instances) leaves it already holding strings at ids unrelated to any one
+///    saved file.
+///
+/// Either way, the string at file position `i` re-interns to some live id that
+/// is generally not `i`. The old restore path asserted positional identity and
+/// aborted with an `InternerMismatch`, which was swallowed to a warning and
+/// silently abandoned the whole graph index — dropping data.
 ///
 /// The fix decouples the two id namespaces: the saved interner file defines a
 /// **file-local** id space, and this remap translates each persisted file id to
@@ -67,6 +84,17 @@ const UNMAPPABLE_FILE_ID: u32 = u32::MAX;
 /// routed through [`InternerRemap::remap_id`] before being resolved against the
 /// live interner. The on-disk wire format is unchanged — this is purely a
 /// load-time interpretation fix.
+///
+/// # Positional-identity invariant
+///
+/// The remap assumes `data.strings[i]` is exactly the string whose live id was
+/// `i` when the interner file was saved. That holds only because
+/// [`StringInterner::get_all_strings`](crate::core::interning::StringInterner::get_all_strings)
+/// (`src/core/interning.rs`) `.flatten()`s the id-ordered slot table, and the
+/// interner only ever leaves **tail** holes (capacity rollbacks), never
+/// interior ones — so flattening drops only trailing empty slots and preserves
+/// the position == id coupling for every retained string. If that ever changes
+/// (interior holes), this remap and `get_all_strings` would need to co-evolve.
 ///
 /// An [`InternerRemap::identity`] variant (used when no interner file was
 /// loaded) passes ids through unchanged, exactly reproducing legacy behavior.
@@ -183,6 +211,30 @@ impl InternerRemap {
         }
         for anchor in data.edge_anchors.iter_mut() {
             self.remap_property_map(&mut anchor.full_state);
+        }
+    }
+
+    /// Rewrite every persisted edge-type interner id in a loaded
+    /// [`TemporalAdjacencyData`] in place. Each `PersistedTemporalAdjacencyEntry`
+    /// stores its edge-type `label` as a file-space interner id; this translates
+    /// it to the live id so the #3225 AS-OF temporal-traversal edge-type filter
+    /// (which compares the entry `label` against a live [`InternedString`])
+    /// matches the correct edge type after reload (Issue #3490).
+    ///
+    /// An unmappable (corrupt/out-of-range) file id becomes
+    /// [`UNMAPPABLE_FILE_ID`], which fails the live-interner resolve check in
+    /// the reconstruction step (that entry is skipped and counted loudly)
+    /// rather than being stored as a garbage edge type.
+    ///
+    /// An identity remap leaves the data byte-for-byte unchanged.
+    pub fn remap_temporal_adjacency_data(&self, data: &mut TemporalAdjacencyData) {
+        if self.mapping.is_none() {
+            return;
+        }
+        for node_entry in data.outgoing.iter_mut() {
+            for entry in node_entry.entries.iter_mut() {
+                entry.label = self.remap_id(entry.label);
+            }
         }
     }
 }

@@ -1020,21 +1020,46 @@ fn test_multi_property_cross_process_reload_survives_interner_remap_3490() {
 /// test, so nothing else touches the interner concurrently), which makes it
 /// safe to `clear()` the GLOBAL_INTERNER to emulate a pristine, freshly
 /// started process.
+///
+/// Coverage extends beyond graph nodes to every persisted-id resolution site
+/// that #3490 can corrupt: graph **edges** (string-valued property), the
+/// **temporal** index (node anchor version property, node delta `removed_keys`,
+/// edge version label + property), and the **temporal adjacency** index
+/// (edge-type label used by #3225 AS-OF edge-type filtering). Each is asserted
+/// to resolve to its ORIGINAL string after a fresh-process reload whose interner
+/// order was polluted away from the saved file positions.
 #[test]
 #[ignore]
 fn regression_3490_interner_remap_subprocess_helper() {
-    use crate::core::id::IdGenerator;
+    use crate::core::hlc::HybridTimestamp;
+    use crate::core::id::{EdgeId, IdGenerator};
     use crate::core::property::PropertyValue;
+    use crate::core::version::VersionData;
+    use crate::core::{GLOBAL_INTERNER, TIMESTAMP_MAX};
+    use crate::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
     use crate::storage::index_persistence::formats::{
-        IndexManifest, PersistedNode, PersistedPropertyMap,
+        EdgeVersionEntry, IndexManifest, NodeVersionEntry, PersistedEdge, PersistedNode,
+        PersistedPropertyMap, PersistedVersionType, TemporalIndexData,
     };
     use crate::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
+    use crate::storage::index_persistence::temporal::save_temporal_index;
+    use crate::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index;
+    use crate::storage::index_persistence::{MANIFEST_VERSION, TEMPORAL_MAGIC};
 
     // Multiple distinct string KEYS and string VALUES across a couple of nodes,
     // to force the collision on real property data (not just labels).
     let label = "Employee";
     let keys = ["dept", "title", "city"];
     let str_values = ["engineering", "staff-swe"];
+
+    // Additional distinct strings exercising edges, temporal versions, and the
+    // temporal adjacency index (each must survive the polluted reload).
+    let edge_type = "REPORTS_TO"; // graph edge label + temporal edge label + adjacency label
+    let edge_prop_key = "since"; // edge string-valued property key
+    let edge_prop_val = "2021-tenure"; // edge string-valued property value
+    let anchor_key = "clearance"; // temporal node ANCHOR version property key
+    let anchor_val = "top-secret"; // temporal node ANCHOR version property value
+    let removed_key = "legacy_field"; // temporal node DELTA removed_keys entry
 
     // ---- Fresh process #1 (the writer): pristine warmed interner. ----
     GLOBAL_INTERNER.clear();
@@ -1044,7 +1069,8 @@ fn regression_3490_interner_remap_subprocess_helper() {
     let manager = IndexPersistenceManager::new(dir.path());
     manager.ensure_directories().unwrap();
 
-    // Intern in "save order": label, then keys, then string values.
+    // Intern in "save order": label, then keys, then string values, then the
+    // edge/temporal/adjacency strings. Capture their FILE-space ids.
     let label_id = GLOBAL_INTERNER.intern(label).unwrap();
     let key_ids: Vec<u32> = keys
         .iter()
@@ -1054,9 +1080,16 @@ fn regression_3490_interner_remap_subprocess_helper() {
         .iter()
         .map(|v| GLOBAL_INTERNER.intern(v).unwrap().as_u32())
         .collect();
+    let edge_type_id = GLOBAL_INTERNER.intern(edge_type).unwrap();
+    let edge_prop_key_id = GLOBAL_INTERNER.intern(edge_prop_key).unwrap().as_u32();
+    let edge_prop_val_id = GLOBAL_INTERNER.intern(edge_prop_val).unwrap().as_u32();
+    let anchor_key_id = GLOBAL_INTERNER.intern(anchor_key).unwrap().as_u32();
+    let anchor_val_id = GLOBAL_INTERNER.intern(anchor_val).unwrap().as_u32();
+    let removed_key_id = GLOBAL_INTERNER.intern(removed_key).unwrap().as_u32();
 
     // Two nodes: node 1 carries 2 string-valued props + 1 int prop; node 2
-    // carries a single string prop. Both exercise multi-property reload.
+    // carries a single string prop. Plus one EDGE (1->2) with a string-valued
+    // property, exercising the graph edge label + edge string-property path.
     let mut graph = new_graph_index_data();
     graph.nodes.push(PersistedNode {
         id: 1,
@@ -1079,24 +1112,161 @@ fn regression_3490_interner_remap_subprocess_helper() {
         },
     });
     graph.node_count = 2;
+    graph.edges.push(PersistedEdge {
+        id: 1,
+        source_id: 1,
+        target_id: 2,
+        label_idx: edge_type_id.as_u32(),
+        version_id: 3,
+        properties: PersistedPropertyMap {
+            entries: vec![(
+                edge_prop_key_id,
+                PersistedPropertyValue::String(edge_prop_val_id),
+            )],
+        },
+    });
+    graph.edge_count = 1;
 
     save_graph_index(&graph, &manager.graph_path().join("adjacency.idx")).unwrap();
+
+    // ---- Temporal index: node ANCHOR version (property), node DELTA version
+    // (removed_keys), and an edge version (label + string property). ----
+    let node_anchor_vid = 10u64;
+    let node_delta_vid = 11u64;
+    let edge_vid = 12u64;
+    let temporal_data = TemporalIndexData {
+        magic: TEMPORAL_MAGIC,
+        version: MANIFEST_VERSION,
+        node_versions: vec![
+            NodeVersionEntry {
+                version_id: node_anchor_vid,
+                node_id: 1,
+                label_idx: label_id.as_u32(),
+                valid_from: 1_000_000,
+                valid_to: None,
+                valid_from_logical: 0,
+                valid_to_logical: None,
+                tx_time: 1_000_000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap {
+                    entries: vec![(anchor_key_id, PersistedPropertyValue::String(anchor_val_id))],
+                },
+                vector_snapshot_id: None,
+                provenance: None,
+                tx_end: None,
+                tx_end_logical: None,
+                prev_version: None,
+                next_version: None,
+            },
+            NodeVersionEntry {
+                version_id: node_delta_vid,
+                node_id: 1,
+                label_idx: label_id.as_u32(),
+                valid_from: 2_000_000,
+                valid_to: None,
+                valid_from_logical: 0,
+                valid_to_logical: None,
+                tx_time: 2_000_000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Delta {
+                    base_anchor_tx: 1_000_000,
+                    base_anchor_tx_logical: 0,
+                    removed_keys: vec![removed_key_id],
+                },
+                properties: PersistedPropertyMap { entries: vec![] },
+                vector_snapshot_id: None,
+                provenance: None,
+                tx_end: None,
+                tx_end_logical: None,
+                prev_version: None,
+                next_version: None,
+            },
+        ],
+        node_anchors: vec![],
+        edge_versions: vec![EdgeVersionEntry {
+            version_id: edge_vid,
+            edge_id: 1,
+            source_id: 1,
+            target_id: 2,
+            label_idx: edge_type_id.as_u32(),
+            valid_from: 1_000_000,
+            valid_to: None,
+            valid_from_logical: 0,
+            valid_to_logical: None,
+            tx_time: 1_000_000,
+            tx_time_logical: 0,
+            version_type: PersistedVersionType::Anchor,
+            properties: PersistedPropertyMap {
+                entries: vec![(
+                    edge_prop_key_id,
+                    PersistedPropertyValue::String(edge_prop_val_id),
+                )],
+            },
+            provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
+        }],
+        edge_anchors: vec![],
+    };
+    save_temporal_index(
+        &temporal_data,
+        &manager.temporal_path().join("versions.idx"),
+    )
+    .unwrap();
+
+    // ---- Temporal adjacency index: one edge (1->2) of type `edge_type`. ----
+    // The stored entry `label` is a FILE-space interner id; #3225 AS-OF
+    // edge-type traversal filters on it, so it must survive the reload.
+    let adj_valid_from = HybridTimestamp::new_unchecked(1_000_000, 0);
+    let adj_tx_from = HybridTimestamp::new_unchecked(1_000_000, 0);
+    {
+        let adj = TemporalAdjacencyIndex::new(TemporalAdjacencyConfig::default());
+        adj.insert_edge(
+            EdgeId::new(1).unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            edge_type_id,
+            adj_valid_from,
+            TIMESTAMP_MAX,
+            adj_tx_from,
+            TIMESTAMP_MAX,
+        )
+        .unwrap();
+        save_temporal_adjacency_index(&adj, manager.base_path()).unwrap();
+    }
+
     manager.save_string_interner().unwrap();
     manager.save_manifest(&IndexManifest::new(0)).unwrap();
 
-    // ---- Fresh process #2 (the reader): pristine warmed interner, THEN
-    // WAL replay re-interns keys/values/label in a DIFFERENT (hash) order,
-    // shifting their live ids away from the saved file positions. ----
+    // ---- Fresh process #2 (the reader): pristine warmed interner, THEN a
+    // divergent re-intern (as WAL bootstrap / a shared process-global interner
+    // would produce) shifts every live id away from its saved file position.
+    // Filler strings + a scrambled order guarantee positional identity is
+    // broken for ALL the strings our entities reference. ----
     GLOBAL_INTERNER.clear();
     GLOBAL_INTERNER.warm_common_strings();
-    // Deterministic divergence: rotate keys and swap values, intern label last.
-    for k in ["city", "dept", "title"] {
-        GLOBAL_INTERNER.intern(k).unwrap();
+    for filler in ["__f0__", "__f1__", "__f2__"] {
+        GLOBAL_INTERNER.intern(filler).unwrap();
     }
-    for v in ["staff-swe", "engineering"] {
-        GLOBAL_INTERNER.intern(v).unwrap();
+    for s in [
+        removed_key,
+        anchor_val,
+        anchor_key,
+        edge_prop_val,
+        edge_prop_key,
+        edge_type,
+        "city",
+        "title",
+        "dept",
+        "staff-swe",
+        "engineering",
+        label,
+    ] {
+        GLOBAL_INTERNER.intern(s).unwrap();
     }
-    GLOBAL_INTERNER.intern(label).unwrap();
 
     // ---- Run the real startup restore path. ----
     let current = Arc::new(CurrentStorage::new());
@@ -1152,5 +1322,95 @@ fn regression_3490_interner_remap_subprocess_helper() {
         node2.properties.get("dept"),
         Some(&PropertyValue::String(Arc::from("engineering"))),
         "Issue #3490: node 2 'dept' property corrupted or lost"
+    );
+
+    // ---- Assert: graph EDGE restored with correct label + string property. ----
+    let edge = current
+        .get_edge(EdgeId::new(1).unwrap())
+        .expect("Issue #3490: edge 1 lost across reload (graph index abandoned)");
+    assert_eq!(
+        GLOBAL_INTERNER.resolve_with(edge.label, |s| s.to_string()),
+        Some(edge_type.to_string()),
+        "Issue #3490: edge type label corrupted across reload"
+    );
+    assert_eq!(
+        edge.properties.get(edge_prop_key),
+        Some(&PropertyValue::String(Arc::from(edge_prop_val))),
+        "Issue #3490: edge string-valued property key/value corrupted across reload"
+    );
+
+    // ---- Assert: TEMPORAL versions restored with correct interned strings. ----
+    let hist = historical.read();
+
+    // Node ANCHOR version property.
+    let anchor_version = hist
+        .get_node_version(VersionId::new(node_anchor_vid).unwrap())
+        .expect("Issue #3490: node anchor version lost across reload");
+    match &anchor_version.data {
+        VersionData::Anchor { properties, .. } => {
+            assert_eq!(
+                properties.get(anchor_key),
+                Some(&PropertyValue::String(Arc::from(anchor_val))),
+                "Issue #3490: temporal node anchor property corrupted across reload"
+            );
+        }
+        other => panic!("Issue #3490: expected anchor version, got {other:?}"),
+    }
+
+    // Node DELTA removed_keys.
+    let delta_version = hist
+        .get_node_version(VersionId::new(node_delta_vid).unwrap())
+        .expect("Issue #3490: node delta version lost across reload");
+    match &delta_version.data {
+        VersionData::Delta { delta } => {
+            let removed: Vec<String> = delta
+                .removed
+                .iter()
+                .filter_map(|k| GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()))
+                .collect();
+            assert!(
+                removed.iter().any(|s| s == removed_key),
+                "Issue #3490: temporal delta removed_key corrupted across reload (got {removed:?})"
+            );
+        }
+        other => panic!("Issue #3490: expected delta version, got {other:?}"),
+    }
+
+    // Edge version label + property.
+    let edge_version = hist
+        .get_edge_version(VersionId::new(edge_vid).unwrap())
+        .expect("Issue #3490: edge version lost across reload");
+    assert_eq!(
+        GLOBAL_INTERNER.resolve_with(edge_version.label, |s| s.to_string()),
+        Some(edge_type.to_string()),
+        "Issue #3490: temporal edge version label corrupted across reload"
+    );
+
+    // ---- Assert: TEMPORAL ADJACENCY edge-type label resolves correctly. ----
+    // This is the Finding-1 assertion: #3225 AS-OF edge-type filtering
+    // (`get_outgoing_with_label_at_time`) compares the stored entry label
+    // against the LIVE id of `edge_type`. Without the adjacency remap the
+    // stored label is a file-space id that no longer equals the live id, so the
+    // query returns EMPTY (the edge is invisible to edge-type traversal).
+    let live_edge_type = GLOBAL_INTERNER
+        .get_id(edge_type)
+        .expect("edge_type must be interned live after reload");
+    let adj_index = hist
+        .get_temporal_adjacency_index()
+        .expect("Issue #3490: temporal adjacency index not loaded")
+        .clone();
+    drop(hist);
+    let query_time = HybridTimestamp::new_unchecked(1_500_000, 0);
+    let matched = adj_index.get_outgoing_with_label_at_time(
+        NodeId::new(1).unwrap(),
+        live_edge_type,
+        query_time,
+        query_time,
+    );
+    assert_eq!(
+        matched,
+        vec![EdgeId::new(1).unwrap()],
+        "Issue #3490: AS-OF edge-type traversal lost edge 1 — temporal adjacency \
+         edge-type label was not remapped (resolves to the wrong live id)"
     );
 }

@@ -910,11 +910,15 @@ pub(crate) fn load_indexes_startup(
     // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
     // (manifest is only saved on shutdown, not during background persistence)
     // Issue #3490: obtain the file-id -> live-id remap alongside the manifest.
-    // WAL replay (in db::config, before this runs) may have re-interned property
-    // keys in a different order than the saved interner file, so persisted
-    // interner ids must be translated through this remap before being resolved
-    // against the live GLOBAL_INTERNER. When no interner/manifest could be
-    // loaded, we fall back to an identity remap (ids pass through unchanged),
+    // Before this runs, the process-global GLOBAL_INTERNER is generally already
+    // populated at ids unrelated to the saved interner file: WAL bootstrap
+    // deserialization (`wal.read_from` in db::config) interns every property KEY
+    // decoded by `PropertyMap::deserialize`, and the interner is a process-wide
+    // singleton shared across instances/opens. Re-interning the saved strings
+    // therefore assigns them DIFFERENT live ids than their saved file positions,
+    // so persisted interner ids must be translated through this remap before
+    // being resolved against the live interner. When no interner/manifest could
+    // be loaded, we fall back to an identity remap (ids pass through unchanged),
     // reproducing the pre-#3490 behavior for that path.
     let (manifest_lsn, interner_remap) = match manager.load_manifest_and_strings_with_remap() {
         Ok((manifest, remap)) => (Some(manifest.lsn), remap), // Successfully loaded
@@ -1262,15 +1266,20 @@ pub(crate) fn load_indexes_startup(
         }
     }
 
-    // Load temporal adjacency index
-    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index;
+    // Load temporal adjacency index.
+    // Issue #3490: the persisted edge-type labels are file-space interner ids
+    // and MUST be translated through the same remap as the graph/temporal
+    // indexes before they are resolved, or AS-OF (#3225) edge-type traversal
+    // filtering silently matches the wrong edge type after a reload whose
+    // interner order diverged from the saved file.
+    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index_with_remap;
 
     let adjacency_file = manager
         .base_path()
         .join("temporal_adjacency")
         .join("adjacency.idx");
     if adjacency_file.exists() {
-        match load_temporal_adjacency_index(manager.base_path()) {
+        match load_temporal_adjacency_index_with_remap(manager.base_path(), &interner_remap) {
             Ok(adj_index) => {
                 let mut hist_write = historical.write();
                 hist_write.set_temporal_adjacency_index(adj_index);
