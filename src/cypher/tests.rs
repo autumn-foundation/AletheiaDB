@@ -4997,3 +4997,447 @@ mod unwind {
         );
     }
 }
+
+// ============================================================================
+// Multi-variable, multi-pattern MATCH (Issue #549)
+// ============================================================================
+//
+// These tests define the contract for correct multi-variable binding: a query
+// that binds and returns more than one entity variable (or references a
+// non-terminal variable) is evaluated by the dedicated multi-pattern evaluator
+// and yields rows carrying `QueryRow::bindings` (named variable -> entity)
+// and/or `QueryRow::columns` (scalar projections). Queries the evaluator cannot
+// answer correctly are rejected with a structured `UnsupportedFeature` error --
+// never a silently-wrong row.
+mod multi_pattern {
+    use super::*;
+    use crate::AletheiaDB;
+    use crate::core::error::{Error, QueryError};
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
+    use crate::query::executor::{EntityResult, QueryRow};
+
+    /// Run a Cypher query and collect its rows (panicking on error).
+    fn run(db: &AletheiaDB, query: &str) -> Vec<QueryRow> {
+        db.execute_cypher(query).unwrap().collect_all().unwrap()
+    }
+
+    /// Look up the entity bound to `var` in a multi-variable row.
+    fn bound<'a>(row: &'a QueryRow, var: &str) -> &'a EntityResult {
+        row.bindings
+            .as_ref()
+            .unwrap_or_else(|| panic!("row has no bindings: {row:?}"))
+            .iter()
+            .find(|(name, _)| name == var)
+            .map(|(_, entity)| entity)
+            .unwrap_or_else(|| panic!("no binding named '{var}' in {row:?}"))
+    }
+
+    /// The set of variable names bound in a row, in binding order.
+    fn binding_names(row: &QueryRow) -> Vec<String> {
+        row.bindings
+            .as_ref()
+            .map(|b| b.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Extract a `String` property from a bound node entity.
+    fn node_prop(entity: &EntityResult, key: &str) -> Option<String> {
+        match entity {
+            EntityResult::Node(n) => n.get_property(key).and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.to_string()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// True if the entity is a node carrying the given label.
+    fn has_label(entity: &EntityResult, label: &str) -> bool {
+        matches!(entity, EntityResult::Node(n) if n.has_label_str(label))
+    }
+
+    /// Fetch a projected scalar column value by name.
+    fn column(row: &QueryRow, name: &str) -> Option<PropertyValue> {
+        row.columns
+            .as_ref()?
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// Assert that executing `query` fails with a structured `UnsupportedFeature`
+    /// error (never a silently-wrong row). `QueryResults` is not `Debug`, so the
+    /// success arm is handled explicitly rather than via `unwrap_err`.
+    fn assert_unsupported(db: &AletheiaDB, query: &str) {
+        match db.execute_cypher(query) {
+            Ok(_) => panic!("expected an UnsupportedFeature error for `{query}`, got Ok"),
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature for `{query}`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_multi_pattern_cross_product() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+            .unwrap();
+        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
+            .unwrap();
+        db.create_node("Company", PropertyMapBuilder::new().insert("name", "Acme").build())
+            .unwrap();
+        db.create_node("Company", PropertyMapBuilder::new().insert("name", "Globex").build())
+            .unwrap();
+
+        let rows = run(&db, "MATCH (a:Person),(b:Company) RETURN a,b");
+        assert_eq!(rows.len(), 4, "2 persons x 2 companies = 4 rows");
+        for row in &rows {
+            assert_eq!(binding_names(row), vec!["a".to_string(), "b".to_string()]);
+            assert!(has_label(bound(row, "a"), "Person"));
+            assert!(has_label(bound(row, "b"), "Company"));
+        }
+    }
+
+    #[test]
+    fn test_multi_pattern_cross_var_where_join() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("company_id", 1i64)
+                .build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Bob")
+                .insert("company_id", 2i64)
+                .build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Acme").insert("id", 1i64).build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Globex").insert("id", 2i64).build(),
+        )
+        .unwrap();
+
+        let rows = run(
+            &db,
+            "MATCH (a:Person),(b:Company) WHERE a.company_id = b.id RETURN a,b",
+        );
+        assert_eq!(rows.len(), 2, "only matching (person, company) pairs");
+        for row in &rows {
+            let person = node_prop(bound(row, "a"), "name").unwrap();
+            let company = node_prop(bound(row, "b"), "name").unwrap();
+            match person.as_str() {
+                "Alice" => assert_eq!(company, "Acme"),
+                "Bob" => assert_eq!(company, "Globex"),
+                other => panic!("unexpected person {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_chain_binds_all_vars() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("Person", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        let b = db
+            .create_node("Person", PropertyMapBuilder::new().insert("name", "B").build())
+            .unwrap();
+        let c = db
+            .create_node("Company", PropertyMapBuilder::new().insert("name", "C").build())
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        db.create_edge(b, c, "WORKS_AT", crate::core::property::PropertyMap::new())
+            .unwrap();
+
+        let rows = run(
+            &db,
+            "MATCH (a)-[:KNOWS]->(b)-[:WORKS_AT]->(c) RETURN a,b,c",
+        );
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(node_prop(bound(row, "a"), "name").unwrap(), "A");
+        assert_eq!(node_prop(bound(row, "b"), "name").unwrap(), "B");
+        assert_eq!(node_prop(bound(row, "c"), "name").unwrap(), "C");
+    }
+
+    #[test]
+    fn test_shared_variable_unify() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        let b = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "B").build())
+            .unwrap();
+        let c = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "C").build())
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        db.create_edge(b, c, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+
+        let rows = run(
+            &db,
+            "MATCH (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c) RETURN a,b,c",
+        );
+        assert_eq!(rows.len(), 1, "b must unify across the two patterns");
+        let row = &rows[0];
+        assert_eq!(node_prop(bound(row, "a"), "name").unwrap(), "A");
+        assert_eq!(node_prop(bound(row, "b"), "name").unwrap(), "B");
+        assert_eq!(node_prop(bound(row, "c"), "name").unwrap(), "C");
+    }
+
+    #[test]
+    fn test_multi_var_property_projection() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+            .unwrap();
+        let b = db
+            .create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+
+        let rows = run(&db, "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name, b.name");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            column(row, "a.name"),
+            Some(PropertyValue::String("Alice".into()))
+        );
+        assert_eq!(
+            column(row, "b.name"),
+            Some(PropertyValue::String("Bob".into()))
+        );
+    }
+
+    #[test]
+    fn test_mixed_pattern_join() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("Person", PropertyMapBuilder::new().insert("name", "A1").build())
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B1").insert("x", 5i64).build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "R", crate::core::property::PropertyMap::new())
+            .unwrap();
+        db.create_node(
+            "L",
+            PropertyMapBuilder::new().insert("name", "C1").insert("y", 5i64).build(),
+        )
+        .unwrap();
+        // Distractor that must not join.
+        db.create_node(
+            "L",
+            PropertyMapBuilder::new().insert("name", "D1").insert("y", 9i64).build(),
+        )
+        .unwrap();
+
+        let rows = run(
+            &db,
+            "MATCH (a)-[:R]->(b),(c:L) WHERE b.x = c.y RETURN a.name,c.name",
+        );
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            column(row, "a.name"),
+            Some(PropertyValue::String("A1".into()))
+        );
+        assert_eq!(
+            column(row, "c.name"),
+            Some(PropertyValue::String("C1".into()))
+        );
+    }
+
+    #[test]
+    fn test_return_star_multi_var() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+            .unwrap();
+        db.create_node("Company", PropertyMapBuilder::new().insert("name", "Acme").build())
+            .unwrap();
+
+        let rows = run(&db, "MATCH (a:Person),(b:Company) RETURN *");
+        assert_eq!(rows.len(), 1);
+        let names = binding_names(&rows[0]);
+        assert!(names.contains(&"a".to_string()), "bindings: {names:?}");
+        assert!(names.contains(&"b".to_string()), "bindings: {names:?}");
+        assert!(has_label(bound(&rows[0], "a"), "Person"));
+        assert!(has_label(bound(&rows[0], "b"), "Company"));
+    }
+
+    #[test]
+    fn test_multi_pattern_order_skip_limit_distinct() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "P20").insert("age", 20i64).build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "P30").insert("age", 30i64).build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "P40").insert("age", 40i64).build(),
+        )
+        .unwrap();
+        db.create_node("Company", PropertyMapBuilder::new().insert("name", "Acme").build())
+            .unwrap();
+
+        // ORDER BY a.age DESC over the 3x1 product -> [40,30,20]; SKIP 1 LIMIT 1 -> 30.
+        let rows = run(
+            &db,
+            "MATCH (a:Person),(b:Company) RETURN a,b ORDER BY a.age DESC SKIP 1 LIMIT 1",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(node_prop(bound(&rows[0], "a"), "name").unwrap(), "P30");
+
+        // DISTINCT over the shared company collapses the 3 product rows to 1.
+        let distinct = run(&db, "MATCH (a:Person),(b:Company) RETURN DISTINCT b");
+        assert_eq!(distinct.len(), 1);
+        assert!(has_label(bound(&distinct[0], "b"), "Company"));
+    }
+
+    #[test]
+    fn test_multi_pattern_empty_result() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").insert("company_id", 1i64).build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Acme").insert("id", 99i64).build(),
+        )
+        .unwrap();
+
+        let rows = run(
+            &db,
+            "MATCH (a:Person),(b:Company) WHERE a.company_id = b.id RETURN a,b",
+        );
+        assert_eq!(rows.len(), 0, "no matching join -> zero rows, still Ok");
+    }
+
+    #[test]
+    fn test_undirected_rel_binds_both() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        let b = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "B").build())
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+
+        let rows = run(&db, "MATCH (a)-[:KNOWS]-(b) RETURN a,b");
+        assert_eq!(rows.len(), 2, "undirected match binds both traversal directions");
+        let mut pairs: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    node_prop(bound(r, "a"), "name").unwrap(),
+                    node_prop(bound(r, "b"), "name").unwrap(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("A".to_string(), "B".to_string()),
+                ("B".to_string(), "A".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_self_pattern_product() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+            .unwrap();
+        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
+            .unwrap();
+
+        let rows = run(&db, "MATCH (a:Person),(b:Person) RETURN a,b");
+        assert_eq!(rows.len(), 4, "2x2 self product includes a==b diagonal");
+    }
+
+    #[test]
+    fn test_single_var_unchanged_still_old_path() {
+        let db = AletheiaDB::new().unwrap();
+        let alice = db
+            .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+            .unwrap();
+        let bob = db
+            .create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
+            .unwrap();
+        db.create_edge(alice, bob, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+
+        // Single-variable scan stays on the entity path: entity set, bindings None.
+        let rows = run(&db, "MATCH (n:Person) RETURN n");
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert!(row.bindings.is_none(), "single-var row must not carry bindings");
+            assert!(matches!(row.entity, EntityResult::Node(_)));
+        }
+
+        // Terminal-only traversal projection also stays on the old path.
+        let rows = run(&db, "MATCH (a:Person)-[:KNOWS]->(b) RETURN b");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].bindings.is_none());
+        assert_eq!(node_prop(&rows[0].entity, "name").unwrap(), "Bob");
+    }
+
+    #[test]
+    fn test_reject_varlength_in_multibinding() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("N", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        assert_unsupported(&db, "MATCH (a)-[:KNOWS*1..3]->(b),(c) RETURN a,c");
+    }
+
+    #[test]
+    fn test_reject_aggregation_multibinding() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("N", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        assert_unsupported(&db, "MATCH (a),(b) RETURN count(a)");
+    }
+
+    #[test]
+    fn test_reject_temporal_multibinding() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("N", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        // A multi-variable pattern with a temporal qualifier reaches the
+        // evaluator, which rejects bi-temporal AS OF in v1 rather than answering
+        // a non-temporal (silently-wrong) result.
+        assert_unsupported(
+            &db,
+            "MATCH (a),(b) AS OF TIMESTAMP '2020-01-01T00:00:00Z' RETURN a,b",
+        );
+    }
+}
