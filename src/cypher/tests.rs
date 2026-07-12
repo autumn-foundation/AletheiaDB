@@ -5014,12 +5014,18 @@ mod unwind {
             CypherExecution::MultiPattern { .. } => {
                 panic!("UNWIND must plan to Rows, not a MultiPattern")
             }
+            CypherExecution::Explain(_) | CypherExecution::Profile(_) => {
+                panic!("UNWIND must plan to Rows, not an Explain/Profile")
+            }
         }
         match plan_cypher("MATCH (n:Person) RETURN n").unwrap() {
             CypherExecution::Query(_) => {}
             CypherExecution::Rows(_) => panic!("MATCH must plan to a Query"),
             CypherExecution::MultiPattern { .. } => {
                 panic!("single-variable MATCH must plan to a Query")
+            }
+            CypherExecution::Explain(_) | CypherExecution::Profile(_) => {
+                panic!("plain MATCH must plan to a Query, not an Explain/Profile")
             }
         }
     }
@@ -5168,6 +5174,370 @@ mod unwind {
         assert!(
             matches!(err, Err(CypherError::ParseError { .. })),
             "an over-cap list literal must yield a ParseError, got {err:?}"
+        );
+    }
+}
+
+// ============================================================================
+// EXPLAIN / PROFILE entry points (Issue #562)
+// ============================================================================
+
+#[cfg(test)]
+mod explain_profile {
+    use crate::AletheiaDB;
+    use crate::core::property::{
+        PropertyMap as CorePropertyMap, PropertyMapBuilder, PropertyValue,
+    };
+
+    /// Run a Cypher statement expected to return exactly one computed row with a
+    /// single `plan` string column, and return that plan text.
+    fn plan_text(db: &AletheiaDB, query: &str) -> String {
+        let results = db
+            .execute_cypher(query)
+            .unwrap_or_else(|e| panic!("`{query}` should execute, got error: {e:?}"));
+        let rows: Vec<_> = results.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 1, "EXPLAIN/PROFILE must return exactly one row");
+        let cols = rows[0]
+            .columns
+            .as_ref()
+            .expect("plan row must carry computed columns");
+        assert_eq!(cols.len(), 1, "plan row has a single column");
+        assert_eq!(cols[0].0, "plan", "the column is named `plan`");
+        match &cols[0].1 {
+            PropertyValue::String(s) => s.to_string(),
+            other => panic!("plan column must be a string, got {other:?}"),
+        }
+    }
+
+    fn seed_people(db: &AletheiaDB) {
+        for name in ["Alice", "Bob", "Carol"] {
+            let props = PropertyMapBuilder::new().insert("name", name).build();
+            db.create_node("Person", props).unwrap();
+        }
+    }
+
+    #[test]
+    fn explain_returns_a_plan_with_estimates() {
+        let db = AletheiaDB::new().unwrap();
+        seed_people(&db);
+        let text = plan_text(&db, "EXPLAIN MATCH (n:Person) RETURN n");
+        assert!(
+            text.contains("Physical Plan"),
+            "EXPLAIN output should carry the plan header: {text}"
+        );
+        assert!(
+            text.contains("NodeScan"),
+            "EXPLAIN of a label scan should name the NodeScan operator: {text}"
+        );
+        assert!(
+            text.contains("rows:"),
+            "EXPLAIN output should include a `rows:` estimate: {text}"
+        );
+        // EXPLAIN must not annotate with executed stats.
+        assert!(
+            !text.contains("actual rows:"),
+            "EXPLAIN must not include executed `actual rows:` stats: {text}"
+        );
+    }
+
+    #[test]
+    fn explain_does_not_execute() {
+        // An empty database still yields a plan (planning, not execution).
+        let db = AletheiaDB::new().unwrap();
+        let text = plan_text(&db, "EXPLAIN MATCH (n:Person) RETURN n");
+        assert!(
+            text.contains("NodeScan"),
+            "plan present even with no data: {text}"
+        );
+    }
+
+    #[test]
+    fn profile_reports_actual_rows_and_timing() {
+        let db = AletheiaDB::new().unwrap();
+        seed_people(&db);
+        let text = plan_text(&db, "PROFILE MATCH (n:Person) RETURN n");
+        assert!(
+            text.contains("actual rows: 3"),
+            "PROFILE scan should report 3 actual rows: {text}"
+        );
+        assert!(
+            text.contains("time:"),
+            "PROFILE output should include a per-operator timing field: {text}"
+        );
+        assert!(
+            text.contains("NodeScan"),
+            "PROFILE output names the executed operator: {text}"
+        );
+    }
+
+    #[test]
+    fn profile_filter_reflects_selectivity() {
+        let db = AletheiaDB::new().unwrap();
+        for age in [10i64, 20, 30] {
+            let props = PropertyMapBuilder::new()
+                .insert("name", "P")
+                .insert("age", age)
+                .build();
+            db.create_node("Person", props).unwrap();
+        }
+        let text = plan_text(&db, "PROFILE MATCH (n:Person) WHERE n.age > 18 RETURN n");
+        assert!(
+            text.contains("Filter"),
+            "PROFILE should show the Filter operator: {text}"
+        );
+        // 2 of 3 satisfy age > 18.
+        assert!(
+            text.contains("actual rows: 2"),
+            "Filter should emit 2 rows for age > 18: {text}"
+        );
+    }
+
+    #[test]
+    fn explain_shows_property_scan_optimization() {
+        // AC-5: a property-filtered label match lowers to a PropertyScan; the
+        // EXPLAIN output must surface that optimized operator.
+        let db = AletheiaDB::new().unwrap();
+        seed_people(&db);
+        let text = plan_text(&db, "EXPLAIN MATCH (n:Person {name: 'Alice'}) RETURN n");
+        assert!(
+            text.contains("PropertyScan"),
+            "EXPLAIN of a property-filtered scan should name PropertyScan: {text}"
+        );
+    }
+
+    #[test]
+    fn explain_unwind_is_rejected_honestly() {
+        let db = AletheiaDB::new().unwrap();
+        let err = db.execute_cypher("EXPLAIN UNWIND [1, 2, 3] AS x RETURN x");
+        assert!(
+            err.is_err(),
+            "EXPLAIN of a standalone UNWIND should be a structured error, not a fake plan"
+        );
+    }
+
+    #[test]
+    fn profile_traversal_shows_operators() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", CorePropertyMap::new())
+            .unwrap();
+        let text = plan_text(
+            &db,
+            "PROFILE MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b",
+        );
+        assert!(
+            text.contains("IndexedTraversal"),
+            "PROFILE of a traversal should show the traversal operator: {text}"
+        );
+        assert!(text.contains("actual rows:"), "traversal annotated: {text}");
+    }
+
+    /// Combined-feature contract (merge of Issue #562 EXPLAIN/PROFILE and Issue
+    /// #549 multi-pattern MATCH): a multi-variable / multi-pattern MATCH routes
+    /// to the dedicated multi-pattern evaluator, which has no physical `Query`
+    /// plan. `EXPLAIN`/`PROFILE` over such a query must therefore surface a
+    /// structured `UnsupportedFeature` error -- never a wrong/empty plan and
+    /// never a panic.
+    #[test]
+    fn explain_profile_of_multi_pattern_is_rejected_honestly() {
+        use crate::core::error::{Error, QueryError};
+
+        let db = AletheiaDB::new().unwrap();
+        // Seed a small graph so the queries would otherwise have data to plan.
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "R", CorePropertyMap::new()).unwrap();
+
+        // (1) EXPLAIN of a comma-joined multi-pattern MATCH.
+        // (2) PROFILE of a multi-variable relationship MATCH.
+        for query in [
+            "EXPLAIN MATCH (a),(b) RETURN a, b",
+            "PROFILE MATCH (a)-[:R]->(b) RETURN a, b",
+        ] {
+            match db.execute_cypher(query) {
+                Ok(_) => {
+                    panic!("`{query}` must be an UnsupportedFeature error, got Ok (wrong plan)")
+                }
+                Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+                Err(other) => {
+                    panic!("`{query}` must be a structured UnsupportedFeature error, got {other:?}")
+                }
+            }
+        }
+    }
+
+    /// Positive companion to the rejection above: a genuinely single-variable
+    /// MATCH still lowers to a physical plan under EXPLAIN after the merge.
+    #[test]
+    fn explain_single_variable_match_still_plans_after_merge() {
+        let db = AletheiaDB::new().unwrap();
+        seed_people(&db);
+        let text = plan_text(&db, "EXPLAIN MATCH (n:Person) RETURN n");
+        assert!(
+            text.contains("NodeScan"),
+            "EXPLAIN of a single-variable MATCH should still produce a plan: {text}"
+        );
+    }
+}
+
+// ============================================================================
+// EXPLAIN / PROFILE parsing (Issue #562)
+// ============================================================================
+
+#[cfg(test)]
+mod explain_profile_parse {
+    use super::super::ast::CypherStatement;
+    use super::super::error::CypherError;
+    use super::super::parser::CypherParser;
+
+    #[test]
+    fn explain_wraps_the_inner_match() {
+        let ast = CypherParser::parse("EXPLAIN MATCH (n) RETURN n").unwrap();
+        match ast {
+            CypherStatement::Explain(inner) => {
+                assert!(matches!(*inner, CypherStatement::Match { .. }));
+            }
+            other => panic!("expected Explain(Match), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_wraps_the_inner_match() {
+        let ast = CypherParser::parse("PROFILE MATCH (n:Person) RETURN n").unwrap();
+        match ast {
+            CypherStatement::Profile(inner) => {
+                assert!(matches!(*inner, CypherStatement::Match { .. }));
+            }
+            other => panic!("expected Profile(Match), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keywords_are_case_insensitive() {
+        assert!(matches!(
+            CypherParser::parse("explain MATCH (n) RETURN n").unwrap(),
+            CypherStatement::Explain(_)
+        ));
+        assert!(matches!(
+            CypherParser::parse("Profile Match (n) Return n").unwrap(),
+            CypherStatement::Profile(_)
+        ));
+    }
+
+    #[test]
+    fn explain_wraps_a_standalone_unwind_at_parse_level() {
+        // The parser accepts EXPLAIN over any statement; the execution layer is
+        // where UNWIND is rejected (it has no plannable Query). Parsing must
+        // still produce Explain(Unwind).
+        let ast = CypherParser::parse("EXPLAIN UNWIND [1, 2] AS x RETURN x").unwrap();
+        match ast {
+            CypherStatement::Explain(inner) => {
+                assert!(matches!(*inner, CypherStatement::Unwind { .. }));
+            }
+            other => panic!("expected Explain(Unwind), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_allows_a_leading_temporal_clause() {
+        let ast = CypherParser::parse(
+            "EXPLAIN AS OF TIMESTAMP '2024-01-01T00:00:00Z' MATCH (n) RETURN n",
+        )
+        .unwrap();
+        match ast {
+            CypherStatement::Explain(inner) => match *inner {
+                CypherStatement::Match { temporal, .. } => {
+                    assert!(temporal.is_some(), "temporal clause should be captured");
+                }
+                other => panic!("expected inner Match, got {other:?}"),
+            },
+            other => panic!("expected Explain(Match), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_and_duplicate_prefixes_are_rejected() {
+        for q in [
+            "EXPLAIN EXPLAIN MATCH (n) RETURN n",
+            "EXPLAIN PROFILE MATCH (n) RETURN n",
+            "PROFILE EXPLAIN MATCH (n) RETURN n",
+            "PROFILE PROFILE MATCH (n) RETURN n",
+        ] {
+            let result = CypherParser::parse(q);
+            assert!(
+                matches!(result, Err(CypherError::ParseError { .. })),
+                "`{q}` must be a ParseError, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_named_explain_still_parses() {
+        // `explain` used as a variable name must still parse (pre-parser
+        // keyword semantics: EXPLAIN is only special at statement start).
+        let ast = CypherParser::parse("MATCH (explain:Thing) RETURN explain").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn property_key_profile_still_parses() {
+        let ast = CypherParser::parse("MATCH (n) WHERE n.profile = 1 RETURN n").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn label_named_profile_still_parses() {
+        let ast = CypherParser::parse("MATCH (n:Profile) RETURN n").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn rel_type_named_explain_still_parses() {
+        let ast = CypherParser::parse("MATCH (a)-[:EXPLAIN]->(b) RETURN b").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn inline_property_explain_still_parses() {
+        let ast = CypherParser::parse("MATCH (n {explain: 1}) RETURN n").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn deep_inner_expression_hits_the_depth_cap_cleanly() {
+        // A pathologically deep expression under EXPLAIN must surface the
+        // expression depth cap as a ParseError (no stack overflow / SIGABRT):
+        // the prefix adds no expression recursion and must not defeat the cap.
+        let query = format!(
+            "EXPLAIN MATCH (n) WHERE {}n.a = 1{} RETURN n",
+            "(".repeat(5000),
+            ")".repeat(5000)
+        );
+        let result = CypherParser::parse(&query);
+        assert!(
+            matches!(result, Err(CypherError::ParseError { .. })),
+            "deep nested expression under EXPLAIN must be a ParseError, got {result:?}"
         );
     }
 }

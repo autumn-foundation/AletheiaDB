@@ -73,6 +73,22 @@ pub enum CypherStatement {
         /// `ORDER BY`, `SKIP`, `LIMIT`).
         return_clause: CypherReturn,
     },
+
+    /// `EXPLAIN <statement>` -- return the query plan for the wrapped statement
+    /// **without executing it** (Issue #562).
+    ///
+    /// The inner statement is any ordinary readable statement (a `MATCH`,
+    /// optionally with a leading temporal clause). A nested/duplicate prefix
+    /// (`EXPLAIN EXPLAIN`, `EXPLAIN PROFILE`) is rejected at parse time, so the
+    /// boxed inner is never itself an `Explain`/`Profile`.
+    Explain(Box<CypherStatement>),
+
+    /// `PROFILE <statement>` -- **execute** the wrapped statement and return its
+    /// plan annotated with per-operator executed statistics (row counts and
+    /// timing) (Issue #562).
+    ///
+    /// Same nesting rules as [`CypherStatement::Explain`].
+    Profile(Box<CypherStatement>),
 }
 
 /// A subsequent `OPTIONAL MATCH` clause within a `MATCH` statement.

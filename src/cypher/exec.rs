@@ -90,6 +90,14 @@ pub enum CypherExecution {
         /// Parameter bindings for `$param` references.
         params: HashMap<String, CypherParameterValue>,
     },
+    /// `EXPLAIN <query>` (Issue #562): plan the wrapped query and return the
+    /// physical plan as a single `plan` row **without executing it**. The
+    /// caller (`AletheiaDB::execute_cypher`) plans only.
+    Explain(Query),
+    /// `PROFILE <query>` (Issue #562): execute the wrapped query with
+    /// per-operator instrumentation and return the annotated plan as a single
+    /// `plan` row.
+    Profile(Query),
 }
 
 /// Parse and plan a Cypher string with no bound parameters.
@@ -126,6 +134,14 @@ pub fn plan_cypher_with_params(
             let results = execute_unwind(&source, &variable, &return_clause, &params)?;
             Ok(CypherExecution::Rows(results))
         }
+        CypherStatement::Explain(inner) => {
+            let query = lower_for_plan(*inner, params, "EXPLAIN")?;
+            Ok(CypherExecution::Explain(query))
+        }
+        CypherStatement::Profile(inner) => {
+            let query = lower_for_plan(*inner, params, "PROFILE")?;
+            Ok(CypherExecution::Profile(query))
+        }
         other if needs_multi_binding(&other) => {
             // A multi-variable / multi-pattern MATCH has no faithful
             // single-entity `Query` representation; route it to the dedicated
@@ -139,6 +155,48 @@ pub fn plan_cypher_with_params(
             let query = CypherConverter::with_params(params).convert(other)?;
             Ok(CypherExecution::Query(query))
         }
+    }
+}
+
+/// Lower the statement wrapped by `EXPLAIN`/`PROFILE` into a plannable [`Query`].
+///
+/// Only statements that convert to the single-entity graph-query IR are
+/// supported. Two inner shapes have no `Query` representation and are rejected
+/// with an honest [`CypherError::UnsupportedFeature`] rather than fabricating a
+/// plan:
+///
+/// - A standalone `UNWIND` (evaluated directly into scalar rows).
+/// - A multi-variable / multi-pattern `MATCH` (Issue #549): classified by
+///   [`needs_multi_binding`], it routes to the dedicated multi-pattern
+///   evaluator ([`CypherExecution::MultiPattern`]), which has **no** physical
+///   `Query`/plan to display or profile. Explaining/profiling it would either
+///   mis-lower through the single-entity converter or produce a wrong/empty
+///   plan, so we reject it explicitly and cleanly.
+///
+/// A nested `EXPLAIN`/`PROFILE` prefix is unreachable (the parser rejects it)
+/// but is handled defensively.
+fn lower_for_plan(
+    inner: CypherStatement,
+    params: HashMap<String, CypherParameterValue>,
+    verb: &str,
+) -> Result<Query, CypherError> {
+    match inner {
+        CypherStatement::Unwind { .. } => Err(CypherError::UnsupportedFeature(format!(
+            "{verb} is not supported for a standalone UNWIND statement yet; UNWIND expands a list \
+             into scalar rows and does not lower to a plannable graph query"
+        ))),
+        CypherStatement::Explain(_) | CypherStatement::Profile(_) => Err(
+            CypherError::UnsupportedFeature(format!("{verb} cannot wrap another EXPLAIN/PROFILE")),
+        ),
+        // A multi-variable / multi-pattern MATCH (Issue #549) is dispatched to
+        // the dedicated evaluator, which has no physical `Query` plan; there is
+        // nothing to lower here, so reject rather than mis-lower.
+        stmt if needs_multi_binding(&stmt) => Err(CypherError::UnsupportedFeature(format!(
+            "{verb} is not supported for multi-pattern queries yet; a multi-variable / \
+             multi-pattern MATCH is evaluated by the dedicated multi-pattern evaluator and has \
+             no physical query plan to display"
+        ))),
+        stmt => CypherConverter::with_params(params).convert(stmt),
     }
 }
 

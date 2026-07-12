@@ -419,6 +419,19 @@ impl CypherConverter {
                  evaluates the list-expansion runtime directly"
                     .to_string(),
             )),
+            // `EXPLAIN`/`PROFILE` are planning/execution *directives*, not
+            // queries: they are unwrapped and dispatched by
+            // [`crate::cypher::plan_cypher`] (which lowers the inner statement
+            // and returns a dedicated `CypherExecution::Explain`/`Profile`), so
+            // the converter never sees them directly. Reject rather than answer
+            // silently wrong if one reaches here.
+            CypherStatement::Explain(_) | CypherStatement::Profile(_) => {
+                Err(CypherError::UnsupportedFeature(
+                    "EXPLAIN/PROFILE are query directives handled by \
+                     cypher::plan_cypher, not lowered by the converter"
+                        .to_string(),
+                ))
+            }
         }
     }
 

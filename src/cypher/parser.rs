@@ -148,6 +148,26 @@ impl CypherParser {
         }
     }
 
+    /// If the current token is a bare identifier whose text (case-insensitively)
+    /// is `EXPLAIN` or `PROFILE`, return `Some(true)` for `EXPLAIN` /
+    /// `Some(false)` for `PROFILE`; otherwise `None`.
+    ///
+    /// `EXPLAIN` / `PROFILE` are pre-parser prefix keywords (Issue #562): they
+    /// are only meaningful at statement start and remain ordinary identifiers
+    /// everywhere else, so they are lexed as [`TokenKind::Identifier`] and
+    /// distinguished here by inspecting the token text.
+    fn leading_explain_profile_prefix(&self) -> Option<bool> {
+        let tok = self.peek();
+        if tok.kind != TokenKind::Identifier {
+            return None;
+        }
+        match tok.text.to_ascii_uppercase().as_str() {
+            "EXPLAIN" => Some(true),
+            "PROFILE" => Some(false),
+            _ => None,
+        }
+    }
+
     /// Build a [`CypherError::ParseError`] at the current token position.
     fn error(&self, message: &str) -> CypherError {
         CypherError::ParseError {
@@ -164,6 +184,37 @@ impl CypherParser {
     /// statement := [temporal] match_stmt
     /// ```
     fn parse_statement(&mut self) -> Result<CypherStatement, CypherError> {
+        // A leading `EXPLAIN` / `PROFILE` prefix (Issue #562) wraps the rest of
+        // the statement. It is handled *before* the expression grammar (it adds
+        // no expression recursion, so the depth caps are untouched) and before
+        // the temporal clause, so `EXPLAIN AS OF ... MATCH ...` works. A
+        // nested/duplicate prefix (`EXPLAIN EXPLAIN`, `EXPLAIN PROFILE`,
+        // `PROFILE EXPLAIN`, `PROFILE PROFILE`) is rejected rather than silently
+        // collapsed.
+        //
+        // These are PRE-PARSER keywords: openCypher treats them as special only
+        // at statement start, so they lex as ordinary identifiers and must stay
+        // usable as variables/labels/rel-types/property keys everywhere else.
+        // We therefore detect the prefix by inspecting the leading token's
+        // *text* (see `leading_explain_profile_prefix`) rather than a dedicated
+        // token kind. This is unambiguous: no valid statement begins with a bare
+        // identifier (statements start with MATCH / OPTIONAL / UNWIND / a
+        // temporal keyword), so a leading identifier is only ever the prefix.
+        if let Some(is_explain) = self.leading_explain_profile_prefix() {
+            self.advance(); // consume the prefix identifier
+            if self.leading_explain_profile_prefix().is_some() {
+                return Err(self.error(
+                    "EXPLAIN/PROFILE cannot be nested; use a single EXPLAIN or PROFILE prefix",
+                ));
+            }
+            let inner = self.parse_statement()?;
+            return Ok(if is_explain {
+                CypherStatement::Explain(Box::new(inner))
+            } else {
+                CypherStatement::Profile(Box::new(inner))
+            });
+        }
+
         // Check for leading temporal clause (AS OF / FOR / BETWEEN).
         let temporal = self.try_parse_temporal()?;
 

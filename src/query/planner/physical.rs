@@ -113,6 +113,24 @@ impl PhysicalPlan {
     /// ```
     #[must_use]
     pub fn explain(&self) -> String {
+        self.explain_with(None)
+    }
+
+    /// Generate the plan explanation, appending a per-operator annotation to
+    /// each operator's line (Issue #562, the `PROFILE` entry point).
+    ///
+    /// `annotations` is indexed by the plan tree's **pre-order** operator
+    /// position -- the same order this renderer walks the tree and the same
+    /// order [`crate::query::executor::QueryExecutor::execute_profiled`]
+    /// registers its per-operator profiles -- so `annotations[i]` decorates the
+    /// i-th operator. A shorter slice leaves later operators unannotated rather
+    /// than panicking.
+    #[must_use]
+    pub fn explain_annotated(&self, annotations: &[String]) -> String {
+        self.explain_with(Some(annotations))
+    }
+
+    fn explain_with(&self, annotations: Option<&[String]>) -> String {
         let mut output = String::new();
 
         // Header with overall plan info
@@ -150,14 +168,31 @@ impl PhysicalPlan {
             output.push_str("  Parallel execution enabled\n");
         }
 
-        // Explain the operator tree
-        self.explain_op(&self.root, &mut output, 0, "");
+        // Explain the operator tree. `idx` tracks the pre-order operator
+        // position so PROFILE annotations line up with the executor's registry.
+        let mut idx = 0usize;
+        self.explain_op(&self.root, &mut output, 0, "", annotations, &mut idx);
 
         output
     }
 
     /// Recursively explain an operator with indentation.
-    fn explain_op(&self, op: &PhysicalOp, output: &mut String, indent: usize, prefix: &str) {
+    ///
+    /// `annotations`/`idx` support the `PROFILE` path: when present, the
+    /// annotation for this operator's pre-order position is appended to its
+    /// line. `idx` is advanced once per operator, matching the executor's
+    /// pre-order profile registration.
+    fn explain_op(
+        &self,
+        op: &PhysicalOp,
+        output: &mut String,
+        indent: usize,
+        prefix: &str,
+        annotations: Option<&[String]>,
+        idx: &mut usize,
+    ) {
+        let my_idx = *idx;
+        *idx += 1;
         let indent_str = "  ".repeat(indent);
         let op_name = op.name();
 
@@ -302,6 +337,13 @@ impl PhysicalPlan {
             _ => {} // Other operators don't need extra details
         }
 
+        // Append this operator's PROFILE annotation (executed stats), if any.
+        if let Some(anns) = annotations
+            && let Some(annotation) = anns.get(my_idx)
+        {
+            line.push_str(annotation);
+        }
+
         output.push_str(&line);
         output.push('\n');
 
@@ -320,7 +362,7 @@ impl PhysicalPlan {
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::IndexedTraversal { input, .. }
             | PhysicalOp::OptionalApply { input, .. } => {
-                self.explain_op(input, output, indent + 1, "└─ ");
+                self.explain_op(input, output, indent + 1, "└─ ", annotations, idx);
             }
 
             // Binary operators
@@ -328,8 +370,8 @@ impl PhysicalPlan {
             | PhysicalOp::Union { left, right }
             | PhysicalOp::Intersect { left, right }
             | PhysicalOp::Except { left, right } => {
-                self.explain_op(left, output, indent + 1, "├─ ");
-                self.explain_op(right, output, indent + 1, "└─ ");
+                self.explain_op(left, output, indent + 1, "├─ ", annotations, idx);
+                self.explain_op(right, output, indent + 1, "└─ ", annotations, idx);
             }
 
             // Leaf operators (no children)
@@ -1982,6 +2024,117 @@ mod tests {
         assert!(lines[1].starts_with("Filter"));
         assert!(lines[2].starts_with("  └─ IndexedTraversal"));
         assert!(lines[3].starts_with("    └─ NodeLookup"));
+    }
+
+    // ==================== explain_annotated (PROFILE) Tests ====================
+
+    fn nested_unary_plan() -> PhysicalPlan {
+        PhysicalPlan {
+            root: PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::Filter {
+                    input: Box::new(PhysicalOp::NodeLookup {
+                        node_ids: vec![NodeId::new(1).unwrap()],
+                    }),
+                    predicate: Predicate::True,
+                }),
+                count: 10,
+                offset: 0,
+            },
+            estimated_cost: Cost::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        }
+    }
+
+    #[test]
+    fn test_explain_annotated_appends_in_preorder() {
+        let plan = nested_unary_plan();
+        // Pre-order operator positions: [Limit, Filter, NodeLookup].
+        let annotations = vec![
+            " | actual rows: 10, time: 5µs (incl. children)".to_string(),
+            " | actual rows: 20, time: 3µs (incl. children)".to_string(),
+            " | actual rows: 1, time: 1µs (incl. children)".to_string(),
+        ];
+
+        let explained = plan.explain_annotated(&annotations);
+        let lines: Vec<&str> = explained.lines().collect();
+        // Header + 3 operator lines.
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("Limit"));
+        assert!(lines[1].ends_with("actual rows: 10, time: 5µs (incl. children)"));
+        assert!(lines[2].contains("Filter"));
+        assert!(lines[2].ends_with("actual rows: 20, time: 3µs (incl. children)"));
+        assert!(lines[3].contains("NodeLookup"));
+        assert!(lines[3].ends_with("actual rows: 1, time: 1µs (incl. children)"));
+
+        // The plain (unannotated) render carries none of the stats.
+        let plain = plan.explain();
+        assert!(!plain.contains("actual rows"));
+    }
+
+    #[test]
+    fn test_explain_annotated_short_slice_leaves_later_ops_unannotated() {
+        let plan = nested_unary_plan();
+        // Only the root operator has an annotation; the shorter slice must not
+        // panic and must leave later operators bare.
+        let annotations = vec![" | actual rows: 10, time: 5µs (incl. children)".to_string()];
+
+        let explained = plan.explain_annotated(&annotations);
+        let lines: Vec<&str> = explained.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("Limit"));
+        assert!(lines[1].contains("actual rows: 10"));
+        // Filter and NodeLookup had no annotation slot.
+        assert!(!lines[2].contains("actual rows"));
+        assert!(!lines[3].contains("actual rows"));
+
+        // An empty slice annotates nothing but still renders every operator.
+        let none = plan.explain_annotated(&[]);
+        assert!(!none.contains("actual rows"));
+        assert!(none.contains("Limit"));
+        assert!(none.contains("Filter"));
+        assert!(none.contains("NodeLookup"));
+    }
+
+    #[test]
+    fn test_explain_annotated_binary_preorder() {
+        // Binary operator: pre-order visits parent, then left, then right, so
+        // the annotation indices must follow that order.
+        let plan = PhysicalPlan {
+            root: PhysicalOp::HashJoin {
+                left: Box::new(PhysicalOp::NodeScan {
+                    label: Some("Person".to_string()),
+                    estimated_rows: 100,
+                }),
+                right: Box::new(PhysicalOp::NodeScan {
+                    label: Some("Company".to_string()),
+                    estimated_rows: 50,
+                }),
+                left_key: "id".to_string(),
+                right_key: "person_id".to_string(),
+            },
+            estimated_cost: Cost::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+        let annotations = vec![
+            " | actual rows: 7, time: 9µs (incl. children)".to_string(),
+            " | actual rows: 100, time: 4µs (incl. children)".to_string(),
+            " | actual rows: 50, time: 2µs (incl. children)".to_string(),
+        ];
+
+        let explained = plan.explain_annotated(&annotations);
+        let lines: Vec<&str> = explained.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("HashJoin"));
+        assert!(lines[1].contains("actual rows: 7"));
+        // Left child (Person) is visited before the right child (Company).
+        assert!(lines[2].contains("Person"));
+        assert!(lines[2].contains("actual rows: 100"));
+        assert!(lines[3].contains("Company"));
+        assert!(lines[3].contains("actual rows: 50"));
     }
 
     #[test]
