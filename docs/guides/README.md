@@ -35,8 +35,10 @@ After those four, pick the guides relevant to what you're building.
 - [Sharding Guide](sharding-guide.md) — Domain-based horizontal scaling with 2PC transactions
 - [HTTP State Management](http-state-management.md) — Session and state management for the HTTP API
 
-### Migration & Import
-- [Neo4j Import Guide](neo4j-import.md) — Migrate a Neo4j CSV export (typed headers) with a fidelity report
+### Migration
+- [Migrating from XTDB](migrating-from-xtdb.md) — History-preserving concept mapping, valid-time backfill, and query translation from XTDB
+- [Migrating from Datomic](migrating-from-datomic.md) — Datomic's single-axis (tx-time) history mapped onto AletheiaDB's bi-temporal model, with provenance and query translation
+- - [Migrating from Neo4j](neo4j-import.md) — Migrate a Neo4j CSV export (typed headers) with a fidelity report
 
 ---
 
@@ -56,6 +58,9 @@ After those four, pick the guides relevant to what you're building.
 
 **I'm scaling to large datasets:**
 → [Sharding Guide](sharding-guide.md) → [Tiered Storage Guide](tiered-storage-guide.md)
+
+**I'm migrating from XTDB or Datomic:**
+→ [Core Concepts](core-concepts.md) → [Migrating from XTDB](migrating-from-xtdb.md) / [Migrating from Datomic](migrating-from-datomic.md)
 
 ---
 
