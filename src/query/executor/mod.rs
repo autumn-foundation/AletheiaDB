@@ -19,6 +19,8 @@ use super::planner::physical::{PhysicalOp, PhysicalPlan};
 #[doc(hidden)]
 pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
+#[doc(hidden)]
+pub use iterators::ScanStrategy;
 pub use iterators::TemporalNodeScanIterator;
 pub use iterators::{
     AggregateIterator, BatchTemporalNodeIterator, CountIterator, DistinctIterator, FilterIterator,

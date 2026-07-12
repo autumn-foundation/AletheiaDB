@@ -319,6 +319,10 @@ pub struct ConcurrentWalSystem {
     /// Crash-torn-tail recovery policy applied by [`Self::read_from`]
     /// (Issue #3433).
     tolerate_torn_tail: bool,
+    /// Optional WAL cipher for encryption at rest. Retained so [`Self::read_from`]
+    /// can decrypt encrypted segments during recovery replay; the write path
+    /// receives its own copy through the inner `ConcurrentWal`.
+    wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
 }
 
 impl ConcurrentWalSystem {
@@ -420,6 +424,7 @@ impl ConcurrentWalSystem {
             group_commit,
             consecutive_flush_errors,
             tolerate_torn_tail: config.tolerate_torn_tail,
+            wal_cipher: config.wal_cipher,
         })
     }
 
@@ -766,9 +771,14 @@ impl ConcurrentWalSystem {
     /// there (keeping the intact prefix); with `tolerate_torn_tail = false` any
     /// parse failure hard-errors.
     pub fn read_from(&self, start_lsn: LSN) -> Result<Vec<super::WalEntry>> {
-        crate::storage::wal_reader::read_wal_entries_with_options(
+        // Thread the configured WAL cipher (if any) into the reader: encrypted
+        // segments cannot be decoded without it, so an encryption-at-rest
+        // database replaying its WAL tail after a crash must decrypt here.
+        // Passing `None` (no encryption) preserves plaintext behavior exactly.
+        crate::storage::wal_reader::read_wal_entries_with_cipher_and_options(
             self.wal_dir(),
             start_lsn,
+            self.wal_cipher.as_ref(),
             self.tolerate_torn_tail,
         )
     }

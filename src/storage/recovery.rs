@@ -136,6 +136,42 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
     current: &CurrentStorage,
     historical: &mut HistoricalStorage,
     start_lsn: LSN,
+    next_version_id: u64,
+    constraint_registry: Option<&ConstraintRegistry>,
+) -> Result<(LSN, Option<u64>, Option<u64>, u64)> {
+    // Read the segment directory once, then apply. Callers that have already
+    // read the WAL for startup (Issue #3429) skip this read entirely and call
+    // `replay_entries_into_storage_with_constraints` directly with the
+    // pre-decoded entries, avoiding a redundant full decode of the WAL.
+    let wal_entries = wal.read_from(start_lsn)?;
+    replay_entries_into_storage_with_constraints(
+        wal,
+        wal_entries,
+        current,
+        historical,
+        next_version_id,
+        constraint_registry,
+    )
+}
+
+/// Apply an already-decoded WAL entry stream to storage (Issue #3429).
+///
+/// This is the body of [`replay_wal_into_storage_with_constraints`] with the
+/// segment read hoisted out. The startup path decodes the WAL exactly once and
+/// feeds the resulting entries here (filtered to `>= start_lsn`) so recovery no
+/// longer re-reads the segment directory for the differential replay. `wal` is
+/// retained only to report the post-replay `current_lsn()`; every operation
+/// applied comes from `wal_entries`, never from a fresh read.
+///
+/// The caller MUST pass exactly the entries with `LSN >= start_lsn` (in the
+/// same LSN-sorted order [`ConcurrentWalSystem::read_from`] produces): the
+/// transaction-framing resolver below is order-sensitive and expects the same
+/// contiguous suffix a direct `read_from(start_lsn)` would return.
+pub(crate) fn replay_entries_into_storage_with_constraints(
+    wal: &ConcurrentWalSystem,
+    wal_entries: Vec<WalEntry>,
+    current: &CurrentStorage,
+    historical: &mut HistoricalStorage,
     mut next_version_id: u64,
     constraint_registry: Option<&ConstraintRegistry>,
 ) -> Result<(LSN, Option<u64>, Option<u64>, u64)> {
@@ -144,21 +180,11 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
     let mut max_node_id: Option<u64> = None;
     let mut max_edge_id: Option<u64> = None;
 
-    let wal_entries = wal.read_from(start_lsn)?;
-
     if !wal_entries.is_empty() {
         #[cfg(feature = "observability")]
-        tracing::info!(
-            "Replaying {} WAL entries from LSN {}",
-            wal_entries.len(),
-            start_lsn.0
-        );
+        tracing::info!("Replaying {} WAL entries", wal_entries.len());
         #[cfg(not(feature = "observability"))]
-        eprintln!(
-            "Replaying {} WAL entries from LSN {}",
-            wal_entries.len(),
-            start_lsn.0
-        );
+        eprintln!("Replaying {} WAL entries", wal_entries.len());
     }
 
     // Resolve transaction framing (Issue #3413) BEFORE applying: pair every
@@ -254,6 +280,21 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     // Re-creation after a tombstone/retraction: supersede the
                     // closed head in transaction time (mirroring the
                     // UpdateNode arm) before appending the new incarnation.
+                    //
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
+                    // following `add_node_version_with_provenance` also closes
+                    // the prior head via `close_previous_version_intervals`,
+                    // BUT that helper guards the tx-time close with a STRICT
+                    // `new_tx_start > prev_tx_start`. When a delete/retract and
+                    // this re-creation land in the SAME transaction they share
+                    // one framed `commit_timestamp`, so the strict `>` SKIPS the
+                    // close and the tombstone head would be left open — leaving
+                    // two versions with overlapping open tx-intervals after
+                    // replay. The explicit close is UNCONDITIONAL (matching the
+                    // live write path in `api/transaction/write/apply.rs`),
+                    // producing the empty `[T, T)` tx-interval live and replay
+                    // alike. See the reachability test in
+                    // `tests/recovery/replay_update_tests.rs`.
                     if let Some(prev) = historical_head {
                         historical.close_node_version_transaction_time(prev, commit_timestamp)?;
                     }
@@ -326,6 +367,10 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 }
 
                 if live_head.is_none() {
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
+                    // helper's strict `>` tx-time guard skips the close when a
+                    // same-transaction delete/retract + re-create share one
+                    // framed `commit_timestamp`. See the CreateNode arm above.
                     if let Some(prev) = historical_head {
                         historical.close_edge_version_transaction_time(prev, commit_timestamp)?;
                     }
@@ -378,6 +423,23 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 // makes history reconstruction loop forever (observed
                 // empirically: get_node_history OOMs after a double replay).
                 if historical.get_node_version(version_id).is_none() {
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
+                    // `add_node_version_with_provenance` below ALSO closes the
+                    // prior head via `close_previous_version_intervals`, but
+                    // that helper guards the tx-time close with a STRICT
+                    // `new_tx_start > prev_tx_start`. Two updates to the SAME
+                    // node in ONE transaction share a single framed
+                    // `commit_timestamp`, so the successor's tx start EQUALS the
+                    // intermediate version's tx start and the strict `>` SKIPS
+                    // the close — the intermediate would be left OPEN on replay
+                    // while the live path (unconditional close in
+                    // `api/transaction/write/apply.rs`) closes it to the empty
+                    // `[T, T)` interval. Leaving it open produces two versions
+                    // with overlapping open tx-intervals, so an
+                    // `AS OF SYSTEM_TIME = T` read could surface the superseded
+                    // version. This UNCONDITIONAL close keeps replay bit-for-bit
+                    // consistent with the live write path. Regression coverage:
+                    // `replay_double_update_same_node_in_one_tx_closes_intermediate`.
                     if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
                         historical.close_node_version_transaction_time(
                             prev_version_id,
@@ -429,6 +491,10 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 // UpdateNode arm above for why an already-present version_id
                 // must not be appended to history a second time.
                 if historical.get_edge_version(version_id).is_none() {
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
+                    // helper's strict `>` tx-time guard skips the close when two
+                    // updates to the same edge in ONE transaction share a framed
+                    // `commit_timestamp`. See the UpdateNode arm above.
                     if let Some(prev_version_id) = historical.get_current_edge_version(edge_id) {
                         historical.close_edge_version_transaction_time(
                             prev_version_id,
@@ -496,6 +562,16 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 };
 
                 if let Some((label, properties)) = tombstone_payload {
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
+                    // tombstone `add_node_version` below also closes the prior
+                    // head via `close_previous_version_intervals`, but that
+                    // helper's STRICT `new_tx_start > prev_tx_start` guard SKIPS
+                    // the tx-time close when an update-then-delete of the same
+                    // node in ONE transaction shares a framed `commit_timestamp`
+                    // — leaving the superseded head open on replay while the
+                    // live path (unconditional close) closes it. This
+                    // UNCONDITIONAL close keeps replay consistent with the live
+                    // write path. See the UpdateNode arm above.
                     if let Some(current_version_id) = historical_head {
                         historical.close_node_version_transaction_time(
                             current_version_id,
@@ -579,6 +655,11 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 };
 
                 if let Some((label, source, target, properties)) = tombstone_payload {
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
+                    // helper's strict `>` tx-time guard skips the close when an
+                    // update-then-delete of the same edge in ONE transaction
+                    // shares a framed `commit_timestamp`. See the DeleteNode /
+                    // UpdateNode arms above.
                     if let Some(current_version_id) = historical_head {
                         historical.close_edge_version_transaction_time(
                             current_version_id,
@@ -670,6 +751,22 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         .map(|v| v.temporal.valid_time().start())
                         .unwrap_or(commit_timestamp);
 
+                    // Step (a): close the head version's TRANSACTION time (its
+                    // valid interval stays untouched — append-only).
+                    //
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
+                    // `add_retracted_node_version` below also closes the prior
+                    // head via `close_previous_version_intervals`, but that
+                    // helper's tx-time close is guarded by a STRICT
+                    // `new_tx_start > prev_tx_start`. An update-then-retract of
+                    // the same node in ONE transaction shares a framed
+                    // `commit_timestamp`, so the strict `>` SKIPS the close and
+                    // the superseded head would be left open on replay — while
+                    // the live path (unconditional close) closes it. This
+                    // UNCONDITIONAL close keeps replay consistent with live. (The
+                    // helper additionally leaves the head's valid interval
+                    // untouched here, since the retraction reuses the head's
+                    // `valid_from`.) See the UpdateNode arm above.
                     if let Some(current_version_id) = head_version_id {
                         historical.close_node_version_transaction_time(
                             current_version_id,
@@ -751,6 +848,12 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         .map(|v| v.temporal.valid_time().start())
                         .unwrap_or(commit_timestamp);
 
+                    // Step (a): close the head version's TRANSACTION time.
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
+                    // helper's strict `>` tx-time guard skips the close when an
+                    // update-then-retract of the same edge in ONE transaction
+                    // shares a framed `commit_timestamp`. See the RetractNode /
+                    // UpdateNode arms above.
                     if let Some(current_version_id) = head_version_id {
                         historical.close_edge_version_transaction_time(
                             current_version_id,
@@ -1015,18 +1118,43 @@ fn resolve_transaction_frames(entries: Vec<WalEntry>) -> Vec<(WalOperation, Time
 
 /// Replay ONLY constraint declaration/drop entries from the full WAL history.
 ///
-/// Called during index-persistence startup BEFORE the regular snapshot-based
-/// WAL replay.  Because constraint declarations are written to the WAL before
-/// the corresponding node data, they may lie at LSNs below the persisted
-/// snapshot LSN and therefore be skipped by the normal differential replay.
-/// This pass reads every WAL entry from LSN 0 and replays only the two
-/// constraint-related operations, giving us the net constraint state.
+/// Because constraint declarations are written to the WAL before the
+/// corresponding node data, they may lie at LSNs below the persisted snapshot
+/// LSN and therefore be skipped by the normal differential replay. This reads
+/// every WAL entry from LSN 0 and replays only the two constraint-related
+/// operations, giving the net constraint state.
+///
+/// As of Issue #3429 the startup path no longer calls this: it decodes the WAL
+/// once and folds the constraint net-state out of the already-read entries via
+/// [`apply_constraint_declarations`], avoiding a dedicated full read. This
+/// wrapper (a thin `read_from` + `apply_constraint_declarations`) is retained
+/// for the recovery unit tests that exercise the read-and-apply path directly.
+#[cfg(test)]
 pub(crate) fn replay_constraint_declarations_from_wal(
     wal: &ConcurrentWalSystem,
     registry: &ConstraintRegistry,
 ) -> Result<()> {
     let all_entries = wal.read_from(LSN::initial())?;
-    for entry in all_entries {
+    apply_constraint_declarations(&all_entries, registry);
+    Ok(())
+}
+
+/// Fold the constraint declare/drop net-state out of an already-decoded WAL
+/// entry stream (Issue #3429).
+///
+/// Same net effect as [`replay_constraint_declarations_from_wal`] but operates
+/// on entries the startup path has *already* read from disk, so recovery does
+/// not decode the segment directory a second time just to recover constraint
+/// state. `entries` is expected to span the full WAL history (from
+/// [`LSN::initial()`]) so declarations that predate the index snapshot LSN --
+/// and would be skipped by the differential replay -- are still applied.
+///
+/// Declares and drops are replayed in stream order; the net set is
+/// order-dependent (declare then drop == dropped), matching the prior full-read
+/// pass exactly. Borrows the entries (does not consume them) so the same vector
+/// can then be filtered and handed to the differential replay.
+pub(crate) fn apply_constraint_declarations(entries: &[WalEntry], registry: &ConstraintRegistry) {
+    for entry in entries {
         match entry.operation {
             WalOperation::DeclareUniqueConstraint { label, property } => {
                 registry.declare(label, property);
@@ -1037,7 +1165,6 @@ pub(crate) fn replay_constraint_declarations_from_wal(
             _ => {}
         }
     }
-    Ok(())
 }
 
 /// Unit tests for the `resolve_transaction_frames` framing resolver
@@ -1570,6 +1697,57 @@ mod tests {
         assert!(
             historical
                 .get_edge_at_time(edge_id, valid_to, time::now())
+                .is_err()
+        );
+
+        // Append-only AS OF SYSTEM_TIME contract, post-replay — symmetric with
+        // the RetractNode twin (Issue #3407 review gap): the PRE-retraction
+        // head must still carry an OPEN valid interval with its TRANSACTION
+        // time closed at the LOGGED RetractEdge entry timestamp (never the
+        // replay time, never rewriting the pre-retraction record). This pins
+        // the `close_edge_version_transaction_time` call in the RetractEdge
+        // replay arm — the one Issue #3407 initially proposed removing.
+        let entries = wal.read_from(LSN::initial()).unwrap();
+        let logged_retract_ts = entries
+            .iter()
+            .find(|e| matches!(e.operation, WalOperation::RetractEdge { .. }))
+            .expect("RetractEdge entry must be in the WAL")
+            .timestamp;
+        let logged_create_ts = entries
+            .iter()
+            .find(|e| matches!(e.operation, WalOperation::CreateEdge { .. }))
+            .expect("CreateEdge entry must be in the WAL")
+            .timestamp;
+
+        let history = historical.get_edge_history(edge_id).unwrap();
+        assert_eq!(history.version_count(), 2, "create + retraction versions");
+        let pre_retraction_head = &history.versions[0];
+        assert!(
+            pre_retraction_head.temporal.valid_time().is_current(),
+            "pre-retraction edge head's valid interval must stay open-ended after replay"
+        );
+        assert!(
+            !pre_retraction_head.temporal.transaction_time().is_current(),
+            "pre-retraction edge head's transaction time must be closed after replay"
+        );
+        assert_eq!(
+            pre_retraction_head.temporal.transaction_time().end(),
+            logged_retract_ts,
+            "edge transaction time must close at the LOGGED entry timestamp, not the replay time"
+        );
+
+        // Anchoring AS OF SYSTEM_TIME before the retraction's logged commit
+        // shows the edge open-ended; anchoring at the retraction's commit does
+        // not.
+        assert!(
+            historical
+                .get_edge_at_time(edge_id, time::now(), logged_create_ts)
+                .is_ok(),
+            "AS OF SYSTEM_TIME before the retraction must show the edge open-ended"
+        );
+        assert!(
+            historical
+                .get_edge_at_time(edge_id, time::now(), logged_retract_ts)
                 .is_err()
         );
     }

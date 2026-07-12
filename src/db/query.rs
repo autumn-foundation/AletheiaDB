@@ -332,8 +332,14 @@ impl AletheiaDB {
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn execute_cypher(&self, query_string: &str) -> Result<QueryResults> {
-        let query = crate::cypher::parse_cypher(query_string)?;
-        self.execute_query(query)
+        // A standalone `UNWIND` (Issue #559) expands a list into scalar rows
+        // that have no `Query`-IR representation, so it is planned into a
+        // pre-computed result stream; every other statement lowers to a `Query`
+        // executed through the standard pipeline.
+        match crate::cypher::plan_cypher(query_string)? {
+            crate::cypher::CypherExecution::Query(query) => self.execute_query(query),
+            crate::cypher::CypherExecution::Rows(results) => Ok(results),
+        }
     }
 
     /// Execute a Cypher query string with parameter bindings.
@@ -374,8 +380,10 @@ impl AletheiaDB {
         query_string: &str,
         params: std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
     ) -> Result<QueryResults> {
-        let query = crate::cypher::parse_cypher_with_params(query_string, params)?;
-        self.execute_query(query)
+        match crate::cypher::plan_cypher_with_params(query_string, params)? {
+            crate::cypher::CypherExecution::Query(query) => self.execute_query(query),
+            crate::cypher::CypherExecution::Rows(results) => Ok(results),
+        }
     }
 }
 

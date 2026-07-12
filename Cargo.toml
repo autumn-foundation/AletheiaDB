@@ -569,3 +569,8 @@ name = "import_throughput"
 harness = false
 path = "benches/import_throughput.rs"
 required-features = ["import"]
+
+[[bench]]
+name = "node_scan"
+harness = false
+path = "benches/node_scan.rs"

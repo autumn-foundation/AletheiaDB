@@ -8,6 +8,7 @@
 use aletheiadb::AletheiaDB;
 use aletheiadb::PropertyMapBuilder;
 use aletheiadb::config::AletheiaDBConfig;
+use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::storage::index_persistence::PersistenceConfig;
 use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 use aletheiadb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
@@ -39,6 +40,17 @@ fn test_reopen_redb_after_shutdown_with_background_thread() {
     // Phase 1: Create database with persistence enabled (spawns background thread)
     {
         let config = AletheiaDBConfig::builder()
+            // Isolate the WAL under this test's own tempdir. Without an
+            // explicit wal_dir, the config falls back to the default RELATIVE
+            // `aletheiadb/wal` (src/config.rs), which is shared by every such
+            // test in a single `cargo test` process and accumulates segments +
+            // trailing garbage — which #3429's eager startup full-decode then
+            // legitimately hard-errors on ("Unknown WAL operation type: 0").
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(data_dir.join("wal"))
+                    .build(),
+            )
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
