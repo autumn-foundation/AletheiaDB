@@ -20,12 +20,172 @@
 //! If the interner is not restored to the exact same state, these IDs will map to incorrect strings,
 //! causing data corruption.
 
-use crate::core::GLOBAL_INTERNER;
+use crate::core::{GLOBAL_INTERNER, InternedString};
 use std::path::Path;
 
 use super::error::{IndexPersistenceError, Result};
-use super::formats::StringInternerData;
+use super::formats::{
+    GraphIndexData, PersistedPropertyMap, PersistedPropertyValue, PersistedVersionType,
+    StringInternerData, TemporalIndexData,
+};
 use super::{INTERNER_MAGIC, MANIFEST_VERSION};
+
+/// Sentinel live id used when a persisted file-space interner id cannot be
+/// mapped through the remap (i.e. it references a position past the end of the
+/// saved interner file — genuine on-disk corruption). It is never a valid
+/// interner id in practice, so downstream resolution of a property key / string
+/// value / label stamped with it deterministically *fails* (the node/edge is
+/// skipped and counted as a load error) rather than silently resolving to some
+/// unrelated live string. This preserves corruption detection while the remap
+/// eliminates the benign file-id vs live-id divergence that Issue #3490 was.
+const UNMAPPABLE_FILE_ID: u32 = u32::MAX;
+
+/// Translation table from **persisted file-space interner ids** to **live
+/// interner ids**, produced by [`restore_string_interner`].
+///
+/// # Why this exists (Issue #3490)
+///
+/// Persistence stores raw `u32` interner ids for property keys, string values,
+/// and node/edge labels. Those ids are assigned by the process-global
+/// [`GLOBAL_INTERNER`] in first-intern order, so they are only meaningful
+/// relative to the interner state that produced them. The saved interner file
+/// records the strings in that id order (position `i` == the string that had
+/// interner id `i` at save time).
+///
+/// On reload the live interner is generally **not** pristine: WAL replay
+/// re-interns every property key (in hash-iteration order) *before* the saved
+/// interner file is restored, so re-interning the saved strings yields
+/// *different* live ids than the file positions they were saved at. The old
+/// restore path asserted positional identity and aborted with an
+/// `InternerMismatch`, which was swallowed to a warning and silently abandoned
+/// the whole graph index — dropping data.
+///
+/// The fix decouples the two id namespaces: the saved interner file defines a
+/// **file-local** id space, and this remap translates each persisted file id to
+/// the live id the same string actually has in this process. Every persisted
+/// `u32` interner id (keys, string values, labels, `removed_keys`) must be
+/// routed through [`InternerRemap::remap_id`] before being resolved against the
+/// live interner. The on-disk wire format is unchanged — this is purely a
+/// load-time interpretation fix.
+///
+/// An [`InternerRemap::identity`] variant (used when no interner file was
+/// loaded) passes ids through unchanged, exactly reproducing legacy behavior.
+#[derive(Debug, Clone, Default)]
+pub struct InternerRemap {
+    /// `mapping[file_position]` == the live [`InternedString`] the saved string
+    /// at that position resolves to in this process. `None` == identity remap
+    /// (no translation; every id passes through unchanged).
+    mapping: Option<Vec<InternedString>>,
+}
+
+impl InternerRemap {
+    /// An identity remap: every persisted id is used verbatim as a live id.
+    ///
+    /// Used when there is no saved interner file to translate against (e.g. a
+    /// first run, or best-effort recovery where the interner file is absent),
+    /// preserving the exact pre-#3490 behavior for those paths.
+    pub fn identity() -> Self {
+        Self { mapping: None }
+    }
+
+    /// Build a remap from the saved strings, in file order.
+    ///
+    /// `positions[i]` is the live id that the string at file position `i`
+    /// resolves to after being interned into the current [`GLOBAL_INTERNER`].
+    fn from_positions(positions: Vec<InternedString>) -> Self {
+        Self {
+            mapping: Some(positions),
+        }
+    }
+
+    /// Translate a persisted file-space interner id to its live id.
+    ///
+    /// Returns `None` when a mapping remap does not cover `file_id` (the id
+    /// points past the end of the saved interner file — genuine corruption).
+    /// Identity remaps always return `Some` (the id verbatim).
+    pub fn resolve(&self, file_id: u32) -> Option<InternedString> {
+        match &self.mapping {
+            None => Some(InternedString::from_raw(file_id)),
+            Some(positions) => positions.get(file_id as usize).copied(),
+        }
+    }
+
+    /// Translate a persisted file-space id to a live id as a raw `u32`,
+    /// substituting [`UNMAPPABLE_FILE_ID`] for an out-of-range (corrupt) id so
+    /// that later resolution fails loudly instead of returning wrong data.
+    fn remap_id(&self, file_id: u32) -> u32 {
+        self.resolve(file_id)
+            .map(|id| id.as_u32())
+            .unwrap_or(UNMAPPABLE_FILE_ID)
+    }
+
+    /// Rewrite every interner id embedded in a persisted property map from
+    /// file space to live space (property keys and any `String` values).
+    fn remap_property_map(&self, map: &mut PersistedPropertyMap) {
+        for (key_idx, value) in map.entries.iter_mut() {
+            *key_idx = self.remap_id(*key_idx);
+            if let PersistedPropertyValue::String(value_idx) = value {
+                *value_idx = self.remap_id(*value_idx);
+            }
+        }
+    }
+
+    /// Rewrite every persisted interner id in a loaded [`GraphIndexData`] in
+    /// place, so the existing restore path (which resolves ids against the live
+    /// interner) sees live ids. Covers node/edge labels and node/edge property
+    /// maps (keys + string values).
+    ///
+    /// An identity remap leaves the data byte-for-byte unchanged.
+    pub fn remap_graph_index_data(&self, data: &mut GraphIndexData) {
+        if self.mapping.is_none() {
+            return;
+        }
+        for node in data.nodes.iter_mut() {
+            node.label_idx = self.remap_id(node.label_idx);
+            self.remap_property_map(&mut node.properties);
+        }
+        for edge in data.edges.iter_mut() {
+            edge.label_idx = self.remap_id(edge.label_idx);
+            self.remap_property_map(&mut edge.properties);
+        }
+    }
+
+    /// Rewrite every persisted interner id in a loaded [`TemporalIndexData`] in
+    /// place. Covers node/edge version labels, version property maps (keys +
+    /// string values), the `removed_keys` of delta versions, and the anchor
+    /// `full_state` property maps.
+    ///
+    /// An identity remap leaves the data byte-for-byte unchanged.
+    pub fn remap_temporal_index_data(&self, data: &mut TemporalIndexData) {
+        if self.mapping.is_none() {
+            return;
+        }
+        for version in data.node_versions.iter_mut() {
+            version.label_idx = self.remap_id(version.label_idx);
+            self.remap_property_map(&mut version.properties);
+            if let PersistedVersionType::Delta { removed_keys, .. } = &mut version.version_type {
+                for key_idx in removed_keys.iter_mut() {
+                    *key_idx = self.remap_id(*key_idx);
+                }
+            }
+        }
+        for version in data.edge_versions.iter_mut() {
+            version.label_idx = self.remap_id(version.label_idx);
+            self.remap_property_map(&mut version.properties);
+            if let PersistedVersionType::Delta { removed_keys, .. } = &mut version.version_type {
+                for key_idx in removed_keys.iter_mut() {
+                    *key_idx = self.remap_id(*key_idx);
+                }
+            }
+        }
+        for anchor in data.node_anchors.iter_mut() {
+            self.remap_property_map(&mut anchor.full_state);
+        }
+        for anchor in data.edge_anchors.iter_mut() {
+            self.remap_property_map(&mut anchor.full_state);
+        }
+    }
+}
 
 /// Save the global string interner to disk with CRC32 checksum using atomic write.
 ///
@@ -136,10 +296,31 @@ pub fn load_string_interner(path: &Path) -> Result<StringInternerData> {
     Ok(data)
 }
 
-/// Restore GLOBAL_INTERNER from persisted data.
+/// Restore the persisted strings into `GLOBAL_INTERNER`, returning a
+/// [`InternerRemap`] that translates persisted file-space ids to live ids.
 ///
-/// This must be called before loading any other indexes since they
-/// reference string indices.
+/// This must be called before loading any other indexes since they reference
+/// string indices — but, crucially (Issue #3490), the caller must translate
+/// every persisted `u32` interner id through the returned [`InternerRemap`]
+/// (via [`InternerRemap::remap_graph_index_data`] /
+/// [`InternerRemap::remap_temporal_index_data`]) rather than resolving raw
+/// persisted ids directly against the live interner.
+///
+/// # File-id vs live-id contract
+///
+/// Each saved string is re-interned into the (possibly already-populated) live
+/// interner. Because WAL replay may have interned property keys in a different
+/// order before this runs, the live id assigned to the string at file position
+/// `i` is generally **not** `i`. This function records `file_position -> live
+/// id` for every saved string and returns it as the remap. It does **not**
+/// assert positional identity (the pre-#3490 behavior that spuriously failed
+/// with `InternerMismatch` and silently dropped the graph index).
+///
+/// Empty strings are interned like any other string; a saved `""` is a real
+/// interned empty string (holes are already filtered out by
+/// [`StringInterner::get_all_strings`](crate::core::interning::StringInterner::get_all_strings)
+/// before save), so its file position still needs a live mapping in case data
+/// references it.
 ///
 /// # Examples
 ///
@@ -156,37 +337,29 @@ pub fn load_string_interner(path: &Path) -> Result<StringInternerData> {
 /// // Load data
 /// let data = load_string_interner(&path).unwrap();
 ///
-/// // Restore (re-interns all strings)
-/// restore_string_interner(&data).unwrap();
+/// // Restore (re-interns all strings) and obtain the file-id -> live-id remap.
+/// let remap = restore_string_interner(&data).unwrap();
+/// let _ = remap; // apply to loaded graph/temporal indexes before resolving ids
 /// ```
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - A string cannot be interned.
-/// - The restored ID does not match the persisted ID (data corruption or mismatch).
-pub fn restore_string_interner(data: &StringInternerData) -> Result<()> {
-    for (idx, s) in data.strings.iter().enumerate() {
+/// Returns an error if a string cannot be interned (e.g. the live interner is
+/// at capacity).
+pub fn restore_string_interner(data: &StringInternerData) -> Result<InternerRemap> {
+    let mut positions = Vec::with_capacity(data.strings.len());
+    for s in &data.strings {
         let interned_id = GLOBAL_INTERNER.intern(s).map_err(|e| {
             IndexPersistenceError::Serialization(format!("Failed to intern string: {}", e))
         })?;
-        // The interner should assign indices in order
-        // If not, the interner had pre-existing strings which is a bug
-        if interned_id.as_u32() != idx as u32 {
-            // Special handling for gaps: if the string is empty, it might be a gap
-            // captured during concurrent ID reservation in `get_all_strings`.
-            // If so, we can safely ignore the mismatch as no data references this ID.
-            if s.is_empty() {
-                continue;
-            }
-
-            return Err(IndexPersistenceError::InternerMismatch {
-                expected: idx as u32,
-                got: interned_id.as_u32(),
-            });
-        }
+        // Record file_position (== `positions.len()`) -> live interner id. We do
+        // NOT require live id == file position: the live interner may already
+        // hold these strings (e.g. from WAL replay) at different ids. The remap
+        // captures whatever translation is needed so persisted ids resolve to
+        // the correct strings regardless of interning order (Issue #3490).
+        positions.push(interned_id);
     }
-    Ok(())
+    Ok(InternerRemap::from_positions(positions))
 }
 
 #[cfg(test)]
@@ -363,15 +536,12 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_string_interner_mismatch() {
-        // This test verifies that we catch inconsistencies where the restored interner
-        // indices don't match the expected order (e.g. if GLOBAL_INTERNER already
-        // contains strings in a different order).
-
-        // Construct data where index 0 is "type" (which has ID 2 in COMMON_STRINGS).
-        // Since GLOBAL_INTERNER is pre-warmed, intern("type") will return 2.
-        // restore_string_interner will expect 0.
-        // 2 != 0 => Mismatch.
+    fn test_restore_string_interner_remaps_position_to_live_id() {
+        // Issue #3490: the interner is a process-global pre-warmed singleton, so
+        // a persisted string at file position 0 (e.g. "type", which warms to a
+        // NON-zero COMMON_STRINGS id) does NOT re-intern back to id 0. The old
+        // code failed this with `InternerMismatch`; the fix instead RETURNS a
+        // remap translating file position -> live id, without error.
         let data = StringInternerData {
             magic: INTERNER_MAGIC,
             version: MANIFEST_VERSION,
@@ -379,25 +549,30 @@ mod tests {
             strings: vec!["type".to_string()],
         };
 
-        let result = restore_string_interner(&data);
-        assert!(result.is_err());
+        let remap = restore_string_interner(&data).expect("remap restore must not error");
 
-        match result.unwrap_err() {
-            IndexPersistenceError::InternerMismatch { expected, got } => {
-                assert_eq!(expected, 0, "Expected index 0 (from data position)");
-                // "type" is usually index 2 in COMMON_STRINGS, but we just verify mismatch
-                assert_ne!(got, 0, "Got index should not be 0");
-            }
-            err => panic!("Expected InternerMismatch, got: {:?}", err),
-        }
+        // Position 0 must resolve to the LIVE id of "type" (a warmed common
+        // string, id != 0), proving the remap decouples file ids from live ids.
+        let live = GLOBAL_INTERNER
+            .get_id("type")
+            .expect("'type' is pre-warmed");
+        assert_eq!(
+            remap.resolve(0),
+            Some(live),
+            "file position 0 must remap to the live id of \"type\""
+        );
+        assert_ne!(
+            live.as_u32(),
+            0,
+            "precondition: pre-warmed \"type\" is not live id 0"
+        );
     }
 
     #[test]
-    fn test_restore_string_interner_mismatch_with_new_string() {
-        // This test verifies mismatch with a completely new string.
-        // Since GLOBAL_INTERNER is pre-warmed (len > 0), a new string will get ID > 0.
-        // If we put it at index 0 in data, it should fail.
-
+    fn test_restore_string_interner_remaps_new_string_to_live_id() {
+        // A completely new (unique) string at file position 0 gets some live id
+        // > 0 (the interner is pre-warmed). The remap must translate position 0
+        // to that live id and it must resolve back to the same string.
         let unique_string = format!(
             "unique_string_{}",
             std::time::SystemTime::now()
@@ -410,21 +585,132 @@ mod tests {
             magic: INTERNER_MAGIC,
             version: MANIFEST_VERSION,
             string_count: 1,
-            strings: vec![unique_string],
+            strings: vec![unique_string.clone()],
         };
 
-        let result = restore_string_interner(&data);
-        assert!(result.is_err());
+        let remap = restore_string_interner(&data).expect("remap restore must not error");
 
-        match result.unwrap_err() {
-            IndexPersistenceError::InternerMismatch { expected, got } => {
-                assert_eq!(expected, 0, "Expected index 0 (from data position)");
-                assert!(
-                    got > 0,
-                    "Got index should be > 0 (because interner is pre-warmed)"
-                );
-            }
-            err => panic!("Expected InternerMismatch, got: {:?}", err),
-        }
+        let live = remap
+            .resolve(0)
+            .expect("file position 0 must map to a live id");
+        assert!(
+            live.as_u32() > 0,
+            "new string must land at a live id > 0 (interner pre-warmed)"
+        );
+        assert_eq!(
+            GLOBAL_INTERNER.resolve_with(live, |s| s.to_string()),
+            Some(unique_string),
+            "remapped live id must resolve back to the original string"
+        );
+    }
+
+    #[test]
+    fn test_interner_remap_identity_passthrough() {
+        // An identity remap must pass every id through verbatim (legacy behavior
+        // for the no-interner-file path).
+        let remap = InternerRemap::identity();
+        assert_eq!(remap.resolve(0), Some(InternedString::from_raw(0)));
+        assert_eq!(remap.resolve(12345), Some(InternedString::from_raw(12345)));
+    }
+
+    #[test]
+    fn test_interner_remap_out_of_range_is_unmappable() {
+        // A referenced file id past the end of the saved interner file has no
+        // mapping -> `resolve` returns None. This is genuine corruption and must
+        // NOT silently resolve to some unrelated live string; downstream the id
+        // is stamped UNMAPPABLE and the entity is skipped/errored.
+        let data = StringInternerData {
+            magic: INTERNER_MAGIC,
+            version: MANIFEST_VERSION,
+            string_count: 2,
+            strings: vec!["remap_a".to_string(), "remap_b".to_string()],
+        };
+        let remap = restore_string_interner(&data).expect("remap restore must not error");
+
+        assert!(remap.resolve(0).is_some());
+        assert!(remap.resolve(1).is_some());
+        assert_eq!(
+            remap.resolve(2),
+            None,
+            "an out-of-range (corrupt) file id must not map to any live id"
+        );
+        assert_eq!(remap.resolve(u32::MAX), None);
+    }
+
+    #[test]
+    fn test_remap_graph_index_data_translates_polluted_order() {
+        use crate::storage::index_persistence::graph::{
+            new_graph_index_data, restore_property_map,
+        };
+
+        // Simulate save order: intern label + keys + a string value, capture the
+        // FILE ids in that order, then build a persisted node referencing them.
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let label = format!("RemapLabel_{suffix}");
+        let key_a = format!("remap_key_a_{suffix}");
+        let key_b = format!("remap_key_b_{suffix}");
+        let val = format!("remap_val_{suffix}");
+
+        let file_label = GLOBAL_INTERNER.intern(&label).unwrap().as_u32();
+        let file_key_a = GLOBAL_INTERNER.intern(&key_a).unwrap().as_u32();
+        let file_key_b = GLOBAL_INTERNER.intern(&key_b).unwrap().as_u32();
+        let file_val = GLOBAL_INTERNER.intern(&val).unwrap().as_u32();
+
+        let mut graph = new_graph_index_data();
+        graph.nodes.push(super::super::formats::PersistedNode {
+            id: 1,
+            label_idx: file_label,
+            version_id: 1,
+            properties: PersistedPropertyMap {
+                entries: vec![
+                    (file_key_a, PersistedPropertyValue::String(file_val)),
+                    (file_key_b, PersistedPropertyValue::Int(7)),
+                ],
+            },
+        });
+
+        // Build a remap whose file positions map to DIFFERENT live ids than the
+        // file ids above (mimicking WAL-replay pollution having shifted them).
+        // The saved interner file lists strings in the id order captured above.
+        // We can't easily control absolute live ids, so we assert behavior:
+        // after remapping, the node's ids resolve to the ORIGINAL strings.
+        let mut ordered = vec![String::new(); (file_val + 1) as usize];
+        // Fill positions that our node references so `from_positions`-style
+        // resolution is well-defined for them. Positions we don't reference are
+        // left empty (harmless).
+        ordered[file_label as usize] = label.clone();
+        ordered[file_key_a as usize] = key_a.clone();
+        ordered[file_key_b as usize] = key_b.clone();
+        ordered[file_val as usize] = val.clone();
+        let data = StringInternerData {
+            magic: INTERNER_MAGIC,
+            version: MANIFEST_VERSION,
+            string_count: ordered.len() as u64,
+            strings: ordered,
+        };
+        let remap = restore_string_interner(&data).unwrap();
+
+        remap.remap_graph_index_data(&mut graph);
+
+        // After remapping, the persisted ids are LIVE ids; restore must yield
+        // the original strings intact.
+        let node = &graph.nodes[0];
+        assert_eq!(
+            GLOBAL_INTERNER
+                .resolve_with(InternedString::from_raw(node.label_idx), |s| s.to_string()),
+            Some(label)
+        );
+        let props = restore_property_map(&node.properties).unwrap();
+        assert_eq!(
+            props.get(key_a.as_str()).and_then(|v| v.as_str()),
+            Some(val.as_str())
+        );
+        assert!(matches!(
+            props.get(key_b.as_str()),
+            Some(crate::core::property::PropertyValue::Int(7))
+        ));
     }
 }

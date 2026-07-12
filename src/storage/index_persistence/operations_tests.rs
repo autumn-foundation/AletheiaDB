@@ -954,3 +954,203 @@ fn test_persist_temporal_index_materializes_sparse_vector_deltas() {
         "restored edge head must reconstruct the updated embedding"
     );
 }
+
+// ============================================================================
+// Issue #3490: cross-process reload must not lose multi-property nodes to a
+// "String interner mismatch". See src/storage/index_persistence/strings.rs.
+// ============================================================================
+
+/// Issue #3490 regression: a node persisted with MULTIPLE string-keyed
+/// properties (and string values) must survive a fresh-process reload whose
+/// WAL replay has already re-interned the property keys/values in a DIFFERENT
+/// order than the saved interner file — the exact ordering divergence that
+/// made `restore_string_interner`'s positional identity assertion fail and
+/// silently abandon the graph index (data loss).
+///
+/// The GLOBAL_INTERNER is a process-global singleton, so this test cannot
+/// safely `clear()` it in-process without corrupting other parallel tests.
+/// It therefore spawns a genuine subprocess that runs the isolated
+/// `regression_3490_interner_remap_subprocess_helper` (an `#[ignore]`d test
+/// that owns the whole interner) and asserts it exits 0. The helper encodes
+/// the root-cause ordering divergence deterministically so it fails RELIABLY
+/// on unfixed code (never intermittently).
+#[test]
+fn test_multi_property_cross_process_reload_survives_interner_remap_3490() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    let exe = std::env::current_exe().expect("failed to locate current test binary");
+    let mut child = Command::new(exe)
+        .args([
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "storage::index_persistence::operations::tests::regression_3490_interner_remap_subprocess_helper",
+        ])
+        .spawn()
+        .expect("failed to spawn subprocess for Issue #3490 reload test");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                assert!(
+                    status.success(),
+                    "Issue #3490 subprocess reload helper failed (multi-property node \
+                     lost or corrupted across a fresh-process reload): {status}"
+                );
+                break;
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("Issue #3490 subprocess reload helper did not complete in time");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("failed while polling Issue #3490 subprocess: {e}"),
+        }
+    }
+}
+
+/// Isolated subprocess body for Issue #3490 (see the spawning test above).
+///
+/// Runs entirely inside a dedicated subprocess (`--exact` selects only this
+/// test, so nothing else touches the interner concurrently), which makes it
+/// safe to `clear()` the GLOBAL_INTERNER to emulate a pristine, freshly
+/// started process.
+#[test]
+#[ignore]
+fn regression_3490_interner_remap_subprocess_helper() {
+    use crate::core::id::IdGenerator;
+    use crate::core::property::PropertyValue;
+    use crate::storage::index_persistence::formats::{
+        IndexManifest, PersistedNode, PersistedPropertyMap,
+    };
+    use crate::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
+
+    // Multiple distinct string KEYS and string VALUES across a couple of nodes,
+    // to force the collision on real property data (not just labels).
+    let label = "Employee";
+    let keys = ["dept", "title", "city"];
+    let str_values = ["engineering", "staff-swe"];
+
+    // ---- Fresh process #1 (the writer): pristine warmed interner. ----
+    GLOBAL_INTERNER.clear();
+    GLOBAL_INTERNER.warm_common_strings();
+
+    let dir = tempfile::tempdir().unwrap();
+    let manager = IndexPersistenceManager::new(dir.path());
+    manager.ensure_directories().unwrap();
+
+    // Intern in "save order": label, then keys, then string values.
+    let label_id = GLOBAL_INTERNER.intern(label).unwrap();
+    let key_ids: Vec<u32> = keys
+        .iter()
+        .map(|k| GLOBAL_INTERNER.intern(k).unwrap().as_u32())
+        .collect();
+    let val_ids: Vec<u32> = str_values
+        .iter()
+        .map(|v| GLOBAL_INTERNER.intern(v).unwrap().as_u32())
+        .collect();
+
+    // Two nodes: node 1 carries 2 string-valued props + 1 int prop; node 2
+    // carries a single string prop. Both exercise multi-property reload.
+    let mut graph = new_graph_index_data();
+    graph.nodes.push(PersistedNode {
+        id: 1,
+        label_idx: label_id.as_u32(),
+        version_id: 1,
+        properties: PersistedPropertyMap {
+            entries: vec![
+                (key_ids[0], PersistedPropertyValue::String(val_ids[0])),
+                (key_ids[1], PersistedPropertyValue::String(val_ids[1])),
+                (key_ids[2], PersistedPropertyValue::Int(42)),
+            ],
+        },
+    });
+    graph.nodes.push(PersistedNode {
+        id: 2,
+        label_idx: label_id.as_u32(),
+        version_id: 2,
+        properties: PersistedPropertyMap {
+            entries: vec![(key_ids[0], PersistedPropertyValue::String(val_ids[0]))],
+        },
+    });
+    graph.node_count = 2;
+
+    save_graph_index(&graph, &manager.graph_path().join("adjacency.idx")).unwrap();
+    manager.save_string_interner().unwrap();
+    manager.save_manifest(&IndexManifest::new(0)).unwrap();
+
+    // ---- Fresh process #2 (the reader): pristine warmed interner, THEN
+    // WAL replay re-interns keys/values/label in a DIFFERENT (hash) order,
+    // shifting their live ids away from the saved file positions. ----
+    GLOBAL_INTERNER.clear();
+    GLOBAL_INTERNER.warm_common_strings();
+    // Deterministic divergence: rotate keys and swap values, intern label last.
+    for k in ["city", "dept", "title"] {
+        GLOBAL_INTERNER.intern(k).unwrap();
+    }
+    for v in ["staff-swe", "engineering"] {
+        GLOBAL_INTERNER.intern(v).unwrap();
+    }
+    GLOBAL_INTERNER.intern(label).unwrap();
+
+    // ---- Run the real startup restore path. ----
+    let current = Arc::new(CurrentStorage::new());
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    let node_gen = Arc::new(IdGenerator::new());
+    let edge_gen = Arc::new(IdGenerator::new());
+    let version_gen = Arc::new(IdGenerator::new());
+
+    load_indexes_startup(
+        &manager,
+        &current,
+        &historical,
+        &node_gen,
+        &edge_gen,
+        &version_gen,
+    );
+
+    // ---- Assert: BOTH nodes restored with ALL properties intact. ----
+    let node1 = current
+        .get_node(NodeId::new(1).unwrap())
+        .expect("Issue #3490: node 1 lost across reload (graph index abandoned)");
+    assert_eq!(
+        node1.properties.len(),
+        3,
+        "Issue #3490: node 1 must retain all 3 properties, got {}",
+        node1.properties.len()
+    );
+    assert_eq!(
+        node1.properties.get("dept"),
+        Some(&PropertyValue::String(Arc::from("engineering"))),
+        "Issue #3490: node 1 'dept' property corrupted or lost"
+    );
+    assert_eq!(
+        node1.properties.get("title"),
+        Some(&PropertyValue::String(Arc::from("staff-swe"))),
+        "Issue #3490: node 1 'title' property corrupted or lost"
+    );
+    assert_eq!(
+        node1.properties.get("city"),
+        Some(&PropertyValue::Int(42)),
+        "Issue #3490: node 1 'city' property corrupted or lost"
+    );
+    assert_eq!(
+        GLOBAL_INTERNER.resolve_with(node1.label, |s| s.to_string()),
+        Some(label.to_string()),
+        "Issue #3490: node 1 label corrupted across reload"
+    );
+
+    let node2 = current
+        .get_node(NodeId::new(2).unwrap())
+        .expect("Issue #3490: node 2 lost across reload (graph index abandoned)");
+    assert_eq!(
+        node2.properties.get("dept"),
+        Some(&PropertyValue::String(Arc::from("engineering"))),
+        "Issue #3490: node 2 'dept' property corrupted or lost"
+    );
+}

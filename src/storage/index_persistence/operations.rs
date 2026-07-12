@@ -909,13 +909,23 @@ pub(crate) fn load_indexes_startup(
 ) -> Option<u64> {
     // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
     // (manifest is only saved on shutdown, not during background persistence)
-    let manifest_lsn = match manager.load_manifest_and_strings() {
-        Ok(manifest) => Some(manifest.lsn), // Successfully loaded
+    // Issue #3490: obtain the file-id -> live-id remap alongside the manifest.
+    // WAL replay (in db::config, before this runs) may have re-interned property
+    // keys in a different order than the saved interner file, so persisted
+    // interner ids must be translated through this remap before being resolved
+    // against the live GLOBAL_INTERNER. When no interner/manifest could be
+    // loaded, we fall back to an identity remap (ids pass through unchanged),
+    // reproducing the pre-#3490 behavior for that path.
+    let (manifest_lsn, interner_remap) = match manager.load_manifest_and_strings_with_remap() {
+        Ok((manifest, remap)) => (Some(manifest.lsn), remap), // Successfully loaded
         Err(e) => {
             if !e.is_not_found() {
                 eprintln!("Warning: Failed to load manifest: {}", e);
             }
-            None // Not found or error
+            (
+                None,
+                crate::storage::index_persistence::strings::InternerRemap::identity(),
+            )
         }
     };
 
@@ -925,7 +935,12 @@ pub(crate) fn load_indexes_startup(
         use crate::storage::index_persistence::graph::{load_graph_index, restore_property_map};
 
         match load_graph_index(&graph_path) {
-            Ok(graph_data) => {
+            Ok(mut graph_data) => {
+                // Issue #3490: translate persisted (file-space) interner ids
+                // (node/edge labels, property keys, and string property values)
+                // to live interner ids before any of the resolution sites below
+                // touch them. A no-op for an identity remap.
+                interner_remap.remap_graph_index_data(&mut graph_data);
                 let current_time = time::now();
                 let mut max_node_id = 0u64;
                 let mut max_edge_id = 0u64;
@@ -1146,7 +1161,12 @@ pub(crate) fn load_indexes_startup(
         };
 
         match load_temporal_index(&temporal_path) {
-            Ok(temporal_data) => {
+            Ok(mut temporal_data) => {
+                // Issue #3490: translate persisted (file-space) interner ids in
+                // the historical versions/anchors (labels, property keys, string
+                // values, and delta removed_keys) to live interner ids before
+                // restoring them. A no-op for an identity remap.
+                interner_remap.remap_temporal_index_data(&mut temporal_data);
                 // Restore versions into historical storage
                 // Labels are now stored directly in the persisted entries
                 let mut historical_guard = historical.write();
