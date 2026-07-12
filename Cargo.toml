@@ -94,6 +94,18 @@ sqlparser = { version = "0.40", optional = true }
 # CSV parsing for the bulk graph importer (optional, Issue #3211)
 csv = { version = "1.3", optional = true }
 
+# Parquet columnar import/export for analytics interoperability (optional, Issue #3364).
+# arrow-rs `parquet` crate with the `arrow` integration (ArrowWriter /
+# ParquetRecordBatchReader, list<float32> embedding columns, streaming row groups)
+# and `snap` (Snappy) compression. Default features are disabled to keep the
+# dependency surface minimal; enabled via the `parquet` feature flag only.
+parquet = { version = "59", default-features = false, features = ["arrow", "snap"], optional = true }
+# arrow-rs umbrella crate: gives `arrow::array` (RecordBatch, typed arrays) and
+# `arrow::datatypes` used to physically decode Parquet columns on import. Kept in
+# lockstep with the `parquet` version. Default features off; `array`/`datatypes`
+# are unconditional so the compute/csv/json/ipc kernels are not pulled in.
+arrow = { version = "59", default-features = false, optional = true }
+
 # Parallel iteration for sharded vector index
 rayon = "1.12"
 comfy-table = "7.2.2"
@@ -257,8 +269,15 @@ cypher = []
 
 # Bulk graph importer for CSV/JSONL with per-row valid-time backfill (Issue #3211).
 # serde_json (JSONL) and chrono (timestamp parsing) are already non-optional deps,
-# so the only extra dependency is the `csv` reader.
-import = ["dep:csv"]
+# so the only extra dependency is the `csv` reader. `serde` is pulled so the
+# Neo4j importer's fidelity report (Issue #3356) is always machine-serializable.
+import = ["dep:csv", "serde"]
+
+# Parquet columnar import/export for analytics interoperability (Issue #3364).
+# Builds on the #3211 import layer (shares NodeMapping/EdgeMapping/ColumnType) and
+# adds a columnar codec via the arrow-rs `parquet` crate. Off by default so the
+# arrow/parquet dependency stays out of default builds.
+parquet = ["dep:parquet", "dep:arrow", "import"]
 
 # HTTP server support (Issue #465) — built on autumn-web.
 http-server = [
@@ -576,6 +595,13 @@ name = "import_throughput"
 harness = false
 path = "benches/import_throughput.rs"
 required-features = ["import"]
+
+# Parquet import/export throughput (Issue #3364)
+[[bench]]
+name = "parquet_throughput"
+harness = false
+path = "benches/parquet_throughput.rs"
+required-features = ["parquet"]
 
 [[bench]]
 name = "node_scan"

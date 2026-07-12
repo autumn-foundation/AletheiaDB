@@ -95,6 +95,7 @@ fn honor_logged_delete_node_version_id() -> Result<()> {
         node_id,
         valid_from: time::now(),
         version_id: Some(live_tombstone),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -147,6 +148,7 @@ fn honor_logged_delete_edge_version_id() -> Result<()> {
         edge_id,
         valid_from: time::now(),
         version_id: Some(live_tombstone),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -186,6 +188,7 @@ fn honor_logged_retract_node_version_id() -> Result<()> {
         node_id,
         valid_to: retract_valid_to,
         version_id: Some(live_retraction),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -255,6 +258,7 @@ fn honor_logged_retract_edge_version_id() -> Result<()> {
         edge_id,
         valid_to: retract_valid_to,
         version_id: Some(live_retraction),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -334,6 +338,7 @@ fn collision_does_not_clobber_history() -> Result<()> {
         node_id: a,
         valid_from: time::now(),
         version_id: Some(a_tombstone),
+        provenance: None,
     })?;
     wal.append(WalOperation::UpdateNode {
         node_id: b,
@@ -421,12 +426,14 @@ fn synthesized_delete_after_honored_high_id_skips_past_it() -> Result<()> {
         node_id: a,
         valid_from: time::now(),
         version_id: Some(honored_high),
+        provenance: None,
     })?;
     // Delete C with NO logged id -> replay must SYNTHESIZE its tombstone.
     wal.append(WalOperation::DeleteNode {
         node_id: c,
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -483,12 +490,14 @@ fn synthesized_delete_after_honored_retract_high_id_skips_past_it() -> Result<()
         node_id: a,
         valid_to: time::now(),
         version_id: Some(honored_high),
+        provenance: None,
     })?;
     // Delete C with NO logged id -> synthesis; must skip past the retract's id.
     wal.append(WalOperation::DeleteNode {
         node_id: c,
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -533,6 +542,7 @@ fn repeated_replay_is_stable() -> Result<()> {
         node_id,
         valid_from: time::now(),
         version_id: Some(live_tombstone),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -577,6 +587,7 @@ fn back_compat_synthesizes_when_version_id_absent() -> Result<()> {
         node_id,
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 

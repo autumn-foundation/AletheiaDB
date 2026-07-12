@@ -390,6 +390,7 @@ fn test_checkpoint_recovery_with_deletes() -> Result<()> {
         node_id: NodeId::new(2)?,
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
 
     wal.flush()?;
@@ -519,6 +520,7 @@ fn test_retraction_then_checkpoint_survives_recovery() -> Result<()> {
         node_id,
         valid_to,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -623,6 +625,7 @@ fn test_retraction_replayed_after_checkpoint() -> Result<()> {
         node_id,
         valid_to,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -745,6 +748,7 @@ fn test_checkpoint_restore_only_preserves_node_bitemporal_fidelity() -> Result<(
         node_id,
         valid_to,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -933,6 +937,7 @@ fn test_checkpoint_restore_only_preserves_edge_bitemporal_fidelity() -> Result<(
         edge_id,
         valid_to,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 

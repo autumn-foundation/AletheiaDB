@@ -69,6 +69,7 @@ fn test_replay_delete_node_basic() -> Result<()> {
         node_id,
         valid_from: timestamp2,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -126,6 +127,7 @@ fn test_replay_delete_node_after_update() -> Result<()> {
         node_id,
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -190,6 +192,7 @@ fn test_replay_delete_edge_basic() -> Result<()> {
         edge_id,
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -247,6 +250,7 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
         node_id,
         valid_from: delete_vf,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -368,6 +372,7 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
         edge_id,
         valid_from: delete_vf,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -483,6 +488,7 @@ fn test_replay_delete_node_honors_logged_valid_from() -> Result<()> {
         node_id,
         valid_from: delete_vf,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -570,6 +576,7 @@ fn test_replay_delete_edge_honors_logged_valid_from() -> Result<()> {
         edge_id,
         valid_from: delete_vf,
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -645,6 +652,7 @@ fn test_replay_multiple_deletes() -> Result<()> {
             node_id: NodeId::new(id).unwrap(),
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })?;
     }
 
@@ -698,6 +706,7 @@ fn test_replay_delete_with_vector() -> Result<()> {
         node_id,
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -758,6 +767,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         node_id: NodeId::new(2).unwrap(),
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
 
     // Create node 3

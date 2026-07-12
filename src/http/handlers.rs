@@ -579,6 +579,7 @@ async fn handle_bulk_delete_nodes(
     db: Arc<crate::AletheiaDB>,
     node_ids: Vec<u64>,
     cascade: bool,
+    principal: Option<String>,
 ) -> Result<Value, AletheiaHttpError> {
     validate_bulk_size(&node_ids, "node_ids")?;
     blocking(move || {
@@ -587,9 +588,12 @@ async fn handle_bulk_delete_nodes(
                 for node_id in &node_ids {
                     let nid = NodeId::new(*node_id)?;
                     if cascade {
-                        tx.delete_node_cascade(nid)?;
+                        tx.delete_node_cascade_with_options(
+                            nid,
+                            write_options_for(principal.as_deref()),
+                        )?;
                     } else {
-                        tx.delete_node(nid)?;
+                        tx.delete_node_with_options(nid, write_options_for(principal.as_deref()))?;
                     }
                 }
                 Ok::<_, crate::core::error::Error>(node_ids.len())
@@ -913,7 +917,7 @@ pub async fn handle_query(
                     handle_bulk_update_nodes(db, updates, principal).await
                 }
                 QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
-                    handle_bulk_delete_nodes(db, node_ids, cascade).await
+                    handle_bulk_delete_nodes(db, node_ids, cascade, principal).await
                 }
                 QueryRequest::FindNode {
                     label,

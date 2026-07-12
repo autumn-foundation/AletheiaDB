@@ -791,3 +791,163 @@ async fn anonymous_http_write_records_no_principal() {
         "anonymous write must not fabricate provenance: {provenance:?}"
     );
 }
+
+/// A destructive `bulk_delete_nodes` through the authenticated HTTP surface
+/// stamps the verified principal's name onto the tombstone version each
+/// deleted node produces (Issue #3427). The node is gone from current state,
+/// so attribution is read off the tombstone in history, not the live node.
+#[tokio::test]
+async fn authenticated_http_bulk_delete_stamps_principal_on_tombstone() {
+    use aletheiadb::core::NodeId;
+
+    let (client, store, db) = required_client();
+    let key = mint(&store, "http-deleter", Role::Writer);
+
+    // Create two nodes to delete.
+    let bulk = json!({
+        "operation": "bulk_create_nodes",
+        "nodes": [{"label": "Person"}, {"label": "Person"}]
+    });
+    let (status, body) = post_query_with_key(&client, &key, &bulk).await;
+    assert_eq!(status, 200, "{body}");
+    let ids: Vec<u64> = body["data"]
+        .as_array()
+        .expect("created array")
+        .iter()
+        .map(|n| n["id"].as_u64().expect("id"))
+        .collect();
+    assert_eq!(ids.len(), 2);
+
+    // Delete them (non-cascade) through the authenticated surface.
+    let del = json!({ "operation": "bulk_delete_nodes", "node_ids": ids });
+    let (status, body) = post_query_with_key(&client, &key, &del).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["deleted_count"], 2, "{body}");
+
+    // Each node's tombstone version carries the deleter's principal.
+    for id in ids {
+        let history = db
+            .get_node_history(NodeId::new(id).expect("node id"))
+            .expect("node history");
+        let tombstone = history
+            .current_version()
+            .expect("tombstone version")
+            .provenance
+            .as_ref()
+            .expect("tombstone must carry provenance for an authenticated delete (#3427)");
+        assert_eq!(tombstone.principal(), Some("http-deleter"));
+    }
+}
+
+/// A cascade `bulk_delete_nodes` through the authenticated HTTP surface
+/// stamps the principal onto the hub-node tombstone AND every co-deleted
+/// edge's tombstone (Issue #3427). Edges are created via the embedded API
+/// (the HTTP `/query` surface has no edge-creation operation).
+#[tokio::test]
+async fn authenticated_http_bulk_delete_cascade_stamps_principal_on_edges() {
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::core::{EdgeId, NodeId};
+
+    let (client, store, db) = required_client();
+    let key = mint(&store, "http-cascader", Role::Writer);
+
+    // hub + two leaves, created through the authenticated HTTP surface.
+    let bulk = json!({
+        "operation": "bulk_create_nodes",
+        "nodes": [{"label": "Person"}, {"label": "Person"}, {"label": "Person"}]
+    });
+    let (status, body) = post_query_with_key(&client, &key, &bulk).await;
+    assert_eq!(status, 200, "{body}");
+    let ids: Vec<u64> = body["data"]
+        .as_array()
+        .expect("created array")
+        .iter()
+        .map(|n| n["id"].as_u64().expect("id"))
+        .collect();
+    let hub = NodeId::new(ids[0]).expect("hub id");
+    let leaf_a = NodeId::new(ids[1]).expect("leaf a id");
+    let leaf_b = NodeId::new(ids[2]).expect("leaf b id");
+
+    // One outgoing and one incoming edge on the hub (embedded API).
+    let e1 = db
+        .create_edge(hub, leaf_a, "KNOWS", PropertyMapBuilder::new().build())
+        .expect("edge 1");
+    let e2 = db
+        .create_edge(leaf_b, hub, "KNOWS", PropertyMapBuilder::new().build())
+        .expect("edge 2");
+
+    // Cascade delete the hub through the authenticated surface.
+    let del = json!({
+        "operation": "bulk_delete_nodes",
+        "node_ids": [hub.as_u64()],
+        "cascade": true
+    });
+    let (status, body) = post_query_with_key(&client, &key, &del).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["cascade"], true, "{body}");
+
+    // Hub node tombstone carries the principal.
+    let hub_tombstone = db
+        .get_node_history(hub)
+        .expect("hub history")
+        .current_version()
+        .expect("hub tombstone")
+        .provenance
+        .clone()
+        .expect("hub tombstone must carry provenance (#3427)");
+    assert_eq!(hub_tombstone.principal(), Some("http-cascader"));
+
+    // Both co-deleted edge tombstones carry the SAME principal.
+    for eid in [e1, e2] {
+        let edge_tombstone = db
+            .get_edge_history(EdgeId::new(eid.as_u64()).expect("edge id"))
+            .expect("edge history")
+            .current_version()
+            .expect("edge tombstone")
+            .provenance
+            .clone()
+            .unwrap_or_else(|| {
+                panic!(
+                    "co-deleted edge {} tombstone must carry provenance (#3427)",
+                    eid.as_u64()
+                )
+            });
+        assert_eq!(edge_tombstone.principal(), Some("http-cascader"));
+    }
+}
+
+/// Anonymous-mode `bulk_delete_nodes` records no provenance principal on the
+/// tombstone (absent, not an empty string) — matching the anonymous
+/// create/update contract.
+#[tokio::test]
+async fn anonymous_http_bulk_delete_records_no_principal() {
+    use aletheiadb::core::NodeId;
+
+    let (client, _store, db) = client_with_auth(AuthMode::Anonymous);
+
+    // Create a node anonymously.
+    let resp = client.post("/query").json(&create_node_op()).send().await;
+    assert_eq!(resp.status.as_u16(), 200);
+    let body: Value = serde_json::from_slice(&resp.body).expect("json");
+    let node_id = body["data"]["id"].as_u64().expect("id");
+
+    // Delete it anonymously.
+    let del = json!({ "operation": "bulk_delete_nodes", "node_ids": [node_id] });
+    let resp = client.post("/query").json(&del).send().await;
+    assert_eq!(resp.status.as_u16(), 200);
+    let body: Value = serde_json::from_slice(&resp.body).expect("json");
+    assert_eq!(body["data"]["deleted_count"], 1, "{body}");
+
+    // The tombstone must not fabricate a principal.
+    let tombstone = db
+        .get_node_history(NodeId::new(node_id).expect("node id"))
+        .expect("node history")
+        .current_version()
+        .expect("tombstone version")
+        .provenance
+        .clone();
+    assert!(
+        tombstone.is_none(),
+        "anonymous delete must not fabricate provenance: {tombstone:?}"
+    );
+}

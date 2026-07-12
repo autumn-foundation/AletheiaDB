@@ -65,10 +65,12 @@ check-features:
     @echo "=== config-toml (standalone) ===" && cargo check --no-default-features --tests --features config-toml
     @echo "=== mcp-server (standalone) ===" && cargo check --no-default-features --tests --features mcp-server
     @echo "=== sharding-rpc (standalone) ===" && cargo check --no-default-features --tests --features sharding-rpc
+    @echo "=== import (standalone) ===" && cargo check --no-default-features --tests --features import
     @echo "=== http-server (standalone) ===" && cargo check --no-default-features --tests --features http-server
     @echo "=== encryption (standalone) ===" && cargo check --no-default-features --tests --features encryption
     @echo "=== encryption-vault (standalone) ===" && cargo check --no-default-features --tests --features encryption-vault
     @echo "=== encryption-aws-kms (standalone) ===" && cargo check --no-default-features --tests --features encryption-aws-kms
+    @echo "=== parquet (standalone) ===" && cargo check --no-default-features --tests --features parquet
 
 # Format code
 fmt:

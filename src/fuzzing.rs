@@ -158,21 +158,25 @@ mod tests {
                 node_id: NodeId::new(1).unwrap(),
                 valid_from: now,
                 version_id: Some(VersionId::new(6).unwrap()),
+                provenance: None,
             },
             WalOperation::DeleteEdge {
                 edge_id: EdgeId::new(2).unwrap(),
                 valid_from: now,
                 version_id: Some(VersionId::new(7).unwrap()),
+                provenance: None,
             },
             WalOperation::RetractNode {
                 node_id: NodeId::new(1).unwrap(),
                 valid_to: now,
                 version_id: Some(VersionId::new(8).unwrap()),
+                provenance: None,
             },
             WalOperation::RetractEdge {
                 edge_id: EdgeId::new(2).unwrap(),
                 valid_to: now,
                 version_id: Some(VersionId::new(9).unwrap()),
+                provenance: None,
             },
             // Transaction-framing markers (#3413).
             WalOperation::BeginTx { tx_id: 42 },
@@ -221,6 +225,7 @@ mod tests {
                 node_id: NodeId::new(1).unwrap(),
                 valid_to: time::now(),
                 version_id: Some(VersionId::new(1).unwrap()),
+                provenance: None,
             },
         );
         let canonical = serialize_entry(&entry).expect("retract entry must serialize");
