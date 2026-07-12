@@ -59,6 +59,28 @@ pub fn property_map_to_json(
     Ok(result)
 }
 
+/// Serialize a [`Node`](crate::core::Node) to the exact `{id, label, properties}`
+/// JSON object the `POST /query` `GetNode` operation returns.
+///
+/// Extracted (Issue #3524) so the `POST /query` GetNode handler and the
+/// autumn-web 0.5.0 migration-spike `GET /nodes/{id}` handler call the *same*
+/// serializer — making the spike's HTTP↔MCP↔`POST /query` byte-parity test a
+/// true equality assertion rather than a reimplementation. Behavior is
+/// identical to the previous inline `json!` in `handle_get_node`.
+///
+/// # Errors
+///
+/// Returns an error string if a property value is too deeply nested (exceeds
+/// the recursion cap in [`property_map_to_json`]).
+pub fn node_to_query_json(node: &crate::core::Node) -> Result<serde_json::Value, String> {
+    let props_json = property_map_to_json(&node.properties)?;
+    Ok(json!({
+        "id": node.id.as_u64(),
+        "label": interned_to_string(node.label),
+        "properties": props_json,
+    }))
+}
+
 /// Converts a [`PropertyValue`] to a serde JSON Value.
 ///
 /// # Mappings

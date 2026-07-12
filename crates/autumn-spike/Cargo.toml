@@ -1,0 +1,41 @@
+[package]
+name = "aletheia-autumn-spike"
+version = "0.1.0"
+edition = "2024"
+# autumn-web 0.5.0 is edition 2024 / rust-version 1.88.0.
+rust-version = "1.88"
+authors = ["AletheiaDB Contributors"]
+description = "Isolated migration spike: AletheiaDB GET /nodes/{id} on autumn-web 0.5.0 (HTTP + MCP + OpenAPI)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.rust]
+missing_docs = "warn"
+
+[features]
+# OTel/tracing span instrumentation for the slice, mirroring `src/http/trace.rs`
+# (Issue #3376). Off by default → the span code is compiled out (no-op),
+# matching how the main crate gates `observability`. When on it also flips
+# aletheiadb's own `observability` so DB child spans nest under the handler span.
+observability = ["dep:tracing", "aletheiadb/observability"]
+
+[dependencies]
+# autumn-web 0.5.0 — UNRENAMED so its proc-macros' hard-coded `::autumn_web`
+# paths resolve. `mcp` implies `openapi`; `default-features = false` keeps
+# diesel/db entirely out of the graph (verified 0 diesel deps).
+autumn-web = { version = "0.5.0", default-features = false, features = ["maud", "mcp"] }
+# The shared AletheiaDB core: reused public API (AuthStore constant-time verify,
+# AccessClass/Role RBAC, AletheiaHttpError envelope shape, the POST /query
+# GetNode node serializer, get_node, NodeId).
+aletheiadb = { path = "../..", features = ["http-server"] }
+axum = { version = "0.8" }
+tower-http = { version = "0.6", features = ["set-header"] }
+serde_json = "1.0"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# Span instrumentation, gated behind the `observability` feature (no-op off).
+tracing = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# `tower::ServiceExt::oneshot` drives the existing 0.4 router in parity tests.
+tower = { version = "0.5", features = ["util"] }
