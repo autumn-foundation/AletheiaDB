@@ -148,6 +148,26 @@ impl CypherParser {
         }
     }
 
+    /// If the current token is a bare identifier whose text (case-insensitively)
+    /// is `EXPLAIN` or `PROFILE`, return `Some(true)` for `EXPLAIN` /
+    /// `Some(false)` for `PROFILE`; otherwise `None`.
+    ///
+    /// `EXPLAIN` / `PROFILE` are pre-parser prefix keywords (Issue #562): they
+    /// are only meaningful at statement start and remain ordinary identifiers
+    /// everywhere else, so they are lexed as [`TokenKind::Identifier`] and
+    /// distinguished here by inspecting the token text.
+    fn leading_explain_profile_prefix(&self) -> Option<bool> {
+        let tok = self.peek();
+        if tok.kind != TokenKind::Identifier {
+            return None;
+        }
+        match tok.text.to_ascii_uppercase().as_str() {
+            "EXPLAIN" => Some(true),
+            "PROFILE" => Some(false),
+            _ => None,
+        }
+    }
+
     /// Build a [`CypherError::ParseError`] at the current token position.
     fn error(&self, message: &str) -> CypherError {
         CypherError::ParseError {
@@ -171,10 +191,18 @@ impl CypherParser {
         // nested/duplicate prefix (`EXPLAIN EXPLAIN`, `EXPLAIN PROFILE`,
         // `PROFILE EXPLAIN`, `PROFILE PROFILE`) is rejected rather than silently
         // collapsed.
-        if self.at(TokenKind::Explain) || self.at(TokenKind::Profile) {
-            let is_explain = self.at(TokenKind::Explain);
-            self.advance(); // consume the prefix keyword
-            if self.at(TokenKind::Explain) || self.at(TokenKind::Profile) {
+        //
+        // These are PRE-PARSER keywords: openCypher treats them as special only
+        // at statement start, so they lex as ordinary identifiers and must stay
+        // usable as variables/labels/rel-types/property keys everywhere else.
+        // We therefore detect the prefix by inspecting the leading token's
+        // *text* (see `leading_explain_profile_prefix`) rather than a dedicated
+        // token kind. This is unambiguous: no valid statement begins with a bare
+        // identifier (statements start with MATCH / OPTIONAL / UNWIND / a
+        // temporal keyword), so a leading identifier is only ever the prefix.
+        if let Some(is_explain) = self.leading_explain_profile_prefix() {
+            self.advance(); // consume the prefix identifier
+            if self.leading_explain_profile_prefix().is_some() {
                 return Err(self.error(
                     "EXPLAIN/PROFILE cannot be nested; use a single EXPLAIN or PROFILE prefix",
                 ));

@@ -37,10 +37,6 @@ pub enum TokenKind {
     With,
     /// `UNWIND`
     Unwind,
-    /// `EXPLAIN` (query-plan inspection prefix, Issue #562)
-    Explain,
-    /// `PROFILE` (executed-plan statistics prefix, Issue #562)
-    Profile,
 
     // -- Keywords: ordering / projection ------------------------------------
     /// `ORDER`
@@ -641,8 +637,6 @@ impl<'a> CypherLexer<'a> {
             "RETURN" => TokenKind::Return,
             "WITH" => TokenKind::With,
             "UNWIND" => TokenKind::Unwind,
-            "EXPLAIN" => TokenKind::Explain,
-            "PROFILE" => TokenKind::Profile,
 
             // Ordering / projection
             "ORDER" => TokenKind::Order,
@@ -711,8 +705,6 @@ mod unit_tests {
             "RETURN",
             "WITH",
             "UNWIND",
-            "EXPLAIN",
-            "PROFILE",
             "ORDER",
             "BY",
             "LIMIT",

@@ -5262,6 +5262,38 @@ mod explain_profile_parse {
     }
 
     #[test]
+    fn identifier_named_explain_still_parses() {
+        // `explain` used as a variable name must still parse (pre-parser
+        // keyword semantics: EXPLAIN is only special at statement start).
+        let ast = CypherParser::parse("MATCH (explain:Thing) RETURN explain").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn property_key_profile_still_parses() {
+        let ast = CypherParser::parse("MATCH (n) WHERE n.profile = 1 RETURN n").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn label_named_profile_still_parses() {
+        let ast = CypherParser::parse("MATCH (n:Profile) RETURN n").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn rel_type_named_explain_still_parses() {
+        let ast = CypherParser::parse("MATCH (a)-[:EXPLAIN]->(b) RETURN b").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
+    fn inline_property_explain_still_parses() {
+        let ast = CypherParser::parse("MATCH (n {explain: 1}) RETURN n").unwrap();
+        assert!(matches!(ast, CypherStatement::Match { .. }));
+    }
+
+    #[test]
     fn deep_inner_expression_hits_the_depth_cap_cleanly() {
         // A pathologically deep expression under EXPLAIN must surface the
         // expression depth cap as a ParseError (no stack overflow / SIGABRT):
