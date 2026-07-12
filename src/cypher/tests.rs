@@ -2299,6 +2299,174 @@ fn test_e2e_optional_match_matched() {
     assert_eq!(row_name(&rows[0]).as_deref(), Some("Bob"));
 }
 
+// -----------------------------------------------------------------------------
+// IS NULL / IS NOT NULL on absent / present-null / present-non-null properties
+// (openCypher: a missing property IS null).
+// -----------------------------------------------------------------------------
+
+/// Nodes with a mix of: present-non-null `email`, absent `email`, and an
+/// explicitly present-null `email` value (the data model stores
+/// `PropertyValue::Null` as a real present value, so all three cases exist).
+fn is_null_test_db() -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
+    // Present, non-null email.
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("email", "alice@example.com")
+            .build(),
+    )
+    .unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Bob")
+            .insert("email", "bob@example.com")
+            .build(),
+    )
+    .unwrap();
+    // Absent email (missing property).
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new().insert("name", "Carol").build(),
+    )
+    .unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new().insert("name", "Dave").build(),
+    )
+    .unwrap();
+    // Present, explicitly-null email.
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Eve")
+            .insert("email", crate::core::property::PropertyValue::Null)
+            .build(),
+    )
+    .unwrap();
+    db
+}
+
+fn row_names_sorted(rows: &[crate::query::executor::QueryRow]) -> Vec<String> {
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn is_null_absent_property_matches() {
+    // openCypher: a missing property IS null, so `IS NULL` must match every node
+    // that lacks `email` (Carol, Dave) as well as the present-null one (Eve),
+    // and exclude the present-non-null ones (Alice, Bob).
+    let db = is_null_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) WHERE n.email IS NULL RETURN n")
+            .unwrap(),
+    );
+    assert_eq!(
+        row_names_sorted(&rows),
+        vec!["Carol".to_string(), "Dave".to_string(), "Eve".to_string()],
+        "IS NULL must match absent (Carol/Dave) and present-null (Eve) properties"
+    );
+}
+
+#[test]
+fn is_not_null_absent_property_excludes() {
+    // `IS NOT NULL` must return only nodes with a present, non-null `email`
+    // (Alice, Bob) -- excluding the absent (Carol, Dave) and present-null (Eve).
+    let db = is_null_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n")
+            .unwrap(),
+    );
+    assert_eq!(
+        row_names_sorted(&rows),
+        vec!["Alice".to_string(), "Bob".to_string()],
+        "IS NOT NULL must match only present non-null properties"
+    );
+}
+
+#[test]
+fn is_null_present_nonnull_property() {
+    // Control (correct both before and after the fix): a node WITH a non-null
+    // email is excluded by IS NULL and included by IS NOT NULL.
+    let db = is_null_test_db();
+    let is_null = collect_rows(
+        db.execute_cypher("MATCH (n:Person {name: 'Alice'}) WHERE n.email IS NULL RETURN n")
+            .unwrap(),
+    );
+    assert_eq!(is_null.len(), 0, "present non-null property is not IS NULL");
+
+    let is_not_null = collect_rows(
+        db.execute_cypher("MATCH (n:Person {name: 'Alice'}) WHERE n.email IS NOT NULL RETURN n")
+            .unwrap(),
+    );
+    assert_eq!(
+        row_names_sorted(&is_not_null),
+        vec!["Alice".to_string()],
+        "present non-null property is IS NOT NULL"
+    );
+}
+
+#[test]
+fn is_null_present_null_value() {
+    // A property present with an explicit null value IS null (and is NOT
+    // IS NOT NULL): the composed lowering must handle present-null, not just
+    // absence.
+    let db = is_null_test_db();
+    let is_null = collect_rows(
+        db.execute_cypher("MATCH (n:Person {name: 'Eve'}) WHERE n.email IS NULL RETURN n")
+            .unwrap(),
+    );
+    assert_eq!(
+        row_names_sorted(&is_null),
+        vec!["Eve".to_string()],
+        "present-null property IS NULL"
+    );
+
+    let is_not_null = collect_rows(
+        db.execute_cypher("MATCH (n:Person {name: 'Eve'}) WHERE n.email IS NOT NULL RETURN n")
+            .unwrap(),
+    );
+    assert_eq!(
+        is_not_null.len(),
+        0,
+        "present-null property is NOT IS NOT NULL"
+    );
+}
+
+#[test]
+fn is_null_composed_with_and() {
+    // The composed lowering (Or(NotExists, Eq{Null}) / And(Exists, Ne{Null}))
+    // must still compose correctly under a surrounding AND/OR.
+    let db = is_null_test_db();
+    // IS NULL AND another predicate -> only the absent-email node named Carol.
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) WHERE n.email IS NULL AND n.name = 'Carol' RETURN n")
+            .unwrap(),
+    );
+    assert_eq!(
+        row_names_sorted(&rows),
+        vec!["Carol".to_string()],
+        "IS NULL composes under AND"
+    );
+
+    // IS NOT NULL OR name = 'Carol' -> Alice, Bob (non-null email) plus Carol.
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (n:Person) WHERE n.email IS NOT NULL OR n.name = 'Carol' RETURN n",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        row_names_sorted(&rows),
+        vec!["Alice".to_string(), "Bob".to_string(), "Carol".to_string()],
+        "IS NOT NULL composes under OR"
+    );
+}
+
 #[test]
 fn test_e2e_optional_match_unmatched_returns_null_row() {
     let db = optional_match_test_db();
