@@ -183,11 +183,9 @@ impl ChainStore {
                 // Torn record body at the tail — drop it and keep the prefix.
                 break;
             }
-            match ChainTxRecord::decode(&bytes[body_start..body_end]) {
-                Ok(rec) => records.push(rec),
-                // A corrupt (non-tail) record is a hard error, not a torn tail.
-                Err(e) => return Err(e),
-            }
+            // A corrupt (non-tail) record is a hard error, not a torn tail.
+            let rec = ChainTxRecord::decode(&bytes[body_start..body_end])?;
+            records.push(rec);
             pos = body_end;
         }
         Ok(records)

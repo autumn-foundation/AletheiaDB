@@ -135,7 +135,7 @@ impl Sealer {
     fn seal_one(&self, pending: PendingTx) -> ChainResult<()> {
         // Deterministic leaf order, independent of enqueue/buffer order.
         let mut refs = pending.entity_refs;
-        refs.sort_by(|a, b| (a.0.tag(), a.1, a.2).cmp(&(b.0.tag(), b.1, b.2)));
+        refs.sort_by_key(|a| (a.0.tag(), a.1, a.2));
 
         let mut kept_refs: Vec<(EntityKind, u64, u64)> = Vec::with_capacity(refs.len());
         let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(refs.len());
