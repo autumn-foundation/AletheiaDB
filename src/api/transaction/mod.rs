@@ -873,6 +873,37 @@ pub trait WriteOps: ReadOps {
         &mut self,
         node_id: NodeId,
         valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.delete_node_with_options(
+            node_id,
+            WriteRequestOptions {
+                valid_from,
+                provenance: None,
+            },
+        )
+    }
+
+    /// Delete a node with an optional [`WriteRequestOptions`] bundle: a
+    /// backdated deletion `valid_from` and/or a write-time [`Provenance`]
+    /// bundle recording the acting principal on the tombstone version
+    /// (Issue #3427).
+    ///
+    /// This is the most general non-cascade node-delete method; all other
+    /// `delete_node*` (non-cascade) methods delegate to it. Passing
+    /// `WriteRequestOptions::default()` is identical to
+    /// [`delete_node`](Self::delete_node) — no provenance, `valid_from`
+    /// defaults to the transaction start time.
+    ///
+    /// # Warning
+    ///
+    /// Like [`delete_node`](Self::delete_node), this does NOT delete connected
+    /// edges. Prefer [`delete_node_cascade`](Self::delete_node_cascade) /
+    /// [`delete_node_cascade_with_options`](Self::delete_node_cascade_with_options)
+    /// for referential safety.
+    fn delete_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        options: WriteRequestOptions,
     ) -> Result<()>;
 
     /// Delete a node (leaves connected edges).
@@ -930,7 +961,24 @@ pub trait WriteOps: ReadOps {
     /// # Ok(())
     /// # }
     /// ```
-    fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()>;
+    fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()> {
+        self.delete_node_cascade_with_options(node_id, WriteRequestOptions::default())
+    }
+
+    /// Delete a node and all connected edges (cascade delete) with an optional
+    /// [`WriteRequestOptions`] bundle (Issue #3427).
+    ///
+    /// The same `options` (backdated `valid_from` and/or a write-time
+    /// [`Provenance`] bundle recording the acting principal) is stamped onto
+    /// the node's tombstone **and every co-deleted edge's tombstone**, so a
+    /// cascade delete attributes every tombstone it creates, not just the node.
+    /// Passing `WriteRequestOptions::default()` is identical to
+    /// [`delete_node_cascade`](Self::delete_node_cascade).
+    fn delete_node_cascade_with_options(
+        &mut self,
+        node_id: NodeId,
+        options: WriteRequestOptions,
+    ) -> Result<()>;
 
     /// Delete an edge with optional backdated valid_from time
     ///
@@ -954,6 +1002,28 @@ pub trait WriteOps: ReadOps {
         &mut self,
         edge_id: EdgeId,
         valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.delete_edge_with_options(
+            edge_id,
+            WriteRequestOptions {
+                valid_from,
+                provenance: None,
+            },
+        )
+    }
+
+    /// Delete an edge with an optional [`WriteRequestOptions`] bundle: a
+    /// backdated deletion `valid_from` and/or a write-time [`Provenance`]
+    /// bundle recording the acting principal on the tombstone version
+    /// (Issue #3427).
+    ///
+    /// This is the most general edge-delete method; all other `delete_edge*`
+    /// methods delegate to it. Passing `WriteRequestOptions::default()` is
+    /// identical to [`delete_edge`](Self::delete_edge).
+    fn delete_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        options: WriteRequestOptions,
     ) -> Result<()>;
 
     /// Delete an edge (delegates to `delete_edge_with_valid_time` with `None`).
