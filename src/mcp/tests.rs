@@ -9271,11 +9271,17 @@ mod structured_error_tests {
                     !message.contains("Unknown tool"),
                     "[{tool}] advertised but not dispatched: {message}"
                 );
-                // Null args can only fail argument deserialization, so the
-                // code must be exactly INVALID_ARGUMENT.
-                assert_eq!(
-                    code, "INVALID_ARGUMENT",
-                    "[{tool}] null args must classify as INVALID_ARGUMENT: {value}"
+                // Null args normalize to the empty request for no-required-arg
+                // tools, so a tool either (a) fails argument deserialization ->
+                // INVALID_ARGUMENT, or (b) deserializes cleanly but hits an
+                // unmet precondition -> FAILED_PRECONDITION (e.g. the Issue
+                // #3351 chain tools when the provenance chain is not enabled on
+                // this server). Both are structured, non-retriable, and
+                // caller-actionable; anything else is a bug.
+                assert!(
+                    code == "INVALID_ARGUMENT" || code == "FAILED_PRECONDITION",
+                    "[{tool}] null args must classify as INVALID_ARGUMENT or \
+                     FAILED_PRECONDITION: {value}"
                 );
             }
         }
@@ -10627,7 +10633,20 @@ mod database_stats_tests {
         let value = stats_response(&server);
         assert_eq!(
             keys(&value),
-            vec!["cold_storage", "current", "historical", "wal"]
+            vec!["chain", "cold_storage", "current", "historical", "wal"]
+        );
+        // Provenance hash chain block (Issue #3351 AC7): present on every
+        // stats response; disabled here, so all optional fields are null but
+        // their keys are always emitted.
+        assert_eq!(
+            keys(&value["chain"]),
+            vec![
+                "enabled",
+                "genesis_digest",
+                "head_digest",
+                "head_seq",
+                "last_verified",
+            ]
         );
         assert_eq!(keys(&value["current"]), vec!["edge_count", "node_count"]);
         assert_eq!(
@@ -15609,5 +15628,169 @@ mod lineage_tool_tests {
                 .and_then(|c| c.as_str()),
             Some("PERMISSION_DENIED")
         );
+    }
+}
+
+// ============================================================================
+// Provenance hash chain tools (Issue #3351): verify_chain, export_chain_head
+// ============================================================================
+
+#[cfg(test)]
+mod provenance_chain_tests {
+    use super::*;
+    use crate::config::WalConfigBuilder;
+    use crate::provenance_chain::{ChainConfig, ChainFsyncMode};
+    use serde_json::json;
+
+    /// Dispatch a tool and return `(parsed_json, is_error)`.
+    fn dispatch(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result must carry text content");
+        (
+            serde_json::from_str(&text).expect("tool response must be valid JSON"),
+            is_error,
+        )
+    }
+
+    /// Build an MCP server over a durable, chain-enabled database rooted at a
+    /// tempdir. Returns the guard so the data dir outlives the server.
+    fn chain_enabled_server() -> (tempfile::TempDir, AletheiaMcpServer) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = crate::config::AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.path().join("wal"))
+                    .build(),
+            )
+            .chain(ChainConfig {
+                enabled: true,
+                fsync: ChainFsyncMode::Batched,
+                dir: None,
+            })
+            .build();
+        let db = AletheiaDB::with_unified_config(config).expect("chain-enabled db");
+        (dir, AletheiaMcpServer::new(Arc::new(db)))
+    }
+
+    #[test]
+    fn both_tools_are_advertised() {
+        let server = create_test_server();
+        let advertised = server.list_tools_for_test();
+        assert!(advertised.iter().any(|t| t == "verify_chain"));
+        assert!(advertised.iter().any(|t| t == "export_chain_head"));
+    }
+
+    #[test]
+    fn verify_chain_disabled_is_failed_precondition() {
+        // The default test server has no chain enabled.
+        let server = create_test_server();
+        let (value, is_error) = dispatch(&server, "verify_chain", json!({}));
+        assert!(
+            is_error,
+            "verify on a disabled chain must be an error: {value}"
+        );
+        assert_eq!(value["error"]["code"].as_str(), Some("FAILED_PRECONDITION"));
+        assert_eq!(value["error"]["retriable"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn export_chain_head_disabled_is_failed_precondition() {
+        let server = create_test_server();
+        let (value, is_error) = dispatch(&server, "export_chain_head", json!({}));
+        assert!(
+            is_error,
+            "export on a disabled chain must be an error: {value}"
+        );
+        assert_eq!(value["error"]["code"].as_str(), Some("FAILED_PRECONDITION"));
+    }
+
+    #[test]
+    fn verify_chain_rejects_bad_entity_kind() {
+        let (_guard, server) = chain_enabled_server();
+        let (value, is_error) = dispatch(
+            &server,
+            "verify_chain",
+            json!({"entity_kind": "vertex", "id": 1}),
+        );
+        assert!(is_error, "bad entity_kind must error: {value}");
+        assert_eq!(value["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+
+    #[test]
+    fn verify_chain_rejects_malformed_against_anchor() {
+        let (_guard, server) = chain_enabled_server();
+        let (value, is_error) = dispatch(
+            &server,
+            "verify_chain",
+            json!({"against": {"not": "a head"}}),
+        );
+        assert!(is_error, "malformed anchor must error: {value}");
+        assert_eq!(value["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+
+    #[test]
+    fn full_verify_export_and_anchor_extension_flow() {
+        let (_guard, server) = chain_enabled_server();
+
+        // Seed some writes so the chain seals real transactions.
+        for _ in 0..5 {
+            let (_v, err) = dispatch(
+                &server,
+                "create_node",
+                json!({"label": "Person", "properties": {}}),
+            );
+            assert!(!err);
+        }
+
+        // Full verify must pass.
+        let (full, err) = dispatch(&server, "verify_chain", json!({}));
+        assert!(!err, "full verify must succeed: {full}");
+        assert_eq!(full["passed"].as_bool(), Some(true), "{full}");
+        assert_eq!(full["scope"].as_str(), Some("full"));
+        assert!(full["head_digest"].as_str().is_some());
+
+        // Export the head anchor.
+        let (head, err) = dispatch(&server, "export_chain_head", json!({}));
+        assert!(!err, "export must succeed: {head}");
+        assert!(
+            head["digest"].as_str().is_some(),
+            "head has a hex digest: {head}"
+        );
+
+        // Anchor-extension verify against the exported head must pass.
+        let (against, err) = dispatch(&server, "verify_chain", json!({ "against": head.clone() }));
+        assert!(!err, "anchor verify must succeed: {against}");
+        assert_eq!(against["passed"].as_bool(), Some(true), "{against}");
+        assert_eq!(against["scope"].as_str(), Some("anchor"));
+    }
+
+    #[test]
+    fn entity_scoped_verify_passes_on_a_created_node() {
+        let (_guard, server) = chain_enabled_server();
+        let (created, err) = dispatch(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {}}),
+        );
+        assert!(!err, "create must succeed: {created}");
+        let node_id = created["id"].as_u64().expect("created node id");
+
+        let (scoped, err) = dispatch(
+            &server,
+            "verify_chain",
+            json!({"entity_kind": "node", "id": node_id}),
+        );
+        assert!(!err, "entity verify must succeed: {scoped}");
+        assert_eq!(scoped["passed"].as_bool(), Some(true), "{scoped}");
+        assert_eq!(scoped["scope"].as_str(), Some("entity"));
     }
 }

@@ -407,6 +407,12 @@ name = "durability_modes"
 harness = false
 path = "benches/durability_modes.rs"
 
+# Provenance hash chain write-throughput overhead (Issue #3351)
+[[bench]]
+name = "provenance_chain"
+harness = false
+path = "benches/provenance_chain.rs"
+
 [[bench]]
 name = "checkpoints"
 harness = false

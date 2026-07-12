@@ -1190,6 +1190,56 @@ pub struct TemporalExtentRequest {
 pub struct DatabaseStatsRequest {}
 
 // ============================================================================
+// Provenance hash chain (Issue #3351)
+// ============================================================================
+
+/// Request to verify the tamper-evident provenance hash chain.
+///
+/// Three independent modes, resolved in this precedence order:
+///
+/// 1. **Anchor extension** — pass `against` (a previously exported chain head,
+///    the object `export_chain_head` returns) to prove the current chain is an
+///    append-only extension of that anchor, detecting rollback (truncation)
+///    and fork (divergence).
+/// 2. **Entity-scoped** — pass `entity_kind` (`"node"`/`"edge"`) and `id` to
+///    recompute only that entity's contribution to the chain.
+/// 3. **Full** — pass nothing to walk the whole chain from genesis and
+///    localize the earliest broken sequence number on tamper.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct VerifyChainRequest {
+    /// Entity kind for an entity-scoped verify: `node` or `edge`.
+    #[serde(default)]
+    #[schemars(
+        description = "For an entity-scoped verify, the entity kind: 'node' or 'edge' \
+                       (requires `id`). Omit for a full-chain verify."
+    )]
+    pub entity_kind: Option<String>,
+
+    /// Entity id for an entity-scoped verify.
+    #[serde(default)]
+    #[schemars(
+        description = "For an entity-scoped verify, the entity id (requires `entity_kind`)."
+    )]
+    pub id: Option<u64>,
+
+    /// A previously exported chain head to verify append-only extension
+    /// against (as returned by `export_chain_head`).
+    #[serde(default)]
+    #[schemars(
+        description = "Optional previously-exported chain head object (as returned by \
+                       export_chain_head) to verify the current chain append-only-extends it, \
+                       detecting rollback (truncation) and fork (divergence)."
+    )]
+    pub against: Option<serde_json::Value>,
+}
+
+/// Request to export the current chain head as an external anchor.
+///
+/// Takes no arguments — the tool always returns the current head checkpoint.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct ExportChainHeadRequest {}
+
+// ============================================================================
 // Response Types (for serialization)
 // ============================================================================
 

@@ -101,6 +101,9 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("lineage_downstream", AccessClass::Read),
     // Signed audit export reads history and signs it — no mutation (Issue #3358).
     ("audit_export", AccessClass::Read),
+    // Provenance hash chain verification / anchor export — read-only (Issue #3351).
+    ("verify_chain", AccessClass::Read),
+    ("export_chain_head", AccessClass::Read),
     // ---- Metrics: operational health/stats.
     ("database_stats", AccessClass::Metrics),
     // ---- Write: graph mutations plus index/constraint state changes.

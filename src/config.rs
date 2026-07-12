@@ -1338,6 +1338,45 @@ mod tests {
 
     #[test]
     #[cfg(feature = "config-toml")]
+    fn test_toml_chain_section_round_trips() {
+        // The opt-in provenance hash chain (Issue #3351) must round-trip
+        // through TOML via the `[chain]` section so `aletheia verify` can be
+        // driven by an on-disk config that enables the chain.
+        use crate::provenance_chain::ChainFsyncMode;
+
+        let toml_str = r#"
+[chain]
+enabled = true
+fsync = "per_transaction"
+dir = "/var/lib/aletheia/chain"
+        "#;
+
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
+        assert!(config.chain.enabled, "[chain] enabled must deserialize");
+        assert_eq!(config.chain.fsync, ChainFsyncMode::PerTransaction);
+        assert_eq!(
+            config.chain.dir,
+            Some(std::path::PathBuf::from("/var/lib/aletheia/chain"))
+        );
+
+        // Serialize back out and confirm the section is present and re-parses
+        // to an identical config (full round-trip, no field loss).
+        let rendered = config.to_toml_string().unwrap();
+        assert!(rendered.contains("[chain]"), "rendered TOML: {rendered}");
+        assert!(rendered.contains("enabled = true"));
+        let reparsed = AletheiaDBConfig::from_toml_str(&rendered).unwrap();
+        assert_eq!(reparsed.chain, config.chain);
+
+        // Omitting the section keeps the chain disabled by default (byte-
+        // identical behavior for existing configs).
+        let no_chain = AletheiaDBConfig::from_toml_str("[wal]\nnum_stripes = 16\n").unwrap();
+        assert!(!no_chain.chain.enabled);
+        assert_eq!(no_chain.chain.fsync, ChainFsyncMode::Batched);
+        assert!(no_chain.chain.dir.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_deserialization_partial() {
         // Test partial config - only override WAL settings
         let toml_str = r#"

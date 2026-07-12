@@ -4640,6 +4640,114 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Handle the `verify_chain` tool (Issue #3351): verify the tamper-evident
+    /// provenance hash chain — full, entity-scoped, or against an exported
+    /// anchor. Read-only; when the chain is not enabled the request is a
+    /// structured `FAILED_PRECONDITION` (never a silent empty pass).
+    fn handle_verify_chain(&self, args: serde_json::Value) -> CallToolResult {
+        let args = if args.is_null() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            args
+        };
+        let req: VerifyChainRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Precedence: anchor extension > entity-scoped > full.
+        let (verification, scope) = if let Some(anchor_value) = req.against {
+            let anchor: crate::provenance_chain::ChainHead =
+                match serde_json::from_value(anchor_value) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        return self.invalid_argument(&format!(
+                            "`against` is not a valid exported chain head (as returned by \
+                             export_chain_head): {e}"
+                        ));
+                    }
+                };
+            match self.db.verify_chain_against(&anchor) {
+                Ok(v) => (v, "anchor"),
+                Err(e) => return self.chain_not_enabled(e),
+            }
+        } else if req.entity_kind.is_some() || req.id.is_some() {
+            let kind = match req.entity_kind.as_deref() {
+                Some(k) => match k.trim().to_ascii_lowercase().as_str() {
+                    "node" => crate::provenance_chain::EntityKind::Node,
+                    "edge" => crate::provenance_chain::EntityKind::Edge,
+                    other => {
+                        return self.invalid_argument(&format!(
+                            "entity_kind must be 'node' or 'edge', got '{other}'"
+                        ));
+                    }
+                },
+                None => {
+                    return self.invalid_argument("entity_kind is required when `id` is supplied");
+                }
+            };
+            let id = match req.id {
+                Some(id) => id,
+                None => {
+                    return self
+                        .invalid_argument("`id` is required when `entity_kind` is supplied");
+                }
+            };
+            match self.db.verify_entity_chain(kind, id) {
+                Ok(v) => (v, "entity"),
+                Err(e) => return self.chain_not_enabled(e),
+            }
+        } else {
+            match self.db.verify_chain() {
+                Ok(v) => (v, "full"),
+                Err(e) => return self.chain_not_enabled(e),
+            }
+        };
+
+        self.success_json(json!({
+            "scope": scope,
+            "passed": verification.passed,
+            "head_seq": verification.head_seq,
+            "head_digest": verification.head_digest_hex,
+            "earliest_broken_seq": verification.earliest_broken_seq,
+            "reason": verification.reason,
+            "transactions_checked": verification.transactions_checked,
+        }))
+    }
+
+    /// Handle the `export_chain_head` tool (Issue #3351): export the current
+    /// chain head as an external anchor for offline storage and later
+    /// fork/rollback detection via `verify_chain`'s `against` argument.
+    fn handle_export_chain_head(&self, args: serde_json::Value) -> CallToolResult {
+        let args = if args.is_null() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            args
+        };
+        let _req: ExportChainHeadRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        match self.db.export_chain_head() {
+            Ok(head) => match serde_json::to_value(&head) {
+                Ok(value) => self.success_json(value),
+                Err(e) => self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    format!("Failed to serialize chain head: {}", e),
+                )),
+            },
+            Err(e) => self.chain_not_enabled(e),
+        }
+    }
+
+    /// Map the "chain not enabled" database error (Issue #3351) to a structured
+    /// `FAILED_PRECONDITION` so a caller learns the chain must be enabled for
+    /// this data dir rather than misreading a bare failure.
+    fn chain_not_enabled(&self, e: crate::core::error::Error) -> CallToolResult {
+        self.failed_precondition(&e.to_string())
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -5382,6 +5490,8 @@ impl AletheiaMcpServer {
             "lineage_downstream" => self.handle_lineage_downstream(args),
             "audit_export" => self.handle_audit_export(args),
             "database_stats" => self.handle_database_stats(args),
+            "verify_chain" => self.handle_verify_chain(args),
+            "export_chain_head" => self.handle_export_chain_head(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
                     .details(json!({ "tool": name })),
@@ -6003,6 +6113,31 @@ fn tool_definitions() -> Vec<Tool> {
              of stored history (earliest/latest timestamps) use temporal_extent; \
              for per-label breakdowns use get_schema.",
             make_input_schema::<DatabaseStatsRequest>(),
+        ),
+        Tool::new(
+            "verify_chain",
+            "Verify the tamper-evident provenance hash chain (Issue #3351) — proof that the \
+             recorded bi-temporal history has not been altered. Three modes: (1) FULL (no \
+             arguments) walks the whole chain from genesis and, on tamper, reports the \
+             `earliest_broken_seq`; (2) ENTITY-SCOPED (pass `entity_kind` 'node'|'edge' and \
+             `id`) recomputes only that entity's contribution; (3) ANCHOR EXTENSION (pass \
+             `against`, a previously exported chain head from export_chain_head) proves the \
+             current chain append-only-extends that anchor, detecting rollback (truncation) \
+             and fork (divergence). Read-only. Returns {scope, passed, head_seq, head_digest, \
+             earliest_broken_seq, reason, transactions_checked}. Requires the chain to be \
+             enabled for this database; if it is not, returns a FAILED_PRECONDITION error \
+             (never a silent empty pass).",
+            make_input_schema::<VerifyChainRequest>(),
+        ),
+        Tool::new(
+            "export_chain_head",
+            "Export the current provenance hash chain head as an external anchor (Issue \
+             #3351). Store the returned checkpoint offsite; later pass it back as \
+             verify_chain's `against` argument to prove the chain has only been appended to \
+             (detecting rollback and fork). No arguments. Returns the chain head {seq, digest, \
+             commit_ts, anchor_lsn, genesis_digest} with digests as lowercase hex. Requires \
+             the chain to be enabled; otherwise returns a FAILED_PRECONDITION error.",
+            make_input_schema::<ExportChainHeadRequest>(),
         ),
     ];
 
