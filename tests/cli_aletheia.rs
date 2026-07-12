@@ -55,6 +55,38 @@ fn stdout_json(out: &str) -> serde_json::Value {
     serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("stdout not JSON ({e}): {out:?}"))
 }
 
+/// Bounded poll: wait up to `timeout` (100ms cadence) for `path` to exist AND be
+/// non-empty, then return; panic with a descriptive message if the deadline
+/// elapses first.
+///
+/// `restore` materialises its index manifest synchronously (via
+/// `materialize_to_dir`'s atomic write + fsync) before the CLI returns, so this
+/// normally succeeds on the first probe. The poll is belt-and-suspenders against
+/// residual filesystem-visibility latency and keeps the assertion STRICT (the
+/// manifest must be present and non-empty) without a bare, racy `.exists()`.
+fn wait_for_nonempty_file(path: &Path, timeout: std::time::Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.is_file()
+            && meta.len() > 0
+        {
+            return;
+        }
+        if start.elapsed() >= timeout {
+            let observed = std::fs::metadata(path)
+                .map(|m| format!("exists, len={}", m.len()))
+                .unwrap_or_else(|e| format!("absent ({e})"));
+            panic!(
+                "timed out after {:?} waiting for a non-empty file at {} ({observed})",
+                timeout,
+                path.display(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 // ============================================================================
 // help / usage / unknown command
 // ============================================================================
@@ -613,11 +645,19 @@ fn restore_into_fresh_dir_succeeds_and_materializes() {
         j.get("data_dir").and_then(|v| v.as_str()),
         Some(target.path().to_str().unwrap())
     );
-    // Restore must have materialized index files on disk.
-    assert!(
-        target.path().join("indexes").join("manifest.idx").exists(),
-        "restore must materialize a manifest.idx under the target"
-    );
+    // Restore must have materialized index files on disk. The canonical durable
+    // layout (#3497) writes the manifest under `indexes/indexes/manifest.idx` —
+    // the exact depth `AletheiaDB::open`/`open_from_env` reads on reopen (the
+    // `IndexPersistenceManager` appends its own `indexes/` beneath the
+    // `data_dir/indexes` persistence root). `materialize_to_dir` writes it
+    // synchronously before `restore` returns; the bounded poll guards against
+    // filesystem-visibility latency and asserts the manifest is non-empty.
+    let manifest = target
+        .path()
+        .join("indexes")
+        .join("indexes")
+        .join("manifest.idx");
+    wait_for_nonempty_file(&manifest, std::time::Duration::from_secs(15));
 }
 
 #[test]
