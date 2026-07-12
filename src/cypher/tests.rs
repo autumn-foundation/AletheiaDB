@@ -4843,10 +4843,16 @@ mod unwind {
         match plan_cypher("UNWIND [1, 2] AS x RETURN x").unwrap() {
             CypherExecution::Rows(_) => {}
             CypherExecution::Query(_) => panic!("UNWIND must plan to Rows, not a Query"),
+            CypherExecution::MultiPattern { .. } => {
+                panic!("UNWIND must plan to Rows, not a MultiPattern")
+            }
         }
         match plan_cypher("MATCH (n:Person) RETURN n").unwrap() {
             CypherExecution::Query(_) => {}
             CypherExecution::Rows(_) => panic!("MATCH must plan to a Query"),
+            CypherExecution::MultiPattern { .. } => {
+                panic!("single-variable MATCH must plan to a Query")
+            }
         }
     }
 
@@ -5010,7 +5016,6 @@ mod unwind {
 // answer correctly are rejected with a structured `UnsupportedFeature` error --
 // never a silently-wrong row.
 mod multi_pattern {
-    use super::*;
     use crate::AletheiaDB;
     use crate::core::error::{Error, QueryError};
     use crate::core::property::{PropertyMapBuilder, PropertyValue};
