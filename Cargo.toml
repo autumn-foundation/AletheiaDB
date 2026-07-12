@@ -588,6 +588,13 @@ harness = false
 path = "benches/import_throughput.rs"
 required-features = ["import"]
 
+# Parquet import/export throughput (Issue #3364)
+[[bench]]
+name = "parquet_throughput"
+harness = false
+path = "benches/parquet_throughput.rs"
+required-features = ["parquet"]
+
 [[bench]]
 name = "node_scan"
 harness = false

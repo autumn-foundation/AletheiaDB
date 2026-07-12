@@ -24,6 +24,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Float32Type, Schema, TimeUnit};
 use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use crate::core::changefeed::{ChangeFeedQuery, EntityKind};
@@ -31,7 +32,7 @@ use crate::core::error::{Error, Result};
 use crate::core::history::VersionInfo;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::property::{PropertyMap, PropertyValue};
+use crate::core::property::{PropertyKey, PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::temporal::{TIMESTAMP_MAX, Timestamp};
 use crate::db::AletheiaDB;
@@ -112,6 +113,13 @@ fn key_name(key: &crate::core::interning::InternedString) -> Option<String> {
 }
 
 /// Accumulates the per-key routing decision over a discovery scan.
+///
+/// Schema discovery is a **full extra scan** of the database: pass 1 reconstructs every
+/// node/edge (or every historical version) solely to observe its property keys and
+/// value types so the emitted columns can be dynamically typed, then pass 2 re-scans to
+/// stream the rows. There is no lighter way to learn the per-key columnar type without a
+/// typed-property-key index, so the doubled reconstruction cost is an accepted tradeoff
+/// (a typed-key catalog that would let pass 1 be skipped is a tracked follow-up).
 struct SchemaBuilder<'a> {
     routes: BTreeMap<String, Route>,
     reserved: &'a [&'a str],
@@ -196,6 +204,14 @@ fn col_kind_datatype(kind: ColKind) -> DataType {
     }
 }
 
+/// Drain a per-batch column buffer, leaving a fresh empty `Vec` that keeps the drained
+/// buffer's capacity so the next batch reuses the same allocation instead of re-growing
+/// from zero.
+fn drain_keep_cap<T>(v: &mut Vec<T>) -> Vec<T> {
+    let cap = v.capacity();
+    std::mem::replace(v, Vec::with_capacity(cap))
+}
+
 /// A per-column value accumulator for one in-flight batch.
 enum ColumnBuf {
     Int(Vec<Option<i64>>),
@@ -206,13 +222,13 @@ enum ColumnBuf {
 }
 
 impl ColumnBuf {
-    fn new(kind: ColKind) -> Self {
+    fn new(kind: ColKind, batch_size: usize) -> Self {
         match kind {
-            ColKind::Int => ColumnBuf::Int(Vec::new()),
-            ColKind::Float => ColumnBuf::Float(Vec::new()),
-            ColKind::Bool => ColumnBuf::Bool(Vec::new()),
-            ColKind::Str => ColumnBuf::Str(Vec::new()),
-            ColKind::Embedding => ColumnBuf::Embedding(Vec::new()),
+            ColKind::Int => ColumnBuf::Int(Vec::with_capacity(batch_size)),
+            ColKind::Float => ColumnBuf::Float(Vec::with_capacity(batch_size)),
+            ColKind::Bool => ColumnBuf::Bool(Vec::with_capacity(batch_size)),
+            ColKind::Str => ColumnBuf::Str(Vec::with_capacity(batch_size)),
+            ColKind::Embedding => ColumnBuf::Embedding(Vec::with_capacity(batch_size)),
         }
     }
 
@@ -243,16 +259,17 @@ impl ColumnBuf {
         }
     }
 
-    /// Build the Arrow array for the accumulated batch, draining the buffer.
+    /// Build the Arrow array for the accumulated batch, draining the buffer (and keeping
+    /// its capacity so the next batch reuses the allocation).
     fn finish(&mut self) -> ArrayRef {
         match self {
-            ColumnBuf::Int(v) => Arc::new(Int64Array::from(std::mem::take(v))),
-            ColumnBuf::Float(v) => Arc::new(Float64Array::from(std::mem::take(v))),
-            ColumnBuf::Bool(v) => Arc::new(BooleanArray::from(std::mem::take(v))),
-            ColumnBuf::Str(v) => Arc::new(StringArray::from_iter(std::mem::take(v))),
+            ColumnBuf::Int(v) => Arc::new(Int64Array::from(drain_keep_cap(v))),
+            ColumnBuf::Float(v) => Arc::new(Float64Array::from(drain_keep_cap(v))),
+            ColumnBuf::Bool(v) => Arc::new(BooleanArray::from(drain_keep_cap(v))),
+            ColumnBuf::Str(v) => Arc::new(StringArray::from_iter(drain_keep_cap(v))),
             ColumnBuf::Embedding(v) => {
                 let arr = ListArray::from_iter_primitive::<Float32Type, _, _>(
-                    std::mem::take(v).into_iter().map(|opt| {
+                    drain_keep_cap(v).into_iter().map(|opt| {
                         opt.map(|floats| floats.into_iter().map(Some).collect::<Vec<_>>())
                     }),
                 );
@@ -263,22 +280,44 @@ impl ColumnBuf {
 }
 
 /// Accumulates the property columns (native + JSON overflow) for one in-flight batch.
+///
+/// Every column key is **interned once** at construction (the schema keys were resolved
+/// from the interner during discovery, so they are already present) and the per-row hot
+/// loop then looks values up by the interned [`PropertyKey`] via
+/// [`PropertyMap::get_by_interned_key`], avoiding a global-interner probe per cell.
 struct PropColumns {
-    native: Vec<(String, ColumnBuf)>,
-    overflow: Vec<String>,
+    /// Native typed columns, each paired with its pre-interned key (in schema order).
+    native: Vec<(PropertyKey, ColumnBuf)>,
+    /// Overflow keys, each paired with its pre-interned key. The `String` name is
+    /// retained because it is the JSON object key in the emitted overflow column.
+    overflow: Vec<(String, PropertyKey)>,
     json: Vec<Option<String>>,
 }
 
 impl PropColumns {
-    fn new(schema: &PropSchema) -> Self {
+    fn new(schema: &PropSchema, batch_size: usize) -> Self {
+        // The schema's key names were produced by resolving interned keys during
+        // discovery, so re-interning here is a lookup (never an insert) and is done once
+        // per column rather than once per cell. `intern` (not `get_id`) is used so the
+        // key is guaranteed present even in the (impossible) event it was evicted; it
+        // cannot fail for an already-interned string.
         PropColumns {
             native: schema
                 .native
                 .iter()
-                .map(|(name, kind)| (name.clone(), ColumnBuf::new(*kind)))
+                .filter_map(|(name, kind)| {
+                    GLOBAL_INTERNER
+                        .intern(name)
+                        .ok()
+                        .map(|key| (key, ColumnBuf::new(*kind, batch_size)))
+                })
                 .collect(),
-            overflow: schema.overflow.clone(),
-            json: Vec::new(),
+            overflow: schema
+                .overflow
+                .iter()
+                .filter_map(|name| GLOBAL_INTERNER.intern(name).ok().map(|k| (name.clone(), k)))
+                .collect(),
+            json: Vec::with_capacity(batch_size),
         }
     }
 
@@ -288,16 +327,16 @@ impl PropColumns {
 
     /// Push one row's properties into every column.
     fn push(&mut self, props: &PropertyMap) {
-        for (name, buf) in &mut self.native {
-            buf.push(props.get(name));
+        for (key, buf) in &mut self.native {
+            buf.push(props.get_by_interned_key(key));
         }
         if self.has_overflow() {
             let mut obj = serde_json::Map::new();
-            for key in &self.overflow {
-                if let Some(value) = props.get(key)
+            for (name, key) in &self.overflow {
+                if let Some(value) = props.get_by_interned_key(key)
                     && !matches!(value, PropertyValue::Null)
                 {
-                    obj.insert(key.clone(), overflow_value_to_json(value));
+                    obj.insert(name.clone(), overflow_value_to_json(value));
                 }
             }
             if obj.is_empty() {
@@ -316,7 +355,7 @@ impl PropColumns {
             arrays.push(buf.finish());
         }
         if self.has_overflow() {
-            arrays.push(Arc::new(StringArray::from_iter(std::mem::take(
+            arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(
                 &mut self.json,
             ))));
         }
@@ -498,8 +537,12 @@ impl StreamWriter {
     fn create(path: &Path, schema: Arc<Schema>, batch_size: usize) -> Result<Self> {
         let file = File::create(path)
             .map_err(|e| Error::other(format!("creating {}: {e}", path.display())))?;
+        // Snappy is the de-facto default Parquet codec: fast, splittable, and read
+        // transparently by DuckDB / pandas / pyarrow with no reader-side config. It keeps
+        // exports well under the <1 GB file-size target without a compatibility cost.
         let props = WriterProperties::builder()
             .set_max_row_group_row_count(Some(batch_size.max(1)))
+            .set_compression(Compression::SNAPPY)
             .build();
         let writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
             .map_err(|e| Error::other(format!("opening parquet writer: {e}")))?;
@@ -561,10 +604,10 @@ pub(super) fn export_nodes(
     let mut report = ExportReport::default();
 
     // Pass 2: stream rows.
-    let mut ids: Vec<i64> = Vec::new();
-    let mut labels: Vec<Option<String>> = Vec::new();
-    let mut valid_times: Vec<Option<i64>> = Vec::new();
-    let mut props = PropColumns::new_from_prop_schema(&prop_schema);
+    let mut ids: Vec<i64> = Vec::with_capacity(batch_size);
+    let mut labels: Vec<Option<String>> = Vec::with_capacity(batch_size);
+    let mut valid_times: Vec<Option<i64>> = Vec::with_capacity(batch_size);
+    let mut props = PropColumns::new(&prop_schema, batch_size);
 
     for &id in &node_ids {
         let Ok(node) = db.get_node(id) else { continue };
@@ -607,11 +650,10 @@ fn flush_current(
     valid_times: &mut Vec<Option<i64>>,
     props: &mut PropColumns,
 ) -> Result<()> {
-    let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(Int64Array::from(std::mem::take(ids))),
-        Arc::new(StringArray::from_iter(std::mem::take(labels))),
-        ts_array(std::mem::take(valid_times)),
-    ];
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(3 + props.native.len() + 1);
+    arrays.push(Arc::new(Int64Array::from(drain_keep_cap(ids))));
+    arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(labels))));
+    arrays.push(ts_array(drain_keep_cap(valid_times)));
     props.finish_into(&mut arrays);
     writer.write(arrays)
 }
@@ -661,11 +703,11 @@ pub(super) fn export_edges(
     let mut writer = StreamWriter::create(path, schema, batch_size)?;
     let mut report = ExportReport::default();
 
-    let mut edge_types: Vec<Option<String>> = Vec::new();
-    let mut sources: Vec<i64> = Vec::new();
-    let mut targets: Vec<i64> = Vec::new();
-    let mut valid_times: Vec<Option<i64>> = Vec::new();
-    let mut props = PropColumns::new_from_prop_schema(&prop_schema);
+    let mut edge_types: Vec<Option<String>> = Vec::with_capacity(batch_size);
+    let mut sources: Vec<i64> = Vec::with_capacity(batch_size);
+    let mut targets: Vec<i64> = Vec::with_capacity(batch_size);
+    let mut valid_times: Vec<Option<i64>> = Vec::with_capacity(batch_size);
+    let mut props = PropColumns::new(&prop_schema, batch_size);
 
     for &nid in &node_ids {
         for eid in db.get_outgoing_edges(nid) {
@@ -713,12 +755,11 @@ fn flush_edges(
     valid_times: &mut Vec<Option<i64>>,
     props: &mut PropColumns,
 ) -> Result<()> {
-    let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter(std::mem::take(edge_types))),
-        Arc::new(Int64Array::from(std::mem::take(sources))),
-        Arc::new(Int64Array::from(std::mem::take(targets))),
-        ts_array(std::mem::take(valid_times)),
-    ];
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(4 + props.native.len() + 1);
+    arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(edge_types))));
+    arrays.push(Arc::new(Int64Array::from(drain_keep_cap(sources))));
+    arrays.push(Arc::new(Int64Array::from(drain_keep_cap(targets))));
+    arrays.push(ts_array(drain_keep_cap(valid_times)));
     props.finish_into(&mut arrays);
     writer.write(arrays)
 }
@@ -781,7 +822,6 @@ fn history_tail_fields() -> Vec<Field> {
 }
 
 /// Column accumulators for the shared history tail.
-#[derive(Default)]
 struct HistoryTail {
     versions: Vec<i64>,
     valid_from: Vec<Option<i64>>,
@@ -797,6 +837,24 @@ struct HistoryTail {
 }
 
 impl HistoryTail {
+    /// Create a tail with every column buffer pre-sized to one batch, so the buffers do
+    /// not re-grow from zero on the first batch.
+    fn with_capacity(batch_size: usize) -> Self {
+        HistoryTail {
+            versions: Vec::with_capacity(batch_size),
+            valid_from: Vec::with_capacity(batch_size),
+            valid_to: Vec::with_capacity(batch_size),
+            transaction_time: Vec::with_capacity(batch_size),
+            transaction_to: Vec::with_capacity(batch_size),
+            tombstone: Vec::with_capacity(batch_size),
+            prov_source: Vec::with_capacity(batch_size),
+            prov_confidence: Vec::with_capacity(batch_size),
+            prov_note: Vec::with_capacity(batch_size),
+            prov_correlation_id: Vec::with_capacity(batch_size),
+            prov_principal: Vec::with_capacity(batch_size),
+        }
+    }
+
     fn push(&mut self, version: &VersionInfo) {
         let valid = version.temporal.valid_time();
         let tx = version.temporal.transaction_time();
@@ -845,29 +903,29 @@ impl HistoryTail {
     }
 
     fn finish_into(&mut self, arrays: &mut Vec<ArrayRef>) {
-        arrays.push(Arc::new(Int64Array::from(std::mem::take(
+        arrays.push(Arc::new(Int64Array::from(drain_keep_cap(
             &mut self.versions,
         ))));
-        arrays.push(ts_array(std::mem::take(&mut self.valid_from)));
-        arrays.push(ts_array(std::mem::take(&mut self.valid_to)));
-        arrays.push(ts_array(std::mem::take(&mut self.transaction_time)));
-        arrays.push(ts_array(std::mem::take(&mut self.transaction_to)));
-        arrays.push(Arc::new(BooleanArray::from(std::mem::take(
+        arrays.push(ts_array(drain_keep_cap(&mut self.valid_from)));
+        arrays.push(ts_array(drain_keep_cap(&mut self.valid_to)));
+        arrays.push(ts_array(drain_keep_cap(&mut self.transaction_time)));
+        arrays.push(ts_array(drain_keep_cap(&mut self.transaction_to)));
+        arrays.push(Arc::new(BooleanArray::from(drain_keep_cap(
             &mut self.tombstone,
         ))));
-        arrays.push(Arc::new(StringArray::from_iter(std::mem::take(
+        arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(
             &mut self.prov_source,
         ))));
-        arrays.push(Arc::new(Float64Array::from(std::mem::take(
+        arrays.push(Arc::new(Float64Array::from(drain_keep_cap(
             &mut self.prov_confidence,
         ))));
-        arrays.push(Arc::new(StringArray::from_iter(std::mem::take(
+        arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(
             &mut self.prov_note,
         ))));
-        arrays.push(Arc::new(StringArray::from_iter(std::mem::take(
+        arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(
             &mut self.prov_correlation_id,
         ))));
-        arrays.push(Arc::new(StringArray::from_iter(std::mem::take(
+        arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(
             &mut self.prov_principal,
         ))));
     }
@@ -911,10 +969,10 @@ pub(super) fn export_node_history(
     let mut writer = StreamWriter::create(path, schema, batch_size)?;
     let mut report = ExportReport::default();
 
-    let mut ids: Vec<i64> = Vec::new();
-    let mut labels: Vec<Option<String>> = Vec::new();
-    let mut props = PropColumns::new_from_prop_schema(&prop_schema);
-    let mut tail = HistoryTail::default();
+    let mut ids: Vec<i64> = Vec::with_capacity(batch_size);
+    let mut labels: Vec<Option<String>> = Vec::with_capacity(batch_size);
+    let mut props = PropColumns::new(&prop_schema, batch_size);
+    let mut tail = HistoryTail::with_capacity(batch_size);
 
     for &id in &node_ids {
         let Ok(history) = db.get_node_history(id) else {
@@ -928,28 +986,31 @@ pub(super) fn export_node_history(
             report.node_versions_exported += 1;
 
             if ids.len() >= batch_size {
-                let mut arrays: Vec<ArrayRef> = vec![
-                    Arc::new(Int64Array::from(std::mem::take(&mut ids))),
-                    Arc::new(StringArray::from_iter(std::mem::take(&mut labels))),
-                ];
-                props.finish_into(&mut arrays);
-                tail.finish_into(&mut arrays);
-                writer.write(arrays)?;
+                flush_node_history(&mut writer, &mut ids, &mut labels, &mut props, &mut tail)?;
             }
         }
     }
     if !ids.is_empty() || tail.len() > 0 {
-        let mut arrays: Vec<ArrayRef> = vec![
-            Arc::new(Int64Array::from(std::mem::take(&mut ids))),
-            Arc::new(StringArray::from_iter(std::mem::take(&mut labels))),
-        ];
-        props.finish_into(&mut arrays);
-        tail.finish_into(&mut arrays);
-        writer.write(arrays)?;
+        flush_node_history(&mut writer, &mut ids, &mut labels, &mut props, &mut tail)?;
     }
 
     writer.close()?;
     Ok(report)
+}
+
+fn flush_node_history(
+    writer: &mut StreamWriter,
+    ids: &mut Vec<i64>,
+    labels: &mut Vec<Option<String>>,
+    props: &mut PropColumns,
+    tail: &mut HistoryTail,
+) -> Result<()> {
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(2 + props.native.len() + 12);
+    arrays.push(Arc::new(Int64Array::from(drain_keep_cap(ids))));
+    arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(labels))));
+    props.finish_into(&mut arrays);
+    tail.finish_into(&mut arrays);
+    writer.write(arrays)
 }
 
 pub(super) fn export_edge_history(
@@ -993,12 +1054,12 @@ pub(super) fn export_edge_history(
     let mut writer = StreamWriter::create(path, schema, batch_size)?;
     let mut report = ExportReport::default();
 
-    let mut ids: Vec<i64> = Vec::new();
-    let mut edge_types: Vec<Option<String>> = Vec::new();
-    let mut sources: Vec<Option<i64>> = Vec::new();
-    let mut targets: Vec<Option<i64>> = Vec::new();
-    let mut props = PropColumns::new_from_prop_schema(&prop_schema);
-    let mut tail = HistoryTail::default();
+    let mut ids: Vec<i64> = Vec::with_capacity(batch_size);
+    let mut edge_types: Vec<Option<String>> = Vec::with_capacity(batch_size);
+    let mut sources: Vec<Option<i64>> = Vec::with_capacity(batch_size);
+    let mut targets: Vec<Option<i64>> = Vec::with_capacity(batch_size);
+    let mut props = PropColumns::new(&prop_schema, batch_size);
+    let mut tail = HistoryTail::with_capacity(batch_size);
 
     for &eid in &edge_ids {
         let Ok(history) = db.get_edge_history(eid) else {
@@ -1057,12 +1118,11 @@ fn flush_edge_history(
     props: &mut PropColumns,
     tail: &mut HistoryTail,
 ) -> Result<()> {
-    let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(Int64Array::from(std::mem::take(ids))),
-        Arc::new(StringArray::from_iter(std::mem::take(edge_types))),
-        Arc::new(Int64Array::from(std::mem::take(sources))),
-        Arc::new(Int64Array::from(std::mem::take(targets))),
-    ];
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(4 + props.native.len() + 12);
+    arrays.push(Arc::new(Int64Array::from(drain_keep_cap(ids))));
+    arrays.push(Arc::new(StringArray::from_iter(drain_keep_cap(edge_types))));
+    arrays.push(Arc::new(Int64Array::from(drain_keep_cap(sources))));
+    arrays.push(Arc::new(Int64Array::from(drain_keep_cap(targets))));
     props.finish_into(&mut arrays);
     tail.finish_into(&mut arrays);
     writer.write(arrays)
@@ -1072,13 +1132,6 @@ fn flush_edge_history(
 // Shared helpers
 // ============================================================================
 
-impl PropColumns {
-    /// Convenience constructor used by the export pipelines.
-    fn new_from_prop_schema(schema: &PropSchema) -> Self {
-        PropColumns::new(schema)
-    }
-}
-
 /// Page size for the changefeed enumeration driving history export.
 const CHANGEFEED_PAGE: usize = 4096;
 
@@ -1086,11 +1139,15 @@ const CHANGEFEED_PAGE: usize = 4096;
 /// history — including entities that were deleted or retracted and are therefore no
 /// longer in current state — by paging the whole-window changefeed.
 ///
-/// Returned ids are ascending (deterministic). Any residual completeness caveat is the
-/// changefeed's own (a version's transaction time must fall inside `[0, TIMESTAMP_MAX)`,
-/// which every committed version does; cold-tier versions are merged by `list_changes`).
+/// Returned ids are ascending and deduped (deterministic). Any residual completeness
+/// caveat is the changefeed's own (a version's transaction time must fall inside
+/// `[0, TIMESTAMP_MAX)`, which every committed version does; cold-tier versions are
+/// merged by `list_changes`).
+///
+/// This buffers all matching ids in a `Vec` then sorts+dedups (cheaper per element than a
+/// `BTreeSet`'s per-node allocation); it is O(total entities of `kind`) transient memory.
 fn collect_history_ids(db: &AletheiaDB, kind: EntityKind) -> Result<Vec<u64>> {
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids: Vec<u64> = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let mut query = ChangeFeedQuery::new(Timestamp::from(0), TIMESTAMP_MAX, CHANGEFEED_PAGE);
@@ -1098,7 +1155,7 @@ fn collect_history_ids(db: &AletheiaDB, kind: EntityKind) -> Result<Vec<u64>> {
         let page = db.list_changes(&query)?;
         for record in &page.changes {
             if record.kind == kind {
-                ids.insert(record.entity_id);
+                ids.push(record.entity_id);
             }
         }
         match page.next_cursor {
@@ -1106,7 +1163,9 @@ fn collect_history_ids(db: &AletheiaDB, kind: EntityKind) -> Result<Vec<u64>> {
             None => break,
         }
     }
-    Ok(ids.into_iter().collect())
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
 }
 
 /// Resolve an edge's `(source, target)` node ids for the history export.

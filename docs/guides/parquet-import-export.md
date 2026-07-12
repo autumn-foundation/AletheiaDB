@@ -82,6 +82,20 @@ db.export()
 Each method returns an `ExportReport` with `nodes_exported` / `edges_exported` (current
 state) or `node_versions_exported` / `edge_versions_exported` (history).
 
+**Compression:** exported files are written with **Snappy** compression (the de-facto
+default Parquet codec). Snappy is fast, splittable, and read transparently by DuckDB /
+pandas / pyarrow / Spark with no reader-side configuration, and keeps exports comfortably
+under the <1 GB file-size target.
+
+**Consistency caveat (concurrent writes):** export is a **two-pass** scan (pass 1
+discovers the property schema, pass 2 streams the rows) and is **not** snapshot-atomic —
+it does not pin an MVCC snapshot across the two passes. It is therefore only
+point-in-time-consistent on a **quiescent** database. If writes land during an export,
+the result is best-effort (a row committed between the passes may be included with a
+schema discovered before it existed, or missed entirely). For a consistent artifact,
+export from a quiescent database (or a restored backup), or accept best-effort
+consistency.
+
 ---
 
 ## CLI
@@ -159,7 +173,13 @@ temporal + provenance tail. Edge history is the same with `id`, `edge_type`,
 `source_key` (nullable), `target_key` (nullable) leading, then the property columns and
 the tail.
 
-Shared tail columns:
+The **property columns** are the one-per-key native typed columns plus, when needed, the
+`properties_json` overflow column (string, nullable). The `properties_json` column — like
+in the current-state files — is emitted as the **last of the property columns**, i.e.
+immediately *before* `version`, not at the end of the row. The shared tail always begins
+at `version`.
+
+Shared tail columns (all appear **after** the property columns):
 
 | Column | Type | Nullable | Notes |
 |--------|------|----------|-------|
@@ -174,7 +194,6 @@ Shared tail columns:
 | `provenance_note` | string | yes | |
 | `provenance_correlation_id` | string | yes | |
 | `provenance_principal` | string | yes | #3350 authenticated principal. |
-| `properties_json` | string | yes | Overflow column (present only when needed). |
 
 **Open-interval convention:** an open (still-valid or still-current) interval is written
 as a JSON/Parquet **null** `valid_to` (and, for the transaction dimension, a null
@@ -269,14 +288,17 @@ of each label were valid on 2024-01-01?"*:
 ```sql
 SELECT label, count(*) AS facts_valid
 FROM 'node_history.parquet'
-WHERE valid_from <= TIMESTAMP '2024-01-01 00:00:00+00'
-  AND (valid_to IS NULL OR valid_to > TIMESTAMP '2024-01-01 00:00:00+00')
+WHERE valid_from <= TIMESTAMPTZ '2024-01-01 00:00:00+00'
+  AND (valid_to IS NULL OR valid_to > TIMESTAMPTZ '2024-01-01 00:00:00+00')
 GROUP BY label
 ORDER BY facts_valid DESC;
 ```
 
-Because open intervals are `NULL` (not a sentinel), the `valid_to IS NULL OR valid_to >
-...` predicate reads naturally as "still valid, or closed after the probe instant".
+The timestamp columns carry a UTC zone (`timestamp(µs, UTC)`), so DuckDB reads them as
+`TIMESTAMPTZ`; compare against a `TIMESTAMPTZ` literal (not a plain `TIMESTAMP`) so the
+comparison stays zone-aware. Because open intervals are `NULL` (not a sentinel), the
+`valid_to IS NULL OR valid_to > ...` predicate reads naturally as "still valid, or closed
+after the probe instant".
 
 ---
 
