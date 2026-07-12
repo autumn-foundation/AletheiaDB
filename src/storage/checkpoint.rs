@@ -2014,6 +2014,7 @@ mod tests {
             node_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })?;
         wal.flush()?;
 
@@ -2073,6 +2074,7 @@ mod tests {
             edge_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })?;
         wal.flush()?;
 

@@ -45,8 +45,8 @@ use super::ring_buffer::PendingEntry;
 use crate::core::error::{Error, Result, StorageError};
 
 use super::segment_reader::{
-    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_DELETE_VERSION_ID,
-    WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID,
+    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_DESTRUCTIVE_PROVENANCE,
+    WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE,
 };
 
 /// Metadata about a WAL segment's LSN range.
@@ -443,9 +443,9 @@ impl FlushCoordinator {
         // present so old readers reject the segment cleanly rather than
         // misparsing.
         let write_version = if self.config.wal_cipher.is_some() {
-            WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID
+            WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE
         } else {
-            WAL_VERSION_DELETE_VERSION_ID
+            WAL_VERSION_DESTRUCTIVE_PROVENANCE
         };
 
         // Allocate the next segment id, rolling past any existing non-empty
@@ -1197,11 +1197,11 @@ mod tests {
         );
 
         // ...the write must have rolled forward to a fresh segment with the
-        // current writer (v9 delete-version-id) header...
+        // current writer (v11 destructive-provenance) header...
         assert_eq!(coordinator.current_segment_id(), 2);
         let new_segment = std::fs::read(dir.path().join("000002.log")).unwrap();
         assert_eq!(&new_segment[0..4], &WAL_MAGIC);
-        assert_eq!(new_segment[4], WAL_VERSION_DELETE_VERSION_ID);
+        assert_eq!(new_segment[4], WAL_VERSION_DESTRUCTIVE_PROVENANCE);
 
         // ...and a full-directory replay succeeds, with the new entry's
         // principal intact.
@@ -1521,7 +1521,7 @@ mod tests {
 
         assert!(data.len() >= WAL_HEADER_SIZE);
         assert_eq!(&data[0..4], &WAL_MAGIC);
-        assert_eq!(data[4], WAL_VERSION_DELETE_VERSION_ID);
+        assert_eq!(data[4], WAL_VERSION_DESTRUCTIVE_PROVENANCE);
     }
 
     #[test]

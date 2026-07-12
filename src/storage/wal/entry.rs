@@ -110,6 +110,11 @@ pub enum WalOperation {
         /// segments written before `WAL_VERSION_DELETE_VERSION_ID` (v9/v10),
         /// which fall back to synthesis during replay.
         version_id: Option<VersionId>,
+        /// Write-time provenance bundle recording the acting principal for the
+        /// deletion (Issue #3427), if supplied. `None` for segments written
+        /// before `WAL_VERSION_DESTRUCTIVE_PROVENANCE` (v11/v12), which carry no
+        /// provenance blob on the delete/retract payloads.
+        provenance: Option<Provenance>,
     },
     /// Delete an edge
     DeleteEdge {
@@ -120,6 +125,9 @@ pub enum WalOperation {
         /// The tombstone version ID assigned by the live write path (Issue
         /// #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
         version_id: Option<VersionId>,
+        /// Write-time provenance bundle (Issue #3427). See
+        /// [`WalOperation::DeleteNode`]'s `provenance`.
+        provenance: Option<Provenance>,
     },
     /// Retract a node: close its valid-time interval at `valid_to` without
     /// deleting its history (Issue #3230).
@@ -131,6 +139,9 @@ pub enum WalOperation {
         /// The retraction (closing) version ID assigned by the live write path
         /// (Issue #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
         version_id: Option<VersionId>,
+        /// Write-time provenance bundle (Issue #3427). See
+        /// [`WalOperation::DeleteNode`]'s `provenance`.
+        provenance: Option<Provenance>,
     },
     /// Retract an edge: close its valid-time interval at `valid_to` without
     /// deleting its history (Issue #3230).
@@ -142,6 +153,9 @@ pub enum WalOperation {
         /// The retraction (closing) version ID assigned by the live write path
         /// (Issue #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
         version_id: Option<VersionId>,
+        /// Write-time provenance bundle (Issue #3427). See
+        /// [`WalOperation::DeleteNode`]'s `provenance`.
+        provenance: Option<Provenance>,
     },
     /// Checkpoint marker - indicates a snapshot was taken
     Checkpoint {

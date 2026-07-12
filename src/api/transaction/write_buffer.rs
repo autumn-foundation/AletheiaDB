@@ -508,6 +508,10 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 node_id: *node_id,
                 valid_from: *valid_from,
                 version_id: None,
+                // Issue #3427 Phase A: the WAL format now carries destructive-op
+                // provenance, but the live write path does not yet thread it
+                // (Phase B, gated on #3416). Emit `None` here as a compile shim.
+                provenance: None,
             },
             BufferedWrite::DeleteEdge {
                 edge_id,
@@ -516,12 +520,16 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 edge_id: *edge_id,
                 valid_from: *valid_from,
                 version_id: None,
+                // Issue #3427 Phase A compile shim; see DeleteNode above.
+                provenance: None,
             },
             BufferedWrite::RetractNode { node_id, valid_to } => {
                 crate::storage::wal::WalOperation::RetractNode {
                     node_id: *node_id,
                     valid_to: *valid_to,
                     version_id: None,
+                    // Issue #3427 Phase A compile shim; see DeleteNode above.
+                    provenance: None,
                 }
             }
             BufferedWrite::RetractEdge { edge_id, valid_to } => {
@@ -529,6 +537,8 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                     edge_id: *edge_id,
                     valid_to: *valid_to,
                     version_id: None,
+                    // Issue #3427 Phase A compile shim; see DeleteNode above.
+                    provenance: None,
                 }
             }
         }
