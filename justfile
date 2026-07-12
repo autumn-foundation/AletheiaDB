@@ -70,6 +70,7 @@ check-features:
     @echo "=== encryption (standalone) ===" && cargo check --no-default-features --tests --features encryption
     @echo "=== encryption-vault (standalone) ===" && cargo check --no-default-features --tests --features encryption-vault
     @echo "=== encryption-aws-kms (standalone) ===" && cargo check --no-default-features --tests --features encryption-aws-kms
+    @echo "=== parquet (standalone) ===" && cargo check --no-default-features --tests --features parquet
 
 # autumn-web 0.5.0 migration spike (Issue #3524): the isolated member crate has
 # its OWN gates (it links autumn-web 0.5 alongside the root's 0.4). CI wiring for

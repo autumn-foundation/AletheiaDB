@@ -235,7 +235,12 @@ crate, no permanent two-version boundary):
 excluding the MCP-stack reconciliation decision (which could add materially if
 the stdio `rmcp` server is folded into autumn's `/mcp`).
 
-## Upstream issue draft (madmax983/autumn)
+## Upstream issue (madmax983/autumn)
+
+**Filed: [madmax983/autumn#1828](https://github.com/madmax983/autumn/issues/1828)**
+— "autumn-macros: macro expansion hardcodes `::autumn_web` paths — breaks
+renamed/parallel-version deps (proc-macro-crate support)". The drafted text is
+kept below for the record.
 
 > **Title:** autumn-macros: proc-macro output hardcodes `::autumn_web`, breaks
 > renamed / multi-version deps
@@ -271,8 +276,7 @@ the stdio `rmcp` server is folded into autumn's `/mcp`).
 > sqlx, and similar do). This would let downstreams rename the dep and host two
 > versions during a migration.
 
-*(The coordinator's GitHub scope is aletheiadb only; this text is the deliverable
-for routing upstream.)*
+*(Filed upstream as madmax983/autumn#1828.)*
 
 ## Gates (isolated `CARGO_TARGET_DIR`)
 
