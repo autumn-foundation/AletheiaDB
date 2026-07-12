@@ -226,6 +226,42 @@ to be: if a crash loses chain records for already-committed WAL transactions,
 recovery re-derives them. No WAL durability mode can produce a chain that
 disagrees with recovered history.
 
+### What is guaranteed per WAL mode × flush mode
+
+Two independent questions:
+
+1. **Did the transaction survive the crash?** — the WAL mode decides.
+   `Synchronous` and `GroupCommit` are ACID (the transaction is durable before,
+   or as, commit returns). `Async` is eventual: a crash may lose the most recent
+   commits — but anything the WAL loses was never committed, so the chain
+   correctly never sealed it.
+2. **Was its chain record on disk, or re-derived on recovery?** — the
+   `ChainFsyncMode` decides, and the answer never changes correctness, only
+   whether the record is read from `chain.log` or re-folded from history:
+
+| WAL mode | `ChainFsyncMode` | Sealed-and-durable on the sidecar | Re-derived on recovery |
+|----------|------------------|-----------------------------------|------------------------|
+| `Synchronous` / `GroupCommit` | `PerTransaction` | Every record whose async-sealer `append` fsynced before the crash. | Committed transactions the sealer had not yet processed. |
+| `Synchronous` / `GroupCommit` | `Batched` (default) | Records flushed by an explicit `flush()`, the shutdown checkpoint, or OS writeback. | Everything since the last sidecar flush. |
+| `Synchronous` / `GroupCommit` | `Never` | Nothing guaranteed by the chain layer. | The whole unflushed tail. |
+| `Async` | any | As above, **bounded by** what the WAL retained. | The tail the WAL kept but the sealer had not durably sealed. |
+
+In every cell the re-derived tail reproduces the exact digests a live seal
+would have produced (the fold is deterministic over commit-ordered records), so
+a **pre-crash exported anchor still verifies** after recovery — proven by the
+`finding4_partial_tail_rebuild_matches_precrash_anchor` integration test (a
+genuine mid-workload crash: a sealed prefix on disk plus an unsealed tail
+rebuilt from history).
+
+### Backpressure (tail-latency tradeoff)
+
+Sealing runs off the commit path through a bounded channel. When that channel is
+**full**, the committing thread **inline-seals** the transaction itself rather
+than blocking or dropping it (drop-to-sync-seal). This keeps the "every
+committed transaction is sealed exactly once" guarantee, at the cost of a
+tail-latency spike on commits during sustained bursts that outrun the sealer —
+a deliberate correctness-over-latency choice.
+
 ## External anchoring workflow
 
 Tamper-*evidence* within the log detects mutation, deletion, reordering, and
@@ -265,11 +301,39 @@ transaction id. The chain digest is a deterministic function of the record set
 crash reproduces the exact pre-crash head digest (a pre-crash anchor still
 verifies), regardless of the order in which commits were originally enqueued.
 
+### Exact leaf coverage
+
+A byte-edit of a stored version is caught if it changes any of: entity id +
+kind, version id / `prev_version_id`, node **label**, edge **source/target**,
+`valid_from`, `transaction_from`, provenance, the **sorted** property set, the
+`is_tombstone` flag, and — for a *born-closed terminal* version (delete
+tombstone or retraction) — its `valid_to`. Interior (still-live, later
+superseded) versions' interval **ends** are **not** hashed directly (a later
+write mutates them); they are instead protected by the per-entity
+timeline-consistency check that `verify_full` runs (monotonic transaction
+starts + per-version interval well-formedness). See the born-closed
+false-positive note below.
+
+### The unsealed-tail / offline-tamper boundary
+
+Tamper-evidence covers the **sealed prefix**. A version is bound into the chain
+by its *first seal*; content altered **before** that seal (or altered offline,
+before the startup rebuild re-folds the tail) is re-blessed on rebuild — the
+rebuild seals whatever bytes history holds. Sealing is near-immediate after
+commit, so the window is small, but the guarantee is precisely "no **post-seal**
+mutation goes undetected," not "no mutation is ever possible."
+
 ### v1 limitations
 
 - The exported anchor is **unsigned** (authorship is the operator's
   responsibility; signing is a follow-up).
 - Entity-scoped verification is **layered**, not a Merkle-inclusion proof.
+- **Unbounded in-memory growth.** The chain keeps its full record vector and
+  entity index resident in RAM (linear in transaction count — no spill/eviction
+  in v1), and full/anchor verification and export snapshot-**clone** that vector
+  under lock (entity verify borrows in place and does not clone). Resident
+  memory grows with history and a full-verify transiently doubles the record
+  footprint; bounding/spilling and a clone-free verify are tracked follow-ups.
 - The chain is **lineage-style**: it is not woven into the WAL format; chain
   state is re-derived on recovery rather than loaded from a durable
   chain-specific WAL payload (durable rehydration is a tracked follow-up that

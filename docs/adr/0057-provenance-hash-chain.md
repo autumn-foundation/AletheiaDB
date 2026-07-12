@@ -44,8 +44,18 @@ transaction share one commit timestamp, which is the grouping and ordering key.
 The fold is three levels of domain-separated SHA-256:
 
 1. **Leaf** — each version is normalized to a canonical, injective
-   `VersionHashInput` (entity kind/id, version id, bi-temporal bounds,
-   provenance, sorted properties) and hashed to a `version_leaf`.
+   `VersionHashInput` and hashed to a `version_leaf`. Exact leaf coverage (what
+   a byte-edit of the stored version must not change to pass verify): entity
+   id + kind, version id and `prev_version_id`, node **label**, edge
+   **source/target**, `valid_from` and `transaction_from`, provenance, the
+   **sorted** property set, the `is_tombstone` flag, and — for a *born-closed
+   terminal* version (a delete tombstone or a retraction) — its `valid_to`. The
+   interval **ends** of a still-live (superseded-later) version are deliberately
+   **not** hashed directly (a later supersession mutates them, so they cannot be
+   bound into an append-only leaf); they are instead protected by the per-entity
+   timeline-consistency check in `verify_full` (monotonic transaction starts +
+   per-version interval well-formedness). See the "born-closed" limitation
+   below.
 2. **Transaction digest** — the leaves of one transaction fold, with the commit
    timestamp and tx id, into a `tx_digest`.
 3. **Chain step** — each transaction digest chains onto the previous record's
@@ -76,13 +86,53 @@ without the WAL carrying any chain-specific payload.
 ### Per-WAL-mode durability semantics (AC6)
 
 The chain's sidecar-flush policy (`ChainFsyncMode`: `PerTransaction`,
-`Batched` (default), `Never`) composes with, but is independent of, the WAL
-durability mode. The invariant that makes this safe: **the WAL is the source of
-truth; the chain is derived.** If the process crashes with sealed WAL
-transactions whose chain records were not yet flushed, recovery re-derives them
-from replayed history. A chain record can never be *more* durable than the WAL
-transaction it describes, and never needs to be — so no durability mode can
-produce a chain that disagrees with recovered history.
+`Batched` (default), `Never`) composes with, but is **independent of**, the WAL
+durability mode (`Synchronous`, `GroupCommit`, `Async`). The invariant that
+makes every combination safe: **the WAL is the source of truth; the chain is
+derived.** A chain record can never be *more* durable than the WAL transaction
+it describes, and never needs to be, because on recovery the unsealed tail is
+re-derived from replayed history (`rebuild_chain_tail`).
+
+What "durable" means therefore splits along two axes:
+
+1. **Is the transaction itself durable?** Governed entirely by the WAL mode.
+   - `Synchronous` — the commit fsyncs the WAL before returning; the transaction
+     survives a crash.
+   - `GroupCommit` — the commit returns after its batch's fsync completes; the
+     transaction survives a crash (ACID, just batched).
+   - `Async` — the commit returns before the WAL fsync; a crash can lose the
+     most recent transactions (eventual durability). Anything the WAL loses was
+     never committed, so the chain correctly never sealed it either.
+
+2. **Is the chain record durable, or re-derived on recovery?** Governed by
+   `ChainFsyncMode`, but the answer never affects *correctness* — only whether a
+   given record is read back from `chain.log` or re-folded from history:
+
+| WAL mode | `ChainFsyncMode` | Guaranteed sealed-and-durable on the sidecar | Re-derived on recovery |
+|----------|------------------|----------------------------------------------|------------------------|
+| `Synchronous` / `GroupCommit` | `PerTransaction` | Every transaction whose seal `append` returned before the crash (sealing is async, so the newest *sealed* records are `fsync`-durable, but transactions committed-yet-not-yet-sealed are not on the sidecar). | Any committed transaction the async sealer had not yet processed + fsynced. |
+| `Synchronous` / `GroupCommit` | `Batched` (default) | Only records flushed by an explicit `flush()` / shutdown checkpoint or OS writeback. | Everything since the last sidecar flush. |
+| `Synchronous` / `GroupCommit` | `Never` | Nothing is guaranteed by the chain layer (OS decides). | Potentially the entire unsealed/unflushed tail. |
+| `Async` | any | Same as above, **bounded by** what the WAL retained: a transaction the WAL lost on an async crash is (correctly) neither in history nor in the chain. | The tail the WAL *did* retain but the sealer had not durably sealed. |
+
+The recovery contract is identical in every cell: after WAL replay restores
+history, `rebuild_chain_tail` groups every restored version by its exact commit
+timestamp and seals each transaction beyond the loaded head, in canonical
+commit order. Because the fold is a deterministic function of the
+commit-timestamp-ordered record set (finding 4), the re-derived tail reproduces
+the exact digests a live seal would have produced — so a pre-crash exported
+anchor still verifies as an append-only extension regardless of which
+combination above was in effect (test:
+`finding4_partial_tail_rebuild_matches_precrash_anchor`).
+
+**Backpressure / tail-latency tradeoff.** Sealing is off the commit critical
+path via a bounded channel (`SEAL_CHANNEL_CAPACITY`). When that channel is full
+the committing thread **inline-seals** the transaction itself
+(`enqueue_commit` → `seal_one`) rather than blocking or dropping it. This
+guarantees every committed transaction is sealed exactly once, at the cost of a
+tail-latency spike on the commit path under sustained bursts that outrun the
+sealer. It is a deliberate drop-to-sync-seal choice: correctness over smooth
+latency under overload.
 
 ## Alternatives Considered
 
@@ -128,6 +178,17 @@ is exactly the point at which an anchor was last externalized: anything after
 the last exported head is only tamper-*evident* within the log, not
 tamper-*proof* against a full-log rewrite.
 
+**The unsealed-tail / offline-tamper boundary (security boundary).**
+Tamper-evidence covers the **sealed prefix** only. A version's content is bound
+into the chain by its *first seal*. Content altered **before** that first seal —
+or altered while the process is offline, before the startup rebuild re-folds the
+tail — is re-blessed on rebuild: `rebuild_chain_tail` reads whatever bytes are
+in history and seals *those*, so a mutation that lands before sealing becomes
+the sealed truth and is not flagged. In practice sealing is near-immediate after
+commit (async sealer + inline-seal fallback), so the exposure window is small,
+but it is a real boundary: the guarantee is "no post-seal mutation goes
+undetected," not "no mutation is ever possible."
+
 **Out of scope (v1 limitations):**
 
 - The exported anchor is **unsigned**. Establishing cryptographic authorship of
@@ -138,6 +199,28 @@ tamper-*proof* against a full-log rewrite.
 - The chain is **not woven into the WAL format**; chain state is lineage-style,
   re-derived on recovery rather than loaded from a durable chain-specific WAL
   payload.
+- **Born-closed `valid_to` predicate false-positive.** The leaf binds a
+  terminal `valid_to` only when it looks born-closed (`valid_to <=
+  transaction_from`, or the tombstone flag). A *heavily backdated* supersession
+  can make a legitimately superseded (open-at-seal) version match that predicate
+  at verify and produce a **false positive** — a spurious failure, never a
+  missed tamper. A stored born-closed discriminator is a follow-up.
+- **Cold-tier rebuild.** Verification `fetch` is cold-aware (it reads through
+  the tiered hot+cold path, so verify does not false-fail after a sealed version
+  migrates to the Redb cold tier). But the startup **crash-rebuild scan**
+  (`rebuild_chain_tail`) enumerates **hot-tier history only**; a version
+  migrated to cold *before its transaction was ever sealed* would be omitted
+  from a from-scratch rebuild. Migration normally happens well after sealing, so
+  this is a narrow edge and a tracked follow-up.
+- **Unbounded in-memory growth (scaling).** The engine keeps the full
+  `records: Vec<ChainTxRecord>` and the derived `EntityIndex` **resident in
+  RAM**, growing linearly with total transaction count — there is no spill or
+  eviction in v1. Additionally, `verify_full` / `verify_against_anchor` /
+  `export` snapshot-**clone** the records vector under the `inner` lock (entity
+  verify, post task #1, borrows in place and does not clone). Resident memory
+  therefore grows with history and each full snapshot transiently doubles the
+  records footprint. Bounding/spilling the in-memory chain (and a
+  clone-free/streaming verify) is a tracked follow-up.
 
 ## Two In-Scope Audit Security Fixes
 
