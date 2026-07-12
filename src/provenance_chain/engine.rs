@@ -494,11 +494,19 @@ impl ProvenanceChain {
 
     /// Flush and stop the sealer thread. Idempotent.
     pub fn shutdown(&self) {
+        self.stop_and_flush();
+    }
+
+    /// Signal the sealer to stop, join it, and flush the log + checkpoint the
+    /// head. Idempotent: the `stopped` swap guards against a double stop, so a
+    /// `Drop` after an explicit [`shutdown`](Self::shutdown) is a no-op.
+    ///
+    /// With `stopped` set, concurrent enqueues seal inline, so the channel
+    /// drains and the `Stop` is guaranteed to be delivered.
+    fn stop_and_flush(&self) {
         if self.stopped.swap(true, Ordering::AcqRel) {
             return;
         }
-        // With `stopped` set, concurrent enqueues seal inline, so the channel
-        // drains and this Stop is guaranteed to be delivered.
         let _ = self.sender.send(SealMsg::Stop);
         if let Ok(mut guard) = self.handle.lock()
             && let Some(handle) = guard.take()
@@ -515,20 +523,7 @@ impl ProvenanceChain {
 
 impl Drop for ProvenanceChain {
     fn drop(&mut self) {
-        // `stopped`/`handle` guard against a double shutdown if one already ran.
-        if self.stopped.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let _ = self.sender.send(SealMsg::Stop);
-        if let Ok(mut guard) = self.handle.lock()
-            && let Some(handle) = guard.take()
-        {
-            let _ = handle.join();
-        }
-        if self.fsync != ChainFsyncMode::Never {
-            let _ = self.sealer.store.flush();
-        }
-        let _ = self.sealer.checkpoint();
+        self.stop_and_flush();
     }
 }
 
