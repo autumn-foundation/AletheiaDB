@@ -136,7 +136,8 @@ fn test_multiple_versions_track_temporal_changes() {
         )
         .unwrap();
 
-    // Update edge at t1 (closes previous valid time)
+    // Update edge at t1 (#3504: v1's valid interval stays OPEN/append-only;
+    // supersession is expressed on the transaction-time dimension only)
     std::thread::sleep(std::time::Duration::from_millis(10));
     let t1 = time::now();
     storage
@@ -153,7 +154,8 @@ fn test_multiple_versions_track_temporal_changes() {
         )
         .unwrap();
 
-    // Should find edge at both times (valid time was closed on v1, but v2 started)
+    // Should find edge at both times (#3504: v1's valid interval stays open, and
+    // v2 is tx-visible at t1, so each bi-temporal coordinate resolves one edge)
     let edges_at_t0 = index.get_outgoing_at_time(source, t0, t0);
     assert_eq!(edges_at_t0.len(), 1);
 

@@ -562,12 +562,13 @@ mod tests {
             Some(t1),
             "per-label earliest must be the min start (backdated t1), not the newest"
         );
-        // The superseded version's valid interval was closed at t2 (the
-        // update's valid start); latest must reach it.
+        // #3504: the superseded version's valid interval stays OPEN
+        // (append-only), so `latest` reaches t2 via the UPDATE version's valid
+        // start (the max of interval starts), not via a closed end.
         assert_eq!(
             person.valid_time.latest,
             Some(t2),
-            "per-label latest must reach the superseded version's closed end"
+            "per-label latest must reach the update version's valid start"
         );
 
         assert_breakdown_consistent_with_overall(&extent);

@@ -11006,7 +11006,7 @@ mod temporal_bounds_tests {
     }
 
     #[test]
-    fn test_superseded_version_has_closed_bounds_and_is_not_current() {
+    fn test_superseded_version_has_open_valid_closed_tx_bound_and_is_not_current() {
         let server = create_test_server();
 
         let node_id = create_person(&server, "Alice")["id"].as_u64().unwrap();
@@ -11029,7 +11029,10 @@ mod temporal_bounds_tests {
         .expect("update must succeed");
 
         // The at-time read anchored before the update returns the superseded
-        // version: both bounds closed, not current.
+        // version. #3504: supersession is append-only on the valid dimension,
+        // so the superseded version's valid interval stays OPEN
+        // (valid_to == null); only its transaction-time bound is closed by the
+        // update. It is not current (its tx interval is closed).
         let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
             node_id,
             valid_time: anchor.to_string(),
@@ -11041,18 +11044,18 @@ mod temporal_bounds_tests {
             "get_node_at_time failed: {at_time}"
         );
         let superseded = temporal_of(&at_time["node"]);
-        let valid_to = superseded["valid_to"].as_str().unwrap_or_else(|| {
-            panic!("superseded valid_to must be a closed RFC3339 bound: {superseded}")
-        });
+        assert!(
+            superseded["valid_to"].is_null(),
+            "superseded version's valid_to must stay open (#3504, append-only): {superseded}"
+        );
         let transaction_to = superseded["transaction_to"].as_str().unwrap_or_else(|| {
             panic!("superseded transaction_to must be a closed RFC3339 bound: {superseded}")
         });
-        assert!(rfc3339_to_micros(valid_to) > anchor);
         assert!(rfc3339_to_micros(transaction_to) > anchor);
         assert_eq!(
             superseded["is_current"],
             serde_json::json!(false),
-            "a superseded version must report is_current: false: {superseded}"
+            "a superseded version must report is_current: false (its tx interval is closed): {superseded}"
         );
 
         // A current read after the update shows the NEW version's bounds:
