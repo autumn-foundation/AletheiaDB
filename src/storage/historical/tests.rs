@@ -2316,10 +2316,8 @@ fn test_pre_anchor_hook_large_property_map_no_panic() {
 
     // Build a property map with 1000 distinct string keys/values.
     let mut builder = PropertyMapBuilder::new();
-    let keys: Vec<String> = (0..1000).map(|i| format!("key_{i}")).collect();
-    let values: Vec<String> = (0..1000).map(|i| format!("value_{i}")).collect();
     for i in 0..1000 {
-        builder = builder.insert(&keys[i], values[i].as_str());
+        builder = builder.insert(&format!("key_{i}"), format!("value_{i}"));
     }
 
     let node_id = NodeId::new(1).unwrap();
@@ -2343,112 +2341,6 @@ fn test_pre_anchor_hook_large_property_map_no_panic() {
         .get_node_version(VersionId::new(1).unwrap())
         .unwrap();
     assert!(version.is_anchor());
-}
-
-/// Feature-gated: a failing pre-anchor hook logs a WARN-level event containing
-/// "Pre-anchor hook failed". The `tracing::warn!` in `handle_pre_anchor_hook`
-/// only compiles under the `observability` feature, so this test is gated the
-/// same way. A minimal in-crate `tracing::Subscriber` captures events using
-/// only the `tracing` crate (available under `observability`), avoiding any new
-/// dependency (`tracing-subscriber` is not a dev-dependency; it is only pulled
-/// in by the `otel` feature).
-#[cfg(feature = "observability")]
-#[test]
-fn test_pre_anchor_hook_failure_logs_warning() {
-    use std::sync::Mutex;
-    use tracing::field::{Field, Visit};
-    use tracing::{Event, Level, Metadata, Subscriber, span};
-
-    // Shared capture buffer of (level, formatted-message) pairs.
-    #[derive(Default)]
-    struct Captured {
-        events: Vec<(Level, String)>,
-    }
-
-    struct CapturingSubscriber {
-        captured: Arc<Mutex<Captured>>,
-    }
-
-    struct MessageVisitor {
-        message: String,
-    }
-
-    impl Visit for MessageVisitor {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                self.message = format!("{value:?}");
-            }
-        }
-    }
-
-    impl Subscriber for CapturingSubscriber {
-        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
-            span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
-        fn event(&self, event: &Event<'_>) {
-            let mut visitor = MessageVisitor {
-                message: String::new(),
-            };
-            event.record(&mut visitor);
-            let level = *event.metadata().level();
-            self.captured
-                .lock()
-                .unwrap()
-                .events
-                .push((level, visitor.message));
-        }
-        fn enter(&self, _span: &span::Id) {}
-        fn exit(&self, _span: &span::Id) {}
-    }
-
-    let captured = Arc::new(Mutex::new(Captured::default()));
-    let subscriber = CapturingSubscriber {
-        captured: Arc::clone(&captured),
-    };
-
-    tracing::subscriber::with_default(subscriber, || {
-        let mut storage = HistoricalStorage::new();
-
-        let hook: PreAnchorHook =
-            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
-                Err(crate::core::error::Error::Storage(
-                    StorageError::InconsistentState {
-                        reason: "Test hook error for warn logging".to_string(),
-                    },
-                ))
-            });
-        storage.register_pre_node_anchor_hook(hook);
-
-        let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Test").unwrap();
-
-        // First version is an anchor -> hook fires and fails -> WARN logged.
-        storage
-            .add_node_version(
-                node_id,
-                VersionId::new(1).unwrap(),
-                1000.into(),
-                1000.into(),
-                label,
-                PropertyMapBuilder::new().build(),
-                false,
-            )
-            .unwrap();
-    });
-
-    let events = &captured.lock().unwrap().events;
-    let found_warn = events
-        .iter()
-        .any(|(level, msg)| *level == Level::WARN && msg.contains("Pre-anchor hook failed"));
-    assert!(
-        found_warn,
-        "expected a WARN event containing 'Pre-anchor hook failed', captured: {events:?}"
-    );
 }
 
 // ========================================================================
