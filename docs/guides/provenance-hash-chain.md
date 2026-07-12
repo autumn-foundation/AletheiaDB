@@ -249,11 +249,21 @@ rewrite up to the anchor point.
 
 | Threat | Guarantee |
 |--------|-----------|
-| Edit a stored version's bytes | Detected by full/entity verify (earliest seq localized). |
+| Edit a stored version's properties, **label**, **edge source/target**, provenance, or creation coordinates | Detected by full/entity verify (earliest seq localized). The per-version leaf binds all of these. |
+| Un-delete a version (re-open a delete tombstone) or re-validate a retraction (extend its `valid_to`) | Detected: the leaf binds the tombstone flag and the born-closed terminal `valid_to`; a per-entity timeline-consistency check backs this up. |
 | Delete / reorder / insert a transaction | Detected by full verify. |
 | Truncate the tail | Detected by verify-against an exported anchor (rollback). |
-| Fork to an alternate history | Detected by verify-against an exported anchor (fork). |
-| Rewrite the entire sidecar log | Detectable only against an externally held anchor. |
+| Fork to an alternate history | Detected by verify-against an exported anchor (fork). The anchor check **re-folds the log from genesis** up to the anchor sequence and requires the chain's genesis digest to match the anchor's, so a fabricated log that merely parrots the anchor digest at that sequence is rejected. |
+| Rewrite the entire sidecar log | Detectable only against an externally held anchor (re-folded, per above). |
+
+### What the digest binds (determinism)
+
+The per-transaction digest binds the **full HLC commit timestamp** (wallclock
+micros + logical counter) and the transaction's sorted leaves — **not** the
+transaction id. The chain digest is a deterministic function of the record set
+**sorted by commit timestamp**, so a chain rebuilt from replayed history after a
+crash reproduces the exact pre-crash head digest (a pre-crash anchor still
+verifies), regardless of the order in which commits were originally enqueued.
 
 ### v1 limitations
 
@@ -264,6 +274,19 @@ rewrite up to the anchor point.
   state is re-derived on recovery rather than loaded from a durable
   chain-specific WAL payload (durable rehydration is a tracked follow-up that
   will not change the verification contract).
+- The born-closed-terminal `valid_to` binding uses the stable predicate
+  `valid_to <= transaction_from` (plus the tombstone flag). A *heavily backdated*
+  supersession — two backdated writes to one entity where the successor's valid
+  start lands at or before the prior version's own transaction start — can make a
+  legitimately superseded (open-at-seal) version look born-closed at verify and
+  produce a **false positive**, not a missed tamper. This is a rare edge; a
+  stored born-closed discriminator is a follow-up.
+- Cold tier: verification reads versions through the tiered (hot **and** cold)
+  path, so it does not false-fail after a sealed version migrates to the Redb
+  cold tier. The startup **tail rebuild** scans hot history only; a version
+  migrated to cold before its transaction was ever sealed would be omitted from a
+  from-scratch rebuild (migration normally happens well after sealing, so this is
+  a narrow edge and a tracked follow-up).
 
 ## See also
 

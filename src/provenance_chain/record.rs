@@ -18,9 +18,15 @@ use super::error::{ChainError, ChainResult};
 pub struct ChainTxRecord {
     /// Monotonic sequence number (genesis is `0`; first real tx is `1`).
     pub seq: u64,
-    /// Commit timestamp (micros since epoch) — the ordering key for the tx.
+    /// Commit timestamp (micros since epoch) — the primary ordering key.
     pub commit_ts: i64,
-    /// The committing transaction's id.
+    /// Logical counter of the HLC commit timestamp — the tie-breaker so two
+    /// transactions sharing a wallclock microsecond stay distinct and ordered
+    /// (Issue #3351 finding 4). Bound into `tx_digest` alongside `commit_ts`.
+    pub commit_ts_logical: u32,
+    /// The committing transaction's id. Record metadata only — NOT bound into
+    /// `tx_digest` (a post-crash rebuild cannot recover it; see
+    /// [`tx_digest`](super::canonical::tx_digest)).
     pub tx_id: u64,
     /// The WAL LSN this record is anchored at (for truncation/recovery).
     pub anchor_lsn: u64,
@@ -108,6 +114,13 @@ impl<'a> Reader<'a> {
         Ok(u64::from_be_bytes(arr))
     }
 
+    fn u32(&mut self) -> ChainResult<u32> {
+        let b = self.take(4)?;
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(b);
+        Ok(u32::from_be_bytes(arr))
+    }
+
     fn i64(&mut self) -> ChainResult<i64> {
         Ok(self.u64()? as i64)
     }
@@ -143,12 +156,17 @@ fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
+fn put_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
 impl ChainTxRecord {
     /// Encode the record to its self-contained binary payload (no outer frame).
     pub(super) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(64 + self.leaves.len() * 32 + self.entity_refs.len() * 17);
         put_u64(&mut out, self.seq);
         put_u64(&mut out, self.commit_ts as u64);
+        put_u32(&mut out, self.commit_ts_logical);
         put_u64(&mut out, self.tx_id);
         put_u64(&mut out, self.anchor_lsn);
         put_u64(&mut out, self.leaves.len() as u64);
@@ -181,6 +199,7 @@ impl ChainTxRecord {
     fn read_from(r: &mut Reader<'_>) -> ChainResult<Self> {
         let seq = r.u64()?;
         let commit_ts = r.i64()?;
+        let commit_ts_logical = r.u32()?;
         let tx_id = r.u64()?;
         let anchor_lsn = r.u64()?;
         let n_leaves = r.count(32)?;
@@ -202,6 +221,7 @@ impl ChainTxRecord {
         Ok(ChainTxRecord {
             seq,
             commit_ts,
+            commit_ts_logical,
             tx_id,
             anchor_lsn,
             leaves,
@@ -289,6 +309,7 @@ mod tests {
         ChainTxRecord {
             seq,
             commit_ts: 1_000 + seq as i64,
+            commit_ts_logical: seq as u32,
             tx_id: 42 + seq,
             anchor_lsn: 7 + seq,
             leaves: vec![[seq as u8; 32], [(seq + 1) as u8; 32]],

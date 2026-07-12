@@ -117,16 +117,42 @@ pub struct VersionHashInput {
     pub version_id: u64,
     /// The previous version's id in the chain, if any.
     pub prev_version_id: Option<u64>,
+    /// The entity's label at this version (node label / edge type), resolved to
+    /// a string. Bound into the leaf so a relabel is tamper-evident (Issue
+    /// #3351: leaf previously omitted the label).
+    pub label: String,
+    /// For an edge, the source node id; `None` for a node. Bound so an edge
+    /// endpoint rewire is tamper-evident (Issue #3351).
+    pub source: Option<u64>,
+    /// For an edge, the target node id; `None` for a node. Bound so an edge
+    /// endpoint rewire is tamper-evident (Issue #3351).
+    pub target: Option<u64>,
     /// Valid-time start (micros); `None` only for a degenerate open start.
     pub valid_from: Option<i64>,
     /// Valid-time end (micros); `None` == open.
+    ///
+    /// A *live* version's valid end is closed by a later supersession, so it is
+    /// normalized out of the leaf (see `db::chain_source::normalize_immutable`).
+    /// A **born-closed terminal** version (delete tombstone or retraction) has an
+    /// immutable valid end (never re-closed by supersession because
+    /// `close_previous_version_intervals` only closes *open* valid intervals), so
+    /// for those it is retained and bound — closing the un-retract / re-validate
+    /// tamper hole (Issue #3351 finding 2).
     pub valid_to: Option<i64>,
     /// Transaction-time start (micros).
     pub transaction_from: Option<i64>,
-    /// Transaction-time end (micros); `None` == open.
+    /// Transaction-time end (micros); `None` == open. Always normalized out of
+    /// the leaf (a supersession closes it), retained here only for structural
+    /// consistency checks.
     pub transaction_to: Option<i64>,
-    /// Whether this version is current in both temporal dimensions.
+    /// Whether this version is current in both temporal dimensions. Normalized
+    /// out of the leaf (flips on supersession).
     pub is_current: bool,
+    /// Whether this version is a delete tombstone (its valid-time interval is
+    /// empty — `start == end`). Immutable after creation and bound into the leaf
+    /// so an un-delete (re-opening the tombstone interval) is tamper-evident
+    /// (Issue #3351 finding 2).
+    pub is_tombstone: bool,
     /// Write-time provenance, if any.
     pub provenance: Option<ProvenanceHashInput>,
     /// Materialized properties `(key, value)`. Encoding sorts by key, so the
@@ -163,6 +189,24 @@ fn properties_from_data(data: &VersionData) -> Vec<(String, PropertyValue)> {
     out
 }
 
+/// Resolve an [`InternedString`](crate::core::interning::InternedString) label to
+/// an owned string, defaulting to empty when the intern table cannot resolve it
+/// (a resolvable label always round-trips; the empty default keeps the leaf total).
+fn resolve_label(label: crate::core::interning::InternedString) -> String {
+    use crate::core::interning::GLOBAL_INTERNER;
+    GLOBAL_INTERNER
+        .resolve_with(label, |s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// Whether a bi-temporal interval's valid-time dimension is empty
+/// (`start == end`), which is exactly how a delete tombstone is encoded (see
+/// `apply::create_temporal_interval` / `HistoricalStorage::add_node_version`).
+fn is_tombstone_interval(interval: &crate::core::temporal::BiTemporalInterval) -> bool {
+    let vt = interval.valid_time();
+    vt.start() == vt.end()
+}
+
 impl From<&NodeVersion> for VersionHashInput {
     fn from(v: &NodeVersion) -> Self {
         let (vf, vt, tf, tt) = temporal_micros(&v.temporal);
@@ -171,11 +215,15 @@ impl From<&NodeVersion> for VersionHashInput {
             entity_id: v.node_id.as_u64(),
             version_id: v.id.as_u64(),
             prev_version_id: v.prev_version.map(|p| p.as_u64()),
+            label: resolve_label(v.label),
+            source: None,
+            target: None,
             valid_from: vf,
             valid_to: vt,
             transaction_from: tf,
             transaction_to: tt,
             is_current: v.temporal.is_current(),
+            is_tombstone: is_tombstone_interval(&v.temporal),
             provenance: v.provenance.as_deref().map(ProvenanceHashInput::from),
             properties: properties_from_data(&v.data),
         }
@@ -190,11 +238,15 @@ impl From<&EdgeVersion> for VersionHashInput {
             entity_id: v.edge_id.as_u64(),
             version_id: v.id.as_u64(),
             prev_version_id: v.prev_version.map(|p| p.as_u64()),
+            label: resolve_label(v.label),
+            source: Some(v.source.as_u64()),
+            target: Some(v.target.as_u64()),
             valid_from: vf,
             valid_to: vt,
             transaction_from: tf,
             transaction_to: tt,
             is_current: v.temporal.is_current(),
+            is_tombstone: is_tombstone_interval(&v.temporal),
             provenance: v.provenance.as_deref().map(ProvenanceHashInput::from),
             properties: properties_from_data(&v.data),
         }
@@ -377,11 +429,22 @@ fn version_canonical(input: &VersionHashInput) -> Vec<u8> {
     c.u64(input.entity_id);
     c.u64(input.version_id);
     c.opt_u64(input.prev_version_id);
+    // Label (length-prefixed str) — binds node label / edge type so a relabel
+    // changes the leaf (Issue #3351 finding 1).
+    c.str(&input.label);
+    // Edge endpoints (presence-gated u64) — bind source/target so an endpoint
+    // rewire changes the leaf; a node emits two `0` presence bytes (Issue #3351
+    // finding 1).
+    c.opt_u64(input.source);
+    c.opt_u64(input.target);
     c.opt_i64(input.valid_from);
     c.opt_i64(input.valid_to);
     c.opt_i64(input.transaction_from);
     c.opt_i64(input.transaction_to);
     c.bool(input.is_current);
+    // Tombstone discriminator — binds the delete flag so re-opening a tombstone
+    // interval (un-delete) changes the leaf (Issue #3351 finding 2).
+    c.bool(input.is_tombstone);
     c.provenance(&input.provenance);
 
     // Sort properties by key so map iteration order is not signed content.
@@ -410,13 +473,27 @@ pub fn version_leaf(input: &VersionHashInput) -> [u8; 32] {
 }
 
 /// The per-transaction digest, order- and count-dependent over its leaves:
-/// `SHA256(TX_DOMAIN || commit_ts || tx_id || len || leaf_0 || .. || leaf_n)`.
+/// `SHA256(TX_DOMAIN || commit_ts_micros || commit_ts_logical || len || leaf_0
+/// || .. || leaf_n)`.
+///
+/// # Determinism across live-seal and post-crash rebuild (Issue #3351 finding 4)
+///
+/// The digest binds the **full HLC commit timestamp** (`commit_ts_micros` *and*
+/// the logical counter), NOT the transaction id. The transaction id survives as
+/// record metadata only. This is deliberate:
+/// - the live seal path knows the real `tx_id`, but a post-crash rebuild folds
+///   from replayed history where the original `tx_id` is not recoverable — so
+///   binding `tx_id` made a rebuilt chain diverge from a pre-crash anchor;
+/// - the commit timestamp plus the (sorted) leaves uniquely identify a
+///   committed transaction, and the logical counter keeps two commits that
+///   share a wallclock microsecond distinct in *both* the live and rebuild
+///   paths.
 #[must_use]
-pub fn tx_digest(commit_ts_micros: i64, tx_id: u64, leaves: &[[u8; 32]]) -> [u8; 32] {
+pub fn tx_digest(commit_ts_micros: i64, commit_ts_logical: u32, leaves: &[[u8; 32]]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(CHAIN_TX_DOMAIN);
     h.update(commit_ts_micros.to_be_bytes());
-    h.update(tx_id.to_be_bytes());
+    h.update(commit_ts_logical.to_be_bytes());
     h.update((leaves.len() as u64).to_be_bytes());
     for leaf in leaves {
         h.update(leaf);
@@ -474,14 +551,60 @@ mod tests {
             entity_id: 1,
             version_id: 1,
             prev_version_id: None,
+            label: "Person".to_string(),
+            source: None,
+            target: None,
             valid_from: Some(100),
             valid_to: None,
             transaction_from: Some(100),
             transaction_to: None,
             is_current: true,
+            is_tombstone: false,
             provenance: None,
             properties: vec![("name".to_string(), PropertyValue::string("Alice"))],
         }
+    }
+
+    #[test]
+    fn distinct_label_produces_distinct_leaves() {
+        let a = base();
+        let mut b = base();
+        b.label = "Company".to_string();
+        assert_ne!(
+            version_leaf(&a),
+            version_leaf(&b),
+            "a relabel must change the leaf (Issue #3351 finding 1)"
+        );
+    }
+
+    #[test]
+    fn distinct_edge_endpoints_produce_distinct_leaves() {
+        let mut a = base();
+        a.entity_kind = EntityKind::Edge;
+        a.source = Some(10);
+        a.target = Some(20);
+        let mut b = a.clone();
+        b.target = Some(99); // rewire target
+        assert_ne!(
+            version_leaf(&a),
+            version_leaf(&b),
+            "an edge endpoint rewire must change the leaf (Issue #3351 finding 1)"
+        );
+        let mut c = a.clone();
+        c.source = Some(99); // rewire source
+        assert_ne!(version_leaf(&a), version_leaf(&c));
+    }
+
+    #[test]
+    fn tombstone_flag_produces_distinct_leaves() {
+        let a = base();
+        let mut b = base();
+        b.is_tombstone = true;
+        assert_ne!(
+            version_leaf(&a),
+            version_leaf(&b),
+            "the tombstone flag must change the leaf (Issue #3351 finding 2)"
+        );
     }
 
     #[test]
@@ -563,7 +686,8 @@ mod tests {
         assert_ne!(d_12, d_21, "leaf order must matter");
         assert_ne!(d_12, d_1, "leaf count must matter");
 
-        // commit_ts and tx_id are bound into the digest.
+        // The full HLC commit timestamp (wallclock micros AND logical counter)
+        // is bound into the digest; the tx id is not (Issue #3351 finding 4).
         assert_ne!(d_12, tx_digest(501, 7, &[l1, l2]));
         assert_ne!(d_12, tx_digest(500, 8, &[l1, l2]));
     }

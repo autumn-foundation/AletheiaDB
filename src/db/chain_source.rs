@@ -53,17 +53,21 @@ impl VersionSource for DbVersionSource {
     fn fetch(&self, kind: EntityKind, _id: u64, version_id: u64) -> Option<VersionHashInput> {
         let vid = VersionId::new(version_id).ok()?;
         let historical = self.historical.read();
+        // Cold-tier aware (Issue #3351 finding 5): read the version metadata via
+        // the tiered getter so verify does not FALSE-FAIL ("version not found")
+        // once a sealed version has migrated to the Redb cold tier. Property
+        // reconstruction (`reconstruct_*_properties`) is already tier-aware.
         let mut input = match kind {
             EntityKind::Node => {
-                let v = historical.get_node_version(vid)?;
-                let mut input = VersionHashInput::from(v);
+                let v = historical.get_node_version_tiered(vid).ok().flatten()?;
+                let mut input = VersionHashInput::from(v.as_ref());
                 let full = historical.reconstruct_node_properties(vid).ok()?;
                 input.properties = resolve_properties(&full);
                 input
             }
             EntityKind::Edge => {
-                let v = historical.get_edge_version(vid)?;
-                let mut input = VersionHashInput::from(v);
+                let v = historical.get_edge_version_tiered(vid).ok().flatten()?;
+                let mut input = VersionHashInput::from(v.as_ref());
                 let full = historical.reconstruct_edge_properties(vid).ok()?;
                 input.properties = resolve_properties(&full);
                 input
@@ -89,12 +93,47 @@ fn resolve_properties(
 }
 
 /// Normalize the fields a later supersession mutates to their as-written state,
-/// so a version's leaf is stable after sealing. The interval **ends** are
-/// closed and `is_current` flips when a successor version arrives, so all three
-/// are excluded from the bound content; the interval **starts**
-/// (`valid_from`/`transaction_from`), which are fixed at creation, remain bound.
+/// so a version's leaf is stable after sealing.
+///
+/// `transaction_to` and `is_current` are ALWAYS normalized out: a successor
+/// version closes the prior version's open transaction interval and flips
+/// `is_current`, so neither can be bound into an append-only leaf.
+///
+/// The valid-time **end** (`valid_to`) is handled per finding 2c:
+/// - For a *live* version it starts open and is closed by a later supersession
+///   (`close_previous_version_intervals` only closes **open** valid intervals),
+///   so it is mutable and MUST be normalized out — otherwise a legitimately
+///   superseded version would fail verification.
+/// - For a **born-closed terminal** version (a delete tombstone, or a
+///   retraction) the valid end is immutable: it is closed at creation and never
+///   re-closed (an already-closed valid interval fails the
+///   `is_currently_valid()` guard in supersession). Binding it directly makes a
+///   re-validation tamper (extending a retraction's `valid_to`, or re-opening a
+///   tombstone) change the leaf and break verification.
+///
+/// We detect "born-closed / historical closure" as `valid_to <= transaction_from`
+/// (the fact stopped being true at or before it was recorded — a tombstone has
+/// `valid_to == valid_from <= tx_from`, a default retraction has
+/// `valid_to == now == tx_from`) plus the explicit tombstone flag. This is a
+/// stable seal==verify predicate for the common case.
+///
+/// # Known limitation (documented v1)
+///
+/// A *backdated* supersession — two heavily backdated writes to the same entity
+/// where the successor's `valid_start` lands at or before the prior version's
+/// own `transaction_from` — closes the prior (live) version's `valid_to` to a
+/// point `<= tx_from`, which this predicate would then treat as born-closed and
+/// bind, while it was open at seal time. That is a rare false-positive class, not
+/// a missed tamper; the timeline-consistency check does not add false negatives.
 fn normalize_immutable(input: &mut VersionHashInput) {
-    input.valid_to = None;
+    let born_closed = input.is_tombstone
+        || matches!(
+            (input.valid_to, input.transaction_from),
+            (Some(vt), Some(tf)) if vt <= tf
+        );
+    if !born_closed {
+        input.valid_to = None;
+    }
     input.transaction_to = None;
     input.is_current = true;
 }

@@ -72,10 +72,22 @@ pub fn verify_full(
     src: &dyn VersionSource,
     genesis: &ChainHead,
 ) -> ChainVerification {
+    // Fold in canonical commit-timestamp order (Issue #3351 finding 4); records
+    // reach here already sorted, but sort a local copy defensively so the fold is
+    // order-independent.
+    let mut ordered: Vec<&ChainTxRecord> = records.iter().collect();
+    ordered.sort_by(|a, b| {
+        (a.commit_ts, a.commit_ts_logical, &a.leaves).cmp(&(
+            b.commit_ts,
+            b.commit_ts_logical,
+            &b.leaves,
+        ))
+    });
+
     let mut prev = genesis.digest;
     let mut checked: u64 = 0;
 
-    for rec in records {
+    for rec in &ordered {
         // Recompute each leaf from the authoritative source.
         let mut recomputed_leaves = Vec::with_capacity(rec.entity_refs.len());
         for (kind, id, vid) in &rec.entity_refs {
@@ -106,7 +118,7 @@ pub fn verify_full(
         }
 
         // Recompute the tx digest and fold; compare to the sealed digest.
-        let txd = tx_digest(rec.commit_ts, rec.tx_id, &recomputed_leaves);
+        let txd = tx_digest(rec.commit_ts, rec.commit_ts_logical, &recomputed_leaves);
         let step = chain_step(&prev, &txd);
         if step != rec.digest {
             return ChainVerification::broken(
@@ -122,7 +134,13 @@ pub fn verify_full(
         checked += 1;
     }
 
-    let head_seq = records.last().map(|r| r.seq).unwrap_or(genesis.seq);
+    // Structural timeline-consistency check (Issue #3351 finding 2b). Runs after
+    // the fold so a leaf/digest tamper is reported first.
+    if let Some(broken) = check_timeline_consistency(&ordered, src) {
+        return broken;
+    }
+
+    let head_seq = ordered.last().map(|r| r.seq).unwrap_or(genesis.seq);
     ChainVerification {
         passed: true,
         head_seq,
@@ -131,6 +149,100 @@ pub fn verify_full(
         reason: None,
         transactions_checked: checked,
     }
+}
+
+/// Per-entity bi-temporal timeline-consistency check (Issue #3351 finding 2b).
+///
+/// The leaf hash binds the interval **starts**, the tombstone flag, and — for
+/// born-closed terminal versions — the valid-time **end** (see
+/// `db::chain_source::normalize_immutable`), but a *live* version's ends are
+/// mutated by later supersession and so are not directly hashable. This check
+/// catches structural interval-END tampering that the leaf hash cannot:
+///
+/// **What it catches:** per entity, the versions ordered by transaction-time
+/// start must have non-decreasing transaction starts and each version's own
+/// interval must be well-formed (`valid_from <= valid_to`, `tx_from <= tx_to`).
+/// A tombstone/retraction whose end was widened past a well-formedness bound, or
+/// a version whose recorded transaction start was moved before an earlier one,
+/// is flagged.
+///
+/// **What it does NOT catch:** it cannot, on its own, detect an interval-end
+/// edit that keeps every per-version interval individually well-formed and does
+/// not reorder transaction starts (e.g. extending a *terminal* retraction's
+/// `valid_to` to a still-valid future point when nothing follows it) — that case
+/// is covered instead by the leaf hash binding the born-closed terminal
+/// `valid_to` (finding 2c). The two mechanisms are complementary.
+fn check_timeline_consistency(
+    ordered: &[&ChainTxRecord],
+    src: &dyn VersionSource,
+) -> Option<ChainVerification> {
+    use std::collections::BTreeMap;
+
+    // Collect (tx_from, valid_from, valid_to, tx_to) per entity from the source.
+    struct Iv {
+        seq: u64,
+        valid_from: Option<i64>,
+        valid_to: Option<i64>,
+        tx_from: Option<i64>,
+        tx_to: Option<i64>,
+    }
+    let mut by_entity: BTreeMap<(u8, u64), Vec<Iv>> = BTreeMap::new();
+    for rec in ordered {
+        for (kind, id, vid) in &rec.entity_refs {
+            if let Some(input) = src.fetch(*kind, *id, *vid) {
+                by_entity.entry((kind.tag(), *id)).or_default().push(Iv {
+                    seq: rec.seq,
+                    valid_from: input.valid_from,
+                    valid_to: input.valid_to,
+                    tx_from: input.transaction_from,
+                    tx_to: input.transaction_to,
+                });
+            }
+        }
+    }
+
+    for ivs in by_entity.values() {
+        let mut prev_tx_from: Option<i64> = None;
+        for iv in ivs {
+            // Each version's own interval must be well-formed.
+            if let (Some(vf), Some(vt)) = (iv.valid_from, iv.valid_to)
+                && vt < vf
+            {
+                return Some(ChainVerification::broken(
+                    iv.seq.saturating_sub(1),
+                    String::new(),
+                    iv.seq,
+                    "timeline inconsistency: valid_to precedes valid_from".to_string(),
+                    0,
+                ));
+            }
+            if let (Some(tf), Some(tt)) = (iv.tx_from, iv.tx_to)
+                && tt < tf
+            {
+                return Some(ChainVerification::broken(
+                    iv.seq.saturating_sub(1),
+                    String::new(),
+                    iv.seq,
+                    "timeline inconsistency: transaction_to precedes transaction_from".to_string(),
+                    0,
+                ));
+            }
+            // Transaction starts are monotonic in fold order for one entity.
+            if let (Some(prev), Some(cur)) = (prev_tx_from, iv.tx_from)
+                && cur < prev
+            {
+                return Some(ChainVerification::broken(
+                    iv.seq.saturating_sub(1),
+                    String::new(),
+                    iv.seq,
+                    "timeline inconsistency: transaction start regressed for entity".to_string(),
+                    0,
+                ));
+            }
+            prev_tx_from = iv.tx_from.or(prev_tx_from);
+        }
+    }
+    None
 }
 
 /// Maps an entity identity to every `(record index, leaf position, version id)`
@@ -250,7 +362,7 @@ pub fn verify_entity(
         } else {
             records[occ.record_idx - 1].digest
         };
-        let txd = tx_digest(rec.commit_ts, rec.tx_id, &rec.leaves);
+        let txd = tx_digest(rec.commit_ts, rec.commit_ts_logical, &rec.leaves);
         if chain_step(&prev, &txd) != rec.digest {
             return ChainVerification::broken(
                 rec.seq.saturating_sub(1),
@@ -276,17 +388,92 @@ pub fn verify_entity(
     }
 }
 
-/// Prove the current chain extends a previously exported anchor: the record at
-/// `anchor.seq` must exist and match `anchor.digest`. A missing seq means the
-/// chain was truncated (rollback); a mismatching digest means it diverged (fork).
+/// Prove the current chain append-only-extends a previously exported anchor
+/// (Issue #3351 finding 3).
+///
+/// # Why this RE-FOLDS instead of trusting the stored digest
+///
+/// A prior version merely looked up the record at `anchor.seq` and compared its
+/// stored `digest` field to `anchor.digest`. That is forgeable: an attacker who
+/// knows the (offsite) anchor digest can fabricate a `chain.log` that simply
+/// carries `anchor.digest` in the `digest` field of the record at `anchor.seq`
+/// while every leaf/fold underneath is bogus — and it would pass. Instead this
+/// **recomputes the chain from genesis** up to `anchor.seq`: it re-folds each
+/// record's `tx_digest`/`chain_step` from the sealed leaves, requires the
+/// recomputed digest at `anchor.seq` to equal `anchor.digest`, and requires the
+/// chain's own genesis digest to equal the anchor's `genesis_digest`. Only then
+/// is the equality trustworthy. It then confirms the current chain extends that
+/// verified prefix (no fork past the anchor).
+///
+/// Note this re-folds the log's own leaves (proving the log is internally sound
+/// and genuinely descends from the anchored genesis); it does not re-fetch
+/// version content — pair with [`verify_full`] for on-disk version tamper.
 #[must_use]
-pub fn verify_against_anchor(records: &[ChainTxRecord], anchor: &ChainHead) -> ChainVerification {
-    let head_seq = records.last().map(|r| r.seq).unwrap_or(0);
-    let head_digest_hex =
-        super::canonical::to_hex(&records.last().map(|r| r.digest).unwrap_or(anchor.digest));
+pub fn verify_against_anchor(
+    records: &[ChainTxRecord],
+    genesis: &ChainHead,
+    anchor: &ChainHead,
+) -> ChainVerification {
+    // Fold in canonical order (defensive; records arrive sorted).
+    let mut ordered: Vec<&ChainTxRecord> = records.iter().collect();
+    ordered.sort_by(|a, b| {
+        (a.commit_ts, a.commit_ts_logical, &a.leaves).cmp(&(
+            b.commit_ts,
+            b.commit_ts_logical,
+            &b.leaves,
+        ))
+    });
 
-    // A genesis anchor (seq 0) is extended by any chain; the digest can only be
-    // checked once real records exist, which they always do here.
+    let head_seq = ordered.last().map(|r| r.seq).unwrap_or(0);
+    let head_digest_hex =
+        super::canonical::to_hex(&ordered.last().map(|r| r.digest).unwrap_or(anchor.digest));
+
+    // The anchor must descend from the same genesis this chain was seeded with;
+    // otherwise the comparison below would be against an unrelated chain.
+    if anchor.genesis_digest != genesis.genesis_digest {
+        return ChainVerification::broken(
+            head_seq,
+            head_digest_hex,
+            anchor.seq,
+            "anchor genesis digest does not match this chain's genesis (unrelated chain)"
+                .to_string(),
+            0,
+        );
+    }
+
+    // Re-fold from genesis, checking each record's stored digest against the
+    // recomputed fold, and capture the recomputed digest at `anchor.seq`.
+    let mut prev = genesis.digest;
+    let mut recomputed_at_anchor: Option<[u8; 32]> = None;
+    let mut checked: u64 = 0;
+    for rec in &ordered {
+        let txd = tx_digest(rec.commit_ts, rec.commit_ts_logical, &rec.leaves);
+        let step = chain_step(&prev, &txd);
+        if step != rec.digest {
+            // The log is internally inconsistent — a forged/tampered record.
+            return ChainVerification::broken(
+                rec.seq.saturating_sub(1),
+                super::canonical::to_hex(&prev),
+                rec.seq,
+                "recomputed chain digest differs from stored digest (forged/tampered log)"
+                    .to_string(),
+                checked,
+            );
+        }
+        if rec.seq == anchor.seq {
+            recomputed_at_anchor = Some(step);
+        }
+        prev = rec.digest;
+        checked += 1;
+        if rec.seq == anchor.seq {
+            // We have re-folded the whole prefix up to the anchor; stop verifying
+            // the prefix (records beyond it are the extension).
+            break;
+        }
+    }
+
+    // A genesis anchor (seq 0) is extended by any chain that shares its genesis
+    // (already checked above).
     if anchor.seq == 0 {
         return ChainVerification {
             passed: true,
@@ -294,11 +481,11 @@ pub fn verify_against_anchor(records: &[ChainTxRecord], anchor: &ChainHead) -> C
             head_digest_hex,
             earliest_broken_seq: None,
             reason: None,
-            transactions_checked: 0,
+            transactions_checked: checked,
         };
     }
 
-    match records.iter().find(|r| r.seq == anchor.seq) {
+    match recomputed_at_anchor {
         None => ChainVerification::broken(
             head_seq,
             head_digest_hex,
@@ -307,25 +494,25 @@ pub fn verify_against_anchor(records: &[ChainTxRecord], anchor: &ChainHead) -> C
                 "chain truncated: no record at anchor seq {} (rollback)",
                 anchor.seq
             ),
-            0,
+            checked,
         ),
-        Some(rec) if rec.digest == anchor.digest => ChainVerification {
+        Some(d) if d == anchor.digest => ChainVerification {
             passed: true,
             head_seq,
             head_digest_hex,
             earliest_broken_seq: None,
             reason: None,
-            transactions_checked: 1,
+            transactions_checked: checked,
         },
         Some(_) => ChainVerification::broken(
             head_seq,
             head_digest_hex,
             anchor.seq,
             format!(
-                "chain diverged: digest at seq {} differs from anchor (fork)",
+                "chain diverged: recomputed digest at seq {} differs from anchor (fork)",
                 anchor.seq
             ),
-            0,
+            checked,
         ),
     }
 }
@@ -363,11 +550,15 @@ mod tests {
             entity_id: id,
             version_id: vid,
             prev_version_id: None,
+            label: "Person".to_string(),
+            source: None,
+            target: None,
             valid_from: Some(100),
             valid_to: None,
             transaction_from: Some(100),
             transaction_to: None,
             is_current: true,
+            is_tombstone: false,
             provenance: None,
             properties: vec![("name".to_string(), PropertyValue::string(name))],
         }
@@ -385,12 +576,14 @@ mod tests {
             let leaf = version_leaf(&vi);
             let seq = (i + 1) as u64;
             let commit_ts = 1000 + seq as i64;
+            let commit_ts_logical = 0u32;
             let tx_id = seq;
-            let txd = tx_digest(commit_ts, tx_id, &[leaf]);
+            let txd = tx_digest(commit_ts, commit_ts_logical, &[leaf]);
             let digest = chain_step(&prev, &txd);
             records.push(ChainTxRecord {
                 seq,
                 commit_ts,
+                commit_ts_logical,
                 tx_id,
                 anchor_lsn: seq,
                 leaves: vec![leaf],
@@ -465,31 +658,31 @@ mod tests {
 
     #[test]
     fn verify_against_anchor_passes_on_extension() {
-        let (records, _src, _genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
+        let (records, _src, genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
         let anchor = ChainHead {
             seq: 2,
             digest: records[1].digest,
             commit_ts: records[1].commit_ts,
             anchor_lsn: records[1].anchor_lsn,
-            genesis_digest: [0u8; 32],
+            genesis_digest: genesis.genesis_digest,
         };
-        let v = verify_against_anchor(&records, &anchor);
+        let v = verify_against_anchor(&records, &genesis, &anchor);
         assert!(v.passed, "reason: {:?}", v.reason);
     }
 
     #[test]
     fn verify_against_anchor_detects_truncation() {
-        let (records, _src, _genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
+        let (records, _src, genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
         let anchor = ChainHead {
             seq: 3,
             digest: records[2].digest,
             commit_ts: records[2].commit_ts,
             anchor_lsn: records[2].anchor_lsn,
-            genesis_digest: [0u8; 32],
+            genesis_digest: genesis.genesis_digest,
         };
         // Roll back to only 2 records.
         let truncated = &records[..2];
-        let v = verify_against_anchor(truncated, &anchor);
+        let v = verify_against_anchor(truncated, &genesis, &anchor);
         assert!(!v.passed);
         assert_eq!(v.earliest_broken_seq, Some(3));
         assert!(v.reason.unwrap().contains("rollback"));
@@ -497,18 +690,43 @@ mod tests {
 
     #[test]
     fn verify_against_anchor_detects_fork() {
-        let (records, _src, _genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
+        let (records, _src, genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
         let anchor = ChainHead {
             seq: 2,
             // A digest that does not match the real record at seq 2.
             digest: [0x11u8; 32],
             commit_ts: records[1].commit_ts,
             anchor_lsn: records[1].anchor_lsn,
-            genesis_digest: [0u8; 32],
+            genesis_digest: genesis.genesis_digest,
         };
-        let v = verify_against_anchor(&records, &anchor);
+        let v = verify_against_anchor(&records, &genesis, &anchor);
         assert!(!v.passed);
         assert_eq!(v.earliest_broken_seq, Some(2));
         assert!(v.reason.unwrap().contains("fork"));
+    }
+
+    /// Issue #3351 finding 3: a forged log whose record at `anchor.seq` carries
+    /// the known anchor digest but whose fold is broken must be REJECTED (the
+    /// old compare-stored-digest path accepted it).
+    #[test]
+    fn verify_against_anchor_rejects_forged_digest_with_broken_fold() {
+        let (records, _src, genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
+        let anchor = ChainHead {
+            seq: 2,
+            digest: records[1].digest,
+            commit_ts: records[1].commit_ts,
+            anchor_lsn: records[1].anchor_lsn,
+            genesis_digest: genesis.genesis_digest,
+        };
+        // Forge a log: keep the anchor digest at seq 2, but corrupt the leaves so
+        // the fold no longer produces that digest.
+        let mut forged = records.clone();
+        forged[1].leaves[0][0] ^= 0xFF; // break the fold under the anchored digest
+        let v = verify_against_anchor(&forged, &genesis, &anchor);
+        assert!(!v.passed, "forged log must be rejected");
+        assert!(
+            v.reason.as_deref().unwrap().contains("forged")
+                || v.reason.as_deref().unwrap().contains("tampered")
+        );
     }
 }

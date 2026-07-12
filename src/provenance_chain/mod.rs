@@ -68,11 +68,15 @@ mod integration_tests {
             entity_id: id,
             version_id: vid,
             prev_version_id: None,
+            label: "Person".to_string(),
+            source: None,
+            target: None,
             valid_from: Some(10),
             valid_to: None,
             transaction_from: Some(10),
             transaction_to: None,
             is_current: true,
+            is_tombstone: false,
             provenance: None,
             properties: vec![("name".to_string(), PropertyValue::string(name))],
         }
@@ -92,11 +96,12 @@ mod integration_tests {
             src.0
                 .insert((v.entity_kind, v.entity_id, v.version_id), v.clone());
             let leaf = version_leaf(&v);
-            let txd = tx_digest(1000 + seq as i64, seq, &[leaf]);
+            let txd = tx_digest(1000 + seq as i64, 0, &[leaf]);
             let digest = chain_step(&prev, &txd);
             let rec = ChainTxRecord {
                 seq,
                 commit_ts: 1000 + seq as i64,
+                commit_ts_logical: 0,
                 tx_id: seq,
                 anchor_lsn: seq,
                 leaves: vec![leaf],
@@ -129,6 +134,6 @@ mod integration_tests {
         assert_eq!(result.head_digest_hex, to_hex(&head.digest));
 
         // The reloaded head extends the exported anchor.
-        assert!(verify_against_anchor(&records, &checkpoint).passed);
+        assert!(verify_against_anchor(&records, &genesis, &checkpoint).passed);
     }
 }

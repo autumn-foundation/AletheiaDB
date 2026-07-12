@@ -173,12 +173,13 @@ fn ac3_tamper_is_detected_and_localized() {
 
     // Flip one byte inside the first sealed record's first leaf. Layout of
     // chain.log: header(12) + [frame_len(4) + payload]; payload =
-    // seq(8) commit_ts(8) tx_id(8) anchor_lsn(8) n_leaves(8) leaves(32*n)...,
-    // so the first leaf begins at offset 12 + 4 + 40 = 56.
+    // seq(8) commit_ts(8) commit_ts_logical(4) tx_id(8) anchor_lsn(8)
+    // n_leaves(8) leaves(32*n)..., so the first leaf begins at offset
+    // 12 + 4 + (8+8+4+8+8+8) = 60.
     let log_path = dir.path().join("chain").join("chain.log");
     let mut bytes = std::fs::read(&log_path).unwrap();
-    assert!(bytes.len() > 56, "chain log unexpectedly small");
-    bytes[56] ^= 0xFF;
+    assert!(bytes.len() > 60, "chain log unexpectedly small");
+    bytes[60] ^= 0xFF;
     std::fs::write(&log_path, &bytes).unwrap();
 
     // Reopen and verify: the tampered sealed leaf no longer matches history.
@@ -339,6 +340,65 @@ fn ac6_crash_recovery_rebuilds_tail() {
     let v = db.verify_chain().unwrap();
     assert!(v.passed, "rebuilt chain must verify: {:?}", v.reason);
     assert_eq!(v.transactions_checked, 3);
+}
+
+// ---------------------------------------------------------------------------
+// Finding 4 (Issue #3351): the rebuilt-from-history chain must reproduce the
+// EXACT pre-crash head digest, so an anchor exported before the crash still
+// verifies as an append-only extension after rebuild. This fails without the
+// deterministic commit-ordered digest (tx_id removed from the fold; full HLC
+// bound; records folded in commit-timestamp order in both live and rebuild
+// paths).
+//
+// Crash model: the head checkpoint (which carries the immutable genesis digest)
+// survives, but the sealed log tail is lost — forcing a full tail rebuild on
+// reopen. The genesis cannot be reproduced from scratch (it is seeded from the
+// open-time LSN, which differs after replay), so preserving the checkpoint's
+// genesis is exactly what a real durable chain does.
+// ---------------------------------------------------------------------------
+#[test]
+fn finding4_rebuilt_chain_matches_precrash_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let anchor;
+    {
+        let db = AletheiaDB::with_unified_config(enabled_config(dir.path())).unwrap();
+        let a = db.create_node("Person", props("Alice")).unwrap();
+        let b = db.create_node("Person", props("Bob")).unwrap();
+        db.create_edge(a, b, "KNOWS", props("")).unwrap();
+        db.create_node("Person", props("Carol")).unwrap();
+        wait_for_head_seq(&db, 4);
+        anchor = db.export_chain_head().unwrap();
+        assert_eq!(anchor.seq, 4);
+        // db drops here: log + head checkpoint flushed.
+    }
+
+    // Simulate the lost sealed tail: truncate chain.log back to just its 12-byte
+    // header (dropping every sealed record) while KEEPING the head checkpoint so
+    // the genesis digest survives. On reopen the chain loads zero records
+    // (head == genesis) and rebuilds all four transactions from replayed history.
+    let log_path = dir.path().join("chain").join("chain.log");
+    let bytes = std::fs::read(&log_path).unwrap();
+    std::fs::write(&log_path, &bytes[..12]).unwrap();
+
+    let db = AletheiaDB::with_unified_config(enabled_config(dir.path())).unwrap();
+    let head = db.export_chain_head().unwrap();
+    assert_eq!(head.seq, 4, "tail rebuilt one record per recovered tx");
+
+    // The rebuilt chain reproduces the pre-crash digest exactly: the pre-crash
+    // anchor verifies as an append-only extension (no false fork).
+    assert_eq!(
+        head.digest, anchor.digest,
+        "rebuilt head digest must equal the pre-crash head digest"
+    );
+    let v = db.verify_chain_against(&anchor).unwrap();
+    assert!(
+        v.passed,
+        "pre-crash anchor must verify against the rebuilt chain: {:?}",
+        v.reason
+    );
+
+    // And full verification still passes over the rebuilt records.
+    assert!(db.verify_chain().unwrap().passed);
 }
 
 // ---------------------------------------------------------------------------

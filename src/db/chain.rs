@@ -119,6 +119,7 @@ impl AletheiaDB {
         }
         PendingTx {
             commit_ts_micros: commit_ts.wallclock(),
+            commit_ts_logical: commit_ts.logical(),
             tx_id: cap.tx_id,
             anchor_lsn,
             entity_refs: cap.refs,
@@ -170,7 +171,7 @@ impl AletheiaDB {
             }
         }
 
-        for ((wallclock, _logical), refs) in groups {
+        for ((wallclock, logical), refs) in groups {
             // Only seal transactions beyond the loaded head. When the head is
             // genesis (seq 0) every restored transaction is unsealed; otherwise
             // skip anything at or before the head's commit timestamp (already
@@ -181,10 +182,13 @@ impl AletheiaDB {
             }
             let pending = PendingTx {
                 commit_ts_micros: wallclock,
-                // Synthetic, deterministic tx id for rebuilt records: the WAL
-                // does not carry the original tx id, and these transactions were
-                // never live-sealed, so any stable value keeps the record
-                // internally consistent (verify recomputes from stored fields).
+                // The full HLC commit timestamp (wallclock + logical) is what the
+                // digest binds — identical in the live-seal and rebuild paths, so
+                // a rebuilt chain reproduces the live head (Issue #3351 finding 4).
+                commit_ts_logical: logical,
+                // Synthetic tx id for rebuilt records: the WAL does not carry the
+                // original tx id, and it is NOT folded into the digest — it is
+                // record metadata only, so any stable value is fine.
                 tx_id: wallclock as u64,
                 anchor_lsn: head.anchor_lsn,
                 entity_refs: refs,
@@ -241,5 +245,181 @@ impl AletheiaDB {
                     .to_string(),
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tamper_tests {
+    //! Real historical-version tamper tests (Issue #3351 finding 6, exercising
+    //! findings 1 & 2). Unlike the AC3 integration test (which tampers the sealed
+    //! `chain.log`), these mutate a **stored data version**'s content in place via
+    //! the `pub(crate)` `insert_restored_*_version` storage API — the same path
+    //! index-persistence restore uses — then assert `verify_chain` recomputes the
+    //! leaf from the tampered version, finds it disagrees with the sealed leaf,
+    //! and localizes the break. This is the dual of AC3 and the only in-crate way
+    //! to reach the stored version without touching off-limits storage internals.
+
+    use std::time::Duration;
+
+    use crate::PropertyMapBuilder;
+    use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::temporal::{BiTemporalInterval, time};
+    use crate::db::AletheiaDB;
+    use crate::provenance_chain::{ChainConfig, ChainFsyncMode};
+    use crate::storage::index_persistence::PersistenceConfig;
+    use crate::storage::wal::DurabilityMode;
+
+    fn enabled_db(dir: &std::path::Path) -> AletheiaDB {
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.join("wal"))
+                    .durability_mode(DurabilityMode::Synchronous)
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: dir.join("indexes"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .chain(ChainConfig {
+                enabled: true,
+                fsync: ChainFsyncMode::PerTransaction,
+                dir: None,
+            })
+            .build();
+        AletheiaDB::with_unified_config(config).unwrap()
+    }
+
+    fn props(name: &str) -> crate::PropertyMap {
+        PropertyMapBuilder::new().insert("name", name).build()
+    }
+
+    fn wait_seq(db: &AletheiaDB, expected: u64) {
+        for _ in 0..300 {
+            if db.export_chain_head().unwrap().seq >= expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "chain head stuck at {}",
+            db.export_chain_head().unwrap().seq
+        );
+    }
+
+    /// Finding 1: relabeling a stored node version is caught (label is now bound
+    /// into the leaf).
+    #[test]
+    fn tampering_stored_node_label_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = enabled_db(dir.path());
+        let alice = db.create_node("Person", props("Alice")).unwrap();
+        wait_seq(&db, 1);
+        assert!(db.verify_chain().unwrap().passed);
+
+        // Relabel the stored version in place.
+        {
+            let mut hist = db.historical.write();
+            let vid = hist.get_current_node_version(alice).unwrap();
+            let mut v = hist.get_node_version(vid).unwrap().clone();
+            v.label = GLOBAL_INTERNER.intern("Robot").unwrap();
+            hist.insert_restored_node_version(v).unwrap();
+        }
+
+        let v = db.verify_chain().unwrap();
+        assert!(!v.passed, "a relabel must be detected");
+        assert!(v.earliest_broken_seq.is_some(), "tamper is localized");
+    }
+
+    /// Finding 1: rewiring a stored edge version's target is caught (endpoints are
+    /// now bound into the leaf).
+    #[test]
+    fn tampering_stored_edge_endpoint_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = enabled_db(dir.path());
+        let a = db.create_node("Person", props("Alice")).unwrap();
+        let b = db.create_node("Person", props("Bob")).unwrap();
+        let c = db.create_node("Person", props("Carol")).unwrap();
+        let edge = db.create_edge(a, b, "KNOWS", props("")).unwrap();
+        wait_seq(&db, 4);
+        assert!(db.verify_chain().unwrap().passed);
+
+        // Rewire the stored edge's target from b to c.
+        {
+            let mut hist = db.historical.write();
+            let vid = hist.get_current_edge_version(edge).unwrap();
+            let mut v = hist.get_edge_version(vid).unwrap().clone();
+            v.target = c;
+            hist.insert_restored_edge_version(v).unwrap();
+        }
+
+        let v = db.verify_chain().unwrap();
+        assert!(!v.passed, "an edge endpoint rewire must be detected");
+        assert!(v.earliest_broken_seq.is_some());
+    }
+
+    /// Finding 2: extending a retraction version's `valid_to` (re-validating an
+    /// ended fact) is caught — the born-closed terminal `valid_to` is bound.
+    #[test]
+    fn tampering_retraction_valid_to_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = enabled_db(dir.path());
+        let alice = db.create_node("Person", props("Alice")).unwrap();
+        // Retract at "now": closes valid time. Seals as a second transaction.
+        db.retract_node(alice, time::now()).unwrap();
+        wait_seq(&db, 2);
+        assert!(db.verify_chain().unwrap().passed);
+
+        // Extend the stored retraction's valid_to far into the future.
+        {
+            let mut hist = db.historical.write();
+            let vid = hist.get_current_node_version(alice).unwrap();
+            let mut v = hist.get_node_version(vid).unwrap().clone();
+            let vf = v.temporal.valid_time().start();
+            let extended = crate::core::hlc::HybridTimestamp::new_unchecked(
+                vf.wallclock() + 10_000_000_000,
+                0,
+            );
+            v.temporal = v.temporal.close_valid_time(extended).unwrap();
+            hist.insert_restored_node_version(v).unwrap();
+        }
+
+        let v = db.verify_chain().unwrap();
+        assert!(
+            !v.passed,
+            "extending a retraction valid_to must be detected"
+        );
+        assert!(v.earliest_broken_seq.is_some());
+    }
+
+    /// Finding 2: re-opening a delete tombstone's interval (un-deleting) is caught
+    /// — the tombstone flag is bound into the leaf.
+    #[test]
+    fn tampering_tombstone_reopen_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = enabled_db(dir.path());
+        let alice = db.create_node("Person", props("Alice")).unwrap();
+        // Delete (no connected edges): creates a tombstone, sealed as tx 2.
+        db.delete_node_with_valid_time(alice, None).unwrap();
+        wait_seq(&db, 2);
+        assert!(db.verify_chain().unwrap().passed);
+
+        // Re-open the tombstone's empty valid interval into an open one.
+        {
+            let mut hist = db.historical.write();
+            let vid = hist.get_current_node_version(alice).unwrap();
+            let mut v = hist.get_node_version(vid).unwrap().clone();
+            let vf = v.temporal.valid_time().start();
+            let tx_from = v.temporal.transaction_time().start();
+            v.temporal = BiTemporalInterval::with_valid_time(vf, tx_from); // open valid
+            hist.insert_restored_node_version(v).unwrap();
+        }
+
+        let v = db.verify_chain().unwrap();
+        assert!(!v.passed, "re-opening a tombstone must be detected");
+        assert!(v.earliest_broken_seq.is_some());
     }
 }

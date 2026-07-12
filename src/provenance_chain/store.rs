@@ -96,6 +96,51 @@ impl ChainStore {
         Ok(())
     }
 
+    /// Atomically rewrite the entire log to `records` (header + framed records),
+    /// replacing the append handle with one positioned at the new tail.
+    ///
+    /// Used by the sealer's rare out-of-order path (Issue #3351 finding 4): when
+    /// a transaction arrives with a commit timestamp that sorts *before* an
+    /// already-sealed record, the in-memory suffix is re-folded and the log is
+    /// rewritten so the persisted order stays the canonical commit-timestamp
+    /// order. The common in-order case still uses [`append`](Self::append).
+    pub fn rewrite(&self, records: &[ChainTxRecord]) -> ChainResult<()> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(LOG_MAGIC);
+        payload.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        for record in records {
+            let body = record.encode();
+            let len = u32::try_from(body.len())
+                .map_err(|_| ChainError::BadFraming("record too large to frame".into()))?;
+            payload.extend_from_slice(&len.to_be_bytes());
+            payload.extend_from_slice(&body);
+        }
+
+        let tmp_path = self.log_path.with_extension("log.tmp");
+        {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&tmp_path)?;
+            f.write_all(&payload)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, &self.log_path)?;
+
+        // Re-point the append handle at the rewritten log.
+        let new_append = OpenOptions::new().append(true).open(&self.log_path)?;
+        let mut guard = self
+            .append
+            .lock()
+            .map_err(|_| ChainError::Io("chain append lock poisoned".into()))?;
+        *guard = new_append;
+        if self.fsync == ChainFsyncMode::PerTransaction {
+            guard.sync_all()?;
+        }
+        Ok(())
+    }
+
     /// Force any buffered/os-cached writes to durable storage. Useful for
     /// [`ChainFsyncMode::Batched`] callers that batch appends and flush
     /// explicitly.
@@ -219,6 +264,7 @@ mod tests {
         ChainTxRecord {
             seq,
             commit_ts: 1000 + seq as i64,
+            commit_ts_logical: 0,
             tx_id: seq,
             anchor_lsn: seq,
             leaves: vec![[seq as u8; 32]],

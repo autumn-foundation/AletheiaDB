@@ -10,13 +10,23 @@
 //! read the SAME [`VersionSource`], a sealed leaf always reproduces exactly
 //! unless the stored version content was tampered with.
 //!
-//! # Ordering
+//! # Ordering (Issue #3351 finding 4)
 //!
-//! The sealer keeps a small reorder buffer keyed by `(commit_ts, tx_id)` so
-//! records are appended in commit order even when two racing writers enqueue out
-//! of order. Correctness never depends on the channel capacity: an enqueue that
-//! finds the channel full seals **inline** (drop-to-sync-seal) rather than
-//! blocking or dropping the transaction, so every committed transaction is
+//! The chain digest is a deterministic function of the record set **sorted by
+//! the full HLC commit timestamp** `(commit_ts, commit_ts_logical)` (tie-broken
+//! by the sorted leaves), NOT of enqueue/arrival order. [`Sealer::seal_one`]
+//! inserts each new record at its canonical sorted position: the common case is
+//! an append at the tail (`O(1)` fold), and a rare out-of-order arrival re-folds
+//! only the bounded suffix after the insertion point and rewrites the log so the
+//! persisted order stays canonical. Consequently a live-sealed chain and a
+//! post-crash rebuilt chain (which folds replayed history in the same sorted
+//! order) yield the identical head digest — enqueue order cannot fork them. The
+//! sealer's reorder buffer is now only a batching convenience.
+//!
+//! Correctness never depends on the channel capacity: an enqueue that finds the
+//! channel full seals **inline** (drop-to-sync-seal) — which still routes through
+//! the same sorted-insert `seal_one`, so it cannot fold out of order — rather
+//! than blocking or dropping the transaction, so every committed transaction is
 //! always sealed exactly once.
 //!
 //! # Recovery
@@ -57,9 +67,14 @@ const SEAL_CHANNEL_CAPACITY: usize = 4096;
 /// in-flight buffer.
 #[derive(Debug, Clone)]
 pub struct PendingTx {
-    /// Commit timestamp (micros since epoch) — the grouping and ordering key.
+    /// Commit timestamp (micros since epoch) — the primary grouping/ordering key.
     pub commit_ts_micros: i64,
-    /// The committing transaction's id.
+    /// Logical counter of the HLC commit timestamp — the ordering tie-breaker so
+    /// two transactions in the same microsecond stay distinct (Issue #3351
+    /// finding 4).
+    pub commit_ts_logical: u32,
+    /// The committing transaction's id. Carried as record metadata only; NOT
+    /// folded into the digest (a rebuild cannot recover it).
     pub tx_id: u64,
     /// WAL LSN this transaction is anchored at.
     pub anchor_lsn: u64,
@@ -100,8 +115,20 @@ struct ChainInner {
 }
 
 impl Sealer {
-    /// Seal one transaction: recompute its leaves from the source, fold onto the
-    /// running head, append the record, and advance the head + entity index.
+    /// Seal one transaction: recompute its leaves from the source, insert the
+    /// record at its **commit-timestamp-sorted** position, (re-)fold the affected
+    /// suffix, persist, and advance the head + entity index.
+    ///
+    /// # Deterministic, commit-ordered digest (Issue #3351 finding 4)
+    ///
+    /// The chain digest is a function of the record set **sorted by the full HLC
+    /// commit timestamp** `(commit_ts, commit_ts_logical)`, tie-broken by the
+    /// (already sorted) leaves — never of arrival order. The common case is a
+    /// tail append (`O(1)` fold + one `append`); a rare out-of-order arrival
+    /// re-folds the bounded suffix after the insertion point and rewrites the log
+    /// so the persisted order stays canonical. This makes a live-sealed chain and
+    /// a post-crash rebuilt chain (which folds replayed history in the same
+    /// sorted order) produce the identical head digest, eliminating false forks.
     ///
     /// A transaction whose versions cannot be resolved at all (every ref missing
     /// from the source) produces no record — there is nothing to bind.
@@ -127,33 +154,76 @@ impl Sealer {
             .lock()
             .map_err(|_| ChainError::Io("provenance chain inner lock poisoned".into()))?;
 
-        let seq = inner.head.seq + 1;
-        let prev = inner.head.digest;
-        let txd = tx_digest(pending.commit_ts_micros, pending.tx_id, &leaves);
-        let digest = chain_step(&prev, &txd);
-        let record = ChainTxRecord {
-            seq,
-            commit_ts: pending.commit_ts_micros,
-            tx_id: pending.tx_id,
-            anchor_lsn: pending.anchor_lsn,
-            leaves,
-            entity_refs: kept_refs,
-            digest,
-        };
+        // Find the sorted insertion position by the canonical commit-order key.
+        let idx = inner.records.partition_point(|r| {
+            (r.commit_ts, r.commit_ts_logical, &r.leaves)
+                < (pending.commit_ts_micros, pending.commit_ts_logical, &leaves)
+        });
 
-        self.store.append(&record)?;
+        // Insert an un-folded shell; `refold_suffix` fills seq + digest.
+        inner.records.insert(
+            idx,
+            ChainTxRecord {
+                seq: 0,
+                commit_ts: pending.commit_ts_micros,
+                commit_ts_logical: pending.commit_ts_logical,
+                tx_id: pending.tx_id,
+                anchor_lsn: pending.anchor_lsn,
+                leaves,
+                entity_refs: kept_refs,
+                digest: [0u8; 32],
+            },
+        );
 
-        let record_idx = inner.records.len();
-        inner.index.push_record(record_idx, &record);
+        let is_tail = idx + 1 == inner.records.len();
+        self.refold_suffix(&mut inner, idx);
+
+        if is_tail {
+            // Common case: append the single new record to the log.
+            let rec = inner.records[idx].clone();
+            self.store.append(&rec)?;
+            inner.index.push_record(idx, &rec);
+        } else {
+            // Rare out-of-order arrival: the suffix digests/seqs shifted, so
+            // rewrite the log in canonical order and rebuild the entity index.
+            let snapshot = inner.records.clone();
+            self.store.rewrite(&snapshot)?;
+            inner.index = EntityIndex::build(&inner.records);
+        }
+
+        let last = inner
+            .records
+            .last()
+            .expect("records is non-empty after insert");
         inner.head = ChainHead {
-            seq,
-            digest,
-            commit_ts: pending.commit_ts_micros,
-            anchor_lsn: pending.anchor_lsn,
+            seq: last.seq,
+            digest: last.digest,
+            commit_ts: last.commit_ts,
+            anchor_lsn: last.anchor_lsn,
             genesis_digest: self.genesis.genesis_digest,
         };
-        inner.records.push(record);
         Ok(())
+    }
+
+    /// Recompute `seq` and `digest` for every record from `start` to the tail,
+    /// folding each onto its predecessor (genesis for index 0). `records[start]`
+    /// and everything after it must already be in canonical order.
+    fn refold_suffix(&self, inner: &mut ChainInner, start: usize) {
+        for i in start..inner.records.len() {
+            let prev = if i == 0 {
+                self.genesis.digest
+            } else {
+                inner.records[i - 1].digest
+            };
+            let txd = {
+                let rec = &inner.records[i];
+                tx_digest(rec.commit_ts, rec.commit_ts_logical, &rec.leaves)
+            };
+            let digest = chain_step(&prev, &txd);
+            let rec = &mut inner.records[i];
+            rec.seq = (i as u64) + 1;
+            rec.digest = digest;
+        }
     }
 
     /// Persist the current head as an atomic checkpoint (carries the genesis
@@ -205,7 +275,17 @@ impl ProvenanceChain {
     ) -> ChainResult<Arc<Self>> {
         let dir = config.resolve_dir(data_dir);
         let store = Arc::new(ChainStore::open(&dir, config.fsync)?);
-        let records = store.load()?;
+        let mut records = store.load()?;
+        // The digest chain is defined over records in canonical commit-timestamp
+        // order (Issue #3351 finding 4). The store persists them so, but sort
+        // defensively so the loaded head/fold are canonical regardless.
+        records.sort_by(|a, b| {
+            (a.commit_ts, a.commit_ts_logical, &a.leaves).cmp(&(
+                b.commit_ts,
+                b.commit_ts_logical,
+                &b.leaves,
+            ))
+        });
 
         // Reconstruct the genesis. An existing head checkpoint carries the
         // original genesis digest, so the genesis stays stable across restarts;
@@ -381,7 +461,7 @@ impl ProvenanceChain {
     #[must_use]
     pub fn verify_against_anchor(&self, anchor: &ChainHead) -> ChainVerification {
         let records = self.snapshot_records();
-        let result = verify_against_anchor(&records, anchor);
+        let result = verify_against_anchor(&records, &self.genesis, anchor);
         self.record_verification(&result);
         result
     }
@@ -435,19 +515,22 @@ impl Drop for ProvenanceChain {
 }
 
 /// The background sealer loop: drain the channel into a commit-ordered reorder
-/// buffer, then flush the buffer to the log in `(commit_ts, tx_id)` order.
+/// buffer, then flush the buffer to the log in `(commit_ts, commit_ts_logical,
+/// tx_id)` order. Final canonical ordering is enforced by
+/// [`Sealer::seal_one`]'s sorted insert regardless.
 fn run_sealer(sealer: Arc<Sealer>, rx: Receiver<SealMsg>) {
-    let mut buffer: BTreeMap<(i64, u64), PendingTx> = BTreeMap::new();
+    let mut buffer: BTreeMap<(i64, u32, u64), PendingTx> = BTreeMap::new();
     loop {
         match rx.recv() {
             Ok(SealMsg::Seal(p)) => {
-                buffer.insert((p.commit_ts_micros, p.tx_id), p);
+                buffer.insert((p.commit_ts_micros, p.commit_ts_logical, p.tx_id), p);
                 // Absorb everything already queued so a burst flushes in order.
                 let mut stop = false;
                 loop {
                     match rx.try_recv() {
                         Ok(SealMsg::Seal(p2)) => {
-                            buffer.insert((p2.commit_ts_micros, p2.tx_id), p2);
+                            buffer
+                                .insert((p2.commit_ts_micros, p2.commit_ts_logical, p2.tx_id), p2);
                         }
                         Ok(SealMsg::Stop) => {
                             stop = true;
@@ -475,9 +558,9 @@ fn run_sealer(sealer: Arc<Sealer>, rx: Receiver<SealMsg>) {
     }
 }
 
-/// Drain the reorder buffer in ascending `(commit_ts, tx_id)` order, sealing
-/// each transaction, then checkpoint the advanced head.
-fn flush_buffer(sealer: &Sealer, buffer: &mut BTreeMap<(i64, u64), PendingTx>) {
+/// Drain the reorder buffer in ascending `(commit_ts, commit_ts_logical, tx_id)`
+/// order, sealing each transaction, then checkpoint the advanced head.
+fn flush_buffer(sealer: &Sealer, buffer: &mut BTreeMap<(i64, u32, u64), PendingTx>) {
     if buffer.is_empty() {
         return;
     }
@@ -487,4 +570,98 @@ fn flush_buffer(sealer: &Sealer, buffer: &mut BTreeMap<(i64, u64), PendingTx>) {
         }
     }
     let _ = sealer.checkpoint();
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    //! Issue #3351 finding 4b: the head digest is a deterministic function of the
+    //! commit-timestamp-ordered record set, independent of enqueue arrival order.
+
+    use super::*;
+    use crate::core::property::PropertyValue;
+    use crate::provenance_chain::canonical::VersionHashInput;
+    use std::collections::HashMap;
+
+    struct MapSource(HashMap<(EntityKind, u64, u64), VersionHashInput>);
+    impl VersionSource for MapSource {
+        fn fetch(&self, kind: EntityKind, id: u64, version_id: u64) -> Option<VersionHashInput> {
+            self.0.get(&(kind, id, version_id)).cloned()
+        }
+    }
+
+    fn vinput(id: u64, vid: u64) -> VersionHashInput {
+        VersionHashInput {
+            entity_kind: EntityKind::Node,
+            entity_id: id,
+            version_id: vid,
+            prev_version_id: None,
+            label: "Person".to_string(),
+            source: None,
+            target: None,
+            valid_from: Some(100),
+            valid_to: None,
+            transaction_from: Some(100),
+            transaction_to: None,
+            is_current: true,
+            is_tombstone: false,
+            provenance: None,
+            properties: vec![("name".to_string(), PropertyValue::string("n"))],
+        }
+    }
+
+    /// Seal `specs` (each `(commit_ts, logical, entity_id, version_id)`) into a
+    /// fresh chain via the synchronous path and return the resulting head digest.
+    fn head_after(specs: &[(i64, u32, u64, u64)]) -> [u8; 32] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut map = HashMap::new();
+        for (_, _, id, vid) in specs {
+            let vi = vinput(*id, *vid);
+            map.insert((vi.entity_kind, vi.entity_id, vi.version_id), vi);
+        }
+        let source: Arc<dyn VersionSource + Send + Sync> = Arc::new(MapSource(map));
+        let config = ChainConfig {
+            enabled: true,
+            fsync: ChainFsyncMode::Never,
+            dir: None,
+        };
+        let chain = ProvenanceChain::open(&config, dir.path(), 1, 0, source).unwrap();
+        for (commit_ts, logical, id, vid) in specs {
+            chain
+                .seal_pending_sync(PendingTx {
+                    commit_ts_micros: *commit_ts,
+                    commit_ts_logical: *logical,
+                    tx_id: *vid, // arbitrary metadata; not folded
+                    anchor_lsn: 1,
+                    entity_refs: vec![(EntityKind::Node, *id, *vid)],
+                })
+                .unwrap();
+        }
+        chain.head().digest
+    }
+
+    #[test]
+    fn out_of_order_enqueue_yields_same_head_as_in_order() {
+        // Three transactions with distinct commit timestamps.
+        let in_order = [(100, 0, 1, 1), (200, 0, 2, 2), (300, 0, 3, 3)];
+        let reversed = [(300, 0, 3, 3), (100, 0, 1, 1), (200, 0, 2, 2)];
+        let shuffled = [(200, 0, 2, 2), (300, 0, 3, 3), (100, 0, 1, 1)];
+
+        let h_in = head_after(&in_order);
+        let h_rev = head_after(&reversed);
+        let h_shuf = head_after(&shuffled);
+
+        assert_eq!(
+            h_in, h_rev,
+            "reverse-order enqueue must match in-order head"
+        );
+        assert_eq!(h_in, h_shuf, "shuffled enqueue must match in-order head");
+    }
+
+    #[test]
+    fn same_wallclock_distinct_logical_stays_ordered() {
+        // Two transactions in the same microsecond, distinguished by logical.
+        let a = [(100, 1, 1, 1), (100, 2, 2, 2)];
+        let b = [(100, 2, 2, 2), (100, 1, 1, 1)];
+        assert_eq!(head_after(&a), head_after(&b));
+    }
 }
