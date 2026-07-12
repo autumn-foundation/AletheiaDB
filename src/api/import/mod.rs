@@ -46,8 +46,14 @@ mod mapping;
 mod neo4j;
 mod parse;
 
+#[cfg(feature = "parquet")]
+mod parquet;
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "parquet"))]
+mod parquet_tests;
 
 #[cfg(test)]
 mod neo4j_tests;
@@ -313,6 +319,14 @@ impl<'a> Importer<'a> {
         self.key_to_id.get(key).copied()
     }
 
+    /// Number of nodes committed so far in this session (one per resolved business key).
+    ///
+    /// Useful after an import error to report how much was persisted before the failure,
+    /// since chunks commit incrementally (see the [module docs](self) on atomicity).
+    pub fn imported_node_count(&self) -> usize {
+        self.key_to_id.len()
+    }
+
     // ---- Nodes -----------------------------------------------------------------
 
     /// Import nodes from a CSV file.
@@ -322,6 +336,24 @@ impl<'a> Importer<'a> {
         mapping: NodeMapping,
     ) -> Result<ImportReport> {
         let rows = parse::csv_rows(path.as_ref())?;
+        self.import_nodes(rows, &mapping)
+    }
+
+    /// Import nodes from a Parquet file (Issue #3364).
+    ///
+    /// Columns are decoded natively from their Parquet/Arrow types — integers,
+    /// floats, booleans, timestamps, and `list<float32>` embeddings never
+    /// round-trip through a string. A SQL null cell yields an absent property, and
+    /// a native `timestamp` column can drive per-row `valid_time` backfill exactly
+    /// like the CSV path. All #3211 abort/skip and `row N:` semantics apply, with a
+    /// stable 1-based row index across row groups.
+    #[cfg(feature = "parquet")]
+    pub fn nodes_from_parquet(
+        &mut self,
+        path: impl AsRef<Path>,
+        mapping: NodeMapping,
+    ) -> Result<ImportReport> {
+        let rows = parquet::parquet_rows(path.as_ref())?;
         self.import_nodes(rows, &mapping)
     }
 
@@ -425,6 +457,21 @@ impl<'a> Importer<'a> {
         mapping: EdgeMapping,
     ) -> Result<ImportReport> {
         let rows = parse::csv_rows(path.as_ref())?;
+        self.import_edges(rows, &mapping)
+    }
+
+    /// Import edges from a Parquet file, resolving endpoints by business key (Issue #3364).
+    ///
+    /// Endpoints are resolved against nodes imported earlier in the same session,
+    /// exactly like the CSV/JSONL edge readers; unresolved endpoints are reported
+    /// (or abort) per the [`FailureMode`]. Property columns are decoded natively.
+    #[cfg(feature = "parquet")]
+    pub fn edges_from_parquet(
+        &mut self,
+        path: impl AsRef<Path>,
+        mapping: EdgeMapping,
+    ) -> Result<ImportReport> {
+        let rows = parquet::parquet_rows(path.as_ref())?;
         self.import_edges(rows, &mapping)
     }
 
@@ -569,6 +616,10 @@ fn build_properties(
     properties: &[PropertyMapping],
 ) -> std::result::Result<PropertyMap, RowError> {
     let mut builder = PropertyMapBuilder::new();
+    // Names inserted from explicit mapping columns; they take precedence over any
+    // auto-expanded overflow key of the same name (Parquet import only).
+    #[cfg(feature = "parquet")]
+    let mut explicit: std::collections::HashSet<String> = std::collections::HashSet::new();
     for mapping in properties {
         let cell = row.cells.get(&mapping.column).ok_or_else(|| {
             RowError::new(row.index, format!("missing column '{}'", mapping.column))
@@ -576,12 +627,25 @@ fn build_properties(
         let value = parse::coerce(cell, mapping.ty).map_err(|message| {
             RowError::new(row.index, format!("column '{}': {message}", mapping.column))
         })?;
+        #[cfg(feature = "parquet")]
+        explicit.insert(mapping.name.clone());
         // Skip nulls so blank cells become absent properties rather than stored nulls.
         if matches!(value, PropertyValue::Null) {
             continue;
         }
         builder = builder
             .try_insert(&mapping.name, value)
+            .map_err(|e| RowError::new(row.index, e.to_string()))?;
+    }
+    // Merge overflow properties auto-expanded from a `properties_json` column of an
+    // AletheiaDB export, so the caller need not map the exotic keys explicitly.
+    #[cfg(feature = "parquet")]
+    for (key, value) in &row.overflow {
+        if explicit.contains(key) || matches!(value, PropertyValue::Null) {
+            continue;
+        }
+        builder = builder
+            .try_insert(key, value.clone())
             .map_err(|e| RowError::new(row.index, e.to_string()))?;
     }
     Ok(builder.build())

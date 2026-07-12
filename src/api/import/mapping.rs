@@ -17,6 +17,21 @@ pub enum ColumnType {
     Float,
     /// Parse the value as a boolean (`true`/`false`, case-insensitive, or `1`/`0`).
     Bool,
+    /// A timestamp column stored as microseconds since the Unix epoch.
+    ///
+    /// Text/JSON inputs accept the same formats as the per-row `valid_time` column
+    /// (RFC 3339 / ISO 8601, a bare date, or bare integer microseconds); a native
+    /// Parquet `timestamp` column is decoded to microseconds without a string
+    /// round-trip. The value is stored as [`PropertyValue::Int`](crate::core::property::PropertyValue::Int)
+    /// microseconds since the epoch (the property model has no dedicated timestamp
+    /// variant).
+    Timestamp,
+    /// A dense embedding column stored as a
+    /// [`PropertyValue::Vector`](crate::core::property::PropertyValue::Vector).
+    ///
+    /// A native Parquet `list<float32>` column is decoded to the exact `f32` bits
+    /// with no string round-trip; a JSON array of numbers is also accepted.
+    Embedding,
 }
 
 /// Where a node's or edge's label comes from.
