@@ -5535,4 +5535,241 @@ mod multi_pattern {
             "MATCH (a),(b) AS OF TIMESTAMP '2020-01-01T00:00:00Z' RETURN a,b",
         );
     }
+
+    // ---- FIX 1: relationship-uniqueness (openCypher isomorphism) ----------
+
+    /// Build a graph with a single directed edge a-[:R]->b and return the db.
+    fn single_edge_db() -> (AletheiaDB, crate::core::id::NodeId, crate::core::id::NodeId) {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        let b = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "B").build())
+            .unwrap();
+        db.create_edge(a, b, "R", crate::core::property::PropertyMap::new())
+            .unwrap();
+        (db, a, b)
+    }
+
+    #[test]
+    fn test_rel_uniqueness_double_hop_undirected() {
+        // Over the single edge a-R->b, an undirected two-hop pattern would
+        // reuse the same edge to walk a-b-a. openCypher relationship-uniqueness
+        // forbids reusing an edge within a MATCH clause => 0 rows.
+        let (db, _, _) = single_edge_db();
+        let rows = run(&db, "MATCH (x)-[:R]-(y)-[:R]-(z) RETURN x,y,z");
+        assert_eq!(
+            rows.len(),
+            0,
+            "an edge may not be traversed twice: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn test_rel_uniqueness_double_hop_rel_vars() {
+        // Same as above but with named relationship variables; the two edges
+        // resolve to the same underlying edge id, which is forbidden => 0 rows.
+        let (db, _, _) = single_edge_db();
+        let rows = run(&db, "MATCH (x)-[r1:R]-(y)-[r2:R]-(z) RETURN x,y,z");
+        assert_eq!(rows.len(), 0, "r1 and r2 cannot be the same edge: {rows:?}");
+    }
+
+    #[test]
+    fn test_rel_uniqueness_across_comma_patterns() {
+        // Relationship-uniqueness spans the whole clause: the two comma
+        // patterns cannot both consume the single edge => 0 rows.
+        let (db, _, _) = single_edge_db();
+        let rows = run(&db, "MATCH (p)-[:R]->(q),(s)-[:R]->(t) RETURN p,q,s,t");
+        assert_eq!(
+            rows.len(),
+            0,
+            "one edge cannot satisfy both comma patterns: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn test_rel_uniqueness_triangle_positive_control() {
+        // Positive control: a triangle a->b->c->a has three DISTINCT edges, so
+        // a two-hop directed pattern uses two distinct edges and matches.
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        let b = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "B").build())
+            .unwrap();
+        let c = db
+            .create_node("N", PropertyMapBuilder::new().insert("name", "C").build())
+            .unwrap();
+        db.create_edge(a, b, "R", crate::core::property::PropertyMap::new())
+            .unwrap();
+        db.create_edge(b, c, "R", crate::core::property::PropertyMap::new())
+            .unwrap();
+        db.create_edge(c, a, "R", crate::core::property::PropertyMap::new())
+            .unwrap();
+
+        let rows = run(&db, "MATCH (x)-[:R]->(y)-[:R]->(z) RETURN x,y,z");
+        // Three starting points (a,b,c), each a distinct 2-edge directed walk.
+        assert_eq!(
+            rows.len(),
+            3,
+            "each anchor yields one 2-hop walk over distinct edges: {rows:?}"
+        );
+    }
+
+    // ---- FIX 2: three-valued WHERE / NOT over null ------------------------
+
+    /// A db with a node `a` that lacks property `x`, plus a plain node `b`.
+    fn null_prop_db() -> AletheiaDB {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn test_where_not_over_null_drops_row() {
+        // a.x is absent => `a.x = 5` is Null => `NOT Null` is Null => the row
+        // is DROPPED (openCypher three-valued logic), not kept.
+        let db = null_prop_db();
+        let rows = run(&db, "MATCH (a),(b) WHERE NOT (a.x = 5) RETURN a,b");
+        assert_eq!(rows.len(), 0, "NOT over null must drop the row: {rows:?}");
+    }
+
+    #[test]
+    fn test_where_null_comparison_drops_row() {
+        // `a.x = 5` with a.x absent is Null => dropped (unchanged behavior).
+        let db = null_prop_db();
+        let rows = run(&db, "MATCH (a),(b) WHERE a.x = 5 RETURN a,b");
+        assert_eq!(rows.len(), 0, "null comparison drops the row: {rows:?}");
+    }
+
+    #[test]
+    fn test_where_is_null_keeps_rows() {
+        // IS NULL is never Null: it is True for the absent property, so rows
+        // are kept. 2 persons x 2 persons = 4 rows.
+        let db = null_prop_db();
+        let rows = run(&db, "MATCH (a),(b) WHERE a.x IS NULL RETURN a,b");
+        assert_eq!(rows.len(), 4, "IS NULL keeps rows: {rows:?}");
+    }
+
+    #[test]
+    fn test_where_or_with_null_true_kept() {
+        // For the (Alice, *) rows: `a.name = 'Alice'` is True, `a.x = 5` is
+        // Null; True OR Null = True => kept. Two b-candidates => 2 rows.
+        let db = null_prop_db();
+        let rows = run(
+            &db,
+            "MATCH (a),(b) WHERE a.name = 'Alice' OR a.x = 5 RETURN a,b",
+        );
+        assert_eq!(
+            rows.len(),
+            2,
+            "True OR Null = True keeps Alice rows: {rows:?}"
+        );
+        for row in &rows {
+            assert_eq!(node_prop(bound(row, "a"), "name").unwrap(), "Alice");
+        }
+    }
+
+    // ---- FIX 4: router last_node_variable skips unnamed terminal ----------
+
+    #[test]
+    fn test_anon_terminal_routes_and_binds_source() {
+        // `MATCH (a)-[:R]->() RETURN a` has an UNNAMED terminal node. The
+        // router must treat the terminal variable as None, so `a` is a
+        // non-terminal referenced variable => route to the evaluator and
+        // return `a` (Alice), never the anonymous endpoint (Bob).
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "R", crate::core::property::PropertyMap::new())
+            .unwrap();
+
+        let rows = run(&db, "MATCH (a)-[:R]->() RETURN a");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert!(
+            row.bindings.is_some(),
+            "anon-terminal query must route to the multi-binding evaluator"
+        );
+        assert_eq!(node_prop(bound(row, "a"), "name").unwrap(), "Alice");
+    }
+
+    // ---- FIX 5: multi-pattern + WITH / OPTIONAL routes to honest error ----
+
+    #[test]
+    fn test_multi_pattern_with_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("N", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        // Multi-pattern + WITH must reach the evaluator and be rejected with a
+        // structured error rather than silently discarding a scan.
+        assert_unsupported(&db, "MATCH (a),(b) WITH a RETURN a");
+    }
+
+    #[test]
+    fn test_multi_pattern_optional_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("X", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        db.create_node("Y", PropertyMapBuilder::new().insert("name", "B").build())
+            .unwrap();
+        assert_unsupported(
+            &db,
+            "MATCH (a:X),(b:Y) OPTIONAL MATCH (b)-[:R]->(c) RETURN b,c",
+        );
+    }
+
+    // ---- FIX 6: binding cap prevents unbounded Cartesian materialization ---
+
+    #[test]
+    fn test_multi_pattern_binding_cap_enforced() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+        // Cap the materialized binding count low via the configurable
+        // `max_schema_as_of_entities` limit, then build enough nodes that the
+        // (a),(b) product exceeds it. Must return a structured error, not OOM.
+        let config = AletheiaDBConfig::builder()
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .max_schema_as_of_entities(5)
+                    .build(),
+            )
+            .build();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
+        for i in 0..3 {
+            db.create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        }
+        // 3 x 3 = 9 intermediate bindings > cap of 5 => structured error.
+        match db.execute_cypher("MATCH (a),(b) RETURN a,b") {
+            Ok(_) => panic!("expected a structured cap error, got Ok"),
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature cap error, got {other:?}"),
+        }
+    }
 }

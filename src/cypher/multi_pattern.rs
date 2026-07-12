@@ -15,6 +15,25 @@
 //! single-entity path: only queries the router
 //! ([`super::exec::needs_multi_binding`]) classifies as multi-variable reach it.
 //!
+//! # v1 semantics
+//!
+//! * **Relationship-uniqueness (openCypher isomorphism).** Each relationship is
+//!   traversed **at most once** within a single `MATCH` clause -- both inside one
+//!   pattern and across the comma-separated patterns of the clause. The set of
+//!   already-traversed edge ids is threaded through every candidate binding
+//!   branch (see [`PartialBinding`]); reusing an edge yields no match, exactly
+//!   as openCypher requires (`MATCH (x)-[:R]-(y)-[:R]-(z)` over a single edge
+//!   returns zero rows).
+//! * **Three-valued `WHERE`.** Predicate evaluation is Kleene three-valued
+//!   ([`Tri`]): a comparison with a null/absent operand is `Null`, `NOT Null` is
+//!   `Null`, and a row is kept **iff** its predicate evaluates to `True` (both
+//!   `Null` and `False` drop it). This makes `WHERE NOT (a.x = 5)` drop a row
+//!   whose `a.x` is absent, per openCypher.
+//! * **Bounded materialization.** The intermediate binding set is capped at the
+//!   configured `max_schema_as_of_entities` limit (see FIX #6) so a pathological
+//!   Cartesian product (`MATCH (a),(b),(c)`) cannot exhaust memory; exceeding
+//!   the cap is a structured [`CypherError`], never an OOM.
+//!
 //! # House rule
 //!
 //! Anything this evaluator cannot answer **correctly** is rejected with a
@@ -22,6 +41,13 @@
 //! silently-wrong row. v1 rejects: `OPTIONAL MATCH`, `WITH`, temporal `AS OF`,
 //! aggregates in `RETURN`, and variable-length relationships inside a bound
 //! pattern.
+//!
+//! # Remaining v1 limitations
+//!
+//! Bindings carry cloned entities (not ids) through the Cartesian product, so a
+//! wide product clones each entity per branch -- a deliberate simplicity/perf
+//! tradeoff. Carrying ids and resolving lazily is tracked as a follow-up
+//! (`TODO(perf #549-followup)`).
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -42,7 +68,82 @@ use super::converter::CypherParameterValue;
 use super::error::CypherError;
 
 /// An ordered set of `variable -> entity` bindings for one candidate row.
+///
+// TODO(perf #549-followup): carry entity *ids* instead of cloned entities
+// through the Cartesian product; a wide product currently clones each entity
+// once per surviving branch.
 type Binding = Vec<(String, EntityResult)>;
+
+/// A projected row paired with its still-full pattern binding (needed to
+/// evaluate `ORDER BY` expressions and `DISTINCT` keys after projection).
+type ProjectedRow = (Binding, QueryRow);
+
+/// A row's evaluated `ORDER BY` sort key: one optional scalar per key
+/// expression (`None` == null).
+type SortKey = Vec<Option<PropertyValue>>;
+
+/// A projected row paired with its pre-computed sort key, used while sorting.
+type KeyedRow = (SortKey, ProjectedRow);
+
+/// A candidate binding branch during matching: the `variable -> entity`
+/// assignments accumulated so far plus the set of relationship edge ids already
+/// traversed by this branch.
+///
+/// The `used_edges` set enforces openCypher **relationship-uniqueness**: an edge
+/// may be traversed at most once per `MATCH` clause. It is threaded through the
+/// whole clause -- across every pattern element AND across the comma-separated
+/// patterns -- by cloning it into each extended branch.
+#[derive(Clone, Default)]
+struct PartialBinding {
+    vars: Binding,
+    used_edges: HashSet<EdgeId>,
+}
+
+/// Kleene three-valued truth for `WHERE` predicate evaluation.
+///
+/// openCypher predicates are three-valued: a comparison involving a null/absent
+/// operand is `Null`, not `False`. A `WHERE` clause keeps a row **iff** the
+/// predicate is [`Tri::True`]; both [`Tri::False`] and [`Tri::Null`] drop it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tri {
+    True,
+    False,
+    Null,
+}
+
+impl Tri {
+    /// A definite boolean lifts to `True`/`False` (never `Null`).
+    fn from_bool(b: bool) -> Tri {
+        if b { Tri::True } else { Tri::False }
+    }
+
+    /// Kleene negation: `NOT Null = Null`.
+    fn not(self) -> Tri {
+        match self {
+            Tri::True => Tri::False,
+            Tri::False => Tri::True,
+            Tri::Null => Tri::Null,
+        }
+    }
+
+    /// Kleene conjunction: any `False` => `False`, else any `Null` => `Null`.
+    fn and(self, other: Tri) -> Tri {
+        match (self, other) {
+            (Tri::False, _) | (_, Tri::False) => Tri::False,
+            (Tri::True, Tri::True) => Tri::True,
+            _ => Tri::Null,
+        }
+    }
+
+    /// Kleene disjunction: any `True` => `True`, else any `Null` => `Null`.
+    fn or(self, other: Tri) -> Tri {
+        match (self, other) {
+            (Tri::True, _) | (_, Tri::True) => Tri::True,
+            (Tri::False, Tri::False) => Tri::False,
+            _ => Tri::Null,
+        }
+    }
+}
 
 /// Entry point: evaluate a multi-variable `MATCH` statement into result rows.
 ///
@@ -138,6 +239,11 @@ pub fn evaluate(
         node_by_id.insert(node.id, idx);
     }
 
+    // Cap on the materialized intermediate binding count (FIX #6): reuse the
+    // configurable `max_schema_as_of_entities` limit so a pathological
+    // Cartesian product cannot exhaust memory. Read once, up front.
+    let binding_cap = db.historical.read().max_schema_as_of_entities();
+
     let eval = MultiEval {
         db,
         params,
@@ -145,21 +251,45 @@ pub fn evaluate(
         node_by_id,
     };
 
-    // ---- Nested-loop binding matcher: extend the binding set by each pattern.
-    let mut env: Vec<Binding> = vec![Vec::new()];
+    // ---- Per-pattern candidate memoization (FIX #6): a pattern's first-node
+    // candidate set (the unbound label/property scan) is base-independent, so
+    // compute it once per pattern and reuse it across every outer binding
+    // instead of re-scanning all nodes per base binding.
+    let mut first_memos: Vec<Vec<Node>> = Vec::with_capacity(pattern.len());
     for p in pattern {
-        let mut next: Vec<Binding> = Vec::new();
+        let memo = match p.elements.first() {
+            Some(CypherPatternElement::Node(first)) => eval.scan_node_candidates(first)?,
+            _ => Vec::new(),
+        };
+        first_memos.push(memo);
+    }
+
+    // ---- Nested-loop binding matcher: extend the binding set by each pattern.
+    // Each branch threads its `used_edges` set forward for relationship
+    // uniqueness across the whole clause (FIX #1).
+    let mut env: Vec<PartialBinding> = vec![PartialBinding::default()];
+    for (p, first_memo) in pattern.iter().zip(first_memos.iter()) {
+        let mut next: Vec<PartialBinding> = Vec::new();
         for base in &env {
-            eval.match_pattern_extends(p, base, &mut next)?;
+            eval.match_pattern_extends(p, base, first_memo, &mut next)?;
+            if next.len() > binding_cap {
+                return Err(CypherError::UnsupportedFeature(format!(
+                    "multi-pattern result exceeds {binding_cap} intermediate \
+                     bindings; add a more selective WHERE filter or labels to \
+                     narrow the Cartesian product (configurable via \
+                     max_schema_as_of_entities)"
+                )));
+            }
         }
         env = next;
     }
 
     // ---- WHERE filter (cross-variable predicates resolve from the binding).
+    // Three-valued (FIX #2): a row survives iff its predicate is `Tri::True`.
     if let Some(predicate) = where_clause {
         let mut filtered = Vec::with_capacity(env.len());
         for binding in env {
-            if eval.eval_predicate(predicate, &binding)? {
+            if eval.eval_predicate(predicate, &binding.vars)? == Tri::True {
                 filtered.push(binding);
             }
         }
@@ -167,11 +297,11 @@ pub fn evaluate(
     }
 
     // ---- Projection: each surviving binding becomes a QueryRow.
-    let entity_order = entity_var_declaration_order(pattern);
+    let entity_order = return_star_var_order(pattern);
     let mut projected: Vec<(Binding, QueryRow)> = Vec::with_capacity(env.len());
     for binding in env {
-        let row = eval.project(&binding, return_clause, &entity_order)?;
-        projected.push((binding, row));
+        let row = eval.project(&binding.vars, return_clause, &entity_order)?;
+        projected.push((binding.vars, row));
     }
 
     // ---- DISTINCT (dedupe by projected content) -> ORDER BY -> SKIP -> LIMIT.
@@ -208,25 +338,57 @@ impl MultiEval<'_> {
     }
 
     /// Extend `base` by every assignment that satisfies `pattern`, appending
-    /// each resulting binding to `out`.
+    /// each resulting [`PartialBinding`] to `out`.
+    ///
+    /// `first_memo` is the pattern's first-node candidate list precomputed by an
+    /// unbound scan (base-independent, so computed once per pattern and reused
+    /// across every outer binding -- FIX #6). It is used only when the first
+    /// node's variable is not already bound by `base`; a bound first-node
+    /// variable resolves to its single existing node instead.
     fn match_pattern_extends(
         &self,
         pattern: &CypherPattern,
-        base: &Binding,
-        out: &mut Vec<Binding>,
+        base: &PartialBinding,
+        first_memo: &[Node],
+        out: &mut Vec<PartialBinding>,
     ) -> Result<(), CypherError> {
         let Some(CypherPatternElement::Node(first)) = pattern.elements.first() else {
             return Err(CypherError::SemanticError(
                 "a graph pattern must start with a node".to_string(),
             ));
         };
-        for node in self.node_candidates(first, base)? {
-            let mut binding = base.clone();
+
+        // Candidate first nodes: the single already-bound node (if the first
+        // variable is bound in `base`), otherwise the memoized unbound scan.
+        let bound_single: Vec<Node>;
+        let candidates: &[Node] = match &first.variable {
+            Some(var) => match lookup(&base.vars, var) {
+                Some(EntityResult::Node(n)) => {
+                    if self.node_element_matches(n, first)? {
+                        bound_single = vec![n.clone()];
+                        &bound_single
+                    } else {
+                        return Ok(());
+                    }
+                }
+                // A variable already bound to an edge cannot also be a node.
+                Some(_) => return Ok(()),
+                None => first_memo,
+            },
+            None => first_memo,
+        };
+
+        for node in candidates {
+            let mut vars = base.vars.clone();
             if let Some(var) = &first.variable
-                && lookup(&binding, var).is_none()
+                && lookup(&vars, var).is_none()
             {
-                binding.push((var.clone(), EntityResult::Node(node.clone())));
+                vars.push((var.clone(), EntityResult::Node(node.clone())));
             }
+            let binding = PartialBinding {
+                vars,
+                used_edges: base.used_edges.clone(),
+            };
             self.extend_from(&pattern.elements, 1, binding, node.id, out)?;
         }
         Ok(())
@@ -239,9 +401,9 @@ impl MultiEval<'_> {
         &self,
         elements: &[CypherPatternElement],
         idx: usize,
-        binding: Binding,
+        binding: PartialBinding,
         current: NodeId,
-        out: &mut Vec<Binding>,
+        out: &mut Vec<PartialBinding>,
     ) -> Result<(), CypherError> {
         if idx >= elements.len() {
             out.push(binding);
@@ -259,6 +421,12 @@ impl MultiEval<'_> {
         };
 
         for (edge, far_id) in self.adjacent(current, rel)? {
+            // Relationship-uniqueness (FIX #1): an edge may be traversed at most
+            // once per MATCH clause. Skip an edge this branch has already used
+            // (named or anonymous relationship element alike).
+            if binding.used_edges.contains(&edge.id) {
+                continue;
+            }
             let Some(far_node) = self.node_ref(far_id).cloned() else {
                 // Orphaned edge whose endpoint is missing from current state.
                 continue;
@@ -266,56 +434,43 @@ impl MultiEval<'_> {
             if !self.node_element_matches(&far_node, next_patt)? {
                 continue;
             }
-            let mut binding = binding.clone();
+            let mut vars = binding.vars.clone();
+            let mut used_edges = binding.used_edges.clone();
+            used_edges.insert(edge.id);
             // Unify the far-node variable (a repeated variable must resolve to
             // the same node id).
             if let Some(nv) = &next_patt.variable {
-                match lookup(&binding, nv) {
+                match lookup(&vars, nv) {
                     Some(existing) => {
                         if existing.node_id() != Some(far_node.id) {
                             continue;
                         }
                     }
-                    None => binding.push((nv.clone(), EntityResult::Node(far_node.clone()))),
+                    None => vars.push((nv.clone(), EntityResult::Node(far_node.clone()))),
                 }
             }
             // Bind (and unify) the relationship variable.
             if let Some(rv) = &rel.variable {
-                match lookup(&binding, rv) {
+                match lookup(&vars, rv) {
                     Some(existing) => {
                         if entity_edge_id(existing) != Some(edge.id) {
                             continue;
                         }
                     }
-                    None => binding.push((rv.clone(), EntityResult::Edge(edge.clone()))),
+                    None => vars.push((rv.clone(), EntityResult::Edge(edge.clone()))),
                 }
             }
-            self.extend_from(elements, idx + 2, binding, far_node.id, out)?;
+            let next = PartialBinding { vars, used_edges };
+            self.extend_from(elements, idx + 2, next, far_node.id, out)?;
         }
         Ok(())
     }
 
-    /// Candidate nodes for a node element: the single already-bound node (if the
-    /// element's variable is bound and still satisfies the element), otherwise
-    /// every node satisfying the element's labels and inline properties.
-    fn node_candidates(
-        &self,
-        patt: &CypherNodePattern,
-        base: &Binding,
-    ) -> Result<Vec<Node>, CypherError> {
-        if let Some(var) = &patt.variable
-            && let Some(existing) = lookup(base, var)
-        {
-            if let EntityResult::Node(n) = existing {
-                return Ok(if self.node_element_matches(n, patt)? {
-                    vec![n.clone()]
-                } else {
-                    Vec::new()
-                });
-            }
-            // A variable bound to an edge cannot also be a node.
-            return Ok(Vec::new());
-        }
+    /// Every node satisfying a node element's labels and inline properties.
+    ///
+    /// Base-independent (it does not consult any binding), so a pattern's first
+    /// node scan is computed once and reused across all outer bindings (FIX #6).
+    fn scan_node_candidates(&self, patt: &CypherNodePattern) -> Result<Vec<Node>, CypherError> {
         let mut out = Vec::new();
         for node in &self.nodes {
             if self.node_element_matches(node, patt)? {
@@ -439,53 +594,73 @@ impl MultiEval<'_> {
 
     // -- Predicate / scalar evaluation ------------------------------------
 
-    /// Evaluate a `WHERE` predicate against a binding (null-yields-false).
-    fn eval_predicate(&self, expr: &CypherExpr, binding: &Binding) -> Result<bool, CypherError> {
+    /// Evaluate a `WHERE` predicate against a binding using Kleene three-valued
+    /// logic (FIX #2): a comparison with a null/absent operand yields
+    /// [`Tri::Null`], `NOT Null` is `Null`, and the caller keeps a row only when
+    /// the result is [`Tri::True`].
+    fn eval_predicate(&self, expr: &CypherExpr, binding: &Binding) -> Result<Tri, CypherError> {
         match expr {
             CypherExpr::Comparison { left, op, right } => {
                 let l = self.eval_value(left, binding)?;
                 let r = self.eval_value(right, binding)?;
                 match (l, r) {
-                    (Some(a), Some(b)) => Ok(compare(&a, &b, *op)),
-                    _ => Ok(false),
+                    (Some(a), Some(b)) => Ok(Tri::from_bool(compare(&a, &b, *op))),
+                    // A comparison with a null/absent operand is Null, not False.
+                    _ => Ok(Tri::Null),
                 }
             }
-            CypherExpr::And(a, b) => {
-                Ok(self.eval_predicate(a, binding)? && self.eval_predicate(b, binding)?)
+            // Both sides are evaluated (no short-circuit) so Kleene logic is
+            // exact: `False AND Null = False`, `True OR Null = True`.
+            CypherExpr::And(a, b) => Ok(self
+                .eval_predicate(a, binding)?
+                .and(self.eval_predicate(b, binding)?)),
+            CypherExpr::Or(a, b) => Ok(self
+                .eval_predicate(a, binding)?
+                .or(self.eval_predicate(b, binding)?)),
+            CypherExpr::Not(inner) => Ok(self.eval_predicate(inner, binding)?.not()),
+            // IS NULL / IS NOT NULL are always definite (never Null).
+            CypherExpr::IsNull(inner) => {
+                Ok(Tri::from_bool(self.eval_value(inner, binding)?.is_none()))
             }
-            CypherExpr::Or(a, b) => {
-                Ok(self.eval_predicate(a, binding)? || self.eval_predicate(b, binding)?)
+            CypherExpr::IsNotNull(inner) => {
+                Ok(Tri::from_bool(self.eval_value(inner, binding)?.is_some()))
             }
-            CypherExpr::Not(inner) => Ok(!self.eval_predicate(inner, binding)?),
-            CypherExpr::IsNull(inner) => Ok(self.eval_value(inner, binding)?.is_none()),
-            CypherExpr::IsNotNull(inner) => Ok(self.eval_value(inner, binding)?.is_some()),
             CypherExpr::In { expr, values } => {
+                // A null subject makes IN Null.
                 let Some(needle) = self.eval_value(expr, binding)? else {
-                    return Ok(false);
+                    return Ok(Tri::Null);
                 };
                 for candidate in values {
                     if let Some(v) = self.eval_value(candidate, binding)?
                         && loosely_equal(&needle, &v)
                     {
-                        return Ok(true);
+                        return Ok(Tri::True);
                     }
                 }
-                Ok(false)
+                Ok(Tri::False)
             }
-            CypherExpr::Contains { expr, substring } => Ok(self
-                .eval_string(expr, binding)?
-                .is_some_and(|s| s.contains(substring))),
-            CypherExpr::StartsWith { expr, prefix } => Ok(self
-                .eval_string(expr, binding)?
-                .is_some_and(|s| s.starts_with(prefix))),
-            CypherExpr::EndsWith { expr, suffix } => Ok(self
-                .eval_string(expr, binding)?
-                .is_some_and(|s| s.ends_with(suffix))),
+            // String predicates with a null/non-string subject are Null.
+            CypherExpr::Contains { expr, substring } => {
+                Ok(match self.eval_string(expr, binding)? {
+                    Some(s) => Tri::from_bool(s.contains(substring)),
+                    None => Tri::Null,
+                })
+            }
+            CypherExpr::StartsWith { expr, prefix } => {
+                Ok(match self.eval_string(expr, binding)? {
+                    Some(s) => Tri::from_bool(s.starts_with(prefix)),
+                    None => Tri::Null,
+                })
+            }
+            CypherExpr::EndsWith { expr, suffix } => Ok(match self.eval_string(expr, binding)? {
+                Some(s) => Tri::from_bool(s.ends_with(suffix)),
+                None => Tri::Null,
+            }),
             CypherExpr::Grouped(inner) => self.eval_predicate(inner, binding),
-            CypherExpr::Value(CypherValue::Bool(b)) => Ok(*b),
+            CypherExpr::Value(CypherValue::Bool(b)) => Ok(Tri::from_bool(*b)),
             other => match self.eval_value(other, binding)? {
-                Some(PropertyValue::Bool(b)) => Ok(b),
-                None => Ok(false),
+                Some(PropertyValue::Bool(b)) => Ok(Tri::from_bool(b)),
+                None => Ok(Tri::Null),
                 Some(_) => Err(CypherError::UnsupportedFeature(format!(
                     "WHERE expression is not a boolean predicate: {other:?}"
                 ))),
@@ -622,40 +797,26 @@ impl MultiEval<'_> {
     /// nulls last for ascending, first for descending).
     fn order_rows(
         &self,
-        rows: &mut [(Binding, QueryRow)],
+        rows: &mut Vec<(Binding, QueryRow)>,
         ret: &CypherReturn,
     ) -> Result<(), CypherError> {
-        // Pre-compute each row's ordered sort keys so the comparator is
-        // infallible (evaluation errors surface here, before sorting).
-        let mut keys: Vec<Vec<Option<PropertyValue>>> = Vec::with_capacity(rows.len());
-        for (binding, _) in rows.iter() {
+        // Pair each row with its pre-computed sort keys, sort the owned tuples
+        // by a stable comparator, then rebuild `rows`. Computing keys up front
+        // keeps the comparator infallible (evaluation errors surface here,
+        // before sorting) and avoids any panicking in-place permutation (FIX #9).
+        let mut keyed: Vec<KeyedRow> = Vec::with_capacity(rows.len());
+        for (binding, row) in rows.drain(..) {
             let mut key = Vec::with_capacity(ret.order_by.len());
             for item in &ret.order_by {
-                key.push(self.eval_value(&item.expr, binding)?);
+                key.push(self.eval_value(&item.expr, &binding)?);
             }
-            keys.push(key);
+            keyed.push((key, (binding, row)));
         }
 
-        let mut index: Vec<usize> = (0..rows.len()).collect();
-        index.sort_by(|&a, &b| compare_order_keys(&keys[a], &keys[b], ret));
-
-        // Apply the permutation.
-        let mut reordered: Vec<Option<(Binding, QueryRow)>> = rows
-            .iter_mut()
-            .map(|slot| Some(std::mem::replace(slot, placeholder_slot())))
-            .collect();
-        for (dst, &src) in index.iter().enumerate() {
-            rows[dst] = reordered[src].take().expect("each source used once");
-        }
+        keyed.sort_by(|a, b| compare_order_keys(&a.0, &b.0, ret));
+        rows.extend(keyed.into_iter().map(|(_, row)| row));
         Ok(())
     }
-}
-
-/// A throwaway `(Binding, QueryRow)` used only to vacate a slot during the
-/// in-place permutation in [`MultiEval::order_rows`]; every placeholder is
-/// overwritten before the function returns.
-fn placeholder_slot() -> (Binding, QueryRow) {
-    (Vec::new(), QueryRow::from_columns(Vec::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -700,10 +861,12 @@ fn param_to_property(param: &CypherParameterValue) -> PropertyValue {
     }
 }
 
-/// Entity variable names in pattern declaration order (nodes and relationships,
-/// first occurrence wins), used for `RETURN *`.
-fn entity_var_declaration_order(patterns: &[CypherPattern]) -> Vec<String> {
-    let mut order = Vec::new();
+/// Entity variable names for `RETURN *`, sorted **alphabetically** (FIX #7).
+///
+/// openCypher / Neo4j return `*` variables in alphabetical order for a
+/// deterministic, declaration-order-independent projection. The names are the
+/// node and relationship variables declared across every pattern (deduped).
+fn return_star_var_order(patterns: &[CypherPattern]) -> Vec<String> {
     let mut seen = HashSet::new();
     for pattern in patterns {
         for element in &pattern.elements {
@@ -711,13 +874,13 @@ fn entity_var_declaration_order(patterns: &[CypherPattern]) -> Vec<String> {
                 CypherPatternElement::Node(n) => n.variable.as_ref(),
                 CypherPatternElement::Relationship(r) => r.variable.as_ref(),
             };
-            if let Some(v) = var
-                && seen.insert(v.clone())
-            {
-                order.push(v.clone());
+            if let Some(v) = var {
+                seen.insert(v.clone());
             }
         }
     }
+    let mut order: Vec<String> = seen.into_iter().collect();
+    order.sort();
     order
 }
 
@@ -844,26 +1007,26 @@ fn compare_order_keys(
     Ordering::Equal
 }
 
-/// A comparable identity for a projected row, used for `DISTINCT` dedup:
-/// bound entity ids plus scalar column values.
-type RowKey = (Vec<(String, u8, u64)>, Vec<(String, PropertyValue)>);
-
-/// Compute a row's `DISTINCT` identity key.
-fn row_key(row: &QueryRow) -> RowKey {
-    let binds = row
-        .bindings
-        .as_ref()
-        .map(|b| {
-            b.iter()
-                .map(|(name, entity)| {
-                    let (kind, id) = entity_kind_id(entity);
-                    (name.clone(), kind, id)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let cols = row.columns.clone().unwrap_or_default();
-    (binds, cols)
+/// Compute a stable string identity for a projected row, used for `DISTINCT`
+/// dedup: bound entity ids plus scalar column values.
+///
+/// A string key is used because [`PropertyValue`] contains float/vector
+/// payloads and does not implement `Hash`/`Eq`; the `{:?}` rendering is
+/// deterministic, so equal rows produce equal keys.
+fn row_dedup_key(row: &QueryRow) -> String {
+    let mut key = String::new();
+    if let Some(bindings) = &row.bindings {
+        for (name, entity) in bindings {
+            let (kind, id) = entity_kind_id(entity);
+            key.push_str(&format!("b:{name}={kind}:{id};"));
+        }
+    }
+    if let Some(columns) = &row.columns {
+        for (name, value) in columns {
+            key.push_str(&format!("c:{name}={value:?};"));
+        }
+    }
+    key
 }
 
 /// A `(kind_tag, id)` identity for an entity result.
@@ -877,17 +1040,15 @@ fn entity_kind_id(entity: &EntityResult) -> (u8, u64) {
     }
 }
 
-/// Deduplicate projected rows by their [`RowKey`] (first occurrence wins).
+/// Deduplicate projected rows by their stable key (first occurrence wins),
+/// using a [`HashSet`] for O(n) total work (FIX #8).
 fn distinct_rows(rows: Vec<(Binding, QueryRow)>) -> Vec<(Binding, QueryRow)> {
-    let mut seen: Vec<RowKey> = Vec::with_capacity(rows.len());
+    let mut seen: HashSet<String> = HashSet::with_capacity(rows.len());
     let mut out = Vec::with_capacity(rows.len());
     for (binding, row) in rows {
-        let key = row_key(&row);
-        if seen.iter().any(|k| k == &key) {
-            continue;
+        if seen.insert(row_dedup_key(&row)) {
+            out.push((binding, row));
         }
-        seen.push(key);
-        out.push((binding, row));
     }
     out
 }

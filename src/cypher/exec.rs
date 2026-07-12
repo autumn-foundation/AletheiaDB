@@ -154,26 +154,23 @@ pub fn plan_cypher_with_params(
 /// n.name`, `count(*)`, a vector-ranked `RETURN d, score`) stays `false` and is
 /// untouched.
 ///
-/// `OPTIONAL MATCH` / `WITH` statements stay on the existing path (which has its
-/// own handling for them); a multi-variable query combined with those clauses is
-/// out of the v1 evaluator's scope and the evaluator rejects it if it is ever
-/// reached.
+/// A single-terminal-variable query -- including a single-pattern `WITH` /
+/// `OPTIONAL MATCH` query the existing path handles correctly -- stays `false`
+/// and is untouched. But a genuinely multi-variable query IS routed to the
+/// evaluator even when combined with `WITH` / `OPTIONAL MATCH` (FIX #5): those
+/// clauses are out of the v1 evaluator's scope, so it rejects them with a
+/// structured error rather than letting the single-entity path silently return
+/// a wrong row.
 pub fn needs_multi_binding(stmt: &CypherStatement) -> bool {
     let CypherStatement::Match {
-        optional,
         pattern,
         where_clause,
         return_clause,
-        with_clauses,
-        optional_matches,
         ..
     } = stmt
     else {
         return false;
     };
-    if *optional || !with_clauses.is_empty() || !optional_matches.is_empty() {
-        return false;
-    }
 
     // Entity (node + relationship) variables declared across all patterns.
     let mut entity_vars: HashSet<String> = HashSet::new();
@@ -199,6 +196,16 @@ pub fn needs_multi_binding(stmt: &CypherStatement) -> bool {
 
     let terminal = pattern.last().and_then(last_node_variable);
 
+    // The multi-binding decision is made from the pattern shape and the
+    // referenced variables ALONE -- the `WITH` / `OPTIONAL MATCH` clauses are
+    // deliberately NOT consulted here (FIX #5). When a query genuinely binds
+    // more than one entity variable (or joins comma-separated patterns), it
+    // must route to the multi-pattern evaluator EVEN if `WITH`/`OPTIONAL MATCH`
+    // is present: the evaluator then rejects those clauses with a structured
+    // `UnsupportedFeature` error, rather than the single-entity path silently
+    // discarding an earlier scan and returning a wrong row. A genuine
+    // single-terminal-variable query (including single-pattern `WITH` /
+    // `OPTIONAL MATCH` queries the old path handles correctly) stays `false`.
     pattern.len() > 1
         || referenced.len() > 1
         || referenced
@@ -219,16 +226,25 @@ fn collect_pattern_entity_vars(pattern: &CypherPattern, out: &mut HashSet<String
     }
 }
 
-/// The variable of the last node element of a pattern, if named.
+/// The variable of the **last node element** of a pattern, or `None` when that
+/// terminal node is unnamed (FIX #4).
+///
+/// This must return the last node's `.variable` directly -- `None` if the last
+/// node is anonymous -- rather than skipping past an unnamed terminal to an
+/// earlier named node. Skipping would make `MATCH (a)-[:R]->()` report a
+/// terminal of `a`, wrongly classifying it as single-terminal and routing it to
+/// the single-entity path (which returns the anonymous endpoint, not `a`).
+/// Mirrors `converter::last_node_variable`.
 fn last_node_variable(pattern: &CypherPattern) -> Option<String> {
     pattern
         .elements
         .iter()
         .rev()
         .find_map(|element| match element {
-            CypherPatternElement::Node(n) => n.variable.clone(),
+            CypherPatternElement::Node(n) => Some(n.variable.clone()),
             CypherPatternElement::Relationship(_) => None,
         })
+        .flatten()
 }
 
 /// Collect variable references from a `RETURN` item.
