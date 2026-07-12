@@ -1096,6 +1096,70 @@ mod tests {
             );
         }
     }
+
+    /// Issue #3506 — write-side corruption guard: serializing a label whose
+    /// interner id does not resolve (a foreign / dangling `InternedString`) must
+    /// fail with a structured `InconsistentState` error naming the offending id,
+    /// rather than silently emitting a garbage label into the WAL.
+    #[test]
+    fn serialize_operation_rejects_unresolvable_label() {
+        // A raw id far beyond anything the process-global interner has allocated;
+        // `resolve_with` returns `None`, driving `serialize_label_str`'s error arm.
+        let bogus = InternedString::from_raw(u32::MAX);
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: bogus,
+            properties: PropertyMapBuilder::new().build(),
+            valid_from: test_timestamp(),
+            provenance: None,
+        };
+        let mut buffer = Vec::new();
+        let err = serialize_operation_into(LSN(1), test_timestamp(), &op, &mut buffer)
+            .expect_err("unresolvable label must fail serialization");
+        match err {
+            crate::core::error::Error::Storage(
+                crate::core::error::StorageError::InconsistentState { reason },
+            ) => {
+                assert!(
+                    reason.contains("not found in interner")
+                        && reason.contains(&u32::MAX.to_string()),
+                    "unexpected InconsistentState reason: {reason}"
+                );
+            }
+            other => panic!("expected InconsistentState, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — the constraint ops carry two labels; an unresolvable
+    /// *property* id (second label slot) must also surface the write-side
+    /// `InconsistentState` guard, and `label_serialized_size` must fall back to
+    /// its `4` length-prefix estimate for such an id without panicking.
+    #[test]
+    fn serialize_constraint_rejects_unresolvable_property_and_size_falls_back() {
+        let good_label = GLOBAL_INTERNER.intern("Cust3506Guard").unwrap();
+        let bogus_property = InternedString::from_raw(u32::MAX);
+
+        // label_serialized_size falls back to `4` (bare length prefix) for an
+        // unresolvable id — the pre-allocation hint must not panic.
+        assert_eq!(label_serialized_size(bogus_property), 4);
+
+        let op = WalOperation::DeclareUniqueConstraint {
+            label: good_label,
+            property: bogus_property,
+        };
+        let mut buffer = Vec::new();
+        let err = serialize_operation_into(LSN(1), test_timestamp(), &op, &mut buffer)
+            .expect_err("unresolvable constraint property must fail serialization");
+        assert!(
+            matches!(
+                err,
+                crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::InconsistentState { .. }
+                )
+            ),
+            "expected InconsistentState, got {err:?}"
+        );
+    }
 }
 
 #[cfg(test)]

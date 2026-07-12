@@ -2071,6 +2071,115 @@ mod tests {
         );
     }
 
+    /// Issue #3506 — crash-recovery corruption path: a v13+ label whose
+    /// length-prefixed bytes are not valid UTF-8 must be rejected as
+    /// `CorruptedData` (not silently mis-decoded), so a torn/garbled segment
+    /// fails the replay loudly instead of interning a bogus label.
+    #[test]
+    fn read_label_v13_rejects_invalid_utf8() {
+        // [len = 2][0xFF, 0xFF] — 0xFF 0xFF is never valid UTF-8.
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&2u32.to_le_bytes());
+        buffer.extend_from_slice(&[0xFF, 0xFF]);
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateNode label",
+        )
+        .expect_err("invalid UTF-8 label bytes must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("Invalid UTF-8 in WAL label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — crash-recovery corruption path: a v13+ label whose declared
+    /// length overruns the remaining buffer must fail `require_bytes` with a
+    /// `CorruptedData` error naming the read context, rather than slicing out of
+    /// bounds or allocating on a crafted length.
+    #[test]
+    fn read_label_v13_rejects_length_overrun() {
+        // [len = 100] but zero label bytes follow.
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&100u32.to_le_bytes());
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateEdge label",
+        )
+        .expect_err("length-overrun label must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("CreateEdge label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — crash-recovery corruption path: a v13+ segment truncated
+    /// mid-way through the 4-byte label length prefix must fail the initial
+    /// `require_bytes` guard rather than reading past the buffer end.
+    #[test]
+    fn read_label_v13_rejects_truncated_length_prefix() {
+        // Only 2 of the 4 length-prefix bytes are present.
+        let buffer = [0x01u8, 0x00];
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "UpdateNode label",
+        )
+        .expect_err("truncated label length prefix must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("UpdateNode label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — happy-path unit coverage for the v13 label decode in
+    /// isolation: a well-formed `[len][utf8]` label re-interns to the exact
+    /// string and advances `offset` past the whole field.
+    #[test]
+    fn read_label_v13_round_trips_and_advances_offset() {
+        let label_str = "Straße3506"; // multi-byte to exercise len != char count
+        let bytes = label_str.as_bytes();
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(bytes);
+        buffer.push(0xAB); // trailing sentinel: offset must stop before this
+        let mut offset = 0usize;
+        let interned = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateNode label",
+        )
+        .expect("well-formed v13 label must decode");
+        assert_eq!(
+            offset,
+            4 + bytes.len(),
+            "offset must advance past [len][utf8]"
+        );
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(interned, |s| s == label_str)
+                .unwrap(),
+            "decoded label must re-intern to the original string"
+        );
+    }
+
     /// Issue #3413: `CommitTx` serializes and parses back byte-for-byte under
     /// the transaction-framing version, and the parsed entry is flagged
     /// `framed`.
