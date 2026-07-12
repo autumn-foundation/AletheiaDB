@@ -53,6 +53,10 @@ fn run() -> Result<(), String> {
         Some("daemon") => handle_daemon(args.collect()),
         Some("backup") => handle_backup(args.collect()),
         Some("restore") => handle_restore(args.collect()),
+        #[cfg(feature = "parquet")]
+        Some("import") => parquet_io::handle_import(args.collect()),
+        #[cfg(feature = "parquet")]
+        Some("export") => parquet_io::handle_export(args.collect()),
         #[cfg(feature = "audit-export")]
         Some("audit-keygen") => audit::handle_keygen(args.collect()),
         #[cfg(feature = "audit-export")]
@@ -85,6 +89,10 @@ Usage:\n\
   aletheia daemon status [--pid-file PATH]\n\
   aletheia backup <output_path>\n\
   aletheia restore <input_path>\n\
+  aletheia import <nodes_file> --format parquet --label L --key COL [--property name:type ...]\n\
+                  [--label-column COL] [--valid-time-column COL]\n\
+                  [--edges FILE --edge-label L --source-key COL --target-key COL [--property name:type ...]]\n\
+  aletheia export <out_prefix> --format parquet [--mode current|history]\n\
   aletheia audit-keygen <key_file>\n\
   aletheia audit-export <node|edge> <id> --key <key_file> --out <path> [--db-id ID] [--redact k1,k2]\n\
   aletheia audit-verify <artifact_path> [--public-key HEX]\n\
@@ -784,6 +792,22 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// Collects the values of every occurrence of a repeatable flag (e.g. all
+/// `--property name:type` pairs).
+#[cfg(feature = "parquet")]
+fn arg_values(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut iter = args.iter();
+    while let Some(token) = iter.next() {
+        if token == flag
+            && let Some(value) = iter.next()
+        {
+            values.push(value.clone());
+        }
+    }
+    values
+}
+
 /// Parses the `--properties` JSON argument if present, converting it to a `PropertyMap`.
 fn parse_optional_properties(args: &[String]) -> Result<PropertyMap, String> {
     match arg_value(args, "--properties") {
@@ -937,6 +961,221 @@ fn print_json_pretty(value: &serde_json::Value) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(format!("error writing JSON output: {e}")),
+    }
+}
+
+/// Parquet columnar import/export subcommands (Issue #3364).
+#[cfg(feature = "parquet")]
+mod parquet_io {
+    use super::{arg_value, arg_values, open_db};
+    use aletheiadb::api::import::{ColumnType, EdgeMapping, LabelSource, NodeMapping};
+
+    /// `aletheia import <nodes_file> --format parquet --label L --key COL ...`
+    ///
+    /// Loads nodes (and optionally edges) from Parquet using the #3211 mapping
+    /// contract. `--label`/`--label-column` choose the label source; `--key` names the
+    /// business-key column; repeated `--property name:type` add typed property columns
+    /// (`type` in string|int|float|bool|timestamp|embedding).
+    pub(super) fn handle_import(args: Vec<String>) -> Result<(), String> {
+        let nodes_file = positional(&args).ok_or_else(usage_import)?;
+        require_parquet_format(&args)?;
+
+        let node_mapping = build_node_mapping(&args)?;
+        let db = open_db()?;
+        let mut importer = db.import();
+        let node_report = importer
+            .nodes_from_parquet(&nodes_file, node_mapping)
+            .map_err(|e| format!("node import failed: {e}"))?;
+
+        let mut edges_imported = 0usize;
+        if let Some(edges_file) = arg_value(&args, "--edges") {
+            let edge_mapping = build_edge_mapping(&args)?;
+            let edge_report = importer
+                .edges_from_parquet(&edges_file, edge_mapping)
+                .map_err(|e| format!("edge import failed: {e}"))?;
+            edges_imported = edge_report.edges_imported;
+        }
+
+        let value = serde_json::json!({
+            "ok": true,
+            "nodes_imported": node_report.nodes_imported,
+            "edges_imported": edges_imported,
+            "rows_read": node_report.rows_read,
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&value).map_err(|e| format!("failed to render JSON: {e}"))?
+        );
+        Ok(())
+    }
+
+    /// `aletheia export <out_prefix> --format parquet [--mode current|history]`
+    ///
+    /// Writes two files: for `current` (the default) `<out_prefix>.nodes.parquet` and
+    /// `<out_prefix>.edges.parquet`; for `history` `<out_prefix>.node_history.parquet`
+    /// and `<out_prefix>.edge_history.parquet`.
+    pub(super) fn handle_export(args: Vec<String>) -> Result<(), String> {
+        let prefix = positional(&args).ok_or_else(usage_export)?;
+        require_parquet_format(&args)?;
+        let mode = arg_value(&args, "--mode").unwrap_or_else(|| "current".to_string());
+
+        let db = open_db()?;
+        let exporter = db.export();
+
+        let value = match mode.as_str() {
+            "current" => {
+                let nodes_path = format!("{prefix}.nodes.parquet");
+                let edges_path = format!("{prefix}.edges.parquet");
+                let nodes = exporter
+                    .nodes_to_parquet(&nodes_path)
+                    .map_err(|e| format!("node export failed: {e}"))?;
+                let edges = exporter
+                    .edges_to_parquet(&edges_path)
+                    .map_err(|e| format!("edge export failed: {e}"))?;
+                serde_json::json!({
+                    "ok": true,
+                    "mode": "current",
+                    "nodes_file": nodes_path,
+                    "edges_file": edges_path,
+                    "nodes_exported": nodes.nodes_exported,
+                    "edges_exported": edges.edges_exported,
+                })
+            }
+            "history" => {
+                let nodes_path = format!("{prefix}.node_history.parquet");
+                let edges_path = format!("{prefix}.edge_history.parquet");
+                let nodes = exporter
+                    .node_history_to_parquet(&nodes_path)
+                    .map_err(|e| format!("node history export failed: {e}"))?;
+                let edges = exporter
+                    .edge_history_to_parquet(&edges_path)
+                    .map_err(|e| format!("edge history export failed: {e}"))?;
+                serde_json::json!({
+                    "ok": true,
+                    "mode": "history",
+                    "node_history_file": nodes_path,
+                    "edge_history_file": edges_path,
+                    "node_versions_exported": nodes.node_versions_exported,
+                    "edge_versions_exported": edges.edge_versions_exported,
+                })
+            }
+            other => {
+                return Err(format!(
+                    "unknown --mode '{other}' (expected current|history)"
+                ));
+            }
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&value).map_err(|e| format!("failed to render JSON: {e}"))?
+        );
+        Ok(())
+    }
+
+    /// The first non-flag, non-flag-value token (the required output/input path).
+    fn positional(args: &[String]) -> Option<String> {
+        let mut iter = args.iter();
+        while let Some(token) = iter.next() {
+            if token.starts_with("--") {
+                // Skip this flag's value too.
+                iter.next();
+            } else {
+                return Some(token.clone());
+            }
+        }
+        None
+    }
+
+    fn require_parquet_format(args: &[String]) -> Result<(), String> {
+        match arg_value(args, "--format").as_deref() {
+            Some("parquet") => Ok(()),
+            Some(other) => Err(format!("unsupported --format '{other}' (only 'parquet')")),
+            None => Err("missing required --format parquet".to_string()),
+        }
+    }
+
+    fn parse_column_type(spec: &str) -> Result<ColumnType, String> {
+        match spec {
+            "string" => Ok(ColumnType::String),
+            "int" => Ok(ColumnType::Int),
+            "float" => Ok(ColumnType::Float),
+            "bool" => Ok(ColumnType::Bool),
+            "timestamp" => Ok(ColumnType::Timestamp),
+            "embedding" => Ok(ColumnType::Embedding),
+            other => Err(format!(
+                "unknown property type '{other}' (expected string|int|float|bool|timestamp|embedding)"
+            )),
+        }
+    }
+
+    /// Parse repeated `--property name:type` flags into `(column, type)` pairs. The
+    /// column and property name are the same (`name`), matching a column-per-key export.
+    fn parse_properties(args: &[String]) -> Result<Vec<(String, ColumnType)>, String> {
+        let mut out = Vec::new();
+        for spec in arg_values(args, "--property") {
+            let (name, ty) = spec
+                .split_once(':')
+                .ok_or_else(|| format!("invalid --property '{spec}' (expected name:type)"))?;
+            if name.is_empty() {
+                return Err(format!("invalid --property '{spec}' (empty name)"));
+            }
+            out.push((name.to_string(), parse_column_type(ty)?));
+        }
+        Ok(out)
+    }
+
+    fn label_source(args: &[String]) -> Result<LabelSource, String> {
+        match (
+            arg_value(args, "--label"),
+            arg_value(args, "--label-column"),
+        ) {
+            (Some(_), Some(_)) => Err("use only one of --label / --label-column".to_string()),
+            (Some(fixed), None) => Ok(LabelSource::fixed(fixed)),
+            (None, Some(col)) => Ok(LabelSource::column(col)),
+            (None, None) => Err("missing required --label or --label-column".to_string()),
+        }
+    }
+
+    fn build_node_mapping(args: &[String]) -> Result<NodeMapping, String> {
+        let label = label_source(args)?;
+        let key = arg_value(args, "--key").ok_or_else(|| "missing required --key".to_string())?;
+        let mut mapping = NodeMapping::new(label, key);
+        for (name, ty) in parse_properties(args)? {
+            mapping = mapping.property_same(name, ty);
+        }
+        if let Some(col) = arg_value(args, "--valid-time-column") {
+            mapping = mapping.valid_time_column(col);
+        }
+        Ok(mapping)
+    }
+
+    fn build_edge_mapping(args: &[String]) -> Result<EdgeMapping, String> {
+        let label = arg_value(args, "--edge-label")
+            .map(LabelSource::fixed)
+            .ok_or_else(|| "missing required --edge-label for --edges".to_string())?;
+        let source = arg_value(args, "--source-key")
+            .ok_or_else(|| "missing required --source-key for --edges".to_string())?;
+        let target = arg_value(args, "--target-key")
+            .ok_or_else(|| "missing required --target-key for --edges".to_string())?;
+        let mut mapping = EdgeMapping::new(label, source, target);
+        for (name, ty) in parse_properties(args)? {
+            mapping = mapping.property_same(name, ty);
+        }
+        if let Some(col) = arg_value(args, "--valid-time-column") {
+            mapping = mapping.valid_time_column(col);
+        }
+        Ok(mapping)
+    }
+
+    fn usage_import() -> String {
+        "usage: aletheia import <nodes_file> --format parquet --label L --key COL \
+         [--property name:type ...] [--label-column COL] [--valid-time-column COL] \
+         [--edges FILE --edge-label L --source-key COL --target-key COL]"
+            .to_string()
+    }
+
+    fn usage_export() -> String {
+        "usage: aletheia export <out_prefix> --format parquet [--mode current|history]".to_string()
     }
 }
 
@@ -1580,5 +1819,82 @@ mod tests {
         let err = parse_optional_properties(&["--properties".to_string(), "not json".to_string()])
             .unwrap_err();
         assert!(err.contains("invalid JSON"), "unexpected error: {err}");
+    }
+}
+
+/// CLI smoke tests for the Parquet import/export verbs (Issue #3364).
+#[cfg(all(test, feature = "parquet"))]
+mod parquet_cli_tests {
+    use super::parquet_io;
+    use tempfile::TempDir;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn import_missing_args_returns_usage_error() {
+        let err = parquet_io::handle_import(vec![]).unwrap_err();
+        assert!(err.contains("usage"), "got: {err}");
+    }
+
+    #[test]
+    fn export_missing_args_returns_usage_error() {
+        let err = parquet_io::handle_export(vec![]).unwrap_err();
+        assert!(err.contains("usage"), "got: {err}");
+    }
+
+    #[test]
+    fn import_requires_parquet_format() {
+        let err = parquet_io::handle_import(vec![
+            s("nodes.parquet"),
+            s("--label"),
+            s("Person"),
+            s("--key"),
+            s("id"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("--format"), "got: {err}");
+    }
+
+    #[test]
+    fn export_current_writes_both_files() {
+        let dir = TempDir::new().unwrap();
+        let prefix = dir.path().join("out").display().to_string();
+        parquet_io::handle_export(vec![prefix.clone(), s("--format"), s("parquet")])
+            .expect("export should succeed");
+        assert!(std::path::Path::new(&format!("{prefix}.nodes.parquet")).exists());
+        assert!(std::path::Path::new(&format!("{prefix}.edges.parquet")).exists());
+    }
+
+    #[test]
+    fn export_history_writes_both_files() {
+        let dir = TempDir::new().unwrap();
+        let prefix = dir.path().join("hist").display().to_string();
+        parquet_io::handle_export(vec![
+            prefix.clone(),
+            s("--format"),
+            s("parquet"),
+            s("--mode"),
+            s("history"),
+        ])
+        .expect("history export should succeed");
+        assert!(std::path::Path::new(&format!("{prefix}.node_history.parquet")).exists());
+        assert!(std::path::Path::new(&format!("{prefix}.edge_history.parquet")).exists());
+    }
+
+    #[test]
+    fn export_rejects_unknown_mode() {
+        let dir = TempDir::new().unwrap();
+        let prefix = dir.path().join("out").display().to_string();
+        let err = parquet_io::handle_export(vec![
+            prefix,
+            s("--format"),
+            s("parquet"),
+            s("--mode"),
+            s("bogus"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("mode"), "got: {err}");
     }
 }

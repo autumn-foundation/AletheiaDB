@@ -22,6 +22,9 @@ After those four, pick the guides relevant to what you're building.
 - [Tiered Storage Guide](tiered-storage-guide.md) — Hot/warm/cold architecture for unlimited history
 - [Index Persistence Guide](index-persistence-guide.md) — Fast cold starts with Zstd-compressed index snapshots
 
+### Interoperability
+- [Parquet Import / Export](parquet-import-export.md) — Columnar import/export of nodes, edges, and full bi-temporal history for DuckDB / pandas / analytics pipelines
+
 ### Querying
 - [Hybrid Query Guide](hybrid-query-guide.md) — Combine graph traversal + vector similarity + temporal in one query
 - [Query Pipeline Guide](query-pipeline-guide.md) — How queries are planned and executed internally
