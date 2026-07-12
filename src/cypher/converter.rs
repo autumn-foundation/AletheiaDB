@@ -243,15 +243,18 @@ impl CypherConverter {
                 let mut with_idx = 0;
                 for opt_match in &optional_matches {
                     while with_idx < opt_match.preceding_withs && with_idx < with_clauses.len() {
-                        let later_ordering =
-                            Self::has_later_ordering(&with_clauses, with_idx, &return_clause);
+                        let order_by_overridden = Self::order_by_overridden_without_window(
+                            &with_clauses,
+                            with_idx,
+                            &return_clause,
+                        );
                         self.convert_with_clause(
                             &with_clauses[with_idx],
                             &mut ops,
                             &mut visible,
                             &mut dropped,
                             &mut current_var,
-                            later_ordering,
+                            order_by_overridden,
                         )?;
                         with_idx += 1;
                     }
@@ -271,20 +274,14 @@ impl CypherConverter {
                     let mut sub_ops = Vec::new();
                     for pat in &opt_match.pattern {
                         self.convert_optional_pattern(pat, &mut sub_ops, current_var.as_deref())?;
-                        // The optional pattern's variables enter scope.
-                        Self::collect_pattern_variables(pat, &mut visible);
-                        for element in &pat.elements {
-                            if let CypherPatternElement::Node(node) = element
-                                && let Some(v) = &node.variable
-                            {
-                                dropped.remove(v);
-                            }
-                            if let CypherPatternElement::Relationship(rel) = element
-                                && let Some(v) = &rel.variable
-                            {
-                                dropped.remove(v);
-                            }
+                        // The optional pattern's variables (re-)enter scope: add
+                        // them to `visible` and clear any earlier `dropped` mark.
+                        let mut pat_vars = HashSet::new();
+                        Self::collect_pattern_variables(pat, &mut pat_vars);
+                        for v in &pat_vars {
+                            dropped.remove(v);
                         }
+                        visible.extend(pat_vars);
                     }
                     // The next clause continues from this pattern's last node.
                     current_var = opt_match
@@ -303,15 +300,18 @@ impl CypherConverter {
                     ops.push(QueryOp::Optional { ops: sub_ops });
                 }
                 while with_idx < with_clauses.len() {
-                    let later_ordering =
-                        Self::has_later_ordering(&with_clauses, with_idx, &return_clause);
+                    let order_by_overridden = Self::order_by_overridden_without_window(
+                        &with_clauses,
+                        with_idx,
+                        &return_clause,
+                    );
                     self.convert_with_clause(
                         &with_clauses[with_idx],
                         &mut ops,
                         &mut visible,
                         &mut dropped,
                         &mut current_var,
-                        later_ordering,
+                        order_by_overridden,
                     )?;
                     with_idx += 1;
                 }
@@ -324,8 +324,25 @@ impl CypherConverter {
                 // out-of-scope, dropped variable is unambiguously wrong and is
                 // rejected here rather than answered against the wrong entity.)
                 for item in &return_clause.items {
-                    if let CypherReturnItem::Expression { expr, .. } = item {
-                        self.reject_dropped_refs(expr, &dropped, "RETURN")?;
+                    match item {
+                        CypherReturnItem::Expression { expr, .. } => {
+                            self.reject_dropped_refs(expr, &dropped, "RETURN")?;
+                        }
+                        // Defense-in-depth for a manually-constructed AST: the
+                        // parser currently emits `Expression` for a bare
+                        // variable, but a hand-built `Variable` item must be
+                        // scope-checked too. `Star` binds nothing to reject.
+                        CypherReturnItem::Variable(name) => {
+                            if dropped.contains(name) {
+                                return Err(CypherError::SemanticError(format!(
+                                    "RETURN references variable '{name}', which is not in \
+                                     scope after a WITH projection dropped it; project it \
+                                     through the WITH (e.g. `WITH ..., {name}`) to keep it \
+                                     visible"
+                                )));
+                            }
+                        }
+                        CypherReturnItem::Star => {}
                     }
                 }
                 for order_item in &return_clause.order_by {
@@ -575,13 +592,28 @@ impl CypherConverter {
         visible: &mut HashSet<String>,
         dropped: &mut HashSet<String>,
         current_var: &mut Option<String>,
-        later_ordering: bool,
+        order_by_overridden: bool,
     ) -> Result<(), CypherError> {
         // 1. Resolve the projection shape and update the scope.
         match Self::with_projection(with)? {
             WithProjection::All => {
-                // `WITH *` carries every visible variable forward: scope and
-                // positional binding are unchanged.
+                // `WITH *` carries every visible variable forward, but the
+                // positional pipeline carries only ONE entity per row. When
+                // more than one variable is in scope, `*` would silently
+                // forward the wrong entity (e.g. `MATCH (a)-[:KNOWS]->(b)
+                // WITH * RETURN a` returns `b`'s data as `a`). Reject rather
+                // than answer wrongly; `*` with a single visible variable is a
+                // faithful no-op (scope and positional binding unchanged).
+                if visible.len() > 1 {
+                    return Err(CypherError::UnsupportedFeature(format!(
+                        "WITH * with more than one variable in scope ({} visible) is \
+                         not supported: the positional execution pipeline carries a \
+                         single entity per row, so '*' would forward the wrong \
+                         entity. Project the single variable you need (optionally \
+                         aliased) instead.",
+                        visible.len()
+                    )));
+                }
             }
             WithProjection::Single { source, output } => {
                 // The pipeline is positioned on `current_var`; it cannot
@@ -603,13 +635,14 @@ impl CypherConverter {
                         ),
                     }));
                 }
-                // Everything except the projected output leaves scope.
-                for name in visible.iter() {
-                    if name != &output {
-                        dropped.insert(name.clone());
+                // Everything except the projected output leaves scope. Drain
+                // `visible` to move the owned names straight into `dropped`
+                // (no clone), then re-seed the scope with the output.
+                for name in visible.drain() {
+                    if name != output {
+                        dropped.insert(name);
                     }
                 }
-                visible.clear();
                 visible.insert(output.clone());
                 dropped.remove(&output);
                 *current_var = Some(output);
@@ -624,20 +657,22 @@ impl CypherConverter {
         // 3. ORDER BY / SKIP / LIMIT on the projected rows.
         //
         //    A `WITH` ORDER BY is meaningful when it selects a SKIP/LIMIT
-        //    window, or when it is the last ordering applied before RETURN. A
-        //    bare intermediate ORDER BY (no SKIP/LIMIT) that is followed by a
-        //    later ORDER BY is fully overridden by that later ordering, so it
-        //    is a no-op that is safely dropped -- openCypher leaves the tie
-        //    order of the overridden sort unspecified. Dropping it also avoids
-        //    an incorrect fold in the physical planner, which merges
-        //    *consecutive* Sort ops into one multi-key Sort; when a SKIP/LIMIT
-        //    window IS present the intervening Skip/Limit op breaks that fold.
+        //    window (in this clause OR any clause before the next re-sort), or
+        //    when it is the last ordering applied before output. It may be
+        //    dropped ONLY when the next ordering-affecting event is a later
+        //    re-sort with NO intervening SKIP/LIMIT window
+        //    (`order_by_overridden`): that later ordering fully replaces it and
+        //    openCypher leaves the overridden tie order unspecified. Dropping
+        //    the pure-consecutive-sort case also avoids an incorrect fold in
+        //    the physical planner, which merges *consecutive* Sort ops into one
+        //    multi-key Sort; emitting a Sort when a window intervenes is
+        //    fold-safe because the intervening Skip/Limit op breaks that fold.
         if !with.order_by.is_empty() {
             for order_item in &with.order_by {
                 self.reject_dropped_refs(&order_item.expr, dropped, "WITH ... ORDER BY")?;
             }
             let has_window = with.skip.is_some() || with.limit.is_some();
-            if has_window || !later_ordering {
+            if has_window || !order_by_overridden {
                 for order_item in &with.order_by {
                     let sort_key = self.convert_order_item_to_sort_key(order_item)?;
                     ops.push(QueryOp::Sort {
@@ -709,22 +744,45 @@ impl CypherConverter {
         }
     }
 
-    /// Whether any clause *after* the `WITH` at `with_idx` applies its own
-    /// ordering: a later `WITH` with an `ORDER BY`, or the final `RETURN` with
-    /// an `ORDER BY`. Used to decide whether a bare intermediate `WITH`
-    /// ORDER BY (no SKIP/LIMIT) is observable or is overridden downstream.
-    fn has_later_ordering(
+    /// Whether a bare intermediate `WITH ... ORDER BY` (one with no SKIP/LIMIT
+    /// window of its own) at `with_idx` is fully overridden by a later re-sort
+    /// with **no intervening SKIP/LIMIT window**, and may therefore be dropped.
+    ///
+    /// A `WITH`/`RETURN` clause applies its own `ORDER BY` *before* its own
+    /// `SKIP`/`LIMIT`, so scanning forward from the next clause:
+    ///
+    /// - the first later clause carrying its own `ORDER BY` is a **re-sort**
+    ///   that replaces this ordering (droppable) -- its order runs before any
+    ///   paging that clause also has, so it counts as a re-sort, not a window;
+    /// - a `SKIP`/`LIMIT` in a clause *before* that re-sort **consumes** this
+    ///   ordering (it selects a window against these ordered rows), making the
+    ///   sort observable -- do not drop;
+    /// - reaching the `RETURN` with no earlier re-sort: the `RETURN`'s own
+    ///   `ORDER BY` (if any) is the next re-sort (droppable); otherwise this
+    ///   ordering is **terminal** (the final result order) and is observable.
+    ///
+    /// The caller additionally guards on this `WITH`'s *own* SKIP/LIMIT (a
+    /// same-clause window makes its ORDER BY observable); this look-ahead only
+    /// considers the clauses that follow it.
+    fn order_by_overridden_without_window(
         with_clauses: &[CypherWith],
         with_idx: usize,
         return_clause: &CypherReturn,
     ) -> bool {
-        if !return_clause.order_by.is_empty() {
-            return true;
+        for later in with_clauses.iter().skip(with_idx + 1) {
+            if !later.order_by.is_empty() {
+                // Next re-sort reached with no intervening window: overridden.
+                return true;
+            }
+            if later.skip.is_some() || later.limit.is_some() {
+                // A window consumes this ordering before any later re-sort.
+                return false;
+            }
         }
-        with_clauses
-            .iter()
-            .skip(with_idx + 1)
-            .any(|w| !w.order_by.is_empty())
+        // No later `WITH` re-sorts before the `RETURN`: the `RETURN`'s own
+        // `ORDER BY` (applied before its paging) is the next re-sort; absent
+        // that, this ordering is terminal and therefore observable.
+        !return_clause.order_by.is_empty()
     }
 
     /// Collect the variable names bound by a graph pattern (node and

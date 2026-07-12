@@ -4419,6 +4419,117 @@ mod with_clause {
         assert_eq!(with.limit, Some(2));
         assert!(with.where_clause.is_some());
     }
+
+    // ---- intermediate ORDER BY: drop only when overridden with no window ---
+
+    #[test]
+    fn intermediate_order_by_observable_when_later_limit_intervenes() {
+        // BLOCKER regression: the intermediate `ORDER BY a.age DESC` is
+        // consumed by a LATER clause's `LIMIT 2` before the final re-sort, so
+        // it MUST be emitted. Top-2 by age desc = {Dave(60), Carol(50)}, then
+        // RETURN ORDER BY name -> [Carol, Dave]. Dropping the age sort would
+        // wrongly page {Alice, Bob} and return [Alice, Bob].
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age DESC WITH a LIMIT 2 RETURN a ORDER BY a.name",
+            ),
+            vec!["Carol".to_string(), "Dave".to_string()]
+        );
+    }
+
+    #[test]
+    fn intermediate_order_by_observable_when_later_skip_intervenes() {
+        // As above but a later `SKIP 2` consumes the ordering: age desc
+        // [Dave,Carol,Bob,Alice] -> SKIP 2 -> [Bob,Alice] -> RETURN ORDER BY
+        // name -> [Alice, Bob]. Dropping the age sort would skip an arbitrary
+        // pair and return the wrong rows.
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age DESC WITH a SKIP 2 RETURN a ORDER BY a.name",
+            ),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn consecutive_bare_with_order_bys_collapse_to_last() {
+        // Override-safe case (no intervening window): a later bare `ORDER BY`
+        // fully replaces the earlier one, so only the last sort is emitted.
+        // Final order is by age (the second re-sort), ascending.
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.name DESC WITH a ORDER BY a.age RETURN a",
+            ),
+            vec![
+                "Alice".to_string(),
+                "Bob".to_string(),
+                "Carol".to_string(),
+                "Dave".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn consecutive_bare_with_order_bys_emit_single_sort() {
+        // Structural guard: the overridden first ORDER BY is dropped, so the
+        // pipeline holds exactly one Sort (no multi-key fold hazard).
+        let q = parse_cypher(
+            "MATCH (a:Person) WITH a ORDER BY a.name DESC WITH a ORDER BY a.age RETURN a",
+        )
+        .unwrap();
+        let sorts = q
+            .ops
+            .iter()
+            .filter(|op| matches!(op, QueryOp::Sort { .. }))
+            .count();
+        assert_eq!(
+            sorts, 1,
+            "override-safe consecutive sorts must collapse to one"
+        );
+    }
+
+    #[test]
+    fn same_clause_with_order_by_limit_still_selects_window() {
+        // Over-correction guard: a same-clause window keeps working exactly as
+        // before (top-2 by age desc, in age-desc order).
+        let db = db();
+        assert_eq!(
+            names_in_order(
+                &db,
+                "MATCH (a:Person) WITH a ORDER BY a.age DESC LIMIT 2 RETURN a"
+            ),
+            vec!["Dave".to_string(), "Carol".to_string()]
+        );
+    }
+
+    // ---- rejected: `WITH *` with more than one variable visible ------------
+
+    #[test]
+    fn with_star_rejected_when_multiple_variables_visible() {
+        // Two variables (`a`, `b`) are in scope; `WITH *` cannot faithfully
+        // carry both through the single-entity positional pipeline.
+        let err = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) WITH * RETURN a").unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(_)),
+            "WITH * with >1 visible variable must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn with_star_ok_when_single_variable_visible() {
+        // Exactly one variable in scope: `WITH *` is a faithful no-op.
+        let db = db();
+        assert_eq!(
+            names_sorted(&db, "MATCH (a:Person) WITH * WHERE a.age > 55 RETURN a"),
+            vec!["Dave".to_string()]
+        );
+    }
 }
 
 // ============================================================================
