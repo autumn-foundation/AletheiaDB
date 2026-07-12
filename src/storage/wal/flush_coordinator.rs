@@ -45,8 +45,7 @@ use super::ring_buffer::PendingEntry;
 use crate::core::error::{Error, Result, StorageError};
 
 use super::segment_reader::{
-    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_DESTRUCTIVE_PROVENANCE,
-    WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE,
+    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_STRING_LABELS, WAL_VERSION_STRING_LABELS,
 };
 
 /// Metadata about a WAL segment's LSN range.
@@ -432,23 +431,24 @@ impl FlushCoordinator {
             return Ok(());
         }
 
-        // New segments use the destructive-op provenance format (Issue #3427):
-        // WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE (v12) for encrypted
-        // segments, WAL_VERSION_DESTRUCTIVE_PROVENANCE (v11) for plaintext. It
-        // is a strict superset of the delete-version-id format (Issue #3406,
-        // v9/v10) — itself a superset of the transaction-framing format (Issue
-        // #3413) and the principal-carrying provenance format (Issues #3224 +
-        // #3350) — additionally appending an optional provenance blob to the
-        // delete/retract payloads so the acting principal on a destructive op
-        // survives crash recovery. It keeps the BeginTx/CommitTx framing
-        // markers AND the tombstone/retraction version_id. Non-transactional
-        // producers simply omit the framing markers; the version bump signals
-        // that the markers AND the extended payloads MAY be present so old
-        // readers reject the segment cleanly rather than misparsing.
+        // New segments use the string-label format (Issue #3506):
+        // WAL_VERSION_ENCRYPTED_STRING_LABELS (v14) for encrypted segments,
+        // WAL_VERSION_STRING_LABELS (v13) for plaintext. It is a strict
+        // superset of the destructive-op provenance format (Issue #3427,
+        // v11/v12) — itself a superset of the delete-version-id (Issue #3406),
+        // transaction-framing (Issue #3413), and principal-carrying provenance
+        // (Issues #3224 + #3350) formats — changing only how the
+        // node/edge/constraint LABEL is encoded: length-prefixed UTF-8 that is
+        // re-interned on read instead of a raw interner id, so labels are
+        // correct under any interner layout on replay. It keeps every prior
+        // field (framing markers, tombstone/retraction version_id, destructive
+        // provenance). The version bump signals the new label encoding so old
+        // readers reject the segment cleanly rather than mis-lengthing the
+        // variable-width label payload.
         let write_version = if self.config.wal_cipher.is_some() {
-            WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE
+            WAL_VERSION_ENCRYPTED_STRING_LABELS
         } else {
-            WAL_VERSION_DESTRUCTIVE_PROVENANCE
+            WAL_VERSION_STRING_LABELS
         };
 
         // Allocate the next segment id, rolling past any existing non-empty
@@ -1130,27 +1130,35 @@ mod tests {
         use crate::core::provenance::Provenance;
         use crate::core::temporal::time;
         use crate::storage::wal::segment_reader::{WAL_VERSION_PROVENANCE, read_entries_from_dir};
-        use crate::storage::wal::serialization::serialize_entry_into;
+        use crate::storage::wal::serialization::{OP_CREATE_NODE, serialize_entry_into};
         use crate::storage::wal::{WalEntry, WalOperation};
 
         let dir = tempdir().unwrap();
 
-        // Hand-write a v3-header segment at id 1 containing one valid entry.
-        // A provenance-less entry's bytes are identical across the v3 and v5
-        // payload formats (the principal slot only exists inside a present
-        // provenance bundle), so this file replays cleanly as v3.
-        let old_entry = WalEntry::new(
-            LSN(1),
-            WalOperation::CreateNode {
-                node_id: NodeId::new(1).unwrap(),
-                label: GLOBAL_INTERNER.intern("Legacy").unwrap(),
-                properties: PropertyMap::new(),
-                valid_from: time::now(),
-                provenance: None,
-            },
-        );
+        // Hand-write a genuine v3-header segment at id 1 containing one valid,
+        // provenance-less CreateNode with a RAW 4-byte interner-id label (the
+        // pre-#3506 label encoding). We build it by hand rather than via the
+        // modern serializer, which now writes string labels at v13 — a v13 body
+        // under a v3 header would not replay. A provenance-less entry's other
+        // bytes are identical across the v3/v5 payload formats, so this file
+        // replays cleanly as v3.
+        let legacy_label = GLOBAL_INTERNER.intern("Legacy").unwrap();
+        let legacy_ts = time::now();
         let mut old_bytes = Vec::new();
-        serialize_entry_into(&old_entry, &mut old_bytes).unwrap();
+        old_bytes.extend_from_slice(&LSN(1).0.to_le_bytes());
+        legacy_ts.serialize_into(&mut old_bytes);
+        let cs = old_bytes.len();
+        old_bytes.extend_from_slice(&[0u8; 4]);
+        old_bytes.push(OP_CREATE_NODE);
+        old_bytes.extend_from_slice(&NodeId::new(1).unwrap().as_u64().to_le_bytes());
+        old_bytes.extend_from_slice(&legacy_label.as_u32().to_le_bytes()); // raw id label
+        PropertyMap::new().serialize_into(&mut old_bytes).unwrap();
+        legacy_ts.serialize_into(&mut old_bytes);
+        old_bytes.push(0u8); // provenance: absent
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&old_bytes[0..20]);
+        hasher.update(&old_bytes[cs + 4..]);
+        old_bytes[cs..cs + 4].copy_from_slice(&hasher.finalize().to_le_bytes());
         let mut v3_segment = Vec::new();
         v3_segment.extend_from_slice(&WAL_MAGIC);
         v3_segment.push(WAL_VERSION_PROVENANCE);
@@ -1200,11 +1208,11 @@ mod tests {
         );
 
         // ...the write must have rolled forward to a fresh segment with the
-        // current writer (v11 destructive-provenance) header...
+        // current writer (v13 string-labels) header...
         assert_eq!(coordinator.current_segment_id(), 2);
         let new_segment = std::fs::read(dir.path().join("000002.log")).unwrap();
         assert_eq!(&new_segment[0..4], &WAL_MAGIC);
-        assert_eq!(new_segment[4], WAL_VERSION_DESTRUCTIVE_PROVENANCE);
+        assert_eq!(new_segment[4], WAL_VERSION_STRING_LABELS);
 
         // ...and a full-directory replay succeeds, with the new entry's
         // principal intact.
@@ -1524,7 +1532,7 @@ mod tests {
 
         assert!(data.len() >= WAL_HEADER_SIZE);
         assert_eq!(&data[0..4], &WAL_MAGIC);
-        assert_eq!(data[4], WAL_VERSION_DESTRUCTIVE_PROVENANCE);
+        assert_eq!(data[4], WAL_VERSION_STRING_LABELS);
     }
 
     #[test]

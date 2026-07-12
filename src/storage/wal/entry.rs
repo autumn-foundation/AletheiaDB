@@ -375,14 +375,13 @@ mod sentry_tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&original_entry, &mut buffer).expect("Serialization failed");
 
-        // Deserialize. Serialization always writes the principal-carrying
-        // provenance payload shape now (Issues #3224 + #3350), so parsing
-        // must use the matching version to consume the same bytes that were
-        // written.
+        // Deserialize. Serialization always writes the newest payload shape now
+        // (string labels, Issue #3506), so parsing must use the matching
+        // version to consume the same bytes that were written.
         let (parsed_entry, consumed) = parse_entry_at(
             &buffer,
             0,
-            crate::storage::wal::segment_reader::WAL_VERSION_PROVENANCE_PRINCIPAL,
+            crate::storage::wal::segment_reader::WAL_VERSION_STRING_LABELS,
         )
         .expect("Deserialization failed");
 
@@ -395,6 +394,10 @@ mod sentry_tests {
         // This validates that the checksum in the buffer is indeed what we expect
         // for this data (since parse_entry_at verifies it).
         original_entry.checksum = parsed_entry.checksum;
+        // Parsing at a framing-capable version (v13 >= v7) flags the entry
+        // `framed`; the freshly-built original defaults to false. Normalize it
+        // (like the checksum) so the comparison targets the payload fidelity.
+        original_entry.framed = parsed_entry.framed;
 
         // Now assert strict equality
         assert_eq!(
