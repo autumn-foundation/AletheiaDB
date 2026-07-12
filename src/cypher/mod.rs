@@ -67,3 +67,6 @@ pub use parser::CypherParser;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "cypher"))]
+mod compat;

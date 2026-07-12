@@ -1,0 +1,1027 @@
+//! openCypher compatibility suite (Issue #561).
+//!
+//! A table-driven contract that pins the **currently-supported read-only Cypher
+//! subset** and asserts that **unsupported constructs are rejected with
+//! structured errors** — never silently answered with wrong data.
+//!
+//! # What this suite guarantees
+//!
+//! - Every construct documented as *supported* in
+//!   [`docs/guides/cypher-compatibility.md`](../../docs/guides/cypher-compatibility.md)
+//!   parses and (where deterministic) executes against a known seed graph with
+//!   the exact expected row count.
+//! - Every construct documented as *intentionally unsupported* is rejected with
+//!   the precise [`CypherError`] variant (and an intent-pinning message
+//!   substring), asserted at the `parse_cypher` boundary — because at the
+//!   `execute_cypher` boundary the variants collapse into the coarser
+//!   `QueryError` family and precise intent would be lost.
+//!
+//! # Structure
+//!
+//! - [`compat_db`] builds a deterministic graph (automated test-data setup).
+//! - [`Case`] + [`Expect`] model one corpus entry.
+//! - `supported_execute_cases` / `supported_parse_cases` / `rejected_cases`
+//!   return the curated corpus, grouped by category.
+//! - Three runner `#[test]`s each iterate their slice, **accumulate every
+//!   failure**, and panic once with an interpretable multi-line report so a CI
+//!   failure names exactly which cases regressed.
+
+use std::collections::HashMap;
+
+use crate::AletheiaDB;
+use crate::core::property::{PropertyMap, PropertyMapBuilder};
+
+use super::converter::{CypherParameterValue, parse_cypher, parse_cypher_with_params};
+use super::error::CypherError;
+
+// ---------------------------------------------------------------------------
+// Automated seed graph
+// ---------------------------------------------------------------------------
+
+/// Build the deterministic compatibility seed graph.
+///
+/// Nodes:
+/// - `Person` Alice {name:'Alice', age:30, dept:'Eng'}
+/// - `Person` Bob   {name:'Bob',   age:25, dept:'Eng'}
+/// - `Person` Carol {name:'Carol', age:40, dept:'Sales'}
+/// - `Person` Dave  {name:'Dave',  age:35, dept:'Sales'}
+/// - `Company` Acme   {name:'Acme',   cid:1}
+/// - `Company` Globex {name:'Globex', cid:2}
+///
+/// No node carries an `email` property (pins `IS NULL` / `IS NOT NULL`).
+///
+/// Edges:
+/// - Alice -[:KNOWS]-> Bob -[:KNOWS]-> Carol -[:KNOWS]-> Dave (a linear chain)
+/// - Alice -[:WORKS_AT]-> Acme
+/// - Dave  -[:WORKS_AT]-> Globex
+fn compat_db() -> AletheiaDB {
+    let db = AletheiaDB::new().expect("create in-memory db");
+
+    let person = |name: &str, age: i64, dept: &str| {
+        PropertyMapBuilder::new()
+            .insert("name", name)
+            .insert("age", age)
+            .insert("dept", dept)
+            .build()
+    };
+
+    let alice = db
+        .create_node("Person", person("Alice", 30, "Eng"))
+        .unwrap();
+    let bob = db.create_node("Person", person("Bob", 25, "Eng")).unwrap();
+    let carol = db
+        .create_node("Person", person("Carol", 40, "Sales"))
+        .unwrap();
+    let dave = db
+        .create_node("Person", person("Dave", 35, "Sales"))
+        .unwrap();
+
+    let acme = db
+        .create_node(
+            "Company",
+            PropertyMapBuilder::new()
+                .insert("name", "Acme")
+                .insert("cid", 1i64)
+                .build(),
+        )
+        .unwrap();
+    let globex = db
+        .create_node(
+            "Company",
+            PropertyMapBuilder::new()
+                .insert("name", "Globex")
+                .insert("cid", 2i64)
+                .build(),
+        )
+        .unwrap();
+
+    db.create_edge(alice, bob, "KNOWS", PropertyMap::new())
+        .unwrap();
+    db.create_edge(bob, carol, "KNOWS", PropertyMap::new())
+        .unwrap();
+    db.create_edge(carol, dave, "KNOWS", PropertyMap::new())
+        .unwrap();
+    db.create_edge(alice, acme, "WORKS_AT", PropertyMap::new())
+        .unwrap();
+    db.create_edge(dave, globex, "WORKS_AT", PropertyMap::new())
+        .unwrap();
+
+    db
+}
+
+// ---------------------------------------------------------------------------
+// Case model
+// ---------------------------------------------------------------------------
+
+/// The kind of structured rejection a case expects, mapped to the precise
+/// [`CypherError`] variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejectKind {
+    /// [`CypherError::ParseError`].
+    Parse,
+    /// [`CypherError::UnsupportedFeature`].
+    Unsupported,
+    /// [`CypherError::SemanticError`].
+    Semantic,
+    /// [`CypherError::ParameterError`].
+    Parameter,
+    /// [`CypherError::InvalidTemporalClause`].
+    #[allow(dead_code)]
+    Temporal,
+    /// [`CypherError::InvalidTimestamp`].
+    #[allow(dead_code)]
+    Timestamp,
+}
+
+impl RejectKind {
+    fn matches(self, err: &CypherError) -> bool {
+        match self {
+            RejectKind::Parse => matches!(err, CypherError::ParseError { .. }),
+            RejectKind::Unsupported => matches!(err, CypherError::UnsupportedFeature(_)),
+            RejectKind::Semantic => matches!(err, CypherError::SemanticError(_)),
+            RejectKind::Parameter => matches!(err, CypherError::ParameterError(_)),
+            RejectKind::Temporal => matches!(err, CypherError::InvalidTemporalClause(_)),
+            RejectKind::Timestamp => matches!(err, CypherError::InvalidTimestamp(_)),
+        }
+    }
+}
+
+/// The expectation pinned for a corpus entry.
+enum Expect {
+    /// Executes against the seed graph and returns exactly this many rows.
+    Executes(usize),
+    /// Executes and returns at least this many rows (for cases whose exact
+    /// count is awkward; the corpus prefers `Executes`).
+    #[allow(dead_code)]
+    ExecutesAtLeast(usize),
+    /// Parses and lowers (`parse_cypher`) without error — used for constructs
+    /// awkward to execute deterministically (temporal, vector).
+    Parses,
+    /// Rejected with the given [`RejectKind`]; the error message must contain
+    /// the substring to pin intent.
+    Rejected(RejectKind, &'static str),
+}
+
+/// One corpus entry: a category tag, a human name, the query, optional
+/// parameter bindings, and the expectation.
+struct Case {
+    category: &'static str,
+    name: &'static str,
+    query: &'static str,
+    params: Vec<(&'static str, CypherParameterValue)>,
+    expect: Expect,
+}
+
+impl Case {
+    fn new(
+        category: &'static str,
+        name: &'static str,
+        query: &'static str,
+        expect: Expect,
+    ) -> Self {
+        Self {
+            category,
+            name,
+            query,
+            params: Vec::new(),
+            expect,
+        }
+    }
+
+    fn with_params(mut self, params: Vec<(&'static str, CypherParameterValue)>) -> Self {
+        self.params = params;
+        self
+    }
+
+    fn param_map(&self) -> HashMap<String, CypherParameterValue> {
+        self.params
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Corpus: supported (executing) cases
+// ---------------------------------------------------------------------------
+
+fn supported_execute_cases() -> Vec<Case> {
+    use Expect::Executes;
+
+    vec![
+        // ---- basic ---------------------------------------------------------
+        Case::new(
+            "basic",
+            "labeled_scan_person",
+            "MATCH (n:Person) RETURN n",
+            Executes(4),
+        ),
+        Case::new(
+            "basic",
+            "labeled_scan_company",
+            "MATCH (c:Company) RETURN c",
+            Executes(2),
+        ),
+        Case::new(
+            "basic",
+            "unlabeled_scan_all",
+            "MATCH (n) RETURN n",
+            Executes(6),
+        ),
+        Case::new(
+            "basic",
+            "inline_prop_single",
+            "MATCH (n:Person {name: 'Alice'}) RETURN n",
+            Executes(1),
+        ),
+        Case::new(
+            "basic",
+            "inline_prop_dept",
+            "MATCH (n:Person {dept: 'Eng'}) RETURN n",
+            Executes(2),
+        ),
+        // ---- where ---------------------------------------------------------
+        Case::new(
+            "where",
+            "gt",
+            "MATCH (n:Person) WHERE n.age > 30 RETURN n",
+            Executes(2),
+        ),
+        Case::new(
+            "where",
+            "gte",
+            "MATCH (n:Person) WHERE n.age >= 30 RETURN n",
+            Executes(3),
+        ),
+        Case::new(
+            "where",
+            "lt",
+            "MATCH (n:Person) WHERE n.age < 30 RETURN n",
+            Executes(1),
+        ),
+        Case::new(
+            "where",
+            "lte",
+            "MATCH (n:Person) WHERE n.age <= 30 RETURN n",
+            Executes(2),
+        ),
+        Case::new(
+            "where",
+            "eq",
+            "MATCH (n:Person) WHERE n.age = 30 RETURN n",
+            Executes(1),
+        ),
+        Case::new(
+            "where",
+            "neq",
+            "MATCH (n:Person) WHERE n.age <> 30 RETURN n",
+            Executes(3),
+        ),
+        Case::new(
+            "where",
+            "and",
+            "MATCH (n:Person) WHERE n.age > 30 AND n.dept = 'Sales' RETURN n",
+            Executes(2),
+        ),
+        Case::new(
+            "where",
+            "or",
+            "MATCH (n:Person) WHERE n.age < 30 OR n.age > 35 RETURN n",
+            Executes(2),
+        ),
+        Case::new(
+            "where",
+            "not",
+            "MATCH (n:Person) WHERE NOT n.dept = 'Eng' RETURN n",
+            Executes(2),
+        ),
+        Case::new(
+            "where",
+            "in_two",
+            "MATCH (n:Person) WHERE n.dept IN ['Eng', 'Sales'] RETURN n",
+            Executes(4),
+        ),
+        Case::new(
+            "where",
+            "in_one",
+            "MATCH (n:Person) WHERE n.dept IN ['Eng'] RETURN n",
+            Executes(2),
+        ),
+        Case::new(
+            "where",
+            "starts_with",
+            "MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n",
+            Executes(1),
+        ),
+        Case::new(
+            "where",
+            "ends_with",
+            "MATCH (n:Person) WHERE n.name ENDS WITH 'e' RETURN n",
+            Executes(2),
+        ),
+        Case::new(
+            "where",
+            "contains",
+            "MATCH (n:Person) WHERE n.name CONTAINS 'ar' RETURN n",
+            Executes(1),
+        ),
+        // NOTE: `IS NULL` / `IS NOT NULL` are openCypher-correct for *present*
+        // properties (below). Their behavior for *absent* properties deviates
+        // from openCypher and is pinned separately in `compat_known_deviations`.
+        Case::new(
+            "where",
+            "is_null_present_prop",
+            "MATCH (n:Person) WHERE n.name IS NULL RETURN n",
+            Executes(0),
+        ),
+        Case::new(
+            "where",
+            "is_not_null_present_prop",
+            "MATCH (n:Person) WHERE n.name IS NOT NULL RETURN n",
+            Executes(4),
+        ),
+        // ---- patterns ------------------------------------------------------
+        Case::new(
+            "patterns",
+            "out_edge_typed",
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b",
+            Executes(1),
+        ),
+        Case::new(
+            "patterns",
+            "out_edge_works_at",
+            "MATCH (a:Person {name: 'Alice'})-[:WORKS_AT]->(c) RETURN c",
+            Executes(1),
+        ),
+        Case::new(
+            "patterns",
+            "out_edge_all_persons",
+            "MATCH (a:Person)-[:KNOWS]->(b) RETURN b",
+            Executes(3),
+        ),
+        Case::new(
+            "patterns",
+            "out_edge_typed_target_label",
+            "MATCH (a:Person)-[:WORKS_AT]->(c:Company) RETURN c",
+            Executes(2),
+        ),
+        Case::new(
+            "patterns",
+            "in_edge",
+            "MATCH (a:Person {name: 'Bob'})<-[:KNOWS]-(x) RETURN x",
+            Executes(1),
+        ),
+        Case::new(
+            "patterns",
+            "undirected_edge",
+            "MATCH (a:Person {name: 'Bob'})-[:KNOWS]-(x) RETURN x",
+            Executes(2),
+        ),
+        // ---- varlength -----------------------------------------------------
+        Case::new(
+            "varlength",
+            "range_1_2",
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..2]->(b) RETURN b",
+            Executes(2),
+        ),
+        Case::new(
+            "varlength",
+            "range_1_3",
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b) RETURN b",
+            Executes(3),
+        ),
+        Case::new(
+            "varlength",
+            "exact_1",
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS*1]->(b) RETURN b",
+            Executes(1),
+        ),
+        Case::new(
+            "varlength",
+            "exact_2",
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS*2]->(b) RETURN b",
+            Executes(1),
+        ),
+        Case::new(
+            "varlength",
+            "unbounded_star",
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS*]->(b) RETURN b",
+            Executes(3),
+        ),
+        Case::new(
+            "varlength",
+            "min_only",
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS*2..]->(b) RETURN b",
+            Executes(2),
+        ),
+        Case::new(
+            "varlength",
+            "max_only",
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS*..2]->(b) RETURN b",
+            Executes(2),
+        ),
+        // ---- projection ----------------------------------------------------
+        Case::new(
+            "projection",
+            "limit",
+            "MATCH (n:Person) RETURN n LIMIT 2",
+            Executes(2),
+        ),
+        Case::new(
+            "projection",
+            "skip",
+            "MATCH (n:Person) RETURN n SKIP 2",
+            Executes(2),
+        ),
+        Case::new(
+            "projection",
+            "skip_limit",
+            "MATCH (n:Person) RETURN n SKIP 1 LIMIT 2",
+            Executes(2),
+        ),
+        Case::new(
+            "projection",
+            "distinct",
+            "MATCH (n:Person) RETURN DISTINCT n",
+            Executes(4),
+        ),
+        Case::new(
+            "projection",
+            "alias",
+            "MATCH (n:Person) RETURN n AS person",
+            Executes(4),
+        ),
+        // ---- ordering ------------------------------------------------------
+        Case::new(
+            "ordering",
+            "order_asc",
+            "MATCH (n:Person) RETURN n ORDER BY n.age",
+            Executes(4),
+        ),
+        Case::new(
+            "ordering",
+            "order_desc",
+            "MATCH (n:Person) RETURN n ORDER BY n.age DESC",
+            Executes(4),
+        ),
+        Case::new(
+            "ordering",
+            "order_multi_key",
+            "MATCH (n:Person) RETURN n ORDER BY n.dept, n.age DESC",
+            Executes(4),
+        ),
+        // ---- aggregation (row-count assertions) ----------------------------
+        Case::new(
+            "aggregation",
+            "count_star",
+            "MATCH (n:Person) RETURN count(*)",
+            Executes(1),
+        ),
+        Case::new(
+            "aggregation",
+            "count_var",
+            "MATCH (n:Person) RETURN count(n)",
+            Executes(1),
+        ),
+        Case::new(
+            "aggregation",
+            "count_distinct",
+            "MATCH (n:Person) RETURN count(DISTINCT n.dept)",
+            Executes(1),
+        ),
+        Case::new(
+            "aggregation",
+            "sum",
+            "MATCH (n:Person) RETURN sum(n.age)",
+            Executes(1),
+        ),
+        Case::new(
+            "aggregation",
+            "avg",
+            "MATCH (n:Person) RETURN avg(n.age)",
+            Executes(1),
+        ),
+        Case::new(
+            "aggregation",
+            "min_max",
+            "MATCH (n:Person) RETURN min(n.age), max(n.age)",
+            Executes(1),
+        ),
+        Case::new(
+            "aggregation",
+            "collect",
+            "MATCH (n:Person) RETURN collect(n.name)",
+            Executes(1),
+        ),
+        Case::new(
+            "aggregation",
+            "grouped_count",
+            "MATCH (n:Person) RETURN n.dept, count(*)",
+            Executes(2),
+        ),
+        Case::new(
+            "aggregation",
+            "grouped_count_ordered",
+            "MATCH (n:Person) RETURN n.dept, count(*) ORDER BY count(*) DESC",
+            Executes(2),
+        ),
+        // ---- with ----------------------------------------------------------
+        Case::new(
+            "with",
+            "with_where",
+            "MATCH (a:Person) WITH a WHERE a.age > 30 RETURN a",
+            Executes(2),
+        ),
+        Case::new(
+            "with",
+            "with_alias",
+            "MATCH (a:Person) WITH a AS p WHERE p.age > 30 RETURN p",
+            Executes(2),
+        ),
+        Case::new(
+            "with",
+            "with_chained",
+            "MATCH (a:Person) WITH a WHERE a.age > 30 WITH a WHERE a.age < 40 RETURN a",
+            Executes(1),
+        ),
+        // ---- unwind (standalone, via execute_cypher) -----------------------
+        Case::new(
+            "unwind",
+            "list_three",
+            "UNWIND [1, 2, 3] AS x RETURN x",
+            Executes(3),
+        ),
+        Case::new(
+            "unwind",
+            "list_four",
+            "UNWIND [1, 2, 3, 4] AS x RETURN x",
+            Executes(4),
+        ),
+        Case::new(
+            "unwind",
+            "empty_list",
+            "UNWIND [] AS x RETURN x",
+            Executes(0),
+        ),
+        Case::new(
+            "unwind",
+            "distinct",
+            "UNWIND [1, 1, 2] AS x RETURN DISTINCT x",
+            Executes(2),
+        ),
+        Case::new(
+            "unwind",
+            "order_by",
+            "UNWIND [3, 1, 2] AS x RETURN x ORDER BY x",
+            Executes(3),
+        ),
+        // ---- optional-match ------------------------------------------------
+        Case::new(
+            "optional-match",
+            "matched",
+            "MATCH (a:Person {name: 'Alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x",
+            Executes(1),
+        ),
+        Case::new(
+            "optional-match",
+            "unmatched_preserves_row",
+            "MATCH (a:Person {name: 'Dave'}) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x",
+            Executes(1),
+        ),
+        Case::new(
+            "optional-match",
+            "all_persons_left_outer",
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x",
+            Executes(4),
+        ),
+        // ---- params --------------------------------------------------------
+        Case::new(
+            "params",
+            "string_param",
+            "MATCH (n:Person {name: $name}) RETURN n",
+            Executes(1),
+        )
+        .with_params(vec![("name", CypherParameterValue::String("Alice".into()))]),
+        Case::new(
+            "params",
+            "string_param_dept",
+            "MATCH (n:Person {dept: $dept}) RETURN n",
+            Executes(2),
+        )
+        .with_params(vec![("dept", CypherParameterValue::String("Eng".into()))]),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Corpus: supported (convert-only / Parses) cases
+// ---------------------------------------------------------------------------
+
+fn supported_parse_cases() -> Vec<Case> {
+    use Expect::Parses;
+
+    vec![
+        // ---- temporal ------------------------------------------------------
+        Case::new(
+            "temporal",
+            "as_of_timestamp",
+            "MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00Z' RETURN n",
+            Parses,
+        ),
+        Case::new(
+            "temporal",
+            "as_of_valid_time",
+            "MATCH (n:Person) AS OF VALID_TIME '2024-01-15' RETURN n",
+            Parses,
+        ),
+        Case::new(
+            "temporal",
+            "for_system_time_as_of",
+            "MATCH (n:Person) FOR SYSTEM_TIME AS OF '2024-01-15' RETURN n",
+            Parses,
+        ),
+        Case::new(
+            "temporal",
+            "bitemporal",
+            "MATCH (n:Person) AS OF VALID_TIME '2024-01-01' AS OF SYSTEM_TIME '2024-06-15' RETURN n",
+            Parses,
+        ),
+        Case::new(
+            "temporal",
+            "between",
+            "MATCH (n:Person) BETWEEN '2024-01-01' AND '2024-12-31' RETURN n",
+            Parses,
+        ),
+        // ---- where null-check parse+convert (absent-prop semantics deviate;
+        //      pinned in compat_known_deviations) -----------------------------
+        Case::new(
+            "where",
+            "is_null_parses",
+            "MATCH (n:Person) WHERE n.email IS NULL RETURN n",
+            Parses,
+        ),
+        Case::new(
+            "where",
+            "is_not_null_parses",
+            "MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n",
+            Parses,
+        ),
+        // ---- vector (convert-only; needs an Embedding param) ---------------
+        Case::new(
+            "vector",
+            "similarity_order_by",
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $query) DESC LIMIT 10",
+            Parses,
+        )
+        .with_params(vec![(
+            "query",
+            CypherParameterValue::Embedding(vec![0.1f32, 0.2, 0.3].into()),
+        )]),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Corpus: rejected cases (variant-precise, via parse_cypher)
+// ---------------------------------------------------------------------------
+
+fn rejected_cases() -> Vec<Case> {
+    use Expect::Rejected;
+    use RejectKind::{Parameter, Parse, Semantic, Unsupported};
+
+    vec![
+        // ---- mutating clauses -> ParseError --------------------------------
+        Case::new(
+            "mutating",
+            "create",
+            "CREATE (n:Person {name: 'Zed'}) RETURN n",
+            Rejected(Parse, ""),
+        ),
+        Case::new(
+            "mutating",
+            "set",
+            "MATCH (n:Person) SET n.age = 1 RETURN n",
+            Rejected(Parse, ""),
+        ),
+        Case::new(
+            "mutating",
+            "merge",
+            "MERGE (n:Person {name: 'Zed'}) RETURN n",
+            Rejected(Parse, ""),
+        ),
+        Case::new(
+            "mutating",
+            "delete",
+            "MATCH (n:Person) DELETE n",
+            Rejected(Parse, ""),
+        ),
+        Case::new(
+            "mutating",
+            "remove",
+            "MATCH (n:Person) REMOVE n.age",
+            Rejected(Parse, ""),
+        ),
+        Case::new(
+            "mutating",
+            "detach_delete",
+            "MATCH (n:Person) DETACH DELETE n",
+            Rejected(Parse, ""),
+        ),
+        Case::new(
+            "mutating",
+            "foreach",
+            "FOREACH (x IN [1] | SET x.a = 1)",
+            Rejected(Parse, ""),
+        ),
+        Case::new("mutating", "call", "CALL db.labels()", Rejected(Parse, "")),
+        Case::new(
+            "mutating",
+            "load_csv",
+            "LOAD CSV FROM 'f.csv' AS row RETURN row",
+            Rejected(Parse, ""),
+        ),
+        // ---- structural parse errors ---------------------------------------
+        Case::new(
+            "structural",
+            "multiple_plain_match",
+            "MATCH (a:Person) MATCH (b:Person) RETURN a",
+            Rejected(Parse, ""),
+        ),
+        Case::new(
+            "structural",
+            "trailing_tokens",
+            "MATCH (n:Person) RETURN n EXTRA",
+            Rejected(Parse, "unexpected tokens after end of statement"),
+        ),
+        Case::new(
+            "structural",
+            "count_distinct_star",
+            "MATCH (n:Person) RETURN count(DISTINCT *)",
+            Rejected(Parse, "DISTINCT * is not allowed"),
+        ),
+        // ---- optional-match unsupported shapes -----------------------------
+        Case::new(
+            "optional-match",
+            "comma_multi_pattern",
+            "MATCH (a:Person) OPTIONAL MATCH (a), (b) RETURN a",
+            Rejected(
+                Unsupported,
+                "comma-separated patterns in an OPTIONAL MATCH clause",
+            ),
+        ),
+        Case::new(
+            "optional-match",
+            "labeled_first_node",
+            "MATCH (a:Person) OPTIONAL MATCH (b:Person)-[:KNOWS]->(c) RETURN c",
+            Rejected(
+                Unsupported,
+                "on the first node of a subsequent OPTIONAL MATCH",
+            ),
+        ),
+        // ---- aggregation unsupported shapes --------------------------------
+        Case::new(
+            "aggregation",
+            "group_by_whole_node",
+            "MATCH (n:Person) RETURN n, count(*)",
+            Rejected(
+                Unsupported,
+                "grouping by a whole node/edge is not supported",
+            ),
+        ),
+        // `RETURN *` is accepted only as the SOLE return item; mixing it with
+        // any other item (including an aggregate) is a ParseError. The
+        // converter's "RETURN * combined with aggregation" UnsupportedFeature
+        // guard is unreachable through the string parser (defense-in-depth for
+        // hand-built ASTs) -- see docs/guides/cypher-compatibility.md.
+        Case::new(
+            "aggregation",
+            "return_star_mixed_with_item",
+            "MATCH (n:Person) RETURN *, count(*)",
+            Rejected(Parse, "unexpected tokens after end of statement"),
+        ),
+        // ---- with unsupported shapes ---------------------------------------
+        Case::new(
+            "with",
+            "with_multiple_items",
+            "MATCH (a:Person)-[:KNOWS]->(b) WITH a, b RETURN a",
+            Rejected(Unsupported, "WITH projecting multiple items"),
+        ),
+        Case::new(
+            "with",
+            "with_computed_projection",
+            "MATCH (a:Person) WITH a.name AS x RETURN x",
+            Rejected(Unsupported, "WITH can only project a bound variable"),
+        ),
+        Case::new(
+            "with",
+            "return_dropped_variable",
+            "MATCH (a:Person) WITH a AS p WHERE p.age > 30 RETURN a",
+            Rejected(Semantic, "not in scope"),
+        ),
+        // ---- params --------------------------------------------------------
+        Case::new(
+            "params",
+            "unbound_parameter",
+            "MATCH (n:Person {name: $name}) RETURN n",
+            Rejected(Parameter, "unbound parameter"),
+        ),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Runners
+// ---------------------------------------------------------------------------
+
+/// Report a formatted panic listing every accumulated failure, or return
+/// quietly when there are none.
+fn assert_no_failures(runner: &str, total: usize, failures: Vec<String>) {
+    if failures.is_empty() {
+        return;
+    }
+    let mut msg = format!(
+        "\n{} compatibility failures: {} of {} cases failed\n",
+        runner,
+        failures.len(),
+        total
+    );
+    for (i, f) in failures.iter().enumerate() {
+        msg.push_str(&format!("  [{}] {}\n", i + 1, f));
+    }
+    panic!("{msg}");
+}
+
+#[test]
+fn compat_supported_execute() {
+    let db = compat_db();
+    let cases = supported_execute_cases();
+    let total = cases.len();
+    let mut failures = Vec::new();
+
+    for case in &cases {
+        let result = if case.params.is_empty() {
+            db.execute_cypher(case.query)
+        } else {
+            db.execute_cypher_with_params(case.query, case.param_map())
+        };
+
+        let rows = match result.and_then(|r| r.collect_all()) {
+            Ok(rows) => rows,
+            Err(e) => {
+                failures.push(format!(
+                    "[{}/{}] query `{}` expected to execute but errored: {e}",
+                    case.category, case.name, case.query
+                ));
+                continue;
+            }
+        };
+        let got = rows.len();
+
+        match case.expect {
+            Expect::Executes(want) => {
+                if got != want {
+                    failures.push(format!(
+                        "[{}/{}] query `{}` expected {want} rows, got {got}",
+                        case.category, case.name, case.query
+                    ));
+                }
+            }
+            Expect::ExecutesAtLeast(min) => {
+                if got < min {
+                    failures.push(format!(
+                        "[{}/{}] query `{}` expected >= {min} rows, got {got}",
+                        case.category, case.name, case.query
+                    ));
+                }
+            }
+            _ => unreachable!("supported_execute_cases only holds Executes/ExecutesAtLeast"),
+        }
+    }
+
+    assert_no_failures("supported-execute", total, failures);
+}
+
+#[test]
+fn compat_supported_parse() {
+    let cases = supported_parse_cases();
+    let total = cases.len();
+    let mut failures = Vec::new();
+
+    for case in &cases {
+        let result = if case.params.is_empty() {
+            parse_cypher(case.query)
+        } else {
+            parse_cypher_with_params(case.query, case.param_map())
+        };
+
+        match case.expect {
+            Expect::Parses => {
+                if let Err(e) = result {
+                    failures.push(format!(
+                        "[{}/{}] query `{}` expected to parse+convert but errored: {e}",
+                        case.category, case.name, case.query
+                    ));
+                }
+            }
+            _ => unreachable!("supported_parse_cases only holds Parses"),
+        }
+    }
+
+    assert_no_failures("supported-parse", total, failures);
+}
+
+#[test]
+fn compat_rejected() {
+    let cases = rejected_cases();
+    let total = cases.len();
+    let mut failures = Vec::new();
+
+    for case in &cases {
+        let result = if case.params.is_empty() {
+            parse_cypher(case.query)
+        } else {
+            parse_cypher_with_params(case.query, case.param_map())
+        };
+
+        let Expect::Rejected(kind, substr) = case.expect else {
+            unreachable!("rejected_cases only holds Rejected");
+        };
+
+        match result {
+            Ok(_) => failures.push(format!(
+                "[{}/{}] query `{}` expected {kind:?} rejection but parsed successfully",
+                case.category, case.name, case.query
+            )),
+            Err(e) => {
+                if !kind.matches(&e) {
+                    failures.push(format!(
+                        "[{}/{}] query `{}` expected {kind:?}, got: {e}",
+                        case.category, case.name, case.query
+                    ));
+                } else if !substr.is_empty() && !e.to_string().contains(substr) {
+                    failures.push(format!(
+                        "[{}/{}] query `{}` got {kind:?} but message `{e}` missing substring `{substr}`",
+                        case.category, case.name, case.query
+                    ));
+                }
+            }
+        }
+    }
+
+    assert_no_failures("rejected", total, failures);
+}
+
+// ---------------------------------------------------------------------------
+// Known deviations from openCypher (pinned, NOT asserted as correct)
+// ---------------------------------------------------------------------------
+
+/// Pin the **actual** (openCypher-*deviating*) behavior of `IS NULL` /
+/// `IS NOT NULL` against an **absent** property, so a regression is caught, but
+/// without misrepresenting it as openCypher-conformant.
+///
+/// # The deviation
+///
+/// The Cypher converter lowers `x IS NULL` to `Predicate::Eq { value: Null }`
+/// and `x IS NOT NULL` to `Predicate::Ne { value: Null }`. The executor's
+/// `evaluate_eq` treats a **missing** property as non-matching (`false`) and
+/// `evaluate_ne` treats it as matching (`true`). Consequently, for a property
+/// that is entirely absent:
+///
+/// | Query | AletheiaDB (actual) | openCypher (expected) |
+/// |-------|---------------------|-----------------------|
+/// | `n.email IS NULL`     | 0 rows | 4 rows (a missing property IS null) |
+/// | `n.email IS NOT NULL` | 4 rows | 0 rows |
+///
+/// For **present** properties the behavior is openCypher-correct (see the
+/// `is_null_present_prop` / `is_not_null_present_prop` supported cases). This
+/// test documents the absent-property inversion; see the "Known limitations"
+/// section of docs/guides/cypher-compatibility.md.
+#[test]
+fn compat_known_deviations() {
+    let db = compat_db();
+
+    // DEVIATION: openCypher would return all 4 Persons (email is null/absent).
+    let is_null_absent = db
+        .execute_cypher("MATCH (n:Person) WHERE n.email IS NULL RETURN n")
+        .unwrap()
+        .collect_all()
+        .unwrap();
+    assert_eq!(
+        is_null_absent.len(),
+        0,
+        "KNOWN DEVIATION: `IS NULL` on an absent property matches 0 rows in \
+         AletheiaDB (openCypher would match all 4). If this changed, the \
+         deviation may be fixed -- update docs/guides/cypher-compatibility.md."
+    );
+
+    // DEVIATION: openCypher would return 0 Persons (email is null/absent).
+    let is_not_null_absent = db
+        .execute_cypher("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n")
+        .unwrap()
+        .collect_all()
+        .unwrap();
+    assert_eq!(
+        is_not_null_absent.len(),
+        4,
+        "KNOWN DEVIATION: `IS NOT NULL` on an absent property matches all rows \
+         in AletheiaDB (openCypher would match 0). If this changed, the \
+         deviation may be fixed -- update docs/guides/cypher-compatibility.md."
+    );
+}
