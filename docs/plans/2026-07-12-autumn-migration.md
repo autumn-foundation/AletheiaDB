@@ -254,6 +254,17 @@ Each invariant → an explicit AC + the test that proves it. **These are written
 | (f) | **Structured error contract with `retriable` preserved on both surfaces** | Custom error type + `IntoResponse` emitting `{code,message,retriable,details}`; contract test on HTTP and `/mcp`. autumn's RFC-7807 has `code` but **no `retriable`** and a different shape (#3234) |
 | (g) | **Revocation is immediate** (re-verify per call) | Revoke-then-call test returns 401 on the next request; no caching of verify results across calls |
 
+### 6.1 The authoritative migration checklist — the parity harness
+
+The ACs above are the *security* contract; the *whole-surface* completion contract lives in the parity-harness lane (branch `feature/parity-harness`, draft PR #3527). It lands `tests/parity/inventory.json` (with human summary `tests/parity/README.md`) — the **machine-readable inventory of all 5 HTTP routes + 44 MCP tools**, each row carrying its access class and the pinning test that fixes its observable behavior. The completion criterion is plain: **the port is done when every inventory row's pinning test passes unchanged against the autumn implementation.** The harness pins the surfaces a port must preserve with **23 HTTP + 7 MCP black-box golden tests plus one in-crate registry-sweep test** (the latter guarding the classification lockstep §2.3 relies on).
+
+Some behaviors are **not black-box reachable** and so cannot be golden-pinned; the harness records them in a `coverage_gaps` array in `inventory.json`, and they carry over as **in-crate test obligations** the port must satisfy directly (they overlap the §6 ACs — RBAC is AC(b), the error envelope is AC(f)):
+
+- **MCP RBAC / token-budget (#3353) / cursor (#3360) per-behavior semantics** — role gating and the response-shaper ladders exercised at the handler level, not just the wire.
+- **HTTP 429 (rate limiting)** — absent today (§2.5); restored as a `tower-governor` layer under 0.5, so its behavior is a new in-crate obligation.
+- **Feature-gated OTel `trace_id`** — only present under the tracing feature, so not exercisable from a default black-box build.
+- **The exact HTTP 500 error envelope** — the internal-error shape (AC(f)'s `{code,message,retriable,details}`) asserted in-crate rather than provoked over the wire.
+
 ---
 
 ## 7. Risks & edge cases (as test cases)
