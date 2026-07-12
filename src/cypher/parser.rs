@@ -164,6 +164,29 @@ impl CypherParser {
     /// statement := [temporal] match_stmt
     /// ```
     fn parse_statement(&mut self) -> Result<CypherStatement, CypherError> {
+        // A leading `EXPLAIN` / `PROFILE` prefix (Issue #562) wraps the rest of
+        // the statement. It is handled *before* the expression grammar (it adds
+        // no expression recursion, so the depth caps are untouched) and before
+        // the temporal clause, so `EXPLAIN AS OF ... MATCH ...` works. A
+        // nested/duplicate prefix (`EXPLAIN EXPLAIN`, `EXPLAIN PROFILE`,
+        // `PROFILE EXPLAIN`, `PROFILE PROFILE`) is rejected rather than silently
+        // collapsed.
+        if self.at(TokenKind::Explain) || self.at(TokenKind::Profile) {
+            let is_explain = self.at(TokenKind::Explain);
+            self.advance(); // consume the prefix keyword
+            if self.at(TokenKind::Explain) || self.at(TokenKind::Profile) {
+                return Err(self.error(
+                    "EXPLAIN/PROFILE cannot be nested; use a single EXPLAIN or PROFILE prefix",
+                ));
+            }
+            let inner = self.parse_statement()?;
+            return Ok(if is_explain {
+                CypherStatement::Explain(Box::new(inner))
+            } else {
+                CypherStatement::Profile(Box::new(inner))
+            });
+        }
+
         // Check for leading temporal clause (AS OF / FOR / BETWEEN).
         let temporal = self.try_parse_temporal()?;
 
