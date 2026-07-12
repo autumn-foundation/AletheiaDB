@@ -45,8 +45,14 @@
 mod mapping;
 mod parse;
 
+#[cfg(feature = "parquet")]
+mod parquet;
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "parquet"))]
+mod parquet_tests;
 
 pub use mapping::{ColumnType, EdgeMapping, LabelSource, NodeMapping, PropertyMapping};
 
@@ -277,6 +283,24 @@ impl<'a> Importer<'a> {
         self.import_nodes(rows, &mapping)
     }
 
+    /// Import nodes from a Parquet file (Issue #3364).
+    ///
+    /// Columns are decoded natively from their Parquet/Arrow types — integers,
+    /// floats, booleans, timestamps, and `list<float32>` embeddings never
+    /// round-trip through a string. A SQL null cell yields an absent property, and
+    /// a native `timestamp` column can drive per-row `valid_time` backfill exactly
+    /// like the CSV path. All #3211 abort/skip and `row N:` semantics apply, with a
+    /// stable 1-based row index across row groups.
+    #[cfg(feature = "parquet")]
+    pub fn nodes_from_parquet(
+        &mut self,
+        path: impl AsRef<Path>,
+        mapping: NodeMapping,
+    ) -> Result<ImportReport> {
+        let rows = parquet::parquet_rows(path.as_ref())?;
+        self.import_nodes(rows, &mapping)
+    }
+
     /// Import nodes from a JSONL file (one JSON object per line).
     pub fn nodes_from_jsonl(
         &mut self,
@@ -358,6 +382,21 @@ impl<'a> Importer<'a> {
         mapping: EdgeMapping,
     ) -> Result<ImportReport> {
         let rows = parse::csv_rows(path.as_ref())?;
+        self.import_edges(rows, &mapping)
+    }
+
+    /// Import edges from a Parquet file, resolving endpoints by business key (Issue #3364).
+    ///
+    /// Endpoints are resolved against nodes imported earlier in the same session,
+    /// exactly like the CSV/JSONL edge readers; unresolved endpoints are reported
+    /// (or abort) per the [`FailureMode`]. Property columns are decoded natively.
+    #[cfg(feature = "parquet")]
+    pub fn edges_from_parquet(
+        &mut self,
+        path: impl AsRef<Path>,
+        mapping: EdgeMapping,
+    ) -> Result<ImportReport> {
+        let rows = parquet::parquet_rows(path.as_ref())?;
         self.import_edges(rows, &mapping)
     }
 

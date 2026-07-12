@@ -18,11 +18,17 @@ use crate::core::property::PropertyValue;
 use crate::core::temporal::Timestamp;
 
 /// A raw cell value, before coercion. CSV cells are always strings; JSONL cells
-/// preserve their parsed JSON type.
+/// preserve their parsed JSON type; Parquet cells arrive already decoded to a
+/// native [`PropertyValue`] (physical decode from the Arrow array), so numeric,
+/// boolean, timestamp, and embedding columns never round-trip through a string.
 #[derive(Debug, Clone)]
 pub(crate) enum Cell {
     Str(String),
     Json(serde_json::Value),
+    /// A Parquet cell physically decoded from its Arrow array. `Null` here means
+    /// the column value was absent (SQL null) for this row.
+    #[cfg(feature = "parquet")]
+    Native(PropertyValue),
 }
 
 /// One parsed input row: the 1-based row/line number plus its named cells.
@@ -52,6 +58,24 @@ fn cell_to_string(cell: &Cell) -> String {
         Cell::Json(serde_json::Value::String(s)) => s.clone(),
         Cell::Json(serde_json::Value::Null) => String::new(),
         Cell::Json(other) => other.to_string(),
+        #[cfg(feature = "parquet")]
+        Cell::Native(value) => property_value_to_string(value),
+    }
+}
+
+/// Render a physically-decoded Parquet [`PropertyValue`] as a plain string for the
+/// label / business-key / valid-time paths. `Null` renders empty (so a null cell is
+/// treated exactly like a blank CSV cell); an integer timestamp renders as its
+/// microseconds, which `parse_valid_time` re-reads losslessly.
+#[cfg(feature = "parquet")]
+fn property_value_to_string(value: &PropertyValue) -> String {
+    match value {
+        PropertyValue::Null => String::new(),
+        PropertyValue::Bool(b) => b.to_string(),
+        PropertyValue::Int(i) => i.to_string(),
+        PropertyValue::Float(f) => f.to_string(),
+        PropertyValue::String(s) => s.to_string(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -63,6 +87,8 @@ pub(crate) fn coerce(cell: &Cell, ty: ColumnType) -> Result<PropertyValue, Strin
     match cell {
         Cell::Str(s) => coerce_str(s, ty),
         Cell::Json(value) => coerce_json(value, ty),
+        #[cfg(feature = "parquet")]
+        Cell::Native(value) => coerce_native(value, ty),
     }
 }
 
@@ -96,7 +122,36 @@ fn coerce_str(raw: &str, ty: ColumnType) -> Result<PropertyValue, String> {
                 .map(PropertyValue::Bool)
                 .ok_or_else(|| format!("cannot coerce '{raw}' to Bool"))
         }
+        ColumnType::Timestamp => {
+            if trimmed.is_empty() {
+                return Ok(PropertyValue::Null);
+            }
+            parse_valid_time(trimmed).map(|ts| PropertyValue::Int(ts.wallclock()))
+        }
+        ColumnType::Embedding => {
+            if trimmed.is_empty() {
+                return Ok(PropertyValue::Null);
+            }
+            let json: serde_json::Value = serde_json::from_str(trimmed)
+                .map_err(|_| format!("cannot coerce '{raw}' to Embedding (expected JSON array)"))?;
+            json_to_embedding(&json)
+        }
     }
+}
+
+/// Convert a JSON array of numbers into a [`PropertyValue::Vector`].
+fn json_to_embedding(value: &serde_json::Value) -> Result<PropertyValue, String> {
+    let serde_json::Value::Array(items) = value else {
+        return Err("cannot coerce non-array JSON to Embedding".to_string());
+    };
+    let mut floats = Vec::with_capacity(items.len());
+    for item in items {
+        let f = item
+            .as_f64()
+            .ok_or_else(|| format!("embedding element {item} is not a number"))?;
+        floats.push(f as f32);
+    }
+    PropertyValue::try_vector(&floats).map_err(|e| e.to_string())
 }
 
 fn coerce_json(value: &serde_json::Value, ty: ColumnType) -> Result<PropertyValue, String> {
@@ -117,7 +172,55 @@ fn coerce_json(value: &serde_json::Value, ty: ColumnType) -> Result<PropertyValu
         (ColumnType::Float, Value::String(s)) => coerce_str(s, ColumnType::Float),
         (ColumnType::Bool, Value::Bool(b)) => Ok(PropertyValue::Bool(*b)),
         (ColumnType::Bool, Value::String(s)) => coerce_str(s, ColumnType::Bool),
+        (ColumnType::Timestamp, Value::Number(n)) => n
+            .as_i64()
+            .map(PropertyValue::Int)
+            .ok_or_else(|| format!("cannot coerce '{n}' to Timestamp")),
+        (ColumnType::Timestamp, Value::String(s)) => coerce_str(s, ColumnType::Timestamp),
+        (ColumnType::Embedding, arr @ Value::Array(_)) => json_to_embedding(arr),
+        (ColumnType::Embedding, Value::String(s)) => coerce_str(s, ColumnType::Embedding),
         (ty, other) => Err(format!("cannot coerce JSON {other} to {ty:?}")),
+    }
+}
+
+/// Coerce a physically-decoded Parquet [`PropertyValue`] to the mapping's requested
+/// [`ColumnType`], widening/reconciling where the physical and logical types differ.
+#[cfg(feature = "parquet")]
+fn coerce_native(value: &PropertyValue, ty: ColumnType) -> Result<PropertyValue, String> {
+    // A null column value is "absent" for every target type.
+    if matches!(value, PropertyValue::Null) {
+        return Ok(PropertyValue::Null);
+    }
+    match ty {
+        ColumnType::String => match value {
+            PropertyValue::String(_) => Ok(value.clone()),
+            other => Ok(PropertyValue::string(property_value_to_string(other))),
+        },
+        ColumnType::Int => match value {
+            PropertyValue::Int(_) => Ok(value.clone()),
+            PropertyValue::String(s) => coerce_str(s, ColumnType::Int),
+            other => Err(format!("cannot coerce {} to Int", other.type_name())),
+        },
+        ColumnType::Float => match value {
+            PropertyValue::Float(_) => Ok(value.clone()),
+            PropertyValue::Int(i) => Ok(PropertyValue::Float(*i as f64)),
+            PropertyValue::String(s) => coerce_str(s, ColumnType::Float),
+            other => Err(format!("cannot coerce {} to Float", other.type_name())),
+        },
+        ColumnType::Bool => match value {
+            PropertyValue::Bool(_) => Ok(value.clone()),
+            PropertyValue::String(s) => coerce_str(s, ColumnType::Bool),
+            other => Err(format!("cannot coerce {} to Bool", other.type_name())),
+        },
+        ColumnType::Timestamp => match value {
+            PropertyValue::Int(_) => Ok(value.clone()),
+            PropertyValue::String(s) => coerce_str(s, ColumnType::Timestamp),
+            other => Err(format!("cannot coerce {} to Timestamp", other.type_name())),
+        },
+        ColumnType::Embedding => match value {
+            PropertyValue::Vector(_) => Ok(value.clone()),
+            other => Err(format!("cannot coerce {} to Embedding", other.type_name())),
+        },
     }
 }
 
