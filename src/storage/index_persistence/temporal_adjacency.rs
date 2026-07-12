@@ -12,6 +12,7 @@ use crate::index::temporal_adjacency::{
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{NodeAdjacencyEntry, PersistedTemporalAdjacencyEntry, TemporalAdjacencyData};
+use super::strings::InternerRemap;
 use super::{MANIFEST_VERSION, TEMPORAL_ADJACENCY_MAGIC};
 
 /// Save temporal adjacency index to disk.
@@ -72,6 +73,33 @@ const MAX_ADJACENCY_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// - The data cannot be deserialized.
 /// - The manifest version or magic bytes do not match.
 pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdjacencyIndex>> {
+    let data = load_temporal_adjacency_data(data_dir)?;
+    Ok(Arc::new(reconstruct_index(data)?))
+}
+
+/// Load the temporal adjacency index, translating each persisted edge-type
+/// label from **file-space** interner ids to **live** ids via `remap`
+/// (Issue #3490) before reconstruction.
+///
+/// This is the startup-path entry point: `load_indexes_startup` restores the
+/// interner (obtaining the remap) before the persisted adjacency labels are
+/// resolved, and those labels — like graph/temporal labels — are file-space ids
+/// that must be routed through the remap or they silently resolve to the wrong
+/// edge type (corrupting #3225 AS-OF edge-type filtering). An
+/// [`InternerRemap::identity`] remap leaves the labels unchanged, reproducing
+/// the plain [`load_temporal_adjacency_index`] behavior.
+pub fn load_temporal_adjacency_index_with_remap(
+    data_dir: &Path,
+    remap: &InternerRemap,
+) -> Result<Arc<TemporalAdjacencyIndex>> {
+    let mut data = load_temporal_adjacency_data(data_dir)?;
+    remap.remap_temporal_adjacency_data(&mut data);
+    Ok(Arc::new(reconstruct_index(data)?))
+}
+
+/// Read, size-check, deserialize, and validate the on-disk temporal adjacency
+/// blob into [`TemporalAdjacencyData`] (no interner-id translation).
+fn load_temporal_adjacency_data(data_dir: &Path) -> Result<TemporalAdjacencyData> {
     let adjacency_file = data_dir.join("temporal_adjacency").join("adjacency.idx");
 
     // Check file size to prevent DoS
@@ -118,10 +146,7 @@ pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdja
         });
     }
 
-    // Reconstruct index
-    let index = reconstruct_index(data)?;
-
-    Ok(Arc::new(index))
+    Ok(data)
 }
 
 /// Extract outgoing edges for persistence.
@@ -167,6 +192,14 @@ fn convert_to_persisted(entry: &TemporalAdjacencyEntry) -> PersistedTemporalAdja
 fn reconstruct_index(data: TemporalAdjacencyData) -> Result<TemporalAdjacencyIndex> {
     let index = TemporalAdjacencyIndex::new(TemporalAdjacencyConfig::default());
 
+    // Count entries whose edge-type label does not resolve to a live interned
+    // string, so an unmappable label (the Issue #3490 UNMAPPABLE_FILE_ID
+    // sentinel written by the remap, or any other on-disk corruption) is
+    // skipped LOUDLY rather than stored as a garbage edge type that would
+    // silently break #3225 AS-OF edge-type filtering. Mirrors the graph
+    // restore path's label validation in `load_indexes_startup`.
+    let mut skipped_unresolvable_labels = 0usize;
+
     // Reconstruct outgoing edges
     for node_entry in data.outgoing {
         let node_id = NodeId::new(node_entry.node_id)
@@ -174,6 +207,18 @@ fn reconstruct_index(data: TemporalAdjacencyData) -> Result<TemporalAdjacencyInd
 
         for entry in node_entry.entries {
             let persisted_entry = convert_from_persisted(entry)?;
+
+            // Validate the edge-type label resolves against the live interner.
+            // `from_raw` never fails, so a bad/unmappable id would otherwise be
+            // stored verbatim and later resolve to the wrong (or no) string.
+            if crate::core::GLOBAL_INTERNER
+                .resolve_with(persisted_entry.label, |_| ())
+                .is_none()
+            {
+                skipped_unresolvable_labels += 1;
+                continue;
+            }
+
             // Insert into index
             index
                 .insert_edge(
@@ -193,6 +238,20 @@ fn reconstruct_index(data: TemporalAdjacencyData) -> Result<TemporalAdjacencyInd
                     ))
                 })?;
         }
+    }
+
+    if skipped_unresolvable_labels > 0 {
+        eprintln!(
+            "Warning: Skipped {} temporal adjacency entr{} whose edge-type label \
+             could not be resolved in the string interner (unmappable/corrupt id); \
+             these edges are omitted from the temporal adjacency index",
+            skipped_unresolvable_labels,
+            if skipped_unresolvable_labels == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
     }
 
     Ok(index)

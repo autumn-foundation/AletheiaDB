@@ -153,10 +153,10 @@ impl Iterator for ParquetRowIter {
                     cells.insert(name.clone(), Cell::Native(value));
                 }
                 Err(message) => {
-                    return Some(Err(ImportError::Row(RowError {
-                        row: row_num,
-                        message: format!("column '{name}': {message}"),
-                    })));
+                    return Some(Err(ImportError::Row(RowError::new(
+                        row_num,
+                        format!("column '{name}': {message}"),
+                    ))));
                 }
             }
         }
@@ -169,10 +169,10 @@ impl Iterator for ParquetRowIter {
             match decode_overflow(row.cells.get(OVERFLOW_COLUMN)) {
                 Ok(overflow) => row.overflow = overflow,
                 Err(message) => {
-                    return Some(Err(ImportError::Row(RowError {
-                        row: row_num,
-                        message: format!("column '{OVERFLOW_COLUMN}': {message}"),
-                    })));
+                    return Some(Err(ImportError::Row(RowError::new(
+                        row_num,
+                        format!("column '{OVERFLOW_COLUMN}': {message}"),
+                    ))));
                 }
             }
         }

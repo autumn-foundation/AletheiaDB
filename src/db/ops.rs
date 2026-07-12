@@ -318,6 +318,50 @@ impl AletheiaDB {
         self.write(|tx| tx.delete_edge_with_valid_time(edge_id, valid_from))
     }
 
+    /// Delete a node with an optional
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle: a backdated deletion `valid_from` and/or a write-time
+    /// [`Provenance`] bundle recording the acting principal on the tombstone
+    /// version (Issue #3427). Does NOT delete connected edges — see
+    /// [`delete_node_cascade_with_options`](Self::delete_node_cascade_with_options).
+    ///
+    /// Passing `WriteRequestOptions::default()` is identical to
+    /// [`delete_node`](crate::api::transaction::WriteOps::delete_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn delete_node_with_options(
+        &self,
+        node_id: NodeId,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.delete_node_with_options(node_id, options))
+    }
+
+    /// Delete an edge with an optional
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle. See [`delete_node_with_options`](Self::delete_node_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn delete_edge_with_options(
+        &self,
+        edge_id: EdgeId,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.delete_edge_with_options(edge_id, options))
+    }
+
+    /// Delete a node and all connected edges (cascade) with an optional
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle. The same options (backdated `valid_from` and/or the acting
+    /// principal's provenance) are stamped onto the node's tombstone AND every
+    /// co-deleted edge's tombstone (Issue #3427).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn delete_node_cascade_with_options(
+        &self,
+        node_id: NodeId,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.delete_node_cascade_with_options(node_id, options))
+    }
+
     /// Retract a node as of valid time `valid_to` (Issue #3230): close its
     /// valid-time interval at `valid_to` without deleting its history.
     ///
@@ -368,6 +412,24 @@ impl AletheiaDB {
         node_id: NodeId,
         valid_to: Timestamp,
     ) -> Result<crate::api::transaction::RetractionResult> {
+        self.retract_node_with_provenance(node_id, valid_to, None)
+    }
+
+    /// Retract a node (Issue #3230), stamping a write-time [`Provenance`]
+    /// bundle recording the acting principal onto the retraction version
+    /// (Issue #3427).
+    ///
+    /// Behaves identically to [`retract_node`](Self::retract_node) — including
+    /// the #3209 connected-edge refusal contract — other than persisting
+    /// `provenance` on the appended retraction version. Passing `None` is
+    /// exactly [`retract_node`](Self::retract_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_node_with_provenance(
+        &self,
+        node_id: NodeId,
+        valid_to: Timestamp,
+        provenance: Option<crate::core::provenance::Provenance>,
+    ) -> Result<crate::api::transaction::RetractionResult> {
         // The connected-edge check and the retraction run inside a single
         // write transaction so they observe the same storage state — no
         // check-then-act gap for a concurrent writer to slip an edge into
@@ -398,7 +460,7 @@ impl AletheiaDB {
                     .into());
                 }
             }
-            tx.retract_node(node_id, valid_to)
+            tx.retract_node_with_provenance(node_id, valid_to, provenance.clone())
         })
     }
 
@@ -424,6 +486,25 @@ impl AletheiaDB {
         node_id: NodeId,
         valid_to: Timestamp,
     ) -> Result<crate::api::transaction::RetractionResult> {
+        self.retract_node_detach_with_provenance(node_id, valid_to, None)
+    }
+
+    /// Retract a node and co-retract every connected edge at the same
+    /// `valid_to` (Issue #3230), stamping a write-time [`Provenance`] bundle
+    /// recording the acting principal onto the node's retraction version AND
+    /// every co-retracted edge's retraction version (Issue #3427).
+    ///
+    /// Behaves identically to
+    /// [`retract_node_detach`](Self::retract_node_detach) other than persisting
+    /// `provenance`. Passing `None` is exactly
+    /// [`retract_node_detach`](Self::retract_node_detach).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_node_detach_with_provenance(
+        &self,
+        node_id: NodeId,
+        valid_to: Timestamp,
+        provenance: Option<crate::core::provenance::Provenance>,
+    ) -> Result<crate::api::transaction::RetractionResult> {
         self.write(|tx| {
             use crate::api::transaction::ReadOps;
             // Enumerate connected edges INSIDE the write transaction (same
@@ -441,13 +522,17 @@ impl AletheiaDB {
 
             let mut edges_retracted = 0;
             for edge_id in edge_ids {
-                let edge_result = tx.retract_edge(edge_id, valid_to)?;
+                // Issue #3427: co-retracted edges carry the SAME acting
+                // principal as the node retraction.
+                let edge_result =
+                    tx.retract_edge_with_provenance(edge_id, valid_to, provenance.clone())?;
                 if !edge_result.already_retracted {
                     edges_retracted += 1;
                 }
             }
 
-            let mut result = tx.retract_node(node_id, valid_to)?;
+            let mut result =
+                tx.retract_node_with_provenance(node_id, valid_to, provenance.clone())?;
             result.edges_retracted = edges_retracted;
             Ok(result)
         })
@@ -469,7 +554,24 @@ impl AletheiaDB {
         edge_id: EdgeId,
         valid_to: Timestamp,
     ) -> Result<crate::api::transaction::RetractionResult> {
-        self.write(|tx| tx.retract_edge(edge_id, valid_to))
+        self.retract_edge_with_provenance(edge_id, valid_to, None)
+    }
+
+    /// Retract an edge (Issue #3230), stamping a write-time [`Provenance`]
+    /// bundle recording the acting principal onto the retraction version
+    /// (Issue #3427).
+    ///
+    /// Behaves identically to [`retract_edge`](Self::retract_edge) other than
+    /// persisting `provenance`. Passing `None` is exactly
+    /// [`retract_edge`](Self::retract_edge).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_edge_with_provenance(
+        &self,
+        edge_id: EdgeId,
+        valid_to: Timestamp,
+        provenance: Option<crate::core::provenance::Provenance>,
+    ) -> Result<crate::api::transaction::RetractionResult> {
+        self.write(|tx| tx.retract_edge_with_provenance(edge_id, valid_to, provenance.clone()))
     }
 
     /// Create a node with an optional [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)

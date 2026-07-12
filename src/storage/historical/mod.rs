@@ -604,9 +604,35 @@ impl HistoricalStorage {
         label: InternedString,
         properties: PropertyMap,
     ) -> Result<()> {
+        self.add_retracted_node_version_with_provenance(
+            node_id, version_id, valid_from, valid_to, tx_time, label, properties, None,
+        )
+    }
+
+    /// Add a *retraction* version of a node (Issue #3230), optionally attaching a
+    /// write-time [`Provenance`](crate::core::provenance::Provenance) bundle
+    /// recording the acting principal (Issue #3427).
+    ///
+    /// Behaves identically to
+    /// [`add_retracted_node_version`](Self::add_retracted_node_version) other
+    /// than persisting `provenance` on the created retraction version.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_retracted_node_version_with_provenance(
+        &mut self,
+        node_id: NodeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        properties: PropertyMap,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         let temporal =
             BiTemporalInterval::with_valid_time(valid_from, tx_time).close_valid_time(valid_to)?;
-        self.add_node_version_with_interval(node_id, version_id, temporal, label, properties, None)
+        self.add_node_version_with_interval(
+            node_id, version_id, temporal, label, properties, provenance,
+        )
     }
 
     /// Shared implementation for appending a node version with a fully
@@ -886,12 +912,36 @@ impl HistoricalStorage {
         target: NodeId,
         properties: PropertyMap,
     ) -> Result<()> {
+        self.add_retracted_edge_version_with_provenance(
+            edge_id, version_id, valid_from, valid_to, tx_time, label, source, target, properties,
+            None,
+        )
+    }
+
+    /// Add a *retraction* version of an edge (Issue #3230), optionally attaching a
+    /// write-time [`Provenance`](crate::core::provenance::Provenance) bundle
+    /// recording the acting principal (Issue #3427). See
+    /// [`add_retracted_node_version_with_provenance`](Self::add_retracted_node_version_with_provenance).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_retracted_edge_version_with_provenance(
+        &mut self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        source: NodeId,
+        target: NodeId,
+        properties: PropertyMap,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         let temporal =
             BiTemporalInterval::with_valid_time(valid_from, tx_time).close_valid_time(valid_to)?;
         self.add_edge_version_with_interval(
             edge_id, version_id, temporal, label, source, target, properties,
             false, // not a tombstone: the closed interval must stay traversable pre-valid_to
-            None,
+            provenance,
         )
     }
 

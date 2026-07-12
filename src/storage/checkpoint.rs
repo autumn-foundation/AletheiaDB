@@ -453,7 +453,21 @@ impl CheckpointManager {
             (c, h)
         };
 
-        // 1. Save string interner first (other indexes depend on it)
+        // 1. Extract graph + temporal data from the snapshots FIRST.
+        //
+        // Issue #3490: extraction interns string property VALUES (a
+        // `PropertyValue::String` holds a plain `Arc<str>`, interned into
+        // GLOBAL_INTERNER only at persist time via `persist_property_value`),
+        // so it can mint NEW interner ids. The string interner file must
+        // therefore be saved AFTER extraction, or it would omit those ids and
+        // the load-time remap (#3490) would flag the persisted references as
+        // unmappable. This mirrors the `persist_graph_index` ordering
+        // ("Persist string interner AFTER graph conversion").
+        let graph_data = self.extract_graph_data_from_snapshot(&current_snapshot)?;
+        let temporal_data = self.extract_temporal_data_from_snapshot(&historical_snapshot)?;
+
+        // 2. Save string interner (now complete — covers every id referenced
+        // by the extracted graph/temporal data).
         self.persistence_manager
             .save_string_interner()
             .map_err(persistence_err)?;
@@ -461,8 +475,7 @@ impl CheckpointManager {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // 2. Save graph index (current state) from snapshot
-        let graph_data = self.extract_graph_data_from_snapshot(&current_snapshot)?;
+        // 3. Save graph index (current state) from snapshot
         let graph_path = self.persistence_manager.graph_path().join("adjacency.idx");
         if self.config.enable_compression {
             crate::storage::index_persistence::graph::save_graph_index_compressed(
@@ -477,8 +490,7 @@ impl CheckpointManager {
         }
         bytes_written += std::fs::metadata(&graph_path).map(|m| m.len()).unwrap_or(0);
 
-        // 3. Save temporal index (historical versions) from snapshot
-        let temporal_data = self.extract_temporal_data_from_snapshot(&historical_snapshot)?;
+        // 4. Save temporal index (historical versions) from snapshot
         let temporal_path = self
             .persistence_manager
             .temporal_path()
@@ -492,7 +504,7 @@ impl CheckpointManager {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // 4. Build and save manifest
+        // 5. Build and save manifest
         let mut manifest = IndexManifest::new(lsn.0);
 
         // Add graph index entry
@@ -566,10 +578,16 @@ impl CheckpointManager {
             return self.recover_from_wal_only(wal);
         }
 
-        // Load manifest and strings
-        let manifest = self
+        // Load manifest and strings.
+        // Issue #3490: obtain the file-id -> live-id remap and apply it to the
+        // loaded graph/temporal data before resolving any persisted interner id.
+        // The interner is a process-global singleton (and WAL bootstrap may have
+        // populated it), so persisted ids are file-space and would otherwise
+        // resolve to the wrong strings — silent corruption on this PUBLIC
+        // recovery path (used by examples/recovery/*).
+        let (manifest, remap) = self
             .persistence_manager
-            .load_manifest_and_strings()
+            .load_manifest_and_strings_with_remap()
             .map_err(persistence_err)?;
         let checkpoint_lsn = LSN(manifest.lsn);
 
@@ -588,10 +606,11 @@ impl CheckpointManager {
         }
 
         // Load graph index
-        let current = self.load_current_storage(&manifest)?;
+        let current = self.load_current_storage(&manifest, &remap)?;
 
         // Load temporal index
-        let (historical, historical_max_version_id) = self.load_historical_storage(&manifest)?;
+        let (historical, historical_max_version_id) =
+            self.load_historical_storage(&manifest, &remap)?;
 
         // Ensure version ID generator accounts for historical versions
         // The current storage's generator was initialized from the count of restored entities,
@@ -701,10 +720,10 @@ impl CheckpointManager {
             return self.recover_from_wal_with_cold_storage(wal, flushed_lsn);
         }
 
-        // Load manifest and strings
-        let manifest = self
+        // Load manifest and strings (Issue #3490: remap-aware, as in `recover`).
+        let (manifest, remap) = self
             .persistence_manager
-            .load_manifest_and_strings()
+            .load_manifest_and_strings_with_remap()
             .map_err(persistence_err)?;
         let checkpoint_lsn = LSN(manifest.lsn);
 
@@ -722,10 +741,11 @@ impl CheckpointManager {
         }
 
         // Load graph index
-        let current = self.load_current_storage(&manifest)?;
+        let current = self.load_current_storage(&manifest, &remap)?;
 
         // Load temporal index
-        let (historical, historical_max_version_id) = self.load_historical_storage(&manifest)?;
+        let (historical, historical_max_version_id) =
+            self.load_historical_storage(&manifest, &remap)?;
 
         // Ensure version ID generator accounts for historical versions
         if historical_max_version_id > 0 {
@@ -961,7 +981,16 @@ impl CheckpointManager {
     }
 
     /// Load CurrentStorage from persisted graph index.
-    fn load_current_storage(&self, manifest: &IndexManifest) -> Result<CurrentStorage> {
+    ///
+    /// Issue #3490: `remap` translates persisted file-space interner ids
+    /// (labels, property keys, string values) to live ids before the raw
+    /// resolution sites below (`InternedString::from_raw`, `restore_property_map`)
+    /// touch them; an identity remap is a no-op.
+    fn load_current_storage(
+        &self,
+        manifest: &IndexManifest,
+        remap: &crate::storage::index_persistence::strings::InternerRemap,
+    ) -> Result<CurrentStorage> {
         let current = CurrentStorage::new();
 
         if let Some(ref graph_entry) = manifest.graph_index {
@@ -969,9 +998,10 @@ impl CheckpointManager {
                 .persistence_manager
                 .indexes_path()
                 .join(&graph_entry.adjacency_file);
-            let graph_data =
+            let mut graph_data =
                 crate::storage::index_persistence::graph::load_graph_index(&graph_path)
                     .map_err(persistence_err)?;
+            remap.remap_graph_index_data(&mut graph_data);
 
             // Track maximum version ID to initialize generator
             let mut max_version_id: u64 = 0;
@@ -1026,6 +1056,7 @@ impl CheckpointManager {
     fn load_historical_storage(
         &self,
         manifest: &IndexManifest,
+        remap: &crate::storage::index_persistence::strings::InternerRemap,
     ) -> Result<(HistoricalStorage, u64)> {
         let mut historical = HistoricalStorage::new();
         let mut max_version_id: u64 = 0;
@@ -1035,9 +1066,14 @@ impl CheckpointManager {
                 .persistence_manager
                 .indexes_path()
                 .join(&temporal_entry.node_versions_file);
-            let temporal_data =
+            // Issue #3490: translate persisted file-space interner ids (version
+            // labels, property keys, string values, delta removed_keys, anchor
+            // full_state) to live ids before `restore_into_historical_storage`
+            // resolves them; an identity remap is a no-op.
+            let mut temporal_data =
                 crate::storage::index_persistence::temporal::load_temporal_index(&temporal_path)
                     .map_err(persistence_err)?;
+            remap.remap_temporal_index_data(&mut temporal_data);
 
             max_version_id = temporal_data
                 .node_versions
@@ -2014,6 +2050,7 @@ mod tests {
             node_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })?;
         wal.flush()?;
 
@@ -2073,6 +2110,7 @@ mod tests {
             edge_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })?;
         wal.flush()?;
 

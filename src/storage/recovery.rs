@@ -520,6 +520,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 node_id,
                 valid_from,
                 version_id: logged_tombstone_id,
+                provenance,
             } => {
                 // Idempotent re-application guard, per store (review round 2,
                 // #3428). Background persistence may snapshot current and
@@ -596,7 +597,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                     // `apply_node_delete` — while tx_time comes from the WAL
                     // entry. The is_tombstone=true flag closes the valid_time
                     // immediately at valid_from (empty interval).
-                    historical.add_node_version(
+                    historical.add_node_version_with_provenance(
                         node_id,
                         tombstone_version_id,
                         valid_from,
@@ -604,6 +605,10 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         label,
                         properties,
                         true, // is_tombstone
+                        // Issue #3427: thread the acting-principal provenance
+                        // logged with the delete so recovery reproduces the
+                        // attribution instead of dropping it.
+                        provenance.map(std::sync::Arc::new),
                     )?;
                 }
 
@@ -615,6 +620,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 edge_id,
                 valid_from,
                 version_id: logged_tombstone_id,
+                provenance,
             } => {
                 // Per-store re-application guard — see the DeleteNode arm
                 // above (review round 2, #3428).
@@ -681,7 +687,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                     // `apply_edge_delete` — while tx_time comes from the WAL
                     // entry. The is_tombstone=true flag closes the valid_time
                     // immediately at valid_from (empty interval).
-                    historical.add_edge_version(
+                    historical.add_edge_version_with_provenance(
                         edge_id,
                         tombstone_version_id,
                         valid_from,
@@ -691,6 +697,8 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         target,
                         properties,
                         true, // is_tombstone
+                        // Issue #3427: thread the acting-principal provenance.
+                        provenance.map(std::sync::Arc::new),
                     )?;
                 }
 
@@ -702,6 +710,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 node_id,
                 valid_to,
                 version_id: logged_retraction_id,
+                provenance,
             } => {
                 // Valid-time retraction (Issue #3230). Reconstruct exactly what
                 // the original commit did:
@@ -783,7 +792,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                     };
                     next_version_id = next_version_id.max(retraction_version_id.as_u64() + 1);
 
-                    historical.add_retracted_node_version(
+                    historical.add_retracted_node_version_with_provenance(
                         node_id,
                         retraction_version_id,
                         valid_from,
@@ -791,6 +800,8 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         commit_timestamp,
                         label,
                         properties,
+                        // Issue #3427: thread the acting-principal provenance.
+                        provenance.map(std::sync::Arc::new),
                     )?;
                 }
 
@@ -802,6 +813,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 edge_id,
                 valid_to,
                 version_id: logged_retraction_id,
+                provenance,
             } => {
                 // Valid-time retraction of an edge (Issue #3230); mirrors the
                 // RetractNode arm above, honoring the logged `valid_to`, with
@@ -870,7 +882,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                     };
                     next_version_id = next_version_id.max(retraction_version_id.as_u64() + 1);
 
-                    historical.add_retracted_edge_version(
+                    historical.add_retracted_edge_version_with_provenance(
                         edge_id,
                         retraction_version_id,
                         valid_from,
@@ -880,6 +892,8 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         source,
                         target,
                         properties,
+                        // Issue #3427: thread the acting-principal provenance.
+                        provenance.map(std::sync::Arc::new),
                     )?;
                 }
 
@@ -1540,6 +1554,7 @@ mod tests {
             node_id,
             valid_to,
             version_id: None,
+            provenance: None,
         })
         .unwrap();
         wal.flush().unwrap();
@@ -1630,6 +1645,196 @@ mod tests {
         );
     }
 
+    /// Issue #3427 (R6): a WAL segment containing a `DeleteNode` and a
+    /// `RetractNode` that carry a `Some(Provenance)` bundle (v11 format) replays
+    /// so the reconstructed tombstone/retraction historical versions carry the
+    /// acting principal — the attribution now survives crash recovery, closing
+    /// the #3427 gap.
+    #[test]
+    fn replay_delete_and_retract_preserve_provenance_principal() {
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::property::PropertyMap;
+        use crate::core::provenance::Provenance;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let del_node = crate::core::NodeId::new(1).unwrap();
+        let ret_node = crate::core::NodeId::new(2).unwrap();
+        let label = GLOBAL_INTERNER.intern("RcvProv3427").unwrap();
+        let now = time::now().wallclock();
+        let valid_from = crate::core::hlc::HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+        let valid_to = crate::core::hlc::HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+
+        let del_prov = Provenance::builder()
+            .source("mcp")
+            .principal("svc-deleter")
+            .build()
+            .unwrap();
+        let ret_prov = Provenance::builder()
+            .principal("svc-retractor")
+            .build()
+            .unwrap();
+
+        // Delete path.
+        wal.append(WalOperation::CreateNode {
+            node_id: del_node,
+            label,
+            properties: PropertyMap::new(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::DeleteNode {
+            node_id: del_node,
+            valid_from: time::now(),
+            version_id: None,
+            provenance: Some(del_prov),
+        })
+        .unwrap();
+
+        // Retract path.
+        wal.append(WalOperation::CreateNode {
+            node_id: ret_node,
+            label,
+            properties: PropertyMap::new(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::RetractNode {
+            node_id: ret_node,
+            valid_to,
+            version_id: None,
+            provenance: Some(ret_prov),
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        // The delete tombstone version (versions[1]) carries the deleter's
+        // principal after WAL replay.
+        let del_history = historical.get_node_history(del_node).unwrap();
+        assert_eq!(del_history.version_count(), 2, "create + tombstone");
+        let tombstone_vid = del_history.versions[1].version_id;
+        let tombstone_prov = historical
+            .get_node_version_provenance(tombstone_vid)
+            .unwrap()
+            .expect("tombstone version must carry provenance after replay");
+        assert_eq!(
+            tombstone_prov.principal(),
+            Some("svc-deleter"),
+            "delete principal must survive WAL replay (#3427)"
+        );
+        assert_eq!(tombstone_prov.source(), Some("mcp"));
+
+        // The retraction version (versions[1]) carries the retractor's principal.
+        let ret_history = historical.get_node_history(ret_node).unwrap();
+        assert_eq!(ret_history.version_count(), 2, "create + retraction");
+        let retraction_vid = ret_history.versions[1].version_id;
+        let retraction_prov = historical
+            .get_node_version_provenance(retraction_vid)
+            .unwrap()
+            .expect("retraction version must carry provenance after replay");
+        assert_eq!(
+            retraction_prov.principal(),
+            Some("svc-retractor"),
+            "retract principal must survive WAL replay (#3427)"
+        );
+    }
+
+    /// Issue #3427 (R7) / #3407 / #3492 regression: threading provenance through
+    /// the delete replay arm must NOT disturb the DELIBERATELY-KEPT explicit
+    /// transaction-time close. An in-ONE-framed-transaction create+delete of the
+    /// same node shares a single `commit_timestamp`, so the `add_node_version`
+    /// helper's strict `new_tx_start > prev_tx_start` guard would SKIP closing
+    /// the superseded create head — the explicit close keeps it consistent with
+    /// the live path. Assert the pre-delete head's transaction time is closed.
+    #[test]
+    fn replay_framed_create_then_delete_still_closes_superseded_tx_time() {
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::property::PropertyMap;
+        use crate::core::provenance::Provenance;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let node_id = crate::core::NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("RcvFramedDel3427").unwrap();
+        let now = time::now().wallclock();
+        let valid_from = crate::core::hlc::HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+        // One shared commit timestamp for the whole framed transaction.
+        let commit_ts = crate::core::hlc::HybridTimestamp::new(now, 0).unwrap();
+        let tx_id = 77u64;
+
+        // Frame: BeginTx, CreateNode, DeleteNode, CommitTx — LSN-contiguous so
+        // resolve_transaction_frames pairs both data ops with `commit_ts`.
+        wal.append(WalOperation::BeginTx { tx_id }).unwrap();
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label,
+            properties: PropertyMap::new(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::DeleteNode {
+            node_id,
+            valid_from: commit_ts,
+            version_id: None,
+            provenance: Some(
+                Provenance::builder()
+                    .principal("svc-deleter")
+                    .build()
+                    .unwrap(),
+            ),
+        })
+        .unwrap();
+        wal.append(WalOperation::CommitTx {
+            tx_id,
+            entry_count: 2,
+            commit_timestamp: commit_ts,
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        let history = historical.get_node_history(node_id).unwrap();
+        assert_eq!(history.version_count(), 2, "create + tombstone");
+        let pre_delete_head = &history.versions[0];
+        assert!(
+            !pre_delete_head.temporal.transaction_time().is_current(),
+            "superseded create head's transaction time must be CLOSED even when \
+             create+delete share one framed commit_timestamp (#3407/#3492 kept close)"
+        );
+        assert_eq!(
+            pre_delete_head.temporal.transaction_time().end(),
+            commit_ts,
+            "must close at the shared framed commit timestamp"
+        );
+        // The delete principal still lands on the tombstone (provenance threaded
+        // orthogonally to the kept close).
+        let tombstone_vid = history.versions[1].version_id;
+        assert_eq!(
+            historical
+                .get_node_version_provenance(tombstone_vid)
+                .unwrap()
+                .and_then(|p| p.principal().map(String::from))
+                .as_deref(),
+            Some("svc-deleter"),
+        );
+    }
+
     /// Issue #3230: RetractEdge replay — same contract as RetractNode.
     #[test]
     fn replay_retract_edge_honors_valid_to() {
@@ -1674,6 +1879,7 @@ mod tests {
             edge_id,
             valid_to,
             version_id: None,
+            provenance: None,
         })
         .unwrap();
         wal.flush().unwrap();
@@ -1930,6 +2136,7 @@ mod tests {
             node_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })
         .unwrap();
         wal.append(WalOperation::CreateNode {
@@ -2038,6 +2245,7 @@ mod tests {
             edge_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })
         .unwrap();
         wal.append(WalOperation::CreateEdge {
@@ -2178,12 +2386,14 @@ mod tests {
             edge_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })
         .unwrap();
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })
         .unwrap();
         wal.flush().unwrap();
@@ -2265,12 +2475,14 @@ mod tests {
             edge_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })
         .unwrap();
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
             version_id: None,
+            provenance: None,
         })
         .unwrap();
         wal.flush().unwrap();
