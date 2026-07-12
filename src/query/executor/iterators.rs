@@ -1805,9 +1805,14 @@ impl FilterIterator {
     ///
     /// Approximates openCypher three-valued logic at the "not true" level:
     /// any comparison, string predicate, or membership test involving the
-    /// null binding is not-true (row filtered), `IS NULL` (encoded as
-    /// `Eq { value: Null }`) is true, and `IS NOT NULL` (encoded as
-    /// `Ne { value: Null }`) is false.
+    /// null binding is not-true (row filtered). A node/edge-level `x IS NULL`
+    /// (bare variable) is lowered by the Cypher converter to
+    /// `Eq { value: Null }` (true here) and `x IS NOT NULL` to
+    /// `Ne { value: Null }` (false here). A property-level `x.p IS NULL` is
+    /// instead lowered to `Or(NotExists, Eq { value: Null })` (true for a null
+    /// binding via its `NotExists` arm) and `x.p IS NOT NULL` to
+    /// `And(Exists, Ne { value: Null })` (false via its `Exists` arm); the bare
+    /// `Eq`/`Ne { value: Null }` arms below also serve that composed form.
     ///
     /// Known deviation: `NOT` uses two-valued negation (`NOT (null.p = 1)`
     /// keeps the row where openCypher's `NOT null` would drop it). This

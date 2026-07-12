@@ -1013,18 +1013,58 @@ impl CypherConverter {
                 Ok(Predicate::Not(Box::new(inner_pred)))
             }
             CypherExpr::IsNull(inner) => {
-                let key = self.extract_property_key(inner)?;
-                Ok(Predicate::Eq {
-                    key,
-                    value: PredicateValue::Null,
-                })
+                match inner.as_ref() {
+                    // Property access (`n.email IS NULL`): openCypher treats a
+                    // property as null when it is ABSENT *or* present with an
+                    // explicit null value. The data model represents both (a
+                    // missing key and a stored `PropertyValue::Null`), so lower to
+                    // `NotExists(key) OR Eq(key, Null)`. The old `Eq(key, Null)`-only
+                    // lowering matched present-null but silently missed absence.
+                    CypherExpr::Property { property, .. } => Ok(Predicate::Or(vec![
+                        Predicate::NotExists(property.clone()),
+                        Predicate::Eq {
+                            key: property.clone(),
+                            value: PredicateValue::Null,
+                        },
+                    ])),
+                    // Bare variable (`x IS NULL`): a node/edge-level null check
+                    // (only an OPTIONAL MATCH unmatched binding is ever null). Keep
+                    // the `Eq(var, Null)` lowering: a matched entity has no property
+                    // literally named after the variable (so it is not-null), and a
+                    // null binding is handled by the executor's null-row path.
+                    _ => {
+                        let key = self.extract_property_key(inner)?;
+                        Ok(Predicate::Eq {
+                            key,
+                            value: PredicateValue::Null,
+                        })
+                    }
+                }
             }
             CypherExpr::IsNotNull(inner) => {
-                let key = self.extract_property_key(inner)?;
-                Ok(Predicate::Ne {
-                    key,
-                    value: PredicateValue::Null,
-                })
+                match inner.as_ref() {
+                    // Property access (`n.email IS NOT NULL`): openCypher requires
+                    // the property to be PRESENT with a non-null value. Lower to
+                    // `Exists(key) AND Ne(key, Null)`; the old `Ne(key, Null)`-only
+                    // lowering wrongly matched absent properties (the executor treats
+                    // a missing property as `!= null`).
+                    CypherExpr::Property { property, .. } => Ok(Predicate::And(vec![
+                        Predicate::Exists(property.clone()),
+                        Predicate::Ne {
+                            key: property.clone(),
+                            value: PredicateValue::Null,
+                        },
+                    ])),
+                    // Bare variable (`x IS NOT NULL`): node/edge-level null check
+                    // (see IsNull above). Keep the `Ne(var, Null)` lowering.
+                    _ => {
+                        let key = self.extract_property_key(inner)?;
+                        Ok(Predicate::Ne {
+                            key,
+                            value: PredicateValue::Null,
+                        })
+                    }
+                }
             }
             CypherExpr::In { expr, values } => {
                 let key = self.extract_property_key(expr)?;
