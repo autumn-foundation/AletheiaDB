@@ -44,6 +44,22 @@ fn py_to_cypher_param(value: &Bound<'_, PyAny>) -> PyResult<CypherParameterValue
     )))
 }
 
+/// Serialize a single query-result entity into a Python object
+/// (`PyNode` / `PyEdge` / int id / `None`).
+///
+/// Shared by the single-entity row path and the multi-variable binding path
+/// (#549) so both surface nodes/edges identically.
+fn entity_to_py(py: Python<'_>, entity: EntityResult) -> PyResult<PyObject> {
+    Ok(match entity {
+        EntityResult::Node(n) => Py::new(py, PyNode::from_rust(n))?.into_py(py),
+        EntityResult::Edge(e) => Py::new(py, PyEdge::from_rust(e))?.into_py(py),
+        EntityResult::NodeId(id) => id.as_u64().into_py(py),
+        EntityResult::EdgeId(id) => id.as_u64().into_py(py),
+        // Null binding (unmatched OPTIONAL MATCH) or any future variant.
+        _ => py.None(),
+    })
+}
+
 pub fn execute_cypher(
     py: Python<'_>,
     db: &Arc<RustDB>,
@@ -75,6 +91,23 @@ pub fn execute_cypher(
     let list = PyList::empty_bound(py);
     for row in rows {
         let d = PyDict::new_bound(py);
+        // Multi-variable binding row (#549): `MATCH (a),(b) RETURN a,b` binds
+        // several variables that the single `entity` field cannot represent.
+        // Surface them under a `bindings` dict (var -> entity) rather than the
+        // lossy single-entity shape, which would drop every bound entity.
+        if let Some(bindings) = row.bindings {
+            let bd = PyDict::new_bound(py);
+            for (name, entity) in bindings {
+                bd.set_item(name, entity_to_py(py, entity)?)?;
+            }
+            d.set_item("kind", "bindings")?;
+            d.set_item("bindings", bd)?;
+            if let Some(score) = row.score {
+                d.set_item("score", score as f64)?;
+            }
+            list.append(d)?;
+            continue;
+        }
         match row.entity {
             EntityResult::Node(n) => {
                 d.set_item("kind", "node")?;

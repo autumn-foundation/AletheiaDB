@@ -39,7 +39,7 @@
 //!   non-scalar list.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::core::error::Result as CoreResult;
@@ -47,7 +47,10 @@ use crate::core::property::PropertyValue;
 use crate::query::Query;
 use crate::query::executor::{QueryResults, QueryRow, ResultIterator};
 
-use super::ast::{CypherExpr, CypherReturn, CypherReturnItem, CypherStatement, CypherValue};
+use super::ast::{
+    CypherExpr, CypherPattern, CypherPatternElement, CypherReturn, CypherReturnItem,
+    CypherStatement, CypherValue,
+};
 use super::converter::{CypherConverter, CypherParameterValue};
 use super::error::CypherError;
 use super::parser::CypherParser;
@@ -74,6 +77,19 @@ pub enum CypherExecution {
     Query(Query),
     /// Pre-computed result rows (a standalone `UNWIND` expansion).
     Rows(QueryResults),
+    /// A multi-variable, multi-pattern `MATCH` (Issue #549) to be evaluated by
+    /// the dedicated multi-pattern evaluator, which needs the database handle.
+    ///
+    /// The single-entity `Query` IR cannot represent a row that binds several
+    /// variables, so a statement the router classifies as multi-variable
+    /// ([`needs_multi_binding`]) is carried here unconverted; `execute_cypher`
+    /// dispatches it to `AletheiaDB::execute_multi_pattern`.
+    MultiPattern {
+        /// The `MATCH` statement to evaluate.
+        statement: Box<CypherStatement>,
+        /// Parameter bindings for `$param` references.
+        params: HashMap<String, CypherParameterValue>,
+    },
     /// `EXPLAIN <query>` (Issue #562): plan the wrapped query and return the
     /// physical plan as a single `plan` row **without executing it**. The
     /// caller (`AletheiaDB::execute_cypher`) plans only.
@@ -126,6 +142,15 @@ pub fn plan_cypher_with_params(
             let query = lower_for_plan(*inner, params, "PROFILE")?;
             Ok(CypherExecution::Profile(query))
         }
+        other if needs_multi_binding(&other) => {
+            // A multi-variable / multi-pattern MATCH has no faithful
+            // single-entity `Query` representation; route it to the dedicated
+            // evaluator (which needs the DB handle) instead of converting.
+            Ok(CypherExecution::MultiPattern {
+                statement: Box::new(other),
+                params,
+            })
+        }
         other => {
             let query = CypherConverter::with_params(params).convert(other)?;
             Ok(CypherExecution::Query(query))
@@ -135,11 +160,21 @@ pub fn plan_cypher_with_params(
 
 /// Lower the statement wrapped by `EXPLAIN`/`PROFILE` into a plannable [`Query`].
 ///
-/// Only statements that convert to the graph-query IR are supported. A
-/// standalone `UNWIND` has no `Query` representation (it is evaluated directly
-/// into scalar rows), so `EXPLAIN`/`PROFILE` over it is rejected with an honest
-/// [`CypherError::UnsupportedFeature`] rather than fabricating a plan. A nested
-/// prefix is unreachable (the parser rejects it) but is handled defensively.
+/// Only statements that convert to the single-entity graph-query IR are
+/// supported. Two inner shapes have no `Query` representation and are rejected
+/// with an honest [`CypherError::UnsupportedFeature`] rather than fabricating a
+/// plan:
+///
+/// - A standalone `UNWIND` (evaluated directly into scalar rows).
+/// - A multi-variable / multi-pattern `MATCH` (Issue #549): classified by
+///   [`needs_multi_binding`], it routes to the dedicated multi-pattern
+///   evaluator ([`CypherExecution::MultiPattern`]), which has **no** physical
+///   `Query`/plan to display or profile. Explaining/profiling it would either
+///   mis-lower through the single-entity converter or produce a wrong/empty
+///   plan, so we reject it explicitly and cleanly.
+///
+/// A nested `EXPLAIN`/`PROFILE` prefix is unreachable (the parser rejects it)
+/// but is handled defensively.
 fn lower_for_plan(
     inner: CypherStatement,
     params: HashMap<String, CypherParameterValue>,
@@ -153,7 +188,172 @@ fn lower_for_plan(
         CypherStatement::Explain(_) | CypherStatement::Profile(_) => Err(
             CypherError::UnsupportedFeature(format!("{verb} cannot wrap another EXPLAIN/PROFILE")),
         ),
+        // A multi-variable / multi-pattern MATCH (Issue #549) is dispatched to
+        // the dedicated evaluator, which has no physical `Query` plan; there is
+        // nothing to lower here, so reject rather than mis-lower.
+        stmt if needs_multi_binding(&stmt) => Err(CypherError::UnsupportedFeature(format!(
+            "{verb} is not supported for multi-pattern queries yet; a multi-variable / \
+             multi-pattern MATCH is evaluated by the dedicated multi-pattern evaluator and has \
+             no physical query plan to display"
+        ))),
         stmt => CypherConverter::with_params(params).convert(stmt),
+    }
+}
+
+/// Classify whether a statement requires multi-variable binding and must be
+/// routed to the multi-pattern evaluator (Issue #549) rather than the
+/// single-entity `Query` pipeline.
+///
+/// Returns `true` only for a base `MATCH` (no `OPTIONAL MATCH`, no `WITH`) that
+/// either joins more than one comma-separated pattern, returns more than one
+/// entity variable, or references a non-terminal entity variable -- exactly the
+/// cases the single-entity row model answers incorrectly. Every query that the
+/// old path already answers correctly (single terminal variable, `RETURN
+/// n.name`, `count(*)`, a vector-ranked `RETURN d, score`) stays `false` and is
+/// untouched.
+///
+/// A single-terminal-variable query -- including a single-pattern `WITH` /
+/// `OPTIONAL MATCH` query the existing path handles correctly -- stays `false`
+/// and is untouched. But a genuinely multi-variable query IS routed to the
+/// evaluator even when combined with `WITH` / `OPTIONAL MATCH` (FIX #5): those
+/// clauses are out of the v1 evaluator's scope, so it rejects them with a
+/// structured error rather than letting the single-entity path silently return
+/// a wrong row.
+pub fn needs_multi_binding(stmt: &CypherStatement) -> bool {
+    let CypherStatement::Match {
+        pattern,
+        where_clause,
+        return_clause,
+        ..
+    } = stmt
+    else {
+        return false;
+    };
+
+    // Entity (node + relationship) variables declared across all patterns.
+    let mut entity_vars: HashSet<String> = HashSet::new();
+    for pattern in pattern {
+        collect_pattern_entity_vars(pattern, &mut entity_vars);
+    }
+    if entity_vars.is_empty() {
+        return false;
+    }
+
+    // Entity variables referenced by RETURN / WHERE / ORDER BY.
+    let mut referenced: HashSet<String> = HashSet::new();
+    for item in &return_clause.items {
+        collect_return_item_refs(item, &mut referenced);
+    }
+    if let Some(where_expr) = where_clause {
+        collect_expr_refs(where_expr, &mut referenced);
+    }
+    for order_item in &return_clause.order_by {
+        collect_expr_refs(&order_item.expr, &mut referenced);
+    }
+    referenced.retain(|v| entity_vars.contains(v));
+
+    let terminal = pattern.last().and_then(last_node_variable);
+
+    // The multi-binding decision is made from the pattern shape and the
+    // referenced variables ALONE -- the `WITH` / `OPTIONAL MATCH` clauses are
+    // deliberately NOT consulted here (FIX #5). When a query genuinely binds
+    // more than one entity variable (or joins comma-separated patterns), it
+    // must route to the multi-pattern evaluator EVEN if `WITH`/`OPTIONAL MATCH`
+    // is present: the evaluator then rejects those clauses with a structured
+    // `UnsupportedFeature` error, rather than the single-entity path silently
+    // discarding an earlier scan and returning a wrong row. A genuine
+    // single-terminal-variable query (including single-pattern `WITH` /
+    // `OPTIONAL MATCH` queries the old path handles correctly) stays `false`.
+    pattern.len() > 1
+        || referenced.len() > 1
+        || referenced
+            .iter()
+            .any(|v| Some(v.as_str()) != terminal.as_deref())
+}
+
+/// Collect the node and relationship variable names of one pattern.
+fn collect_pattern_entity_vars(pattern: &CypherPattern, out: &mut HashSet<String>) {
+    for element in &pattern.elements {
+        let var = match element {
+            CypherPatternElement::Node(n) => n.variable.as_ref(),
+            CypherPatternElement::Relationship(r) => r.variable.as_ref(),
+        };
+        if let Some(v) = var {
+            out.insert(v.clone());
+        }
+    }
+}
+
+/// The variable of the **last node element** of a pattern, or `None` when that
+/// terminal node is unnamed (FIX #4).
+///
+/// This must return the last node's `.variable` directly -- `None` if the last
+/// node is anonymous -- rather than skipping past an unnamed terminal to an
+/// earlier named node. Skipping would make `MATCH (a)-[:R]->()` report a
+/// terminal of `a`, wrongly classifying it as single-terminal and routing it to
+/// the single-entity path (which returns the anonymous endpoint, not `a`).
+/// Mirrors `converter::last_node_variable`.
+fn last_node_variable(pattern: &CypherPattern) -> Option<String> {
+    pattern
+        .elements
+        .iter()
+        .rev()
+        .find_map(|element| match element {
+            CypherPatternElement::Node(n) => Some(n.variable.clone()),
+            CypherPatternElement::Relationship(_) => None,
+        })
+        .flatten()
+}
+
+/// Collect variable references from a `RETURN` item.
+fn collect_return_item_refs(item: &CypherReturnItem, out: &mut HashSet<String>) {
+    match item {
+        CypherReturnItem::Star => {}
+        CypherReturnItem::Variable(name) => {
+            out.insert(name.clone());
+        }
+        CypherReturnItem::Expression { expr, .. } => collect_expr_refs(expr, out),
+    }
+}
+
+/// Collect the variable names an expression references (bare variables and the
+/// base of a property access), recursing through sub-expressions. Parser-bounded
+/// nesting (Issue #3404) makes unbounded recursion safe here.
+fn collect_expr_refs(expr: &CypherExpr, out: &mut HashSet<String>) {
+    match expr {
+        CypherExpr::Variable(name) => {
+            out.insert(name.clone());
+        }
+        CypherExpr::Property { variable, .. } => {
+            out.insert(variable.clone());
+        }
+        CypherExpr::Value(_) | CypherExpr::Star => {}
+        CypherExpr::Comparison { left, right, .. } => {
+            collect_expr_refs(left, out);
+            collect_expr_refs(right, out);
+        }
+        CypherExpr::And(a, b) | CypherExpr::Or(a, b) => {
+            collect_expr_refs(a, out);
+            collect_expr_refs(b, out);
+        }
+        CypherExpr::Not(inner)
+        | CypherExpr::IsNull(inner)
+        | CypherExpr::IsNotNull(inner)
+        | CypherExpr::Grouped(inner) => collect_expr_refs(inner, out),
+        CypherExpr::In { expr, values } => {
+            collect_expr_refs(expr, out);
+            for value in values {
+                collect_expr_refs(value, out);
+            }
+        }
+        CypherExpr::Contains { expr, .. }
+        | CypherExpr::StartsWith { expr, .. }
+        | CypherExpr::EndsWith { expr, .. } => collect_expr_refs(expr, out),
+        CypherExpr::FunctionCall { args, .. } | CypherExpr::List(args) => {
+            for arg in args {
+                collect_expr_refs(arg, out);
+            }
+        }
     }
 }
 

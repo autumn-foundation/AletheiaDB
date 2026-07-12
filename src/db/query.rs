@@ -339,6 +339,9 @@ impl AletheiaDB {
         match crate::cypher::plan_cypher(query_string)? {
             crate::cypher::CypherExecution::Query(query) => self.execute_query(query),
             crate::cypher::CypherExecution::Rows(results) => Ok(results),
+            crate::cypher::CypherExecution::MultiPattern { statement, params } => {
+                self.execute_multi_pattern(&statement, &params)
+            }
             crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
             crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
         }
@@ -385,9 +388,31 @@ impl AletheiaDB {
         match crate::cypher::plan_cypher_with_params(query_string, params)? {
             crate::cypher::CypherExecution::Query(query) => self.execute_query(query),
             crate::cypher::CypherExecution::Rows(results) => Ok(results),
+            crate::cypher::CypherExecution::MultiPattern { statement, params } => {
+                self.execute_multi_pattern(&statement, &params)
+            }
             crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
             crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
         }
+    }
+
+    /// Execute a multi-variable, multi-pattern `MATCH` (Issue #549).
+    ///
+    /// Delegates to the dedicated [`crate::cypher::multi_pattern`] evaluator,
+    /// which binds several named variables per row (carried on
+    /// [`QueryRow::bindings`](crate::query::executor::QueryRow::bindings)) --
+    /// something the single-entity `Query` pipeline cannot represent. Reached
+    /// only for statements the router
+    /// ([`crate::cypher::exec::needs_multi_binding`]) classifies as
+    /// multi-variable.
+    fn execute_multi_pattern(
+        &self,
+        statement: &crate::cypher::ast::CypherStatement,
+        params: &std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
+    ) -> Result<QueryResults> {
+        Ok(crate::cypher::multi_pattern::evaluate(
+            self, statement, params,
+        )?)
     }
 
     /// Plan (but do not execute) a Cypher `EXPLAIN` query, returning the

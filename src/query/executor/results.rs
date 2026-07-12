@@ -175,6 +175,20 @@ pub struct QueryRow {
     /// row's [`entity`](Self::entity) is typically [`EntityResult::Null`]: the
     /// meaningful payload lives here.
     pub columns: Option<Vec<(String, PropertyValue)>>,
+    /// Named variable→entity bindings for a multi-variable row (Issue #549).
+    ///
+    /// The single-entity [`entity`](Self::entity) field can only carry one
+    /// node/edge per row, which cannot represent a query that binds and returns
+    /// several variables (e.g. `MATCH (a),(b) RETURN a, b`). Those queries are
+    /// evaluated by the dedicated multi-pattern evaluator, which populates this
+    /// field with one `(variable_name, entity)` pair per bound variable, in
+    /// declaration order.
+    ///
+    /// `None` for ordinary single-entity rows (the common case), so those rows
+    /// are byte-identical to their prior form. When `Some`, the row's
+    /// [`entity`](Self::entity) is [`EntityResult::Null`]; the bound entities
+    /// live here and any scalar projections live in [`columns`](Self::columns).
+    pub bindings: Option<Vec<(String, EntityResult)>>,
 }
 
 impl QueryRow {
@@ -187,6 +201,7 @@ impl QueryRow {
             path: None,
             timestamp: None,
             columns: None,
+            bindings: None,
         }
     }
 
@@ -216,6 +231,31 @@ impl QueryRow {
             path: None,
             timestamp: None,
             columns: Some(columns),
+            bindings: None,
+        }
+    }
+
+    /// Create a multi-variable row carrying named `variable → entity` bindings
+    /// (Issue #549).
+    ///
+    /// Used by the multi-pattern evaluator for queries that bind and return
+    /// more than one entity variable (e.g. `MATCH (a),(b) RETURN a, b`), which
+    /// the single-entity [`entity`](Self::entity) field cannot represent. The
+    /// row's entity is [`EntityResult::Null`]; consumers read the bound
+    /// entities from [`bindings`](Self::bindings) and any scalar projections
+    /// (property accesses, aliased expressions) from the optional `columns`.
+    #[must_use]
+    pub fn from_bindings(
+        bindings: Vec<(String, EntityResult)>,
+        columns: Option<Vec<(String, PropertyValue)>>,
+    ) -> Self {
+        QueryRow {
+            entity: EntityResult::Null,
+            score: None,
+            path: None,
+            timestamp: None,
+            columns,
+            bindings: Some(bindings),
         }
     }
 
@@ -239,6 +279,7 @@ impl QueryRow {
             path: None,
             timestamp: None,
             columns: None,
+            bindings: None,
         }
     }
 
@@ -251,6 +292,7 @@ impl QueryRow {
             path: Some(path),
             timestamp: None,
             columns: None,
+            bindings: None,
         }
     }
 
@@ -776,6 +818,7 @@ impl QueryResults {
                 path,
                 timestamp,
                 columns: row_columns,
+                bindings: _,
             } = row;
 
             // Extract computed aggregation columns (padding rows without any

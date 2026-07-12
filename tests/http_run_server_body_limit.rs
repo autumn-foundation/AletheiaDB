@@ -63,13 +63,13 @@ fn post_status(addr: &str, path: &str, body: &[u8]) -> Option<u16> {
     // with BrokenPipe/ConnectionReset even though a valid `413` status line is
     // already waiting to be read. Tolerate those write errors and still attempt
     // the read — the status line, not a clean write, is the real assertion.
-    if let Err(e) = stream.write_all(body) {
-        if !matches!(
+    if let Err(e) = stream.write_all(body)
+        && !matches!(
             e.kind(),
             std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
-        ) {
-            return None;
-        }
+        )
+    {
+        return None;
     }
     let _ = stream.flush();
 

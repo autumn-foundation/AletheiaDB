@@ -145,8 +145,31 @@ pub(crate) const WAL_VERSION_DELETE_VERSION_ID: u8 = 9;
 /// delete-version-id entry format (i.e. [`WAL_VERSION_DELETE_VERSION_ID`]).
 pub(crate) const WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID: u8 = 10;
 
+/// WAL format version for plaintext segments whose delete/retract payloads
+/// additionally carry an optional [`Provenance`] bundle recording the acting
+/// principal for the destructive op (Issue #3427).
+///
+/// A strict superset of [`WAL_VERSION_DELETE_VERSION_ID`]: it keeps the tx
+/// framing markers and the tombstone/retraction `version_id`, and appends the
+/// same `[presence][source][confidence][note][correlation_id][principal]`
+/// provenance blob used by create/update after the `version_id` tail on the
+/// `DeleteNode`/`DeleteEdge`/`RetractNode`/`RetractEdge` payloads. This lets
+/// crash recovery reconstruct the tombstone/retraction version WITH its
+/// acting-principal attribution instead of dropping it. The
+/// [`carries_destructive_provenance`] gate is an independent monotonic `>=`
+/// boolean on the same version byte, composing with the framing and
+/// delete-version-id gates. Bumping the header version makes an older reader
+/// reject the file cleanly rather than mis-length the extended payload,
+/// following the #3224/#3406/#3413 precedent.
+pub(crate) const WAL_VERSION_DESTRUCTIVE_PROVENANCE: u8 = 11;
+
+/// WAL format version for encrypted segments whose decrypted payload uses the
+/// destructive-op provenance entry format (i.e.
+/// [`WAL_VERSION_DESTRUCTIVE_PROVENANCE`]).
+pub(crate) const WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE: u8 = 12;
+
 /// Maximum supported WAL version (inclusive).
-const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID;
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE;
 
 /// Returns `true` if `version` denotes an encrypted segment (the original
 /// encrypted format or one of its provenance/framing-carrying successors).
@@ -157,6 +180,7 @@ fn is_encrypted_version(version: u8) -> bool {
         || version == WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
         || version == WAL_VERSION_ENCRYPTED_TX_FRAMING
         || version == WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID
+        || version == WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE
 }
 
 /// Returns `true` if `version` (a plaintext/payload version) supports the
@@ -178,6 +202,19 @@ fn carries_delete_version_id(version: u8) -> bool {
     version >= WAL_VERSION_DELETE_VERSION_ID
 }
 
+/// Returns `true` if `version` (a plaintext/payload version) carries the
+/// optional [`Provenance`] blob trailing the delete/retract payloads (Issue
+/// #3427).
+///
+/// Independent of [`is_framed_version`] / [`carries_delete_version_id`]: all
+/// three are monotonic `>=` predicates on the same version byte, so v11/v12
+/// segments are simultaneously framed, delete-version-id-carrying, AND
+/// destructive-provenance-carrying.
+#[inline]
+fn carries_destructive_provenance(version: u8) -> bool {
+    version >= WAL_VERSION_DESTRUCTIVE_PROVENANCE
+}
+
 /// Map a segment/container format version to the logical *payload* version
 /// used to gate field parsing (e.g. `version >= WAL_VERSION_PROVENANCE`).
 ///
@@ -192,6 +229,7 @@ fn payload_version(version: u8) -> u8 {
         WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL => WAL_VERSION_PROVENANCE_PRINCIPAL,
         WAL_VERSION_ENCRYPTED_TX_FRAMING => WAL_VERSION_TX_FRAMING,
         WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID => WAL_VERSION_DELETE_VERSION_ID,
+        WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE => WAL_VERSION_DESTRUCTIVE_PROVENANCE,
         v => v,
     }
 }
@@ -212,7 +250,7 @@ fn payload_version(version: u8) -> u8 {
 /// and fails the entry checksum.
 ///
 /// History of the newest plaintext version: #3224→3, #3421→5, #3413→7,
-/// #3406→9. Bump on every WAL plaintext format increase.
+/// #3406→9, #3427→11. Bump on every WAL plaintext format increase.
 #[inline]
 // Only referenced by the fuzz-only `crate::fuzzing` module, so it is compiled
 // only under `any(fuzzing, feature = "fuzzing")`; on non-fuzzing builds it is
@@ -1538,10 +1576,19 @@ fn parse_delete_node_op(
         tx_timestamp
     };
     let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "DeleteNode")?;
+    // Issue #3427: v11+ segments append the same provenance blob create/update
+    // carry. Older (v9/v10/legacy) segments stop at the version_id tail and must
+    // parse byte-identically, so gate the read on `carries_destructive_provenance`.
+    let provenance = if carries_destructive_provenance(version) {
+        read_provenance(buffer, offset, version)?
+    } else {
+        None
+    };
     Ok(WalOperation::DeleteNode {
         node_id,
         valid_from,
         version_id,
+        provenance,
     })
 }
 
@@ -1561,10 +1608,17 @@ fn parse_delete_edge_op(
         tx_timestamp
     };
     let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "DeleteEdge")?;
+    // Issue #3427: version-gated trailing provenance blob (see parse_delete_node_op).
+    let provenance = if carries_destructive_provenance(version) {
+        read_provenance(buffer, offset, version)?
+    } else {
+        None
+    };
     Ok(WalOperation::DeleteEdge {
         edge_id,
         valid_from,
         version_id,
+        provenance,
     })
 }
 
@@ -1581,10 +1635,17 @@ fn parse_retract_node_op(buffer: &[u8], offset: &mut usize, version: u8) -> Resu
     let (valid_to, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
     advance(offset, ts_len)?;
     let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "RetractNode")?;
+    // Issue #3427: version-gated trailing provenance blob (see parse_delete_node_op).
+    let provenance = if carries_destructive_provenance(version) {
+        read_provenance(buffer, offset, version)?
+    } else {
+        None
+    };
     Ok(WalOperation::RetractNode {
         node_id,
         valid_to,
         version_id,
+        provenance,
     })
 }
 
@@ -1598,10 +1659,17 @@ fn parse_retract_edge_op(buffer: &[u8], offset: &mut usize, version: u8) -> Resu
     let (valid_to, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
     advance(offset, ts_len)?;
     let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "RetractEdge")?;
+    // Issue #3427: version-gated trailing provenance blob (see parse_delete_node_op).
+    let provenance = if carries_destructive_provenance(version) {
+        read_provenance(buffer, offset, version)?
+    } else {
+        None
+    };
     Ok(WalOperation::RetractEdge {
         edge_id,
         valid_to,
         version_id,
+        provenance,
     })
 }
 
@@ -2630,14 +2698,17 @@ mod tests {
             node_id,
             valid_to,
             version_id,
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(10), operation);
 
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
+        // Serialization always writes the newest (v11+) payload shape, which now
+        // trails a provenance blob (Issue #3427), so parse at that version.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
 
         assert_eq!(parsed_entry.lsn, LSN(10));
         assert_eq!(bytes_consumed, buffer.len());
@@ -2646,10 +2717,12 @@ mod tests {
                 node_id: parsed_id,
                 valid_to: parsed_valid_to,
                 version_id: parsed_version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(parsed_valid_to, valid_to, "valid_to must survive verbatim");
                 assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
+                assert_eq!(provenance, None, "absent provenance round-trips as None");
             }
             other => panic!("Expected RetractNode operation, got {other:?}"),
         }
@@ -2666,6 +2739,7 @@ mod tests {
             edge_id,
             valid_to,
             version_id,
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(11), operation);
 
@@ -2673,7 +2747,7 @@ mod tests {
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
 
         assert_eq!(parsed_entry.lsn, LSN(11));
         assert_eq!(bytes_consumed, buffer.len());
@@ -2682,13 +2756,596 @@ mod tests {
                 edge_id: parsed_id,
                 valid_to: parsed_valid_to,
                 version_id: parsed_version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(parsed_valid_to, valid_to, "valid_to must survive verbatim");
                 assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
+                assert_eq!(provenance, None, "absent provenance round-trips as None");
             }
             other => panic!("Expected RetractEdge operation, got {other:?}"),
         }
+    }
+
+    // ---- Issue #3427: destructive-op provenance (v11 / v12) ----
+
+    /// A fully-populated provenance bundle used by the #3427 round-trip tests.
+    fn full_destructive_provenance() -> Provenance {
+        Provenance::builder()
+            .source("mcp")
+            .confidence(0.9)
+            .note("closed by operator")
+            .correlation_id("req-3427")
+            .principal("svc-deleter")
+            .build()
+            .unwrap()
+    }
+
+    fn assert_full_destructive_provenance(p: &Provenance) {
+        assert_eq!(p.source(), Some("mcp"));
+        assert_eq!(p.confidence(), Some(0.9));
+        assert_eq!(p.note(), Some("closed by operator"));
+        assert_eq!(p.correlation_id(), Some("req-3427"));
+        assert_eq!(
+            p.principal(),
+            Some("svc-deleter"),
+            "the acting principal must survive WAL round-trip (#3427)"
+        );
+    }
+
+    /// Issue #3427 (R1): a `DeleteNode` carrying a `Some(Provenance)` bundle
+    /// round-trips serialize -> parse at v11 with the full bundle intact.
+    #[test]
+    fn test_v11_delete_node_roundtrips_provenance() {
+        let node_id = NodeId::new(42).unwrap();
+        let valid_from = HybridTimestamp::new(1_234_567, 7).unwrap();
+        let operation = WalOperation::DeleteNode {
+            node_id,
+            valid_from,
+            version_id: Some(VersionId::new(555).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        };
+        let entry = WalEntry::new(LSN(5), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+
+        assert_eq!(consumed, buffer.len(), "v11 delete must consume all bytes");
+        match parsed.operation {
+            WalOperation::DeleteNode {
+                node_id: parsed_id,
+                valid_from: parsed_vf,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vf, valid_from);
+                assert_eq!(version_id, Some(VersionId::new(555).unwrap()));
+                assert_full_destructive_provenance(
+                    &provenance.expect("DeleteNode provenance must round-trip"),
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R1): `DeleteEdge` provenance round-trips at v11.
+    #[test]
+    fn test_v11_delete_edge_roundtrips_provenance() {
+        let edge_id = EdgeId::new(100).unwrap();
+        let valid_from = HybridTimestamp::new(9_876_543, 1).unwrap();
+        let operation = WalOperation::DeleteEdge {
+            edge_id,
+            valid_from,
+            version_id: Some(VersionId::new(556).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        };
+        let entry = WalEntry::new(LSN(6), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+
+        assert_eq!(consumed, buffer.len());
+        match parsed.operation {
+            WalOperation::DeleteEdge {
+                edge_id: parsed_id,
+                valid_from: parsed_vf,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, edge_id);
+                assert_eq!(parsed_vf, valid_from);
+                assert_eq!(version_id, Some(VersionId::new(556).unwrap()));
+                assert_full_destructive_provenance(
+                    &provenance.expect("DeleteEdge provenance must round-trip"),
+                );
+            }
+            other => panic!("Expected DeleteEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R1): `RetractNode` provenance round-trips at v11.
+    #[test]
+    fn test_v11_retract_node_roundtrips_provenance() {
+        let node_id = NodeId::new(7).unwrap();
+        let valid_to = HybridTimestamp::new(1_700_000, 3).unwrap();
+        let operation = WalOperation::RetractNode {
+            node_id,
+            valid_to,
+            version_id: Some(VersionId::new(321).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        };
+        let entry = WalEntry::new(LSN(10), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+
+        assert_eq!(consumed, buffer.len());
+        match parsed.operation {
+            WalOperation::RetractNode {
+                node_id: parsed_id,
+                valid_to: parsed_vt,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vt, valid_to);
+                assert_eq!(version_id, Some(VersionId::new(321).unwrap()));
+                assert_full_destructive_provenance(
+                    &provenance.expect("RetractNode provenance must round-trip"),
+                );
+            }
+            other => panic!("Expected RetractNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R1): `RetractEdge` provenance round-trips at v11.
+    #[test]
+    fn test_v11_retract_edge_roundtrips_provenance() {
+        let edge_id = EdgeId::new(11).unwrap();
+        let valid_to = HybridTimestamp::new(2_500_000, 5).unwrap();
+        let operation = WalOperation::RetractEdge {
+            edge_id,
+            valid_to,
+            version_id: Some(VersionId::new(654).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        };
+        let entry = WalEntry::new(LSN(11), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+
+        assert_eq!(consumed, buffer.len());
+        match parsed.operation {
+            WalOperation::RetractEdge {
+                edge_id: parsed_id,
+                valid_to: parsed_vt,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, edge_id);
+                assert_eq!(parsed_vt, valid_to);
+                assert_eq!(version_id, Some(VersionId::new(654).unwrap()));
+                assert_full_destructive_provenance(
+                    &provenance.expect("RetractEdge provenance must round-trip"),
+                );
+            }
+            other => panic!("Expected RetractEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R2): a v11 `DeleteNode` with `provenance: None` writes a
+    /// single presence byte (0) and parses back to `None`.
+    #[test]
+    fn test_v11_delete_node_none_provenance_roundtrips() {
+        let operation = WalOperation::DeleteNode {
+            node_id: NodeId::new(1).unwrap(),
+            valid_from: HybridTimestamp::new(1000, 0).unwrap(),
+            version_id: Some(VersionId::new(9).unwrap()),
+            provenance: None,
+        };
+        let entry = WalEntry::new(LSN(1), operation);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert_eq!(
+            *buffer.last().unwrap(),
+            0,
+            "None provenance must serialize as a single absent presence byte"
+        );
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        assert_eq!(consumed, buffer.len());
+        match parsed.operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                assert_eq!(provenance, None, "absent provenance must parse as None");
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R3): a hand-assembled v9 `DeleteNode` payload (node_id +
+    /// valid_from + tombstone version_id, NO trailing provenance blob — the
+    /// pre-#3427 on-disk shape shared by plaintext v9 and the decrypted payload
+    /// of encrypted v10) parses under the v9 reader with `provenance: None` and
+    /// NO over-read of the trailing bytes.
+    #[test]
+    fn test_v9_delete_node_parses_without_provenance() {
+        let timestamp = time::now();
+        let node_id = NodeId::new(77).unwrap();
+        let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap();
+        let version_id = VersionId::new(999).unwrap();
+
+        // v9 DeleteNode op_data: node_id (8) + valid_from (12) + version_id (8).
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        valid_from.serialize_into(&mut op_data);
+        op_data.extend_from_slice(&version_id.as_u64().to_le_bytes());
+        let buf = make_v0_buffer(6, &op_data, timestamp); // OP_DELETE_NODE = 6
+
+        let (entry, consumed) = parse_entry_at(&buf, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+        assert_eq!(
+            consumed,
+            buf.len(),
+            "v9 reader must consume exactly the v9 payload — no phantom provenance blob"
+        );
+        match entry.operation {
+            WalOperation::DeleteNode {
+                node_id: parsed_id,
+                valid_from: parsed_vf,
+                version_id: parsed_vid,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vf, valid_from);
+                assert_eq!(parsed_vid, Some(version_id));
+                assert_eq!(
+                    provenance, None,
+                    "a pre-#3427 (v9/v10) delete carries no provenance"
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R3): same as above for a v9 `RetractNode` payload.
+    #[test]
+    fn test_v9_retract_node_parses_without_provenance() {
+        let timestamp = time::now();
+        let node_id = NodeId::new(88).unwrap();
+        let valid_to = HybridTimestamp::new(1_700_000_000_000_000, 0).unwrap();
+        let version_id = VersionId::new(1000).unwrap();
+
+        // v9 RetractNode op_data: node_id (8) + valid_to (12) + version_id (8).
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        valid_to.serialize_into(&mut op_data);
+        op_data.extend_from_slice(&version_id.as_u64().to_le_bytes());
+        let buf = make_v0_buffer(10, &op_data, timestamp); // OP_RETRACT_NODE = 10
+
+        let (entry, consumed) = parse_entry_at(&buf, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+        assert_eq!(consumed, buf.len());
+        match entry.operation {
+            WalOperation::RetractNode {
+                version_id: parsed_vid,
+                provenance,
+                ..
+            } => {
+                assert_eq!(parsed_vid, Some(version_id));
+                assert_eq!(provenance, None);
+            }
+            other => panic!("Expected RetractNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R4): an encrypted v12 segment carrying a `DeleteNode` with a
+    /// provenance bundle survives the cipher-aware read path — the trailing
+    /// provenance blob is parsed downstream of decrypt.
+    #[test]
+    fn test_v12_encrypted_destructive_provenance_survives_decrypt() {
+        use std::io::Write;
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+
+        // Write an encrypted (v12) segment header.
+        {
+            let mut file = File::create(&path).unwrap();
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE])
+                .unwrap();
+            file.sync_all().unwrap();
+        }
+
+        // Build a v11 DeleteNode-with-provenance entry, encrypt it into a frame.
+        let entry = WalEntry::new(
+            LSN(5),
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(42).unwrap(),
+                valid_from: HybridTimestamp::new(1_234_567, 0).unwrap(),
+                version_id: Some(VersionId::new(555).unwrap()),
+                provenance: Some(full_destructive_provenance()),
+            },
+        );
+        let mut plaintext = Vec::new();
+        serialize_entry_into(&entry, &mut plaintext).unwrap();
+        let ct =
+            crate::encryption::wal_encryption::encrypt_wal_payload(&plaintext, &cipher).unwrap();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(ct.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&ct);
+        append_bytes(&path, &frame);
+
+        let entries = read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher))
+            .expect("encrypted v12 destructive-provenance segment must decrypt+parse");
+        assert_eq!(entries.len(), 1);
+        match &entries[0].operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                assert_full_destructive_provenance(
+                    provenance
+                        .as_ref()
+                        .expect("provenance must survive encrypted v12 decrypt+parse"),
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+    }
+
+    /// Round-trip a destructive `WalOperation` through an encrypted (v12)
+    /// segment via the cipher-aware read path, returning the decrypted+parsed
+    /// operation. Shared by the RetractNode/DeleteEdge/RetractEdge hardening
+    /// tests below (DeleteNode is covered by
+    /// `test_v12_encrypted_destructive_provenance_survives_decrypt`).
+    fn roundtrip_encrypted_v12_op(op: WalOperation) -> WalOperation {
+        use std::io::Write;
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+        {
+            let mut file = File::create(&path).unwrap();
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE])
+                .unwrap();
+            file.sync_all().unwrap();
+        }
+        let entry = WalEntry::new(LSN(5), op);
+        let mut plaintext = Vec::new();
+        serialize_entry_into(&entry, &mut plaintext).unwrap();
+        let ct =
+            crate::encryption::wal_encryption::encrypt_wal_payload(&plaintext, &cipher).unwrap();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(ct.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&ct);
+        append_bytes(&path, &frame);
+
+        let mut entries = read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher))
+            .expect("encrypted v12 destructive-provenance segment must decrypt+parse");
+        assert_eq!(entries.len(), 1);
+        entries.remove(0).operation
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `RetractNode` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_retract_node_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::RetractNode {
+            node_id: NodeId::new(7).unwrap(),
+            valid_to: HybridTimestamp::new(1_700_000, 3).unwrap(),
+            version_id: Some(VersionId::new(321).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::RetractNode { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("RetractNode provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected RetractNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `DeleteEdge` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_delete_edge_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::DeleteEdge {
+            edge_id: EdgeId::new(100).unwrap(),
+            valid_from: HybridTimestamp::new(9_876_543, 1).unwrap(),
+            version_id: Some(VersionId::new(556).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::DeleteEdge { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("DeleteEdge provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected DeleteEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `RetractEdge` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_retract_edge_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::RetractEdge {
+            edge_id: EdgeId::new(11).unwrap(),
+            valid_to: HybridTimestamp::new(2_500_000, 5).unwrap(),
+            version_id: Some(VersionId::new(654).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::RetractEdge { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("RetractEdge provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected RetractEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (hardening): a v11 destructive entry whose trailing
+    /// provenance blob is truncated must fail to parse with a
+    /// `CorruptedData` error (NEVER a panic — a torn provenance string must
+    /// be a bounds-checked read, not an out-of-bounds slice), and the
+    /// torn-tail machinery must classify it correctly:
+    ///
+    /// * tolerated as a crash-torn tail when it is the FINAL segment's last
+    ///   entry (the torn write was never acknowledged), but
+    /// * a HARD error when the same torn bytes sit in a NON-final (mid-log)
+    ///   segment — acknowledged data lies past it, so silently dropping it is
+    ///   forbidden.
+    #[test]
+    fn test_v11_torn_provenance_blob_is_corrupt_not_panic_and_classified() {
+        use std::io::Write;
+
+        // A fully-serialized v11 RetractNode carrying provenance. The blob's
+        // last field is the principal string, so dropping trailing bytes
+        // truncates it mid-field.
+        let entry = WalEntry::new(
+            LSN(5),
+            WalOperation::RetractNode {
+                node_id: NodeId::new(7).unwrap(),
+                valid_to: HybridTimestamp::new(1_700_000, 3).unwrap(),
+                version_id: Some(VersionId::new(321).unwrap()),
+                provenance: Some(full_destructive_provenance()),
+            },
+        );
+        let mut full = Vec::new();
+        serialize_entry_into(&entry, &mut full).unwrap();
+        let torn = &full[..full.len() - 4];
+
+        // (1) Direct parse of the truncated buffer: CorruptedData, no panic.
+        let err = parse_entry_at(torn, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE)
+            .expect_err("a truncated trailing provenance blob must fail to parse");
+        assert!(
+            matches!(err, Error::Storage(StorageError::CorruptedData(_))),
+            "a torn provenance blob must surface as CorruptedData (no panic), got {err:?}"
+        );
+
+        // (2) As the sole/final segment: tolerated as a crash-torn tail.
+        let dir = TempDir::new().unwrap();
+        let seg0 = dir.path().join("0.log");
+        {
+            let mut f = File::create(&seg0).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_DESTRUCTIVE_PROVENANCE]).unwrap();
+            f.write_all(torn).unwrap();
+            f.sync_all().unwrap();
+        }
+        let tolerated = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect("a torn provenance blob in the FINAL segment is a tolerable torn tail");
+        assert!(
+            tolerated.is_empty(),
+            "the torn (never-acknowledged) entry is dropped, not applied: {tolerated:?}"
+        );
+
+        // (3) Same torn bytes in a NON-final (mid-log) segment: hard error. A
+        // valid, higher-LSN entry lives in a later segment (1.log), so 0.log
+        // is no longer the final segment and torn-tail tolerance does not
+        // apply to it — mid-log corruption must fail-stop.
+        let seg1 = dir.path().join("1.log");
+        {
+            let mut f = File::create(&seg1).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_DESTRUCTIVE_PROVENANCE]).unwrap();
+            let good = WalEntry::new(
+                LSN(9),
+                WalOperation::DeleteNode {
+                    node_id: NodeId::new(1).unwrap(),
+                    valid_from: HybridTimestamp::new(2000, 0).unwrap(),
+                    version_id: Some(VersionId::new(2).unwrap()),
+                    provenance: None,
+                },
+            );
+            let mut buf = Vec::new();
+            serialize_entry_into(&good, &mut buf).unwrap();
+            f.write_all(&buf).unwrap();
+            f.sync_all().unwrap();
+        }
+        let err = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect_err("a torn blob in a non-final segment is mid-log corruption -> hard error");
+        assert!(
+            matches!(err, Error::Storage(StorageError::CorruptedData(_))),
+            "mid-log torn provenance must hard-error as CorruptedData, got {err:?}"
+        );
+    }
+
+    /// Issue #3427 (hardening): an empty-string principal (`Some("")`) is a
+    /// distinct, meaningful value from an absent principal (`None`) and must
+    /// round-trip as such — the field's presence byte (1 vs 0) carries the
+    /// distinction, so a zero-length string is not collapsed into `None`.
+    #[test]
+    fn test_v11_empty_string_principal_roundtrips_distinct_from_none() {
+        // Bundle A: principal explicitly the empty string.
+        let empty_principal = Provenance::builder()
+            .source("mcp")
+            .principal("")
+            .build()
+            .unwrap();
+        let entry_a = WalEntry::new(
+            LSN(1),
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(1).unwrap(),
+                valid_from: HybridTimestamp::new(1000, 0).unwrap(),
+                version_id: Some(VersionId::new(1).unwrap()),
+                provenance: Some(empty_principal),
+            },
+        );
+        let mut buf_a = Vec::new();
+        serialize_entry_into(&entry_a, &mut buf_a).unwrap();
+        let (parsed_a, _) = parse_entry_at(&buf_a, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        match parsed_a.operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                let p = provenance.expect("bundle with source+empty-principal must be present");
+                assert_eq!(
+                    p.principal(),
+                    Some(""),
+                    "an empty-string principal must round-trip as Some(\"\"), not None"
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+
+        // Bundle B: no principal at all (source only).
+        let no_principal = Provenance::builder().source("mcp").build().unwrap();
+        let entry_b = WalEntry::new(
+            LSN(2),
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(2).unwrap(),
+                valid_from: HybridTimestamp::new(1000, 0).unwrap(),
+                version_id: Some(VersionId::new(2).unwrap()),
+                provenance: Some(no_principal),
+            },
+        );
+        let mut buf_b = Vec::new();
+        serialize_entry_into(&entry_b, &mut buf_b).unwrap();
+        let (parsed_b, _) = parse_entry_at(&buf_b, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        match parsed_b.operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                let p = provenance.expect("bundle with source must be present");
+                assert_eq!(
+                    p.principal(),
+                    None,
+                    "an absent principal must round-trip as None"
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+
+        // The two serializations differ (presence byte 1+len vs 0), proving
+        // the distinction is carried on the wire, not just in the parsed type.
+        assert_ne!(
+            buf_a, buf_b,
+            "Some(\"\") and None principals must serialize to different bytes"
+        );
     }
 
     #[test]
@@ -2792,6 +3449,7 @@ mod tests {
             node_id,
             valid_from,
             version_id,
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(5), operation);
 
@@ -2799,9 +3457,10 @@ mod tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
-        // Parse it back
+        // Parse it back at the newest (v11+) payload version, which trails a
+        // provenance blob (Issue #3427).
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(5));
@@ -2811,6 +3470,7 @@ mod tests {
                 node_id: parsed_id,
                 valid_from: parsed_valid_from,
                 version_id: parsed_version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(
@@ -2818,6 +3478,7 @@ mod tests {
                     "backdated delete valid_from must roundtrip exactly"
                 );
                 assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
+                assert_eq!(provenance, None, "absent provenance round-trips as None");
             }
             _ => panic!("Expected DeleteNode operation"),
         }
@@ -2836,6 +3497,7 @@ mod tests {
             edge_id,
             valid_from,
             version_id,
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(6), operation);
 
@@ -2843,9 +3505,9 @@ mod tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
-        // Parse it back
+        // Parse it back at the newest (v11+) payload version (Issue #3427).
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(6));
@@ -2855,6 +3517,7 @@ mod tests {
                 edge_id: parsed_id,
                 valid_from: parsed_valid_from,
                 version_id: parsed_version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(
@@ -2862,6 +3525,7 @@ mod tests {
                     "backdated delete valid_from must roundtrip exactly"
                 );
                 assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
+                assert_eq!(provenance, None, "absent provenance round-trips as None");
             }
             _ => panic!("Expected DeleteEdge operation"),
         }
@@ -3751,12 +4415,15 @@ mod tests {
                 node_id: parsed_id,
                 valid_from,
                 version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(valid_from, timestamp);
                 // v0 segments carry no tombstone version_id (Issue #3406);
                 // replay synthesizes it.
                 assert_eq!(version_id, None);
+                // v0 segments carry no provenance blob (Issue #3427).
+                assert_eq!(provenance, None);
             }
             _ => panic!("Expected DeleteNode"),
         }
@@ -3774,11 +4441,14 @@ mod tests {
                 edge_id: parsed_id,
                 valid_from,
                 version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(valid_from, timestamp);
                 // v0 segments carry no tombstone version_id (Issue #3406).
                 assert_eq!(version_id, None);
+                // v0 segments carry no provenance blob (Issue #3427).
+                assert_eq!(provenance, None);
             }
             _ => panic!("Expected DeleteEdge"),
         }
@@ -3824,12 +4494,17 @@ mod tests {
                 node_id: parsed_id,
                 valid_from: parsed_vf,
                 version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(parsed_vf, valid_from, "v7 delete carries valid_from");
                 assert_eq!(
                     version_id, None,
                     "a genuine pre-v9 delete carries no tombstone version_id"
+                );
+                assert_eq!(
+                    provenance, None,
+                    "a genuine pre-v11 delete carries no provenance blob"
                 );
             }
             _ => panic!("Expected DeleteNode"),
@@ -3862,12 +4537,17 @@ mod tests {
                 node_id: parsed_id,
                 valid_to: parsed_vt,
                 version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(parsed_vt, valid_to, "v7 retract carries valid_to");
                 assert_eq!(
                     version_id, None,
                     "a genuine pre-v9 retract carries no version_id"
+                );
+                assert_eq!(
+                    provenance, None,
+                    "a genuine pre-v11 retract carries no provenance blob"
                 );
             }
             _ => panic!("Expected RetractNode"),

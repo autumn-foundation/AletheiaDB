@@ -2057,6 +2057,292 @@ fn test_pre_anchor_hook_node_and_edge_separate() {
     assert_eq!(edge_version.data.get_vector_snapshot_id(), Some(2));
 }
 
+// ------------------------------------------------------------------------
+// Issue #354: PreAnchorHook failure-recovery coverage (test-only).
+//
+// The node Err graceful-degradation path is already covered above by
+// `test_pre_anchor_hook_error_graceful_degradation`. The tests below close
+// the remaining gaps: the EDGE Err path, that subsequent writes stay correct
+// after a failed anchor, that failure is per-invocation (recovery on a later
+// anchor), that a very large property map does not panic, and (feature-gated)
+// that the failure is logged at WARN level.
+// ------------------------------------------------------------------------
+
+/// Edge analogue of `test_pre_anchor_hook_error_graceful_degradation`: a
+/// failing pre-edge-anchor hook must not fail the edge write; the anchor is
+/// still created, just without a vector snapshot id (graceful degradation).
+#[test]
+fn test_pre_anchor_hook_error_graceful_degradation_edge() {
+    let mut storage = HistoricalStorage::new();
+
+    // Hook that always fails.
+    let hook: PreAnchorHook = Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+        Err(crate::core::error::Error::Storage(
+            StorageError::InconsistentState {
+                reason: "Test edge hook error".to_string(),
+            },
+        ))
+    });
+
+    storage.register_pre_edge_anchor_hook(hook);
+
+    let edge_id = EdgeId::new(1).unwrap();
+    let source = NodeId::new(1).unwrap();
+    let target = NodeId::new(2).unwrap();
+    let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+    // First edge version is always an anchor -> hook fires and fails.
+    let result = storage.add_edge_version(
+        edge_id,
+        VersionId::new(1).unwrap(),
+        2000.into(),
+        2000.into(),
+        label,
+        source,
+        target,
+        PropertyMapBuilder::new().build(),
+        false, // not a tombstone
+    );
+
+    // Write succeeds despite the hook failure (graceful degradation).
+    assert!(result.is_ok());
+
+    // Anchor exists, is an anchor, and carries no snapshot id.
+    let version = storage
+        .get_edge_version(VersionId::new(1).unwrap())
+        .unwrap();
+    assert!(version.is_anchor());
+    assert_eq!(version.data.get_vector_snapshot_id(), None);
+}
+
+/// A failed anchor hook must not corrupt subsequent writes: after the failing
+/// anchor, later delta versions still reconstruct their properties correctly.
+///
+/// NOTE (per #3504 coordination): this asserts only on property reconstruction,
+/// snapshot ids, version existence, and anchor-ness -- never on a superseded
+/// version's exact `valid_to`/interval-close values.
+#[test]
+fn test_writes_continue_correctly_after_hook_failure() {
+    // Large anchor interval so that v2/v3 following the failed anchor are
+    // deltas (their correctness is what proves the failure didn't corrupt
+    // subsequent writes).
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 5,
+        max_delta_chain: 10,
+    });
+
+    // Hook that always fails.
+    let hook: PreAnchorHook = Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+        Err(crate::core::error::Error::Storage(
+            StorageError::InconsistentState {
+                reason: "Test hook error".to_string(),
+            },
+        ))
+    });
+
+    storage.register_pre_node_anchor_hook(hook);
+
+    let node_id = NodeId::new(1).unwrap();
+    let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+    // v1: anchor (hook fires and fails), name=Alice age=30
+    let v1 = VersionId::new(1).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v1,
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+            false,
+        )
+        .unwrap();
+
+    // v2: delta, age=31
+    let v2 = VersionId::new(2).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v2,
+            2000.into(),
+            2000.into(),
+            label,
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 31i64)
+                .build(),
+            false,
+        )
+        .unwrap();
+
+    // v3: delta, age=32
+    let v3 = VersionId::new(3).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v3,
+            3000.into(),
+            3000.into(),
+            label,
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 32i64)
+                .build(),
+            false,
+        )
+        .unwrap();
+
+    // The failed anchor is still an anchor and carries no snapshot id.
+    let anchor = storage.get_node_version(v1).unwrap();
+    assert!(anchor.is_anchor());
+    assert_eq!(anchor.data.get_vector_snapshot_id(), None);
+
+    // Subsequent deltas reconstruct their properties correctly despite the
+    // failed anchor -- the write path was not corrupted.
+    let props_v1 = storage.reconstruct_node_properties(v1).unwrap();
+    assert_eq!(props_v1.get("name").and_then(|v| v.as_str()), Some("Alice"));
+    assert_eq!(
+        props_v1.get("age").and_then(|v| v.as_int()),
+        Some(30.into())
+    );
+
+    let props_v2 = storage.reconstruct_node_properties(v2).unwrap();
+    assert_eq!(props_v2.get("name").and_then(|v| v.as_str()), Some("Alice"));
+    assert_eq!(
+        props_v2.get("age").and_then(|v| v.as_int()),
+        Some(31.into())
+    );
+
+    let props_v3 = storage.reconstruct_node_properties(v3).unwrap();
+    assert_eq!(props_v3.get("name").and_then(|v| v.as_str()), Some("Alice"));
+    assert_eq!(
+        props_v3.get("age").and_then(|v| v.as_int()),
+        Some(32.into())
+    );
+}
+
+/// Hook failure is per-invocation: a hook that fails on its first call but
+/// succeeds on a later call leaves the first anchor without a snapshot id and
+/// the later anchor with one. Proves recovery works on subsequent anchors.
+#[test]
+fn test_pre_anchor_hook_recovers_on_later_anchor() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // anchor_interval: 1 => every version is an anchor, so each write fires
+    // the hook.
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 1,
+        max_delta_chain: 10,
+    });
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_clone = Arc::clone(&call_count);
+
+    // First invocation fails; every later invocation succeeds with id 77.
+    let hook: PreAnchorHook = Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+        let prev = call_count_clone.fetch_add(1, Ordering::SeqCst);
+        if prev == 0 {
+            Err(crate::core::error::Error::Storage(
+                StorageError::InconsistentState {
+                    reason: "First-call hook failure".to_string(),
+                },
+            ))
+        } else {
+            Ok(Some(77))
+        }
+    });
+
+    storage.register_pre_node_anchor_hook(hook);
+
+    let node1 = NodeId::new(1).unwrap();
+    let node2 = NodeId::new(2).unwrap();
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+    // v1: anchor, hook call #1 -> Err -> no snapshot id.
+    let v1 = VersionId::new(1).unwrap();
+    storage
+        .add_node_version(
+            node1,
+            v1,
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().build(),
+            false,
+        )
+        .unwrap();
+
+    // v2: anchor (different node), hook call #2 -> Ok(Some(77)) -> snapshot id.
+    let v2 = VersionId::new(2).unwrap();
+    storage
+        .add_node_version(
+            node2,
+            v2,
+            2000.into(),
+            2000.into(),
+            label,
+            PropertyMapBuilder::new().build(),
+            false,
+        )
+        .unwrap();
+
+    // Hook was invoked twice (both versions are anchors).
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+    let first_anchor = storage.get_node_version(v1).unwrap();
+    assert!(first_anchor.is_anchor());
+    assert_eq!(first_anchor.data.get_vector_snapshot_id(), None);
+
+    let second_anchor = storage.get_node_version(v2).unwrap();
+    assert!(second_anchor.is_anchor());
+    assert_eq!(second_anchor.data.get_vector_snapshot_id(), Some(77));
+}
+
+/// A registered hook plus a very large property map on the anchor must not
+/// panic; the anchor is created normally.
+#[test]
+fn test_pre_anchor_hook_large_property_map_no_panic() {
+    let mut storage = HistoricalStorage::new();
+
+    // Hook that returns None (no snapshot) -- exercises the hook path without
+    // affecting the large-map assertion.
+    let hook: PreAnchorHook =
+        Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| Ok(None));
+    storage.register_pre_node_anchor_hook(hook);
+
+    // Build a property map with 1000 distinct string keys/values.
+    let mut builder = PropertyMapBuilder::new();
+    for i in 0..1000 {
+        builder = builder.insert(&format!("key_{i}"), format!("value_{i}"));
+    }
+
+    let node_id = NodeId::new(1).unwrap();
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+    // Must not panic.
+    storage
+        .add_node_version(
+            node_id,
+            VersionId::new(1).unwrap(),
+            1000.into(),
+            1000.into(),
+            label,
+            builder.build(),
+            false,
+        )
+        .unwrap();
+
+    // Anchor created normally.
+    let version = storage
+        .get_node_version(VersionId::new(1).unwrap())
+        .unwrap();
+    assert!(version.is_anchor());
+}
+
 // ========================================================================
 // Tests for Issue #17: Recursion depth limit in version reconstruction
 // ========================================================================
