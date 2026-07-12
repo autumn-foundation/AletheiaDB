@@ -214,6 +214,8 @@ fn classify_db_error(e: &Error) -> (McpErrorCode, bool) {
         Error::Io(_) | Error::Backup(_) => (McpErrorCode::Internal, false),
         // The feature exists but this build/deployment doesn't provide it.
         Error::NotImplemented { .. } => (McpErrorCode::FailedPrecondition, false),
+        // An opt-in feature is disabled (e.g. the provenance hash chain).
+        Error::FailedPrecondition(_) => (McpErrorCode::FailedPrecondition, false),
         Error::Other(_) => (McpErrorCode::Internal, false),
     }
 }

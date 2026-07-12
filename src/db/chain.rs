@@ -203,7 +203,7 @@ impl AletheiaDB {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Other`] when the provenance hash chain is not enabled on
+    /// Returns [`Error::FailedPrecondition`] when the provenance hash chain is not enabled on
     /// this database (see [`ChainConfig`](crate::provenance_chain::ChainConfig)).
     pub fn verify_chain(&self) -> Result<ChainVerification> {
         Ok(self.require_chain()?.verify_full())
@@ -214,7 +214,7 @@ impl AletheiaDB {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Other`] when the chain is not enabled.
+    /// Returns [`Error::FailedPrecondition`] when the chain is not enabled.
     pub fn verify_entity_chain(&self, kind: EntityKind, id: u64) -> Result<ChainVerification> {
         Ok(self.require_chain()?.verify_entity(kind, id))
     }
@@ -223,7 +223,7 @@ impl AletheiaDB {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Other`] when the chain is not enabled.
+    /// Returns [`Error::FailedPrecondition`] when the chain is not enabled.
     pub fn export_chain_head(&self) -> Result<ChainHead> {
         Ok(self.require_chain()?.export_head())
     }
@@ -233,14 +233,14 @@ impl AletheiaDB {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Other`] when the chain is not enabled.
+    /// Returns [`Error::FailedPrecondition`] when the chain is not enabled.
     pub fn verify_chain_against(&self, anchor: &ChainHead) -> Result<ChainVerification> {
         Ok(self.require_chain()?.verify_against_anchor(anchor))
     }
 
     fn require_chain(&self) -> Result<&Arc<ProvenanceChain>> {
         self.chain.as_ref().ok_or_else(|| {
-            Error::Other(
+            Error::FailedPrecondition(
                 "provenance hash chain is not enabled (set ChainConfig::enabled = true)"
                     .to_string(),
             )

@@ -68,6 +68,12 @@ pub enum Error {
         /// Why it's not implemented (e.g., "Phase 4 feature")
         reason: String,
     },
+    /// A precondition for the requested operation is not met — e.g. an opt-in
+    /// feature is disabled (the provenance hash chain, Issue #3351). Distinct
+    /// from [`Error::Other`] so callers can match on it programmatically; maps to
+    /// the MCP `FAILED_PRECONDITION` structured code.
+    #[error("{0}")]
+    FailedPrecondition(String),
     /// Other errors.
     #[error("{0}")]
     Other(String),
@@ -93,7 +99,7 @@ impl Error {
                 Error::Constraint(_) => crate::observability::ErrorCategory::Other,
                 Error::Io(_) => crate::observability::ErrorCategory::Io,
                 Error::Backup(_) => crate::observability::ErrorCategory::Other,
-                Error::NotImplemented { .. } | Error::Other(_) => {
+                Error::NotImplemented { .. } | Error::FailedPrecondition(_) | Error::Other(_) => {
                     crate::observability::ErrorCategory::Other
                 }
             };
