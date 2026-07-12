@@ -74,6 +74,14 @@ pub enum CypherExecution {
     Query(Query),
     /// Pre-computed result rows (a standalone `UNWIND` expansion).
     Rows(QueryResults),
+    /// `EXPLAIN <query>` (Issue #562): plan the wrapped query and return the
+    /// physical plan as a single `plan` row **without executing it**. The
+    /// caller (`AletheiaDB::execute_cypher`) plans only.
+    Explain(Query),
+    /// `PROFILE <query>` (Issue #562): execute the wrapped query with
+    /// per-operator instrumentation and return the annotated plan as a single
+    /// `plan` row.
+    Profile(Query),
 }
 
 /// Parse and plan a Cypher string with no bound parameters.
@@ -110,10 +118,42 @@ pub fn plan_cypher_with_params(
             let results = execute_unwind(&source, &variable, &return_clause, &params)?;
             Ok(CypherExecution::Rows(results))
         }
+        CypherStatement::Explain(inner) => {
+            let query = lower_for_plan(*inner, params, "EXPLAIN")?;
+            Ok(CypherExecution::Explain(query))
+        }
+        CypherStatement::Profile(inner) => {
+            let query = lower_for_plan(*inner, params, "PROFILE")?;
+            Ok(CypherExecution::Profile(query))
+        }
         other => {
             let query = CypherConverter::with_params(params).convert(other)?;
             Ok(CypherExecution::Query(query))
         }
+    }
+}
+
+/// Lower the statement wrapped by `EXPLAIN`/`PROFILE` into a plannable [`Query`].
+///
+/// Only statements that convert to the graph-query IR are supported. A
+/// standalone `UNWIND` has no `Query` representation (it is evaluated directly
+/// into scalar rows), so `EXPLAIN`/`PROFILE` over it is rejected with an honest
+/// [`CypherError::UnsupportedFeature`] rather than fabricating a plan. A nested
+/// prefix is unreachable (the parser rejects it) but is handled defensively.
+fn lower_for_plan(
+    inner: CypherStatement,
+    params: HashMap<String, CypherParameterValue>,
+    verb: &str,
+) -> Result<Query, CypherError> {
+    match inner {
+        CypherStatement::Unwind { .. } => Err(CypherError::UnsupportedFeature(format!(
+            "{verb} is not supported for a standalone UNWIND statement yet; UNWIND expands a list \
+             into scalar rows and does not lower to a plannable graph query"
+        ))),
+        CypherStatement::Explain(_) | CypherStatement::Profile(_) => Err(
+            CypherError::UnsupportedFeature(format!("{verb} cannot wrap another EXPLAIN/PROFILE")),
+        ),
+        stmt => CypherConverter::with_params(params).convert(stmt),
     }
 }
 

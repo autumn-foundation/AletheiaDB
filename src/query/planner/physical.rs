@@ -113,6 +113,24 @@ impl PhysicalPlan {
     /// ```
     #[must_use]
     pub fn explain(&self) -> String {
+        self.explain_with(None)
+    }
+
+    /// Generate the plan explanation, appending a per-operator annotation to
+    /// each operator's line (Issue #562, the `PROFILE` entry point).
+    ///
+    /// `annotations` is indexed by the plan tree's **pre-order** operator
+    /// position -- the same order this renderer walks the tree and the same
+    /// order [`crate::query::executor::QueryExecutor::execute_profiled`]
+    /// registers its per-operator profiles -- so `annotations[i]` decorates the
+    /// i-th operator. A shorter slice leaves later operators unannotated rather
+    /// than panicking.
+    #[must_use]
+    pub fn explain_annotated(&self, annotations: &[String]) -> String {
+        self.explain_with(Some(annotations))
+    }
+
+    fn explain_with(&self, annotations: Option<&[String]>) -> String {
         let mut output = String::new();
 
         // Header with overall plan info
@@ -150,14 +168,31 @@ impl PhysicalPlan {
             output.push_str("  Parallel execution enabled\n");
         }
 
-        // Explain the operator tree
-        self.explain_op(&self.root, &mut output, 0, "");
+        // Explain the operator tree. `idx` tracks the pre-order operator
+        // position so PROFILE annotations line up with the executor's registry.
+        let mut idx = 0usize;
+        self.explain_op(&self.root, &mut output, 0, "", annotations, &mut idx);
 
         output
     }
 
     /// Recursively explain an operator with indentation.
-    fn explain_op(&self, op: &PhysicalOp, output: &mut String, indent: usize, prefix: &str) {
+    ///
+    /// `annotations`/`idx` support the `PROFILE` path: when present, the
+    /// annotation for this operator's pre-order position is appended to its
+    /// line. `idx` is advanced once per operator, matching the executor's
+    /// pre-order profile registration.
+    fn explain_op(
+        &self,
+        op: &PhysicalOp,
+        output: &mut String,
+        indent: usize,
+        prefix: &str,
+        annotations: Option<&[String]>,
+        idx: &mut usize,
+    ) {
+        let my_idx = *idx;
+        *idx += 1;
         let indent_str = "  ".repeat(indent);
         let op_name = op.name();
 
@@ -302,6 +337,13 @@ impl PhysicalPlan {
             _ => {} // Other operators don't need extra details
         }
 
+        // Append this operator's PROFILE annotation (executed stats), if any.
+        if let Some(anns) = annotations
+            && let Some(annotation) = anns.get(my_idx)
+        {
+            line.push_str(annotation);
+        }
+
         output.push_str(&line);
         output.push('\n');
 
@@ -320,7 +362,7 @@ impl PhysicalPlan {
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::IndexedTraversal { input, .. }
             | PhysicalOp::OptionalApply { input, .. } => {
-                self.explain_op(input, output, indent + 1, "└─ ");
+                self.explain_op(input, output, indent + 1, "└─ ", annotations, idx);
             }
 
             // Binary operators
@@ -328,8 +370,8 @@ impl PhysicalPlan {
             | PhysicalOp::Union { left, right }
             | PhysicalOp::Intersect { left, right }
             | PhysicalOp::Except { left, right } => {
-                self.explain_op(left, output, indent + 1, "├─ ");
-                self.explain_op(right, output, indent + 1, "└─ ");
+                self.explain_op(left, output, indent + 1, "├─ ", annotations, idx);
+                self.explain_op(right, output, indent + 1, "└─ ", annotations, idx);
             }
 
             // Leaf operators (no children)

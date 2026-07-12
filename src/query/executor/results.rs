@@ -292,6 +292,18 @@ impl QueryResults {
         QueryResults { iterator }
     }
 
+    /// Build a result stream from an in-memory vector of rows.
+    ///
+    /// Used by the Cypher `EXPLAIN`/`PROFILE` entry points (Issue #562), which
+    /// synthesize a single computed `plan` row rather than streaming stored
+    /// entities.
+    #[cfg(feature = "cypher")]
+    pub(crate) fn from_rows(rows: Vec<QueryRow>) -> Self {
+        QueryResults::new(Box::new(MaterializedRows {
+            rows: rows.into_iter(),
+        }))
+    }
+
     /// Eagerly collect every row in the result stream into a memory-backed vector.
     ///
     /// **Why?** Use this when the expected result set is small and you need random access.
@@ -843,6 +855,27 @@ impl QueryResults {
             versions,
             columns,
         })
+    }
+}
+
+/// A [`ResultIterator`] backed by a pre-computed vector of rows.
+///
+/// Backs [`QueryResults::from_rows`] -- the one-row `plan` stream returned by
+/// the Cypher `EXPLAIN`/`PROFILE` entry points (Issue #562).
+#[cfg(feature = "cypher")]
+struct MaterializedRows {
+    rows: std::vec::IntoIter<QueryRow>,
+}
+
+#[cfg(feature = "cypher")]
+impl ResultIterator for MaterializedRows {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.rows.next().map(Ok)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.rows.len();
+        (n, Some(n))
     }
 }
 

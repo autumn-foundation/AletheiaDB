@@ -339,6 +339,8 @@ impl AletheiaDB {
         match crate::cypher::plan_cypher(query_string)? {
             crate::cypher::CypherExecution::Query(query) => self.execute_query(query),
             crate::cypher::CypherExecution::Rows(results) => Ok(results),
+            crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
+            crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
         }
     }
 
@@ -383,7 +385,54 @@ impl AletheiaDB {
         match crate::cypher::plan_cypher_with_params(query_string, params)? {
             crate::cypher::CypherExecution::Query(query) => self.execute_query(query),
             crate::cypher::CypherExecution::Rows(results) => Ok(results),
+            crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
+            crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
         }
+    }
+
+    /// Plan (but do not execute) a Cypher `EXPLAIN` query, returning the
+    /// physical plan as a single `plan` text row (Issue #562).
+    ///
+    /// This mirrors [`Self::execute_query`]'s planner construction but stops
+    /// after planning -- no executor is run, so there are no side effects and
+    /// the plan is returned even against an empty database.
+    fn explain_cypher_query(&self, query: Query) -> Result<QueryResults> {
+        let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
+        let physical_plan = planner.plan(query)?;
+        Ok(Self::plan_text_result("plan", physical_plan.explain()))
+    }
+
+    /// Execute a Cypher `PROFILE` query with per-operator instrumentation,
+    /// returning the plan annotated with executed row counts and timing as a
+    /// single `plan` text row (Issue #562).
+    ///
+    /// The instrumented stream is drained (its data rows discarded -- `PROFILE`
+    /// reports statistics, not the query's data, in v1) so the per-operator
+    /// counters are fully populated before the annotated plan is rendered.
+    fn profile_cypher_query(&self, query: Query) -> Result<QueryResults> {
+        let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
+        let physical_plan = planner.plan(query)?;
+
+        let executor = QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
+        let (results, registry) = executor.execute_profiled(&physical_plan)?;
+
+        // Fully drain so every operator's counters are populated before render.
+        let _ = results.collect_all()?;
+
+        let annotations: Vec<String> = registry.iter().map(|op| op.annotation()).collect();
+        Ok(Self::plan_text_result(
+            "plan",
+            physical_plan.explain_annotated(&annotations),
+        ))
+    }
+
+    /// Wrap a rendered plan string in a single computed-column result row.
+    fn plan_text_result(column: &str, text: String) -> QueryResults {
+        let row = crate::query::executor::QueryRow::from_columns(vec![(
+            column.to_string(),
+            crate::core::property::PropertyValue::String(std::sync::Arc::from(text.as_str())),
+        )]);
+        QueryResults::from_rows(vec![row])
     }
 }
 
