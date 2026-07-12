@@ -78,10 +78,13 @@ impl OpProfile {
     /// The suffix appended to this operator's `explain` line in `PROFILE`
     /// output. Uses a stable, fixed-label format (`actual rows:` / `time:`) so
     /// substring assertions in tests are robust against timing non-determinism.
+    /// The `(incl. children)` qualifier discloses that the reported time is
+    /// cumulative over child operators (the Volcano `next()` recurses), so the
+    /// number is not this operator's self-time.
     #[must_use]
     pub fn annotation(&self) -> String {
         format!(
-            " | actual rows: {}, time: {}µs",
+            " | actual rows: {}, time: {}µs (incl. children)",
             self.actual_rows(),
             self.elapsed_micros()
         )
