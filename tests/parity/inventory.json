@@ -1,5 +1,5 @@
 {
-  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication).",
+  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 40 — have only their name + access class pinned via the golden set. Live drift detection of the full 44-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
   "generated_for": "framework port parity harness",
   "totals": {
     "http_routes": 5,
@@ -41,7 +41,7 @@
         "pinned_by": [
           "tests/parity_http.rs::query_success_envelope_shape",
           "tests/parity_http.rs::query_not_found_minimal_error_envelope",
-          "tests/parity_http.rs::query_malformed_payload_is_4xx_not_500",
+          "tests/parity_http.rs::query_malformed_payload_is_400_not_500",
           "tests/parity_http.rs::query_error_envelope_has_no_trace_id_without_observability",
           "tests/parity_http.rs::query_missing_credential_is_uniform_401",
           "tests/parity_http.rs::query_reader_write_is_403_permission_denied",
@@ -116,7 +116,8 @@
       "opt_out": "include_vectors:true returns full array",
       "pinned_by": "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable"
     },
-    "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+    "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable (external mirror — internal-consistency only)",
+    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 44 pairs — the authoritative drift detector)",
     "budgetable_read_tools": ["get_node", "list_nodes", "get_edge", "list_edges", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "hybrid_query", "query", "find_nodes_at_time", "get_node_history", "get_schema"],
     "tools": [
       {"name": "get_node", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::not_found_structured_error", "tests/parity_mcp.rs::out_of_range_id_is_non_retriable_structured_error", "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable", "tests/parity_mcp.rs::success_envelope_and_temporal_block"]},
@@ -169,9 +170,11 @@
     {
       "id": "mcp-registry-sweep-not-external",
       "area": "MCP advertised-tool dispatch sweep",
+      "status": "partially closed",
       "why": "tool_definitions()/list_tools_for_test()/dispatch_tool are pub(crate); the rmcp ServerHandler list_tools/call_tool entry is not reachable from an external test crate (rmcp is not a dev-dependency and is not re-exported). Per house rules we do not add pub to production code.",
-      "mitigation": "The 44-tool inventory + access classes are mirrored as a golden constant (tests/parity_mcp.rs::tool_inventory_golden_is_stable) that a porter must keep in lockstep. The server-side sweep remains enforced in-crate.",
-      "referenced_test": "src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments (~line 9257)"
+      "closed_part": "Full 44-name/class DRIFT DETECTION is now closed: the in-crate golden src/mcp/auth_tests.rs::live_tool_inventory_matches_golden reads the live registry and fails on any tool added/removed/renamed/reclassified. The external tests/parity_mcp.rs::tool_inventory_golden_is_stable mirrors that constant cross-crate.",
+      "remaining_gap": "What stays external-unreachable is per-tool RUNTIME BEHAVIOR for the 40 non-behavior-tested tools: only the 4 behavior-pinned tools (get_node, create_node, create_edge, traverse) have black-box runtime assertions in tests/parity_mcp.rs; the other 40 are name/class-pinned only. Their dispatch/error-on-invalid-args behavior remains enforced in-crate.",
+      "referenced_test": "src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments (~line 9257); src/mcp/auth_tests.rs::live_tool_inventory_matches_golden"
     },
     {
       "id": "mcp-rbac-not-external",
@@ -207,6 +210,13 @@
       "why": "populated only under the observability/otel features; under the parity suite's feature set the field is absent (pinned as absent).",
       "mitigation": "Absence pinned by query_error_envelope_has_no_trace_id_without_observability.",
       "referenced_test": "tests/http_otel_tracing.rs, tests/http_otel_parent_sampling.rs, tests/http_otel_sampled_out.rs"
+    },
+    {
+      "id": "http-500-internal-shape-indirect",
+      "area": "HTTP 500 / INTERNAL error-envelope shape",
+      "why": "The 500 (Internal/StateMissing) path cannot be triggered deterministically over the black-box surface without injecting a fault, so its {success:false, error} envelope is NOT positively pinned. It is only asserted INDIRECTLY, as a negative: the malformed-payload path is pinned to 400 ('4xx/400, never 500') by query_malformed_payload_is_400_not_500, and the error_envelope.additive_fields_note documents that plain 500 keeps the minimal {success,error} shape (code_str maps Internal/StateMissing -> INTERNAL for the trace span only, never the body).",
+      "mitigation": "The Internal-variant body shape (minimal {success,error}, no code) is covered in-crate by the src/http/error.rs IntoResponse unit tests; over the wire it is asserted only as 'not 500' on the malformed path.",
+      "referenced_test": "src/http/error.rs IntoResponse unit tests (~error.rs:403 BadRequest/NotFound body_json cases); tests/parity_http.rs::query_malformed_payload_is_400_not_500 (indirect)"
     }
   ]
 }

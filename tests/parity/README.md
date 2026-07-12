@@ -38,6 +38,17 @@ Driven black-box through the public per-tool typed methods
 (`server.get_node(GetNodeRequest{..}) -> String`) and the public `McpErrorCode`
 enum. Access classes: 31 read, 12 write, 1 metrics (`database_stats`), 0 admin.
 
+**Two kinds of MCP pin.** Four tools are **behavior-pinned** — `get_node`,
+`create_node`, `create_edge`, `traverse` carry black-box *runtime* assertions
+(envelopes, temporal block, vector elision, roundtrip reachability). The other
+40 are **inventory-pinned** — only their name + access class are fixed via the
+golden set. Live drift detection of the whole 44-name/class registry (a tool
+added/removed/renamed/reclassified) is done in-crate by
+`src/mcp/auth_tests.rs::live_tool_inventory_matches_golden`, which reads the
+live registry and fails on drift. The external
+`tool_inventory_golden_is_stable` is only a cross-crate mirror of that constant
+(internal-consistency only — it cannot read the registry).
+
 **Error envelope:** `{error:{code, message, retriable, details?}}` with `code` in
 the 9-value `McpErrorCode` enum (`NOT_FOUND`, `INVALID_ARGUMENT`,
 `CONSTRAINT_VIOLATION`, `FAILED_PRECONDITION`, `CONFLICT`, `UNAVAILABLE`,
@@ -65,21 +76,31 @@ properties are elided to `{type,dim,elided:true}` unless `include_vectors:true`.
 
 ## Coverage gaps (honest, no silent skips)
 
-The MCP registry sweep, RBAC enforcement, token-budget ladder, and cursor paging
-are **not reachable** through the public black-box API (`dispatch_tool` /
-`list_tools_for_test` / `apply_budget` / `authorize_tool` are `pub(crate)`; the
-`rmcp::ServerHandler` entry is not nameable from an external test crate, and the
-public per-tool methods bypass the dispatch-path auth/budget/cursor logic). Per
-the harness house rules we do not add `pub` to production code. These are pinned
-by the existing in-crate suites and only referenced here:
+Per-tool RUNTIME BEHAVIOR for the 40 non-behavior-tested tools, RBAC
+enforcement, the token-budget ladder, and cursor paging are **not reachable**
+through the public black-box API (`dispatch_tool` / `list_tools_for_test` /
+`apply_budget` / `authorize_tool` are `pub(crate)`; the `rmcp::ServerHandler`
+entry is not nameable from an external test crate, and the public per-tool
+methods bypass the dispatch-path auth/budget/cursor logic). Per the harness
+house rules we do not add `pub` to production code. These are pinned by the
+existing in-crate suites and only referenced here:
 
-- Registry sweep → `src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments`
+- Registry name/class **drift** → **now closed in-crate** by
+  `src/mcp/auth_tests.rs::live_tool_inventory_matches_golden` (reads the live
+  registry). What remains external-unreachable is per-tool runtime behavior for
+  the 40 inventory-pinned tools.
+- Registry dispatch sweep → `src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments`
 - RBAC matrix → `src/mcp/auth_tests.rs::every_advertised_tool_has_a_classification`
 - Token budget → `src/mcp/tests.rs` budget suite
 - HTTP 429 timeout → `src/http/handlers.rs` `enforce_query_limits` unit tests
 - HTTP OTel `trace_id`/`x-trace-id` → `tests/http_otel_tracing.rs` (observability/otel features)
+- HTTP **500 / INTERNAL envelope shape** → asserted only **indirectly** (as
+  "not 500" on the malformed path, `query_malformed_payload_is_400_not_500`);
+  the Internal-variant body shape is covered by the `src/http/error.rs`
+  `IntoResponse` unit tests, not positively pinned over the wire.
 
 The 44-tool inventory + access classes are mirrored as a golden constant
-(`tool_inventory_golden_is_stable`) that a porter must keep in lockstep with the
-server. See `inventory.json` for the full per-route/per-tool table and the
-`coverage_gaps` array.
+(`tool_inventory_golden_is_stable`, cross-crate mirror) and drift-checked live
+in-crate (`live_tool_inventory_matches_golden`); a porter must keep both in
+lockstep with the server. See `inventory.json` for the full per-route/per-tool
+table and the `coverage_gaps` array.

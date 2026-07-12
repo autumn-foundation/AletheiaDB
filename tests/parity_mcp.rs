@@ -211,9 +211,10 @@ fn not_found_structured_error() {
 }
 
 /// PARITY: an out-of-range node id (beyond `MAX_VALID_ID`) is rejected as a
-/// caller-fault structured error (non-retriable) rather than panicking or
-/// succeeding. We pin the envelope + non-retriable flag; the exact code is
-/// asserted to be a caller-fault class.
+/// caller-fault structured error rather than panicking or succeeding. The code
+/// is DETERMINISTIC: `NodeId::new` rejects the overflow id and `get_node` maps
+/// that to `INVALID_ARGUMENT` (never `NOT_FOUND` — the id never resolves to a
+/// lookup), non-retriable. A port must reproduce this exact classification.
 #[test]
 fn out_of_range_id_is_non_retriable_structured_error() {
     let s = server();
@@ -227,10 +228,25 @@ fn out_of_range_id_is_non_retriable_structured_error() {
         json!(false),
         "an out-of-range id is caller-fault, never retriable: {v}"
     );
-    // Caller-fault classification (not a transient class).
-    assert!(
-        matches!(code.as_str(), "INVALID_ARGUMENT" | "NOT_FOUND"),
-        "overflow id must classify as a caller-fault code, got {code}"
+    // Exact, deterministic classification — the id-validation rejection.
+    assert_eq!(
+        code, "INVALID_ARGUMENT",
+        "an overflow id is an id-validation rejection → INVALID_ARGUMENT: {v}"
+    );
+
+    // Exact key-set pin on the error object: an id-validation error carries
+    // exactly `{code, message, retriable}` (no `details` on this path). An
+    // added/renamed error field is caught here.
+    let err_keys: std::collections::BTreeSet<&str> = v["error"]
+        .as_object()
+        .expect("error is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        err_keys,
+        std::collections::BTreeSet::from(["code", "message", "retriable"]),
+        "id-validation error object must be exactly {{code, message, retriable}}: {v}"
     );
 }
 
@@ -311,6 +327,24 @@ fn representative_tool_roundtrip_is_wellformed() {
         traversed.get("error").is_none(),
         "traverse failed: {traversed}"
     );
+
+    // The traversal must actually REACH node B — not merely return a
+    // well-formed empty page. Assert B is present in the results.
+    let results = traversed["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("traverse response must carry a `results` array: {traversed}"));
+    assert_eq!(
+        traversed["count"].as_u64(),
+        Some(1),
+        "one-hop KNOWS traversal from A reaches exactly B: {traversed}"
+    );
+    let reached_b = results
+        .iter()
+        .any(|r| r["node"]["id"].as_u64() == Some(b_id));
+    assert!(
+        reached_b,
+        "traversal over KNOWS must reach node B (id={b_id}): {traversed}"
+    );
 }
 
 // ===========================================================================
@@ -373,9 +407,19 @@ const TOOL_INVENTORY: [(&str, &str); 44] = [
     ("database_stats", "metrics"),
 ];
 
-/// PARITY: the advertised MCP tool inventory is exactly 44 tools with the
-/// documented access classes, and every name is unique. Adding/removing a tool
-/// (or reclassifying it) must update this golden AND tests/parity/inventory.json.
+/// PARITY (external mirror, NOT a live drift detector): this constant is a
+/// cross-crate reference copy of the 44-tool inventory. Because the live
+/// registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)`
+/// and unreachable from this external test crate, this test only validates the
+/// mirror's internal consistency (44 tools, unique names, MCP-legal classes,
+/// exactly one metrics tool) — it does NOT read the server, so it cannot by
+/// itself catch a tool added/removed/renamed/reclassified in the registry.
+///
+/// Live drift detection is performed in-crate by
+/// `src/mcp/auth_tests.rs::live_tool_inventory_matches_golden`, which derives
+/// the advertised `(name, class)` set from the registry and asserts it equals
+/// an identical hardcoded golden. Keep this mirror, that in-crate golden, and
+/// `tests/parity/inventory.json` in lockstep when the inventory changes.
 #[test]
 fn tool_inventory_golden_is_stable() {
     assert_eq!(TOOL_INVENTORY.len(), 44, "MCP advertises exactly 44 tools");

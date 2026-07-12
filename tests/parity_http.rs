@@ -159,7 +159,9 @@ async fn route_inventory_is_the_known_five() {
 // GET /status — Metrics class, liveness probe.
 // ===========================================================================
 
-/// PARITY: `/status` returns 200 with the exact liveness body.
+/// PARITY: `/status` returns 200 with the exact liveness body. The top-level
+/// key set is pinned exactly (`{status}` only) so a port that ADDS a field
+/// (e.g. `version`, `uptime`) is caught here, not silently tolerated.
 #[tokio::test]
 async fn status_success_shape() {
     let (client, _db) = anon_client();
@@ -167,6 +169,19 @@ async fn status_success_shape() {
     assert_eq!(resp.status.as_u16(), 200);
     let body: Value = serde_json::from_slice(&resp.body).expect("json");
     assert_eq!(body, json!({ "status": "healthy" }));
+
+    // Exact top-level key-set pin (an ADDED field breaks this).
+    let keys: std::collections::BTreeSet<&str> = body
+        .as_object()
+        .expect("status body is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from(["status"]),
+        "/status success body must carry exactly {{status}}: {body}"
+    );
 }
 
 /// PARITY: `/status` in required mode with no credential is the uniform 401.
@@ -229,12 +244,31 @@ async fn query_not_found_minimal_error_envelope() {
         body.get("details").is_none(),
         "404 carries no `details`: {body}"
     );
+
+    // Exact top-level key-set pin: the minimal error envelope is EXACTLY
+    // `{success, error}` — an ADDED field (e.g. a leaked `code`/`trace_id`)
+    // is caught here. Additive fields (code/details/retriable) are
+    // deliberately kept off this path so this exact-key-set pin is valid.
+    let keys: std::collections::BTreeSet<&str> = body
+        .as_object()
+        .expect("error body is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from(["success", "error"]),
+        "minimal 404 error envelope must carry exactly {{success, error}}: {body}"
+    );
 }
 
-/// PARITY: a malformed operation payload is a clean 4xx client error (never a
-/// 500). A nested-object property is rejected before any DB work.
+/// PARITY: a malformed operation payload is a clean 400 client error (never a
+/// 500). A nested-object property is rejected before any DB work (BadRequest →
+/// 400) and keeps the MINIMAL `{success:false, error:<string>}` envelope with
+/// NO additive `code`/`retriable`/`details` (consistent with the not-found
+/// case; those additive fields are auth/limit-only).
 #[tokio::test]
-async fn query_malformed_payload_is_4xx_not_500() {
+async fn query_malformed_payload_is_400_not_500() {
     let (client, _db) = anon_client();
     let (status, body) = post_query(
         &client,
@@ -245,11 +279,24 @@ async fn query_malformed_payload_is_4xx_not_500() {
         }),
     )
     .await;
-    assert!(
-        (400..500).contains(&status),
-        "nested property must be a 4xx client error, got {status}: {body}"
+    assert_eq!(
+        status, 400,
+        "nested property must be a 400 client error, got {status}: {body}"
     );
     assert_eq!(body["success"], false);
+    assert!(
+        body["error"].as_str().is_some_and(|s| !s.is_empty()),
+        "error must be a non-empty string: {body}"
+    );
+    assert!(body.get("code").is_none(), "400 carries no `code`: {body}");
+    assert!(
+        body.get("retriable").is_none(),
+        "400 carries no `retriable`: {body}"
+    );
+    assert!(
+        body.get("details").is_none(),
+        "400 carries no `details`: {body}"
+    );
 }
 
 /// PARITY: without the `observability` feature the error envelope carries no
@@ -356,7 +403,12 @@ async fn query_byte_cap_is_413_resource_exhausted() {
 
     let (status, body) = post_query(&client, &find_people()).await;
     assert_eq!(status, 413, "oversized response → 413: {body}");
+    assert_eq!(body["success"], false);
     assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
+    assert_eq!(
+        body["retriable"], false,
+        "a byte cap is never retriable (symmetry with the row cap): {body}"
+    );
     assert_eq!(body["details"]["dimension"], "result_bytes");
     assert_eq!(body["details"]["limit"], 16);
     assert!(body["details"]["consumed"].as_u64().unwrap() > 16);
@@ -599,7 +651,9 @@ async fn admin_revoke_key_success_and_immediate_effect() {
     assert_eq!(body["code"], "UNAUTHENTICATED");
 }
 
-/// PARITY: revoking an unknown id → 404.
+/// PARITY: revoking an unknown id → 404 with the MINIMAL
+/// `{success:false, error:<string>}` envelope (NotFound → no additive
+/// `code`/`retriable`/`details`).
 #[tokio::test]
 async fn admin_revoke_unknown_id_is_404() {
     let (client, store, _db) = required_client();
@@ -611,6 +665,17 @@ async fn admin_revoke_unknown_id_is_404() {
         .send()
         .await;
     assert_eq!(resp.status.as_u16(), 404);
+    let body: Value = serde_json::from_slice(&resp.body).expect("json");
+    assert_eq!(body["success"], false);
+    assert!(
+        body["error"].as_str().is_some_and(|s| !s.is_empty()),
+        "error must be a non-empty string: {body}"
+    );
+    assert!(body.get("code").is_none(), "404 carries no `code`: {body}");
+    assert!(
+        body.get("retriable").is_none(),
+        "404 carries no `retriable`: {body}"
+    );
 }
 
 /// PARITY: a non-admin role → 403 on the revoke route.
