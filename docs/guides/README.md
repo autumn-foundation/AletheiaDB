@@ -38,6 +38,7 @@ After those four, pick the guides relevant to what you're building.
 ### Migration
 - [Migrating from XTDB](migrating-from-xtdb.md) — History-preserving concept mapping, valid-time backfill, and query translation from XTDB
 - [Migrating from Datomic](migrating-from-datomic.md) — Datomic's single-axis (tx-time) history mapped onto AletheiaDB's bi-temporal model, with provenance and query translation
+- - [Migrating from Neo4j](neo4j-import.md) — Migrate a Neo4j CSV export (typed headers) with a fidelity report
 
 ---
 

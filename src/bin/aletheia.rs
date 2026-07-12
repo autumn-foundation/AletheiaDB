@@ -53,6 +53,7 @@ fn run() -> Result<(), String> {
         Some("daemon") => handle_daemon(args.collect()),
         Some("backup") => handle_backup(args.collect()),
         Some("restore") => handle_restore(args.collect()),
+        Some("import") => handle_import(args.collect()),
         #[cfg(feature = "audit-export")]
         Some("audit-keygen") => audit::handle_keygen(args.collect()),
         #[cfg(feature = "audit-export")]
@@ -85,6 +86,7 @@ Usage:\n\
   aletheia daemon status [--pid-file PATH]\n\
   aletheia backup <output_path>\n\
   aletheia restore <input_path>\n\
+  aletheia import --format neo4j-csv --nodes <f>... --relationships <f>... [options]\n\
   aletheia audit-keygen <key_file>\n\
   aletheia audit-export <node|edge> <id> --key <key_file> --out <path> [--db-id ID] [--redact k1,k2]\n\
   aletheia audit-verify <artifact_path> [--public-key HEX]\n\
@@ -98,6 +100,22 @@ Usage:\n\
   backup  — Write a portable .albk artifact capturing full bi-temporal state.\n\
             Opens the database via ALETHEIADB_CONFIG or ALETHEIADB_DATA_DIR.\n\
   restore — Restore a .albk artifact into ALETHEIADB_DATA_DIR (must be empty).\n\
+\nImport (Issue #3356):\n\
+  import  — Load a Neo4j CSV export (neo4j-admin / apoc.export.csv typed headers)\n\
+            into the database, emitting a machine-readable fidelity report.\n\
+            Requires --features import. Options:\n\
+              --format neo4j-csv         (required; binary .dump is unsupported)\n\
+              --nodes <file>             node CSV file (repeatable)\n\
+              --relationships <file>     relationship CSV file (repeatable)\n\
+              --array-delimiter <char>   array/multi-label delimiter (default ;)\n\
+              --delimiter <char>         field delimiter (default ,)\n\
+              --quote <char>             quote char (default \")\n\
+              --vector-property <name>   numeric[] -> vector (repeatable, opt-in)\n\
+              --valid-from-property <n>  date/datetime column -> valid_from\n\
+              --label-strategy <s>       first|concat|property (default first)\n\
+              --on-error <mode>          abort|skip (default abort)\n\
+              --strict-types             reject unsupported type headers\n\
+              --report <path>            also write the fidelity report JSON here\n\
 \nSigned audit export (Issue #3358):\n\
   audit-keygen — Generate an Ed25519 signing key (0600) and print its public key.\n\
   audit-export — Sign an entity's full bi-temporal history into a portable artifact.\n\
@@ -144,6 +162,165 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
         .map_err(|e| format!("restore failed: {e}"))?;
     println!("{}", restore_success_json(&data_dir)?);
     Ok(())
+}
+
+/// `aletheia import` — load an external graph export (Issue #3356).
+///
+/// v1 supports the Neo4j CSV export convention (`--format neo4j-csv`). A binary
+/// Neo4j `.dump` archive and the APOC Cypher-script dump are unsupported and
+/// rejected with an actionable message (documented follow-ups).
+#[cfg(feature = "import")]
+fn handle_import(args: Vec<String>) -> Result<(), String> {
+    use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCsvOptions};
+
+    let format = arg_value(&args, "--format").unwrap_or_else(|| "neo4j-csv".to_string());
+    let nodes = arg_values(&args, "--nodes");
+    let rels = arg_values(&args, "--relationships");
+
+    // Reject binary dump / Cypher-script inputs with a clear pointer to CSV.
+    for path in nodes.iter().chain(rels.iter()) {
+        let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".dump") {
+            return Err(
+                "neo4j binary dump import is not supported; export to CSV with \
+                'neo4j-admin database import' headers or apoc.export.csv"
+                    .to_string(),
+            );
+        }
+        if lower.ends_with(".cypher") {
+            return Err(
+                "neo4j Cypher-script dump import is a documented follow-up; \
+                use CSV export (neo4j-admin database import / apoc.export.csv)"
+                    .to_string(),
+            );
+        }
+    }
+
+    match format.as_str() {
+        "neo4j-csv" | "neo4j" => {}
+        "neo4j-dump" | "dump" => {
+            return Err(
+                "neo4j binary dump import is not supported; export to CSV with \
+                'neo4j-admin database import' headers or apoc.export.csv"
+                    .to_string(),
+            );
+        }
+        other => {
+            return Err(format!(
+                "unsupported import format '{other}'; supported: neo4j-csv"
+            ));
+        }
+    }
+
+    if nodes.is_empty() && rels.is_empty() {
+        return Err(
+            "usage: aletheia import --format neo4j-csv --nodes <file>... \
+            [--relationships <file>...] [options]"
+                .to_string(),
+        );
+    }
+
+    let mut opts = Neo4jCsvOptions::new();
+    if let Some(d) = arg_value(&args, "--array-delimiter") {
+        opts.array_delimiter = single_char(&d, "--array-delimiter")?;
+    }
+    if let Some(d) = arg_value(&args, "--delimiter") {
+        opts.delimiter = single_byte(&d, "--delimiter")?;
+    }
+    if let Some(q) = arg_value(&args, "--quote") {
+        opts.quote = single_byte(&q, "--quote")?;
+    }
+    for name in arg_values(&args, "--vector-property") {
+        opts.vector_properties.insert(name);
+    }
+    if let Some(name) = arg_value(&args, "--valid-from-property") {
+        opts.valid_from_property = Some(name);
+    }
+    if let Some(strategy) = arg_value(&args, "--label-strategy") {
+        opts.label_strategy = match strategy.as_str() {
+            "first" => LabelStrategy::First,
+            "concat" => LabelStrategy::Concat,
+            "property" => LabelStrategy::Property,
+            other => {
+                return Err(format!(
+                    "invalid --label-strategy '{other}', expected first|concat|property"
+                ));
+            }
+        };
+    }
+    if args.iter().any(|a| a == "--strict-types") {
+        opts.strict_types = true;
+    }
+    let failure_mode = match arg_value(&args, "--on-error").as_deref() {
+        None | Some("abort") => FailureMode::Abort,
+        Some("skip") => FailureMode::SkipAndReport,
+        Some(other) => {
+            return Err(format!("invalid --on-error '{other}', expected abort|skip"));
+        }
+    };
+
+    let node_paths: Vec<PathBuf> = nodes.iter().map(PathBuf::from).collect();
+    let rel_paths: Vec<PathBuf> = rels.iter().map(PathBuf::from).collect();
+
+    let db = open_db()?;
+    let mut importer = db.import().failure_mode(failure_mode);
+    let report = importer
+        .neo4j_import_csv(&node_paths, &rel_paths, &opts)
+        .map_err(|e| format!("import failed: {e}"))?;
+
+    let value =
+        serde_json::to_value(&report).map_err(|e| format!("failed to render report JSON: {e}"))?;
+    if let Some(report_path) = arg_value(&args, "--report") {
+        let rendered = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("failed to render report JSON: {e}"))?;
+        fs::write(&report_path, rendered)
+            .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
+    }
+    print_json_pretty(&value)
+}
+
+/// Stub `import` handler when the `import` feature is not compiled in.
+#[cfg(not(feature = "import"))]
+fn handle_import(_args: Vec<String>) -> Result<(), String> {
+    Err("the 'import' subcommand requires building with --features import".to_string())
+}
+
+/// Collect every value following each occurrence of `flag` (repeatable flags).
+#[cfg(feature = "import")]
+fn arg_values(args: &[String], flag: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut iter = args.iter();
+    while let Some(token) = iter.next() {
+        if token == flag
+            && let Some(value) = iter.next()
+        {
+            out.push(value.clone());
+        }
+    }
+    out
+}
+
+/// Parse a single-character CLI argument into a `char`.
+#[cfg(feature = "import")]
+fn single_char(value: &str, flag: &str) -> Result<char, String> {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Ok(c),
+        _ => Err(format!("{flag} must be a single character, got '{value}'")),
+    }
+}
+
+/// Parse a single-ASCII-byte CLI argument (field delimiter / quote).
+#[cfg(feature = "import")]
+fn single_byte(value: &str, flag: &str) -> Result<u8, String> {
+    let bytes = value.as_bytes();
+    if bytes.len() == 1 {
+        Ok(bytes[0])
+    } else {
+        Err(format!(
+            "{flag} must be a single ASCII character, got '{value}'"
+        ))
+    }
 }
 
 /// `aletheia demo` — boot a seeded, ephemeral bi-temporal graph and print a
