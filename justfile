@@ -71,6 +71,13 @@ check-features:
     @echo "=== encryption-vault (standalone) ===" && cargo check --no-default-features --tests --features encryption-vault
     @echo "=== encryption-aws-kms (standalone) ===" && cargo check --no-default-features --tests --features encryption-aws-kms
 
+# autumn-web 0.5.0 migration spike (Issue #3524): the isolated member crate has
+# its OWN gates (it links autumn-web 0.5 alongside the root's 0.4). CI wiring for
+# this crate is a follow-up; run locally with `just spike-check`.
+spike-check:
+    @echo "=== spike clippy ===" && cargo clippy -p aletheia-autumn-spike --all-targets -- -D warnings
+    @echo "=== spike tests ===" && cargo test -p aletheia-autumn-spike
+
 # Format code
 fmt:
     cargo fmt --all

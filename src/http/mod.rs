@@ -34,7 +34,12 @@
 pub mod admin;
 pub mod auth;
 mod config;
-pub(crate) mod converters;
+// exposed for autumn-web migration spike (Issue #3524): the isolated
+// `aletheia-autumn-spike` crate reuses the exact node → JSON serializer
+// (`converters::node_to_query_json`) the `POST /query` GetNode path uses, so
+// its parity assertion is a true byte-equality check. Widening the module from
+// `pub(crate)` to `pub` is additive and changes no behavior.
+pub mod converters;
 mod error;
 pub mod handlers;
 mod server;
