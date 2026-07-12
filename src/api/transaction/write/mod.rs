@@ -1840,8 +1840,18 @@ impl WriteTransaction {
 
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        // Auto-rollback if not committed
-        if self.state == TxState::Active {
+        // Auto-rollback if the transaction never reached a terminal state.
+        //
+        // `Preparing` must be released here too (Issue #3415): a commit that
+        // fails at any pre-`register_commit` step (validation, conflict,
+        // constraint, WAL, or apply) leaves the consumed transaction in
+        // `Preparing`. Without covering that state, its `TxId` would never be
+        // removed from `TxVisibilityManager::active`, leaking one entry per
+        // failed commit and pinning the snapshot horizon forever. The success
+        // path transitions `Preparing -> Committed` before drop, so a committed
+        // transaction never matches and is never double-aborted; an explicit
+        // `rollback()`/`abort()` sets `Aborted` and likewise does not match.
+        if matches!(self.state, TxState::Active | TxState::Preparing) {
             self.buffer.clear();
             // Register abort with visibility manager
             self.visibility_manager.register_abort(self.tx_id);

@@ -229,6 +229,25 @@ the HTTP-layer *input* memory guard: it rejects an oversized request body with
 *response* and the *time*. Together they cover the HTTP layer's input/output/time
 axes.
 
+### Structural parameter/embedding width cap
+
+Complementing the body-size limit, the `/query` parameter path applies a
+*structural* width cap (#3426): a numeric parameter array (an embedding) is
+capped at `MAX_VECTOR_DIMENSIONS` (**100,000**) elements, and an over-cap array
+is rejected with HTTP `400` / `INVALID_ARGUMENT` when the parameters are
+converted (`json_to_parameter_value`). This mirrors the property path's
+structural vector-dimension bound and bounds the converted embedding
+allocation, so a future operator raising `max_request_body_bytes` cannot
+silently reopen a structural amplification vector.
+
+The two limits are complementary, not substitutes: `max_request_body_bytes`
+remains the **aggregate** input-memory bound for a request — total across all
+parameters, the number of parameters, and the length of any string parameter —
+whereas this per-array cap is a structural bound on a single embedding's width.
+Because the width check runs *after* serde has materialized the request body,
+peak parse-time memory is still governed by the body-size limit, not by this
+cap.
+
 ## Coverage matrix
 
 Honest breakdown of #3368 across lanes:

@@ -98,15 +98,28 @@ fn seed_lsn_allocator_from_segments(
     wal: &ConcurrentWalSystem,
     cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
 ) -> Result<()> {
-    if let Some(max_lsn) =
-        crate::storage::wal::segment_reader::max_lsn_in_dir(wal.wal_dir(), cipher)?
-    {
+    let max_lsn = crate::storage::wal::segment_reader::max_lsn_in_dir(wal.wal_dir(), cipher)?;
+    seed_lsn_allocator_from_max(wal, max_lsn);
+    Ok(())
+}
+
+/// Move the allocator to `max_lsn + 1` (never backwards), given a max LSN that
+/// the caller has already determined (Issue #3429).
+///
+/// Split out of [`seed_lsn_allocator_from_segments`] so the startup path can
+/// seed from the max LSN of the single full WAL read it performs, instead of
+/// scanning the segment directory a second time purely to compute it. See
+/// [`seed_lsn_allocator_from_segments`] for the seeding-policy rationale.
+fn seed_lsn_allocator_from_max(
+    wal: &ConcurrentWalSystem,
+    max_lsn: Option<crate::storage::wal::LSN>,
+) {
+    if let Some(max_lsn) = max_lsn {
         let next = crate::storage::wal::LSN(max_lsn.0.saturating_add(1));
         if next > wal.current_lsn() {
             wal.set_next_lsn(next);
         }
     }
-    Ok(())
 }
 
 /// Extract the effective flush interval from a durability mode, falling back to a default.
@@ -376,13 +389,44 @@ impl AletheiaDB {
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
 
+            // Issue #3429: decode the WAL exactly once here and reuse that
+            // single decode for all three startup passes that historically each
+            // re-read every segment: (1) the LSN-allocator seed below, (2) the
+            // constraint declaration net-state, and (3) the differential
+            // node/edge replay. `read_from` mirrors the recovery reader's cipher
+            // behavior (plaintext today), so for an encrypted WAL its max LSN
+            // would omit encrypted entries; the cipher-aware directory scan is
+            // used as a targeted fallback below only when a cipher is
+            // configured, preserving the #3420/#3430 encrypted seed exactly.
+            //
+            // Held (as `mut`, consumed by whichever replay branch runs) across
+            // index load so no later pass re-reads the segment directory.
+            let mut startup_wal_entries = wal.read_from(crate::storage::wal::LSN::initial())?;
+
             // Issue #3420: seed the LSN allocator past every LSN already durable
             // in existing WAL segments, BEFORE any write is accepted. Without
             // this, a restarted process re-allocates LSNs starting at 1,
             // breaking LSN total ordering across segments and placing new
             // writes below the index manifest LSN (so the next startup's
             // differential replay silently skips them).
-            seed_lsn_allocator_from_segments(&wal, wal_cipher.as_ref())?;
+            let seed_max_lsn = if wal_cipher.is_some() {
+                // Encrypted segments are invisible to the cipher-less read
+                // above; fall back to the cipher-aware directory scan so the
+                // seed still accounts for encrypted entries (unchanged #3420
+                // behavior for encrypted WALs; the constraint/replay passes
+                // stay cipher-less exactly as before, per #3430).
+                crate::storage::wal::segment_reader::max_lsn_in_dir(
+                    wal.wal_dir(),
+                    wal_cipher.as_ref(),
+                )?
+            } else {
+                // `read_from` returns entries globally sorted by LSN
+                // (segment_reader: `entries.sort_by_key(|e| e.lsn)`), so the
+                // last element carries the max LSN in O(1). Empty WAL -> `None`
+                // -> the seed is a no-op.
+                startup_wal_entries.last().map(|e| e.lsn)
+            };
+            seed_lsn_allocator_from_max(&wal, seed_max_lsn);
 
             // Create persistence manager if enabled
             let persistence_manager = if config.persistence.enabled {
@@ -479,10 +523,16 @@ impl AletheiaDB {
                 // Replay constraint declarations from the full WAL history before the
                 // differential node/edge replay.  Constraint WAL entries may predate
                 // the snapshot LSN and would be skipped by the differential replay.
-                crate::storage::recovery::replay_constraint_declarations_from_wal(
-                    &db.wal,
+                //
+                // Issue #3429: fold the constraint net-state out of the single
+                // full read taken at startup (`startup_wal_entries` spans the
+                // whole history from LSN 0), so this no longer re-reads the
+                // segment directory. Below-manifest declarations are still
+                // applied because the borrowed slice includes them.
+                crate::storage::recovery::apply_constraint_declarations(
+                    &startup_wal_entries,
                     &db.constraint_registry,
-                )?;
+                );
 
                 // Replay WAL entries that occurred after the persisted snapshot
                 // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
@@ -527,13 +577,31 @@ impl AletheiaDB {
                 // Capture initial version ID before replay
                 let initial_version_id = db.version_id_gen.current();
 
+                // Issue #3429: feed the differential replay the suffix of the
+                // single startup read (entries with LSN >= start_lsn), rather
+                // than re-reading the segment directory a third time.
+                //
+                // CORRECTNESS: `read_from` returns entries globally sorted by
+                // LSN (segment_reader: `entries.sort_by_key(|e| e.lsn)`), so
+                // `partition_point` finds the first index with LSN >= start_lsn
+                // and `drain(..idx)` discards exactly the entries below it — a
+                // contiguous, in-place split with no extra allocation. This is
+                // byte-identical to what `read_from(start_lsn)` would have
+                // produced (the same LSN-ordered tail the framing resolver
+                // expects). If the sort is ever removed upstream, this
+                // partition (and the O(1) seed above) breaks — keep them
+                // together.
+                let split = startup_wal_entries.partition_point(|entry| entry.lsn < start_lsn);
+                startup_wal_entries.drain(..split);
+                let replay_entries = std::mem::take(&mut startup_wal_entries);
+
                 let mut historical_guard = db.historical.write();
                 let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
-                    crate::storage::recovery::replay_wal_into_storage_with_constraints(
+                    crate::storage::recovery::replay_entries_into_storage_with_constraints(
                         &db.wal,
+                        replay_entries,
                         &db.current,
                         &mut historical_guard,
-                        start_lsn,
                         initial_version_id,
                         Some(&db.constraint_registry),
                     )?;
@@ -566,13 +634,23 @@ impl AletheiaDB {
             // WAL from the beginning to restore node/edge data AND constraint declarations.
             if persistence_manager.is_none() {
                 let initial_version_id = db.version_id_gen.current();
+
+                // Issue #3429: replay directly from the single startup read
+                // instead of re-decoding the segment directory. This branch
+                // replays from LSN 0, so it consumes every entry; the inline
+                // constraint arms in the replay loop recover constraint state
+                // (no separate constraint pass is needed here). `std::mem::take`
+                // moves the entries out of the (persistence-branch-shared)
+                // binding; only one of the two branches runs.
+                let replay_entries = std::mem::take(&mut startup_wal_entries);
+
                 let mut historical_guard = db.historical.write();
                 let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
-                    crate::storage::recovery::replay_wal_into_storage_with_constraints(
+                    crate::storage::recovery::replay_entries_into_storage_with_constraints(
                         &db.wal,
+                        replay_entries,
                         &db.current,
                         &mut historical_guard,
-                        crate::storage::wal::LSN::initial(),
                         initial_version_id,
                         Some(&db.constraint_registry),
                     )?;
