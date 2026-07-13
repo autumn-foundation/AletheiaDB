@@ -425,4 +425,105 @@ mod tests {
             Ok(_) => panic!("expected an error, but load succeeded"),
         }
     }
+
+    // ── Encryption-at-rest tests (Issue #481) ────────────────────────
+
+    fn enc_test_cipher(seed: u8) -> Arc<dyn Cipher> {
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+        let mut key = Zeroizing::new([0u8; 32]);
+        key[0] = seed;
+        key[9] = seed.wrapping_add(3);
+        Arc::new(Aes256GcmCipher::new(&key))
+    }
+
+    /// Build a single-edge index whose edge-type label is interned so it
+    /// survives the load-time label-resolution guard.
+    fn index_with_one_edge(src: NodeId) -> TemporalAdjacencyIndex {
+        use crate::core::temporal::time;
+        let index = TemporalAdjacencyIndex::new(TemporalAdjacencyConfig::default());
+        let label = crate::core::GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        index
+            .insert_edge(
+                EdgeId::new(100).unwrap(),
+                src,
+                NodeId::new(2).unwrap(),
+                label,
+                time::from_secs(10),
+                time::from_secs(20),
+                time::from_secs(10),
+                crate::core::TIMESTAMP_MAX,
+            )
+            .unwrap();
+        index
+    }
+
+    #[test]
+    fn encrypted_round_trip_preserves_edges() {
+        use crate::core::temporal::time;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let cipher = enc_test_cipher(0x11);
+        let src = NodeId::new(1).unwrap();
+
+        let index = index_with_one_edge(src);
+        save_temporal_adjacency_index_with_cipher(&index, &data_dir, Some(&cipher)).unwrap();
+
+        // The persisted file carries the AEIX encrypted-index header on disk.
+        let raw = std::fs::read(data_dir.join("temporal_adjacency").join("adjacency.idx")).unwrap();
+        assert!(
+            super::super::common::is_encrypted_index(&raw),
+            "expected AEIX header on disk"
+        );
+
+        // Decrypts with the right key and the edge is recovered intact.
+        let loaded = load_temporal_adjacency_index_with_cipher(&data_dir, Some(&cipher)).unwrap();
+        let out = loaded.get_outgoing_at_time(src, time::from_secs(15), time::now());
+        assert_eq!(out, vec![EdgeId::new(100).unwrap()]);
+
+        // Empty valid-time window before the edge existed => nothing.
+        assert!(
+            loaded
+                .get_outgoing_at_time(src, time::from_secs(5), time::now())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn encrypted_file_fails_closed_without_cipher() {
+        // Header says encrypted but no key is configured => structured error,
+        // never a fallback that reads ciphertext as a bitcode blob.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let cipher = enc_test_cipher(0x22);
+        let src = NodeId::new(1).unwrap();
+
+        let index = index_with_one_edge(src);
+        save_temporal_adjacency_index_with_cipher(&index, &data_dir, Some(&cipher)).unwrap();
+
+        match load_temporal_adjacency_index_with_cipher(&data_dir, None) {
+            Err(IndexPersistenceError::Corrupted { .. }) => {}
+            Err(other) => panic!("expected Corrupted fail-closed error, got {other:?}"),
+            Ok(_) => panic!("expected fail-closed error, but load succeeded"),
+        }
+    }
+
+    #[test]
+    fn encrypted_wrong_key_fails_closed() {
+        // A different key must never decrypt to the original data.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let cipher = enc_test_cipher(0x33);
+        let wrong = enc_test_cipher(0x44);
+        let src = NodeId::new(1).unwrap();
+
+        let index = index_with_one_edge(src);
+        save_temporal_adjacency_index_with_cipher(&index, &data_dir, Some(&cipher)).unwrap();
+
+        match load_temporal_adjacency_index_with_cipher(&data_dir, Some(&wrong)) {
+            Err(IndexPersistenceError::Corrupted { .. }) => {}
+            Err(other) => panic!("expected Corrupted wrong-key error, got {other:?}"),
+            Ok(_) => panic!("expected wrong-key error, but load succeeded"),
+        }
+    }
 }

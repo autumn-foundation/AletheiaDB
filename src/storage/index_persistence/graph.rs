@@ -1100,6 +1100,46 @@ mod tests {
     }
 
     #[test]
+    fn test_graph_index_mmap_encrypted_fails_closed_without_cipher() {
+        // The mmap load path must also fail closed for an encrypted file when
+        // no cipher is supplied: it detects the header, routes to the buffered
+        // decrypt, and errors rather than mapping ciphertext as a live struct.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index_with_cipher(&data, &path, Some(&cipher)).unwrap();
+
+        assert!(load_graph_index_mmap_with_cipher(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_graph_index_zstd_encrypted_tampered_fails() {
+        // A tampered byte inside an encrypted+compressed graph file must fail
+        // authentication on decrypt (Corrupted), never surface a half-decoded
+        // or wrong graph.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index_compressed_with_cipher(&data, &path, 3, Some(&cipher)).unwrap();
+
+        let mut raw = fs::read(&path).unwrap();
+        let mid = raw.len() / 2;
+        raw[mid] ^= 0xFF;
+        fs::write(&path, &raw).unwrap();
+
+        match load_graph_index_with_cipher(&path, Some(&cipher)) {
+            Err(IndexPersistenceError::Corrupted { .. }) => {}
+            other => {
+                panic!("expected Corrupted error for tampered encrypted zstd graph, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
     fn test_array_property_errors() {
         // Test that Array properties properly error instead of silently losing data
         let array_value = PropertyValue::Array(Arc::from(vec![

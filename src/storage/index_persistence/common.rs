@@ -765,4 +765,65 @@ mod tests {
             load_encoded_maybe_encrypted(path, 4096, "Test", Some(&cipher));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_unsupported_format_version_fails() {
+        // A future/unknown header format version must fail closed with a clear
+        // Corrupted error, before any decryption is attempted with the wrong
+        // framing — never a panic, never a silent misparse.
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let cipher = test_cipher();
+
+        save_encoded_encrypted(&77u64, path, &cipher).unwrap();
+
+        let mut raw = fs::read(path).unwrap();
+        raw[4] = 99; // bogus format_version (header byte 4)
+        fs::write(path, &raw).unwrap();
+
+        let err =
+            load_encoded_maybe_encrypted::<u64>(path, 4096, "Test", Some(&cipher)).unwrap_err();
+        match err {
+            IndexPersistenceError::Corrupted { source, .. } => {
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("Unsupported encrypted index format version"),
+                    "expected unsupported-format-version message, got: {msg}"
+                );
+            }
+            other => panic!("expected Corrupted unsupported-version error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_is_encrypted_index_boundaries() {
+        // Empty and any buffer shorter than a full 10-byte header is NOT
+        // treated as encrypted, even when the leading bytes match the magic —
+        // detection requires a complete header so a tiny legacy file can never
+        // be misclassified.
+        assert!(!is_encrypted_index(b""));
+        assert!(!is_encrypted_index(&ENC_INDEX_MAGIC[..])); // 4 bytes: magic but < header
+        let short = {
+            let mut v = ENC_INDEX_MAGIC.to_vec();
+            v.extend_from_slice(&[0u8; ENC_HEADER_LEN - 4 - 1]); // total 9 bytes
+            v
+        };
+        assert_eq!(short.len(), ENC_HEADER_LEN - 1);
+        assert!(!is_encrypted_index(&short), "9-byte header must not match");
+
+        // Exactly ENC_HEADER_LEN bytes with the magic => encrypted (boundary).
+        let exact = {
+            let mut v = ENC_INDEX_MAGIC.to_vec();
+            v.extend_from_slice(&[0u8; ENC_HEADER_LEN - 4]);
+            v
+        };
+        assert_eq!(exact.len(), ENC_HEADER_LEN);
+        assert!(is_encrypted_index(&exact), "exact-length header must match");
+
+        // Full-length buffer whose first 4 bytes are not the magic => legacy
+        // plaintext (e.g. the bitcode scheme byte 0x00, never 'A').
+        let mut wrong_magic = vec![0u8; ENC_HEADER_LEN + 8];
+        wrong_magic[0] = 0x00;
+        assert!(!is_encrypted_index(&wrong_magic));
+    }
 }

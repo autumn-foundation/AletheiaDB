@@ -577,4 +577,86 @@ mod tests {
         assert_eq!(loaded.vector_count, 1000);
         assert!(matches!(loaded.snapshot_type, PersistedSnapshotType::Full));
     }
+
+    /// `true` if any plaintext native-usearch temp file was leaked into `dir`.
+    fn any_aeix_temp_present(dir: &Path) -> bool {
+        std::fs::read_dir(dir).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".aeix-usearch-tmp")
+        })
+    }
+
+    #[test]
+    fn test_native_usearch_encrypted_round_trip_and_fail_closed() {
+        use crate::core::id::NodeId;
+        use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("current.usearch");
+        let cipher = enc_test_cipher();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let index = HnswIndex::new(config.clone()).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+            .unwrap();
+
+        save_hnsw_index_maybe_encrypted(&index, &path, Some(&cipher)).unwrap();
+
+        // Both the native index file and its mappings sidecar are encrypted at
+        // rest (carry the AEIX header).
+        assert!(
+            native_file_is_encrypted(&path),
+            "native index not encrypted on disk"
+        );
+        let sidecar = path.with_extension("usearch.mappings");
+        assert!(
+            native_file_is_encrypted(&sidecar),
+            "mappings sidecar not encrypted on disk"
+        );
+        // No decrypted-plaintext temp files leaked after save.
+        assert!(
+            !any_aeix_temp_present(dir.path()),
+            "plaintext temp file leaked after save"
+        );
+
+        // Correct key => decrypts to a temp file, loads, and the vectors survive.
+        let loaded = load_hnsw_index_maybe_encrypted(&path, config.clone(), Some(&cipher)).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(
+            !any_aeix_temp_present(dir.path()),
+            "plaintext temp file leaked after load"
+        );
+
+        // Fails closed: encrypted on disk but no cipher supplied. The error
+        // message names the missing key and leaks no plaintext / no temp file.
+        let err = load_hnsw_index_maybe_encrypted(&path, config.clone(), None).unwrap_err();
+        assert!(
+            format!("{err}").contains("no encryption key"),
+            "expected fail-closed missing-key error, got: {err}"
+        );
+        assert!(
+            !any_aeix_temp_present(dir.path()),
+            "temp leaked on fail-closed load"
+        );
+
+        // Wrong key => authentication failure, never the original data, and the
+        // decrypted-plaintext temp files are cleaned up on the error path.
+        let wrong = {
+            use crate::encryption::Aes256GcmCipher;
+            use zeroize::Zeroizing;
+            let mut k = Zeroizing::new([0u8; 32]);
+            k[7] = 0x5A;
+            Arc::new(Aes256GcmCipher::new(&k)) as Arc<dyn Cipher>
+        };
+        assert!(load_hnsw_index_maybe_encrypted(&path, config, Some(&wrong)).is_err());
+        assert!(
+            !any_aeix_temp_present(dir.path()),
+            "temp leaked on wrong-key load"
+        );
+    }
 }
