@@ -2,7 +2,44 @@
 
 ## Status
 
-Accepted — 2026-04-19.
+Accepted — 2026-04-19. **Partially superseded — 2026-07-13** (see
+[Supersession: rate limiting returns under autumn 0.5](#supersession-rate-limiting-returns-under-autumn-05) below).
+
+## Supersession: rate limiting returns under autumn 0.5
+
+The migration landed on autumn-web **0.5** (not the 0.2/0.3 line this ADR was
+drafted against), and the production server now lives in the dedicated
+`aletheia-server` crate (Issue #3524). Two of the deferrals recorded under
+[Decision](#decision) are lifted by that move:
+
+-   **Rate limiting is no longer deferred.** This ADR judged a custom
+    tower/middleware rate limiter impractical because autumn 0.4's sealed
+    `IntoAppLayer` rejected arbitrary `tower::Layer`s, and it bet on autumn
+    0.3 shipping native per-IP rate limiting. Neither held: autumn **0.5**
+    relaxes that bound so an arbitrary `tower::Layer` — including
+    `tower_governor::GovernorLayer` — mounts through `.layer()`, and no native
+    limiter shipped. Rate limiting therefore returns as a **default-off**
+    `tower-governor` layer built by
+    `aletheia_server::security::rate_limit::governor_layer`, which yields
+    `None` unless the operator opts in via `SecurityConfig::rate_limit`. Default
+    behavior is byte-for-byte unchanged (no layer, no `429`s), so this
+    supersedes the deferral without changing the shipped default. The
+    "[Retire `tower-governor`](#follow-up-work)" follow-up is likewise moot —
+    `tower-governor` is retained, not retired.
+-   **The `ConnectInfo` test-harness gap is unchanged.** The negative
+    consequence that `PeerIpKeyExtractor` needs `ConnectInfo<SocketAddr>` (only
+    populated by `axum::serve()` at the TCP layer) still stands; the new crate's
+    `security::rate_limit` acceptance tests insert `ConnectInfo` by hand when
+    driving the layer via `tower`'s `oneshot`, exactly as noted here.
+
+The rate limiter arrives alongside the other per-query security **primitives**
+in the `aletheia-server::security` module (per-query timeout / row / byte caps
+and a bounded in-flight guard, Issues #3542 / #3550; signed opaque cursor
+tokens, Issue #3360). These are the building blocks; the wiring PR that mounts
+them via `apply_security` (and wraps governor's raw `429` into the Issue #3234
+`{code, retriable, ...}` envelope) is tracked under the autumn migration §8 /
+Issue #3561 plan. This note records the reversal; it does not re-open the ADR's
+other decisions.
 
 ## Context
 

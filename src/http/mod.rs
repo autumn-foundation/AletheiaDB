@@ -47,7 +47,7 @@ pub use config::{
     LimitOverrideError, QueryLimitsConfig, QueryLimitsOverride, RateLimitConfig, RowOverflowPolicy,
     ServerConfig, ServerConfigBuilder,
 };
-pub use error::AletheiaHttpError;
+pub use error::{AletheiaHttpError, ResourceLimitExceeded};
 // exposed for autumn-web migration spike (Issue #3524): the isolated
 // `aletheia-autumn-spike` crate reuses the exact node → JSON serializer the
 // `POST /query` GetNode path uses, so its parity assertion is a true

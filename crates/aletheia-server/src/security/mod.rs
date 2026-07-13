@@ -16,9 +16,14 @@
 //! - [`init_state`] installs the shared [`ServerAuthState`] extension.
 //! - [`validate_startup`] refuses required-mode startup with zero credentials.
 //! - [`auth::Authorized`] **authenticates and enforces the RBAC class** via
-//!   [`authorize`] (Lane B, this PR): a role that does not permit the handler's
+//!   [`authorize`] (Lane B): a role that does not permit the handler's
 //!   declared `C::CLASS` gets a byte-identical 403.
-//! - [`rate_limit`], [`resource_limits`], [`cursor`] are empty `TODO(Lane B)`.
+//! - [`resource_limits`], [`rate_limit`], [`cursor`] carry the Lane B security
+//!   **primitives** — per-query timeout/row/byte caps + bounded in-flight guard
+//!   (#3542 / #3550), the default-off `tower-governor` rate-limit layer (#3561
+//!   §8), and signed opaque cursor tokens (#3360). They are the building blocks
+//!   the B4 wiring PR mounts via [`apply_security`]; PR1 behavior is unchanged
+//!   until then (rate limiting off, generous caps, no cursor validation wired).
 
 pub mod auth;
 pub mod cursor;
@@ -31,10 +36,12 @@ use autumn_web::auth::RequireApiToken;
 use autumn_web::prelude::AppState as AutumnAppState;
 use autumn_web::test::TestApp;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use auth::{
     AccessClassMarker, AdminClass, ApiKeyStore, AuthStoreTokenAdapter, Authorized, MetricsClass,
-    ReadClass, ServerAuthState, WriteClass, authorize, authorize_class, extract_credential,
+    RateLimitSettings, ReadClass, ServerAuthState, WriteClass, authorize, authorize_class,
+    extract_credential,
 };
 
 /// Security configuration for the server surface.
@@ -49,13 +56,49 @@ pub struct SecurityConfig {
     pub store: Arc<AuthStore>,
     /// Whether authentication is required or explicitly anonymous.
     pub mode: AuthMode,
+    /// Per-IP rate-limit settings (Lane B3). `None` = **off** (default, parity
+    /// with today). `Some` builds the default-off `tower-governor` layer via
+    /// [`rate_limit::governor_layer`]. The B4 wiring PR mounts the layer.
+    pub rate_limit: Option<RateLimitSettings>,
+    /// Per-query wall-clock timeout (Lane B2, #3542). Generous default (30 s)
+    /// so no existing behavior changes; `Duration::ZERO` = unlimited.
+    pub query_timeout: Duration,
+    /// Cap on rows/entities returned by a single query (Lane B2, #3542). `0` =
+    /// unlimited. Generous default (10_000) mirroring the HTTP `/query`
+    /// surface's `DEFAULT_MAX_RESULT_ROWS`.
+    pub max_result_rows: usize,
+    /// Cap on serialized response bytes of a single query (Lane B2, #3542).
+    /// `0` = unlimited. Generous default (8 MiB) mirroring
+    /// `DEFAULT_MAX_RESPONSE_BYTES`.
+    pub max_response_bytes: usize,
+    /// Max concurrent in-flight timed queries (Lane B2 DoS guard, #3550). `0` =
+    /// unbounded. The cap the [`resource_limits`] in-flight limiter enforces.
+    pub max_in_flight_queries: usize,
+    /// Cursor time-to-live (Lane B4, #3360 default 300 s). Wired at B4.
+    pub cursor_ttl: Duration,
+    /// Max concurrently-live cursors per connection (Lane B4, #3360 default
+    /// 128). Wired at B4.
+    pub max_live_cursors_per_conn: usize,
 }
 
 impl SecurityConfig {
-    /// Build a config from a shared store and mode.
+    /// Build a config from a shared store and mode, with the not-yet-wired
+    /// security primitives at their conservative defaults (rate limiting off,
+    /// 30 s query timeout, 10_000-row / 8-MiB caps, in-flight cap 64, cursor
+    /// TTL 300 s, cursor cap 128).
     #[must_use]
     pub fn new(store: Arc<AuthStore>, mode: AuthMode) -> Self {
-        Self { store, mode }
+        Self {
+            store,
+            mode,
+            rate_limit: None,
+            query_timeout: Duration::from_millis(30_000),
+            max_result_rows: 10_000,
+            max_response_bytes: 8 * 1024 * 1024,
+            max_in_flight_queries: 64,
+            cursor_ttl: Duration::from_secs(300),
+            max_live_cursors_per_conn: 128,
+        }
     }
 }
 
