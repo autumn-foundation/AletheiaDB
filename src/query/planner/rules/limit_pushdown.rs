@@ -50,6 +50,9 @@ use super::{OptimizationRule, Statistics};
 ///         embedding: vec![0.1, 0.2].into(),
 ///         top_k: None, // Missing limit!
 ///         property_key: None,
+///         metric: aletheiadb::core::vector::DistanceMetric::Cosine,
+///         threshold: None,
+///         score_alias: None,
 ///     },
 ///     scan
 /// );
