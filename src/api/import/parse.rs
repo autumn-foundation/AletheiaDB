@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn coerce_str_timestamp_ok_and_empty() {
+    fn coerce_str_timestamp_ok_empty_and_parse_failure() {
         assert_eq!(
             coerce_str("1000", ColumnType::Timestamp).unwrap(),
             PropertyValue::Int(1000)
@@ -517,6 +517,12 @@ mod tests {
         assert_eq!(
             coerce_str("", ColumnType::Timestamp).unwrap(),
             PropertyValue::Null
+        );
+        // A non-empty, unparseable value must propagate the parse_valid_time
+        // error (the Timestamp arm has no error message of its own).
+        assert_eq!(
+            coerce_str("garbage", ColumnType::Timestamp).unwrap_err(),
+            "could not parse valid_time 'garbage'"
         );
     }
 
@@ -564,6 +570,18 @@ mod tests {
             json_to_embedding(&serde_json::json!([1.0, 2.0, 3.0])).unwrap(),
             PropertyValue::try_vector([1.0f32, 2.0, 3.0]).unwrap()
         );
+    }
+
+    #[test]
+    fn json_to_embedding_try_vector_failure_propagates() {
+        // A dimension over MAX_VECTOR_DIMENSIONS makes `try_vector` fail; the
+        // `.map_err(|e| e.to_string())` arm must surface that as a non-empty
+        // error string (not an Ok, not an empty string).
+        use crate::core::vector::constants::MAX_VECTOR_DIMENSIONS;
+        let oversized =
+            serde_json::Value::Array(vec![serde_json::json!(0.0); MAX_VECTOR_DIMENSIONS + 1]);
+        let err = json_to_embedding(&oversized).unwrap_err();
+        assert!(!err.is_empty(), "try_vector error must not be empty");
     }
 
     // --- coerce_json error + success arms ----------------------------------
@@ -651,6 +669,19 @@ mod tests {
     }
 
     #[test]
+    fn coerce_json_timestamp_string_delegates() {
+        // The (Timestamp, String) arm routes through coerce_str.
+        assert_eq!(
+            coerce_json(&serde_json::json!("2000"), ColumnType::Timestamp).unwrap(),
+            PropertyValue::Int(2000)
+        );
+        assert_eq!(
+            coerce_json(&serde_json::json!("garbage"), ColumnType::Timestamp).unwrap_err(),
+            "could not parse valid_time 'garbage'"
+        );
+    }
+
+    #[test]
     fn coerce_json_embedding_arms() {
         assert_eq!(
             coerce_json(&serde_json::json!([1.0, 2.0, 3.0]), ColumnType::Embedding).unwrap(),
@@ -721,26 +752,31 @@ mod tests {
         assert_eq!(parse_valid_time("1000000").unwrap().wallclock(), 1_000_000);
     }
 
+    // 2024-01-15T00:00:00Z is exactly 1_705_276_800 s = 1_705_276_800_000_000 µs
+    // since the Unix epoch. Pinning the absolute value catches a uniform
+    // conversion-corrupting mutant that a relative (x == Z-form) check misses.
+    const JAN_15_2024_UTC_MICROS: i64 = 1_705_276_800_000_000;
+
     #[test]
     fn parse_valid_time_rfc3339_utc_and_offset() {
         let z = parse_valid_time("2024-01-15T00:00:00Z").unwrap();
         let off = parse_valid_time("2024-01-15T02:00:00+02:00").unwrap();
-        // Same instant expressed two ways -> identical micros.
-        assert_eq!(z.wallclock(), off.wallclock());
+        // Absolute instant (kills uniform-offset mutants), and the same instant
+        // expressed two ways -> identical micros.
+        assert_eq!(z.wallclock(), JAN_15_2024_UTC_MICROS);
+        assert_eq!(off.wallclock(), JAN_15_2024_UTC_MICROS);
     }
 
     #[test]
     fn parse_valid_time_naive_datetime_assumed_utc() {
         let naive = parse_valid_time("2024-01-15T00:00:00").unwrap();
-        let utc = parse_valid_time("2024-01-15T00:00:00Z").unwrap();
-        assert_eq!(naive.wallclock(), utc.wallclock());
+        assert_eq!(naive.wallclock(), JAN_15_2024_UTC_MICROS);
     }
 
     #[test]
     fn parse_valid_time_bare_date_is_midnight_utc() {
         let date = parse_valid_time("2024-01-15").unwrap();
-        let midnight = parse_valid_time("2024-01-15T00:00:00Z").unwrap();
-        assert_eq!(date.wallclock(), midnight.wallclock());
+        assert_eq!(date.wallclock(), JAN_15_2024_UTC_MICROS);
     }
 
     #[test]

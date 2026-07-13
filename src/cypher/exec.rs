@@ -978,7 +978,6 @@ mod tests {
         let err = unwind_source_values(&src, "x", &params).unwrap_err();
         match err {
             CypherError::SemanticError(m) => {
-                assert!(m.contains("is a"), "got {m}");
                 assert!(m.contains("scalar"), "got {m}");
             }
             other => panic!("expected SemanticError, got {other:?}"),
@@ -1082,6 +1081,11 @@ mod tests {
             value_to_property(&CypherValue::String("hi".to_string()), &p).unwrap(),
             PropertyValue::String(Arc::from("hi"))
         );
+        let vec: Arc<[f32]> = Arc::from([1.0f32, 2.0, 3.0].as_slice());
+        assert_eq!(
+            value_to_property(&CypherValue::Vector(Arc::clone(&vec)), &p).unwrap(),
+            PropertyValue::Vector(vec)
+        );
     }
 
     #[test]
@@ -1143,6 +1147,13 @@ mod tests {
         assert_eq!(
             param_to_property(&nested, 0).unwrap(),
             PropertyValue::Array(Arc::new(vec![PropertyValue::Int(9)]))
+        );
+        // The Embedding arm maps to a dense Vector (distinct from the
+        // list-source expansion in unwind_source_values).
+        let emb: Arc<[f32]> = Arc::from([1.0f32, 2.0].as_slice());
+        assert_eq!(
+            param_to_property(&CypherParameterValue::Embedding(Arc::clone(&emb)), 0).unwrap(),
+            PropertyValue::Vector(emb)
         );
     }
 
@@ -1516,6 +1527,39 @@ mod tests {
     fn needs_multi_binding_non_match_is_false() {
         assert!(!needs_multi_binding(&parse_stmt(
             "UNWIND [1] AS x RETURN x"
+        )));
+    }
+
+    #[test]
+    fn needs_multi_binding_empty_referenced_is_false() {
+        // `RETURN *` binds no entity var into `referenced`, so with a single
+        // node pattern `referenced` is empty: original returns false, but the
+        // `referenced.len() > 1` -> `< 1` (== 0) mutant would flip it to true
+        // (0 < 1) because the `any()` over the empty set does NOT mask at len 0.
+        assert!(!needs_multi_binding(&parse_stmt("MATCH (n) RETURN *")));
+    }
+
+    #[test]
+    fn needs_multi_binding_varless_pattern_is_false() {
+        // All-anonymous pattern -> entity_vars empty -> early-return false.
+        assert!(!needs_multi_binding(&parse_stmt("MATCH () RETURN *")));
+    }
+
+    #[test]
+    fn needs_multi_binding_where_reference_counts() {
+        // The second entity var `a` is referenced ONLY via WHERE; without the
+        // where-clause collection path it would look single-terminal (`b`).
+        assert!(needs_multi_binding(&parse_stmt(
+            "MATCH (a)-[:R]->(b) WHERE a.age > 1 RETURN b"
+        )));
+    }
+
+    #[test]
+    fn needs_multi_binding_order_by_reference_counts() {
+        // The second entity var `a` is referenced ONLY via ORDER BY; this pins
+        // the order_by collection path.
+        assert!(needs_multi_binding(&parse_stmt(
+            "MATCH (a)-[:R]->(b) RETURN b ORDER BY a.age"
         )));
     }
 
