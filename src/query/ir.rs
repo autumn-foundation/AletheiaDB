@@ -9,6 +9,11 @@ use std::sync::Arc;
 
 use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
+// The brute-force vector rerank path (`RankBySimilarity`) selects its metric
+// from the `core::vector` family (Cosine/Euclidean/DotProduct), which exposes a
+// ready `compute_similarity` used by the executor. This is distinct from the
+// HNSW-index `DistanceMetric` (6 variants) used by `VectorSearch` below.
+use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::index::vector::DistanceMetric;
 
 /// A query operation that can be composed into a query pipeline.
@@ -104,6 +109,19 @@ pub enum QueryOp {
         top_k: Option<usize>,
         /// Property key containing the embedding (default: "embedding")
         property_key: Option<String>,
+        /// Distance/similarity metric selected by the calling surface (e.g. the
+        /// Cypher `vector.cosine` / `vector.euclidean` / `vector.dot_product`
+        /// function name). Determines how each candidate is scored; `Cosine`
+        /// reproduces the historical default.
+        metric: VectorMetric,
+        /// Optional threshold that keeps only rows whose similarity score
+        /// satisfies the comparison (Cypher `WHERE vector.similarity(...) > t`).
+        /// `None` ranks/keeps all input rows.
+        threshold: Option<ScoreThreshold>,
+        /// When set, the computed similarity score is also materialized as a
+        /// named output column under this alias (Cypher
+        /// `vector.cosine(...) AS score`), in addition to `QueryRow::score`.
+        score_alias: Option<String>,
     },
 
     // === Temporal Operations ===
@@ -194,6 +212,47 @@ pub enum QueryOp {
 
     /// Project specific properties
     Project(Vec<String>),
+}
+
+/// A comparison operator for a [`ScoreThreshold`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreComparison {
+    /// Keep rows whose score is strictly greater than the threshold.
+    Gt,
+    /// Keep rows whose score is greater than or equal to the threshold.
+    Ge,
+    /// Keep rows whose score is strictly less than the threshold.
+    Lt,
+    /// Keep rows whose score is less than or equal to the threshold.
+    Le,
+}
+
+/// A similarity-score threshold applied by [`QueryOp::RankBySimilarity`].
+///
+/// The comparison is evaluated against the metric's **similarity** score
+/// (higher = more similar), i.e. the same value materialized on
+/// [`crate::query::executor::QueryRow::score`]. For `Euclidean` that similarity
+/// is `1 / (1 + distance)` rather than the raw distance (see the Cypher vector
+/// guide); prefer `Cosine`/`DotProduct`/`similarity` for threshold filters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoreThreshold {
+    /// The comparison operator.
+    pub op: ScoreComparison,
+    /// The threshold value to compare the similarity score against.
+    pub value: f32,
+}
+
+impl ScoreThreshold {
+    /// Returns `true` if `score` satisfies this threshold.
+    #[inline]
+    pub fn passes(&self, score: f32) -> bool {
+        match self.op {
+            ScoreComparison::Gt => score > self.value,
+            ScoreComparison::Ge => score >= self.value,
+            ScoreComparison::Lt => score < self.value,
+            ScoreComparison::Le => score <= self.value,
+        }
+    }
 }
 
 /// A grouping key in a [`QueryOp::Aggregate`] (a non-aggregate projection

@@ -1,9 +1,9 @@
 {
-  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 40 — have only their name + access class pinned via the golden set. Live drift detection of the full 44-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
+  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 42 — have only their name + access class pinned via the golden set. Live drift detection of the full 46-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
   "generated_for": "framework port parity harness",
   "totals": {
     "http_routes": 5,
-    "mcp_tools": 44,
+    "mcp_tools": 46,
     "mcp_budgetable_read_tools": 13
   },
   "http": {
@@ -15,7 +15,7 @@
       "additive_fields_note": "code/retriable/details are present ONLY for auth (401/403) and resource-limit (413/422/429) variants; plain 400/404/500 keep the minimal {success,error} shape.",
       "trace_id_note": "trace_id body field + x-trace-id header are populated only under the observability/otel features (pinned by tests/http_otel_tracing.rs). Absent otherwise.",
       "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT"],
-      "vocabulary_asymmetry_vs_mcp": "HTTP uses RESOURCE_EXHAUSTED for limit errors; MCP has no such code. HTTP emits `code` only on auth+limit variants; MCP emits `code` on every error."
+      "vocabulary_asymmetry_vs_mcp": "Both surfaces use RESOURCE_EXHAUSTED for per-query resource-limit errors (Issue #3368: HTTP /query since #3446, MCP `query` tool since #3368-lane4). Remaining asymmetry: HTTP emits `code` only on auth+limit variants; MCP emits `code` on every error."
     },
     "routes": [
       {
@@ -52,7 +52,7 @@
         ],
         "referenced": {
           "429_wall_clock_timeout": "not forceable deterministically over the wire; pinned by enforce_query_limits unit tests in src/http/handlers.rs (see tests/http_query_limits.rs header). RESOURCE_EXHAUSTED + Retry-After:1, retriable:true for reads.",
-          "413_request_body_limit": "tests/parity_http.rs::run_server_enforces_request_body_413 (real-socket production run_server stack, Issue #3426)",
+          "413_request_body_limit": "tests/http_run_server_body_limit.rs::run_server_enforces_413_over_the_wire (real-socket production run_server stack, Issue #3426)",
           "otel_trace_id": "tests/http_otel_tracing.rs (observability/otel features)",
           "provenance_filter_3348": "Issue #3348 (additive): find_node/get_node/find_neighbors accept optional provenance_source/provenance_sources/min_confidence/include_unattributed (flattened into QueryRequest). Omitting all four is byte-identical to prior behavior. Invalid values (confidence out of [0,1], empty source list) -> 400 INVALID_ARGUMENT naming the field; get_node excluded-by-filter -> 404. HTTP find_node/find_neighbors bare-array pages are OVER-FETCHED/REFILLED under an active filter (bounded by MAX_DEEP_PAGINATION) so a short/empty page means end-of-data (no false-short mid-scan). Pinned by tests/parity_http.rs::find_node_filters_by_provenance_source / find_node_include_unattributed / find_node_min_confidence_inclusive / find_node_invalid_confidence_is_400 / find_node_empty_source_list_is_400 / get_node_provenance_filter_excludes_as_404 / find_node_without_filter_is_unchanged / find_node_filtered_page_is_refilled_not_short / find_neighbors_filters_by_provenance / find_neighbors_invalid_confidence_is_400."
         }
@@ -103,8 +103,9 @@
     "advertised_tool_source": "src/mcp/server.rs::tool_definitions()",
     "error_envelope": {
       "shape": "{error:{code, message, retriable, details?}, <legacy top-level fields>?}",
-      "code_enum": ["NOT_FOUND", "INVALID_ARGUMENT", "CONSTRAINT_VIOLATION", "FAILED_PRECONDITION", "CONFLICT", "UNAVAILABLE", "INTERNAL", "UNAUTHENTICATED", "PERMISSION_DENIED"],
+      "code_enum": ["NOT_FOUND", "INVALID_ARGUMENT", "CONSTRAINT_VIOLATION", "FAILED_PRECONDITION", "CONFLICT", "UNAVAILABLE", "INTERNAL", "UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED"],
       "retriable_true_only_for": ["CONFLICT", "UNAVAILABLE"],
+      "resource_exhausted_note": "RESOURCE_EXHAUSTED (Issue #3368, MCP `query` tool per-query resource limits) defaults non-retriable; the read-only wall-clock-timeout case overrides retriable:true at its call site, the result-byte-cap case keeps the non-retriable default.",
       "pinned_by": "tests/parity_mcp.rs::error_code_vocabulary_is_stable"
     },
     "success_envelope": {
@@ -118,7 +119,7 @@
       "pinned_by": "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable"
     },
     "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable (external mirror — internal-consistency only)",
-    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 44 pairs — the authoritative drift detector)",
+    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 46 pairs — the authoritative drift detector)",
     "budgetable_read_tools": ["get_node", "list_nodes", "get_edge", "list_edges", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "hybrid_query", "query", "find_nodes_at_time", "get_node_history", "get_schema"],
     "provenance_filterable_read_tools": {
       "$comment": "Issue #3348: read tools that accept the optional additive provenance filter params (provenance_source, provenance_sources, min_confidence, include_unattributed). Purely additive — omitting all four is byte-identical to prior behavior, so this does NOT change the tool name/class golden. Source of truth: PROVENANCE_FILTERABLE_TOOLS in src/mcp/server.rs. Behavior pinned by src/mcp/tests.rs::provenance_filter_tests.",
@@ -163,12 +164,14 @@
       {"name": "get_edge_history", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "diff_edge_versions", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "hybrid_query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "tests/parity_mcp.rs::query_over_ceiling_override_is_invalid_argument", "tests/parity_mcp.rs::query_byte_cap_is_resource_exhausted", "tests/parity_mcp.rs::query_row_cap_override_truncates_successfully", "tests/parity_mcp.rs::resource_exhausted_code_is_in_vocabulary"], "resource_limits": "Issue #3368 (MCP lane 4): optional per-call `limits` {timeout_ms, max_result_rows, max_response_bytes} folded against server defaults + operator ceilings. Over-ceiling override -> INVALID_ARGUMENT (kind invalid_params, details{dimension,requested,ceiling}); wall-clock timeout -> RESOURCE_EXHAUSTED (kind runtime_error, retriable:true, details{dimension:wall_clock_timeout,limit}); result-byte cap -> RESOURCE_EXHAUSTED (retriable:false, details{dimension:result_bytes,limit,consumed}); result-row cap -> truncated:true success (#3226). Timeout enforcement bounds the caller's wait via a thread-race without engine-level cancellation (read-only guard runs first, so a discarded query never writes); the raced worker is bounded by QueryLimitsConfig.max_in_flight_queries (default 64, MCP-only; at the cap a timed query is rejected UNAVAILABLE retriable:true with details{reason:in_flight_query_cap,max_in_flight_queries} instead of spawning; a worker that panics -> INTERNAL retriable:false, never a timeout). An equivalent in-flight cap on the HTTP /query worker path (#3446) is a parity follow-up. The result-byte cap is measured incrementally as rows are appended (peak working memory ~= cap) then re-checked exactly on the full serialized response. Composes with #3353 token budget (protective byte cap runs first inside handle_query, budget shaper runs after in dispatch_tool) and the #3360 cursor unsupported_construct. In-process per-dimension termination counters via AletheiaMcpServer::limit_termination_counts(); database_stats integration is a cross-lane storage follow-up."},
       {"name": "get_schema", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "temporal_extent", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "lineage_upstream", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "lineage_downstream", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "audit_export", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "verify_chain", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "export_chain_head", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "database_stats", "access_class": "metrics", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]}
     ]
   },
@@ -178,8 +181,8 @@
       "area": "MCP advertised-tool dispatch sweep",
       "status": "partially closed",
       "why": "tool_definitions()/list_tools_for_test()/dispatch_tool are pub(crate); the rmcp ServerHandler list_tools/call_tool entry is not reachable from an external test crate (rmcp is not a dev-dependency and is not re-exported). Per house rules we do not add pub to production code.",
-      "closed_part": "Full 44-name/class DRIFT DETECTION is now closed: the in-crate golden src/mcp/auth_tests.rs::live_tool_inventory_matches_golden reads the live registry and fails on any tool added/removed/renamed/reclassified. The external tests/parity_mcp.rs::tool_inventory_golden_is_stable mirrors that constant cross-crate.",
-      "remaining_gap": "What stays external-unreachable is per-tool RUNTIME BEHAVIOR for the 40 non-behavior-tested tools: only the 4 behavior-pinned tools (get_node, create_node, create_edge, traverse) have black-box runtime assertions in tests/parity_mcp.rs; the other 40 are name/class-pinned only. Their dispatch/error-on-invalid-args behavior remains enforced in-crate.",
+      "closed_part": "Full 46-name/class DRIFT DETECTION is now closed: the in-crate golden src/mcp/auth_tests.rs::live_tool_inventory_matches_golden reads the live registry and fails on any tool added/removed/renamed/reclassified. The external tests/parity_mcp.rs::tool_inventory_golden_is_stable mirrors that constant cross-crate.",
+      "remaining_gap": "What stays external-unreachable is per-tool RUNTIME BEHAVIOR for the 42 non-behavior-tested tools: only the 4 behavior-pinned tools (get_node, create_node, create_edge, traverse) have black-box runtime assertions in tests/parity_mcp.rs; the other 42 are name/class-pinned only. Their dispatch/error-on-invalid-args behavior remains enforced in-crate.",
       "referenced_test": "src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments (~line 9257); src/mcp/auth_tests.rs::live_tool_inventory_matches_golden"
     },
     {

@@ -607,6 +607,9 @@ impl SqlConverter {
                             embedding,
                             top_k: k,
                             property_key: Some(property_key.clone()),
+                            metric: crate::core::vector::DistanceMetric::Cosine,
+                            threshold: None,
+                            score_alias: None,
                         },
                     );
                 } else {

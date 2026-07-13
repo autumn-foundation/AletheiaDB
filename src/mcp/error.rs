@@ -75,6 +75,14 @@ pub enum McpErrorCode {
     /// `{required_class, principal_role}`. Not retriable: the same call
     /// under the same principal can never succeed.
     PermissionDenied,
+    /// A per-query resource limit was exceeded (Issue #3368): the wall-clock
+    /// timeout elapsed, or the result exceeded the response-byte cap.
+    /// `details` carries `{dimension, limit, consumed?}`. Retriability is
+    /// case-specific and set explicitly (a read-only wall-clock timeout is
+    /// retriable; a byte-cap breach is not), so the default is the
+    /// conservative non-retriable — treat an unqualified `RESOURCE_EXHAUSTED`
+    /// as non-retriable.
+    ResourceExhausted,
 }
 
 impl McpErrorCode {
@@ -90,6 +98,7 @@ impl McpErrorCode {
             McpErrorCode::Internal => "INTERNAL",
             McpErrorCode::Unauthenticated => "UNAUTHENTICATED",
             McpErrorCode::PermissionDenied => "PERMISSION_DENIED",
+            McpErrorCode::ResourceExhausted => "RESOURCE_EXHAUSTED",
         }
     }
 
@@ -404,6 +413,18 @@ mod tests {
         assert_eq!(McpErrorCode::Internal.as_str(), "INTERNAL");
         assert_eq!(McpErrorCode::Unauthenticated.as_str(), "UNAUTHENTICATED");
         assert_eq!(McpErrorCode::PermissionDenied.as_str(), "PERMISSION_DENIED");
+        assert_eq!(
+            McpErrorCode::ResourceExhausted.as_str(),
+            "RESOURCE_EXHAUSTED"
+        );
+    }
+
+    #[test]
+    fn resource_exhausted_defaults_non_retriable() {
+        // The default is the conservative non-retriable; the read-only
+        // wall-clock-timeout case opts into retriable at its call site (see
+        // `server::wall_clock_timeout_error`), the byte-cap case does not.
+        assert!(!McpErrorCode::ResourceExhausted.default_retriable());
     }
 
     #[test]

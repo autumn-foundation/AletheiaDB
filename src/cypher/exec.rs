@@ -98,6 +98,18 @@ pub enum CypherExecution {
     /// per-operator instrumentation and return the annotated plan as a single
     /// `plan` row.
     Profile(Query),
+    /// A write statement (Issue #560): `CREATE` / `SET` / `DELETE` /
+    /// `DETACH DELETE`, optionally with a reading `MATCH` and a `RETURN`.
+    ///
+    /// Carried unconverted (writes do not lower to the read-only [`Query`] IR)
+    /// and dispatched to `AletheiaDB::execute_mutation`, which needs the database
+    /// handle to apply the mutation through the native write APIs.
+    Mutation {
+        /// The parsed write statement to execute.
+        statement: Box<CypherStatement>,
+        /// Parameter bindings for `$param` references.
+        params: HashMap<String, CypherParameterValue>,
+    },
 }
 
 /// Parse and plan a Cypher string with no bound parameters.
@@ -141,6 +153,15 @@ pub fn plan_cypher_with_params(
         CypherStatement::Profile(inner) => {
             let query = lower_for_plan(*inner, params, "PROFILE")?;
             Ok(CypherExecution::Profile(query))
+        }
+        stmt @ CypherStatement::Write(_) => {
+            // A write statement is executed directly against the native write
+            // APIs (see `crate::cypher::mutation`); it has no read-only `Query`
+            // representation, so it is carried unconverted.
+            Ok(CypherExecution::Mutation {
+                statement: Box::new(stmt),
+                params,
+            })
         }
         other if needs_multi_binding(&other) => {
             // A multi-variable / multi-pattern MATCH has no faithful
@@ -188,6 +209,13 @@ fn lower_for_plan(
         CypherStatement::Explain(_) | CypherStatement::Profile(_) => Err(
             CypherError::UnsupportedFeature(format!("{verb} cannot wrap another EXPLAIN/PROFILE")),
         ),
+        // A write statement has no read-only `Query` plan to display or profile,
+        // and EXPLAIN/PROFILE must never execute a mutation as a side effect, so
+        // reject rather than mis-lower.
+        CypherStatement::Write(_) => Err(CypherError::UnsupportedFeature(format!(
+            "{verb} is not supported for write statements (CREATE / SET / DELETE); \
+             EXPLAIN/PROFILE describe read-only query plans"
+        ))),
         // A multi-variable / multi-pattern MATCH (Issue #549) is dispatched to
         // the dedicated evaluator, which has no physical `Query` plan; there is
         // nothing to lower here, so reject rather than mis-lower.
@@ -826,4 +854,942 @@ fn is_aggregate_name(name: &str) -> bool {
         name.to_ascii_uppercase().as_str(),
         "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "COLLECT"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! Standalone-UNWIND error-path coverage (Issue #3535 mutation backfill).
+    //!
+    //! These tests pin the exact `Err(...)` variants/messages and `Ok(...)`
+    //! values of the UNWIND planning/validation/evaluation helpers so the
+    //! surviving mutants on this file's error branches (surfaced by the
+    //! PR #3527 Mutants run) are killed: each test fails if the branch it
+    //! targets is deleted or its return value swapped.
+
+    use super::*;
+    use crate::cypher::ast::CypherOrderItem;
+
+    // --- helpers -----------------------------------------------------------
+
+    fn no_params() -> HashMap<String, CypherParameterValue> {
+        HashMap::new()
+    }
+
+    fn ret_var(variable: &str) -> CypherReturn {
+        CypherReturn {
+            distinct: false,
+            items: vec![CypherReturnItem::Variable(variable.to_string())],
+            order_by: vec![],
+            skip: None,
+            limit: None,
+        }
+    }
+
+    /// Build one `UnwindRow` for the `order_kind` / `order_rows` helpers.
+    fn urow(value: PropertyValue) -> UnwindRow {
+        (value.clone(), vec![("x".to_string(), value)])
+    }
+
+    /// Plan a standalone UNWIND and collect the first output column of each row.
+    fn run_unwind_params(
+        cypher: &str,
+        params: HashMap<String, CypherParameterValue>,
+    ) -> Vec<PropertyValue> {
+        match plan_cypher_with_params(cypher, params).expect("plan should succeed") {
+            CypherExecution::Rows(results) => results
+                .collect_all()
+                .expect("collect should succeed")
+                .into_iter()
+                .map(|row| {
+                    row.columns.expect("standalone UNWIND rows carry columns")[0]
+                        .1
+                        .clone()
+                })
+                .collect(),
+            _ => panic!("expected CypherExecution::Rows for a standalone UNWIND"),
+        }
+    }
+
+    fn run_unwind(cypher: &str) -> Vec<PropertyValue> {
+        run_unwind_params(cypher, no_params())
+    }
+
+    // --- unwind_source_values ---------------------------------------------
+
+    #[test]
+    fn source_null_literal_is_empty() {
+        let src = CypherExpr::Value(CypherValue::Null);
+        assert!(
+            unwind_source_values(&src, "x", &no_params())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn source_list_literal_yields_elements() {
+        let src = CypherExpr::List(vec![
+            CypherExpr::Value(CypherValue::Int(1)),
+            CypherExpr::Value(CypherValue::Int(2)),
+        ]);
+        assert_eq!(
+            unwind_source_values(&src, "x", &no_params()).unwrap(),
+            vec![PropertyValue::Int(1), PropertyValue::Int(2)]
+        );
+    }
+
+    #[test]
+    fn source_grouped_recurses() {
+        let src = CypherExpr::Grouped(Box::new(CypherExpr::List(vec![CypherExpr::Value(
+            CypherValue::Int(7),
+        )])));
+        assert_eq!(
+            unwind_source_values(&src, "x", &no_params()).unwrap(),
+            vec![PropertyValue::Int(7)]
+        );
+    }
+
+    #[test]
+    fn source_unbound_parameter_is_parameter_error() {
+        let src = CypherExpr::Value(CypherValue::Parameter("missing".to_string()));
+        let err = unwind_source_values(&src, "x", &no_params()).unwrap_err();
+        assert!(
+            matches!(err, CypherError::ParameterError(ref m) if m == "unbound parameter: $missing"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn source_null_parameter_is_empty() {
+        let mut params = no_params();
+        params.insert("p".to_string(), CypherParameterValue::Null);
+        let src = CypherExpr::Value(CypherValue::Parameter("p".to_string()));
+        assert!(unwind_source_values(&src, "x", &params).unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_list_parameter_yields_elements() {
+        let mut params = no_params();
+        params.insert(
+            "p".to_string(),
+            CypherParameterValue::List(vec![
+                CypherParameterValue::Int(1),
+                CypherParameterValue::Int(2),
+            ]),
+        );
+        let src = CypherExpr::Value(CypherValue::Parameter("p".to_string()));
+        assert_eq!(
+            unwind_source_values(&src, "x", &params).unwrap(),
+            vec![PropertyValue::Int(1), PropertyValue::Int(2)]
+        );
+    }
+
+    #[test]
+    fn source_embedding_parameter_expands_to_floats() {
+        let mut params = no_params();
+        params.insert(
+            "p".to_string(),
+            CypherParameterValue::Embedding(Arc::from([1.0f32, 2.0].as_slice())),
+        );
+        let src = CypherExpr::Value(CypherValue::Parameter("p".to_string()));
+        assert_eq!(
+            unwind_source_values(&src, "x", &params).unwrap(),
+            vec![PropertyValue::Float(1.0), PropertyValue::Float(2.0)]
+        );
+    }
+
+    #[test]
+    fn source_scalar_parameter_is_semantic_error() {
+        let mut params = no_params();
+        params.insert("p".to_string(), CypherParameterValue::Int(5));
+        let src = CypherExpr::Value(CypherValue::Parameter("p".to_string()));
+        let err = unwind_source_values(&src, "x", &params).unwrap_err();
+        match err {
+            CypherError::SemanticError(m) => {
+                assert!(m.contains("scalar"), "got {m}");
+            }
+            other => panic!("expected SemanticError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_row_dependent_expression_is_semantic_error() {
+        // A bare property access is neither a list nor null -> the catch-all
+        // `other` arm rejects it.
+        let src = CypherExpr::Property {
+            variable: "n".to_string(),
+            property: "tags".to_string(),
+        };
+        let err = unwind_source_values(&src, "x", &no_params()).unwrap_err();
+        match err {
+            CypherError::SemanticError(m) => {
+                assert!(m.contains("scalar or row-dependent"), "got {m}");
+            }
+            other => panic!("expected SemanticError, got {other:?}"),
+        }
+    }
+
+    // --- eval_element ------------------------------------------------------
+
+    #[test]
+    fn eval_element_depth_guard_is_parse_error() {
+        let expr = CypherExpr::Value(CypherValue::Int(1));
+        let err = eval_element(&expr, &no_params(), MAX_UNWIND_DEPTH + 1).unwrap_err();
+        match err {
+            CypherError::ParseError { message, .. } => {
+                assert_eq!(
+                    message,
+                    "UNWIND list nesting too deep for evaluation (max 256)"
+                );
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_element_value_and_nested_list() {
+        assert_eq!(
+            eval_element(&CypherExpr::Value(CypherValue::Int(3)), &no_params(), 0).unwrap(),
+            PropertyValue::Int(3)
+        );
+        let nested = CypherExpr::List(vec![CypherExpr::Value(CypherValue::Int(1))]);
+        let out = eval_element(&nested, &no_params(), 0).unwrap();
+        assert_eq!(
+            out,
+            PropertyValue::Array(Arc::new(vec![PropertyValue::Int(1)]))
+        );
+    }
+
+    #[test]
+    fn eval_element_grouped_recurses() {
+        let expr = CypherExpr::Grouped(Box::new(CypherExpr::Value(CypherValue::Int(8))));
+        assert_eq!(
+            eval_element(&expr, &no_params(), 0).unwrap(),
+            PropertyValue::Int(8)
+        );
+    }
+
+    #[test]
+    fn eval_element_row_dependent_is_unsupported() {
+        let expr = CypherExpr::Property {
+            variable: "n".to_string(),
+            property: "k".to_string(),
+        };
+        let err = eval_element(&expr, &no_params(), 0).unwrap_err();
+        match err {
+            CypherError::UnsupportedFeature(m) => {
+                assert!(m.contains("row-dependent expression"), "got {m}");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    // --- value_to_property -------------------------------------------------
+
+    #[test]
+    fn value_to_property_all_literal_variants() {
+        let p = no_params();
+        assert_eq!(
+            value_to_property(&CypherValue::Null, &p).unwrap(),
+            PropertyValue::Null
+        );
+        assert_eq!(
+            value_to_property(&CypherValue::Bool(true), &p).unwrap(),
+            PropertyValue::Bool(true)
+        );
+        assert_eq!(
+            value_to_property(&CypherValue::Int(4), &p).unwrap(),
+            PropertyValue::Int(4)
+        );
+        assert_eq!(
+            value_to_property(&CypherValue::Float(1.5), &p).unwrap(),
+            PropertyValue::Float(1.5)
+        );
+        assert_eq!(
+            value_to_property(&CypherValue::String("hi".to_string()), &p).unwrap(),
+            PropertyValue::String(Arc::from("hi"))
+        );
+        let vec: Arc<[f32]> = Arc::from([1.0f32, 2.0, 3.0].as_slice());
+        assert_eq!(
+            value_to_property(&CypherValue::Vector(Arc::clone(&vec)), &p).unwrap(),
+            PropertyValue::Vector(vec)
+        );
+    }
+
+    #[test]
+    fn value_to_property_unbound_parameter_is_parameter_error() {
+        let err =
+            value_to_property(&CypherValue::Parameter("q".to_string()), &no_params()).unwrap_err();
+        assert!(
+            matches!(err, CypherError::ParameterError(ref m) if m == "unbound parameter: $q"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn value_to_property_bound_parameter_resolves() {
+        let mut params = no_params();
+        params.insert("q".to_string(), CypherParameterValue::Int(42));
+        assert_eq!(
+            value_to_property(&CypherValue::Parameter("q".to_string()), &params).unwrap(),
+            PropertyValue::Int(42)
+        );
+    }
+
+    // --- param_to_property -------------------------------------------------
+
+    #[test]
+    fn param_to_property_depth_guard_is_parse_error() {
+        let err =
+            param_to_property(&CypherParameterValue::Int(1), MAX_UNWIND_DEPTH + 1).unwrap_err();
+        match err {
+            CypherError::ParseError { message, .. } => {
+                assert_eq!(
+                    message,
+                    "UNWIND list parameter nesting too deep for evaluation (max 256)"
+                );
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn param_to_property_variants_and_list_recursion() {
+        assert_eq!(
+            param_to_property(&CypherParameterValue::Null, 0).unwrap(),
+            PropertyValue::Null
+        );
+        assert_eq!(
+            param_to_property(&CypherParameterValue::Bool(true), 0).unwrap(),
+            PropertyValue::Bool(true)
+        );
+        assert_eq!(
+            param_to_property(&CypherParameterValue::Float(2.0), 0).unwrap(),
+            PropertyValue::Float(2.0)
+        );
+        assert_eq!(
+            param_to_property(&CypherParameterValue::String("s".to_string()), 0).unwrap(),
+            PropertyValue::String(Arc::from("s"))
+        );
+        let nested = CypherParameterValue::List(vec![CypherParameterValue::Int(9)]);
+        assert_eq!(
+            param_to_property(&nested, 0).unwrap(),
+            PropertyValue::Array(Arc::new(vec![PropertyValue::Int(9)]))
+        );
+        // The Embedding arm maps to a dense Vector (distinct from the
+        // list-source expansion in unwind_source_values).
+        let emb: Arc<[f32]> = Arc::from([1.0f32, 2.0].as_slice());
+        assert_eq!(
+            param_to_property(&CypherParameterValue::Embedding(Arc::clone(&emb)), 0).unwrap(),
+            PropertyValue::Vector(emb)
+        );
+    }
+
+    // --- validate_return_items --------------------------------------------
+
+    #[test]
+    fn validate_return_items_accepts_star_and_variable() {
+        let star = CypherReturn {
+            items: vec![CypherReturnItem::Star],
+            ..ret_var("x")
+        };
+        assert!(validate_return_items(&star, "x").is_ok());
+        assert!(validate_return_items(&ret_var("x"), "x").is_ok());
+    }
+
+    #[test]
+    fn validate_return_items_rejects_other_variable() {
+        let err = validate_return_items(&ret_var("y"), "x").unwrap_err();
+        match err {
+            CypherError::UnsupportedFeature(m) => {
+                assert!(m.contains("RETURN references variable 'y'"), "got {m}");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_return_items_accepts_expression_of_unwound_variable() {
+        let ret = CypherReturn {
+            items: vec![CypherReturnItem::Expression {
+                expr: CypherExpr::Variable("x".to_string()),
+                alias: Some("out".to_string()),
+            }],
+            ..ret_var("x")
+        };
+        assert!(validate_return_items(&ret, "x").is_ok());
+    }
+
+    #[test]
+    fn validate_return_items_rejects_expression_of_other_variable() {
+        let ret = CypherReturn {
+            items: vec![CypherReturnItem::Expression {
+                expr: CypherExpr::Variable("y".to_string()),
+                alias: None,
+            }],
+            ..ret_var("x")
+        };
+        let err = validate_return_items(&ret, "x").unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("RETURN references variable 'y'")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_return_items_rejects_aggregate() {
+        let ret = CypherReturn {
+            items: vec![CypherReturnItem::Expression {
+                expr: CypherExpr::FunctionCall {
+                    name: "count".to_string(),
+                    args: vec![CypherExpr::Star],
+                    distinct: false,
+                },
+                alias: None,
+            }],
+            ..ret_var("x")
+        };
+        let err = validate_return_items(&ret, "x").unwrap_err();
+        match err {
+            CypherError::UnsupportedFeature(m) => {
+                assert!(m.contains("aggregation (count)"), "got {m}");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_return_items_rejects_other_expression() {
+        let ret = CypherReturn {
+            items: vec![CypherReturnItem::Expression {
+                expr: CypherExpr::Property {
+                    variable: "x".to_string(),
+                    property: "k".to_string(),
+                },
+                alias: None,
+            }],
+            ..ret_var("x")
+        };
+        let err = validate_return_items(&ret, "x").unwrap_err();
+        match err {
+            CypherError::UnsupportedFeature(m) => {
+                assert!(m.contains("is not supported after a standalone"), "got {m}");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    // --- validate_order_by -------------------------------------------------
+
+    #[test]
+    fn validate_order_by_empty_returns_false() {
+        assert!(!validate_order_by(&ret_var("x"), "x").unwrap());
+    }
+
+    #[test]
+    fn validate_order_by_by_variable_returns_true() {
+        let ret = CypherReturn {
+            order_by: vec![CypherOrderItem {
+                expr: CypherExpr::Variable("x".to_string()),
+                descending: false,
+            }],
+            ..ret_var("x")
+        };
+        assert!(validate_order_by(&ret, "x").unwrap());
+    }
+
+    #[test]
+    fn validate_order_by_by_alias_returns_true() {
+        let ret = CypherReturn {
+            items: vec![CypherReturnItem::Expression {
+                expr: CypherExpr::Variable("x".to_string()),
+                alias: Some("a".to_string()),
+            }],
+            order_by: vec![CypherOrderItem {
+                expr: CypherExpr::Variable("a".to_string()),
+                descending: false,
+            }],
+            ..ret_var("x")
+        };
+        assert!(validate_order_by(&ret, "x").unwrap());
+    }
+
+    #[test]
+    fn validate_order_by_non_variable_expr_is_unsupported() {
+        let ret = CypherReturn {
+            order_by: vec![CypherOrderItem {
+                expr: CypherExpr::Property {
+                    variable: "x".to_string(),
+                    property: "k".to_string(),
+                },
+                descending: false,
+            }],
+            ..ret_var("x")
+        };
+        let err = validate_order_by(&ret, "x").unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("ORDER BY")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_order_by_wrong_variable_is_unsupported() {
+        let ret = CypherReturn {
+            order_by: vec![CypherOrderItem {
+                expr: CypherExpr::Variable("z".to_string()),
+                descending: false,
+            }],
+            ..ret_var("x")
+        };
+        let err = validate_order_by(&ret, "x").unwrap_err();
+        match err {
+            CypherError::UnsupportedFeature(m) => {
+                assert!(m.contains("ORDER BY 'z'"), "got {m}");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    // --- order_kind --------------------------------------------------------
+
+    #[test]
+    fn order_kind_homogeneous_kinds() {
+        assert!(matches!(
+            order_kind(&[urow(PropertyValue::Int(1)), urow(PropertyValue::Float(2.0))]).unwrap(),
+            OrderKind::Numeric
+        ));
+        assert!(matches!(
+            order_kind(&[urow(PropertyValue::String(Arc::from("a")))]).unwrap(),
+            OrderKind::Text
+        ));
+        assert!(matches!(
+            order_kind(&[urow(PropertyValue::Bool(true))]).unwrap(),
+            OrderKind::Boolean
+        ));
+    }
+
+    #[test]
+    fn order_kind_all_null_defaults_to_numeric() {
+        assert!(matches!(
+            order_kind(&[urow(PropertyValue::Null)]).unwrap(),
+            OrderKind::Numeric
+        ));
+        assert!(matches!(order_kind(&[]).unwrap(), OrderKind::Numeric));
+    }
+
+    #[test]
+    fn order_kind_non_scalar_is_unsupported() {
+        let arr = PropertyValue::Array(Arc::new(vec![PropertyValue::Int(1)]));
+        match order_kind(&[urow(arr)]) {
+            Err(CypherError::UnsupportedFeature(m)) => {
+                assert!(m.contains("only scalar values"), "got {m}");
+            }
+            Ok(_) => panic!("expected an error, got Ok"),
+            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_kind_heterogeneous_is_unsupported() {
+        match order_kind(&[
+            urow(PropertyValue::Int(1)),
+            urow(PropertyValue::String(Arc::from("a"))),
+        ]) {
+            Err(CypherError::UnsupportedFeature(m)) => {
+                assert!(m.contains("homogeneous scalar"), "got {m}");
+            }
+            Ok(_) => panic!("expected an error, got Ok"),
+            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    // --- order_rows / compare_scalar --------------------------------------
+
+    fn first_values(rows: &[UnwindRow]) -> Vec<PropertyValue> {
+        rows.iter().map(|(v, _)| v.clone()).collect()
+    }
+
+    #[test]
+    fn order_rows_ascending_and_descending_ints() {
+        let mut rows = vec![
+            urow(PropertyValue::Int(3)),
+            urow(PropertyValue::Int(1)),
+            urow(PropertyValue::Int(2)),
+        ];
+        order_rows(&mut rows, false).unwrap();
+        assert_eq!(
+            first_values(&rows),
+            vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                PropertyValue::Int(3)
+            ]
+        );
+        order_rows(&mut rows, true).unwrap();
+        assert_eq!(
+            first_values(&rows),
+            vec![
+                PropertyValue::Int(3),
+                PropertyValue::Int(2),
+                PropertyValue::Int(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn order_rows_large_ints_keep_precision() {
+        // Two distinct integers above 2^53 must not collapse to a tie.
+        let a = (1_i64 << 53) + 1;
+        let b = (1_i64 << 53) + 2;
+        let mut rows = vec![urow(PropertyValue::Int(b)), urow(PropertyValue::Int(a))];
+        order_rows(&mut rows, false).unwrap();
+        assert_eq!(
+            first_values(&rows),
+            vec![PropertyValue::Int(a), PropertyValue::Int(b)]
+        );
+    }
+
+    #[test]
+    fn order_rows_strings_and_bools() {
+        let mut rows = vec![
+            urow(PropertyValue::String(Arc::from("b"))),
+            urow(PropertyValue::String(Arc::from("a"))),
+        ];
+        order_rows(&mut rows, false).unwrap();
+        assert_eq!(
+            first_values(&rows),
+            vec![
+                PropertyValue::String(Arc::from("a")),
+                PropertyValue::String(Arc::from("b"))
+            ]
+        );
+
+        let mut bools = vec![
+            urow(PropertyValue::Bool(true)),
+            urow(PropertyValue::Bool(false)),
+        ];
+        order_rows(&mut bools, false).unwrap();
+        assert_eq!(
+            first_values(&bools),
+            vec![PropertyValue::Bool(false), PropertyValue::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn order_rows_null_placement() {
+        // Ascending: nulls last.
+        let mut asc = vec![
+            urow(PropertyValue::Null),
+            urow(PropertyValue::Int(2)),
+            urow(PropertyValue::Int(1)),
+        ];
+        order_rows(&mut asc, false).unwrap();
+        assert_eq!(
+            first_values(&asc),
+            vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                PropertyValue::Null
+            ]
+        );
+        // Descending: nulls first.
+        let mut desc = vec![
+            urow(PropertyValue::Int(1)),
+            urow(PropertyValue::Null),
+            urow(PropertyValue::Int(2)),
+        ];
+        order_rows(&mut desc, true).unwrap();
+        assert_eq!(
+            first_values(&desc),
+            vec![
+                PropertyValue::Null,
+                PropertyValue::Int(2),
+                PropertyValue::Int(1)
+            ]
+        );
+    }
+
+    // --- is_aggregate_name -------------------------------------------------
+
+    #[test]
+    fn is_aggregate_name_recognizes_aggregates_case_insensitively() {
+        for name in ["count", "SUM", "Avg", "min", "MAX", "collect"] {
+            assert!(is_aggregate_name(name), "{name} should be an aggregate");
+        }
+        assert!(!is_aggregate_name("length"));
+        assert!(!is_aggregate_name("similarity"));
+    }
+
+    // --- needs_multi_binding ----------------------------------------------
+
+    fn parse_stmt(input: &str) -> CypherStatement {
+        CypherParser::parse(input).expect("parse should succeed")
+    }
+
+    #[test]
+    fn needs_multi_binding_single_terminal_variable_is_false() {
+        assert!(!needs_multi_binding(&parse_stmt("MATCH (n) RETURN n")));
+        assert!(!needs_multi_binding(&parse_stmt(
+            "MATCH (a)-[:R]->(b) RETURN b"
+        )));
+    }
+
+    #[test]
+    fn needs_multi_binding_multiple_referenced_vars_is_true() {
+        assert!(needs_multi_binding(&parse_stmt(
+            "MATCH (a)-[:R]->(b) RETURN a, b"
+        )));
+    }
+
+    #[test]
+    fn needs_multi_binding_anonymous_terminal_is_true() {
+        // Terminal node is anonymous, but `a` is referenced -> routed to the
+        // multi-pattern evaluator.
+        assert!(needs_multi_binding(&parse_stmt(
+            "MATCH (a)-[:R]->() RETURN a"
+        )));
+    }
+
+    #[test]
+    fn needs_multi_binding_non_match_is_false() {
+        assert!(!needs_multi_binding(&parse_stmt(
+            "UNWIND [1] AS x RETURN x"
+        )));
+    }
+
+    #[test]
+    fn needs_multi_binding_empty_referenced_is_false() {
+        // `RETURN *` binds no entity var into `referenced`, so with a single
+        // node pattern `referenced` is empty: original returns false, but the
+        // `referenced.len() > 1` -> `< 1` (== 0) mutant would flip it to true
+        // (0 < 1) because the `any()` over the empty set does NOT mask at len 0.
+        assert!(!needs_multi_binding(&parse_stmt("MATCH (n) RETURN *")));
+    }
+
+    #[test]
+    fn needs_multi_binding_varless_pattern_is_false() {
+        // All-anonymous pattern -> entity_vars empty -> early-return false.
+        assert!(!needs_multi_binding(&parse_stmt("MATCH () RETURN *")));
+    }
+
+    #[test]
+    fn needs_multi_binding_where_reference_counts() {
+        // The second entity var `a` is referenced ONLY via WHERE; without the
+        // where-clause collection path it would look single-terminal (`b`).
+        assert!(needs_multi_binding(&parse_stmt(
+            "MATCH (a)-[:R]->(b) WHERE a.age > 1 RETURN b"
+        )));
+    }
+
+    #[test]
+    fn needs_multi_binding_order_by_reference_counts() {
+        // The second entity var `a` is referenced ONLY via ORDER BY; this pins
+        // the order_by collection path.
+        assert!(needs_multi_binding(&parse_stmt(
+            "MATCH (a)-[:R]->(b) RETURN b ORDER BY a.age"
+        )));
+    }
+
+    // --- end-to-end execute_unwind ----------------------------------------
+
+    #[test]
+    fn unwind_empty_and_null_expand_to_zero_rows() {
+        assert!(run_unwind("UNWIND [] AS x RETURN x").is_empty());
+        assert!(run_unwind("UNWIND null AS x RETURN x").is_empty());
+    }
+
+    #[test]
+    fn unwind_order_by_asc_and_desc() {
+        assert_eq!(
+            run_unwind("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x"),
+            vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                PropertyValue::Int(3)
+            ]
+        );
+        assert_eq!(
+            run_unwind("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x DESC"),
+            vec![
+                PropertyValue::Int(3),
+                PropertyValue::Int(2),
+                PropertyValue::Int(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn unwind_distinct_dedups() {
+        assert_eq!(
+            run_unwind("UNWIND [1, 1, 2] AS x RETURN DISTINCT x"),
+            vec![PropertyValue::Int(1), PropertyValue::Int(2)]
+        );
+    }
+
+    #[test]
+    fn unwind_skip_and_limit_paginate() {
+        assert_eq!(
+            run_unwind("UNWIND [1, 2, 3, 4] AS x RETURN x SKIP 1 LIMIT 2"),
+            vec![PropertyValue::Int(2), PropertyValue::Int(3)]
+        );
+    }
+
+    #[test]
+    fn unwind_parameter_list_end_to_end() {
+        let mut params = no_params();
+        params.insert(
+            "p".to_string(),
+            CypherParameterValue::List(vec![
+                CypherParameterValue::Int(10),
+                CypherParameterValue::Int(20),
+            ]),
+        );
+        assert_eq!(
+            run_unwind_params("UNWIND $p AS x RETURN x", params),
+            vec![PropertyValue::Int(10), PropertyValue::Int(20)]
+        );
+    }
+
+    // --- sharper boundary / discrimination tests --------------------------
+    // These pin operator, guard, size-hint, and depth-arithmetic mutants that
+    // a coarse "MAX+1" / message-only assertion leaves alive.
+
+    #[test]
+    fn vec_result_iterator_size_hint_is_exact() {
+        let it = VecResultIterator::new(vec![
+            QueryRow::from_columns(vec![("x".to_string(), PropertyValue::Int(1))]),
+            QueryRow::from_columns(vec![("x".to_string(), PropertyValue::Int(2))]),
+        ]);
+        // Exact `(len, Some(len))` -- distinguishes every wrong-tuple mutant.
+        assert_eq!(it.size_hint(), (2, Some(2)));
+    }
+
+    #[test]
+    fn eval_element_depth_boundary_is_inclusive() {
+        // At exactly MAX_UNWIND_DEPTH the guard (`depth > MAX`) must NOT fire;
+        // this kills the `>` -> `>=` mutant that an over-limit test cannot.
+        assert_eq!(
+            eval_element(
+                &CypherExpr::Value(CypherValue::Int(1)),
+                &no_params(),
+                MAX_UNWIND_DEPTH
+            )
+            .unwrap(),
+            PropertyValue::Int(1)
+        );
+    }
+
+    #[test]
+    fn param_to_property_depth_boundary_is_inclusive() {
+        assert_eq!(
+            param_to_property(&CypherParameterValue::Int(1), MAX_UNWIND_DEPTH).unwrap(),
+            PropertyValue::Int(1)
+        );
+    }
+
+    #[test]
+    fn eval_element_list_recursion_increments_depth() {
+        // A list nested deeper than MAX must trip the guard. The `depth + 1`
+        // increment is what accumulates toward the cap; a `depth * 1` mutant
+        // would leave depth pinned at 0 and never error.
+        let mut expr = CypherExpr::Value(CypherValue::Int(1));
+        for _ in 0..(MAX_UNWIND_DEPTH + 40) {
+            expr = CypherExpr::List(vec![expr]);
+        }
+        assert!(
+            matches!(
+                eval_element(&expr, &no_params(), 0),
+                Err(CypherError::ParseError { .. })
+            ),
+            "deeply nested list should trip the depth guard"
+        );
+    }
+
+    #[test]
+    fn eval_element_grouped_recursion_increments_depth() {
+        let mut expr = CypherExpr::Value(CypherValue::Int(1));
+        for _ in 0..(MAX_UNWIND_DEPTH + 40) {
+            expr = CypherExpr::Grouped(Box::new(expr));
+        }
+        assert!(matches!(
+            eval_element(&expr, &no_params(), 0),
+            Err(CypherError::ParseError { .. })
+        ));
+    }
+
+    #[test]
+    fn param_to_property_list_recursion_increments_depth() {
+        let mut param = CypherParameterValue::Int(1);
+        for _ in 0..(MAX_UNWIND_DEPTH + 40) {
+            param = CypherParameterValue::List(vec![param]);
+        }
+        assert!(matches!(
+            param_to_property(&param, 0),
+            Err(CypherError::ParseError { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_return_items_non_aggregate_function_is_generic_error() {
+        // A non-aggregate function call must hit the generic `other` arm, NOT
+        // the aggregate arm -- this kills the `is_aggregate_name(name)` guard
+        // being replaced with `true`.
+        let ret = CypherReturn {
+            items: vec![CypherReturnItem::Expression {
+                expr: CypherExpr::FunctionCall {
+                    name: "length".to_string(),
+                    args: vec![CypherExpr::Variable("x".to_string())],
+                    distinct: false,
+                },
+                alias: None,
+            }],
+            ..ret_var("x")
+        };
+        match validate_return_items(&ret, "x") {
+            Err(CypherError::UnsupportedFeature(m)) => {
+                assert!(m.contains("is not supported after a standalone"), "got {m}");
+                assert!(!m.contains("aggregation"), "got {m}");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn needs_multi_binding_comma_patterns_route_on_pattern_count() {
+        // Two comma-separated patterns with a single referenced terminal var:
+        // the ONLY clause making this multi-binding is `pattern.len() > 1`.
+        // Kills the `>` -> `<` and the `||` -> `&&` mutants on that clause.
+        assert!(needs_multi_binding(&parse_stmt("MATCH (a), (b) RETURN b")));
+    }
+
+    #[test]
+    fn plan_routes_multi_pattern_vs_single_entity() {
+        // The `needs_multi_binding` match guard in `plan_cypher_with_params`
+        // decides MultiPattern vs Query routing.
+        assert!(matches!(
+            plan_cypher("MATCH (a)-[:R]->(b) RETURN a, b").unwrap(),
+            CypherExecution::MultiPattern { .. }
+        ));
+        assert!(matches!(
+            plan_cypher("MATCH (n) RETURN n").unwrap(),
+            CypherExecution::Query(_)
+        ));
+    }
+
+    #[test]
+    fn explain_rejects_multi_pattern_but_plans_single() {
+        // The `needs_multi_binding` guard in `lower_for_plan`.
+        assert!(matches!(
+            plan_cypher("EXPLAIN MATCH (n) RETURN n").unwrap(),
+            CypherExecution::Explain(_)
+        ));
+        match plan_cypher("EXPLAIN MATCH (a)-[:R]->(b) RETURN a, b") {
+            Err(CypherError::UnsupportedFeature(m)) => {
+                assert!(m.contains("multi-pattern"), "got {m}");
+            }
+            Ok(_) => panic!("expected an error, got a plannable execution"),
+            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
 }

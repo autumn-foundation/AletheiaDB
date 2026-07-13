@@ -443,6 +443,9 @@ impl AstConverter {
             embedding,
             top_k: rank.top_k,
             property_key: None,
+            metric: crate::core::vector::DistanceMetric::Cosine,
+            threshold: None,
+            score_alias: None,
         });
         Ok(())
     }
