@@ -1408,6 +1408,21 @@ then `.matches(Option<&Provenance>)`), and on the HTTP `/query` endpoint the
 `find_node`, `get_node`, and `find_neighbors` operations accept the same four
 keys inline (invalid values → `400` naming the field).
 
+**HTTP paging is refilled, so a short page means end-of-data.** The HTTP
+`find_node` / `find_neighbors` responses are bare JSON arrays with no
+`has_more` / `next_offset` signal (unlike the MCP tools). When a provenance
+filter is active these endpoints **over-fetch and refill**: they keep scanning
+forward past the requested `limit` until the page holds `limit` filter-passing
+rows or the underlying scan is exhausted. A returned page therefore has up to
+`limit` rows whenever that many matches remain, and a **short or empty page
+genuinely means end-of-data** — a client may use the standard "short page ⇒
+stop" heuristic without under-reading later matches. The refill scan is bounded
+by the same `MAX_DEEP_PAGINATION` (10,000) horizon already enforced on
+`offset + limit`; in the rare case that horizon is reached before the page
+fills, the shorter page is returned (the documented boundary). This preserves
+the bare-array response shape exactly. (The MCP tools are unaffected: they
+expose `has_more` and advance by a pre-filter page window.)
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`
