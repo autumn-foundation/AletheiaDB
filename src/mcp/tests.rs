@@ -16061,3 +16061,409 @@ mod provenance_chain_tests {
         assert_eq!(scoped["scope"].as_str(), Some("entity"));
     }
 }
+
+// ============================================================================
+// Provenance filtering (Issue #3348)
+// ============================================================================
+
+mod provenance_filter_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Dispatch a tool through the same table `call_tool` uses; return
+    /// `(parsed_json, is_error)`.
+    fn dispatch(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        let value = serde_json::from_str(&text).expect("tool response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Create a `Doc` node with the given `source`/`confidence` provenance
+    /// (either optional) and return its id.
+    fn create_doc(
+        server: &AletheiaMcpServer,
+        name: &str,
+        source: Option<&str>,
+        confidence: Option<f64>,
+    ) -> u64 {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), json!(name));
+        let provenance = if source.is_some() || confidence.is_some() {
+            Some(ProvenanceRequest {
+                source: source.map(String::from),
+                confidence,
+                note: None,
+                correlation_id: None,
+            })
+        } else {
+            None
+        };
+        let n: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            label: "Doc".to_string(),
+            properties: Some(props),
+            provenance,
+        }))
+        .unwrap();
+        n.id
+    }
+
+    // --- get_node --------------------------------------------------------
+
+    #[test]
+    fn get_node_passes_and_excludes_by_source() {
+        let server = create_test_server();
+        let id = create_doc(&server, "a", Some("crm"), Some(0.9));
+
+        // Matching source -> returned.
+        let (ok, err) = dispatch(
+            &server,
+            "get_node",
+            json!({"node_id": id, "provenance_source": "crm"}),
+        );
+        assert!(!err);
+        assert_eq!(ok["id"].as_u64(), Some(id));
+
+        // Non-matching source -> NOT_FOUND (never a fabricated node).
+        let (excluded, err) = dispatch(
+            &server,
+            "get_node",
+            json!({"node_id": id, "provenance_source": "hr"}),
+        );
+        assert!(err);
+        assert_eq!(excluded["error"]["code"].as_str(), Some("NOT_FOUND"));
+        assert_eq!(excluded["error"]["retriable"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn get_node_no_filter_is_unchanged() {
+        let server = create_test_server();
+        let id = create_doc(&server, "a", Some("crm"), Some(0.9));
+        let (plain, _) = dispatch(&server, "get_node", json!({"node_id": id}));
+        // A no-op provenance object (all keys absent) is byte-identical.
+        let (also_plain, _) = dispatch(
+            &server,
+            "get_node",
+            json!({"node_id": id, "provenance_source": serde_json::Value::Null}),
+        );
+        assert_eq!(plain, also_plain);
+    }
+
+    // --- list_nodes ------------------------------------------------------
+
+    fn seed_docs(server: &AletheiaMcpServer) {
+        create_doc(server, "crm-hi", Some("crm"), Some(0.9));
+        create_doc(server, "crm-lo", Some("crm"), Some(0.4));
+        create_doc(server, "hr-hi", Some("hr"), Some(0.95));
+        create_doc(server, "none", None, None); // unattributed
+    }
+
+    fn list_names(v: &serde_json::Value) -> Vec<String> {
+        v["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["properties"]["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn list_nodes_source_filter() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_source": "crm"}),
+        );
+        assert!(!err);
+        let mut names = list_names(&v);
+        names.sort();
+        assert_eq!(names, vec!["crm-hi", "crm-lo"]);
+    }
+
+    #[test]
+    fn list_nodes_multi_source_any_of() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_sources": ["crm", "hr"]}),
+        );
+        let mut names = list_names(&v);
+        names.sort();
+        assert_eq!(names, vec!["crm-hi", "crm-lo", "hr-hi"]);
+    }
+
+    #[test]
+    fn list_nodes_min_confidence_inclusive() {
+        let server = create_test_server();
+        seed_docs(&server);
+        // >= 0.9 -> crm-hi (0.9) and hr-hi (0.95); crm-lo (0.4) excluded.
+        let (v, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "min_confidence": 0.9}),
+        );
+        let mut names = list_names(&v);
+        names.sort();
+        assert_eq!(names, vec!["crm-hi", "hr-hi"]);
+    }
+
+    #[test]
+    fn list_nodes_combined_is_and() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_source": "crm", "min_confidence": 0.8}),
+        );
+        assert_eq!(list_names(&v), vec!["crm-hi"]);
+    }
+
+    #[test]
+    fn list_nodes_unattributed_excluded_then_included() {
+        let server = create_test_server();
+        seed_docs(&server);
+        // Default: the unattributed "none" node is excluded by an active filter.
+        let (v, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "min_confidence": 0.0}),
+        );
+        assert!(!list_names(&v).contains(&"none".to_string()));
+        // include_unattributed re-includes it.
+        let (v2, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "min_confidence": 0.0, "include_unattributed": true}),
+        );
+        assert!(list_names(&v2).contains(&"none".to_string()));
+    }
+
+    #[test]
+    fn list_nodes_empty_result_is_success_not_error() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_source": "nonexistent-source"}),
+        );
+        assert!(
+            !err,
+            "an empty filtered result must be a success, not an error"
+        );
+        assert_eq!(v["count"].as_u64(), Some(0));
+    }
+
+    // --- validation (AC5) ------------------------------------------------
+
+    #[test]
+    fn invalid_confidence_is_invalid_argument_with_field() {
+        let server = create_test_server();
+        for bad in [json!(1.5), json!(-0.1)] {
+            let (v, err) = dispatch(
+                &server,
+                "list_nodes",
+                json!({"label": "Doc", "min_confidence": bad}),
+            );
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+            assert_eq!(
+                v["error"]["details"]["field"].as_str(),
+                Some("min_confidence")
+            );
+            assert_eq!(v["error"]["retriable"].as_bool(), Some(false));
+        }
+    }
+
+    #[test]
+    fn empty_source_list_is_invalid_argument() {
+        let server = create_test_server();
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_sources": []}),
+        );
+        assert!(err);
+        assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+        assert_eq!(
+            v["error"]["details"]["field"].as_str(),
+            Some("provenance_sources")
+        );
+    }
+
+    #[test]
+    fn wrong_typed_min_confidence_is_invalid_argument() {
+        let server = create_test_server();
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "min_confidence": "high"}),
+        );
+        assert!(err);
+        assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+        assert_eq!(
+            v["error"]["details"]["field"].as_str(),
+            Some("min_confidence")
+        );
+    }
+
+    // --- adjacency edges -------------------------------------------------
+
+    #[test]
+    fn outgoing_edges_filtered_by_source() {
+        let server = create_test_server();
+        let a = create_doc(&server, "a", None, None);
+        let b = create_doc(&server, "b", None, None);
+        let c = create_doc(&server, "c", None, None);
+        for (target, source) in [(b, "crm"), (c, "hr")] {
+            server.create_edge(CreateEdgeRequest {
+                source_id: a,
+                target_id: target,
+                label: "LINK".to_string(),
+                properties: None,
+                valid_time: None,
+                provenance: Some(ProvenanceRequest {
+                    source: Some(source.to_string()),
+                    confidence: Some(0.9),
+                    note: None,
+                    correlation_id: None,
+                }),
+                derived_from: None,
+            });
+        }
+        let (v, err) = dispatch(
+            &server,
+            "get_outgoing_edges",
+            json!({"node_id": a, "provenance_source": "crm"}),
+        );
+        assert!(!err);
+        assert_eq!(v["count"].as_u64(), Some(1));
+        assert_eq!(v["edges"][0]["target_id"].as_u64(), Some(b));
+    }
+
+    // --- traverse (composes with temporal, AC3) --------------------------
+
+    #[test]
+    fn traverse_min_confidence_filters_returned_nodes() {
+        let server = create_test_server();
+        let a = create_doc(&server, "a", Some("crm"), Some(0.9));
+        let hi = create_doc(&server, "hi", Some("crm"), Some(0.95));
+        let lo = create_doc(&server, "lo", Some("crm"), Some(0.2));
+        for t in [hi, lo] {
+            server.create_edge(CreateEdgeRequest {
+                source_id: a,
+                target_id: t,
+                label: "LINK".to_string(),
+                properties: None,
+                valid_time: None,
+                provenance: None,
+                derived_from: None,
+            });
+        }
+        let (v, err) = dispatch(
+            &server,
+            "traverse",
+            json!({"start_node_id": a, "edge_label": "LINK", "depth": 1, "min_confidence": 0.9}),
+        );
+        assert!(!err);
+        let names: Vec<String> = v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                r["node"]["properties"]["name"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["hi"],
+            "only the high-confidence node is returned"
+        );
+    }
+
+    // --- find_similar (AC6) ----------------------------------------------
+
+    #[test]
+    fn find_similar_returns_k_filter_passing_candidates() {
+        let server = create_test_server();
+        server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        // 6 docs: alternate trusted/untrusted sources.
+        for i in 0..6 {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), json!(format!("d{i}")));
+            props.insert(
+                "embedding".to_string(),
+                json!([0.1 + i as f32 * 0.01, 0.2, 0.3, 0.4]),
+            );
+            let source = if i % 2 == 0 { "trusted" } else { "other" };
+            server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Doc".to_string(),
+                properties: Some(props),
+                provenance: Some(ProvenanceRequest {
+                    source: Some(source.to_string()),
+                    confidence: Some(0.9),
+                    note: None,
+                    correlation_id: None,
+                }),
+            });
+        }
+        // k=3, filter to "trusted" (3 exist). AC6: exactly the trusted ones,
+        // all passing, no post-truncation below k.
+        let (v, err) = dispatch(
+            &server,
+            "find_similar",
+            json!({
+                "property_name": "embedding",
+                "embedding": [0.1, 0.2, 0.3, 0.4],
+                "k": 3,
+                "provenance_source": "trusted"
+            }),
+        );
+        assert!(!err, "response: {v}");
+        let results = v["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3, "all 3 trusted candidates returned: {v}");
+        for r in results {
+            assert_eq!(r["node"]["provenance"]["source"].as_str(), Some("trusted"));
+        }
+    }
+
+    // --- cursor interaction (fail closed) --------------------------------
+
+    #[test]
+    fn provenance_filter_with_cursor_is_rejected() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_source": "crm", "use_cursor": true}),
+        );
+        assert!(err);
+        assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+}

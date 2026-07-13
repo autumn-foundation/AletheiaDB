@@ -1441,6 +1441,117 @@ unchanged for backward compatibility and is fine for small, stable, one-shot
 lists where re-planning per page is cheap and concurrent drift is not a
 concern.
 
+## Filtering by provenance (Issue #3348)
+
+Issue #3224 lets every version carry write-time provenance (`source`,
+`confidence`, `reason`). Issue #3348 makes that metadata **queryable**: the read
+tools `get_node`, `list_nodes`, `get_outgoing_edges`, `get_incoming_edges`,
+`traverse`, `find_similar`, and `hybrid_query` accept an optional provenance
+filter so an agent reasons only over facts whose origin and trust level meet its
+bar — no fetch-everything-then-filter in application code.
+
+### The parameters
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `provenance_source` | string | Keep facts whose provenance `source` **exactly equals** this value. |
+| `provenance_sources` | string[] | Keep facts whose `source` is **any of** these (unioned with `provenance_source`). An empty list is rejected. |
+| `min_confidence` | number `[0,1]` | Keep facts whose recorded `confidence` is `>=` this **inclusive** lower bound. |
+| `include_unattributed` | bool | When `true`, re-include facts with **no recorded provenance** (default `false` = excluded). |
+
+Semantics:
+
+- **AND across dimensions.** Source and confidence constraints must both hold.
+- **Unattributed = no bundle at all.** A version with no provenance is excluded
+  whenever a filter is active, unless `include_unattributed: true`. A *partial*
+  bundle (present, but missing the queried field) is **attributed** and simply
+  fails the constraint on the missing field — `include_unattributed` does not
+  rescue it.
+- **Per-version, so it composes with time.** The filter is evaluated against the
+  provenance recorded on the exact version a read returns, so combining it with
+  `as_of_valid_time` / `as_of_transaction_time` filters on provenance **as
+  recorded at that coordinate**, not against the latest version.
+- **Omitting all four is byte-identical to today.**
+- **Invalid values fail closed.** A confidence outside `[0,1]` (or NaN) or an
+  empty source list returns a structured `INVALID_ARGUMENT` naming the offending
+  field under `details.field` — never a silently-empty result.
+- **`find_similar` / `hybrid_query` never under-truncate.** The filter is applied
+  to *candidates* (over-fetched up to the vector horizon), so the returned top-k
+  are all filter-passing whenever at least k passing candidates exist — ranked
+  order is preserved.
+- **v1 caveat: cursor paging.** A provenance filter combined with cursor paging
+  (`use_cursor` / `cursor`) is rejected with `INVALID_ARGUMENT`; use offset
+  paging (`limit`/`offset`) to page a provenance-filtered scan.
+
+### Worked examples
+
+**1. Single source.** Only facts recorded by the `crm-sync` pipeline:
+
+```json
+{ "name": "list_nodes",
+  "arguments": { "label": "Customer", "provenance_source": "crm-sync" } }
+```
+
+**2. Multi-source + confidence (AND).** Facts from either `crm-sync` or
+`billing`, with recorded confidence at least 0.8:
+
+```json
+{ "name": "find_similar",
+  "arguments": {
+    "property_name": "embedding",
+    "embedding": [0.12, 0.04, ...],
+    "k": 10,
+    "provenance_sources": ["crm-sync", "billing"],
+    "min_confidence": 0.8
+  } }
+```
+
+All ten returned neighbors are guaranteed to satisfy the filter (candidates are
+filtered before the top-k is cut).
+
+**3. Temporal + provenance.** Who did Alice know on 2024-01-01, following only
+edges whose recorded confidence was `>= 0.9` **as recorded at that coordinate**:
+
+```json
+{ "name": "traverse",
+  "arguments": {
+    "start_node_id": 42,
+    "edge_label": "KNOWS",
+    "depth": 2,
+    "as_of_valid_time": "2024-01-01T00:00:00Z",
+    "min_confidence": 0.9
+  } }
+```
+
+### On `get_node`
+
+`get_node` returns the node when the filter passes; when the node exists but
+does **not** satisfy the filter it returns a `NOT_FOUND` (the node is simply not
+in the filtered view) rather than a fabricated result.
+
+### Rust and HTTP surfaces
+
+The same semantics are available to embedders through the surface-agnostic
+`aletheiadb::core::ProvenanceFilter` predicate (`ProvenanceFilter::validated(..)`
+then `.matches(Option<&Provenance>)`), and on the HTTP `/query` endpoint the
+`find_node`, `get_node`, and `find_neighbors` operations accept the same four
+keys inline (invalid values → `400` naming the field).
+
+**HTTP paging is refilled, so a short page means end-of-data.** The HTTP
+`find_node` / `find_neighbors` responses are bare JSON arrays with no
+`has_more` / `next_offset` signal (unlike the MCP tools). When a provenance
+filter is active these endpoints **over-fetch and refill**: they keep scanning
+forward past the requested `limit` until the page holds `limit` filter-passing
+rows or the underlying scan is exhausted. A returned page therefore has up to
+`limit` rows whenever that many matches remain, and a **short or empty page
+genuinely means end-of-data** — a client may use the standard "short page ⇒
+stop" heuristic without under-reading later matches. The refill scan is bounded
+by the same `MAX_DEEP_PAGINATION` (10,000) horizon already enforced on
+`offset + limit`; in the rare case that horizon is reached before the page
+fills, the shorter page is returned (the documented boundary). This preserves
+the bare-array response shape exactly. (The MCP tools are unaffected: they
+expose `has_more` and advance by a pre-filter page window.)
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`

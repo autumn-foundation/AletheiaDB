@@ -146,7 +146,7 @@ use crate::api::transaction::WriteOps;
 use crate::core::temporal::time;
 use crate::core::{
     ChangeFeedQuery, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
-    PropertyValue, Provenance, Timestamp, VersionId,
+    PropertyValue, Provenance, ProvenanceFilter, Timestamp, VersionId,
 };
 use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
@@ -1332,6 +1332,113 @@ impl AletheiaMcpServer {
         })
     }
 
+    /// Parse the optional provenance filter parameters (Issue #3348) off the
+    /// raw tool arguments, returning `Ok(None)` when no filter is active
+    /// (byte-identical legacy behavior) or a validated [`ProvenanceFilter`].
+    ///
+    /// Reading straight off the raw `Value` (rather than a typed struct field)
+    /// lets the offset path and the snapshot-anchored cursor path (#3360)
+    /// share one parser, and keeps the filter available on tools whose cursor
+    /// handlers never build the typed request. The four recognized keys are
+    /// `provenance_source` (scalar, exact), `provenance_sources` (array,
+    /// any-of), `min_confidence` (inclusive lower bound in `[0,1]`), and
+    /// `include_unattributed` (bool).
+    ///
+    /// Invalid values fail closed with a structured `INVALID_ARGUMENT` whose
+    /// `details.field` names the offending parameter (AC5) — never a silent
+    /// empty result.
+    pub(crate) fn parse_provenance_filter(
+        &self,
+        args: &serde_json::Value,
+    ) -> std::result::Result<Option<ProvenanceFilter>, CallToolResult> {
+        let Some(obj) = args.as_object() else {
+            return Ok(None);
+        };
+
+        // Type-check each key up front so a wrong JSON type is a clear
+        // caller-fault error rather than a silently-ignored filter.
+        let provenance_source = match obj.get("provenance_source") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                return Err(self.provenance_filter_type_error("provenance_source", "a string"));
+            }
+        };
+
+        let provenance_sources = match obj.get("provenance_sources") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Array(arr)) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for item in arr {
+                    match item {
+                        serde_json::Value::String(s) => out.push(s.clone()),
+                        _ => {
+                            return Err(self.provenance_filter_type_error(
+                                "provenance_sources",
+                                "an array of strings",
+                            ));
+                        }
+                    }
+                }
+                Some(out)
+            }
+            Some(_) => {
+                return Err(
+                    self.provenance_filter_type_error("provenance_sources", "an array of strings")
+                );
+            }
+        };
+
+        let min_confidence = match obj.get("min_confidence") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Number(n)) => match n.as_f64() {
+                Some(f) => Some(f),
+                None => {
+                    return Err(self
+                        .provenance_filter_type_error("min_confidence", "a number in [0.0, 1.0]"));
+                }
+            },
+            Some(_) => {
+                return Err(
+                    self.provenance_filter_type_error("min_confidence", "a number in [0.0, 1.0]")
+                );
+            }
+        };
+
+        let include_unattributed = match obj.get("include_unattributed") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(_) => {
+                return Err(self.provenance_filter_type_error("include_unattributed", "a boolean"));
+            }
+        };
+
+        ProvenanceFilter::validated(
+            provenance_source,
+            provenance_sources,
+            min_confidence,
+            include_unattributed,
+        )
+        .map_err(|e| {
+            self.error_result(
+                McpError::new(McpErrorCode::InvalidArgument, e.to_string())
+                    .details(json!({ "field": e.field() })),
+            )
+        })
+    }
+
+    /// Structured `INVALID_ARGUMENT` for a wrong-typed provenance-filter
+    /// parameter (Issue #3348), naming the field so the caller can repair it.
+    fn provenance_filter_type_error(&self, field: &str, expected: &str) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::InvalidArgument,
+                format!("Invalid '{field}': expected {expected}"),
+            )
+            .details(json!({ "field": field })),
+        )
+    }
+
     /// Parse a single MCP [`LineageRefRequest`] into a core
     /// [`LineageRef`](crate::core::lineage::LineageRef) (Issue #3371).
     ///
@@ -1580,6 +1687,35 @@ impl AletheiaMcpServer {
     fn cursor_requested(args: &serde_json::Value) -> bool {
         args.get("cursor").and_then(|v| v.as_str()).is_some()
             || args.get("use_cursor").and_then(|v| v.as_bool()) == Some(true)
+    }
+
+    /// Whether the raw arguments carry any (non-null) Issue #3348 provenance
+    /// filter parameter. Used to fail closed when a filter is combined with a
+    /// path that does not yet honor it (v1: cursor paging), rather than
+    /// silently returning unfiltered results.
+    fn has_provenance_filter_args(args: &serde_json::Value) -> bool {
+        let Some(obj) = args.as_object() else {
+            return false;
+        };
+        ["provenance_source", "provenance_sources", "min_confidence"]
+            .iter()
+            .any(|k| matches!(obj.get(*k), Some(v) if !v.is_null()))
+    }
+
+    /// Fail-closed error for combining a provenance filter with cursor paging
+    /// (Issue #3348 v1): the snapshot-anchored cursor token does not yet carry
+    /// the filter, so rather than silently ignore it, reject with guidance to
+    /// use offset paging.
+    fn provenance_filter_cursor_unsupported(&self) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::InvalidArgument,
+                "A provenance filter is not supported together with cursor paging \
+                 (use_cursor/cursor) in this version; use offset paging (limit/offset) \
+                 to combine provenance filtering with pagination.",
+            )
+            .details(json!({ "field": "cursor" })),
+        )
     }
 
     /// Read an optional non-empty string argument.
@@ -1937,6 +2073,13 @@ impl AletheiaMcpServer {
     // ========================================================================
 
     fn handle_get_node(&self, args: serde_json::Value) -> CallToolResult {
+        // Issue #3348: parse the optional provenance filter off the raw args
+        // before consuming them into the typed request.
+        let prov_filter = match self.parse_provenance_filter(&args) {
+            Ok(f) => f,
+            Err(result) => return result,
+        };
+
         let req: GetNodeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -1956,6 +2099,27 @@ impl AletheiaMcpServer {
                 let now = time::now();
                 let response =
                     self.node_to_response(&node, req.include_vectors.unwrap_or(false), now);
+                // Issue #3348: when a provenance filter is supplied, a node
+                // that exists but does not satisfy it is not in the filtered
+                // view. Surface an honest, non-retriable NOT_FOUND (never a
+                // fabricated node), naming the constraint via details.
+                if let Some(filter) = &prov_filter
+                    && !filter.matches(response.provenance.as_ref())
+                {
+                    return self.error_result(
+                        McpError::new(
+                            McpErrorCode::NotFound,
+                            format!(
+                                "Node {} exists but does not satisfy the provenance filter",
+                                node_id.as_u64()
+                            ),
+                        )
+                        .details(json!({
+                            "node_id": node_id.as_u64(),
+                            "reason": "provenance_filter_excluded"
+                        })),
+                    );
+                }
                 self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
@@ -2541,8 +2705,20 @@ impl AletheiaMcpServer {
         // backward compatibility. The cursor parameters are additive and read
         // straight off the raw arguments (the request structs stay unchanged).
         if Self::cursor_requested(&args) {
+            // Issue #3348: fail closed rather than silently ignore a filter
+            // the cursor path does not yet honor.
+            if Self::has_provenance_filter_args(&args) {
+                return self.provenance_filter_cursor_unsupported();
+            }
             return self.handle_list_nodes_cursor(&args);
         }
+
+        // Issue #3348: parse the optional provenance filter before consuming
+        // the raw args into the typed request.
+        let prov_filter = match self.parse_provenance_filter(&args) {
+            Ok(f) => f,
+            Err(result) => return result,
+        };
 
         let req: ListNodesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -2596,7 +2772,18 @@ impl AletheiaMcpServer {
             let mut nodes = Vec::with_capacity(limit);
             for node_id in node_ids.into_iter().skip(offset).take(limit) {
                 if let Ok(node) = self.db.get_node(node_id) {
-                    nodes.push(self.node_to_response(&node, include_vectors, now));
+                    let resp = self.node_to_response(&node, include_vectors, now);
+                    // Issue #3348: the provenance filter is applied per-page.
+                    // Non-matching rows are dropped from this page while
+                    // `offset`/`next_offset` still advance over the unfiltered
+                    // candidate window, so paging stays gap-free/dup-free (a
+                    // page may therefore hold fewer than `limit` rows).
+                    if prov_filter
+                        .as_ref()
+                        .is_none_or(|f| f.matches(resp.provenance.as_ref()))
+                    {
+                        nodes.push(resp);
+                    }
                 }
             }
 
@@ -2614,7 +2801,15 @@ impl AletheiaMcpServer {
                 "offset": offset,
                 "limit": limit
             });
-            Self::attach_completeness(&mut response, offset, limit, has_more, Some(total_matching));
+            // With a provenance filter active, `total_matching` would be the
+            // *unfiltered* candidate count and therefore misleading, so it is
+            // omitted; `has_more` still carries the completeness signal.
+            let reported_total = if prov_filter.is_some() {
+                None
+            } else {
+                Some(total_matching)
+            };
+            Self::attach_completeness(&mut response, offset, limit, has_more, reported_total);
             return self.success_json(response);
         }
 
@@ -2634,6 +2829,10 @@ impl AletheiaMcpServer {
                     let mut skipped = 0;
                     let mut has_more = false;
 
+                    // `page_window` counts rows consumed from the unfiltered
+                    // scan for this page (so `next_offset` advances correctly
+                    // even when the provenance filter drops some of them).
+                    let mut page_window = 0usize;
                     for row_result in results {
                         match row_result {
                             Ok(row) => {
@@ -2642,13 +2841,21 @@ impl AletheiaMcpServer {
                                     continue;
                                 }
                                 if let EntityResult::Node(node) = row.entity {
-                                    if nodes.len() >= limit {
+                                    if page_window >= limit {
                                         // The extra (offset+limit+1)th matching
                                         // row proves more results remain.
                                         has_more = true;
                                         break;
                                     }
-                                    nodes.push(self.node_to_response(&node, include_vectors, now));
+                                    page_window += 1;
+                                    let resp = self.node_to_response(&node, include_vectors, now);
+                                    // Issue #3348: per-page provenance filter.
+                                    if prov_filter
+                                        .as_ref()
+                                        .is_none_or(|f| f.matches(resp.provenance.as_ref()))
+                                    {
+                                        nodes.push(resp);
+                                    }
                                 }
                             }
                             Err(e) => return self.db_error(e),
@@ -2658,13 +2865,16 @@ impl AletheiaMcpServer {
                     // A label scan cannot cheaply know the matching total
                     // (that needs a full scan), so `total_matching` is omitted;
                     // `has_more` alone carries the completeness signal.
+                    // `next_offset` advances by the unfiltered `page_window`,
+                    // not `nodes.len()`, so a provenance-filtered page never
+                    // re-skips or duplicates rows on the next page.
                     let mut response = json!({
                         "nodes": nodes,
                         "count": nodes.len(),
                         "offset": offset,
                         "limit": limit
                     });
-                    Self::attach_completeness(&mut response, offset, nodes.len(), has_more, None);
+                    Self::attach_completeness(&mut response, offset, page_window, has_more, None);
                     self.success_json(response)
                 }
                 Err(e) => self.db_error(e),
@@ -3001,8 +3211,17 @@ impl AletheiaMcpServer {
         // Snapshot-anchored cursor paging (Issue #3360); the full-adjacency
         // path below is unchanged for backward compatibility.
         if Self::cursor_requested(&args) {
+            if Self::has_provenance_filter_args(&args) {
+                return self.provenance_filter_cursor_unsupported();
+            }
             return self.handle_adjacency_cursor("get_outgoing_edges", false, &args);
         }
+
+        // Issue #3348: parse the optional provenance filter before consuming args.
+        let prov_filter = match self.parse_provenance_filter(&args) {
+            Ok(f) => f,
+            Err(result) => return result,
+        };
 
         let req: GetOutgoingEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3032,6 +3251,12 @@ impl AletheiaMcpServer {
             .into_iter()
             .filter_map(|eid| self.db.get_edge(eid).ok())
             .map(|e| self.edge_to_response(&e, include_vectors, now))
+            // Issue #3348: keep only edges whose per-version provenance passes.
+            .filter(|resp| {
+                prov_filter
+                    .as_ref()
+                    .is_none_or(|f| f.matches(resp.provenance.as_ref()))
+            })
             .collect();
 
         // This handler returns the complete adjacency (no limit/offset), so the
@@ -3050,8 +3275,17 @@ impl AletheiaMcpServer {
         // Snapshot-anchored cursor paging (Issue #3360); the full-adjacency
         // path below is unchanged for backward compatibility.
         if Self::cursor_requested(&args) {
+            if Self::has_provenance_filter_args(&args) {
+                return self.provenance_filter_cursor_unsupported();
+            }
             return self.handle_adjacency_cursor("get_incoming_edges", true, &args);
         }
+
+        // Issue #3348: parse the optional provenance filter before consuming args.
+        let prov_filter = match self.parse_provenance_filter(&args) {
+            Ok(f) => f,
+            Err(result) => return result,
+        };
 
         let req: GetIncomingEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3084,6 +3318,12 @@ impl AletheiaMcpServer {
                     .unwrap_or(true)
             })
             .map(|e| self.edge_to_response(&e, include_vectors, now))
+            // Issue #3348: keep only edges whose per-version provenance passes.
+            .filter(|resp| {
+                prov_filter
+                    .as_ref()
+                    .is_none_or(|f| f.matches(resp.provenance.as_ref()))
+            })
             .collect();
 
         // Complete adjacency (no limit/offset): never truncated, so
@@ -3212,8 +3452,17 @@ impl AletheiaMcpServer {
         // keyset traversal is a documented follow-up). The offset path below
         // is unchanged for backward compatibility.
         if Self::cursor_requested(&args) {
+            if Self::has_provenance_filter_args(&args) {
+                return self.provenance_filter_cursor_unsupported();
+            }
             return self.handle_traverse_cursor(&args);
         }
+
+        // Issue #3348: parse the optional provenance filter before consuming args.
+        let prov_filter = match self.parse_provenance_filter(&args) {
+            Ok(f) => f,
+            Err(result) => return result,
+        };
 
         let req: TraverseRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3251,7 +3500,7 @@ impl AletheiaMcpServer {
         // (Issue #3391).
         let now = time::now();
 
-        let (results, has_more) = self.run_traversal(
+        let (mut results, has_more) = self.run_traversal(
             start_id,
             &req.edge_label,
             direction,
@@ -3262,6 +3511,19 @@ impl AletheiaMcpServer {
             req.include_vectors.unwrap_or(false),
             now,
         );
+
+        // Issue #3348: apply the provenance filter to this page's returned
+        // nodes (each carries its per-version provenance, resolved at the
+        // temporal coordinate when `as_of_*` is set -- AC3). `page_window` is
+        // the pre-filter page size, so `next_offset` still advances over the
+        // unfiltered DFS order (gap-free/dup-free); a page may hold fewer than
+        // `limit` results. The filter constrains the returned nodes, not which
+        // edges the DFS follows (edge-provenance-gated path pruning is a
+        // documented follow-up).
+        let page_window = results.len();
+        if let Some(filter) = &prov_filter {
+            results.retain(|r| filter.matches(r.node.provenance.as_ref()));
+        }
 
         let count = results.len();
         let mut response = match temporal {
@@ -3279,7 +3541,7 @@ impl AletheiaMcpServer {
         // The matching total would require exhausting the traversal, so
         // `total_matching` is omitted; `has_more`/`next_offset` carry the
         // completeness signal.
-        Self::attach_completeness(&mut response, offset, count, has_more, None);
+        Self::attach_completeness(&mut response, offset, page_window, has_more, None);
         self.success_json(response)
     }
 
@@ -3535,6 +3797,12 @@ impl AletheiaMcpServer {
     }
 
     fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
+        // Issue #3348: parse the optional provenance filter before consuming args.
+        let prov_filter = match self.parse_provenance_filter(&args) {
+            Ok(f) => f,
+            Err(result) => return result,
+        };
+
         let req: FindSimilarRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -3574,28 +3842,60 @@ impl AletheiaMcpServer {
         // more similar nodes exist beyond this page (`has_more`) without a
         // second query. The matching total would need a full index scan, so
         // `total_matching` is omitted.
-        let fetch_k = k.saturating_add(offset).saturating_add(1);
+        //
+        // Issue #3348 (AC6): when a provenance filter is active, over-fetch the
+        // full candidate horizon (MAX_VECTOR_K + 1) and apply the filter to
+        // CANDIDATES so the returned top-k are all filter-passing -- never a
+        // post-truncation that returns fewer than k when >= k passing
+        // candidates exist within the horizon. The horizon (MAX_VECTOR_K) is
+        // the same resource bound the unfiltered path already enforces.
+        let fetch_k = if prov_filter.is_some() {
+            MAX_VECTOR_K.saturating_add(1)
+        } else {
+            k.saturating_add(offset).saturating_add(1)
+        };
         match self
             .db
             .similarity_search(crate::SimilarityQuery::from_embedding(req.embedding).k(fetch_k))
         {
             Ok(results) => {
-                let has_more = results.len() > offset.saturating_add(k);
                 let include_vectors = req.include_vectors.unwrap_or(false);
                 // One request-scoped wallclock for every entity in the
                 // response (Issue #3391).
                 let now = time::now();
-                let similarity_results: Vec<SimilarityResult> = results
-                    .into_iter()
-                    .skip(offset)
-                    .take(k)
-                    .filter_map(|(node_id, score)| {
-                        self.db.get_node(node_id).ok().map(|node| SimilarityResult {
-                            node: self.node_to_response(&node, include_vectors, now),
-                            score,
+
+                let (similarity_results, has_more) = if let Some(filter) = &prov_filter {
+                    // Build each candidate (in descending score order), keep
+                    // only filter-passing ones, THEN page. Ranking order is
+                    // preserved; only per-candidate inclusion changes (AC6).
+                    let passing: Vec<SimilarityResult> = results
+                        .into_iter()
+                        .filter_map(|(node_id, score)| {
+                            self.db.get_node(node_id).ok().map(|node| SimilarityResult {
+                                node: self.node_to_response(&node, include_vectors, now),
+                                score,
+                            })
                         })
-                    })
-                    .collect();
+                        .filter(|r| filter.matches(r.node.provenance.as_ref()))
+                        .collect();
+                    let has_more = passing.len() > offset.saturating_add(k);
+                    let page = passing.into_iter().skip(offset).take(k).collect();
+                    (page, has_more)
+                } else {
+                    let has_more = results.len() > offset.saturating_add(k);
+                    let page: Vec<SimilarityResult> = results
+                        .into_iter()
+                        .skip(offset)
+                        .take(k)
+                        .filter_map(|(node_id, score)| {
+                            self.db.get_node(node_id).ok().map(|node| SimilarityResult {
+                                node: self.node_to_response(&node, include_vectors, now),
+                                score,
+                            })
+                        })
+                        .collect();
+                    (page, has_more)
+                };
 
                 let count = similarity_results.len();
                 let mut response = json!({
@@ -4907,6 +5207,12 @@ impl AletheiaMcpServer {
     }
 
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
+        // Issue #3348: parse the optional provenance filter before consuming args.
+        let prov_filter = match self.parse_provenance_filter(&args) {
+            Ok(f) => f,
+            Err(result) => return result,
+        };
+
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -4947,14 +5253,23 @@ impl AletheiaMcpServer {
         // (Issue #3391).
         let now = time::now();
 
-        // Helper to convert rows to hybrid results with temporal info
+        // Helper to convert rows to hybrid results with temporal info. Issue
+        // #3348: rows whose per-version provenance fails the filter are
+        // dropped here; ranked (similarity) order among survivors is
+        // preserved (no reordering).
+        let prov_filter_ref = prov_filter.as_ref();
         let rows_to_results =
             |rows: Vec<crate::query::executor::QueryRow>| -> Vec<HybridQueryResult> {
                 rows.into_iter()
                     .filter_map(|row| {
                         if let EntityResult::Node(node) = row.entity {
+                            let node = self.node_to_response(&node, include_vectors, now);
+                            if !prov_filter_ref.is_none_or(|f| f.matches(node.provenance.as_ref()))
+                            {
+                                return None;
+                            }
                             Some(HybridQueryResult {
-                                node: self.node_to_response(&node, include_vectors, now),
+                                node,
                                 similarity_score: row.score,
                                 traversal_path: row.path.map(|p| {
                                     p.iter()
@@ -4988,14 +5303,25 @@ impl AletheiaMcpServer {
                 return match self.db.get_node_at_time(node_id, vt, tt) {
                     Ok(node) => {
                         let response = self.node_to_response(&node, include_vectors, now);
-                        self.success_json(json!({
-                            "results": [HybridQueryResult {
+                        // Issue #3348: apply the provenance filter (evaluated on
+                        // the version resolved at this coordinate) to the single
+                        // result; a fail yields an empty result set, never a
+                        // fabricated row.
+                        let results: Vec<HybridQueryResult> = if prov_filter_ref
+                            .is_none_or(|f| f.matches(response.provenance.as_ref()))
+                        {
+                            vec![HybridQueryResult {
                                 node: response,
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: Some(vt.wallclock().to_string()),
-                            }],
-                            "count": 1,
+                            }]
+                        } else {
+                            Vec::new()
+                        };
+                        self.success_json(json!({
+                            "results": results,
+                            "count": results.len(),
                             "temporal_query": {
                                 "valid_time": req.valid_time,
                                 "transaction_time": req.transaction_time
@@ -5020,14 +5346,22 @@ impl AletheiaMcpServer {
                 return match self.db.get_node(node_id) {
                     Ok(node) => {
                         let response = self.node_to_response(&node, include_vectors, now);
-                        self.success_json(json!({
-                            "results": [HybridQueryResult {
+                        // Issue #3348: filter the single start node.
+                        let results: Vec<HybridQueryResult> = if prov_filter_ref
+                            .is_none_or(|f| f.matches(response.provenance.as_ref()))
+                        {
+                            vec![HybridQueryResult {
                                 node: response,
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: None,
-                            }],
-                            "count": 1
+                            }]
+                        } else {
+                            Vec::new()
+                        };
+                        self.success_json(json!({
+                            "results": results,
+                            "count": results.len(),
                         }))
                     }
                     Err(e) => self.db_error(e),
@@ -5066,12 +5400,23 @@ impl AletheiaMcpServer {
                 return self.invalid_argument(&e);
             }
 
-            let builder = crate::query::QueryBuilder::new().find_similar(embedding, k);
+            // Issue #3348 (AC6): with a provenance filter, over-fetch the
+            // candidate horizon so the returned top rows are all
+            // filter-passing rather than a short post-truncation. Ranked order
+            // is preserved; the page is truncated back to `limit` after
+            // filtering.
+            let (fetch_k, fetch_limit) = if prov_filter.is_some() {
+                (MAX_VECTOR_K, MAX_VECTOR_K)
+            } else {
+                (k, limit)
+            };
+            let builder = crate::query::QueryBuilder::new().find_similar(embedding, fetch_k);
 
-            match builder.limit(limit).execute(&self.db) {
+            match builder.limit(fetch_limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
+                        let mut hybrid_results = rows_to_results(rows);
+                        hybrid_results.truncate(limit);
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len(),
@@ -6055,6 +6400,26 @@ pub(crate) fn is_budgetable_read_tool(name: &str) -> bool {
     BUDGETABLE_READ_TOOLS.contains(&name)
 }
 
+/// Read tools that honor the Issue #3348 provenance filter parameters
+/// (`provenance_source`, `provenance_sources`, `min_confidence`,
+/// `include_unattributed`). This is the single source of truth for schema
+/// advertisement; each listed tool's handler parses the filter via
+/// [`AletheiaMcpServer::parse_provenance_filter`].
+pub(crate) const PROVENANCE_FILTERABLE_TOOLS: &[&str] = &[
+    "get_node",
+    "list_nodes",
+    "get_outgoing_edges",
+    "get_incoming_edges",
+    "traverse",
+    "find_similar",
+    "hybrid_query",
+];
+
+/// Does this tool honor the provenance filter parameters (Issue #3348)?
+pub(crate) fn is_provenance_filterable_tool(name: &str) -> bool {
+    PROVENANCE_FILTERABLE_TOOLS.contains(&name)
+}
+
 fn make_input_schema<T: rmcp::schemars::JsonSchema>()
 -> Arc<serde_json::Map<String, serde_json::Value>> {
     let schema = rmcp::schemars::schema_for!(T);
@@ -6691,9 +7056,86 @@ fn tool_definitions() -> Vec<Tool> {
             desc.push_str(BUDGET_TOOL_HINT);
             tool.description = Some(std::borrow::Cow::Owned(desc));
         }
+        // Advertise the Issue #3348 provenance filter on every filterable read
+        // tool, kept in lockstep with `PROVENANCE_FILTERABLE_TOOLS`.
+        if is_provenance_filterable_tool(&tool.name) {
+            inject_provenance_filter_schema_params(&mut tool.input_schema);
+            let mut desc = tool.description.as_deref().unwrap_or("").to_string();
+            desc.push_str(PROVENANCE_FILTER_TOOL_HINT);
+            tool.description = Some(std::borrow::Cow::Owned(desc));
+        }
     }
     tools
 }
+
+/// Inject the four optional Issue #3348 provenance-filter parameters into a
+/// tool's generated JSON `inputSchema.properties`, so a client introspecting
+/// the schema discovers them with correct types. All are optional, so
+/// `required` is untouched. Idempotent.
+fn inject_provenance_filter_schema_params(
+    schema: &mut Arc<serde_json::Map<String, serde_json::Value>>,
+) {
+    let schema = Arc::make_mut(schema);
+    let props = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(props) = props.as_object_mut() else {
+        return;
+    };
+    props
+        .entry("provenance_source".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "string",
+                "description": "Optional provenance filter (Issue #3348): keep only facts whose \
+                    write-time provenance source exactly equals this value. Combine with \
+                    'provenance_sources' (any-of) and/or 'min_confidence' (AND).",
+            })
+        });
+    props
+        .entry("provenance_sources".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional provenance filter (Issue #3348): keep facts whose \
+                    provenance source is ANY of these values (unioned with 'provenance_source'). \
+                    An empty list is rejected as INVALID_ARGUMENT.",
+            })
+        });
+    props
+        .entry("min_confidence".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Optional provenance filter (Issue #3348): keep only facts whose \
+                    recorded confidence is >= this INCLUSIVE threshold, in [0.0, 1.0]. \
+                    Out-of-range/NaN is rejected as INVALID_ARGUMENT.",
+            })
+        });
+    props
+        .entry("include_unattributed".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "boolean",
+                "description": "Optional provenance filter (Issue #3348): when true, facts with NO \
+                    recorded provenance bundle are re-included despite an active provenance filter \
+                    (default false = excluded).",
+            })
+        });
+}
+
+/// Uniform description suffix documenting the provenance-filter parameters
+/// (Issue #3348), appended to every filterable read tool.
+const PROVENANCE_FILTER_TOOL_HINT: &str = " Optional provenance filter (Issue #3348): pass \
+    `provenance_source` (exact) and/or `provenance_sources` (any-of) and/or `min_confidence` \
+    (inclusive lower bound in [0,1]) to return only facts whose write-time provenance meets your \
+    bar; the constraints are ANDed. The filter is evaluated per-version (so it composes with \
+    `as_of_*` temporal reads). Facts with no recorded provenance are excluded unless \
+    `include_unattributed: true`. Invalid values (confidence out of [0,1], empty source list) \
+    return INVALID_ARGUMENT naming the field. Omit for unchanged behavior.";
 
 /// Inject the three optional Issue #3353 token-budget parameters into a tool's
 /// generated JSON `inputSchema.properties`, so a client that introspects the

@@ -56,7 +56,9 @@ pub use lineage::{
     LineageStore,
 };
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
-pub use provenance::{Provenance, ProvenanceBuilder, ProvenanceError};
+pub use provenance::{
+    Provenance, ProvenanceBuilder, ProvenanceError, ProvenanceFilter, ProvenanceFilterError,
+};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 pub use vector::{
     // Types and constants

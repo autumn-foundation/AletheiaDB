@@ -82,6 +82,47 @@ pub async fn health_check(
 // Query Endpoint
 // ============================================================================
 
+/// Optional provenance filter parameters (Issue #3348) accepted by the
+/// read operations (`find_node`, `get_node`, `find_neighbors`).
+///
+/// Flattened into each read variant so callers pass the four keys inline;
+/// all default to absent, so omitting them reproduces prior behavior exactly.
+/// Validated via [`ProvenanceFilterParams::into_filter`], sharing the
+/// surface-agnostic [`ProvenanceFilter`](crate::core::ProvenanceFilter)
+/// semantics with the MCP surface.
+#[derive(Debug, Default, Deserialize)]
+pub struct ProvenanceFilterParams {
+    /// Exact-match provenance source.
+    #[serde(default)]
+    pub provenance_source: Option<String>,
+    /// Any-of provenance sources (unioned with `provenance_source`).
+    #[serde(default)]
+    pub provenance_sources: Option<Vec<String>>,
+    /// Inclusive minimum recorded confidence, in `[0.0, 1.0]`.
+    #[serde(default)]
+    pub min_confidence: Option<f64>,
+    /// Re-include versions with no recorded provenance.
+    #[serde(default)]
+    pub include_unattributed: Option<bool>,
+}
+
+impl ProvenanceFilterParams {
+    /// Validate into a [`ProvenanceFilter`](crate::core::ProvenanceFilter),
+    /// returning `Ok(None)` when no constraint is active (byte-identical
+    /// legacy behavior). Invalid values map to a `400 BadRequest`
+    /// (INVALID_ARGUMENT) whose message names the offending field (Issue
+    /// #3348 AC5), never a silently-empty success.
+    fn into_filter(self) -> Result<Option<crate::core::ProvenanceFilter>, AletheiaHttpError> {
+        crate::core::ProvenanceFilter::validated(
+            self.provenance_source,
+            self.provenance_sources,
+            self.min_confidence,
+            self.include_unattributed.unwrap_or(false),
+        )
+        .map_err(|e| AletheiaHttpError::BadRequest(format!("{} (field: {})", e, e.field())))
+    }
+}
+
 /// Polymorphic request for the `/query` endpoint, discriminated by `operation`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -93,9 +134,18 @@ pub enum QueryRequest {
         properties: Option<HashMap<String, Value>>,
         limit: Option<usize>,
         offset: Option<usize>,
+        /// Provenance filter (Issue #3348), all optional. See
+        /// [`ProvenanceFilterParams`].
+        #[serde(flatten)]
+        provenance_filter: ProvenanceFilterParams,
     },
     /// Get a single node by its 64-bit ID.
-    GetNode { node_id: u64 },
+    GetNode {
+        node_id: u64,
+        /// Provenance filter (Issue #3348), all optional.
+        #[serde(flatten)]
+        provenance_filter: ProvenanceFilterParams,
+    },
     /// Create a new node with an optional property map.
     CreateNode {
         label: String,
@@ -120,6 +170,9 @@ pub enum QueryRequest {
         limit: Option<usize>,
         #[serde(default)]
         offset: Option<usize>,
+        /// Provenance filter (Issue #3348), all optional.
+        #[serde(default, flatten)]
+        provenance_filter: ProvenanceFilterParams,
     },
     /// Execute an AQL query string, optionally with bound parameters.
     ExecuteQuery {
@@ -289,16 +342,42 @@ async fn handle_create_node(
     .await
 }
 
+/// Load a node's write-time provenance bundle for the exact version the
+/// snapshot is holding (Issue #3348). Best-effort: an unreadable metadata
+/// record degrades to `None` (treated as unattributed by the filter),
+/// mirroring the MCP surface, rather than failing the whole read.
+fn node_provenance(
+    db: &crate::AletheiaDB,
+    node: &crate::core::Node,
+) -> Option<crate::core::Provenance> {
+    match db.get_node_version_read_metadata(node.current_version) {
+        Ok(Some((prov, _interval))) => prov,
+        _ => None,
+    }
+}
+
 async fn handle_get_node(
     db: Arc<crate::AletheiaDB>,
     node_id: u64,
+    provenance_filter: ProvenanceFilterParams,
 ) -> Result<Value, AletheiaHttpError> {
     let nid = NodeId::new(node_id).map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+    // Issue #3348: validate the filter up front (400 on bad input, AC5).
+    let prov_filter = provenance_filter.into_filter()?;
 
     blocking(move || {
         let node = db
             .get_node(nid)
             .map_err(|_| AletheiaHttpError::NotFound(format!("Node {node_id} not found")))?;
+        // Issue #3348: a node that exists but fails the provenance filter is
+        // not in the filtered view -> an honest 404 (never a fabricated node).
+        if let Some(filter) = &prov_filter
+            && !filter.matches(node_provenance(&db, &node).as_ref())
+        {
+            return Err(AletheiaHttpError::NotFound(format!(
+                "Node {node_id} not found"
+            )));
+        }
         // Issue #3524: reuse the shared serializer so the migration-spike's
         // `GET /nodes/{id}` produces byte-identical output. Behavior unchanged.
         crate::http::converters::node_to_query_json(&node).map_err(AletheiaHttpError::Internal)
@@ -312,15 +391,36 @@ async fn handle_find_node(
     properties: Option<HashMap<String, Value>>,
     limit: Option<usize>,
     offset: Option<usize>,
+    provenance_filter: ProvenanceFilterParams,
 ) -> Result<Value, AletheiaHttpError> {
     let limit_val = limit.unwrap_or(100);
     let offset_val = offset.unwrap_or(0);
+    // Issue #3348: validate the filter up front (400 on bad input, AC5).
+    let prov_filter = provenance_filter.into_filter()?;
 
     if offset_val.saturating_add(limit_val) > MAX_DEEP_PAGINATION {
         return Err(AletheiaHttpError::BadRequest(format!(
             "Pagination limit exceeded: offset + limit must be <= {MAX_DEEP_PAGINATION}"
         )));
     }
+
+    // Issue #3348 (FIX A): the HTTP find_node response is a bare array with no
+    // `has_more`/`next_offset` signal, so a page that filters down below
+    // `limit_val` mid-scan would make a client using the standard "short page
+    // => end of results" heuristic stop early and under-read later matches.
+    // When a provenance filter is active we therefore OVER-FETCH and REFILL:
+    // scan forward past `limit_val` until the page holds `limit_val`
+    // filter-passing rows (or the source is exhausted), so a short/empty page
+    // genuinely means end-of-data. The refill scan is bounded by
+    // `MAX_DEEP_PAGINATION` (the same horizon enforced on `offset + limit`
+    // above) -- it is never unbounded; if that cap is reached before the page
+    // fills, we stop and return the shorter page (documented boundary). With no
+    // filter the behavior is byte-identical to before (scan exactly `limit_val`).
+    let scan_limit = if prov_filter.is_some() {
+        MAX_DEEP_PAGINATION.saturating_sub(offset_val)
+    } else {
+        limit_val
+    };
 
     blocking(move || {
         let mut builder = if let Some(lbl) = label {
@@ -342,7 +442,7 @@ async fn handle_find_node(
         }
 
         let results = builder
-            .limit(limit_val)
+            .limit(scan_limit)
             .execute(&db)
             .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
 
@@ -353,6 +453,15 @@ async fn handle_find_node(
         for row_result in results {
             let row = row_result.map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
             if let crate::query::executor::EntityResult::Node(node) = row.entity {
+                // Issue #3348: per-page provenance filter. The scan over-fetches
+                // (see `scan_limit` above) so the page can be refilled to
+                // `limit_val` passing rows; iteration is lazy, so we stop
+                // consuming the scan as soon as the page is full.
+                if let Some(filter) = &prov_filter
+                    && !filter.matches(node_provenance(&db, &node).as_ref())
+                {
+                    continue;
+                }
                 let props_json =
                     property_map_to_json(&node.properties).map_err(AletheiaHttpError::Internal)?;
                 nodes.push(json!({
@@ -360,6 +469,9 @@ async fn handle_find_node(
                     "label": interned_to_string(node.label),
                     "properties": props_json,
                 }));
+                if nodes.len() >= limit_val {
+                    break;
+                }
             }
         }
         Ok(Value::Array(nodes))
@@ -372,17 +484,34 @@ async fn handle_find_neighbors(
     node_id: u64,
     limit: Option<usize>,
     offset: Option<usize>,
+    provenance_filter: ProvenanceFilterParams,
 ) -> Result<Value, AletheiaHttpError> {
     let nid = NodeId::new(node_id).map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
 
     let limit_val = limit.unwrap_or(100).min(MAX_NEIGHBOR_LIMIT);
     let offset_val = offset.unwrap_or(0);
+    // Issue #3348: validate the filter up front (400 on bad input, AC5).
+    let prov_filter = provenance_filter.into_filter()?;
 
     if offset_val.saturating_add(limit_val) > MAX_DEEP_PAGINATION {
         return Err(AletheiaHttpError::BadRequest(format!(
             "Pagination limit exceeded: offset + limit must be <= {MAX_DEEP_PAGINATION}"
         )));
     }
+
+    // Issue #3348 (FIX A): like find_node, find_neighbors returns a bare array
+    // with no completeness signal, so a provenance-filtered page that would
+    // fall short mid-scan is refilled by over-fetching neighbor candidates
+    // until the page holds `limit_val` passing rows (or candidates are
+    // exhausted). The refill scan is bounded by `MAX_DEEP_PAGINATION` (the same
+    // horizon enforced on `offset + limit` above) so it is never unbounded; if
+    // that cap is reached before the page fills we stop (documented boundary).
+    // With no filter the behavior is unchanged (take exactly `limit_val`).
+    let scan_limit = if prov_filter.is_some() {
+        MAX_DEEP_PAGINATION.saturating_sub(offset_val)
+    } else {
+        limit_val
+    };
 
     blocking(move || {
         let mut seen_ids = HashSet::new();
@@ -395,17 +524,27 @@ async fn handle_find_neighbors(
             .get_incoming_edges_iter(nid)
             .map(|edge_id| db.get_edge_source(edge_id).ok());
 
+        // `take(scan_limit)` bounds the candidate scan; when a filter is active
+        // this over-fetches past `limit_val` so the page can be refilled, and
+        // the explicit `break` below stops once `limit_val` passing rows are
+        // collected (lazy iteration => no wasted candidate reads).
         let combined_iter = outgoing_iter
             .chain(incoming_iter)
             .flatten()
             .filter(|&neighbor_id| seen_ids.insert(neighbor_id))
             .skip(offset_val)
-            .take(limit_val);
+            .take(scan_limit);
 
         for neighbor_id in combined_iter {
             let node = db
                 .get_node(neighbor_id)
                 .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
+            // Issue #3348: keep only neighbor nodes whose provenance passes.
+            if let Some(filter) = &prov_filter
+                && !filter.matches(node_provenance(&db, &node).as_ref())
+            {
+                continue;
+            }
             let props_json =
                 property_map_to_json(&node.properties).map_err(AletheiaHttpError::Internal)?;
             neighbors.push(json!({
@@ -413,6 +552,9 @@ async fn handle_find_neighbors(
                 "label": interned_to_string(node.label),
                 "properties": props_json,
             }));
+            if neighbors.len() >= limit_val {
+                break;
+            }
         }
         Ok(Value::Array(neighbors))
     })
@@ -909,7 +1051,10 @@ pub async fn handle_query(
                 QueryRequest::CreateNode { label, properties } => {
                     handle_create_node(db, label, properties, principal).await
                 }
-                QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await,
+                QueryRequest::GetNode {
+                    node_id,
+                    provenance_filter,
+                } => handle_get_node(db, node_id, provenance_filter).await,
                 QueryRequest::BulkCreateNodes { nodes } => {
                     handle_bulk_create_nodes(db, nodes, principal).await
                 }
@@ -927,12 +1072,16 @@ pub async fn handle_query(
                     properties,
                     limit,
                     offset,
-                } => handle_find_node(db, label, properties, limit, offset).await,
+                    provenance_filter,
+                } => {
+                    handle_find_node(db, label, properties, limit, offset, provenance_filter).await
+                }
                 QueryRequest::FindNeighbors {
                     node_id,
                     limit,
                     offset,
-                } => handle_find_neighbors(db, node_id, limit, offset).await,
+                    provenance_filter,
+                } => handle_find_neighbors(db, node_id, limit, offset, provenance_filter).await,
                 QueryRequest::ExecuteQuery { query, parameters } => {
                     handle_execute_query(db, query, parameters).await
                 }
@@ -1239,7 +1388,10 @@ mod tests {
             "limits": { "timeout_ms": 500, "max_result_rows": 3 }
         }))
         .expect("deserialize envelope with limits");
-        assert!(matches!(env.request, QueryRequest::GetNode { node_id: 7 }));
+        assert!(matches!(
+            env.request,
+            QueryRequest::GetNode { node_id: 7, .. }
+        ));
         let ov = env.limits.expect("limits present");
         assert_eq!(ov.timeout_ms, Some(500));
         assert_eq!(ov.max_result_rows, Some(3));
@@ -1250,7 +1402,10 @@ mod tests {
             "node_id": 9
         }))
         .expect("deserialize envelope without limits");
-        assert!(matches!(env.request, QueryRequest::GetNode { node_id: 9 }));
+        assert!(matches!(
+            env.request,
+            QueryRequest::GetNode { node_id: 9, .. }
+        ));
         assert!(env.limits.is_none());
     }
 

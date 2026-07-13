@@ -53,7 +53,8 @@
         "referenced": {
           "429_wall_clock_timeout": "not forceable deterministically over the wire; pinned by enforce_query_limits unit tests in src/http/handlers.rs (see tests/http_query_limits.rs header). RESOURCE_EXHAUSTED + Retry-After:1, retriable:true for reads.",
           "413_request_body_limit": "tests/http_run_server_body_limit.rs::run_server_enforces_413_over_the_wire (real-socket production run_server stack, Issue #3426)",
-          "otel_trace_id": "tests/http_otel_tracing.rs (observability/otel features)"
+          "otel_trace_id": "tests/http_otel_tracing.rs (observability/otel features)",
+          "provenance_filter_3348": "Issue #3348 (additive): find_node/get_node/find_neighbors accept optional provenance_source/provenance_sources/min_confidence/include_unattributed (flattened into QueryRequest). Omitting all four is byte-identical to prior behavior. Invalid values (confidence out of [0,1], empty source list) -> 400 INVALID_ARGUMENT naming the field; get_node excluded-by-filter -> 404. HTTP find_node/find_neighbors bare-array pages are OVER-FETCHED/REFILLED under an active filter (bounded by MAX_DEEP_PAGINATION) so a short/empty page means end-of-data (no false-short mid-scan). Pinned by tests/parity_http.rs::find_node_filters_by_provenance_source / find_node_include_unattributed / find_node_min_confidence_inclusive / find_node_invalid_confidence_is_400 / find_node_empty_source_list_is_400 / get_node_provenance_filter_excludes_as_404 / find_node_without_filter_is_unchanged / find_node_filtered_page_is_refilled_not_short / find_neighbors_filters_by_provenance / find_neighbors_invalid_confidence_is_400."
         }
       },
       {
@@ -120,6 +121,11 @@
     "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable (external mirror — internal-consistency only)",
     "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 46 pairs — the authoritative drift detector)",
     "budgetable_read_tools": ["get_node", "list_nodes", "get_edge", "list_edges", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "hybrid_query", "query", "find_nodes_at_time", "get_node_history", "get_schema"],
+    "provenance_filterable_read_tools": {
+      "$comment": "Issue #3348: read tools that accept the optional additive provenance filter params (provenance_source, provenance_sources, min_confidence, include_unattributed). Purely additive — omitting all four is byte-identical to prior behavior, so this does NOT change the tool name/class golden. Source of truth: PROVENANCE_FILTERABLE_TOOLS in src/mcp/server.rs. Behavior pinned by src/mcp/tests.rs::provenance_filter_tests.",
+      "tools": ["get_node", "list_nodes", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "hybrid_query"],
+      "semantics": "AND across source/confidence; min_confidence inclusive; unattributed (no bundle) excluded unless include_unattributed:true; per-version (composes with as_of_*); invalid values -> INVALID_ARGUMENT with details.field; find_similar/hybrid_query filter candidates so top-k stay full; provenance filter + cursor paging -> INVALID_ARGUMENT (v1)."
+    },
     "tools": [
       {"name": "get_node", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::not_found_structured_error", "tests/parity_mcp.rs::out_of_range_id_is_non_retriable_structured_error", "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable", "tests/parity_mcp.rs::success_envelope_and_temporal_block"]},
       {"name": "create_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::success_envelope_and_temporal_block", "tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"]},
