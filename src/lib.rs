@@ -62,6 +62,9 @@ pub mod db;
 /// Encryption at rest (ADR-0028).
 pub mod encryption;
 pub mod index;
+/// Tamper-evident provenance hash chain (Issue #3351): canonical version
+/// encoder, append-only sidecar store, and offline verification.
+pub mod provenance_chain;
 pub mod query;
 pub mod storage;
 // Semantic search cohort (graduated from "Nova" in 0.1).
@@ -91,6 +94,10 @@ pub mod http;
 // server today and the MCP server in Phase 2, hence gated on either feature.
 #[cfg(any(feature = "http-server", feature = "mcp-server"))]
 pub mod auth;
+// Signed audit export of entity history for compliance (Issue #3358).
+// Offline-verifiable Ed25519-signed evidence artifacts built on history reads.
+#[cfg(feature = "audit-export")]
+pub mod audit;
 // Test utilities: available in unit tests and when the simulation feature is enabled
 // (integration tests under `--features simulation` need create_test_db).
 #[cfg(any(test, feature = "simulation"))]
@@ -129,8 +136,9 @@ pub use core::error::{
 };
 pub use db::{
     AletheiaDB, BackupSummary, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats,
-    DatabaseStats, EdgeTypeSchema, GraphSchema, HistoricalDepthStats, LabelExtent, LabelSchema,
-    SchemaInstant, SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds,
+    DatabaseStats, EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent,
+    LabelSchema, LineageView, LineageViewEntry, PitrCoord, PitrPlan, PitrTarget, SchemaInstant,
+    SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds,
     UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
 };
 pub use index::{

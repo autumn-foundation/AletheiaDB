@@ -85,6 +85,21 @@ const DEFAULT_PROPERTY_SCAN_ROWS: usize = 100;
 /// Fallback maximum traversal depth when the query specifies unbounded (`Variable`) depth.
 const DEFAULT_MAX_TRAVERSAL_DEPTH: usize = 10;
 
+/// Resolve the effective maximum traversal depth for a [`TraversalDepth`],
+/// clamping the unbounded upper cases to [`DEFAULT_MAX_TRAVERSAL_DEPTH`].
+///
+/// Both `Variable` (`*`) and the `*N..` / `Min` form (which the converter
+/// models as `Range { min, max: usize::MAX }`) are unbounded above and must be
+/// capped so BFS terminates; finite bounds (`Exact`, `Max`, closed `Range`)
+/// pass through unchanged. Configurable caps are a noted follow-up.
+fn cap_traversal_depth(depth: &super::ir::TraversalDepth) -> usize {
+    match depth.max_depth() {
+        Some(max) if max == usize::MAX => DEFAULT_MAX_TRAVERSAL_DEPTH,
+        Some(max) => max,
+        None => DEFAULT_MAX_TRAVERSAL_DEPTH,
+    }
+}
+
 /// Default `top_k` for vector re-rank when the caller does not provide one.
 const DEFAULT_VECTOR_TOP_K: usize = 10;
 
@@ -424,11 +439,17 @@ impl QueryPlanner {
                 embedding,
                 top_k,
                 property_key,
+                metric,
+                threshold,
+                score_alias,
             } => Ok(LogicalOp::unary(
                 UnaryOp::VectorRank {
                     embedding: embedding.clone(),
                     top_k: *top_k,
                     property_key: property_key.clone(),
+                    metric: *metric,
+                    threshold: *threshold,
+                    score_alias: score_alias.clone(),
                 },
                 input,
             )),
@@ -452,6 +473,17 @@ impl QueryPlanner {
 
             // Aggregation operations
             QueryOp::Count => Ok(LogicalOp::unary(UnaryOp::Count, input)),
+
+            QueryOp::Aggregate {
+                group_keys,
+                aggregates,
+            } => Ok(LogicalOp::unary(
+                UnaryOp::Aggregate {
+                    group_keys: group_keys.clone(),
+                    aggregates: aggregates.clone(),
+                },
+                input,
+            )),
 
             QueryOp::Distinct => Ok(LogicalOp::unary(UnaryOp::Distinct, input)),
 
@@ -494,6 +526,7 @@ impl QueryPlanner {
             QueryOp::Limit(_) => "Limit",
             QueryOp::Skip(_) => "Skip",
             QueryOp::Count => "Count",
+            QueryOp::Aggregate { .. } => "Aggregate",
             QueryOp::Distinct => "Distinct",
             QueryOp::Project(_) => "Project",
             QueryOp::Sort { .. } => "Sort",
@@ -562,6 +595,14 @@ impl QueryPlanner {
             LogicalOp::Scan(scan) => self.scan_to_physical(scan, temporal),
 
             LogicalOp::Unary { op, input } => {
+                // Fold a chain of consecutive Sort ops (from a multi-key
+                // `ORDER BY a, b, c`) into ONE multi-key PhysicalOp::Sort so the
+                // FIRST-emitted key is primary. Emitting one stable Sort per key
+                // would otherwise invert precedence (the last-applied stable
+                // sort dominates). Fixes both Cypher and AQL (Issue #558).
+                if matches!(op, UnaryOp::Sort { .. }) {
+                    return self.fold_sort_chain(logical, temporal);
+                }
                 let physical_input = self.to_physical_op(input, temporal)?;
                 self.unary_to_physical(op, physical_input, temporal)
             }
@@ -574,6 +615,46 @@ impl QueryPlanner {
 
             LogicalOp::Empty => Ok(PhysicalOp::Empty),
         }
+    }
+
+    /// Fold a chain of consecutive [`UnaryOp::Sort`] operators into a single
+    /// multi-key [`PhysicalOp::Sort`].
+    ///
+    /// The logical chain nests outermost = last-emitted `ORDER BY` key,
+    /// innermost = first-emitted key. openCypher wants the first key to be
+    /// primary, so we collect from the outside in, then reverse: the resulting
+    /// `keys` vector is in precedence order (first = primary). The base (first
+    /// non-Sort operator) is converted once.
+    fn fold_sort_chain(
+        &self,
+        logical: &LogicalOp,
+        temporal: &Option<TemporalContext>,
+    ) -> Result<PhysicalOp> {
+        use super::plan::SortKey;
+
+        let mut keys: Vec<(SortKey, bool)> = Vec::new();
+        let mut cursor = logical;
+        let base = loop {
+            match cursor {
+                LogicalOp::Unary {
+                    op: UnaryOp::Sort { key, descending },
+                    input,
+                } => {
+                    keys.push((key.clone(), *descending));
+                    cursor = input;
+                }
+                other => break other,
+            }
+        };
+
+        let physical_input = self.to_physical_op(base, temporal)?;
+        // Reverse so the first-emitted (innermost) key becomes primary.
+        keys.reverse();
+
+        Ok(PhysicalOp::Sort {
+            input: Box::new(physical_input),
+            keys,
+        })
     }
 
     /// Helper to validate vector index existence
@@ -628,10 +709,59 @@ impl QueryPlanner {
             ScanOp::NodeScan {
                 label,
                 estimated_rows,
-            } => Ok(PhysicalOp::NodeScan {
-                label: label.clone(),
-                estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
-            }),
+            } => {
+                // Bi-temporal label scans (Issues #550/#551/#552). When the query
+                // carries a temporal context the label scan must reconstruct
+                // history instead of reading current storage -- otherwise
+                // `MATCH (n:Label) AS OF T RETURN n` silently returns present-day
+                // data. When no temporal context is present the fast current-state
+                // path below is 100% unchanged.
+                if let Some(ctx) = temporal.as_ref() {
+                    // Point-in-time (`AS OF`). Any single dimension is enough; the
+                    // missing dimension resolves to "now" via `resolve_now()`, so
+                    // `AS OF VALID_TIME` and `AS OF SYSTEM_TIME` alone both work.
+                    if ctx.valid_time_as_of.is_some() || ctx.transaction_time_as_of.is_some() {
+                        let (valid_time, transaction_time) = ctx.resolve_now();
+                        return Ok(PhysicalOp::TemporalNodeScan {
+                            label: label.clone(),
+                            valid_time,
+                            transaction_time,
+                        });
+                    }
+                    // Valid-time range (`BETWEEN ... AND ...`): every version whose
+                    // valid interval overlaps the range, observed at the current
+                    // transaction time (or an explicit system-time anchor).
+                    if let Some(range) = ctx.valid_time_between {
+                        let transaction_time = ctx
+                            .transaction_time_as_of
+                            .unwrap_or_else(crate::core::temporal::time::now);
+                        return Ok(PhysicalOp::TemporalNodeRangeScan {
+                            label: label.clone(),
+                            valid_from: range.start(),
+                            valid_to: range.end(),
+                            transaction_time,
+                        });
+                    }
+                    // A transaction-time RANGE (`FOR SYSTEM_TIME BETWEEN ...`,
+                    // reachable via the SQL:2011 parser / `QueryBuilder`) has no
+                    // label-scan lowering yet. Reject it with a structured error
+                    // rather than silently falling through to the current-state
+                    // `NodeScan` below (which would return present-day data -- the
+                    // exact bug class this PR fixes, for the tx-range dimension).
+                    if ctx.transaction_time_between.is_some() {
+                        return Err(Error::Query(QueryError::UnsupportedFeature {
+                            feature: "transaction-time range scan (FOR SYSTEM_TIME BETWEEN) on a \
+                                      label scan is not supported; use AS OF SYSTEM_TIME for a \
+                                      point-in-time transaction-time query"
+                                .to_string(),
+                        }));
+                    }
+                }
+                Ok(PhysicalOp::NodeScan {
+                    label: label.clone(),
+                    estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
+                })
+            }
 
             ScanOp::EdgeScan {
                 edge_type,
@@ -764,7 +894,8 @@ impl QueryPlanner {
                     input: Box::new(input),
                     direction: *direction,
                     label: label.clone(),
-                    depth: depth.max_depth().unwrap_or(DEFAULT_MAX_TRAVERSAL_DEPTH),
+                    min_depth: depth.min_depth(),
+                    depth: cap_traversal_depth(depth),
                     temporal_context: temporal_ctx,
                 })
             }
@@ -773,21 +904,37 @@ impl QueryPlanner {
                 embedding,
                 top_k,
                 property_key,
+                metric,
+                threshold,
+                score_alias,
             } => {
                 self.validate_vector_index(property_key.as_deref())?;
+
+                // A pure threshold filter (no explicit top_k) keeps *every*
+                // passing row, so leave `k` unbounded rather than clamping to
+                // the default top-k; a genuine top_k still bounds the result.
+                let k = top_k.unwrap_or(if threshold.is_some() {
+                    usize::MAX
+                } else {
+                    DEFAULT_VECTOR_TOP_K
+                });
 
                 Ok(PhysicalOp::VectorRerank {
                     input: Box::new(input),
                     embedding: embedding.clone(),
-                    k: top_k.unwrap_or(DEFAULT_VECTOR_TOP_K),
+                    k,
                     property_key: property_key.clone(),
+                    metric: *metric,
+                    threshold: *threshold,
+                    score_alias: score_alias.clone(),
                 })
             }
 
+            // A lone Sort (not part of a chain intercepted by the fold in
+            // `to_physical_op`) lowers to a single-key multi-key Sort.
             UnaryOp::Sort { key, descending } => Ok(PhysicalOp::Sort {
                 input: Box::new(input),
-                key: key.clone(),
-                descending: *descending,
+                keys: vec![(key.clone(), *descending)],
             }),
 
             UnaryOp::Project(props) => Ok(PhysicalOp::Project {
@@ -801,6 +948,15 @@ impl QueryPlanner {
 
             UnaryOp::Count => Ok(PhysicalOp::Count {
                 input: Box::new(input),
+            }),
+
+            UnaryOp::Aggregate {
+                group_keys,
+                aggregates,
+            } => Ok(PhysicalOp::Aggregate {
+                input: Box::new(input),
+                group_keys: group_keys.clone(),
+                aggregates: aggregates.clone(),
             }),
 
             UnaryOp::TemporalTrack { time_range } => Ok(PhysicalOp::TemporalTrack {
@@ -825,7 +981,8 @@ impl QueryPlanner {
                         } => physical::OptionalPhysicalStep::Traverse {
                             direction: *direction,
                             label: label.clone(),
-                            depth: depth.max_depth().unwrap_or(DEFAULT_MAX_TRAVERSAL_DEPTH),
+                            min_depth: depth.min_depth(),
+                            depth: cap_traversal_depth(depth),
                             temporal_context: temporal_ctx,
                         },
                         OptionalStep::Filter(predicate) => {
@@ -1327,6 +1484,9 @@ mod tests {
                 embedding: Arc::from(embedding.as_slice()),
                 top_k: Some(10),
                 property_key: None,
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             }],
             temporal_context: None,
             hints: QueryHints::default(),
@@ -1565,6 +1725,110 @@ mod tests {
         let plan = planner.plan(query).unwrap();
         // Should be TemporalNodeLookup instead of NodeLookup
         assert!(matches!(plan.root, PhysicalOp::TemporalNodeLookup { .. }));
+    }
+
+    #[test]
+    fn test_temporal_node_scan_with_context() {
+        // Companion to `test_temporal_node_lookup_with_context`: a *label scan*
+        // carrying a point-in-time context must lower to `TemporalNodeScan`, not
+        // the current-state `NodeScan` (Issues #550/#551) -- otherwise
+        // `MATCH (n:Label) AS OF T RETURN n` silently returns present-day data.
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::as_of(now, now)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(
+            matches!(plan.root, PhysicalOp::TemporalNodeScan { .. }),
+            "AS OF label scan must lower to TemporalNodeScan, got {:?}",
+            plan.root.name()
+        );
+    }
+
+    #[test]
+    fn test_temporal_node_scan_single_dimension_context() {
+        // A single-dimension `AS OF SYSTEM_TIME` (only transaction time set)
+        // must still lower to the temporal scan; the missing dimension resolves
+        // to "now" (Issue #551).
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::as_of_transaction_time(now)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::TemporalNodeScan { .. }));
+    }
+
+    #[test]
+    fn test_temporal_node_range_scan_with_between_context() {
+        // A `BETWEEN` valid-time range on a label scan must lower to
+        // `TemporalNodeRangeScan` (Issue #552).
+        let planner = test_planner();
+        let range = crate::core::temporal::TimeRange::new(1_000.into(), 2_000.into()).unwrap();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::valid_time_between(range)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(
+            matches!(plan.root, PhysicalOp::TemporalNodeRangeScan { .. }),
+            "BETWEEN label scan must lower to TemporalNodeRangeScan, got {:?}",
+            plan.root.name()
+        );
+    }
+
+    #[test]
+    fn test_node_scan_without_temporal_context_unchanged() {
+        // Regression: with no temporal context the fast current-state path is
+        // untouched -- still a plain `NodeScan`.
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::NodeScan { .. }));
+    }
+
+    #[test]
+    fn test_transaction_time_between_label_scan_rejected() {
+        // A transaction-time RANGE context on a label scan has no lowering yet;
+        // it must be REJECTED with a structured error, never fall through to a
+        // current-state NodeScan (which would silently return present-day data).
+        let planner = test_planner();
+        let range = crate::core::temporal::TimeRange::new(1_000.into(), 2_000.into()).unwrap();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::transaction_time_between(range)),
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            matches!(err, Error::Query(QueryError::UnsupportedFeature { .. })),
+            "transaction_time_between must be an UnsupportedFeature error, got {err:?}"
+        );
     }
 
     #[test]
@@ -2003,11 +2267,13 @@ mod tests {
                     physical::OptionalPhysicalStep::Traverse {
                         direction,
                         label,
+                        min_depth,
                         depth,
                         temporal_context,
                     } => {
                         assert_eq!(*direction, Direction::Outgoing);
                         assert_eq!(label.as_deref(), Some("KNOWS"));
+                        assert_eq!(*min_depth, 1);
                         assert_eq!(*depth, 1);
                         assert!(temporal_context.is_none());
                     }

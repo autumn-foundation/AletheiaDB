@@ -14,4 +14,16 @@ ignore = [
     # to the optional embedding pipeline, which is not deployed in production.
     # Track: upgrade embed_anything when it supports lopdf >= 0.42.
     "RUSTSEC-2026-0187",
+
+    # rsa 0.9.10 "Marvin Attack" key-recovery timing sidechannel (CVSS 5.9
+    # Medium). No patched release exists upstream. Pulled in TRANSITIVELY (not a
+    # direct dependency): rsa <- jsonwebtoken <- autumn-web 0.5 (via its `mcp`
+    # feature) <- the unpublished `crates/autumn-spike` crate ONLY. It is ABSENT
+    # from the default / CI / all-features builds, and no AletheiaDB code
+    # exercises RSA private-key operations, so exposure in shipped builds is nil.
+    # The `rsa` pull originates in the upstream `autumn-web 0.5` crate, so we
+    # cannot drop the feature from our own Cargo.toml; the durable fix is the
+    # upstream bump to autumn 0.6.0 (tracked via autumn#1828). This ignore is the
+    # interim unblock. Mirrors the lopdf RUSTSEC-2026-0187 precedent above.
+    "RUSTSEC-2023-0071",
 ]

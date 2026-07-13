@@ -408,6 +408,13 @@ impl CostModel {
                 ..
             } => self.estimate_temporal_lookup(node_ids.len(), *use_batch, stats),
 
+            // Temporal label scans reconstruct every ever-versioned candidate at
+            // the requested point/range: approximate as a batched temporal lookup
+            // over the current node population.
+            PhysicalOp::TemporalNodeScan { .. } | PhysicalOp::TemporalNodeRangeScan { .. } => {
+                self.estimate_temporal_lookup(stats.node_count().max(1), true, stats)
+            }
+
             PhysicalOp::TemporalVectorSearch { k, .. } => {
                 self.estimate_temporal_vector_search(*k, stats)
             }
@@ -460,6 +467,7 @@ impl CostModel {
             PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input }
             | PhysicalOp::Count { input }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::Materialize { input }
             | PhysicalOp::TemporalTrack { input, .. } => self.estimate(input, stats),
 
@@ -512,6 +520,10 @@ impl CostModel {
             PhysicalOp::PropertyScan { estimated_rows, .. } => *estimated_rows,
             PhysicalOp::HnswSearch { k, .. } => *k,
             PhysicalOp::TemporalNodeLookup { node_ids, .. } => node_ids.len(),
+            // Temporal label scans reconstruct historical candidates; a range
+            // scan can emit several rows per node, so nudge its estimate up.
+            PhysicalOp::TemporalNodeScan { .. } => stats.node_count(),
+            PhysicalOp::TemporalNodeRangeScan { .. } => stats.node_count().saturating_mul(2),
             PhysicalOp::TemporalVectorSearch { k, .. } => *k,
             PhysicalOp::IndexedTraversal { input, depth, .. } => {
                 let input_card = self.estimate_cardinality(input, stats);
@@ -523,7 +535,11 @@ impl CostModel {
                 (self.estimate_cardinality(input, stats) as f64 * DEFAULT_FILTER_SELECTIVITY)
                     as usize
             }
-            PhysicalOp::VectorRerank { k, .. } => *k,
+            // A rerank emits at most `k` rows, never more than its input. Clamp
+            // so an unbounded `k` (threshold filter) does not report usize::MAX.
+            PhysicalOp::VectorRerank { k, input, .. } => {
+                (*k).min(self.estimate_cardinality(input, stats))
+            }
             PhysicalOp::Limit { count, input, .. } => {
                 (*count).min(self.estimate_cardinality(input, stats))
             }
@@ -535,6 +551,19 @@ impl CostModel {
                 (self.estimate_cardinality(input, stats) as f64 * DEFAULT_DISTINCT_RATIO) as usize
             }
             PhysicalOp::Count { .. } => 1,
+            PhysicalOp::Aggregate {
+                group_keys, input, ..
+            } => {
+                if group_keys.is_empty() {
+                    1
+                } else {
+                    // One row per distinct group; approximate with the default
+                    // distinct ratio over the input cardinality (at least one).
+                    ((self.estimate_cardinality(input, stats) as f64 * DEFAULT_DISTINCT_RATIO)
+                        as usize)
+                        .max(1)
+                }
+            }
             PhysicalOp::HashJoin { left, right, .. } => {
                 // Assume default join selectivity of cross product
                 let left_card = self.estimate_cardinality(left, stats);
@@ -681,10 +710,15 @@ impl CostModel {
     }
 
     fn estimate_vector_rerank(&self, input_cost: Cost, input_card: usize, k: usize) -> Cost {
+        // The rerank heap holds at most `k` rows, but never more than the input
+        // cardinality. Clamp before sizing so an unbounded `k` (usize::MAX, used
+        // for a pure similarity-threshold filter that keeps every passing row)
+        // does not overflow the memory estimate.
+        let retained = k.min(input_card);
         Cost {
             cpu: input_cost.cpu + self.operation_costs.vector_similarity * input_card as f64,
             io: input_cost.io,
-            memory: input_cost.memory + k * std::mem::size_of::<(u64, f32)>(),
+            memory: input_cost.memory + retained * std::mem::size_of::<(u64, f32)>(),
             network: 0.0,
         }
     }
@@ -822,6 +856,7 @@ mod tests {
             }),
             direction: crate::query::ir::Direction::Outgoing,
             label: None,
+            min_depth: 2,
             depth: 2,
             temporal_context: None,
         };

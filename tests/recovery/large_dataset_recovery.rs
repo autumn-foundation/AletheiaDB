@@ -515,6 +515,8 @@ fn test_large_dataset_with_deletions() -> Result<()> {
         wal.append(WalOperation::DeleteNode {
             node_id: NodeId::new(node_id).unwrap(),
             valid_from: time::now(),
+            version_id: None,
+            provenance: None,
         })?;
     }
 

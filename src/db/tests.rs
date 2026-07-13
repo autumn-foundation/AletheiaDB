@@ -1275,6 +1275,409 @@ fn test_count_connected_edges() {
 }
 
 #[test]
+fn test_count_connected_edges_self_loop_is_distinct() {
+    // Issue #3416 Pt2: a self-loop is ONE edge. `count_connected_edges` must
+    // count DISTINCT edge ids (not out_degree + in_degree, which double-counts
+    // a self-loop as 2), so `details.connected_edges` means the same thing the
+    // retract_node / apply_batch DISTINCT enumeration reports.
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // A single self-loop alice -> alice.
+    db.create_edge(alice, alice, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(
+        db.count_connected_edges(alice).unwrap(),
+        1,
+        "a self-loop is one distinct edge, not two"
+    );
+
+    // Mixed: self-loop + a real outgoing + a real incoming = 3 distinct edges.
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(alice, bob, "OUT", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(bob, alice, "IN", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(
+        db.count_connected_edges(alice).unwrap(),
+        3,
+        "self-loop counted once alongside two distinct directed edges"
+    );
+}
+
+#[test]
+fn test_delete_node_cascade_self_loop_single_delete() {
+    // Issue #3416 Pt3: a self-loop appears in BOTH the outgoing and incoming
+    // adjacency lists; without dedup, `delete_node_cascade` would `delete_edge`
+    // it twice in the same tx (double tombstone / double-close). Deduping by
+    // EdgeId means each connected edge is deleted exactly once.
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let self_loop = db
+        .create_edge(alice, alice, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    assert_eq!(db.edge_count(), 1);
+
+    // Cascade must succeed (no double-delete error) and remove node + edge.
+    db.write(|tx| tx.delete_node_cascade(alice)).unwrap();
+
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.edge_count(), 0);
+    assert!(db.get_node(alice).is_err());
+    assert!(db.get_edge(self_loop).is_err());
+}
+
+#[test]
+fn test_delete_node_cascade_self_loop_mixed_graph_single_delete() {
+    // Issue #3416 Pt3: self-loop + normal in/out edges — every distinct edge
+    // deleted exactly once, no double-delete on the self-loop.
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.create_edge(alice, alice, "SELF", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(alice, bob, "OUT", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(bob, alice, "IN", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(db.edge_count(), 3);
+
+    db.write(|tx| tx.delete_node_cascade(alice)).unwrap();
+
+    assert_eq!(db.node_count(), 1); // bob remains
+    assert_eq!(db.edge_count(), 0); // all 3 distinct edges removed once each
+    assert!(db.get_node(alice).is_err());
+}
+
+#[test]
+fn test_delete_node_cascade_removes_same_tx_created_edge() {
+    // Issue #3416 Pt4 (folded from #3417 review): a cascade must see edges
+    // CREATED earlier in the SAME transaction, not just committed adjacency.
+    // create_node -> create_edge(self-loop) -> delete_node_cascade in ONE tx
+    // must leave no orphaned edge after commit.
+    let db = AletheiaDB::new().unwrap();
+
+    let (victim, self_loop) = db
+        .write(|tx| {
+            let victim = tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            let self_loop =
+                tx.create_edge(victim, victim, "KNOWS", PropertyMapBuilder::new().build())?;
+            tx.delete_node_cascade(victim)?;
+            Ok::<_, Error>((victim, self_loop))
+        })
+        .unwrap();
+
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(
+        db.edge_count(),
+        0,
+        "the same-tx-created self-loop must be cascade-deleted, not orphaned"
+    );
+    assert!(db.get_node(victim).is_err());
+    assert!(db.get_edge(self_loop).is_err());
+}
+
+#[test]
+fn test_delete_node_cascade_removes_same_tx_created_directed_edge() {
+    // Issue #3416 Pt4: same-tx create_node(x) already committed, then
+    // create_edge(x -> victim) in the cascade tx; the cascade must delete the
+    // same-tx incoming edge too.
+    let db = AletheiaDB::new().unwrap();
+
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let (victim, edge) = db
+        .write(|tx| {
+            let victim = tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            let edge = tx.create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build())?;
+            tx.delete_node_cascade(victim)?;
+            Ok::<_, Error>((victim, edge))
+        })
+        .unwrap();
+
+    assert_eq!(db.edge_count(), 0, "same-tx incoming edge must be removed");
+    assert!(db.get_node(victim).is_err());
+    assert!(db.get_edge(edge).is_err());
+    assert!(db.get_node(x).is_ok());
+}
+
+#[test]
+fn test_delete_node_write_skew_concurrent_edge_aborts() {
+    // Issue #3416 Pt1: SI write-skew. tx_A stages delete_node(victim) after
+    // seeing 0 connected edges; a SEPARATE tx_B commits create_edge(x ->
+    // victim); tx_A commits. Without a commit-time re-check the disjoint write
+    // sets escape conflict detection and tx_A commits -> a committed edge
+    // pointing at a deleted node (silent orphan). The re-check must ABORT tx_A
+    // with FAILED_PRECONDITION and leave the victim + edge intact.
+    let db = AletheiaDB::new().unwrap();
+
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    // victim committed with 0 connected edges.
+    assert_eq!(db.count_connected_edges(victim).unwrap(), 0);
+
+    // tx_A: snapshot captured now (before B's edge exists), stage the delete.
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.delete_node(victim).unwrap();
+
+    // tx_B: concurrently create + commit an edge x -> victim.
+    let edge = db
+        .write(|tx| tx.create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build()))
+        .unwrap();
+
+    // tx_A commits -> must be rejected as a write-skew precondition failure.
+    let commit_result = tx_a.commit();
+    assert!(
+        commit_result.is_err(),
+        "delete_node must abort when a concurrent edge would be orphaned"
+    );
+    let err = commit_result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("orphan") || msg.contains("connected edge"),
+        "abort message should explain the write-skew/orphan: {msg}"
+    );
+
+    // No orphan: victim still present, edge still points at a live node.
+    assert!(db.get_node(victim).is_ok());
+    assert!(db.get_edge(edge).is_ok());
+    assert_eq!(db.get_edge(edge).unwrap().target, victim);
+}
+
+#[test]
+fn test_delete_node_no_concurrent_edge_commits_ok() {
+    // Issue #3416 Pt1 negative: when NO concurrent edge appears, the staged
+    // delete commits fine (the re-check must not abort a legitimate delete).
+    let db = AletheiaDB::new().unwrap();
+
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.delete_node(victim).unwrap();
+    // No concurrent writer.
+    tx_a.commit().unwrap();
+
+    assert_eq!(db.node_count(), 0);
+    assert!(db.get_node(victim).is_err());
+}
+
+#[test]
+fn test_delete_node_preexisting_edge_still_orphan_preserving() {
+    // Issue #3416 Pt1 refinement guard: an edge that existed AT tx_A's snapshot
+    // (committed before the snapshot) is the documented low-level
+    // orphan-preserving delete_node behavior and must NOT trip the write-skew
+    // re-check (only edges committed AFTER the snapshot are write-skew).
+    let db = AletheiaDB::new().unwrap();
+
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let edge = db
+        .create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Snapshot taken AFTER the edge already exists.
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.delete_node(victim).unwrap();
+    // Low-level delete preserves the pre-existing edge (documented behavior).
+    tx_a.commit().unwrap();
+
+    assert!(db.get_node(victim).is_err());
+    assert!(db.get_edge(edge).is_ok()); // orphan preserved, no spurious abort
+}
+
+#[test]
+fn test_retract_node_write_skew_concurrent_edge_aborts() {
+    // Issue #3416 Pt1: same write-skew window for retract_node. A concurrent
+    // edge committed after tx_A's snapshot would leave an edge pointing at a
+    // retracted node; the commit-time re-check must abort tx_A.
+    let db = AletheiaDB::new().unwrap();
+
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.retract_node(victim, crate::core::temporal::time::now())
+        .unwrap();
+
+    let edge = db
+        .write(|tx| tx.create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build()))
+        .unwrap();
+
+    let commit_result = tx_a.commit();
+    assert!(
+        commit_result.is_err(),
+        "retract_node must abort when a concurrent edge would be orphaned"
+    );
+
+    // Victim still valid, edge intact.
+    assert!(db.get_node(victim).is_ok());
+    assert!(db.get_edge(edge).is_ok());
+}
+
+#[test]
+fn test_retract_node_no_concurrent_edge_commits_ok() {
+    // Issue #3416 Pt1 negative (retract side): with NO concurrent edge, a staged
+    // retract commits fine — the commit-time re-check must not abort a
+    // legitimate retract.
+    let db = AletheiaDB::new().unwrap();
+
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.retract_node(victim, crate::core::temporal::time::now())
+        .unwrap();
+    // No concurrent writer.
+    tx_a.commit().unwrap();
+
+    // Retract closes valid time but keeps the node out of current state.
+    assert!(db.get_node(victim).is_err());
+}
+
+#[test]
+fn test_create_edge_write_skew_concurrent_delete_aborts() {
+    // Issue #3416 Pt1 MIRROR interleaving (ordering ii). The edge creator
+    // validates endpoints BEFORE the WAL/apply phase; if a concurrent tx
+    // deletes an endpoint in the window between validate() and apply, the
+    // apply-time endpoint re-check must ABORT the edge tx so no dangling edge
+    // is committed. Driven deterministically (single thread) via the
+    // #[cfg(test)] pre-apply hook, which fires after the edge tx has validated
+    // but before it acquires historical.write().
+    use crate::api::transaction::write::commit_test_hooks;
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    thread_local! {
+        // Only the edge tx's own commit thread arms this; every other commit
+        // in the process (including tx A's nested commit below, and unrelated
+        // concurrent tests) sees the hook as a no-op.
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    let db = Arc::new(AletheiaDB::new().unwrap());
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    // victim committed with 0 connected edges.
+    assert_eq!(db.count_connected_edges(victim).unwrap(), 0);
+
+    // Edge tx B: stage create_edge(x -> victim); do NOT commit yet.
+    let mut tx_b = db.write_transaction().unwrap();
+    let edge = tx_b
+        .create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Pre-apply hook: exactly once, on the armed (edge-tx) thread, commit the
+    // concurrent tx A that deletes victim. B does not hold historical yet, so A
+    // acquires the guard and commits cleanly (victim has 0 committed edges).
+    {
+        let db_hook = Arc::clone(&db);
+        commit_test_hooks::set_pre_apply_hook(Arc::new(move || {
+            let armed = ARMED.with(|a| a.replace(false));
+            if !armed {
+                return; // no-op for A's own commit and any other tx/thread
+            }
+            db_hook
+                .write(|tx| tx.delete_node(victim))
+                .expect("concurrent delete of victim should commit");
+        }));
+    }
+
+    ARMED.with(|a| a.set(true));
+    let commit_result = tx_b.commit();
+    ARMED.with(|a| a.set(false));
+    commit_test_hooks::clear_pre_apply_hook();
+
+    // The edge tx applied SECOND and must abort — no dangling edge.
+    assert!(
+        commit_result.is_err(),
+        "create_edge must abort when its endpoint was concurrently deleted"
+    );
+    let msg = commit_result.unwrap_err().to_string();
+    assert!(
+        msg.contains("dangling") || msg.contains("deleted or retracted"),
+        "abort message should explain the dangling-edge write-skew: {msg}"
+    );
+
+    // tx A won: victim stays deleted, and NO orphan/dangling edge was committed.
+    assert!(db.get_node(victim).is_err(), "victim was deleted by tx A");
+    assert!(db.get_edge(edge).is_err(), "no dangling edge was committed");
+    assert!(db.get_node(x).is_ok());
+}
+
+#[test]
+fn test_count_connected_edges_parallel_edges_distinct() {
+    // Issue #3416 Pt2 (parallel edges): two DISTINCT edges between the same
+    // ordered pair are two connected edges (dedup is by EdgeId, not by
+    // endpoint pair), and a self-loop adds exactly one more.
+    let db = AletheiaDB::new().unwrap();
+
+    let a = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let b = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Two parallel a -> b edges: distinct EdgeIds, so both count.
+    db.create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(a, b, "LIKES", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(
+        db.count_connected_edges(a).unwrap(),
+        2,
+        "two distinct parallel edges count as 2"
+    );
+
+    // Add a self-loop a -> a: one more distinct edge (counted once, not twice).
+    db.create_edge(a, a, "SELF", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(
+        db.count_connected_edges(a).unwrap(),
+        3,
+        "self-loop adds exactly one to the two parallel edges"
+    );
+    // b sees only the two parallel incoming edges.
+    assert_eq!(db.count_connected_edges(b).unwrap(), 2);
+}
+
+#[test]
 fn test_delete_edge_via_transaction() {
     let db = AletheiaDB::new().unwrap();
 
@@ -2650,7 +3053,7 @@ fn test_schema_as_of_entity_cap_is_configurable_and_discloses_sampling() {
 /// `config-toml` or `mcp-server` is enabled, so this test is gated the same
 /// way; `test_stats_populated_matches_underlying_counters` keeps the
 /// non-serde behavior covered in minimal builds.
-#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[cfg(feature = "serde")]
 #[test]
 fn test_stats_serialization_shape_empty_db() {
     let db = AletheiaDB::new().unwrap();
@@ -2734,7 +3137,7 @@ fn test_stats_populated_matches_underlying_counters() {
 ///
 /// Gated like `test_stats_serialization_shape_empty_db`: the serde derive
 /// this test exercises only exists under `config-toml`/`mcp-server`.
-#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[cfg(feature = "serde")]
 #[test]
 fn test_stats_cold_storage_enabled() {
     use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
@@ -2823,5 +3226,225 @@ fn test_stats_cold_storage_reports_migrated_versions() {
         stats.historical.total_node_versions,
         hot_versions_before - migrated,
         "migrated versions must leave the hot historical counters"
+    );
+}
+
+/// Regression test for Issue #3425: a checkpoint/backup snapshot must never
+/// capture a *committed* node whose `commit_timestamp` is still `None`.
+///
+/// The latent bug: the commit path finalized `commit_timestamp`
+/// (`None -> Some(T)`) *after* dropping the `historical.write()` guard and took
+/// no snapshot lock, leaving a narrow window in which a snapshot holding
+/// `historical.read()` could clone a committed node while its timestamp was
+/// still `None` (which downstream visibility logic treats as uncommitted).
+///
+/// The hardening (Option A in the issue) holds the `historical.write()` guard
+/// across finalization, making the current-write + finalize atomic w.r.t. any
+/// `historical.read()`-holding snapshot.
+///
+/// This test uses the `#[cfg(test)]` pre-finalize hook to deterministically park
+/// a committing writer in that exact window while a checker thread mimics
+/// `create_checkpoint`'s snapshot block -- holding `historical.read()` (outer)
+/// then `snapshot_lock.write()` (inner), exactly as the issue describes -- and
+/// inspects every captured node. Before the fix the checker observes
+/// `commit_timestamp: None` (RED). After the fix the checker's `historical.read()`
+/// blocks until finalize completes under the writer's held guard, so it only ever
+/// sees resolved timestamps (GREEN).
+/// Serializes the finalize-window tests (#3425). Both install the *global*
+/// `commit_test_hooks` pre-finalize hook, so they must never run concurrently or
+/// they would clobber each other's hook and interleave unpredictably.
+static FINALIZE_WINDOW_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn test_checkpoint_never_captures_uncommitted_finalize_window_3425() {
+    use crate::api::transaction::write::commit_test_hooks;
+    use crate::storage::wal::LSN;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    let _serial = FINALIZE_WINDOW_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    let db = Arc::new(AletheiaDB::new().unwrap());
+
+    // Writer sets this when it enters the finalize window (pre-finalize hook).
+    let in_window = Arc::new(AtomicBool::new(false));
+    // Both threads rendezvous before the writer begins its commit.
+    let barrier = Arc::new(Barrier::new(2));
+
+    // Install a pre-finalize hook that (1) announces the window and (2) parks the
+    // writer long enough for the checker to attempt its snapshot. In the buggy
+    // code the `historical.write()` guard is already dropped here; in the fixed
+    // code it is still held across this sleep.
+    {
+        let in_window = Arc::clone(&in_window);
+        commit_test_hooks::set_pre_finalize_hook(Arc::new(move || {
+            in_window.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+        }));
+    }
+
+    // Writer thread: commit a single node. Its commit fires the hook.
+    let writer = {
+        let db = Arc::clone(&db);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+            db.create_node("Person", props).expect("create_node failed");
+        })
+    };
+
+    // Checker thread: once the writer is in the window, replicate the checkpoint
+    // snapshot block and assert no captured node is finalize-pending.
+    let checker = {
+        let db = Arc::clone(&db);
+        let in_window = Arc::clone(&in_window);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            // Spin until the writer signals it has entered the finalize window.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !in_window.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "writer never entered window");
+                std::thread::yield_now();
+            }
+
+            // Mimic `create_checkpoint`'s consistent-snapshot block: hold the
+            // historical read guard (outer) then the snapshot lock (inner).
+            let hist_guard = db.historical.read();
+            let snap_lock = db.current.snapshot_lock.write();
+            let snapshot = db.current.create_snapshot(LSN(0));
+            let captured_none = snapshot
+                .nodes()
+                .iter()
+                .any(|n| n.metadata.commit_timestamp.is_none());
+            drop(snap_lock);
+            drop(hist_guard);
+            captured_none
+        })
+    };
+
+    writer.join().expect("writer thread panicked");
+    let captured_none = checker.join().expect("checker thread panicked");
+
+    commit_test_hooks::clear_pre_finalize_hook();
+
+    assert!(
+        !captured_none,
+        "Issue #3425: checkpoint snapshot captured a committed node with \
+         commit_timestamp: None inside the finalize window"
+    );
+}
+
+/// Regression test for Issue #3425 on the **`backup()`** path specifically.
+///
+/// The checkpoint test above only replicates the checkpoint lock ordering. This
+/// test drives the *real* `AletheiaDB::backup()` code concurrently with a writer
+/// parked in the finalize window, and — via a `#[cfg(test)]` seam inside
+/// `backup()` — inspects the exact current-storage snapshot `backup()` captured.
+///
+/// Before the Finding-1 fix, `backup()` cloned the current snapshot BEFORE (and
+/// outside) the `historical.read()` guard, so it could observe a committed node
+/// whose `commit_timestamp` is still `None` (RED). After the fix the snapshot is
+/// taken INSIDE `historical.read()`, which blocks on the writer's held
+/// `historical.write()` guard until finalize completes, so it only ever sees a
+/// resolved timestamp (GREEN).
+#[test]
+fn test_backup_never_captures_uncommitted_finalize_window_3425() {
+    use crate::api::transaction::write::commit_test_hooks;
+    use crate::db::backup::backup_test_hooks;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    let _serial = FINALIZE_WINDOW_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    let db = Arc::new(AletheiaDB::new().unwrap());
+
+    // Writer sets this when it enters the finalize window (pre-finalize hook).
+    let in_window = Arc::new(AtomicBool::new(false));
+    // Records whether the snapshot that real `backup()` captured held a committed
+    // node with `commit_timestamp: None` (the bug).
+    let captured_none = Arc::new(AtomicBool::new(false));
+    // Set once the backup hook has fired (so we know backup reached its snapshot).
+    let backup_snapshotted = Arc::new(AtomicBool::new(false));
+    // Both threads rendezvous before the writer begins its commit.
+    let barrier = Arc::new(Barrier::new(2));
+
+    // Pre-finalize hook: announce the window and park the writer so the backup
+    // thread can run. In the buggy code the `historical.write()` guard is already
+    // dropped here; in the fixed code it is still held across this sleep.
+    {
+        let in_window = Arc::clone(&in_window);
+        commit_test_hooks::set_pre_finalize_hook(Arc::new(move || {
+            in_window.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+        }));
+    }
+
+    // Backup post-snapshot hook: inspect the real snapshot `backup()` took.
+    {
+        let captured_none = Arc::clone(&captured_none);
+        let backup_snapshotted = Arc::clone(&backup_snapshotted);
+        backup_test_hooks::set_post_current_snapshot_hook(Arc::new(move |snapshot| {
+            let has_none = snapshot
+                .nodes()
+                .iter()
+                .any(|n| n.metadata.commit_timestamp.is_none());
+            captured_none.store(has_none, Ordering::SeqCst);
+            backup_snapshotted.store(true, Ordering::SeqCst);
+        }));
+    }
+
+    // Writer thread: commit a single node. Its commit fires the pre-finalize hook.
+    let writer = {
+        let db = Arc::clone(&db);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+            db.create_node("Person", props).expect("create_node failed");
+        })
+    };
+
+    // Backup thread: once the writer is in the window, run the real backup path.
+    let backup_thread = {
+        let db = Arc::clone(&db);
+        let in_window = Arc::clone(&in_window);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            // Spin until the writer signals it has entered the finalize window.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !in_window.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "writer never entered window");
+                std::thread::yield_now();
+            }
+
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let path = tmp.path().join("finalize_window.albk");
+            db.backup(&path).expect("backup failed");
+        })
+    };
+
+    writer.join().expect("writer thread panicked");
+    backup_thread.join().expect("backup thread panicked");
+
+    commit_test_hooks::clear_pre_finalize_hook();
+    backup_test_hooks::clear_post_current_snapshot_hook();
+
+    assert!(
+        backup_snapshotted.load(Ordering::SeqCst),
+        "backup never captured its current snapshot (hook did not fire)"
+    );
+    assert!(
+        !captured_none.load(Ordering::SeqCst),
+        "Issue #3425: backup() captured a committed node with \
+         commit_timestamp: None inside the finalize window"
     );
 }

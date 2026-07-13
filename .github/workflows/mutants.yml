@@ -7,7 +7,7 @@ on:
   pull_request:
     branches: [trunk]
   schedule:
-    # Weekly full run: Sunday at 03:00 UTC
+    # Weekly rotating-sample run: Sunday at 03:00 UTC
     - cron: "0 3 * * 0"
   workflow_dispatch:
     inputs:
@@ -27,21 +27,38 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  MUTANTS_FEATURES: "config-toml,mcp-server,sharding-rpc"
+  # Pinned for reproducibility and stable flag/exit-code semantics
+  # (--sharding round-robin requires cargo-mutants 27.x; exit codes per
+  # https://mutants.rs/exit-codes.html: 0 = all caught, 2 = missed mutants,
+  # 3 = timeouts, everything else = usage/infrastructure error).
+  # cargo-nextest is pinned too so the test harness cannot drift between
+  # weekly windows or PR re-runs.
+  CARGO_MUTANTS_VERSION: "27.1.0"
+  CARGO_NEXTEST_VERSION: "0.9.140"
+  # Weekly-sample geometry. TOTAL_SHARDS is provisional and will be finalized
+  # from measured per-mutant nextest timing (alongside the gate threshold).
+  # If you change JOBS_PER_WEEK, also update the matrix idx list below —
+  # GitHub matrices cannot reference env values.
+  TOTAL_SHARDS: 96
+  JOBS_PER_WEEK: 12
 
 jobs:
-  # ── PR mode: test only changed code (informational) ──────────────────
+  # ── PR mode: gate the mutation score of the code touched by the diff ──
   mutants-pr:
     name: Mutants (PR diff)
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'diff')
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      - name: Gate script self-test
+        run: python3 .github/scripts/test_mutants_gate.py
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -65,67 +82,110 @@ jobs:
       - name: Install cargo-binstall
         uses: taiki-e/install-action@cargo-binstall
 
-      - name: Install cargo-mutants
-        run: cargo binstall --no-confirm cargo-mutants
+      - name: Install cargo-mutants and cargo-nextest
+        run: cargo binstall --no-confirm "cargo-mutants@${CARGO_MUTANTS_VERSION}" "cargo-nextest@${CARGO_NEXTEST_VERSION}"
 
       - name: Generate diff against base branch
-        run: git diff origin/${{ github.base_ref }}..HEAD > mutants-diff.patch
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          # Three-dot: diff from merge-base so only PR-introduced changes are mutated, not drifted trunk code.
+          git diff "origin/${BASE_REF:-trunk}"...HEAD > mutants-diff.patch
+          wc -c mutants-diff.patch
 
       - name: Run mutation tests on diff
         run: |
+          if [ ! -s mutants-diff.patch ]; then
+            echo "Diff is empty; skipping mutation run (gate passes with no mutants)."
+            exit 0
+          fi
+          set +e
           cargo mutants --in-place -vV \
-            --features "config-toml,mcp-server,sharding-rpc" \
-            --in-diff mutants-diff.patch
+            --features "$MUTANTS_FEATURES" \
+            --test-tool nextest \
+            --in-diff mutants-diff.patch \
+            --output mutants-run
+          status=$?
+          set -e
+          echo "cargo-mutants exit code: $status"
+          # 0 = all caught, 2 = missed mutants found, 3 = timeouts occurred:
+          # all three mean the run itself worked — the gate script decides
+          # pass/fail from the score. Anything else (1 usage, 4 baseline tests
+          # failing, 5/6 diff problems, 70 internal) is an infrastructure
+          # failure and fails this step immediately.
+          case "$status" in
+            0|2|3) exit 0 ;;
+            *)
+              echo "::error::cargo-mutants infrastructure failure (exit $status)"
+              exit "$status"
+              ;;
+          esac
+
+      - name: Enforce mutation-score gate
+        run: |
+          python3 .github/scripts/mutants_gate.py gate \
+            --mutants-out mutants-run/mutants.out \
+            --config .github/mutants-gate.toml \
+            --allow-missing
 
       - name: Upload mutation results
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: mutants-pr-results
-          path: mutants.out/
+          path: mutants-run/mutants.out/
           retention-days: 14
+          if-no-files-found: ignore
+          # Artifacts are immutable within a run; without this a job re-run
+          # 409s on upload and the stale first-attempt artifact survives.
+          overwrite: true
 
-      - name: Post summary
-        if: always()
-        run: |
-          echo "## Mutation Testing (PR diff)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f mutants.out/caught.txt ]; then
-            CAUGHT=$(wc -l < mutants.out/caught.txt)
-            echo "Caught: **$CAUGHT** mutants" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -f mutants.out/missed.txt ]; then
-            MISSED=$(wc -l < mutants.out/missed.txt)
-            echo "Missed: **$MISSED** mutants" >> $GITHUB_STEP_SUMMARY
-            if [ "$MISSED" -gt 0 ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "<details><summary>Missed mutants (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              cat mutants.out/missed.txt >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              echo "</details>" >> $GITHUB_STEP_SUMMARY
-            fi
-          fi
-          if [ -f mutants.out/timeout.txt ]; then
-            TIMEOUT=$(wc -l < mutants.out/timeout.txt)
-            echo "Timeout: **$TIMEOUT** mutants" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -f mutants.out/unviable.txt ]; then
-            UNVIABLE=$(wc -l < mutants.out/unviable.txt)
-            echo "Unviable: **$UNVIABLE** mutants" >> $GITHUB_STEP_SUMMARY
-          fi
-
-  # ── Full mode: sharded across 4 runners (weekly + manual) ────────────
-  mutants-full:
-    name: Mutants (full shard ${{ matrix.shard }}/4)
+  # ── Weekly rotating sample: JOBS_PER_WEEK of TOTAL_SHARDS shards ───────
+  #
+  # cargo-mutants' DEFAULT sharding is "slice" (contiguous chunks of the
+  # mutant list, which follows file order — a biased sample). We pass
+  # --sharding round-robin (mutant i runs on shard i % k), so ANY subset of
+  # shards is a systematic, project-wide sample. Each weekly run covers
+  # 12 of 96 shards (~12.5% of all mutants) and publishes an unbiased
+  # project-wide score estimate; the rotating start walks through every
+  # shard approximately every TOTAL_SHARDS/JOBS_PER_WEEK (currently 8)
+  # weeks (approximately: skipped/failed weeks miss their window, and code
+  # churn reassigns round-robin positions between weeks).
+  #
+  # WEEK and START are computed ONCE in this setup job and consumed by the
+  # matrix jobs and the aggregate via job outputs. Computing them per-job
+  # would let a shard job re-run after the epoch-week boundary (Thursday
+  # 00:00 UTC) land in next week's window and silently break rotation.
+  mutants-weekly-setup:
+    name: Weekly sample setup
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 5
+    outputs:
+      week: ${{ steps.calc.outputs.week }}
+      start: ${{ steps.calc.outputs.start }}
+    steps:
+      - name: Compute epoch week and rotating start shard
+        id: calc
+        run: |
+          WEEK=$(( $(date +%s) / 604800 ))
+          START=$(( (WEEK * JOBS_PER_WEEK) % TOTAL_SHARDS ))
+          echo "Week $WEEK -> start shard $START ($JOBS_PER_WEEK jobs of $TOTAL_SHARDS shards)"
+          {
+            echo "week=$WEEK"
+            echo "start=$START"
+          } >> "$GITHUB_OUTPUT"
+
+  mutants-weekly:
+    name: Mutants (weekly sample ${{ matrix.idx }})
+    needs: mutants-weekly-setup
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # Keep in sync with env.JOBS_PER_WEEK (matrices cannot read env).
+        idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -153,34 +213,105 @@ jobs:
       - name: Install cargo-binstall
         uses: taiki-e/install-action@cargo-binstall
 
-      - name: Install cargo-mutants
-        run: cargo binstall --no-confirm cargo-mutants
+      - name: Install cargo-mutants and cargo-nextest
+        run: cargo binstall --no-confirm "cargo-mutants@${CARGO_MUTANTS_VERSION}" "cargo-nextest@${CARGO_NEXTEST_VERSION}"
 
-      - name: Run mutation tests (shard ${{ matrix.shard }}/4)
+      - name: Compute rotating shard index
+        id: shard
         run: |
-          cargo mutants --in-place -vV \
-            --features "config-toml,mcp-server,sharding-rpc" \
-            --shard ${{ matrix.shard }}/4
+          # WEEK/START are pinned by the setup job so re-runs stay in the
+          # same weekly window.
+          START="${{ needs.mutants-weekly-setup.outputs.start }}"
+          SHARD=$(( (START + ${{ matrix.idx }}) % TOTAL_SHARDS ))
+          echo "Week ${{ needs.mutants-weekly-setup.outputs.week }} -> shard $SHARD of $TOTAL_SHARDS (round-robin sharding)"
+          echo "shard=$SHARD" >> "$GITHUB_OUTPUT"
 
-      - name: Upload mutation results
+      # NOTE: cargo-mutants shards are 0-indexed — valid values for
+      # --shard k/96 are 0..95. (The previous workflow passed 1..4 for
+      # --shard k/4, so shard 4/4 errored and shard 0 never ran.)
+      - name: Run mutation tests (rotating shard ${{ matrix.idx }})
+        run: |
+          set +e
+          cargo mutants -vV \
+            --features "$MUTANTS_FEATURES" \
+            --test-tool nextest \
+            --sharding round-robin \
+            --shard "${{ steps.shard.outputs.shard }}/${TOTAL_SHARDS}" \
+            --output mutants-run
+          status=$?
+          set -e
+          echo "cargo-mutants exit code: $status"
+          # Missed mutants (2) and timeouts (3) are results, not failures;
+          # the aggregate job computes the informational weekly score.
+          case "$status" in
+            0|2|3) exit 0 ;;
+            *)
+              echo "::error::cargo-mutants infrastructure failure (exit $status)"
+              exit "$status"
+              ;;
+          esac
+
+      - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mutants-full-shard-${{ matrix.shard }}
-          path: mutants.out/
-          retention-days: 30
+          name: mutants-weekly-shard-${{ matrix.idx }}
+          path: mutants-run/mutants.out/
+          retention-days: 90
+          if-no-files-found: ignore
+          # Allow shard-job re-runs to replace the first attempt's artifact
+          # instead of 409ing and leaving stale partial output behind.
+          overwrite: true
 
       - name: Post shard summary
         if: always()
         run: |
-          echo "## Mutation Testing (shard ${{ matrix.shard }}/4)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f mutants.out/caught.txt ]; then
-            echo "Caught: **$(wc -l < mutants.out/caught.txt)** mutants" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -f mutants.out/missed.txt ]; then
-            echo "Missed: **$(wc -l < mutants.out/missed.txt)** mutants" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -f mutants.out/timeout.txt ]; then
-            echo "Timeout: **$(wc -l < mutants.out/timeout.txt)** mutants" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "## Mutation sample shard ${{ steps.shard.outputs.shard }} of $TOTAL_SHARDS (job ${{ matrix.idx }})" >> "$GITHUB_STEP_SUMMARY"
+          for f in caught missed timeout unviable; do
+            p="mutants-run/mutants.out/$f.txt"
+            if [ -f "$p" ]; then
+              echo "- $f: **$(wc -l < "$p")**" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+  # ── Aggregate the weekly sample into a project-wide score estimate ────
+  mutants-weekly-score:
+    name: Weekly mutation score (aggregate)
+    needs: [mutants-weekly-setup, mutants-weekly]
+    # !cancelled() (not always()) so a cancelled run cannot publish a
+    # normal-looking 365-day score artifact from whatever shards finished;
+    # failed (non-cancelled) shards still aggregate, marked PARTIAL.
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Gate script self-test
+        run: python3 .github/scripts/test_mutants_gate.py
+
+      - name: Download shard artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mutants-weekly-shard-*
+          path: weekly-shards
+          merge-multiple: false
+
+      - name: Aggregate weekly score (informational)
+        run: |
+          python3 .github/scripts/mutants_gate.py summarize \
+            --shards-dir weekly-shards \
+            --config .github/mutants-gate.toml \
+            --week "${{ needs.mutants-weekly-setup.outputs.week }}" \
+            --expected-shards "$JOBS_PER_WEEK"
+
+      - name: Upload weekly score
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-weekly-score
+          path: |
+            weekly-shards/score.json
+            weekly-shards/combined-missed.txt
+          retention-days: 365
+          overwrite: true

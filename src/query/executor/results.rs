@@ -38,7 +38,7 @@
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::VersionId;
-use crate::core::property::PropertyMap;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
 
@@ -165,6 +165,30 @@ pub struct QueryRow {
     pub path: Option<Vec<EntityId>>,
     /// The specific point in bi-temporal history this result represents.
     pub timestamp: Option<Timestamp>,
+    /// Computed output columns for a row that does not correspond to a single
+    /// stored entity -- e.g. the grouped result of a Cypher aggregation
+    /// (`RETURN n.dept, count(*)`). Each entry is an `(column_name, value)`
+    /// pair, in projection order.
+    ///
+    /// `None` for ordinary entity rows (the overwhelming common case), so those
+    /// rows are byte-identical to their pre-aggregation form. When `Some`, the
+    /// row's [`entity`](Self::entity) is typically [`EntityResult::Null`]: the
+    /// meaningful payload lives here.
+    pub columns: Option<Vec<(String, PropertyValue)>>,
+    /// Named variable→entity bindings for a multi-variable row (Issue #549).
+    ///
+    /// The single-entity [`entity`](Self::entity) field can only carry one
+    /// node/edge per row, which cannot represent a query that binds and returns
+    /// several variables (e.g. `MATCH (a),(b) RETURN a, b`). Those queries are
+    /// evaluated by the dedicated multi-pattern evaluator, which populates this
+    /// field with one `(variable_name, entity)` pair per bound variable, in
+    /// declaration order.
+    ///
+    /// `None` for ordinary single-entity rows (the common case), so those rows
+    /// are byte-identical to their prior form. When `Some`, the row's
+    /// [`entity`](Self::entity) is [`EntityResult::Null`]; the bound entities
+    /// live here and any scalar projections live in [`columns`](Self::columns).
+    pub bindings: Option<Vec<(String, EntityResult)>>,
 }
 
 impl QueryRow {
@@ -176,6 +200,62 @@ impl QueryRow {
             score: None,
             path: None,
             timestamp: None,
+            columns: None,
+            bindings: None,
+        }
+    }
+
+    /// Create a computed-output row carrying named columns rather than a stored
+    /// entity.
+    ///
+    /// Used by aggregation (`RETURN count(*)`, `RETURN n.dept, count(*)`) where
+    /// the output row is derived from a group of input rows and has no single
+    /// backing node/edge. The row's entity is [`EntityResult::Null`]; consumers
+    /// read the payload from [`QueryRow::columns`].
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::executor::QueryRow;
+    /// use aletheiadb::core::property::PropertyValue;
+    ///
+    /// let row = QueryRow::from_columns(vec![("count(*)".to_string(), PropertyValue::Int(5))]);
+    /// assert!(row.entity.is_null());
+    /// assert_eq!(row.columns.as_ref().unwrap()[0].1, PropertyValue::Int(5));
+    /// ```
+    #[must_use]
+    pub fn from_columns(columns: Vec<(String, PropertyValue)>) -> Self {
+        QueryRow {
+            entity: EntityResult::Null,
+            score: None,
+            path: None,
+            timestamp: None,
+            columns: Some(columns),
+            bindings: None,
+        }
+    }
+
+    /// Create a multi-variable row carrying named `variable → entity` bindings
+    /// (Issue #549).
+    ///
+    /// Used by the multi-pattern evaluator for queries that bind and return
+    /// more than one entity variable (e.g. `MATCH (a),(b) RETURN a, b`), which
+    /// the single-entity [`entity`](Self::entity) field cannot represent. The
+    /// row's entity is [`EntityResult::Null`]; consumers read the bound
+    /// entities from [`bindings`](Self::bindings) and any scalar projections
+    /// (property accesses, aliased expressions) from the optional `columns`.
+    #[must_use]
+    pub fn from_bindings(
+        bindings: Vec<(String, EntityResult)>,
+        columns: Option<Vec<(String, PropertyValue)>>,
+    ) -> Self {
+        QueryRow {
+            entity: EntityResult::Null,
+            score: None,
+            path: None,
+            timestamp: None,
+            columns,
+            bindings: Some(bindings),
         }
     }
 
@@ -198,6 +278,8 @@ impl QueryRow {
             score: Some(score),
             path: None,
             timestamp: None,
+            columns: None,
+            bindings: None,
         }
     }
 
@@ -209,6 +291,8 @@ impl QueryRow {
             score: None,
             path: Some(path),
             timestamp: None,
+            columns: None,
+            bindings: None,
         }
     }
 
@@ -248,6 +332,18 @@ impl QueryResults {
     /// Create a new stream of results from a boxed iterator.
     pub(crate) fn new(iterator: Box<dyn ResultIterator>) -> Self {
         QueryResults { iterator }
+    }
+
+    /// Build a result stream from an in-memory vector of rows.
+    ///
+    /// Used by the Cypher `EXPLAIN`/`PROFILE` entry points (Issue #562), which
+    /// synthesize a single computed `plan` row rather than streaming stored
+    /// entities.
+    #[cfg(feature = "cypher")]
+    pub(crate) fn from_rows(rows: Vec<QueryRow>) -> Self {
+        QueryResults::new(Box::new(MaterializedRows {
+            rows: rows.into_iter(),
+        }))
     }
 
     /// Eagerly collect every row in the result stream into a memory-backed vector.
@@ -415,6 +511,14 @@ pub struct QueryResult {
     pub paths: Option<Vec<Path>>,
     /// Version IDs for temporal results
     pub versions: Option<Vec<VersionId>>,
+    /// Computed column rows for aggregation results (`RETURN count(*)`,
+    /// `RETURN n.dept, count(*)`).
+    ///
+    /// `Some` when at least one collected row carried [`QueryRow::columns`];
+    /// each inner vector is one output row's `(column_name, value)` pairs in
+    /// projection order. `None` for ordinary entity result sets, so existing
+    /// consumers are unaffected.
+    pub columns: Option<Vec<Vec<(String, PropertyValue)>>>,
 }
 
 impl QueryResult {
@@ -427,6 +531,7 @@ impl QueryResult {
             scores: None,
             paths: None,
             versions: None,
+            columns: None,
         }
     }
 
@@ -439,6 +544,7 @@ impl QueryResult {
             scores: None,
             paths: None,
             versions: None,
+            columns: None,
         }
     }
 
@@ -663,11 +769,13 @@ impl QueryResults {
         // Determine which fields we have (single pass)
         let (mut has_any_scores, mut has_any_paths, mut has_any_versions, mut has_any_nodes) =
             (false, false, false, false);
+        let mut has_any_columns = false;
         let mut node_count = 0usize;
         for row in &rows {
             has_any_scores = has_any_scores || row.score.is_some();
             has_any_paths = has_any_paths || row.path.is_some();
             has_any_versions = has_any_versions || row.timestamp.is_some();
+            has_any_columns = has_any_columns || row.columns.is_some();
             if row.entity.as_node().is_some() {
                 has_any_nodes = true;
                 node_count += 1;
@@ -697,6 +805,11 @@ impl QueryResults {
         } else {
             None
         };
+        let mut columns = if has_any_columns {
+            Some(Vec::with_capacity(capacity))
+        } else {
+            None
+        };
 
         for row in rows {
             let QueryRow {
@@ -704,7 +817,15 @@ impl QueryResults {
                 score,
                 path,
                 timestamp,
+                columns: row_columns,
+                bindings: _,
             } = row;
+
+            // Extract computed aggregation columns (padding rows without any
+            // with an empty column list to preserve positional alignment).
+            if let Some(ref mut cols) = columns {
+                cols.push(row_columns.unwrap_or_default());
+            }
 
             // ⚡ Bolt Optimization: Consumes the entity directly by value instead of cloning
             // properties map via `as_node().map(|n| n.properties.clone())`. This eliminates
@@ -775,7 +896,29 @@ impl QueryResults {
             scores,
             paths,
             versions,
+            columns,
         })
+    }
+}
+
+/// A [`ResultIterator`] backed by a pre-computed vector of rows.
+///
+/// Backs [`QueryResults::from_rows`] -- the one-row `plan` stream returned by
+/// the Cypher `EXPLAIN`/`PROFILE` entry points (Issue #562).
+#[cfg(feature = "cypher")]
+struct MaterializedRows {
+    rows: std::vec::IntoIter<QueryRow>,
+}
+
+#[cfg(feature = "cypher")]
+impl ResultIterator for MaterializedRows {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.rows.next().map(Ok)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.rows.len();
+        (n, Some(n))
     }
 }
 

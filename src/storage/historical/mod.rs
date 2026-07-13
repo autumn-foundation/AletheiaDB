@@ -27,9 +27,18 @@ use crate::core::version::{
 use quick_cache::sync::Cache;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 #[cfg(feature = "observability")]
 use tracing;
+
+mod hooks;
+mod snapshot_policy;
+
+use hooks::{AnchorHookContext, HookMetrics};
+pub use hooks::{HookMetricsSnapshot, PreAnchorHook};
+pub use snapshot_policy::SnapshotPolicy;
+use snapshot_policy::SnapshotPolicyRegistry;
 
 /// Default maximum number of versions per entity (DoS protection)
 pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
@@ -91,63 +100,6 @@ impl RetentionPolicy {
             max_age_ms: i64::MAX,
         }
     }
-}
-
-/// Pre-anchor hook for creating snapshots before anchor storage.
-///
-/// This hook is called **before** storing an anchor to create synchronized snapshots
-/// and return a snapshot ID to be stored atomically with the anchor. This enables
-/// strong consistency for provenance tracking between graph versioning and vector indexing.
-///
-/// # Arguments
-///
-/// * `entity_type` - Type of entity ("node" or "edge")
-/// * `entity_id` - ID of the entity as u64
-/// * `timestamp` - Transaction timestamp when the anchor is being created
-/// * `properties` - Property map that will be stored in the anchor
-///
-/// # Returns
-///
-/// * `Ok(Some(snapshot_id))` - Snapshot created successfully, link to anchor
-/// * `Ok(None)` - No snapshot needed or empty index
-/// * `Err(e)` - Snapshot creation failed (anchor will still be created, graceful degradation)
-///
-/// # Examples
-///
-/// ```ignore
-/// use aletheiadb::storage::historical::PreAnchorHook;
-/// use std::sync::Arc;
-///
-/// let hook: PreAnchorHook = Arc::new(|entity_type, entity_id, timestamp, properties| {
-///     // Create vector snapshot before anchor is stored
-///     let snapshot_id = create_vector_snapshot(timestamp, properties)?;
-///     Ok(Some(snapshot_id))
-/// });
-/// ```
-pub type PreAnchorHook = Arc<
-    dyn Fn(
-            /* entity_type */ &str,
-            /* entity_id */ u64,
-            /* timestamp */ Timestamp,
-            /* properties */ &PropertyMap,
-        ) -> Result<Option<usize>>
-        + Send
-        + Sync,
->;
-
-/// Context for pre-anchor hook invocation.
-///
-/// Groups the parameters needed to invoke a pre-anchor hook, improving
-/// readability and reducing the number of function parameters.
-struct AnchorHookContext<'a> {
-    /// Entity type ("node" or "edge")
-    entity_type: &'a str,
-    /// Entity ID as u64
-    entity_id: u64,
-    /// Transaction timestamp
-    timestamp: Timestamp,
-    /// Properties being stored in the anchor
-    properties: &'a PropertyMap,
 }
 
 /// Default cache size for reconstructed properties (10,000 entries)
@@ -253,18 +205,47 @@ pub struct HistoricalStorage {
     /// for indexing, metrics, logging, or coordination. Observers are notified
     /// asynchronously and errors don't block storage operations.
     observers: Vec<Observer>,
-    /// Pre-anchor hook for node anchors (called before storage).
+    /// Ordered pre-anchor hooks for node anchors (called before storage).
     ///
-    /// This hook is called **before** storing a node anchor to create synchronized
-    /// snapshots. The returned snapshot ID is stored atomically with the anchor,
-    /// enabling strong consistency for provenance tracking.
-    pre_node_anchor_hook: Option<PreAnchorHook>,
-    /// Pre-anchor hook for edge anchors (called before storage).
+    /// These hooks are called **before** storing a node anchor, in registration
+    /// order, to create synchronized snapshots. The returned snapshot ID is
+    /// stored atomically with the anchor, enabling strong consistency for
+    /// provenance tracking. A failure, panic, or timeout of one hook is isolated
+    /// and does not prevent the others from running (Issue #3525).
+    pre_node_anchor_hooks: Vec<PreAnchorHook>,
+    /// Ordered pre-anchor hooks for edge anchors (called before storage).
     ///
-    /// This hook is called **before** storing an edge anchor to create synchronized
-    /// snapshots. The returned snapshot ID is stored atomically with the anchor,
-    /// enabling strong consistency for provenance tracking.
-    pre_edge_anchor_hook: Option<PreAnchorHook>,
+    /// These hooks are called **before** storing an edge anchor, in registration
+    /// order, to create synchronized snapshots. The returned snapshot ID is
+    /// stored atomically with the anchor, enabling strong consistency for
+    /// provenance tracking. A failure, panic, or timeout of one hook is isolated
+    /// and does not prevent the others from running (Issue #3525).
+    pre_edge_anchor_hooks: Vec<PreAnchorHook>,
+    /// Optional bound on how long the write path waits for a single pre-anchor
+    /// hook before degrading gracefully (Issue #3525).
+    ///
+    /// `None` (default) runs hooks inline under the `historical` lock exactly as
+    /// before (panics still isolated). `Some(d)` runs each hook on a detached
+    /// worker thread and waits at most `d`; if the deadline elapses the write
+    /// path stops waiting, records a timeout, and creates the anchor without a
+    /// snapshot id from that hook. See [`hooks`] for the locking rationale.
+    hook_timeout: Option<Duration>,
+    /// Observability counters for pre-anchor hook execution (Issue #3525).
+    hook_metrics: HookMetrics,
+    /// Per-node temporal vector snapshot policy (Issue #383).
+    ///
+    /// Consulted at node-anchor creation to decide whether that entity's anchor
+    /// should trigger the pre-anchor snapshot hooks. Entities resolving to
+    /// [`SnapshotPolicy::Skip`] form graph anchors normally but do **not** run
+    /// the snapshot hooks, decoupling graph anchors from vector snapshots. The
+    /// default policy is [`SnapshotPolicy::Snapshot`], reproducing the pre-#383
+    /// global behavior when no per-entity policy is configured.
+    node_snapshot_policies: SnapshotPolicyRegistry<NodeId>,
+    /// Per-edge temporal vector snapshot policy (Issue #383).
+    ///
+    /// The edge counterpart of [`node_snapshot_policies`](Self::node_snapshot_policies);
+    /// resolved independently at edge-anchor creation.
+    edge_snapshot_policies: SnapshotPolicyRegistry<EdgeId>,
     /// Optional tiered storage for cold data access.
     ///
     /// When configured, versions not found in hot storage will be looked up
@@ -398,8 +379,12 @@ impl HistoricalStorage {
             anchor_cache_hits: Arc::new(AtomicU64::new(0)),
             full_reconstructions: Arc::new(AtomicU64::new(0)),
             observers: Vec::new(),
-            pre_node_anchor_hook: None,
-            pre_edge_anchor_hook: None,
+            pre_node_anchor_hooks: Vec::new(),
+            pre_edge_anchor_hooks: Vec::new(),
+            hook_timeout: None,
+            hook_metrics: HookMetrics::default(),
+            node_snapshot_policies: SnapshotPolicyRegistry::default(),
+            edge_snapshot_policies: SnapshotPolicyRegistry::default(),
             tiered_storage: None,
             temporal_indexes: None,
             temporal_adjacency_index: None,
@@ -477,8 +462,28 @@ impl HistoricalStorage {
     /// let mut storage = HistoricalStorage::new();
     /// storage.register_pre_node_anchor_hook(hook);
     /// ```
+    ///
+    /// # Backward compatibility (Issue #3525)
+    ///
+    /// This setter **replaces** all currently registered node pre-anchor hooks
+    /// with the single `hook`, preserving the original single-hook "set THE
+    /// hook" semantics. To register multiple ordered hooks without discarding
+    /// existing ones, use [`add_pre_node_anchor_hook`](Self::add_pre_node_anchor_hook).
     pub fn register_pre_node_anchor_hook(&mut self, hook: PreAnchorHook) {
-        self.pre_node_anchor_hook = Some(hook);
+        self.pre_node_anchor_hooks = vec![hook];
+    }
+
+    /// Append a pre-anchor hook for nodes, preserving registration order (Issue #3525).
+    ///
+    /// Unlike [`register_pre_node_anchor_hook`](Self::register_pre_node_anchor_hook)
+    /// (which replaces), this **appends** `hook` after any previously registered
+    /// node hooks. When an anchor is created, all registered node hooks run in
+    /// registration order. Each invocation is isolated: a failure, panic, or
+    /// timeout of one hook is recorded and logged but does not prevent later
+    /// hooks from running. Because an anchor has a single snapshot-id slot, the
+    /// **last** hook that returns `Ok(Some(id))` wins.
+    pub fn add_pre_node_anchor_hook(&mut self, hook: PreAnchorHook) {
+        self.pre_node_anchor_hooks.push(hook);
     }
 
     /// Register a pre-anchor hook for edges.
@@ -517,8 +522,174 @@ impl HistoricalStorage {
     /// let mut storage = HistoricalStorage::new();
     /// storage.register_pre_edge_anchor_hook(hook);
     /// ```
+    ///
+    /// # Backward compatibility (Issue #3525)
+    ///
+    /// This setter **replaces** all currently registered edge pre-anchor hooks
+    /// with the single `hook`, preserving the original single-hook "set THE
+    /// hook" semantics. To register multiple ordered hooks without discarding
+    /// existing ones, use [`add_pre_edge_anchor_hook`](Self::add_pre_edge_anchor_hook).
     pub fn register_pre_edge_anchor_hook(&mut self, hook: PreAnchorHook) {
-        self.pre_edge_anchor_hook = Some(hook);
+        self.pre_edge_anchor_hooks = vec![hook];
+    }
+
+    /// Append a pre-anchor hook for edges, preserving registration order (Issue #3525).
+    ///
+    /// Unlike [`register_pre_edge_anchor_hook`](Self::register_pre_edge_anchor_hook)
+    /// (which replaces), this **appends** `hook` after any previously registered
+    /// edge hooks. See [`add_pre_node_anchor_hook`](Self::add_pre_node_anchor_hook)
+    /// for the multi-hook ordering and partial-failure semantics.
+    pub fn add_pre_edge_anchor_hook(&mut self, hook: PreAnchorHook) {
+        self.pre_edge_anchor_hooks.push(hook);
+    }
+
+    /// Set the bound on how long the write path waits for a single pre-anchor
+    /// hook before degrading gracefully (Issue #3525).
+    ///
+    /// * `None` (default) runs hooks **inline** under the `historical` lock,
+    ///   exactly as before — identical lock-hold profile, with panics isolated.
+    /// * `Some(timeout)` runs each hook on a detached worker thread and waits at
+    ///   most `timeout`. If the deadline elapses the write path stops waiting,
+    ///   records a timeout in [`hook_metrics`](Self::hook_metrics), and creates
+    ///   the anchor without a snapshot id from that hook.
+    ///
+    /// # Locking / cancellation
+    ///
+    /// A configured timeout **bounds** the time the `historical` lock is held
+    /// across a hung hook (previously unbounded), so it never holds the lock
+    /// longer than before. Rust cannot safely cancel a running closure, so a
+    /// timed-out hook thread is detached and may run to completion in the
+    /// background; "timeout" means the write path stops waiting, not that the
+    /// hook is killed.
+    pub fn set_pre_anchor_hook_timeout(&mut self, timeout: Option<Duration>) {
+        self.hook_timeout = timeout;
+    }
+
+    /// Return the currently configured pre-anchor hook timeout, if any (Issue #3525).
+    pub fn pre_anchor_hook_timeout(&self) -> Option<Duration> {
+        self.hook_timeout
+    }
+
+    /// Return a point-in-time snapshot of pre-anchor hook execution metrics
+    /// (invocations, successes, failures, panics, timeouts) — the observability
+    /// surface for graceful degradation (Issue #3525).
+    pub fn hook_metrics(&self) -> HookMetricsSnapshot {
+        self.hook_metrics.snapshot()
+    }
+
+    // --- Per-entity temporal vector snapshot policy (Issue #383) ---------------
+    //
+    // These control, per node/edge, whether that entity's anchor triggers the
+    // pre-anchor snapshot hooks (registered via the #3525 multi-hook API).
+    // Replacing the single global anchor hook, they let production deployments
+    // snapshot only the vectors that actually change instead of re-snapshotting
+    // the whole index on every anchor. The default policy is
+    // [`SnapshotPolicy::Snapshot`], so a database that configures nothing behaves
+    // exactly as before Issue #383.
+
+    /// Set the temporal vector snapshot policy for a specific node (Issue #383).
+    ///
+    /// A [`SnapshotPolicy::Skip`] node still forms graph anchors normally but no
+    /// longer runs the pre-anchor snapshot hooks, so no vector snapshot is
+    /// captured for its anchors. Overrides the default policy for this node
+    /// until [`clear_node_snapshot_policy`](Self::clear_node_snapshot_policy) is
+    /// called.
+    pub fn set_node_snapshot_policy(&mut self, node_id: NodeId, policy: SnapshotPolicy) {
+        self.node_snapshot_policies.set(node_id, policy);
+    }
+
+    /// Set the temporal vector snapshot policy for a specific edge (Issue #383).
+    ///
+    /// The edge counterpart of
+    /// [`set_node_snapshot_policy`](Self::set_node_snapshot_policy).
+    pub fn set_edge_snapshot_policy(&mut self, edge_id: EdgeId, policy: SnapshotPolicy) {
+        self.edge_snapshot_policies.set(edge_id, policy);
+    }
+
+    /// Remove any per-node snapshot policy override, reverting the node to the
+    /// current default node policy (Issue #383). Returns the removed override,
+    /// if any.
+    pub fn clear_node_snapshot_policy(&mut self, node_id: NodeId) -> Option<SnapshotPolicy> {
+        self.node_snapshot_policies.clear(node_id)
+    }
+
+    /// Remove any per-edge snapshot policy override, reverting the edge to the
+    /// current default edge policy (Issue #383). Returns the removed override,
+    /// if any.
+    pub fn clear_edge_snapshot_policy(&mut self, edge_id: EdgeId) -> Option<SnapshotPolicy> {
+        self.edge_snapshot_policies.clear(edge_id)
+    }
+
+    /// Set the fall-through default snapshot policy for **nodes** without an
+    /// explicit override (Issue #383).
+    ///
+    /// Flipping this to [`SnapshotPolicy::Skip`] gives an opt-in model: no node
+    /// is snapshotted unless individually set to [`SnapshotPolicy::Snapshot`].
+    pub fn set_default_node_snapshot_policy(&mut self, policy: SnapshotPolicy) {
+        self.node_snapshot_policies.set_default(policy);
+    }
+
+    /// Set the fall-through default snapshot policy for **edges** without an
+    /// explicit override (Issue #383).
+    pub fn set_default_edge_snapshot_policy(&mut self, policy: SnapshotPolicy) {
+        self.edge_snapshot_policies.set_default(policy);
+    }
+
+    /// Return the current default node snapshot policy (Issue #383).
+    pub fn default_node_snapshot_policy(&self) -> SnapshotPolicy {
+        self.node_snapshot_policies.default_policy()
+    }
+
+    /// Return the current default edge snapshot policy (Issue #383).
+    pub fn default_edge_snapshot_policy(&self) -> SnapshotPolicy {
+        self.edge_snapshot_policies.default_policy()
+    }
+
+    /// Resolve the effective snapshot policy for a node: its explicit override
+    /// if set, otherwise the default node policy (Issue #383).
+    pub fn node_snapshot_policy(&self, node_id: NodeId) -> SnapshotPolicy {
+        self.node_snapshot_policies.resolve(node_id)
+    }
+
+    /// Resolve the effective snapshot policy for an edge: its explicit override
+    /// if set, otherwise the default edge policy (Issue #383).
+    pub fn edge_snapshot_policy(&self, edge_id: EdgeId) -> SnapshotPolicy {
+        self.edge_snapshot_policies.resolve(edge_id)
+    }
+
+    /// Whether a node's anchor should trigger a temporal vector snapshot
+    /// (Issue #383).
+    ///
+    /// This is the single per-entity decision consulted by BOTH anchor-driven
+    /// snapshot triggers so they can never diverge:
+    /// 1. the **pre-anchor hook** run in `add_node_version*` (returns a snapshot
+    ///    id stored on the anchor), and
+    /// 2. the **`NodeAnchorCreated` observer event** delivered right after the
+    ///    anchor is stored, which the [`VectorIndexObserver`] reacts to by
+    ///    calling `create_snapshot_for_anchor`.
+    ///
+    /// A `Skip` node still forms its graph anchor normally; only these two
+    /// vector-snapshot triggers are suppressed. The default policy is
+    /// `Snapshot`, so absent any per-entity configuration this is always `true`
+    /// — byte-identical to the pre-#383 behavior.
+    ///
+    /// [`VectorIndexObserver`]: crate::index::vector::temporal::VectorIndexObserver
+    #[inline]
+    fn node_anchor_triggers_vector_snapshot(&self, node_id: NodeId) -> bool {
+        self.node_snapshot_policies
+            .resolve(node_id)
+            .should_snapshot()
+    }
+
+    /// Edge counterpart of
+    /// [`node_anchor_triggers_vector_snapshot`](Self::node_anchor_triggers_vector_snapshot)
+    /// (Issue #383). Gates both the edge pre-anchor hook and the
+    /// `EdgeAnchorCreated` observer event on the shared per-edge policy.
+    #[inline]
+    fn edge_anchor_triggers_vector_snapshot(&self, edge_id: EdgeId) -> bool {
+        self.edge_snapshot_policies
+            .resolve(edge_id)
+            .should_snapshot()
     }
 
     /// Add a new version of a node.
@@ -604,9 +775,35 @@ impl HistoricalStorage {
         label: InternedString,
         properties: PropertyMap,
     ) -> Result<()> {
+        self.add_retracted_node_version_with_provenance(
+            node_id, version_id, valid_from, valid_to, tx_time, label, properties, None,
+        )
+    }
+
+    /// Add a *retraction* version of a node (Issue #3230), optionally attaching a
+    /// write-time [`Provenance`](crate::core::provenance::Provenance) bundle
+    /// recording the acting principal (Issue #3427).
+    ///
+    /// Behaves identically to
+    /// [`add_retracted_node_version`](Self::add_retracted_node_version) other
+    /// than persisting `provenance` on the created retraction version.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_retracted_node_version_with_provenance(
+        &mut self,
+        node_id: NodeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        properties: PropertyMap,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         let temporal =
             BiTemporalInterval::with_valid_time(valid_from, tx_time).close_valid_time(valid_to)?;
-        self.add_node_version_with_interval(node_id, version_id, temporal, label, properties, None)
+        self.add_node_version_with_interval(
+            node_id, version_id, temporal, label, properties, provenance,
+        )
     }
 
     /// Shared implementation for appending a node version with a fully
@@ -692,9 +889,17 @@ impl HistoricalStorage {
         };
         version.provenance = provenance;
 
-        // Handle pre-anchor hook (BEFORE storing)
-        if version.is_anchor() {
-            Self::handle_pre_anchor_hook(
+        // Handle pre-anchor hooks (BEFORE storing).
+        //
+        // Issue #383: the per-entity snapshot policy gates whether this anchor
+        // triggers the (potentially whole-index) snapshot hooks. A `Skip` entity
+        // still forms the anchor above but runs no snapshot hooks, so no vector
+        // snapshot is captured for it — decoupling graph anchors from vector
+        // snapshots. The default policy is `Snapshot`, so absent any per-entity
+        // configuration this is identical to the pre-#383 behavior.
+        if version.is_anchor() && self.node_anchor_triggers_vector_snapshot(node_id) {
+            self.run_pre_anchor_hooks_into(
+                &self.pre_node_anchor_hooks,
                 AnchorHookContext {
                     entity_type: "node",
                     entity_id: node_id.as_u64(),
@@ -702,7 +907,6 @@ impl HistoricalStorage {
                     properties: &properties,
                 },
                 &mut version.data,
-                &self.pre_node_anchor_hook,
             );
         }
 
@@ -781,7 +985,14 @@ impl HistoricalStorage {
                 is_anchor,
             },
         );
-        if is_anchor {
+        // Issue #383: the `NodeAnchorCreated` event is the second temporal
+        // vector snapshot trigger (the `VectorIndexObserver` reacts to it by
+        // calling `create_snapshot_for_anchor`). Gate it on the SAME per-entity
+        // policy as the pre-anchor hook above so a `Skip` node captures no
+        // snapshot via EITHER path. The general `NodeVersionCreated` event
+        // (emitted unconditionally above) stays available for metrics/audit
+        // observers, so this never over-suppresses non-vector observers.
+        if is_anchor && self.node_anchor_triggers_vector_snapshot(node_id) {
             notify_observers(
                 &self.observers,
                 &StorageEvent::NodeAnchorCreated {
@@ -886,12 +1097,36 @@ impl HistoricalStorage {
         target: NodeId,
         properties: PropertyMap,
     ) -> Result<()> {
+        self.add_retracted_edge_version_with_provenance(
+            edge_id, version_id, valid_from, valid_to, tx_time, label, source, target, properties,
+            None,
+        )
+    }
+
+    /// Add a *retraction* version of an edge (Issue #3230), optionally attaching a
+    /// write-time [`Provenance`](crate::core::provenance::Provenance) bundle
+    /// recording the acting principal (Issue #3427). See
+    /// [`add_retracted_node_version_with_provenance`](Self::add_retracted_node_version_with_provenance).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_retracted_edge_version_with_provenance(
+        &mut self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        source: NodeId,
+        target: NodeId,
+        properties: PropertyMap,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         let temporal =
             BiTemporalInterval::with_valid_time(valid_from, tx_time).close_valid_time(valid_to)?;
         self.add_edge_version_with_interval(
             edge_id, version_id, temporal, label, source, target, properties,
             false, // not a tombstone: the closed interval must stay traversable pre-valid_to
-            None,
+            provenance,
         )
     }
 
@@ -994,9 +1229,14 @@ impl HistoricalStorage {
         };
         version.provenance = provenance;
 
-        // Handle pre-anchor hook (BEFORE storing)
-        if version.is_anchor() {
-            Self::handle_pre_anchor_hook(
+        // Handle pre-anchor hooks (BEFORE storing).
+        //
+        // Issue #383: gated by the per-edge snapshot policy, symmetric with the
+        // node path above. See `snapshot_policy` for the rationale and the
+        // backward-compatible default (`Snapshot`).
+        if version.is_anchor() && self.edge_anchor_triggers_vector_snapshot(edge_id) {
+            self.run_pre_anchor_hooks_into(
+                &self.pre_edge_anchor_hooks,
                 AnchorHookContext {
                     entity_type: "edge",
                     entity_id: edge_id.as_u64(),
@@ -1004,7 +1244,6 @@ impl HistoricalStorage {
                     properties: &properties,
                 },
                 &mut version.data,
-                &self.pre_edge_anchor_hook,
             );
         }
 
@@ -1040,15 +1279,23 @@ impl HistoricalStorage {
                 }
             }
 
-            // Update temporal adjacency index to reflect closed valid time
+            // #3504: the superseded version's OWN valid interval now stays open
+            // (append-only) -- close_previous_version_intervals no longer closes
+            // it. Mirror the version chain's masking in the denormalized temporal
+            // adjacency index by closing the prior entry's TRANSACTION time (the
+            // tx-close that still happens on supersession and that hides the
+            // superseded version from current-state reads) instead of its valid
+            // time. This keeps a deleted/updated edge from reappearing in
+            // traversals while preserving snapshot isolation for reads anchored
+            // before the supersession (an earlier-tx query still sees the entry).
             if let Some(ref adj_index) = self.temporal_adjacency_index {
                 let new_temporal = *prev.temporal();
-                if old_temporal.valid_time().end() != new_temporal.valid_time().end() {
-                    adj_index.close_edge_valid_time(
+                if old_temporal.transaction_time().end() != new_temporal.transaction_time().end() {
+                    adj_index.close_edge_transaction_time(
                         edge_id,
                         source,
                         target,
-                        new_temporal.valid_time().end(),
+                        new_temporal.transaction_time().end(),
                     );
                 }
             }
@@ -1091,7 +1338,10 @@ impl HistoricalStorage {
                 is_anchor,
             },
         );
-        if is_anchor {
+        // Issue #383: symmetric with the node path — gate the second snapshot
+        // trigger (`EdgeAnchorCreated`, consumed by `VectorIndexObserver`) on
+        // the per-edge policy. `EdgeVersionCreated` above remains ungated.
+        if is_anchor && self.edge_anchor_triggers_vector_snapshot(edge_id) {
             notify_observers(
                 &self.observers,
                 &StorageEvent::EdgeAnchorCreated {
@@ -2870,52 +3120,28 @@ impl HistoricalStorage {
         self.count_versions_since_anchor(version_id, |vid| self.edge_versions.get(&vid))
     }
 
-    /// Handle pre-anchor hook invocation with proper logging.
+    /// Run the given ordered pre-anchor hooks and, if any resolves a snapshot
+    /// id, store it on the anchor's [`VersionData`] (Issue #3525).
     ///
-    /// This helper method encapsulates the common pattern of calling pre-anchor hooks
-    /// and handling their results (success with snapshot ID, success without snapshot,
-    /// or graceful degradation on failure).
-    fn handle_pre_anchor_hook(
+    /// This is a thin, allocation-free-when-empty wrapper over
+    /// [`hooks::run_pre_anchor_hooks`]. Hooks run in registration order under
+    /// the configured timeout policy; panics and errors are isolated (see the
+    /// [`hooks`] module for the locking and partial-failure semantics). Because
+    /// an anchor has a single snapshot-id slot, the last hook returning
+    /// `Ok(Some(id))` wins.
+    fn run_pre_anchor_hooks_into(
+        &self,
+        hooks: &[PreAnchorHook],
         context: AnchorHookContext<'_>,
         version_data: &mut VersionData,
-        hook: &Option<PreAnchorHook>,
     ) {
-        if let Some(hook_fn) = hook {
-            match hook_fn(
-                context.entity_type,
-                context.entity_id,
-                context.timestamp,
-                context.properties,
-            ) {
-                Ok(Some(snapshot_id)) => {
-                    version_data.set_vector_snapshot_id(snapshot_id);
-                    #[cfg(feature = "observability")]
-                    tracing::debug!(
-                        "Pre-anchor hook returned snapshot ID {} for {} {}",
-                        snapshot_id,
-                        context.entity_type,
-                        context.entity_id
-                    );
-                }
-                Ok(None) => {
-                    #[cfg(feature = "observability")]
-                    tracing::debug!(
-                        "Pre-anchor hook returned None for {} {} (no snapshot needed)",
-                        context.entity_type,
-                        context.entity_id
-                    );
-                }
-                Err(_e) => {
-                    #[cfg(feature = "observability")]
-                    tracing::warn!(
-                        "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
-                        context.entity_type,
-                        context.entity_id,
-                        context.timestamp,
-                        _e
-                    );
-                }
-            }
+        if hooks.is_empty() {
+            return;
+        }
+        if let Some(snapshot_id) =
+            hooks::run_pre_anchor_hooks(hooks, &context, self.hook_timeout, &self.hook_metrics)
+        {
+            version_data.set_vector_snapshot_id(snapshot_id);
         }
     }
 
@@ -2933,11 +3159,18 @@ impl HistoricalStorage {
         // Work on a local copy, apply modifications, then write back
         let mut prev_temporal = *prev_version.temporal();
 
-        if prev_temporal.is_currently_valid()
-            && new_temporal.valid_time().start() > prev_temporal.valid_time().start()
-        {
-            prev_temporal = prev_temporal.close_valid_time(new_temporal.valid_time().start())?;
-        }
+        // #3504: The superseded version's valid-time interval must stay
+        // append-only -- we deliberately do NOT close it here. The version
+        // chain is a transaction-time partition: every write/replay path
+        // unconditionally tx-closes the prior head (below), so at any tx
+        // coordinate at most one version is visible and current-state reads
+        // already skip the superseded version. Closing its valid_to in place at
+        // the successor's valid_from would retroactively shrink an interval that
+        // earlier-tx-time read snapshots still observe (the prior version's
+        // transaction-time window remains open to them), making a node that was
+        // alive at snapshot time disappear -- a snapshot-isolation violation on
+        // the valid dimension (residual of #3435; #3437 fixed the tx-time half).
+        // The tx-close alone is both necessary and sufficient.
 
         if prev_temporal.is_currently_recorded()
             && new_temporal.transaction_time().start() > prev_temporal.transaction_time().start()

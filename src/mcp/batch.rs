@@ -353,6 +353,21 @@ enum BatchAbort {
         edge_id: u64,
         removed_at_index: usize,
     },
+    /// The op at `index` targets a committed integer id that a `create_node`/
+    /// `create_edge` earlier in THIS batch allocated — a guessed-id write
+    /// against an entity not yet committed. This is the documented v1-scope
+    /// rejection ("no update/delete of batch-created refs") that the static
+    /// `$alias`/`$<index>` prevalidation enforces for the ref *spelling*
+    /// (`batch_committed_node`); enforced explicitly here for the integer-id
+    /// form because buffer-aware transaction reads (Issue #3417) no longer
+    /// surface it incidentally as `NOT_FOUND`.
+    BatchCreatedRefWrite {
+        index: usize,
+        entity: &'static str,
+        id: u64,
+        created_at_index: usize,
+        verb: &'static str,
+    },
     /// A commit-phase failure (no attributable op index).
     Commit { source: Error },
     /// An internal invariant breach in the batch handler itself (never the
@@ -1045,6 +1060,17 @@ impl AletheiaMcpServer {
         // Committed edges updated so far -> (endpoints, op index), to refuse
         // a later cascade silently discarding the update.
         let mut updated_committed_edges: HashMap<u64, (NodeId, NodeId, usize)> = HashMap::new();
+        // Integer ids of nodes/edges CREATED earlier in this batch, mapped to
+        // the op index that created them. An update/delete targeting one of
+        // these is a guessed-id write against an entity not yet committed —
+        // the v1-scope rejection the static `$alias` prevalidation
+        // (`batch_committed_node`) enforces for the ref SPELLING. Enforced
+        // explicitly here because buffer-aware transaction reads (Issue #3417)
+        // removed the incidental `NOT_FOUND` that used to catch the integer-id
+        // form (pinned by
+        // apply_batch_guessed_id_of_batch_created_node_aborts_whole_batch).
+        let mut created_node_ids: HashMap<u64, usize> = HashMap::new();
+        let mut created_edge_ids: HashMap<u64, usize> = HashMap::new();
 
         let mut results = Vec::with_capacity(planned.len());
         let mut ref_map = serde_json::Map::new();
@@ -1066,6 +1092,7 @@ impl AletheiaMcpServer {
                         .map_err(op_err(index))?;
                     let version_id = tx.buffered_node_version(node_id).map(|v| v.as_u64());
                     created_nodes[index] = Some(node_id);
+                    created_node_ids.insert(node_id.as_u64(), index);
                     if let Some(alias) = alias {
                         ref_map.insert(alias.clone(), json!(node_id.as_u64()));
                     }
@@ -1119,6 +1146,7 @@ impl AletheiaMcpServer {
                         )
                         .map_err(op_err(index))?;
                     let version_id = tx.buffered_edge_version(edge_id).map(|v| v.as_u64());
+                    created_edge_ids.insert(edge_id.as_u64(), index);
                     batch_edges.push(BatchEdge {
                         source,
                         target,
@@ -1139,6 +1167,15 @@ impl AletheiaMcpServer {
                     valid_from,
                     provenance,
                 } => {
+                    if let Some(&created_at) = created_node_ids.get(&node_id.as_u64()) {
+                        return Err(BatchAbort::BatchCreatedRefWrite {
+                            index,
+                            entity: "node",
+                            id: node_id.as_u64(),
+                            created_at_index: created_at,
+                            verb: "update",
+                        });
+                    }
                     let options = write_options(*valid_from, provenance.clone());
                     tx.update_node_with_options(*node_id, properties.clone(), options)
                         .map_err(op_err(index))?;
@@ -1156,6 +1193,15 @@ impl AletheiaMcpServer {
                     valid_from,
                     provenance,
                 } => {
+                    if let Some(&created_at) = created_edge_ids.get(&edge_id.as_u64()) {
+                        return Err(BatchAbort::BatchCreatedRefWrite {
+                            index,
+                            entity: "edge",
+                            id: edge_id.as_u64(),
+                            created_at_index: created_at,
+                            verb: "update",
+                        });
+                    }
                     if let Some(&removed_at) = deleted_committed_edges.get(&edge_id.as_u64()) {
                         return Err(BatchAbort::EdgeRemovedByCascade {
                             index,
@@ -1184,6 +1230,15 @@ impl AletheiaMcpServer {
                     detach,
                     valid_from,
                 } => {
+                    if let Some(&created_at) = created_node_ids.get(&node_id.as_u64()) {
+                        return Err(BatchAbort::BatchCreatedRefWrite {
+                            index,
+                            entity: "node",
+                            id: node_id.as_u64(),
+                            created_at_index: created_at,
+                            verb: "delete",
+                        });
+                    }
                     let edges_removed = self.batch_delete_node(
                         tx,
                         index,
@@ -1206,6 +1261,15 @@ impl AletheiaMcpServer {
                     edge_id,
                     valid_from,
                 } => {
+                    if let Some(&created_at) = created_edge_ids.get(&edge_id.as_u64()) {
+                        return Err(BatchAbort::BatchCreatedRefWrite {
+                            index,
+                            entity: "edge",
+                            id: edge_id.as_u64(),
+                            created_at_index: created_at,
+                            verb: "delete",
+                        });
+                    }
                     if let Some(&removed_at) = deleted_committed_edges.get(&edge_id.as_u64()) {
                         return Err(BatchAbort::EdgeRemovedByCascade {
                             index,
@@ -1247,11 +1311,10 @@ impl AletheiaMcpServer {
     ) -> Result<usize, BatchAbort> {
         // Existence check through the transaction (same snapshot the delete
         // will use), so a nonexistent node reports NOT_FOUND at this index.
-        // Note: transaction reads see COMMITTED state only, so a guessed
-        // numeric id that a create earlier in this batch happens to allocate
-        // is still NOT_FOUND here (and in the update/delete core ops) — the
-        // whole batch aborts and zero writes survive (pinned by
-        // apply_batch_guessed_id_of_batch_created_node_aborts_whole_batch).
+        // A guessed numeric id that a create earlier in this batch allocated
+        // is rejected BEFORE reaching here by the explicit batch-created-ref
+        // guard in `execute_batch` (Issue #3417) — this read only sees
+        // genuinely committed nodes.
         tx.get_node(node_id)
             .map_err(|source| BatchAbort::Op { index, source })?;
 
@@ -1424,6 +1487,35 @@ impl AletheiaMcpServer {
                     "removed_at_index": removed_at_index
                 })),
             ),
+            // Mirrors the static `$alias` prevalidation in
+            // `batch_committed_node`: same INVALID_ARGUMENT code and the same
+            // "created in the same batch is not supported in v1" phrasing, for
+            // the guessed integer-id form.
+            BatchAbort::BatchCreatedRefWrite {
+                index,
+                entity,
+                id,
+                created_at_index,
+                verb,
+            } => {
+                let mut details = serde_json::Map::new();
+                details.insert("failed_op_index".to_string(), json!(index));
+                details.insert(format!("{entity}_id"), json!(id));
+                details.insert("created_at_index".to_string(), json!(created_at_index));
+                self.error_result(
+                    McpError::new(
+                        McpErrorCode::InvalidArgument,
+                        format!(
+                            "Operation {index}: cannot {verb} {entity} {id} — updating or \
+                             deleting a {entity} created in the same batch (operation \
+                             {created_at_index}) is not supported in v1. Commit the creation \
+                             first, then {verb} it in a follow-up call. The whole batch was \
+                             rolled back."
+                        ),
+                    )
+                    .details(serde_json::Value::Object(details)),
+                )
+            }
         }
     }
 

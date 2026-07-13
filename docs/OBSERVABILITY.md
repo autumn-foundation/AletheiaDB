@@ -27,6 +27,27 @@ The crate emits named `tracing` spans such as:
 Applications install their own `tracing` subscriber, including any
 `tracing-opentelemetry` layer.
 
+### OTLP export (feature `otel`, Issue #3376)
+
+For a batteries-included OpenTelemetry story — an OTLP exporter, head sampling,
+W3C `traceparent`/`tracestate` propagation across the HTTP surface, and trace-id
+correlation in error responses — enable the `otel` feature (it composes with
+`observability`):
+
+```toml
+aletheiadb = { version = "0.3", features = ["http-server", "otel"] }
+```
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318" \
+  cargo run --bin aletheia-server --features http-server,otel
+```
+
+See **[guides/otel-tracing-guide.md](guides/otel-tracing-guide.md)** for
+enablement, exporter/env configuration, sampling guidance, the attribute/privacy
+model, and a worked "find the slow query" walkthrough with a collector + Jaeger
+compose example.
+
 ## Metrics
 
 Metrics flow through `observability::MetricsRecorder`. The default recorder is

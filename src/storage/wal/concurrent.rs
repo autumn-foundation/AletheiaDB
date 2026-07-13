@@ -385,6 +385,15 @@ impl ConcurrentWal {
     /// Vector of allocated LSNs in the same order as the operations.
     /// Returns an empty vector if `operations` is empty.
     ///
+    /// # Failure atomicity
+    ///
+    /// Serializing all entries before appending any guarantees zero WAL residue
+    /// on a **serialization** failure (e.g. an oversized entry rejected by the
+    /// `MAX_WAL_ENTRY_SIZE` guard): no prefix is written, flushed, or replayed.
+    /// A phase-2 append failure (reachable only if the stripe is closed
+    /// mid-batch during teardown) is out of scope and covered by transaction
+    /// framing (#3413).
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -414,16 +423,37 @@ impl ConcurrentWal {
         // Allocate all LSNs in a single atomic operation
         let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
 
-        // Pre-allocate result vector
-        let mut lsns = Vec::with_capacity(operations.len());
-
-        // Serialize and append each operation individually since each entry has its own LSN.
-        // The main optimization is the single batch LSN allocation above (vs N atomic operations).
+        // Phase 1 (fallible): serialize EVERY entry up front. Only once all
+        // entries have serialized successfully do we begin appending. If any
+        // entry fails to serialize (e.g. an oversized entry rejected by the
+        // MAX_WAL_ENTRY_SIZE guard), we return the error WITHOUT having
+        // appended anything, so a SERIALIZATION failure leaves ZERO WAL residue
+        // -- no prefix is written, flushed, or replayed on recovery
+        // (Issue #3414). (A phase-2 append failure is a distinct, narrower case
+        // scoped out below.)
+        //
+        // The reserved LSN range is consumed but unwritten on failure, which
+        // is benign: recovery seeds the allocator from the max *written* LSN,
+        // and the single-op `append_async` path already produces the identical
+        // hole on a serialize failure. Rolling back the shared atomic
+        // allocator would be unsound under concurrent batches, so we reserve
+        // up front and simply bail without appending.
+        let mut serialized: Vec<(LSN, Vec<u8>)> = Vec::with_capacity(count as usize);
         for (idx, operation) in operations.into_iter().enumerate() {
             let lsn = LSN(first_lsn.0 + idx as u64);
-            lsns.push(lsn);
-
             let data = self.serialize_entry(lsn, &operation)?;
+            serialized.push((lsn, data));
+        }
+
+        // Phase 2 (append): every entry serialized successfully, so append
+        // them all. An append failure here is reachable ONLY if the stripe is
+        // closed mid-batch during teardown (abnormal shutdown), and could leave
+        // a partial prefix; that residue is out of scope for this contained
+        // serialize-first fix and is covered by the WAL transaction-framing
+        // work (Issue #3413).
+        let mut lsns = Vec::with_capacity(serialized.len());
+        for (lsn, data) in serialized {
+            lsns.push(lsn);
             let stripe = self.get_stripe();
 
             match stripe.append_blocking(lsn, data) {
@@ -451,6 +481,13 @@ impl ConcurrentWal {
     /// A tuple containing:
     /// - Vector of allocated LSNs
     /// - Vector of completion handles corresponding to each operation
+    ///
+    /// # Failure atomicity
+    ///
+    /// Serializing all entries before appending any guarantees zero WAL residue
+    /// on a **serialization** failure. A phase-2 append failure (reachable only
+    /// if the stripe is closed mid-batch during teardown) is out of scope and
+    /// covered by transaction framing (#3413).
     pub fn append_batch_with_handles(
         &self,
         operations: Vec<WalOperation>,
@@ -471,17 +508,28 @@ impl ConcurrentWal {
         // Allocate all LSNs in a single atomic operation
         let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
 
-        // Pre-allocate result vectors
-        let mut lsns = Vec::with_capacity(operations.len());
-        let mut handles = Vec::with_capacity(operations.len());
-
-        // Serialize and append each operation individually since each entry has its own LSN.
-        // The main optimization is the single batch LSN allocation above (vs N atomic operations).
+        // Phase 1 (fallible): serialize EVERY entry up front, exactly as in
+        // `append_batch`. A SERIALIZATION failure (e.g. an oversized entry)
+        // returns the error WITHOUT appending anything, so it leaves ZERO WAL
+        // residue -- nothing is written, flushed, or replayed (Issue #3414).
+        // The reserved-but-unwritten LSN range is benign (see `append_batch`
+        // for the rationale).
+        let mut serialized: Vec<(LSN, Vec<u8>)> = Vec::with_capacity(count as usize);
         for (idx, operation) in operations.into_iter().enumerate() {
             let lsn = LSN(first_lsn.0 + idx as u64);
-            lsns.push(lsn);
-
             let data = self.serialize_entry(lsn, &operation)?;
+            serialized.push((lsn, data));
+        }
+
+        // Phase 2 (append): every entry serialized successfully, so append
+        // them all. An append failure here is reachable ONLY if the stripe is
+        // closed mid-batch during teardown (abnormal shutdown), and could leave
+        // a partial prefix; that residue is out of scope here and is covered by
+        // the WAL transaction-framing work (Issue #3413).
+        let mut lsns = Vec::with_capacity(serialized.len());
+        let mut handles = Vec::with_capacity(serialized.len());
+        for (lsn, data) in serialized {
+            lsns.push(lsn);
             let stripe = self.get_stripe();
 
             match stripe.append_sync_blocking(lsn, data) {
@@ -1033,17 +1081,18 @@ mod sentry_tests {
         // Calculate size needed for payload
         // CreateNode overhead:
         // Fixed: 24 bytes (LSN + Time + Checksum)
-        // Variable: 1 (op) + 8 (node_id) + 4 (label) + 12 (time) = 25 bytes
+        // Variable: 1 (op) + 8 (node_id) + 8 (label [len:4]["Test":4], #3506)
+        //           + 12 (time) = 29 bytes
         // PropertyMap overhead:
         // 4 (count) + 4 (key_len) + key_bytes + 1 (tag_string) + 4 (val_len) + val_bytes
 
         // Let's use a key "k" (1 byte)
-        // Overhead = 24 + 25 + 4 + 4 + 1 + 1 + 4 + 1 (provenance presence byte) = 64 bytes
-        // Total = 64 + val_bytes
+        // Overhead = 24 + 29 + 4 + 4 + 1 + 1 + 4 + 1 (provenance presence byte) = 68 bytes
+        // Total = 68 + val_bytes
         // Target = MAX_WAL_ENTRY_SIZE
-        // val_bytes = MAX_WAL_ENTRY_SIZE - 64
+        // val_bytes = MAX_WAL_ENTRY_SIZE - 68
 
-        let overhead = 64;
+        let overhead = 68;
         let target_val_len = MAX_WAL_ENTRY_SIZE - overhead;
 
         // Create a string of target length
@@ -1087,7 +1136,7 @@ mod sentry_tests {
         let wal = ConcurrentWal::new(config).unwrap();
 
         // Use same calculation as above but +1 byte
-        let overhead = 64;
+        let overhead = 68;
         let target_val_len = MAX_WAL_ENTRY_SIZE - overhead + 1;
 
         let big_string = "x".repeat(target_val_len);

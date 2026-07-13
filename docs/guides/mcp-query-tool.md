@@ -95,6 +95,62 @@ extend them. Advertised, supported constructs:
 Mutating clauses (`CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`, `DETACH`,
 `DROP`, `CALL`, `FOREACH`, `LOAD`) are rejected **before execution**.
 
+## Querying provenance (Issue #3354a)
+
+Write-time provenance (source / confidence / reason, Issue #3224 — the same
+metadata the structured read tools filter on in Issue #3348) is queryable
+directly from an **AQL** `WHERE` clause through the `query` tool, so an LLM can
+express a trust-thresholded, temporally-scoped question as one declarative
+statement instead of a fetch-all-then-filter chain.
+
+Read-only accessors (usable in `WHERE` only in v1):
+
+- `source(x)` — the version's `source` (string; `=`, `<>`)
+- `confidence(x)` — the version's `confidence` (number in `[0,1]`; `=`, `<>`,
+  `<`, `<=`, `>`, `>=`)
+- `reason(x)` — the version's `reason` (string; `=`, `<>`)
+- `provenance(x) IS [NOT] NULL` — select (or exclude) versions with no bundle
+
+`x` is a bound variable. A property literally named `source` is still
+`n.source` (property access) and is unaffected — the accessors resolve only in
+function-call position.
+
+**Semantics match the #3348 structured filter exactly.** Provenance is
+evaluated per-version at the query's bi-temporal coordinate (an `AS OF` query
+reads the bundle on the version visible at that coordinate, not the latest);
+unattributed versions (or a bundle missing the queried field) are **excluded**
+by any comparison and selectable only via `provenance(x) IS NULL`.
+
+```jsonc
+// tools/call -> "query": trusted HR facts as of a coordinate, one call
+{
+  "language": "aql",
+  "query": "AS OF '1704067200000000' MATCH (n:Person) WHERE source(n) = 'hr-system' AND confidence(n) >= 0.9 RETURN n",
+  "limit": 20
+}
+```
+
+Misuse fails closed with the tool's structured error payload, never a silent
+empty result: a `confidence` literal outside `[0,1]` (or NaN) → `invalid_params`
+naming `min_confidence`; an accessor compared to the wrong type
+(`confidence(n) = 'high'`, `source(n) = 5`) → `invalid_params`
+(`Type mismatch: …`); an **ordering operator on a string accessor**
+(`source(n) < 'x'`, `reason(n) >= 'y'`) → `parse_error` (the string accessors
+support only `=`/`<>`, and ordering ops are rejected at convert time rather than
+silently accepted as lexicographic comparisons); a malformed accessor argument
+(`source(n.foo)`, `confidence(n, m)`, `source()`) → `parse_error`. The accessors
+introduce no mutating clause, so the tool's read-only guarantee is unchanged, and
+the query tool stays `reader`-class.
+
+In the single-entity pipeline, a non-provenance property leaf on an **edge** row
+is a pass-through (evaluates `true`); only provenance leaves actually filter edge
+rows, so a mixed edge predicate filters **only on its provenance clause**.
+
+> **Deferred (v1):** provenance in `RETURN`/`ORDER BY` projections (needs the
+> scalar-projection-into-row lowering) and the Cypher surface (#3354b). Like
+> ordinary property predicates, an accessor reads the row's bound entity rather
+> than resolving per-variable.
+
 ## End-to-end example (LLM-style)
 
 **Question:** *"As of June 2026, which Products does Alice's KNOWS-network view
@@ -673,10 +729,11 @@ object of this shape (Issue #3234):
 | `CONSTRAINT_VIOLATION` | A declared uniqueness constraint rejected the write (`details` carries `label`, `property`, `value`, `existing_node_id`) | `false` | Use the existing entity or change the value |
 | `FAILED_PRECONDITION` | Valid request, wrong system state: vector index not enabled, node still has connected edges without `detach: true`, referenced edge endpoint missing, enabling a unique constraint over already-existing duplicate values, feature not compiled in | `false` | Change the state (enable the index, pass `detach`, create the endpoint, dedupe the data), then re-issue |
 | `CONFLICT` | Concurrency conflict: serialization failure, write-write conflict, aborted transaction | usually `true` | Retry the operation (a duplicate-ID conflict is the exception: `retriable: false`) |
-| `UNAVAILABLE` | Transient condition: query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow) | `true` | Retry, ideally with backoff |
+| `UNAVAILABLE` | Transient condition: engine-internal query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow), or the `query` tool at its in-flight-worker cap (Issue #3368, `details.max_in_flight_queries`) | `true` | Retry, ideally with backoff |
 | `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
 | `UNAUTHENTICATED` | No valid session credential in `required` auth mode (Issue #3350) — missing, unknown, or revoked; deliberately indistinguishable, and returned for *every* tool including unknown tool names (no inventory leak). Never carries `details`, never echoes the credential | `false` | Supply a valid `ALETHEIADB_MCP_API_KEY` (or bootstrap key) and restart the session; retrying with the same credential cannot succeed |
 | `PERMISSION_DENIED` | Authenticated, but the principal's role does not allow the tool's access class (Issue #3350). `details` carries `required_class` and `principal_role` | `false` | Use a credential whose role allows the class (see [docs/guides/access-control-matrix.md](access-control-matrix.md)); do not retry with the same key |
+| `RESOURCE_EXHAUSTED` | A per-query resource limit was exceeded on the `query` tool (Issue #3368): the wall-clock timeout elapsed, or the result exceeded the response-byte cap. `details` carries `dimension` (`wall_clock_timeout`/`result_bytes`), `limit`, and (for byte caps) `consumed` | timeout: `true` (read-only, so a tightened retry is sound); byte cap: `false` | Narrow the query (smaller depth/`LIMIT`/time window, fewer returned properties) or raise the matching `limits.*` override (up to the operator ceiling) |
 
 Codes may be **added** over time; existing codes never change. Treat an
 unrecognized code as non-retriable. `UNAUTHENTICATED` and
@@ -712,6 +769,134 @@ Legacy top-level fields that predate this contract (the DETACH refusal's
 `connected_edges` / `detach_required`, the unique-violation's
 `constraint_violation` / `existing_node_id`) remain present alongside
 `error.details`, so pre-#3234 consumers keep working.
+
+## Per-query resource limits (Issue #3368)
+
+A single pathological `query` — an unbounded variable-depth traversal, an
+accidental cross product, a temporal scan across a million versions — can
+starve every other concurrent agent. The `query` tool enforces three per-call
+resource limits so a runaway query fails predictably instead of hurting its
+neighbors, and returns a **structured, self-correctable** error.
+
+Each dimension has a **server default**, an operator **hard ceiling**, and an
+optional **per-call override** (supplied under `limits`) that may tighten below
+the default but is rejected if it exceeds the ceiling:
+
+```jsonc
+// tools/call -> "query"
+{
+  "language": "cypher",
+  "query": "MATCH (n:Person)-[:KNOWS*1..5]->(m) RETURN m",
+  "limits": {
+    "timeout_ms": 2000,          // wall-clock budget for this call
+    "max_result_rows": 500,      // truncates with truncated:true past this
+    "max_response_bytes": 262144 // fail-closed cap on the serialized response
+  }
+}
+```
+
+`0` on any override means *unlimited* — but only under an unbounded ceiling; a
+`0` under a finite operator ceiling is rejected (a caller cannot disable a limit
+the operator set). Omitting `limits` entirely uses the server defaults, and with
+default (generous) limits the response is byte-identical to pre-#3368 behavior.
+
+### What each breach returns
+
+| Dimension | Over-limit outcome | `code` | `retriable` | `details` |
+|-----------|--------------------|--------|-------------|-----------|
+| Wall-clock timeout | Query terminated, structured error | `RESOURCE_EXHAUSTED` (kind `runtime_error`) | `true` — the tool is read-only, so a tightened retry is sound | `{dimension:"wall_clock_timeout", limit}` |
+| Result rows | **Success**, truncated to the cap and flagged | *(none — success)* | n/a | response carries `truncated: true` (the #3226 completeness signal) |
+| Result bytes | Response rejected, structured error | `RESOURCE_EXHAUSTED` (kind `runtime_error`) | `false` — the same query yields the same oversized result | `{dimension:"result_bytes", limit, consumed}` |
+| Over-ceiling override | Rejected before any execution | `INVALID_ARGUMENT` (kind `invalid_params`) | `false` | `{dimension, requested, ceiling}` |
+| In-flight cap reached | Rejected before spawning a worker | `UNAVAILABLE` (kind `runtime_error`) | `true` — transient load; back off and retry | `{reason:"in_flight_query_cap", max_in_flight_queries}` |
+| Worker died (panic) | Structured error (never a timeout) | `INTERNAL` (kind `runtime_error`) | `false` — a deterministic panic won't fix itself on retry | *(none)* |
+
+**Two distinct timeout `code`s.** The *wall-clock-limit* timeout above — the
+`query` tool's own deadline elapsing on the raced worker — is
+`RESOURCE_EXHAUSTED`. An *engine-internal* `QueryError::Timeout` bubbled up from
+the executor maps to `UNAVAILABLE` instead. Both are `retriable: true`, but they
+carry different `code`s (and the former alone carries
+`details.dimension = "wall_clock_timeout"`), so branch on `details` when you need
+to tell them apart.
+
+Row-cap overflow degrades to a **disclosed truncation** (never a silent drop);
+the timeout and byte cap **fail closed** with an error. The read-only guard runs
+*before* execution, so a query terminated by the timeout can never leave a
+partial write. Timeout enforcement bounds the caller's wait via a thread-race;
+the underlying computation is not force-cancelled (it runs to completion and is
+discarded), mirroring the HTTP `/query` surface — engine-level cooperative
+cancellation is a separate query-executor concern.
+
+### Bounded in-flight workers (DoS guard)
+
+Because a timed query runs on a **detached, non-cancellable** worker thread, a
+caller sending tiny `timeout_ms` overrides — or simply hammering the documented
+retriable-timeout retry loop — could otherwise pile up thousands of still-running
+expensive queries and exhaust threads/CPU/memory. The server caps the number of
+`query` calls concurrently occupying a worker
+(`QueryLimitsConfig::max_in_flight_queries`, **default 64**, `0` = unbounded;
+configured on the same `AletheiaMcpServer::with_query_limits(...)` path as the
+other limits). At the cap a new timed query is **rejected up front** with a
+retriable `UNAVAILABLE` error (`details.max_in_flight_queries`) instead of
+spawning another worker. A worker holds its slot for its whole lifetime — even
+after the caller has timed out and discarded it — so a discarded-but-still-running
+query keeps occupying capacity until it actually finishes. The inline
+unlimited-timeout path (`timeout_ms == 0`) never spawns a worker and is therefore
+unguarded. (The already-merged HTTP `/query` path (#3446) shares the same
+unbounded-worker weakness; adding an equivalent cap there is a parity follow-up.)
+A worker that **panics** mid-computation is reported as a non-retriable
+`INTERNAL` error (never a retriable timeout), so a deterministic panic can't
+become an invisible, infinitely-retriable "timeout".
+
+### LLM self-correction path
+
+The error payload contains everything an agent needs to shrink the query and
+succeed within the same session — no human help, no substring matching:
+
+```jsonc
+// 1. query { "query": "MATCH (n)-[:KNOWS*1..8]->(m) RETURN m", "limits": {"timeout_ms": 1000} }
+// -> { "error": { "code": "RESOURCE_EXHAUSTED", "retriable": true,
+//                 "details": { "dimension": "wall_clock_timeout", "limit": 1000 } } }
+// Agent reads details.dimension == wall_clock_timeout -> narrow the traversal depth:
+// 2. query { "query": "MATCH (n)-[:KNOWS*1..3]->(m) RETURN m", "limits": {"timeout_ms": 1000} }
+// -> success.
+
+// A byte-cap breach names the consumed size so the agent can shrink deterministically:
+// -> { "error": { "code": "RESOURCE_EXHAUSTED", "retriable": false,
+//                 "details": { "dimension": "result_bytes", "limit": 262144, "consumed": 900000 } } }
+// Agent adds a smaller LIMIT (or raises limits.max_response_bytes toward the ceiling) and re-issues.
+```
+
+### Composition with token budgets (#3353) and cursors (#3360)
+
+The **protective** result-byte cap here and the **ergonomic** #3353
+`max_response_tokens` / `max_response_bytes` budget compose without
+double-truncation: the operator byte cap is enforced first (inside the tool), so
+a breach fails closed as `RESOURCE_EXHAUSTED` and the budget shaper passes that
+error through untouched — a generous token budget can never mask the protective
+limit. A response *within* the byte cap is then shaped by the caller's token
+budget along the #3353 disclosed ladder as usual. Cursor paging on the `query`
+tool remains an `unsupported_construct` (#3360).
+
+### Coverage matrix
+
+| Surface | Wall-clock timeout | Result-row cap | Result-byte cap | Override + operator ceiling |
+|---------|--------------------|----------------|------------------|-----------------------------|
+| MCP `query` tool | ✅ (thread-race, read-only) | ✅ truncate + disclose | ✅ fail-closed | ✅ `limits` |
+| HTTP `/query` | ✅ (Issue #3446) | ✅ truncate/reject | ✅ | ✅ `limits` |
+| MCP `traverse` / `hybrid_query` / `find_similar` | ⚠️ row `limit`/`top_k` caps only; timeout + byte cap are a documented follow-up | ✅ via `limit`/`top_k` | via #3353 budget | — |
+| Rust query builder | ⚠️ builder-level limit options are a documented follow-up (embedders hold the `Arc<AletheiaDB>` and can bound work directly) | — | — | — |
+
+Over-limit terminations are counted per dimension in-process
+(`AletheiaMcpServer::limit_termination_counts()`); surfacing them through
+`database_stats` needs a storage-layer counter and is a cross-lane follow-up.
+The response-byte cap is enforced **incrementally**: rows are serialized and
+measured as they are appended, and the response fails closed as soon as the
+running size provably exceeds the cap — so peak working memory stays ≈ the cap
+rather than materializing the full (up to the row-count ceiling) result before
+rejecting it. The row-count ceiling remains the independent bound on how many
+rows are ever built. True engine-level **memory** accounting (spill, per-operator
+budgets) is a separate query-executor follow-up.
 
 ## Discovering the queryable temporal extent (`temporal_extent`)
 
@@ -776,17 +961,21 @@ maintain at write time; bounds only ever widen while the server runs, so a
 caller can cache the result for the duration of a session. The per-label
 breakdown is folded from the hot-tier historical version store.
 
-**Coverage caveat (cold storage + restarts).** Bounds cover all history
+**Coverage (cold storage + restarts).** Overall bounds cover all history
 recorded during the **current process lifetime**, plus the hot-tier history
-restored at startup. On databases with cold-storage migration enabled,
-versions migrated to the cold tier *before the last restart* are **not**
-reflected — the temporal indexes (and their extent aggregate) are rebuilt at
-startup from hot-tier versions only. Within a single process lifetime,
-cold-tier migration never shrinks the bounds. The per-label breakdown is
-additionally hot-tier-only even within a process lifetime: after cold
-migration a label's bounds may be narrower than the overall bounds, or a
-label may be absent entirely. A follow-up could persist cold-tier bounds
-metadata to close the restart gap.
+restored at startup, plus history migrated to the cold tier — including
+across restarts (Issue #3389). The cold store persists its min/max extent
+bounds per dimension in metadata (maintained incrementally as versions
+migrate), and those bounds are merged back into the extent aggregate at
+startup, so a fact migrated to cold before a restart still bounds the extent.
+The **per-label breakdown** is still folded from the hot-tier historical
+version store only: after cold migration a label's per-label bounds may be
+narrower than the overall bounds, or a label may be absent entirely (the
+persisted cold bounds are aggregate-only, not per-label). Bounds never
+shrink. One narrow gap: bounds are **not** backfilled for a cold file created
+by a pre-#3389 binary that already held versions — such pre-existing cold
+history is captured only from the first new write onward, so the extent can
+under-report (never over-report) until those versions are re-touched.
 
 **Calibration pattern:** if `temporal_extent` reports
 `valid_time.earliest = 2021-03-01`, an `AS OF '2019-01-01'` query is
@@ -975,6 +1164,450 @@ keeps its existing microseconds-as-string format — that contract is
 unchanged). The block is purely additive: no existing field moved or changed
 shape.
 
+## Token-budget-aware responses (Issue #3353)
+
+An LLM's context window is its scarcest resource, yet the read tools size their
+responses by *row count* (`limit`), not by *cost*: a `limit: 50` traversal can
+return 500 tokens or 50,000 depending on the property payloads, and the caller
+cannot know in advance. The token budget lets a caller say "spend at most N
+tokens answering this" and receive a response *guaranteed* to fit, with an
+explicit, machine-readable account of what was reduced and how to fetch it.
+
+### The parameters
+
+The **thirteen** budgetable read tools — `get_node`, `list_nodes`, `get_edge`,
+`list_edges`, `get_outgoing_edges`, `get_incoming_edges`, `traverse`,
+`find_similar`, `hybrid_query`, `query`, `find_nodes_at_time`,
+`get_node_history`, and `get_schema` — accept these optional parameters. This is
+the exact set (the code's single source of truth is `BUDGETABLE_READ_TOOLS`);
+it is **not** *every* read tool — single-entity/aggregate reads such as
+`get_node_at_time`, `get_edge_history`, `diff_node_versions`, `temporal_extent`,
+`database_stats`, and `count_nodes` are out of scope. The three parameters are
+injected into each budgetable tool's advertised `inputSchema.properties`, so a
+client that introspects the schema discovers them (with correct types) rather
+than relying on the prose description alone. Omitting all of them leaves the
+tool's behavior **completely unchanged**.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `max_response_tokens` | Maximum response size in **estimated tokens**. The serialized **success** response, *including the truncation metadata itself*, is guaranteed not to exceed this. |
+| `max_response_bytes` | Byte-exact alternative. When both are set, the **tighter** bound wins. |
+| `priority_properties` | Array of property keys to protect from elision; they out-survive unprotected properties at every degradation rung. |
+
+The budget bounds **success** responses. A structured *error* response (for
+example the too-small-budget `INVALID_ARGUMENT` below) is itself small and is
+returned intact. In the rare case a budgetable tool returns a non-object success
+payload (a JSON scalar/array, or plain text) it cannot degrade along the entity
+ladder, but the byte cap is still enforced: the payload is truncated with a
+disclosed marker rather than emitted unbounded.
+
+A **misspelled or unknown budget key** (e.g. `max_tokens` instead of
+`max_response_tokens`) is **ignored** — consistent with the surface's
+unknown-field tolerance — and the full, unbudgeted response is returned. Use the
+exact key names above so a budget you intend to apply is actually applied.
+
+**Token-estimation basis:** tokens are estimated as `ceil(utf8_byte_len / 4)`.
+Four bytes per token is the standard approximation of GPT/Claude-family BPE
+tokenizers for English-plus-JSON text and holds within ~10% at the 1K-token
+scale. Callers needing an exact wire bound use `max_response_bytes`, which is
+enforced byte-for-byte.
+
+### The degradation ladder (deterministic, disclosed)
+
+Over budget, the response degrades along a fixed, ordered ladder. The same
+request at the same budget on the same data always degrades **identically**:
+
+1. **`full`** — nothing reduced.
+2. **`elided_properties`** — inside each entity's `properties`, any value whose
+   serialized size exceeds a threshold (and is not a protected
+   `priority_properties` key) is replaced with an `{ "elided": true, ... }`
+   descriptor, mirroring the vector-elision convention of #3220. A value is
+   elided **only when the descriptor is actually smaller** than the value it
+   replaces, so this rung can never enlarge the response.
+3. **`entity_summaries`** — each entity's `properties` is reduced to the
+   protected keys only. Result *structure* — ids, labels, relationships,
+   temporal coordinates, provenance and similarity scores — survives because it
+   lives *beside* `properties`, never inside it.
+4. **`counts_and_handles`** — entity arrays are truncated to the prefix that
+   fits; the omitted tail is disclosed as a count plus a fetch handle, **and the
+   object's own pagination/count siblings are rewritten** to describe the
+   retained prefix — `count`/`row_count` become the retained length,
+   `has_more`/`truncated` become `true`, and `next_offset` (on offset-paginated
+   tools) advances to exactly the cut point. This keeps a paginating caller
+   gap-free and duplicate-free: following the disclosed resume call yields the
+   dropped rows and nothing else. (`total_matching`, when present, still counts
+   the full matching set and is left unchanged.)
+
+`find_similar` and `hybrid_query` **never reach rung 4**: their ranked results
+are never dropped or reordered to meet a budget — only the per-result payloads
+degrade. Temporal responses never omit the temporal coordinates that make a
+result interpretable.
+
+Every response carries a `budget` block naming the rung applied per section:
+
+```jsonc
+// tools/call -> "get_node"
+{ "node_id": 7, "max_response_tokens": 400 }
+// -> {
+//      "id": 7,
+//      "label": "Person",
+//      "properties": {
+//        "name": "Alice",
+//        "bio": {
+//          "elided": true, "reason": "budget", "type": "string", "size_bytes": 4002,
+//          "fetch": { "tool": "get_node",
+//                     "arguments": { "node_id": 7, "include_vectors": true } }
+//        }
+//      },
+//      "temporal": { /* ... always preserved ... */ },
+//      "budget": {
+//        "applied": true,
+//        "rung": "elided_properties",
+//        "token_estimation_basis": "ceil(utf8_bytes / 4)",
+//        "requested_max_tokens": 400,
+//        "effective_max_bytes": 1600,
+//        "priority_properties": [],
+//        "sections": [ { "section": "properties", "rung": "elided_properties",
+//                        "elided_values": 1 } ]
+//      }
+//    }
+```
+
+### Fetch handles — nothing is lost
+
+Every elision/truncation site carries a **fetch handle**: a concrete follow-up
+call (`tool` + `arguments`) that retrieves exactly the omitted content.
+
+- A **per-entity elision** on a live node/edge points at `get_node`/`get_edge`
+  with `include_vectors: true`.
+- A **history version** elision (`get_node_history`/`get_edge_history`) points at
+  `get_node_at_time`/`get_edge_at_time` addressing the *exact superseded
+  version* — the parent entity id (taken from the history wrapper) plus that
+  version's own `valid_from`/`transaction_from` coordinates. A plain `get_node`
+  would return the current state, not the historical version, so the handle uses
+  the point-in-time tool instead.
+- A **truncated array** on an offset-paginated tool
+  (`list_nodes`/`traverse`/`find_nodes_at_time`) carries a concrete resume call:
+  the original arguments with the budget knobs stripped and `offset` advanced to
+  the cut point (composing with the #3226 `next_offset` completeness signal). On
+  a tool that does **not** page by offset (e.g. `get_outgoing_edges`,
+  `get_schema`, `query`) the handle honestly discloses the truncation and tells
+  the caller to re-request with a larger budget — it never fabricates an `offset`
+  argument the tool does not accept.
+
+An agent that follows the handles can reconstruct the full, unbudgeted response.
+
+### Budgets too small to satisfy
+
+If the budget is too small to return even the minimal rung, the tool returns a
+structured #3234 `INVALID_ARGUMENT` error stating the **minimum viable budget** —
+never a silently empty success. The reported minimum is **self-consistent**:
+re-issuing the same request at `min_viable_tokens` (or `min_viable_bytes`)
+succeeds — the figure already accounts for the disclosed `budget` block's own
+numbers growing at the larger budget.
+
+```jsonc
+{ "error": {
+    "code": "INVALID_ARGUMENT",
+    "message": "requested budget is too small to return even the minimal response for this request; minimum viable budget is approximately 1222 tokens (4886 bytes)",
+    "retriable": false,
+    "details": { "min_viable_tokens": 1222, "min_viable_bytes": 4886,
+                 "requested_tokens": 1200, "requested_bytes": null }
+} }
+```
+
+### Composition and scope
+
+- **Composes with #3220 vector elision** (already-elided vectors are left as-is),
+  **#3226 completeness signals** (truncation handles reference `next_offset`),
+  and the **#3234 error contract** (the too-small-budget error is `INVALID_ARGUMENT`).
+- **Read tools only.** Write and admin tools are out of scope (their responses
+  are already small and fixed-shape). Cursor continuation of large results
+  (#3360) is a complementary, now-landed feature — see
+  [Paging large results](#paging-large-results-cursor-continuation) below for how
+  the two compose.
+
+## Paging large results (cursor continuation)
+
+Offset pagination (`offset`/`next_offset`, Issue #3226) works, but over a
+*concurrently written* database it is quietly unsafe: between fetching page 1
+and page 2 other agents write, offsets shift, and the reader sees duplicates
+or misses rows — and each page is computed against a *different* database
+state, so an agent assembling "all Persons matching X" across five pages can
+return a set that never existed at any single moment. It also degrades
+linearly (page 50 recomputes and discards 4,900 rows).
+
+**Cursor continuation (Issue #3360)** fixes this. Set `use_cursor: true` on
+the first call to a bounded read tool; the response includes an opaque
+`cursor` token. Pass that token back — *with no other parameters* — to fetch
+the next page. When no `cursor` is present in a response, the scan is
+complete.
+
+### The consistency guarantee
+
+Every page of one cursor scan is evaluated at the **bi-temporal coordinate
+captured on the first page** (disclosed in each response as
+`snapshot_valid_time` / `snapshot_transaction_time`), leveraging AletheiaDB's
+existing point-in-time read semantics. Concretely, for the whole scan:
+
+- a node/edge **created** after the first page is **never** seen (it did not
+  exist in the snapshot) — no post-cursor leakage;
+- a node/edge **deleted** after the first page is **still** seen (the snapshot
+  predates the deletion) — no omission;
+- a node/edge **updated** after the first page is returned **as it was** at
+  the snapshot.
+
+So the union of all pages equals *exactly* the unbounded result at one
+consistent moment — zero duplicates, zero gaps — even under concurrent
+mutation, **up to the candidate cap** (see below). This is uniquely cheap for
+AletheiaDB: the bi-temporal engine already answers "the database as of
+coordinate T" natively, so consistent paging falls out of existing semantics
+rather than requiring a held-open transaction (contrast Qdrant/Weaviate/Milvus
+scroll APIs, which drift under concurrent writes because they have no
+coordinate to anchor to).
+
+**Candidate cap (`sampled`).** The node scans (`list_nodes`,
+`find_nodes_at_time`) route through the #3236 point-in-time finders, whose
+candidate enumeration is capped at `max_schema_as_of_entities` (default 50,000,
+lowest node ids kept). When the labelled candidate set exceeds that cap, every
+page of the scan carries `sampled: true`, and the "union equals exactly the
+unbounded result" guarantee holds only **up to the cap** — the scan is bounded
+by the cap, not exhausted. `total_matching` then counts matches within the
+sampled candidate set only. When `sampled` is `false` (the common case) the
+union is the complete result. To scan a set larger than the cap with full
+coverage, narrow it with a `property_key`/`property_value` filter (or a more
+specific `label`) so the candidate set fits under the cap.
+
+**Current-state vs. bi-temporal-at-now divergence.** `get_outgoing_edges`,
+`get_incoming_edges`, and `traverse` in cursor mode (with no `as_of_*`
+coordinate supplied) pin the snapshot at "now" on the first page and answer via
+the bi-temporal **as-of-now** read path — *not* the plain current-state path
+their default (non-cursor) mode uses. The practical consequence: a cursor scan
+**excludes future-valid** rows (an edge or node whose `valid_from` is in the
+future, e.g. a #3221 forward-dated fact), whereas a plain current-state
+`get_outgoing_edges` / `traverse` call returns them. This is the same tradeoff
+`find_nodes_at_time` (and #3236) already documents for point-in-time reads: a
+future-dated `valid_from` row is in current state but not yet visible at
+`(now, now)`. If you specifically need future-valid rows, use the tool's
+non-cursor mode.
+
+### The cursor loop
+
+```jsonc
+// Page 1 — opt in. `label` is required (an unlabeled list has no ordered set).
+// tools/call -> "list_nodes"
+{ "label": "Person", "use_cursor": true, "limit": 100 }
+// -> {
+//      "nodes": [ ...up to 100, ascending by id... ],
+//      "count": 100,
+//      "total_matching": 2500,
+//      "has_more": true,
+//      "paging": "cursor",
+//      "snapshot_valid_time": "2026-07-09T12:00:00.000000Z",
+//      "snapshot_transaction_time": "2026-07-09T12:00:00.000000Z",
+//      "cursor": "aletheiadb.cursor.v1.eyJ2Ijox...==.Qk9x...",   // opaque
+//      "cursor_ttl_seconds": 300
+//    }
+
+// Page 2..N — pass the cursor back verbatim, nothing else.
+// tools/call -> "list_nodes"
+{ "cursor": "aletheiadb.cursor.v1.eyJ2Ijox...==.Qk9x..." }
+// -> { ...next 100..., "cursor": "aletheiadb.cursor.v1.…", ... }
+
+// Last page: no `cursor` field and `has_more: false`. Stop.
+```
+
+An agent completing a 10K-row scan therefore sends the query text **once**
+(one full request + N cursor-only continuations), not N filtered re-queries.
+
+### Which tools are cursorable
+
+| Tool | Cursor support | Ordering / continuation |
+|------|----------------|-------------------------|
+| `list_nodes` | Yes (requires `label`) | Ascending node id — **keyset** |
+| `find_nodes_at_time` | Yes | Ascending node id — **keyset**; snapshot is the request's `(valid_time, transaction_time)` |
+| `get_outgoing_edges` | Yes | Ascending edge id — **keyset** |
+| `get_incoming_edges` | Yes | Ascending edge id — **keyset** |
+| `traverse` | Yes | Deterministic DFS order — snapshot-pinned **offset** in v1 |
+| `query` | No (v1) | Returns a structured `unsupported_construct` error — no silent fallback; use `list_nodes`/`find_nodes_at_time` |
+| `list_edges` | No | Does not enumerate edges; returns `INVALID_ARGUMENT` pointing at `get_outgoing_edges`/`get_incoming_edges` |
+
+The **keyset** continuation avoids **re-emitting prior result pages** (no
+duplicates, no gaps): page N does not re-send the rows already returned on pages
+1..N−1, unlike offset paging which re-materializes and discards them. Note this
+is *result-page* deduplication, **not** a depth-independent seek — in v1 the
+candidate enumeration is still O(total) per page (the node scans re-run the full
+`find_nodes_at_time` candidate scan, and the adjacency scans re-resolve the
+whole edge set, on every page). A true depth-independent keyset seek that skips
+prior candidates is a follow-up. `traverse` likewise pins the snapshot (so every
+page is consistent) but continues by an internal offset that re-runs the
+traversal each page in v1.
+
+### Token, lifecycle, and error contract
+
+- **Opaque and LLM-safe.** The token is a printable, bounded-length,
+  base64url string (`aletheiadb.cursor.v1.<payload>.<signature>`) with no
+  escaping hazards — safe to echo back verbatim. It is *self-describing to the
+  server*: the originating tool, the pinned snapshot, the keyset position, the
+  page size, and the query filters are all encoded inside it and signed with a
+  per-process secret. Continuation needs no other parameters.
+- **Stateless design.** No server-side scan state is held, so there is no
+  unbounded memory growth. A tiny in-process registry tracks only live cursor
+  *ids* (not pages) to enforce the cap and make reclamation observable.
+- **TTL.** Cursors expire after a documented, configurable TTL (default 5
+  minutes, surfaced as `cursor_ttl_seconds`), refreshed on each page (an idle
+  timeout between successive fetches). Expired cursors pin no storage.
+- **Live-cursor cap.** A configurable per-connection cap (default 128) bounds
+  concurrently open scans; continuation pages of one scan reuse its slot, so a
+  thousand-page scan holds exactly one.
+- **Cross-restart.** Cursors do **not** survive a server restart (the signing
+  secret is per-process); a stale token simply fails verification and the
+  caller re-issues the query.
+- **Structured errors** (Issue #3234): a **tampered**, malformed, or
+  wrong-tool token returns `INVALID_ARGUMENT` (never wrong data); an
+  **expired** cursor or one **exceeding the cap** returns `FAILED_PRECONDITION`
+  with remediation guidance (re-issue the query). Both are `retriable: false`.
+
+### Composing with token budgets (Issue #3353)
+
+Cursors and token-budget truncation (#3353) are both available and complementary.
+They compose along a fixed order: within one `call_tool` the cursor page is
+produced **first** (the handler pages the snapshot-anchored scan), then the token
+budget shapes **that page** — a budget-constrained page simply ends up smaller
+(fewer rows retained, or degraded payloads), while the cursor still resumes the
+same consistent scan on the next call. Budgeting shapes *one* call; cursors move
+data *across* calls; the snapshot is unchanged between pages.
+
+Caveat for v1: the cursor continuation key is derived from the underlying keyset
+scan (or, for `traverse`, the internal DFS offset), not from the last row that
+*survived* a budget trim. So if a token budget truncates a cursor page's entity
+array below the rows the scan actually advanced past, following the returned
+`cursor` can skip the trimmed-off rows. To page a large scan losslessly, either
+resume via the budget ladder's own offset-advancing fetch handle, or re-request
+the page with a larger budget so the whole page is retained before advancing the
+cursor. Deriving the continuation key from the last *emitted* row after budget
+trim is a tracked follow-up.
+
+### When to prefer cursors over offsets
+
+Use a **cursor** whenever you scan a result set that may span multiple pages
+while the graph is being written — you need snapshot consistency, no
+duplicates/gaps, and flat latency at depth. Offset paging remains available
+unchanged for backward compatibility and is fine for small, stable, one-shot
+lists where re-planning per page is cheap and concurrent drift is not a
+concern.
+
+## Filtering by provenance (Issue #3348)
+
+Issue #3224 lets every version carry write-time provenance (`source`,
+`confidence`, `reason`). Issue #3348 makes that metadata **queryable**: the read
+tools `get_node`, `list_nodes`, `get_outgoing_edges`, `get_incoming_edges`,
+`traverse`, `find_similar`, and `hybrid_query` accept an optional provenance
+filter so an agent reasons only over facts whose origin and trust level meet its
+bar — no fetch-everything-then-filter in application code.
+
+### The parameters
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `provenance_source` | string | Keep facts whose provenance `source` **exactly equals** this value. |
+| `provenance_sources` | string[] | Keep facts whose `source` is **any of** these (unioned with `provenance_source`). An empty list is rejected. |
+| `min_confidence` | number `[0,1]` | Keep facts whose recorded `confidence` is `>=` this **inclusive** lower bound. |
+| `include_unattributed` | bool | When `true`, re-include facts with **no recorded provenance** (default `false` = excluded). |
+
+Semantics:
+
+- **AND across dimensions.** Source and confidence constraints must both hold.
+- **Unattributed = no bundle at all.** A version with no provenance is excluded
+  whenever a filter is active, unless `include_unattributed: true`. A *partial*
+  bundle (present, but missing the queried field) is **attributed** and simply
+  fails the constraint on the missing field — `include_unattributed` does not
+  rescue it.
+- **Per-version, so it composes with time.** The filter is evaluated against the
+  provenance recorded on the exact version a read returns, so combining it with
+  `as_of_valid_time` / `as_of_transaction_time` filters on provenance **as
+  recorded at that coordinate**, not against the latest version.
+- **Omitting all four is byte-identical to today.**
+- **Invalid values fail closed.** A confidence outside `[0,1]` (or NaN) or an
+  empty source list returns a structured `INVALID_ARGUMENT` naming the offending
+  field under `details.field` — never a silently-empty result.
+- **`find_similar` / `hybrid_query` never under-truncate.** The filter is applied
+  to *candidates* (over-fetched up to the vector horizon), so the returned top-k
+  are all filter-passing whenever at least k passing candidates exist — ranked
+  order is preserved.
+- **v1 caveat: cursor paging.** A provenance filter combined with cursor paging
+  (`use_cursor` / `cursor`) is rejected with `INVALID_ARGUMENT`; use offset
+  paging (`limit`/`offset`) to page a provenance-filtered scan.
+
+### Worked examples
+
+**1. Single source.** Only facts recorded by the `crm-sync` pipeline:
+
+```json
+{ "name": "list_nodes",
+  "arguments": { "label": "Customer", "provenance_source": "crm-sync" } }
+```
+
+**2. Multi-source + confidence (AND).** Facts from either `crm-sync` or
+`billing`, with recorded confidence at least 0.8:
+
+```json
+{ "name": "find_similar",
+  "arguments": {
+    "property_name": "embedding",
+    "embedding": [0.12, 0.04, ...],
+    "k": 10,
+    "provenance_sources": ["crm-sync", "billing"],
+    "min_confidence": 0.8
+  } }
+```
+
+All ten returned neighbors are guaranteed to satisfy the filter (candidates are
+filtered before the top-k is cut).
+
+**3. Temporal + provenance.** Who did Alice know on 2024-01-01, following only
+edges whose recorded confidence was `>= 0.9` **as recorded at that coordinate**:
+
+```json
+{ "name": "traverse",
+  "arguments": {
+    "start_node_id": 42,
+    "edge_label": "KNOWS",
+    "depth": 2,
+    "as_of_valid_time": "2024-01-01T00:00:00Z",
+    "min_confidence": 0.9
+  } }
+```
+
+### On `get_node`
+
+`get_node` returns the node when the filter passes; when the node exists but
+does **not** satisfy the filter it returns a `NOT_FOUND` (the node is simply not
+in the filtered view) rather than a fabricated result.
+
+### Rust and HTTP surfaces
+
+The same semantics are available to embedders through the surface-agnostic
+`aletheiadb::core::ProvenanceFilter` predicate (`ProvenanceFilter::validated(..)`
+then `.matches(Option<&Provenance>)`), and on the HTTP `/query` endpoint the
+`find_node`, `get_node`, and `find_neighbors` operations accept the same four
+keys inline (invalid values → `400` naming the field).
+
+**HTTP paging is refilled, so a short page means end-of-data.** The HTTP
+`find_node` / `find_neighbors` responses are bare JSON arrays with no
+`has_more` / `next_offset` signal (unlike the MCP tools). When a provenance
+filter is active these endpoints **over-fetch and refill**: they keep scanning
+forward past the requested `limit` until the page holds `limit` filter-passing
+rows or the underlying scan is exhausted. A returned page therefore has up to
+`limit` rows whenever that many matches remain, and a **short or empty page
+genuinely means end-of-data** — a client may use the standard "short page ⇒
+stop" heuristic without under-reading later matches. The refill scan is bounded
+by the same `MAX_DEEP_PAGINATION` (10,000) horizon already enforced on
+`offset + limit`; in the rare case that horizon is reached before the page
+fills, the shorter page is returned (the documented boundary). This preserves
+the bare-array response shape exactly. (The MCP tools are unaffected: they
+expose `has_more` and advance by a pre-filter page window.)
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`
@@ -982,6 +1615,8 @@ shape.
 - **Feature gating.** When AletheiaDB is built without the `cypher` feature,
   `language: "cypher"` returns `language_unavailable` rather than failing; AQL
   remains available.
-- **Result cap.** Large result sets are capped (default 100, max 10000); use the
-  `truncated` flag to detect a cap hit. A streaming/cursor protocol is future
-  work.
+- **Result cap.** Large result sets from the `query` tool are capped (default
+  100, max 10000); use the `truncated` flag to detect a cap hit. The `query`
+  tool is not cursorable in v1 — for consistent, resumable scans use the
+  cursor-paged bounded read tools (see
+  [Paging large results](#paging-large-results-cursor-continuation)).

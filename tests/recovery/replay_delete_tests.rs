@@ -68,6 +68,8 @@ fn test_replay_delete_node_basic() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: timestamp2,
+        version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -124,6 +126,8 @@ fn test_replay_delete_node_after_update() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: time::now(),
+        version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -187,6 +191,8 @@ fn test_replay_delete_edge_basic() -> Result<()> {
     wal.append(WalOperation::DeleteEdge {
         edge_id,
         valid_from: time::now(),
+        version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -216,9 +222,9 @@ fn test_replay_delete_edge_basic() -> Result<()> {
 fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     // Issue #452: after replaying Create + Delete, the version chain must
     // carry exact bi-temporal intervals:
-    // - prior head: valid_from preserved, valid time closed at the
-    //   tombstone's LOGGED valid_from, transaction time closed at the delete
-    //   entry's LOGGED timestamp;
+    // - prior head: valid_from preserved, valid time stays OPEN (#3504:
+    //   supersession is append-only on the valid dimension), transaction time
+    //   closed at the delete entry's LOGGED timestamp;
     // - tombstone: empty valid interval anchored at the LOGGED valid_from
     //   (issue #3400: replay honors the logged value, mirroring the live
     //   path), transaction [delete ts, open).
@@ -243,6 +249,8 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: delete_vf,
+        version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -270,10 +278,11 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
         vf,
         "prior head's valid_from must survive replay exactly"
     );
-    assert_eq!(
-        prior.temporal.valid_time().end(),
-        delete_vf,
-        "prior head's valid time must be closed exactly at the tombstone's LOGGED valid_from"
+    // #3504: the superseded prior head's valid interval stays OPEN (append-only);
+    // supersession only closes its transaction-time window (asserted below).
+    assert!(
+        prior.temporal.valid_time().is_current(),
+        "prior head's valid interval must stay open (append-only) after supersession"
     );
     assert_eq!(
         prior.temporal.transaction_time().start(),
@@ -363,6 +372,8 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
     wal.append(WalOperation::DeleteEdge {
         edge_id,
         valid_from: delete_vf,
+        version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -392,10 +403,11 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
         vf,
         "prior head's valid_from must survive replay exactly"
     );
-    assert_eq!(
-        prior.temporal.valid_time().end(),
-        delete_vf,
-        "prior head's valid time must be closed exactly at the tombstone's LOGGED valid_from"
+    // #3504: the superseded prior head's valid interval stays OPEN (append-only);
+    // supersession only closes its transaction-time window (asserted below).
+    assert!(
+        prior.temporal.valid_time().is_current(),
+        "prior head's valid interval must stay open (append-only) after supersession"
     );
     assert_eq!(
         prior.temporal.transaction_time().start(),
@@ -477,6 +489,8 @@ fn test_replay_delete_node_honors_logged_valid_from() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: delete_vf,
+        version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -507,10 +521,11 @@ fn test_replay_delete_node_honors_logged_valid_from() -> Result<()> {
         tombstone.temporal.valid_time().is_empty(),
         "tombstone must carry an empty valid interval"
     );
-    assert_eq!(
-        prior.temporal.valid_time().end(),
-        delete_vf,
-        "prior head's valid_to must be closed at the LOGGED backdated valid_from"
+    // #3504: the superseded prior head's valid interval stays OPEN (append-only);
+    // backdating the tombstone's valid_from does not retroactively close it.
+    assert!(
+        prior.temporal.valid_time().is_current(),
+        "prior head's valid interval must stay open (append-only) after backdated supersession"
     );
     assert_eq!(
         tombstone.temporal.transaction_time().start(),
@@ -563,6 +578,8 @@ fn test_replay_delete_edge_honors_logged_valid_from() -> Result<()> {
     wal.append(WalOperation::DeleteEdge {
         edge_id,
         valid_from: delete_vf,
+        version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -593,10 +610,11 @@ fn test_replay_delete_edge_honors_logged_valid_from() -> Result<()> {
         tombstone.temporal.valid_time().is_empty(),
         "tombstone must carry an empty valid interval"
     );
-    assert_eq!(
-        prior.temporal.valid_time().end(),
-        delete_vf,
-        "prior head's valid_to must be closed at the LOGGED backdated valid_from"
+    // #3504: the superseded prior head's valid interval stays OPEN (append-only);
+    // backdating the tombstone's valid_from does not retroactively close it.
+    assert!(
+        prior.temporal.valid_time().is_current(),
+        "prior head's valid interval must stay open (append-only) after backdated supersession"
     );
     assert_eq!(
         tombstone.temporal.transaction_time().start(),
@@ -637,6 +655,8 @@ fn test_replay_multiple_deletes() -> Result<()> {
         wal.append(WalOperation::DeleteNode {
             node_id: NodeId::new(id).unwrap(),
             valid_from: time::now(),
+            version_id: None,
+            provenance: None,
         })?;
     }
 
@@ -689,6 +709,8 @@ fn test_replay_delete_with_vector() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: time::now(),
+        version_id: None,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -748,6 +770,8 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id: NodeId::new(2).unwrap(),
         valid_from: time::now(),
+        version_id: None,
+        provenance: None,
     })?;
 
     // Create node 3

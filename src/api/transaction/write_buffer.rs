@@ -100,6 +100,9 @@ pub enum BufferedWrite {
         node_id: NodeId,
         /// When the deletion became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle recording the acting principal on the
+        /// tombstone version (Issue #3427), if supplied.
+        provenance: Option<Arc<Provenance>>,
     },
     /// Delete an edge
     DeleteEdge {
@@ -107,6 +110,9 @@ pub enum BufferedWrite {
         edge_id: EdgeId,
         /// When the deletion became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle recording the acting principal on the
+        /// tombstone version (Issue #3427), if supplied.
+        provenance: Option<Arc<Provenance>>,
     },
     /// Retract a node: close its valid-time interval at `valid_to` without
     /// deleting its history (Issue #3230).
@@ -115,6 +121,9 @@ pub enum BufferedWrite {
         node_id: NodeId,
         /// When the fact stopped being true in reality (user-controlled)
         valid_to: Timestamp,
+        /// Write-time provenance bundle recording the acting principal on the
+        /// retraction version (Issue #3427), if supplied.
+        provenance: Option<Arc<Provenance>>,
     },
     /// Retract an edge: close its valid-time interval at `valid_to` without
     /// deleting its history (Issue #3230).
@@ -123,6 +132,9 @@ pub enum BufferedWrite {
         edge_id: EdgeId,
         /// When the relationship stopped being true in reality (user-controlled)
         valid_to: Timestamp,
+        /// Write-time provenance bundle recording the acting principal on the
+        /// retraction version (Issue #3427), if supplied.
+        provenance: Option<Arc<Provenance>>,
     },
 }
 
@@ -497,32 +509,56 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 valid_from: *valid_from,
                 provenance: provenance.as_deref().cloned(),
             },
+            // The tombstone/retraction `version_id` (Issue #3406) is not known
+            // at the buffer level — it is pre-generated at commit time and
+            // stamped onto the WAL op by `log_operations_to_wal`. This blanket
+            // conversion therefore emits `None` for it; see that function.
+            //
+            // Issue #3427 Phase B: the caller-supplied destructive-op
+            // provenance (acting principal) IS known at the buffer level, so we
+            // thread it into the WAL op here, converting `Arc<Provenance>` to the
+            // owned `Provenance` the WAL payload carries — exactly as the
+            // create/update arms above do.
             BufferedWrite::DeleteNode {
                 node_id,
                 valid_from,
+                provenance,
             } => crate::storage::wal::WalOperation::DeleteNode {
                 node_id: *node_id,
                 valid_from: *valid_from,
+                version_id: None,
+                provenance: provenance.as_deref().cloned(),
             },
             BufferedWrite::DeleteEdge {
                 edge_id,
                 valid_from,
+                provenance,
             } => crate::storage::wal::WalOperation::DeleteEdge {
                 edge_id: *edge_id,
                 valid_from: *valid_from,
+                version_id: None,
+                provenance: provenance.as_deref().cloned(),
             },
-            BufferedWrite::RetractNode { node_id, valid_to } => {
-                crate::storage::wal::WalOperation::RetractNode {
-                    node_id: *node_id,
-                    valid_to: *valid_to,
-                }
-            }
-            BufferedWrite::RetractEdge { edge_id, valid_to } => {
-                crate::storage::wal::WalOperation::RetractEdge {
-                    edge_id: *edge_id,
-                    valid_to: *valid_to,
-                }
-            }
+            BufferedWrite::RetractNode {
+                node_id,
+                valid_to,
+                provenance,
+            } => crate::storage::wal::WalOperation::RetractNode {
+                node_id: *node_id,
+                valid_to: *valid_to,
+                version_id: None,
+                provenance: provenance.as_deref().cloned(),
+            },
+            BufferedWrite::RetractEdge {
+                edge_id,
+                valid_to,
+                provenance,
+            } => crate::storage::wal::WalOperation::RetractEdge {
+                edge_id: *edge_id,
+                valid_to: *valid_to,
+                version_id: None,
+                provenance: provenance.as_deref().cloned(),
+            },
         }
     }
 }
@@ -1153,6 +1189,7 @@ mod tests {
             .add(BufferedWrite::DeleteEdge {
                 edge_id,
                 valid_from: crate::core::temporal::time::now(),
+                provenance: None,
             })
             .unwrap();
 
@@ -1356,6 +1393,7 @@ mod tests {
             .add(BufferedWrite::DeleteEdge {
                 edge_id: edge_id_1,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 

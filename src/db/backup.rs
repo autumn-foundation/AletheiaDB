@@ -35,15 +35,36 @@ impl AletheiaDB {
         let source_lsn = self.wal.current_lsn().0;
 
         // Take consistent point-in-time snapshots.
-        let current_snapshot = self
-            .current
-            .create_snapshot(crate::storage::wal::LSN(source_lsn));
-        let (historical_snapshot, tiered_arc) = {
+        //
+        // Issue #3425: the current-storage snapshot is taken INSIDE the
+        // `historical.read()` guard (and under `snapshot_lock`, mirroring
+        // `create_checkpoint`'s locking contract) rather than before/outside it.
+        // A committing writer holds `historical.write()` across its
+        // `commit_timestamp` finalization, so acquiring `historical.read()` here
+        // excludes that window: without this, the backup could clone a committed
+        // node/edge whose `commit_timestamp` is still `None` (an in-memory
+        // finalize-window artifact). Lock order is preserved
+        // (`historical` -> `snapshot_lock` -> DashMap shards); `create_snapshot`
+        // takes no `historical`/`wal`/`current_timestamp` lock, so no inversion.
+        let (current_snapshot, historical_snapshot, tiered_arc) = {
             let hist = self.historical.read();
-            let snap = hist.create_snapshot(crate::storage::wal::LSN(source_lsn));
+            let current_snapshot = {
+                let _snap_lock = self.current.snapshot_lock.write();
+                self.current
+                    .create_snapshot(crate::storage::wal::LSN(source_lsn))
+            };
+            let historical_snapshot = hist.create_snapshot(crate::storage::wal::LSN(source_lsn));
             let tiered = hist.tiered_storage_arc();
-            (snap, tiered)
+            (current_snapshot, historical_snapshot, tiered)
         };
+
+        // Test-only seam (Issue #3425): lets the backup-path regression test inspect
+        // the exact current-storage snapshot this backup captured, so it can prove
+        // the snapshot never contains a committed node with `commit_timestamp: None`
+        // even when a concurrent writer is parked in the finalize window. Production
+        // builds compile this away.
+        #[cfg(test)]
+        backup_test_hooks::run_post_current_snapshot_hook(&current_snapshot);
 
         // Scan cold-tier versions outside the historical lock (disk I/O).
         let (cold_node_versions, cold_edge_versions) = if let Some(tiered) = tiered_arc {
@@ -122,11 +143,23 @@ impl AletheiaDB {
 
     /// Restore a backup artifact into a **durable** database at `data_dir`.
     ///
-    /// The target directory must be empty (no `indexes/manifest.idx` present)
-    /// to prevent overwriting existing data.
+    /// The target directory must be empty (no index manifest present) to
+    /// prevent overwriting existing data.
     ///
-    /// After restoration, the DB is persisted to `data_dir` and can be
-    /// reopened with `AletheiaDB::with_unified_config(durable_config_for_data_dir(data_dir))`.
+    /// After restoration, the DB is persisted under `data_dir` in the canonical
+    /// durable layout and can be reopened with either
+    /// [`AletheiaDB::open`]`(data_dir)` /
+    /// [`AletheiaDB::open_from_env`] or the equivalent
+    /// `AletheiaDB::with_unified_config(durable_config_for_data_dir(data_dir))`.
+    ///
+    /// The restored index artifacts are materialised at the same on-disk depth
+    /// that [`crate::config::durable_config_for_data_dir`] reads them from: the
+    /// index-persistence root is `data_dir/indexes` (the value that config
+    /// assigns to `PersistenceConfig::data_dir`), and the
+    /// `IndexPersistenceManager` appends its own `indexes/` beneath that base.
+    /// Writing at any other depth (e.g. using `data_dir` directly as the base)
+    /// leaves the manifest where `open`/`open_from_env` cannot find it, so a
+    /// reopen silently comes up empty.
     ///
     /// # Errors
     ///
@@ -134,14 +167,31 @@ impl AletheiaDB {
     /// - `Error::Backup(BackupError::BadMagic)` — invalid artifact.
     /// - `Error::Backup(BackupError::IncompatibleVersion { .. })` — format too new.
     pub fn restore_to_data_dir(path: &Path, data_dir: &Path) -> Result<AletheiaDB> {
-        check_target_empty(data_dir).map_err(Error::Backup)?;
+        // Canonical index-persistence root: the same base that
+        // `durable_config_for_data_dir` assigns to `PersistenceConfig::data_dir`
+        // (the `IndexPersistenceManager` appends its own `indexes/` under this).
+        let index_root = index_persistence_root(data_dir);
+
+        check_target_empty(&index_root).map_err(Error::Backup)?;
 
         let payload = read_artifact(path).map_err(Error::Backup)?;
-        materialize_to_dir(&payload, data_dir).map_err(Error::Backup)?;
+        materialize_to_dir(&payload, &index_root).map_err(Error::Backup)?;
 
-        let config = build_restore_config(data_dir, data_dir.join("wal"));
+        // Reopen through the canonical durable config so the layout written above
+        // is exactly the layout `open`/`open_from_env` will read on restart.
+        let config = crate::config::durable_config_for_data_dir(data_dir);
         AletheiaDB::with_unified_config(config)
     }
+}
+
+/// The index-persistence base directory under a durable data root.
+///
+/// This mirrors [`crate::config::durable_config_for_data_dir`], which sets
+/// `PersistenceConfig::data_dir = data_dir/indexes`. Keeping the join in one
+/// place ensures restore materialises artifacts at the exact depth the durable
+/// reopen path reads them from.
+fn index_persistence_root(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("indexes")
 }
 
 /// Build an `AletheiaDBConfig` that loads from an existing persistence directory.
@@ -168,4 +218,50 @@ fn build_restore_config(persistence_dir: &Path, wal_dir: std::path::PathBuf) -> 
             ..Default::default()
         })
         .build()
+}
+
+/// Test-only interleaving seam for the Issue #3425 backup-path regression test.
+///
+/// Lets a test observe the exact current-storage snapshot that a real `backup()`
+/// call captured. The hook fires immediately after the snapshot is taken (inside
+/// the `historical.read()` guard block), so a test can drive the real backup path
+/// concurrently with a writer parked in the finalize window and assert the
+/// captured snapshot never contains a committed node with `commit_timestamp: None`.
+/// Compiled away in non-test builds.
+#[cfg(test)]
+pub(crate) mod backup_test_hooks {
+    use crate::storage::snapshot::CurrentStorageSnapshot;
+    use std::sync::{Arc, Mutex};
+
+    type Hook = Arc<dyn Fn(&CurrentStorageSnapshot) + Send + Sync>;
+
+    static POST_CURRENT_SNAPSHOT_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Install a hook fired just after `backup()` captures its current snapshot.
+    pub(crate) fn set_post_current_snapshot_hook(hook: Hook) {
+        *POST_CURRENT_SNAPSHOT_HOOK
+            .lock()
+            .expect("backup post-snapshot hook mutex poisoned") = Some(hook);
+    }
+
+    /// Remove any installed post-snapshot hook.
+    pub(crate) fn clear_post_current_snapshot_hook() {
+        *POST_CURRENT_SNAPSHOT_HOOK
+            .lock()
+            .expect("backup post-snapshot hook mutex poisoned") = None;
+    }
+
+    /// Invoke the installed post-snapshot hook, if any.
+    ///
+    /// The `Arc` is cloned out from under the mutex so the hook body never runs
+    /// while holding the registry lock.
+    pub(crate) fn run_post_current_snapshot_hook(snapshot: &CurrentStorageSnapshot) {
+        let hook = POST_CURRENT_SNAPSHOT_HOOK
+            .lock()
+            .expect("backup post-snapshot hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook(snapshot);
+        }
+    }
 }

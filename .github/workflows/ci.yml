@@ -65,6 +65,44 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc --verbose
 
+  cypher-compat:
+    name: Cypher Compatibility Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/powershell /usr/share/swift \
+            /usr/local/.ghcup /usr/lib/jvm "$AGENT_TOOLSDIRECTORY" || true
+          df -h
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-v2-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run openCypher compatibility suite
+        run: cargo test --features cypher --lib cypher::compat
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
@@ -147,4 +185,51 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ignore: "RUSTSEC-2026-0104, RUSTSEC-2024-0436"
+          # RUSTSEC-2023-0071: rsa 0.9.10 "Marvin Attack" timing sidechannel
+          # (CVSS 5.9 Medium, no patched release). Transitive-only via
+          # jsonwebtoken <- autumn-web 0.5 (mcp feature) <- unpublished
+          # crates/autumn-spike; absent from default/CI/all-features builds and
+          # no RSA private-key ops are exercised, so shipped-build exposure is
+          # nil. Durable fix is upstream in autumn 0.6.0. Mirrors the audit.toml
+          # RUSTSEC-2026-0187 (lopdf) precedent. rustsec/audit-check@v2 honors
+          # only this `ignore:` input, so the advisory is listed here as well as
+          # in .cargo/audit.toml.
+          ignore: "RUSTSEC-2026-0104, RUSTSEC-2024-0436, RUSTSEC-2023-0071"
+
+  feature-matrix:
+    name: Feature Matrix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-v2-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Verify feature flags compile standalone
+        run: just check-features

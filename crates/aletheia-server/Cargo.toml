@@ -1,0 +1,34 @@
+[package]
+name = "aletheia-server"
+version = "0.1.0"
+edition = "2024"
+# autumn-web 0.5.0 is edition 2024 / rust-version 1.88.0.
+rust-version = "1.88"
+authors = ["AletheiaDB Contributors"]
+description = "Production autumn-web 0.5.0 server for AletheiaDB (HTTP + MCP + OpenAPI) — Issue #3524 PR1 skeleton"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+# autumn-web 0.5.0 — UNRENAMED so its proc-macros' hard-coded `::autumn_web`
+# paths resolve (see docs/spikes/autumn-web-migration-spike.md §1). `mcp`
+# implies `openapi`; `default-features = false` keeps diesel/db out of the graph.
+autumn-web = { version = "0.5.0", default-features = false, features = ["maud", "mcp"] }
+# The shared AletheiaDB core: the HTTP serializers/envelope/error type
+# (`ApiResponse`, `node_to_query_json`, `AletheiaHttpError`), the constant-time
+# `AuthStore`/`AccessClass`/`Role` RBAC model, and the MCP typed node-read
+# request/response methods (`AletheiaMcpServer::get_node`/`list_nodes`/`count_nodes`).
+aletheiadb = { path = "../..", features = ["http-server", "mcp-server"] }
+axum = { version = "0.8" }
+tower-http = { version = "0.6", features = ["set-header"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# `tower::ServiceExt::oneshot` drives the legacy 0.4 router in parity tests.
+tower = { version = "0.5", features = ["util"] }

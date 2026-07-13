@@ -136,6 +136,12 @@ instance without cold storage (and vice versa) with no version loss.
 ```text
 aletheia backup  <output_path>   # backup → prints JSON summary
 aletheia restore <input_path>    # restore → ALETHEIADB_DATA_DIR must be set and empty
+
+# Point-in-time restore (Issue #3374): replay an archived WAL over the base
+# to a target transaction-time coordinate (see "Point-in-Time Restore" below).
+# In-window target -> partial restore; no target / --latest -> full replay to
+# the tail; an explicit target above the tail is an error.
+aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n> | --latest] [--dry-run]
 ```
 
 JSON output from `aletheia backup`:
@@ -151,6 +157,156 @@ JSON output from `aletheia backup`:
   "source_lsn": 98765
 }
 ```
+
+## Point-in-Time Restore (PITR)
+
+Plain restore recovers a database to the moment a `.albk` backup was taken. **Point-in-time
+restore** (Issue #3374) reaches *any* transaction-time coordinate between the backup and the
+present, by replaying an **archived WAL chain** over the base backup and **stopping** at an
+operator-chosen target. Use it when recorded history after a point is *unwanted* — a bad batch
+job, a compromised credential, a runaway agent, a compliance-mandated rollback of a bad
+ingestion — and you need a running database whose recorded state ends at the last known-good
+moment, with bounded, known data loss (only the unwanted suffix).
+
+> PITR targets **transaction time only**. Restoring "to a valid time" is a category error:
+> valid time is a query dimension (`AS OF VALID_TIME`), not a physical recovery coordinate.
+> When history itself is intact, use bi-temporal `AS OF` reads instead — PITR is for when the
+> recorded tail is *unwanted*, not merely *old*.
+
+### Prerequisite: an operator-managed WAL archive
+
+PITR reaches only as far as the **base backup + archived WAL chain** allow. The WAL archive is a
+directory of the WAL segment files (`*.log`) covering the window you want to restore into. In
+v1 this archive is **operator-managed**: you must retain/copy WAL segments rather than letting
+them be truncated after checkpoint or cold-tier migration.
+
+Recommended retention runbook:
+
+1. Take periodic base backups: `aletheia backup /backups/base-$(date +%s).albk`.
+2. Continuously archive WAL segments to durable storage (e.g. `rsync`/object-store sync of the
+   `wal/` directory). Keep segments for at least your target RPO window plus one backup interval.
+3. Do **not** delete archived segments that are newer than your oldest retained base backup —
+   they are the replay chain PITR depends on.
+
+RPO statement: with this configuration, the achievable RPO to any coordinate in the retention
+window is **0 discarded good transactions** — the loss is exactly and only the operator-chosen
+suffix.
+
+### Inspecting the window (`--dry-run`)
+
+Before restoring, inspect the achievable window and the blast radius of a target — without
+materializing or opening anything:
+
+```text
+aletheia restore /backups/base.albk --wal-archive /archive/wal --dry-run
+aletheia restore /backups/base.albk --wal-archive /archive/wal --as-of 2026-07-12T14:05:00Z --dry-run
+```
+
+The dry-run prints a `PitrPlan` as JSON:
+
+```json
+{
+  "earliest": { "lsn": 98765, "timestamp_micros": 1783840000000000, "timestamp_rfc3339": "2026-07-12T13:59:00.000000Z" },
+  "latest":   { "lsn": 120400, "timestamp_micros": 1783843200000000, "timestamp_rfc3339": "2026-07-12T14:40:00.000000Z" },
+  "resolved_stop": { "lsn": 110230, "timestamp_micros": 1783840300000000, "timestamp_rfc3339": "2026-07-12T14:05:00.000000Z" },
+  "transactions_applied": 842,
+  "transactions_discarded": 205
+}
+```
+
+`transactions_discarded` is the rollback blast radius: the count of committed transactions after
+the target that this restore would drop.
+
+### Performing the restore
+
+```text
+# Stop at a wall-clock coordinate (ISO 8601 / RFC 3339):
+ALETHEIADB_DATA_DIR=/restore/side-by-side \
+  aletheia restore /backups/base.albk --wal-archive /archive/wal --as-of 2026-07-12T14:05:00Z
+
+# ...or at an exact WAL LSN (or microseconds-since-epoch for --as-of):
+ALETHEIADB_DATA_DIR=/restore/side-by-side \
+  aletheia restore /backups/base.albk --wal-archive /archive/wal --lsn 110230
+
+# ...or replay the WHOLE archive to its tail (no target, or the --latest alias):
+ALETHEIADB_DATA_DIR=/restore/side-by-side \
+  aletheia restore /backups/base.albk --wal-archive /archive/wal --latest
+```
+
+`--as-of` and `--lsn` are **mutually exclusive**; pass exactly one (or neither).
+Passing **no target** — a bare `--wal-archive`, or the explicit `--latest` alias —
+performs a **full replay to the archived tail**; `--latest` is mutually exclusive
+with `--as-of`/`--lsn`. The target directory (`ALETHEIADB_DATA_DIR`) must be empty,
+matching plain restore's atomicity posture. The produced directory reopens through
+the canonical `AletheiaDB::open(data_dir)` path with the target state intact.
+
+Rust API:
+
+```rust
+use aletheiadb::{AletheiaDB, PitrTarget, Timestamp};
+
+// Dry-run: inspect the window + blast radius.
+let plan = AletheiaDB::inspect_pitr(&albk, &wal_archive, Some(PitrTarget::AsOf(target_ts)))?;
+
+// Restore to a fresh, empty data dir.
+let db = AletheiaDB::restore_to_data_dir_at(
+    &albk, &wal_archive, PitrTarget::AsOf(target_ts), &data_dir,
+)?;
+```
+
+### Band-boundary stop semantics
+
+Every committed transaction is one atomic `[BeginTx .. CommitTx]` band in the WAL. PITR includes
+the prefix of **whole bands** committed **at-or-before** the target and never a partial band. A
+target that falls **between** two transactions lands on the earlier one (inclusive tie-break):
+everything committed at-or-before the coordinate is present, everything after it is absent. An
+incomplete trailing band (a crash-torn tail) is dropped. To replay *everything*, pass **no
+target** / `--latest` (a full replay to the tail); an explicit target **above** the archived tail
+is an error, and a target **below** the base backup fails (see next). Band selection parses whole
+`[BeginTx .. CommitTx]` frames from the full WAL stream, so even if the base backup's `source_lsn`
+lands *inside* a transaction frame, that frame is included or excluded whole — never split into
+mis-timed singleton ops.
+
+### Target outside the window
+
+The achievable window is bounded **below** by the base backup — PITR cannot reconstruct a
+coordinate before the backup from base + forward replay — and **above** by the archived WAL tail.
+A target **outside** the window in either direction (below the base backup, or above the archived
+tail) fails with a structured `BackupError::TargetOutsideWindow` naming the window
+(`earliest`/`latest`); on the MCP surface this maps to `FAILED_PRECONDITION`. An above-tail target
+is a deliberate error (not a silent full replay): to restore to the tail, pass **no target** or
+`--latest`. Run `--dry-run` first to pick a reachable coordinate.
+
+### Window crosses a vocabulary change
+
+The WAL stores labels and property keys as raw interner ids, and the base `.albk` only carries the
+interner as of `source_lsn`. If a transaction at-or-before the target introduced a **brand-new
+label or property key** (an id the base interner does not define), PITR cannot resolve it — and
+replaying it verbatim would **silently mislabel or drop data**, because the restored interner's
+next id collides with the dangling one. PITR detects this before materializing anything and fails
+with a structured `BackupError::WindowCrossesVocabularyChange { first_unresolved_id,
+restored_interner_count }` (MCP `FAILED_PRECONDITION`). Take a fresh base backup that includes the
+new vocabulary, or target a coordinate before the change.
+
+### Side-by-side restore-then-switch flow
+
+PITR always produces a **fresh** directory and never mutates the base backup, the WAL archive, or
+your original (pre-incident) data directory. The recommended incident flow:
+
+1. **Assess** — `--dry-run` against candidate targets to bound the blast radius.
+2. **Restore side-by-side** — restore into a *new* empty directory (leave production untouched).
+3. **Verify** — open the restored directory, run integrity/temporal spot checks, confirm the bad
+   writes are gone and good writes are present.
+4. **Switch** — cut traffic over to the restored instance (or promote its data directory).
+5. **Retain** — keep the original directory until the switch is confirmed good.
+
+### Constraints, provenance, and cold tier
+
+- **Constraints (#3218)** declared before the target are re-established and enforced in the
+  restored instance (including declarations that predate the base backup), and survive a reopen.
+- **Provenance (#3224)** on replayed versions is preserved through PITR.
+- **Cold tier (#3238)** coverage of the restored instance depends on what the base backup
+  captured; the window bounds are stated in the same terms as `temporal_extent`.
 
 ## Performance Notes
 
@@ -186,3 +342,21 @@ scan API that avoids this peak is planned as follow-up work.
 Restore enforces a 5 GiB cap on decompressed payload size to guard against
 decompression-bomb denial-of-service attacks. Artifacts larger than 5 GiB
 uncompressed are rejected with `BackupError::Corrupt`.
+
+### Point-in-time restore (v1)
+
+- **WAL archive must be supplied.** PITR reaches only as far as the base backup + archived WAL
+  chain allow; there is no PITR from a `.albk` alone.
+- **Retention is operator-managed.** v1 has no built-in WAL retention/rotation policy — you must
+  archive segments yourself (see the retention runbook above). An integrated policy is a
+  follow-up.
+- **Band-granularity stop.** The stop coordinate resolves to a whole transaction boundary
+  (inclusive at-or-before); PITR never splits a transaction.
+- **Interner vocabulary (guarded).** The WAL stores node/edge labels and property keys as interner
+  ids (property *values* are self-contained). The base backup carries the interner as of
+  `source_lsn`, so a post-backup transaction that introduces a **brand-new label or property key**
+  cannot be resolved after replay — and replaying it verbatim would *silently mislabel or drop
+  data*. PITR guards against this: it scans the window before materializing and fails cleanly with
+  `WindowCrossesVocabularyChange` rather than corrupting. Keep the label/key vocabulary stable
+  across the window (or take a fresh base backup); a durable interner archive is a follow-up.
+- **Encrypted WAL archives** are not yet supported by the PITR reader (plaintext segments only).

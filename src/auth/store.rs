@@ -58,6 +58,29 @@ pub struct Principal {
     pub created_at: String,
 }
 
+impl Principal {
+    /// Construct a synthetic, fully-privileged **anonymous** principal for
+    /// surfaces running in explicit anonymous mode, where no credential is
+    /// presented but a [`Principal`] value is still required (e.g. the
+    /// autumn-web 0.5 server's class-parameterized auth extractor). Carries the
+    /// `admin` role so it may exercise every access class, matching anonymous
+    /// mode's documented "full, unauthenticated access". This is the only
+    /// out-of-crate way to obtain a principal not backed by a stored key, since
+    /// [`Principal`] is `#[non_exhaustive]`.
+    ///
+    // exposed for autumn-web migration (Issue #3524)
+    #[must_use]
+    pub fn anonymous() -> Self {
+        Self {
+            id: "anonymous".to_string(),
+            name: "anonymous".to_string(),
+            role: Role::Admin,
+            key_prefix: String::new(),
+            created_at: String::new(),
+        }
+    }
+}
+
 /// Errors from [`AuthStore`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {

@@ -84,7 +84,7 @@ jobs:
           # CI runs (push/PR): performance_targets only for fast feedback on key metrics
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Running ALL benchmarks (weekly/manual run)..."
-            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench aletheiadb --bench hnsw_index --bench performance_targets --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity"
+            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench aletheiadb --bench hnsw_index --bench performance_targets --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity --bench provenance_write_throughput"
           else
             echo "Running PERFORMANCE TARGETS benchmark only (CI run)..."
             # Performance targets: lightweight benchmark verifying key performance metrics
@@ -112,6 +112,63 @@ jobs:
             echo "Benchmarks may have failed to run properly. Check output.txt for details."
             exit 1
           fi
+
+      # ----------------------------------------------------------------------
+      # Provenance write-throughput "cost of trust" gate (Issue #3383)
+      #
+      # Two lanes, per the CI-policy fence:
+      #   * SCHEDULED / manual: run the self-gate (PROV_BENCH_GATE=1). Hard-fail
+      #     is intentional here -- it ALERTS on a same-run ratio regression and
+      #     does NOT block any pull request (this job never gates a PR merge).
+      #   * PULL REQUEST: reduced-scale smoke, INFORMATIONAL only. continue-on-
+      #     error guarantees it can never fail the PR. Flipping this to blocking
+      #     is a one-line change (drop continue-on-error) once a week or two of
+      #     scheduled-lane signal proves the gate stable on the runner -- and
+      #     that flip is an operator decision, not part of Issue #3383.
+      # ----------------------------------------------------------------------
+      - name: Provenance write self-gate (scheduled, hard-fail alert)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          # Gate the CPU-bound (Async 1ms-flush, interleaved) arm ratio bounds
+          # AND the AC5 recovery <5s budget at the reduced default scale (2000
+          # nodes / 4000 edges). Hard-fail here is an ALERT; it never blocks a PR.
+          #
+          # NOTE: the recovery dataset is populated by a single-writer GroupCommit
+          # loop (~10 ms/commit), so the 10K-node/50K-edge REFERENCE scale would
+          # take ~10 min to build -- too slow for this shared CI job. The
+          # reference scale is reproduced manually / on the performance rig via
+          # PROV_BENCH_RECOVERY_NODES=10000 PROV_BENCH_RECOVERY_EDGES=50000 (the
+          # reopen, not the build, is what the <5s budget governs). See
+          # docs/benchmarks/cost-of-trust.md.
+          PROV_BENCH_GATE: '1'
+          PROV_BENCH_JSON_OUT: provenance_write_throughput.json
+        run: |
+          set -o pipefail
+          cargo bench --features "config-toml,observability,semantic-search,embeddings" \
+            --bench provenance_write_throughput | tee prov-write-gate.txt
+
+      - name: Provenance write smoke (PR, informational / non-blocking)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          # One interleaved pass (5000 timed writes/config) — a fast smoke.
+          PROV_BENCH_WRITES: '5000'
+          BENCH_SAMPLE_SIZE: 10
+          BENCH_MEASUREMENT_TIME: 1
+          BENCH_WARMUP_TIME: 1
+          PROV_BENCH_JSON_OUT: provenance_write_throughput.json
+        run: |
+          # No PROV_BENCH_GATE: report the matrix + JSON artifact, never fail the PR.
+          cargo bench --features "config-toml,observability,semantic-search,embeddings" \
+            --bench provenance_write_throughput | tee prov-write-smoke.txt
+
+      - name: Upload provenance write-throughput JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: provenance-write-throughput-results
+          path: provenance_write_throughput.json
 
       - name: Generate benchmark JSON
         run: |
@@ -270,3 +327,100 @@ jobs:
             benchmark-results/
             target/criterion/
             output.txt
+
+  # MCP round-trip p99 latency harness (Issue #3361) — reference/nightly lane.
+  # Full fixture scale, ENFORCED p99<5ms gate: a gated scenario over budget
+  # HARD-FAILS this job. Runs on the schedule/manual triggers only.
+  mcp-roundtrip-nightly:
+    name: MCP round-trip latency (nightly, gated)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-mcpbench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run MCP round-trip benchmark (nightly scale, enforced gates)
+        env:
+          MCP_BENCH_SCALE: nightly
+          MCP_BENCH_SAMPLE_SIZE: 1000
+          MCP_BENCH_WARMUP: 50
+          # Absolute p99<5ms ceiling (exit 3) AND relative committed-baseline
+          # p50<=2x regression gate (exit 4) are BOTH enforced here.
+          MCP_BENCH_ENFORCE_LATENCY: '1'
+          MCP_BENCH_ENFORCE_RELATIVE: '1'
+          MCP_BENCH_BASELINE: benchmarks/baselines/mcp_round_trip_baseline.json
+          MCP_BENCH_JSON: mcp_round_trip_results.json
+        run: |
+          # Hard-fail on: registry-completeness (exit 2), an over-budget gated
+          # scenario p99>=5ms (exit 3), or a gated scenario p50 > 2x its committed
+          # baseline (exit 4). This is the reference enforcement lane; the relative
+          # gate is what makes a clean 2x regression fail CI.
+          cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
+      - name: Upload MCP latency artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-round-trip-nightly
+          path: mcp_round_trip_results.json
+
+  # MCP round-trip smoke lane — reduced scale, INFORMATIONAL on every push/PR.
+  # continue-on-error means it never blocks a PR; flip to `false` to make it a
+  # required check (a deliberate one-line owner decision).
+  mcp-roundtrip-smoke:
+    name: MCP round-trip latency (PR smoke, informational)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-mcpbench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run MCP round-trip benchmark (smoke scale, informational)
+        env:
+          MCP_BENCH_SCALE: smoke
+          MCP_BENCH_SAMPLE_SIZE: 100
+          MCP_BENCH_WARMUP: 15
+          # Not enforcing the p99 gate on the per-PR lane (informational only);
+          # registry-completeness (exit 2) is always enforced.
+          MCP_BENCH_ENFORCE_LATENCY: '0'
+          MCP_BENCH_JSON: mcp_round_trip_results.json
+        run: |
+          cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
+      - name: Upload MCP latency artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-round-trip-smoke
+          path: mcp_round_trip_results.json

@@ -55,6 +55,7 @@ use std::sync::Arc;
 
 use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
+use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::index::vector::DistanceMetric;
 
 use super::ir::{Predicate, QueryOp, TraversalDepth};
@@ -329,6 +330,9 @@ impl QueryBuilder<state::HasNodes> {
             embedding: Arc::from(embedding),
             top_k: Some(top_k),
             property_key: None,
+            metric: VectorMetric::Cosine,
+            threshold: None,
+            score_alias: None,
         })
     }
 
@@ -508,6 +512,9 @@ impl QueryBuilder<state::HasTraversalResults> {
             embedding: Arc::from(embedding),
             top_k: Some(top_k),
             property_key: None,
+            metric: VectorMetric::Cosine,
+            threshold: None,
+            score_alias: None,
         })
     }
 
@@ -1011,6 +1018,9 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
             embedding: self.embedding,
             top_k: Some(self.top_k),
             property_key: self.property_key,
+            metric: VectorMetric::Cosine,
+            threshold: None,
+            score_alias: None,
         })
     }
 }

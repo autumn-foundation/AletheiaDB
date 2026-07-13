@@ -64,7 +64,9 @@
 //! - **[`normalize_in_place`]**: Normalizes vector in place
 //! - **[`is_normalized`]**: Checks if vector has unit magnitude
 //!
-//! All functions use SIMD acceleration (AVX2/SSE2) when available.
+//! All functions use SIMD acceleration via the `simsimd` crate when the
+//! `simsimd` feature is enabled (x86 AVX2/AVX-512 and ARM NEON/SVE, selected at
+//! runtime), and a portable scalar fallback otherwise (Issue #426).
 //!
 //! # Future Additions
 //!
@@ -98,9 +100,6 @@ pub mod serialization;
 mod sentry_tests;
 
 #[cfg(test)]
-mod sentry_simd_tests;
-
-#[cfg(test)]
 mod sentry_safety_tests;
 
 #[cfg(test)]
@@ -112,6 +111,9 @@ mod sentry_sparse_tests;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod simsimd_differential_tests;
+
 pub use constants::*;
 pub use metric::*;
 pub use ops::*;
@@ -120,7 +122,5 @@ pub use sparse::*;
 pub use types::*;
 pub use validation::*;
 
-#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
-mod havoc_tests;
 #[cfg(test)]
 mod havoc_vector_math;

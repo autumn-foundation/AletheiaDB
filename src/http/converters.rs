@@ -59,6 +59,28 @@ pub fn property_map_to_json(
     Ok(result)
 }
 
+/// Serialize a [`Node`](crate::core::Node) to the exact `{id, label, properties}`
+/// JSON object the `POST /query` `GetNode` operation returns.
+///
+/// Extracted (Issue #3524) so the `POST /query` GetNode handler and the
+/// autumn-web 0.5.0 migration-spike `GET /nodes/{id}` handler call the *same*
+/// serializer — making the spike's HTTP↔MCP↔`POST /query` byte-parity test a
+/// true equality assertion rather than a reimplementation. Behavior is
+/// identical to the previous inline `json!` in `handle_get_node`.
+///
+/// # Errors
+///
+/// Returns an error string if a property value is too deeply nested (exceeds
+/// the recursion cap in [`property_map_to_json`]).
+pub fn node_to_query_json(node: &crate::core::Node) -> Result<serde_json::Value, String> {
+    let props_json = property_map_to_json(&node.properties)?;
+    Ok(json!({
+        "id": node.id.as_u64(),
+        "label": interned_to_string(node.label),
+        "properties": props_json,
+    }))
+}
+
 /// Converts a [`PropertyValue`] to a serde JSON Value.
 ///
 /// # Mappings
@@ -175,6 +197,49 @@ pub fn json_to_parameter_value(value: &serde_json::Value) -> Result<ParameterVal
             Ok(ParameterValue::Value(PredicateValue::String(s.clone())))
         }
         serde_json::Value::Array(arr) => {
+            // Structural width cap (defense-in-depth, Issue #3426). This
+            // mirrors the sibling property path's structural vector-dimension
+            // bound (`json_to_property_value`): it bounds the converted
+            // embedding allocation (the downstream `Arc<[f32]>`) and rejects
+            // absurd dimensions early with a clear error.
+            //
+            // NOTE: this check runs *after* serde_json has already
+            // materialized the full `Vec<serde_json::Value>` for the array, so
+            // it does NOT bound peak parse-time memory for the request body --
+            // that remains governed by `max_request_body_bytes`
+            // (`DefaultBodyLimit`, Issue #3108 / #3424), exactly like the
+            // post-parse property-path cap. The two limits are complementary:
+            // the body-size limit bounds request bytes, this cap bounds the
+            // embedding width we convert to.
+            //
+            // This path is non-recursive: a parameter array is ALWAYS
+            // interpreted as a flat numeric embedding (a nested array or object
+            // element yields the float error below, never a general list and
+            // never deeper recursion), so depth is bounded at 1 by construction
+            // and `MAX_VECTOR_DIMENSIONS` is the single, semantically-precise
+            // structural cap. Unlike the sibling property path, which can also
+            // produce a generic `Array` and therefore needs the broader
+            // `MAX_ARRAY_ELEMENTS` bound, that cap would be provably unreachable
+            // here: the compile-time invariant below guarantees
+            // `MAX_VECTOR_DIMENSIONS < MAX_ARRAY_ELEMENTS`, so the vector cap
+            // always rejects first. The assert makes the invariant explicit at
+            // the check site (enforced in every build, not just tests) so nobody
+            // re-adds a redundant array-elements check should the constants ever
+            // drift.
+            const {
+                assert!(
+                    crate::core::property::MAX_VECTOR_DIMENSIONS
+                        < crate::core::property::MAX_ARRAY_ELEMENTS
+                )
+            };
+            if arr.len() > crate::core::property::MAX_VECTOR_DIMENSIONS {
+                return Err(format!(
+                    "Vector dimension {} exceeds limit {}",
+                    arr.len(),
+                    crate::core::property::MAX_VECTOR_DIMENSIONS
+                ));
+            }
+
             // Check if it's an embedding (vector of floats)
             let floats: Result<Vec<f32>, String> = arr
                 .iter()
@@ -496,6 +561,73 @@ mod tests {
         assert!(res.is_err());
         // Should hit vector limit, not array limit
         assert!(res.unwrap_err().contains("Vector dimension"));
+    }
+
+    #[test]
+    fn test_json_to_parameter_value_vector_dimension_limit() {
+        use crate::core::property::MAX_VECTOR_DIMENSIONS;
+
+        // A parameter/embedding array that exceeds MAX_VECTOR_DIMENSIONS must be
+        // rejected structurally (Issue #3426), independent of the request
+        // body-size limit. One element over the boundary is enough.
+        let too_large = MAX_VECTOR_DIMENSIONS + 1;
+        let large_vec: Vec<serde_json::Value> =
+            std::iter::repeat_n(json!(1.0), too_large).collect();
+        let json_val = serde_json::Value::Array(large_vec);
+
+        let result = json_to_parameter_value(&json_val);
+        match result {
+            Ok(_) => panic!("oversized embedding parameter should have been rejected"),
+            Err(e) => assert!(
+                e.contains("exceeds limit"),
+                "unexpected error message: {}",
+                e
+            ),
+        }
+    }
+
+    #[test]
+    fn test_json_to_parameter_value_dimension_boundary() {
+        use crate::core::property::MAX_VECTOR_DIMENSIONS;
+
+        // Exactly MAX_VECTOR_DIMENSIONS elements is accepted (the cap rejects
+        // strictly-greater, mirroring the property path's boundary).
+        let at_limit: Vec<serde_json::Value> =
+            std::iter::repeat_n(json!(0.5), MAX_VECTOR_DIMENSIONS).collect();
+        let ok = json_to_parameter_value(&serde_json::Value::Array(at_limit));
+        assert!(
+            matches!(ok, Ok(ParameterValue::Embedding(_))),
+            "an embedding exactly at the dimension cap must be accepted"
+        );
+    }
+
+    #[test]
+    fn test_json_to_parameter_value_empty_array_ok() {
+        // The lower boundary: an empty array (len 0) trivially passes the
+        // dimension cap and converts to an empty embedding — the cap only
+        // rejects the upper end.
+        let empty = json_to_parameter_value(&serde_json::Value::Array(vec![]));
+        match empty {
+            Ok(ParameterValue::Embedding(e)) => assert_eq!(e.len(), 0),
+            other => panic!("expected an empty embedding, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn test_json_to_parameter_value_normal_embedding_ok() {
+        // A small, legitimate embedding parameter must still convert cleanly —
+        // the structural cap must not regress the happy path.
+        let val = json!([0.1, 0.2, 0.3, 0.4]);
+        match json_to_parameter_value(&val) {
+            Ok(ParameterValue::Embedding(e)) => assert_eq!(e.len(), 4),
+            other => panic!("expected an embedding, got {:?}", other.map(|_| ())),
+        }
+
+        // Scalars remain unaffected.
+        assert!(matches!(
+            json_to_parameter_value(&json!(7)),
+            Ok(ParameterValue::Value(PredicateValue::Int(7)))
+        ));
     }
 
     #[test]

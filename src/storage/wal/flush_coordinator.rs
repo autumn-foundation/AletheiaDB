@@ -45,8 +45,7 @@ use super::ring_buffer::PendingEntry;
 use crate::core::error::{Error, Result, StorageError};
 
 use super::segment_reader::{
-    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL,
-    WAL_VERSION_PROVENANCE_PRINCIPAL,
+    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_STRING_LABELS, WAL_VERSION_STRING_LABELS,
 };
 
 /// Metadata about a WAL segment's LSN range.
@@ -274,42 +273,87 @@ impl FlushCoordinator {
     }
 
     /// Initialize from existing WAL segments.
+    ///
+    /// # Failure semantics (Issue #3423)
+    ///
+    /// The maximum existing segment id determines where `ensure_segment_open`
+    /// starts allocating. Under-reporting it (e.g. defaulting to 0 after a
+    /// failed directory scan) can land the writer on a stale/existing segment
+    /// and — combined with a payload-version bump — produce an unparseable
+    /// mixed-version segment. We therefore distinguish two cases:
+    ///
+    /// - **Directory does not exist yet** (`NotFound`): a normal first run on
+    ///   a fresh data dir. The scan yields no segments and we start at id 0.
+    ///   This is not an error.
+    /// - **Any other I/O error** (permission denied, not-a-directory, a
+    ///   transient failure): we cannot trust that segment id 0 is unused, so
+    ///   we **fail loud** and propagate the error rather than silently
+    ///   defaulting to 0. The header-version check in `ensure_segment_open`
+    ///   remains a second line of defense, but a swallowed scan error must not
+    ///   be the reason we rely on it.
     fn initialize_from_existing(&self) -> Result<()> {
-        let mut max_segment_id = 0u64;
-
-        match std::fs::read_dir(&self.config.wal_dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if let Some(id) = path
-                        .extension()
-                        .filter(|ext| *ext == "log")
-                        .and_then(|_| path.file_stem())
-                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
-                    {
-                        max_segment_id = max_segment_id.max(id);
-                    }
-                }
-            }
+        let max_segment_id = match std::fs::read_dir(&self.config.wal_dir) {
+            // Map each yielded entry to its path (a cheap, non-fallible op)
+            // while preserving per-entry iteration errors as `Err`, then fold
+            // to the max segment id. `scan_max_segment_id` propagates those
+            // per-entry errors instead of swallowing them with `.flatten()`.
+            Ok(entries) => Self::scan_max_segment_id(
+                &self.config.wal_dir,
+                entries.map(|entry| entry.map(|e| e.path())),
+            )?,
+            // First run: the WAL directory has not been created yet. Treat an
+            // absent directory as "no existing segments" and start at id 0.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            // A genuine I/O error opening the directory: refuse to proceed
+            // rather than under-report the max segment id and risk appending
+            // to an existing segment.
             Err(e) => {
-                // Under-reporting the max segment id here would make
-                // `ensure_segment_open` collide with existing segment files.
-                // That collision is now caught defensively by the
-                // header-version check (Issue #3423), but warn loudly so
-                // operators can see the scan failed.
-                eprintln!(
-                    "WARNING: failed to scan WAL directory {} for existing segments ({}); \
-                     segment id allocation starts at 0 and relies on the header-version \
-                     check to avoid appending to mismatched segments",
+                return Err(Error::Storage(StorageError::IoError(format!(
+                    "Failed to scan WAL directory {} for existing segments: {}; \
+                     refusing to start segment allocation at 0 (Issue #3423)",
                     self.config.wal_dir.display(),
                     e
-                );
+                ))));
             }
-        }
+        };
 
         self.current_segment_id
             .store(max_segment_id, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Fold a WAL-directory listing into the maximum `NNNNNN.log` segment id.
+    ///
+    /// A per-entry iteration error (an `Err` yielded partway through the
+    /// directory scan) is **propagated**, never swallowed: skipping an entry
+    /// could let the returned max id under-report and default the writer
+    /// toward segment id 0, exactly the fail-loud gap this hardening closes
+    /// (Issue #3423). Extracted from `initialize_from_existing` so the
+    /// per-entry error path is unit-testable without a filesystem mock.
+    fn scan_max_segment_id(
+        wal_dir: &Path,
+        entries: impl Iterator<Item = std::io::Result<PathBuf>>,
+    ) -> Result<u64> {
+        let mut max_segment_id = 0u64;
+        for entry in entries {
+            let path = entry.map_err(|e| {
+                Error::Storage(StorageError::IoError(format!(
+                    "Failed to read a WAL directory entry in {}: {}; \
+                     refusing to start segment allocation at 0 (Issue #3423)",
+                    wal_dir.display(),
+                    e
+                )))
+            })?;
+            if let Some(id) = path
+                .extension()
+                .filter(|ext| *ext == "log")
+                .and_then(|_| path.file_stem())
+                .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+            {
+                max_segment_id = max_segment_id.max(id);
+            }
+        }
+        Ok(max_segment_id)
     }
 
     /// Get the path for a segment file.
@@ -387,13 +431,24 @@ impl FlushCoordinator {
             return Ok(());
         }
 
-        // New segments always use the principal-carrying provenance
-        // format (Issues #3224 + #3350): version 6 for encrypted
-        // segments, version 5 for plaintext.
+        // New segments use the string-label format (Issue #3506):
+        // WAL_VERSION_ENCRYPTED_STRING_LABELS (v14) for encrypted segments,
+        // WAL_VERSION_STRING_LABELS (v13) for plaintext. It is a strict
+        // superset of the destructive-op provenance format (Issue #3427,
+        // v11/v12) — itself a superset of the delete-version-id (Issue #3406),
+        // transaction-framing (Issue #3413), and principal-carrying provenance
+        // (Issues #3224 + #3350) formats — changing only how the
+        // node/edge/constraint LABEL is encoded: length-prefixed UTF-8 that is
+        // re-interned on read instead of a raw interner id, so labels are
+        // correct under any interner layout on replay. It keeps every prior
+        // field (framing markers, tombstone/retraction version_id, destructive
+        // provenance). The version bump signals the new label encoding so old
+        // readers reject the segment cleanly rather than mis-lengthing the
+        // variable-width label payload.
         let write_version = if self.config.wal_cipher.is_some() {
-            WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
+            WAL_VERSION_ENCRYPTED_STRING_LABELS
         } else {
-            WAL_VERSION_PROVENANCE_PRINCIPAL
+            WAL_VERSION_STRING_LABELS
         };
 
         // Allocate the next segment id, rolling past any existing non-empty
@@ -1075,27 +1130,35 @@ mod tests {
         use crate::core::provenance::Provenance;
         use crate::core::temporal::time;
         use crate::storage::wal::segment_reader::{WAL_VERSION_PROVENANCE, read_entries_from_dir};
-        use crate::storage::wal::serialization::serialize_entry_into;
+        use crate::storage::wal::serialization::{OP_CREATE_NODE, serialize_entry_into};
         use crate::storage::wal::{WalEntry, WalOperation};
 
         let dir = tempdir().unwrap();
 
-        // Hand-write a v3-header segment at id 1 containing one valid entry.
-        // A provenance-less entry's bytes are identical across the v3 and v5
-        // payload formats (the principal slot only exists inside a present
-        // provenance bundle), so this file replays cleanly as v3.
-        let old_entry = WalEntry::new(
-            LSN(1),
-            WalOperation::CreateNode {
-                node_id: NodeId::new(1).unwrap(),
-                label: GLOBAL_INTERNER.intern("Legacy").unwrap(),
-                properties: PropertyMap::new(),
-                valid_from: time::now(),
-                provenance: None,
-            },
-        );
+        // Hand-write a genuine v3-header segment at id 1 containing one valid,
+        // provenance-less CreateNode with a RAW 4-byte interner-id label (the
+        // pre-#3506 label encoding). We build it by hand rather than via the
+        // modern serializer, which now writes string labels at v13 — a v13 body
+        // under a v3 header would not replay. A provenance-less entry's other
+        // bytes are identical across the v3/v5 payload formats, so this file
+        // replays cleanly as v3.
+        let legacy_label = GLOBAL_INTERNER.intern("Legacy").unwrap();
+        let legacy_ts = time::now();
         let mut old_bytes = Vec::new();
-        serialize_entry_into(&old_entry, &mut old_bytes).unwrap();
+        old_bytes.extend_from_slice(&LSN(1).0.to_le_bytes());
+        legacy_ts.serialize_into(&mut old_bytes);
+        let cs = old_bytes.len();
+        old_bytes.extend_from_slice(&[0u8; 4]);
+        old_bytes.push(OP_CREATE_NODE);
+        old_bytes.extend_from_slice(&NodeId::new(1).unwrap().as_u64().to_le_bytes());
+        old_bytes.extend_from_slice(&legacy_label.as_u32().to_le_bytes()); // raw id label
+        PropertyMap::new().serialize_into(&mut old_bytes).unwrap();
+        legacy_ts.serialize_into(&mut old_bytes);
+        old_bytes.push(0u8); // provenance: absent
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&old_bytes[0..20]);
+        hasher.update(&old_bytes[cs + 4..]);
+        old_bytes[cs..cs + 4].copy_from_slice(&hasher.finalize().to_le_bytes());
         let mut v3_segment = Vec::new();
         v3_segment.extend_from_slice(&WAL_MAGIC);
         v3_segment.push(WAL_VERSION_PROVENANCE);
@@ -1144,12 +1207,12 @@ mod tests {
             "existing v3 segment must not be appended to"
         );
 
-        // ...the write must have rolled forward to a fresh segment with a
-        // matching (v5) header...
+        // ...the write must have rolled forward to a fresh segment with the
+        // current writer (v13 string-labels) header...
         assert_eq!(coordinator.current_segment_id(), 2);
         let new_segment = std::fs::read(dir.path().join("000002.log")).unwrap();
         assert_eq!(&new_segment[0..4], &WAL_MAGIC);
-        assert_eq!(new_segment[4], WAL_VERSION_PROVENANCE_PRINCIPAL);
+        assert_eq!(new_segment[4], WAL_VERSION_STRING_LABELS);
 
         // ...and a full-directory replay succeeds, with the new entry's
         // principal intact.
@@ -1200,6 +1263,96 @@ mod tests {
             !dir.path().join("000002.log").exists(),
             "no roll-forward for a version-matching segment"
         );
+    }
+
+    /// Regression test for Issue #3423 (secondary hardening): a genuine I/O
+    /// failure while scanning the WAL directory for existing segments must
+    /// **propagate** rather than being swallowed and silently defaulting the
+    /// segment-id counter to 0. Defaulting to 0 after a failed scan is one of
+    /// the ways the writer can land on a stale/existing segment; failing loud
+    /// lets the operator see the problem instead of risking a poisoned
+    /// mixed-version segment.
+    #[test]
+    fn test_initialize_from_existing_propagates_real_io_error() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let config = FlushCoordinatorConfig::new(&wal_dir);
+
+        // `new()` creates the directory and scans it successfully.
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Now replace the WAL directory with a regular FILE at the same path.
+        // `read_dir` on a non-directory fails with a real I/O error (NOT
+        // `NotFound`), which the scan must surface rather than swallow.
+        std::fs::remove_dir_all(&wal_dir).unwrap();
+        std::fs::write(&wal_dir, b"not a directory").unwrap();
+
+        let result = coordinator.initialize_from_existing();
+        assert!(
+            result.is_err(),
+            "a real read_dir I/O error must propagate, not silently default to segment id 0"
+        );
+    }
+
+    /// The first-run case -- the WAL directory does not exist yet -- must NOT
+    /// be treated as an error: a missing directory is normal on a fresh data
+    /// dir and must still succeed with segment id 0.
+    #[test]
+    fn test_initialize_from_existing_missing_dir_is_ok() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let config = FlushCoordinatorConfig::new(&wal_dir);
+
+        // `new()` creates the directory; remove it entirely so the scan hits
+        // a genuinely absent directory (`NotFound`).
+        let coordinator = FlushCoordinator::new(config).unwrap();
+        std::fs::remove_dir_all(&wal_dir).unwrap();
+        assert!(!wal_dir.exists());
+
+        let result = coordinator.initialize_from_existing();
+        assert!(
+            result.is_ok(),
+            "a missing WAL directory (first run) must succeed, not error"
+        );
+        assert_eq!(
+            coordinator.current_segment_id.load(Ordering::Relaxed),
+            0,
+            "an absent WAL directory yields segment id 0"
+        );
+    }
+
+    /// Regression test for Issue #3423 (secondary hardening): a per-entry
+    /// iteration error yielded partway through the WAL-directory scan must
+    /// **propagate**, not be swallowed by `.flatten()`. Swallowing it could
+    /// skip an existing segment, under-report the max id, and default the
+    /// writer toward segment id 0. Exercised directly on the extracted
+    /// `scan_max_segment_id` helper with a synthetic mid-iteration I/O error,
+    /// since a genuine `ReadDir::next()` error is not portably injectable.
+    #[test]
+    fn test_scan_max_segment_id_propagates_per_entry_error() {
+        let wal_dir = Path::new("/some/wal");
+
+        // A well-formed listing with an I/O error yielded between valid
+        // entries must surface the error, not skip past it.
+        let entries: Vec<std::io::Result<PathBuf>> = vec![
+            Ok(wal_dir.join("000001.log")),
+            Err(std::io::Error::other("simulated readdir failure")),
+            Ok(wal_dir.join("000009.log")),
+        ];
+        let result = FlushCoordinator::scan_max_segment_id(wal_dir, entries.into_iter());
+        assert!(
+            result.is_err(),
+            "a per-entry iteration error must propagate, not be swallowed"
+        );
+
+        // Sanity: an all-Ok listing folds to the max id.
+        let ok_entries: Vec<std::io::Result<PathBuf>> = vec![
+            Ok(wal_dir.join("000003.log")),
+            Ok(wal_dir.join("notes.txt")), // ignored (wrong extension)
+            Ok(wal_dir.join("000007.log")),
+        ];
+        let max = FlushCoordinator::scan_max_segment_id(wal_dir, ok_entries.into_iter()).unwrap();
+        assert_eq!(max, 7, "max id folds over well-formed .log entries");
     }
 
     // ============================================================
@@ -1379,7 +1532,7 @@ mod tests {
 
         assert!(data.len() >= WAL_HEADER_SIZE);
         assert_eq!(&data[0..4], &WAL_MAGIC);
-        assert_eq!(data[4], WAL_VERSION_PROVENANCE_PRINCIPAL);
+        assert_eq!(data[4], WAL_VERSION_STRING_LABELS);
     }
 
     #[test]

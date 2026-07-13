@@ -318,6 +318,7 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
+| **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Stats** | `database_stats` (holistic snapshot: current size, bi-temporal depth + anchor/delta compression, hot/warm/cold tier distribution, WAL state; no arguments) |
@@ -502,6 +503,56 @@ temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
 `get_node_history`), which have no `include_vectors` flag and always return
 full vectors.
 
+**Token-budget-aware responses (Issue #3353)**: the thirteen budgetable read
+tools — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
+`get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
+`hybrid_query`, `query`, `find_nodes_at_time`, `get_node_history`, `get_schema`
+(the single source of truth is `BUDGETABLE_READ_TOOLS`; not *every* read tool —
+e.g. `get_node_at_time`, `get_edge_history`, `diff_node_versions`,
+`temporal_extent`, `database_stats`, `count_nodes` are out of scope) — accept an
+optional `max_response_tokens` (estimated as `ceil(utf8_bytes / 4)`) or the
+byte-exact `max_response_bytes`, so a context-bounded caller can say "spend at
+most N tokens answering this" instead of guessing a row `limit`. These three
+parameters (`max_response_tokens`, `max_response_bytes`, `priority_properties`)
+are injected into each budgetable tool's advertised `inputSchema.properties`, so
+they are machine-discoverable, not just described in prose. The serialized
+response — **including its own truncation metadata** — is guaranteed not to
+exceed the stated budget (hard contract, CI conformance sweep 256..32K tokens,
+0 overruns). This bound governs **success** responses; a structured *error*
+response (e.g. the too-small-budget `INVALID_ARGUMENT` below) is itself small
+and returned intact. The rare non-object success payload (JSON scalar/array or
+plain text) cannot degrade along the entity ladder but is still held to the byte
+cap via a disclosed truncation marker (never emitted unbounded). Over budget the
+response degrades along a deterministic, disclosed ladder — full →
+`elided_properties` (bulky property values become `{elided: true, ...}`
+descriptors, reusing #3220's convention, and only when the descriptor is
+actually smaller than the value, so the ladder never enlarges the response) →
+`entity_summaries` (properties reduced to protected keys;
+ids/labels/relationships/temporal coordinates/provenance/scores always survive)
+→ `counts_and_handles` (entity arrays truncated to the prefix that fits, with the
+object's own `count`/`row_count`/`has_more`/`next_offset`/`truncated` siblings
+rewritten to describe the retained prefix so a paginating caller sees no gap and
+no duplicate) — carrying a `budget` block that names the rung applied per
+section. Every elision/truncation site carries a **fetch handle**: a concrete
+`get_node`/`get_edge` call with `include_vectors: true` for an elided entity, a
+`get_node_at_time`/`get_edge_at_time` call for an elided history version (parent
+id + that version's own coordinates, not the current state), and for a truncated
+array a concrete `offset`-advancing resume call on paginated tools
+(`list_nodes`/`traverse`/`find_nodes_at_time`) or an honest "re-request with a
+larger budget" disclosure on non-paginated ones — so nothing is lost: an agent
+following handles reconstructs the full response. `priority_properties` names
+properties to protect; they out-survive unprotected ones at every rung.
+`find_similar`/`hybrid_query` never drop or reorder ranked results to meet a
+budget (only per-result payloads degrade), and temporal responses never omit
+temporal coordinates. A budget too small for even the minimal rung returns a
+#3234 `INVALID_ARGUMENT` stating a minimum viable budget that is self-consistent
+(re-issuing at the reported `min_viable_tokens` succeeds) — never a silently
+empty success. Omitting the budget parameters reproduces prior behavior exactly,
+and a **misspelled/unknown budget key** (e.g. `max_tokens`) is ignored — the
+full response is returned — so use the exact key names. Write/admin tools are out
+of scope. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#token-budget-aware-responses-issue-3353).
+
 **Temporal extent (Issue #3238)**: `temporal_extent` reports the dataset's
 queryable bi-temporal extent — the earliest/latest valid-time and
 transaction-time coordinates across recorded history (including
@@ -513,10 +564,59 @@ max of interval starts and *closed* ends, so the open-interval sentinel
 never leaks. Overall bounds are O(1) reads of a write-time-maintained
 aggregate and only ever widen while the server runs (cacheable per
 session). Optional `by_label: true` adds per-node-label / per-edge-type
-bounds folded from hot-tier history. Coverage caveat: bounds span the
-current process lifetime plus hot-tier history restored at startup —
-versions cold-migrated before the last restart are not reflected. See
+bounds folded from hot-tier history. Overall bounds also span history
+migrated to the cold tier across restarts (Issue #3389): the cold store
+persists its per-dimension extent bounds and they are merged into the
+aggregate at startup (the per-label breakdown remains hot-tier-only). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#discovering-the-queryable-temporal-extent-temporal_extent).
+
+**Cursor continuation for large scans (Issue #3360)**: the bounded read tools
+(`list_nodes`, `find_nodes_at_time`, `get_outgoing_edges`,
+`get_incoming_edges`, `traverse`) accept an additive `use_cursor: true` on the
+first call (returning an opaque `cursor` token) and a `cursor` continuation
+token thereafter — passed back **with no other parameters** — for
+**snapshot-anchored** paging that is consistent, duplicate-free, and gap-free
+under concurrent writes. Every page of one scan is evaluated at the
+bi-temporal coordinate captured on the first page (disclosed as
+`snapshot_valid_time`/`snapshot_transaction_time`), leveraging the existing
+point-in-time read semantics: a row **created** after the first page is never
+seen, a row **deleted** after it is still seen, and the union of all pages
+equals exactly the unbounded result at that one moment — **up to the candidate
+cap** (the node scans route through the #3236 finders, capped at
+`max_schema_as_of_entities`, default 50,000, lowest ids; a page with
+`sampled: true` means the scan is bounded by that cap, not exhausted — narrow
+with a property filter for full coverage). The node/adjacency tools use a
+**keyset** (ascending id) that avoids re-emitting prior result pages (no
+dup/gap); candidate enumeration is still O(total) per page in v1 (each page
+re-runs the full candidate/adjacency scan — a true depth-independent keyset
+seek is a follow-up); `traverse` pins the snapshot but continues by an internal
+offset over its deterministic DFS in v1. Note `use_cursor:true` on
+`get_outgoing_edges`/`get_incoming_edges`/`traverse` with no `as_of` answers
+"as of first-page now" via the bi-temporal-at-now path, and therefore
+**excludes future-valid** (`valid_from > now`) edges/nodes that a plain
+current-state (non-cursor) call would return — the same tradeoff #3236
+documents for point-in-time reads. Tokens are opaque,
+printable, bounded base64url strings signed with a per-process secret (so
+tampered/wrong-tool tokens are rejected `INVALID_ARGUMENT`, never wrong data;
+they do not survive a server restart). Cursors have a documented, configurable
+**TTL** (default 5 min, `cursor_ttl_seconds`) and a per-connection **cap** on
+concurrently live cursors (default 128; both via
+`AletheiaMcpServer::with_cursor_config`); resuming after expiry or exceeding
+the cap returns `FAILED_PRECONDITION` with remediation guidance, and expired
+cursors pin no storage. The design is **stateless** (all resume state is in
+the token) with only a tiny in-process registry for cap enforcement. Cursor
+composition with #3353 token budgets is **live** (both features have landed):
+within one call the cursor page is produced first, then the token budget shapes
+that page, so a budget-limited page ends smaller while the cursor still resumes
+the same snapshot-anchored scan (v1 caveat: the continuation key advances by the
+underlying scan, not the last budget-trimmed row, so page a budgeted cursor scan
+losslessly via the budget ladder's offset handle or a larger budget — see the
+guide). Offset paging (#3226)
+remains unchanged for backward compatibility. The `query` tool returns a structured
+`unsupported_construct` error for cursor requests in v1 (no silent fallback);
+`list_edges` is not cursorable (it does not enumerate edges — use the
+adjacency tools). See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#paging-large-results-cursor-continuation).
 
 **Authentication & RBAC (Issue #3350)**: both server surfaces (MCP and
 HTTP) require an API key by default and refuse to start with zero
@@ -619,14 +719,54 @@ let results = db.execute_cypher_with_params("MATCH (n:Person {name: $name}) RETU
   earlier variable is rejected, and comma-separated patterns per optional
   clause are rejected (no variable-binding analysis yet -- all three would
   silently produce wrong rows)
-- Variable-depth: `-[:KNOWS*1..3]->`
+- Variable-depth: `-[:KNOWS*1..3]->` -- binds the far node to every node
+  reachable within the range (Issue #548); `*min..max`, `*..max`, `*min..`,
+  `*n`, and bare `*` are all honored. **Known v1 limitations**: (1) matching is
+  **node-distinct / shortest-path reachability**, a deliberate simplification of
+  openCypher trail (path-enumeration) semantics -- each distinct target is bound
+  once at its *shortest* hop-distance, so a node whose shortest path is below
+  `min` (or an anchor reached only via an in-range cycle) is not re-emitted at a
+  longer in-range depth (full trail semantics is a tracked follow-up); (2) the
+  open-ended upper bounds (`*` and `*min..`) are capped at depth **10**
+  (`DEFAULT_MAX_TRAVERSAL_DEPTH`; a configurable cap is a follow-up).
 - Directions: `->` (outgoing), `<-` (incoming), `-` (both)
 - Filtering: `WHERE n.age > 18 AND n.name = 'Alice'`
 - Results: `RETURN`, `RETURN DISTINCT`, `AS` aliases
-- Ordering: `ORDER BY n.age DESC`
+- Aggregation (Issue #558): `count(*)`, `count(expr)`, `count(DISTINCT expr)`,
+  `sum`/`avg`/`min`/`max`/`collect` (each with optional `DISTINCT`), with
+  openCypher **implicit grouping** — non-aggregate `RETURN` items become the
+  group key (`RETURN n.dept, count(*)` groups by `n.dept`; a keyless
+  `RETURN count(*)` is one global row, `0` over empty input). `ORDER BY` over
+  aggregate output sorts by the output column / aggregate alias.
+- Ordering: `ORDER BY n.age DESC` — multi-key `ORDER BY a, b` sorts by `a`
+  (primary) then `b`; openCypher null placement (nulls **last** for `ASC`,
+  **first** for `DESC`)
 - Pagination: `SKIP 10 LIMIT 20`
 - Query chaining: `WITH b WHERE b.score > 0.5 RETURN b`
 - Parameters: `$paramName`
+
+**Aggregation v1 limitations (Issue #558):**
+- **Grouping by a whole node/edge is rejected** (`RETURN n, count(*)` returns a
+  structured `UnsupportedFeature` error): the single-entity row model cannot
+  express node-identity grouping — group by a property (`n.id`) instead.
+  `count(n)` (bare variable) is allowed and counts non-null bindings.
+  `count(DISTINCT *)` is a parse error (openCypher disallows it).
+- **`min`/`max`/`sum`/`avg` over mixed or non-numeric types are lenient**:
+  non-numeric values are skipped by `sum`/`avg`, and `min`/`max` treat
+  incomparable pairs as equal (retain input order) rather than erroring. An
+  all-integer `sum` that overflows `i64` promotes to `Float` (never silently
+  wraps).
+- **`RETURN DISTINCT <scalar projection>`** (e.g. `RETURN DISTINCT n.dept`)
+  deduplicates by entity id, **not** the projected value — a pre-existing
+  projection-model limitation (property projection is not yet lowered into the
+  row), independent of aggregation.
+- **MCP `query`-tool rendering (cross-lane)**: aggregate rows are carried on
+  `QueryRow.columns` with a null entity, but the MCP serializer
+  (`query_row_to_json`, `src/mcp/server.rs`) ignores `columns` and renders the
+  row as `{"entity": null, ...}`. Aggregation is correct at the
+  `execute_cypher`/Rust-API level; surfacing it through MCP is a one-branch
+  follow-up for the MCP lane owner (serialize `row.columns` via
+  `property_value_to_json` and make `query_columns()` dynamic).
 
 **Temporal Extensions:**
 - `AS OF TIMESTAMP '2024-01-15T10:00:00Z'`
@@ -682,6 +822,42 @@ let shard = coordinator.router().route_node("Person");
 Optional embedding providers via feature flags (OpenAI, HuggingFace, Ollama, ONNX).
 
 **See [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md) for comprehensive user guide.**
+
+### Derivation Lineage (Issue #3371)
+
+Records **fact-to-fact derivation** at write time — "fact B was computed from
+facts A1..An" — the complement to write-time provenance (#3224), which only
+records external-source origin. Each reference is **version-pinned**
+(`LineageRef { entity, version }`), so lineage refers to exactly the fact
+version that was read, immune to later updates of the input.
+
+**Rust API:** `create_node_with_lineage` / `create_edge_with_lineage` /
+`update_node_with_lineage` / `update_edge_with_lineage` accept a
+`derived_from: &[LineageRef]` (omit/empty == today's behavior); a nonexistent
+reference fails the write with a structured error **before any commit**.
+`upstream_lineage` ("what was this derived from?") and `downstream_lineage`
+("what has been derived from this?" — the retraction **blast radius**) return a
+depth-bounded, entry-limited `LineageView` with `has_more` (#3226) and each
+entry's current-state `FactStatus` (`Current`/`Superseded`/`Absent`);
+`with_as_of(ts)` scopes the closure to lineage recorded by that transaction
+time. Lineage records are **immutable** and survive supersession/retraction of
+the facts they reference (a retracted input still resolves in the closure,
+marked `Absent`). v1 lineage index is **in-memory** (does not survive restart —
+keeps the WAL format untouched during #3413; durable rehydration is a
+follow-up).
+
+**MCP surface:** the `create_node`/`create_edge`/`update_node`/`update_edge`
+tools accept an optional `derived_from` array of version-pinned refs
+(`[{entity_kind:"node"|"edge", id, version}]`); `lineage_upstream` /
+`lineage_downstream` query the closure (args: `entity_kind`/`id`/`version`
+root, `max_depth`, `limit`, `offset`, `as_of_transaction_time`) returning
+entries with the version-pinned ref, `depth`, `status`, plus `has_more` /
+`next_offset` (#3226). Write params stay `writer`-class; the query tools are
+`reader`-class. Errors use the #3234 structured codes (`NOT_FOUND` for a
+dangling ref, `INVALID_ARGUMENT` for self/cycle, `FAILED_PRECONDITION` for
+already-recorded), all non-retriable. Durable persistence of lineage is a
+#3413 follow-up; the #3427 attribution caveat applies. See
+[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
 
 ### Feature Flags: Stable vs Experimental
 
@@ -958,15 +1134,29 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 ### Orphaned Edges on Node Deletion
 
 The **low-level Rust** `delete_node` (`src/storage/current/mod.rs`) removes only the
-node itself -- any edges where the deleted node is the source or target remain in
-storage as **orphaned edges**. This edge-preserving behavior is intentional and is
-retained for audit/history use cases where callers manage edge cleanup themselves or
-need to preserve edge records. Traversals that follow these orphaned edges may
-encounter missing endpoints.
+node itself -- any edges where the deleted node is the source or target **and that
+existed at the deleting transaction's snapshot** remain in storage as **orphaned
+edges**. This edge-preserving behavior is intentional and is retained for
+audit/history use cases where callers manage edge cleanup themselves or need to
+preserve edge records. Traversals that follow these orphaned edges may encounter
+missing endpoints.
+
+**Concurrent-write exception (Issue #3416)**: the orphan-preserving behavior applies
+only to *pre-existing* edges. Under snapshot isolation, a `delete_node`/`retract_node`
+(and symmetrically a `create_edge`) that would orphan an edge **committed by a
+concurrent transaction after the deleter's snapshot** now **aborts at commit** with
+`TransactionError::ValidationFailed` (MCP `FAILED_PRECONDITION`, non-retriable),
+first-committer-wins. The check is symmetric under the commit-serialization
+(`historical` write) guard: whichever of the concurrent delete-node / create-edge
+pair applies second aborts, so neither ordering can commit a new dangling edge. A
+single transaction that both creates an edge and deletes its endpoint is unaffected
+(that is the caller's own buffered decision), as are pre-existing edges deleted with
+no concurrent writer.
 
 **Recommended (Rust API)**: Use `delete_node_cascade` instead, which atomically
 deletes the node and all connected edges, preventing orphans. To decide before acting,
-call `db.count_connected_edges(node_id)` to learn how many edges reference a node.
+call `db.count_connected_edges(node_id)` to learn how many edges reference a node
+(DISTINCT edges -- a self-loop counts once, Issue #3416).
 
 **MCP surface is safe-by-default (Issue #3209)**: The MCP `delete_node` tool mirrors
 Cypher's `DETACH DELETE` contract -- it never silently orphans edges:
@@ -1035,6 +1225,8 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture and roadmap
 - **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide
 - **[docs/query-language-design.md](docs/query-language-design.md)** - Query language grammar and semantics
+- **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Derivation lineage between facts (Issue #3371)
+- **[docs/guides/provenance-hash-chain.md](docs/guides/provenance-hash-chain.md)** - Tamper-evident provenance hash chain: `aletheia verify`, `verify_chain`/`export_chain_head` MCP tools, external anchoring (Issue #3351)
 
 ### User Guides
 - **[docs/guides/vector-search-integration.md](docs/guides/vector-search-integration.md)** - Complete vector search API
@@ -1046,6 +1238,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/query-pipeline-guide.md](docs/guides/query-pipeline-guide.md)** - Query execution pipeline
 - **[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md)** - Authentication, RBAC roles, API-key lifecycle
 - **[docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)** - Canonical role/operation authorization matrix
+- **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Fact-to-fact derivation lineage: version-pinned upstream/downstream closures (Issue #3371)
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.

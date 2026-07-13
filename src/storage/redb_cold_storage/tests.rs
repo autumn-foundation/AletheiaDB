@@ -2432,3 +2432,184 @@ fn test_stats_version_counters_seeded_on_reopen() {
         .unwrap();
     assert_eq!(reopened.stats().node_versions_stored, 4);
 }
+
+// ========================================================================
+// Persisted cold-tier temporal extent bounds (Issue #3389)
+// ========================================================================
+
+/// Build a node version whose valid interval starts at `valid_start` (open
+/// ended) and whose transaction interval starts at `tx_start`.
+fn node_version_with_times(id: u64, valid_start: i64, tx_start: i64) -> NodeVersion {
+    use crate::core::temporal::TimeRange;
+    NodeVersion::new_anchor(
+        VersionId::new(id).unwrap(),
+        NodeId::new(id).unwrap(),
+        BiTemporalInterval::new(
+            TimeRange::from(Timestamp::from(valid_start)),
+            TimeRange::from(Timestamp::from(tx_start)),
+        ),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+    )
+}
+
+#[test]
+fn extent_bounds_none_when_cold_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap();
+    assert_eq!(
+        store.get_temporal_extent_bounds().unwrap(),
+        None,
+        "an empty cold tier contributes no extent bounds"
+    );
+}
+
+#[test]
+fn extent_bounds_persist_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cold.redb");
+
+    {
+        let store = RedbColdStorage::with_default_config(&path).unwrap();
+        store
+            .store_node_version(&node_version_with_times(1, 1_000, 5_000))
+            .unwrap();
+        // Bounds are visible immediately after the write.
+        let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+        assert_eq!(bounds.valid_earliest, Some(Timestamp::from(1_000)));
+        assert_eq!(bounds.tx_earliest, Some(Timestamp::from(5_000)));
+    }
+
+    // Reopen the file (simulated restart): the bounds must survive.
+    let reopened = RedbColdStorage::with_default_config(&path).unwrap();
+    let bounds = reopened.get_temporal_extent_bounds().unwrap().unwrap();
+    assert_eq!(
+        bounds.valid_earliest,
+        Some(Timestamp::from(1_000)),
+        "cold-tier valid earliest must survive reopen"
+    );
+    assert_eq!(bounds.tx_earliest, Some(Timestamp::from(5_000)));
+}
+
+#[test]
+fn extent_bounds_open_valid_to_never_leaks_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap();
+    // Open valid_to (TimeRange::from is [start, MAX)).
+    store
+        .store_node_version(&node_version_with_times(1, 2_000, 2_000))
+        .unwrap();
+
+    let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+    // A single open-ended fact: latest equals its start, never TIMESTAMP_MAX.
+    assert_eq!(bounds.valid_latest, Some(Timestamp::from(2_000)));
+    assert!(bounds.valid_latest.unwrap() < TIMESTAMP_MAX);
+    assert_eq!(bounds.tx_latest, Some(Timestamp::from(2_000)));
+    assert!(bounds.tx_latest.unwrap() < TIMESTAMP_MAX);
+}
+
+#[test]
+fn extent_bounds_widen_monotonically_across_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap();
+
+    store
+        .store_node_version(&node_version_with_times(1, 3_000, 9_000))
+        .unwrap();
+    // A backdated fact widens earliest; a later one widens latest.
+    store
+        .store_node_version(&node_version_with_times(2, 1_000, 5_000))
+        .unwrap();
+    store
+        .store_node_version(&node_version_with_times(3, 7_000, 12_000))
+        .unwrap();
+
+    let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+    assert_eq!(bounds.valid_earliest, Some(Timestamp::from(1_000)));
+    assert_eq!(bounds.valid_latest, Some(Timestamp::from(7_000)));
+    assert_eq!(bounds.tx_earliest, Some(Timestamp::from(5_000)));
+    assert_eq!(bounds.tx_latest, Some(Timestamp::from(12_000)));
+}
+
+#[test]
+fn extent_bounds_updated_by_batch_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap();
+
+    // store_node_versions_batch path.
+    store
+        .store_node_versions_batch(&[
+            node_version_with_times(1, 4_000, 8_000),
+            node_version_with_times(2, 2_000, 6_000),
+        ])
+        .unwrap();
+    let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+    assert_eq!(bounds.valid_earliest, Some(Timestamp::from(2_000)));
+
+    // store_batch_with_lsn path widens further.
+    store
+        .store_batch_with_lsn(&[node_version_with_times(3, 1_000, 5_000)], &[], LSN(42))
+        .unwrap();
+    let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+    assert_eq!(bounds.valid_earliest, Some(Timestamp::from(1_000)));
+    assert_eq!(bounds.tx_earliest, Some(Timestamp::from(5_000)));
+    // The flushed LSN update in the same path still works alongside the extent.
+    assert_eq!(store.get_flushed_lsn().unwrap(), Some(LSN(42)));
+}
+
+#[test]
+fn extent_bounds_round_trip_serialization() {
+    // Every-field-present round trip (all four dimensions Some).
+    let bounds = ColdTemporalExtentBounds {
+        valid_earliest: Some(Timestamp::from(1_000)),
+        valid_latest: Some(Timestamp::from(9_000)),
+        tx_earliest: Some(Timestamp::from(2_000)),
+        tx_latest: Some(Timestamp::from(8_000)),
+    };
+    let decoded = ColdTemporalExtentBounds::from_bytes(&bounds.to_bytes()).unwrap();
+    assert_eq!(decoded, bounds);
+
+    // Mixed presence: some dimensions Some, others None. Exercises the
+    // per-field presence flag independently in both `to_bytes`/`from_bytes`
+    // arms (a Some field must decode back Some, a None field back None) rather
+    // than the all-present fixture above, which cannot distinguish the arms.
+    let mixed = ColdTemporalExtentBounds {
+        valid_earliest: Some(Timestamp::from(1_000)),
+        valid_latest: None,
+        tx_earliest: None,
+        tx_latest: Some(Timestamp::from(8_000)),
+    };
+    assert_eq!(
+        ColdTemporalExtentBounds::from_bytes(&mixed.to_bytes()).unwrap(),
+        mixed
+    );
+
+    // Extreme wallclock values round-trip losslessly through the i64 encoding.
+    let extremes = ColdTemporalExtentBounds {
+        valid_earliest: Some(Timestamp::new_unchecked(i64::MIN, 0)),
+        valid_latest: Some(Timestamp::new_unchecked(i64::MAX, u32::MAX)),
+        tx_earliest: Some(Timestamp::new_unchecked(i64::MIN, u32::MAX)),
+        tx_latest: Some(Timestamp::new_unchecked(i64::MAX, 0)),
+    };
+    assert_eq!(
+        ColdTemporalExtentBounds::from_bytes(&extremes.to_bytes()).unwrap(),
+        extremes
+    );
+
+    // A default (all-None) record round-trips to all-None.
+    let empty = ColdTemporalExtentBounds::default();
+    assert_eq!(
+        ColdTemporalExtentBounds::from_bytes(&empty.to_bytes()).unwrap(),
+        empty
+    );
+
+    // A record with an unrecognized version tag is treated as absent.
+    let mut bad = bounds.to_bytes();
+    bad[0] = 0xFF;
+    assert_eq!(ColdTemporalExtentBounds::from_bytes(&bad), None);
+    // Wrong length is also treated as absent, never a panic.
+    assert_eq!(ColdTemporalExtentBounds::from_bytes(&[1, 2, 3]), None);
+    // An empty buffer likewise decodes to None (guards the length check
+    // against an index-out-of-bounds panic on `bytes[0]`).
+    assert_eq!(ColdTemporalExtentBounds::from_bytes(&[]), None);
+}

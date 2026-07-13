@@ -5,6 +5,7 @@
 //! lazily produce results.
 
 mod iterators;
+mod profiling;
 mod results;
 
 use parking_lot::RwLock;
@@ -19,11 +20,15 @@ use super::planner::physical::{PhysicalOp, PhysicalPlan};
 #[doc(hidden)]
 pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
+#[doc(hidden)]
+pub use iterators::ScanStrategy;
 pub use iterators::TemporalNodeScanIterator;
 pub use iterators::{
-    BatchTemporalNodeIterator, FilterIterator, LimitIterator, ProjectIterator,
-    ProvenanceFilterIterator, TemporalNodeIterator, VectorRerankIterator, VectorResultIterator,
+    AggregateIterator, BatchTemporalNodeIterator, CountIterator, DistinctIterator, FilterIterator,
+    LimitIterator, ProjectIterator, ProvenanceFilterIterator, SortIterator, TemporalNodeIterator,
+    TemporalNodeRangeScanIterator, VectorRerankIterator, VectorResultIterator,
 };
+pub use profiling::{OpProfile, ProfileRegistry, ProfilingIterator};
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
@@ -189,7 +194,7 @@ impl QueryExecutor {
     /// }
     /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
-        let iterator = self.execute_op(&plan.root)?;
+        let iterator = self.build_op(&plan.root, &mut None, 0)?;
         // Wrap with provenance filter to conditionally strip metadata
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
@@ -198,17 +203,111 @@ impl QueryExecutor {
         Ok(QueryResults::new(filtered))
     }
 
-    /// Execute a physical operator, returning an iterator
-    fn execute_op(&self, op: &PhysicalOp) -> Result<Box<dyn ResultIterator>> {
-        match op {
-            PhysicalOp::NodeLookup { node_ids } => Ok(Box::new(
-                iterators::NodeLookupIterator::new(node_ids.clone(), Arc::clone(&self.current)),
+    /// Execute a physical plan with per-operator profiling instrumentation
+    /// (Issue #562, the `PROFILE` entry point).
+    ///
+    /// Builds the same iterator pipeline as [`Self::execute`], but wraps every
+    /// operator in a [`ProfilingIterator`] that records the rows it emits and
+    /// the cumulative wall-clock time spent in its `next()`. The returned
+    /// [`ProfileRegistry`] is ordered in plan-tree **pre-order**, aligning by
+    /// index with `PhysicalPlan::explain`'s traversal so the caller can annotate
+    /// each plan line with its executed stats.
+    ///
+    /// Stats are only meaningful **after** the returned [`QueryResults`] stream
+    /// is fully drained (an iterator is lazy). The caller
+    /// (`AletheiaDB::execute_cypher` for `PROFILE`) drains the stream, then reads
+    /// the registry.
+    pub fn execute_profiled(&self, plan: &PhysicalPlan) -> Result<(QueryResults, ProfileRegistry)> {
+        let mut registry: Option<ProfileRegistry> = Some(Vec::new());
+        let iterator = self.build_op(&plan.root, &mut registry, 0)?;
+        let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
+            iterator,
+            plan.include_provenance,
+        ));
+        // `registry` was seeded `Some` above and is never taken, so the unwrap
+        // is infallible.
+        let registry = registry.unwrap_or_default();
+        Ok((QueryResults::new(filtered), registry))
+    }
+
+    /// Candidate node ids for a temporal label scan (`AS OF` / `BETWEEN`).
+    ///
+    /// Enumerates every node that has ever had a version recorded -- the same
+    /// candidate set the AS OF node-find oracle
+    /// (`AletheiaDB::find_nodes_at_time`) uses, which stays complete for nodes
+    /// deleted from current state. The set is capped at the configured
+    /// `max_schema_as_of_entities` limit (lowest ids kept) so a pathological
+    /// history can't make a single scan unbounded, then sorted for
+    /// deterministic, stable output.
+    ///
+    /// # Truncation caveat
+    ///
+    /// When recorded history exceeds `max_schema_as_of_entities` (default
+    /// 50,000) the candidate set is **truncated** (lowest ids kept, newest
+    /// dropped) and the temporal scan returns an *incomplete* result. This
+    /// mirrors the oracle's [`NodesAtTime::sampled`] cap. The query-results
+    /// envelope does not yet carry a `truncated`/`sampled` flag, so today
+    /// truncation is only surfaced via an `observability` `warn!`; wiring the
+    /// flag through the executor result is tracked as a follow-up. Callers with
+    /// larger histories should raise `max_schema_as_of_entities`.
+    fn temporal_scan_candidates(&self) -> Vec<crate::core::NodeId> {
+        let historical = self.historical.read();
+        let mut ids = historical.versioned_node_ids();
+        let cap = historical.max_schema_as_of_entities();
+        drop(historical);
+        // History exceeds the cap => incomplete result (lowest ids kept).
+        // Surface it rather than silently dropping the signal.
+        let truncated = crate::db::schema::cap_ids(&mut ids, cap);
+        #[cfg(feature = "observability")]
+        if truncated {
+            tracing::warn!(
+                cap,
+                kept = ids.len(),
+                "temporal label scan candidate set truncated at max_schema_as_of_entities; \
+                 result is incomplete (newest node ids dropped)"
+            );
+        }
+        #[cfg(not(feature = "observability"))]
+        let _ = truncated;
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Execute a physical operator, returning an iterator.
+    ///
+    /// Builds the iterator pipeline for `op`. When `profile` is `Some`, every
+    /// operator is instrumented: a shared [`OpProfile`] handle is registered
+    /// (in plan-tree **pre-order** -- parent before children, so the registry
+    /// index aligns with `PhysicalPlan::explain`'s pre-order render) and this
+    /// operator's iterator is wrapped in a [`ProfilingIterator`]. When `profile`
+    /// is `None` (the ordinary [`Self::execute`] path) no wrapping occurs and
+    /// there is no measurable overhead.
+    fn build_op(
+        &self,
+        op: &PhysicalOp,
+        profile: &mut Option<ProfileRegistry>,
+        depth: usize,
+    ) -> Result<Box<dyn ResultIterator>> {
+        // Reserve this operator's profile slot *before* building its children so
+        // the registry is in pre-order (the closure's mutable borrow of the
+        // registry ends before the match reborrows `profile` for recursion).
+        let handle = profile.as_mut().map(|registry| {
+            let h = Arc::new(OpProfile::new(op.name(), depth));
+            registry.push(Arc::clone(&h));
+            h
+        });
+
+        let child_depth = depth + 1;
+        let iter: Box<dyn ResultIterator> = match op {
+            PhysicalOp::NodeLookup { node_ids } => Box::new(iterators::NodeLookupIterator::new(
+                node_ids.clone(),
+                Arc::clone(&self.current),
             )),
 
-            PhysicalOp::NodeScan { label, .. } => Ok(Box::new(iterators::NodeScanIterator::new(
+            PhysicalOp::NodeScan { label, .. } => Box::new(iterators::NodeScanIterator::new(
                 label.clone(),
                 Arc::clone(&self.current),
-            ))),
+            )),
 
             PhysicalOp::HnswSearch {
                 embedding,
@@ -220,7 +319,7 @@ impl QueryExecutor {
                 *k,
                 label_filter.as_deref(),
                 property_key.as_deref(),
-            ),
+            )?,
 
             PhysicalOp::TemporalNodeLookup {
                 node_ids,
@@ -230,21 +329,66 @@ impl QueryExecutor {
             } => {
                 if *use_batch {
                     // Use batch iterator for large queries (holds lock across all iterations)
-                    Ok(Box::new(iterators::BatchTemporalNodeIterator::new(
+                    Box::new(iterators::BatchTemporalNodeIterator::new(
                         node_ids.clone(),
                         *valid_time,
                         *transaction_time,
                         Arc::clone(&self.historical),
-                    )?))
+                    )?)
                 } else {
                     // Use per-node iterator for small queries (lock per node)
-                    Ok(Box::new(iterators::TemporalNodeIterator::new(
+                    Box::new(iterators::TemporalNodeIterator::new(
                         node_ids.clone(),
                         *valid_time,
                         *transaction_time,
                         Arc::clone(&self.historical),
-                    )))
+                    ))
                 }
+            }
+
+            PhysicalOp::TemporalNodeScan {
+                label,
+                valid_time,
+                transaction_time,
+            } => {
+                // Point-in-time label scan (`AS OF`, Issues #550/#551). Enumerate
+                // every ever-versioned node (mirroring the AS OF node-find oracle
+                // `AletheiaDB::find_nodes_at_time`) and reconstruct each at the
+                // requested bi-temporal point, filtering by label; candidates that
+                // did not exist at that instant are skipped, not errors.
+                let node_ids = self.temporal_scan_candidates();
+                Box::new(
+                    iterators::TemporalNodeScanIterator::new(
+                        node_ids,
+                        *valid_time,
+                        *transaction_time,
+                        Arc::clone(&self.historical),
+                        label.clone(),
+                    )
+                    .skipping_missing(),
+                )
+            }
+
+            PhysicalOp::TemporalNodeRangeScan {
+                label,
+                valid_from,
+                valid_to,
+                transaction_time,
+            } => {
+                // Valid-time range label scan (`BETWEEN`, Issue #552). Same
+                // candidate enumeration; the iterator emits each node's
+                // believed-at-`transaction_time` version whose valid interval
+                // overlaps the range (at most one row per node -- multiple rows
+                // only across distinct nodes).
+                let node_ids = self.temporal_scan_candidates();
+                Box::new(iterators::TemporalNodeRangeScanIterator::new(
+                    node_ids,
+                    *valid_from,
+                    *valid_to,
+                    *transaction_time,
+                    Arc::clone(&self.historical),
+                    label.clone(),
+                ))
             }
 
             PhysicalOp::TemporalVectorSearch {
@@ -261,46 +405,52 @@ impl QueryExecutor {
                     .current
                     .find_similar_as_of_in(prop, embedding, *k, *timestamp)?;
 
-                Ok(Box::new(iterators::VectorResultIterator::new(
+                Box::new(iterators::VectorResultIterator::new(
                     results,
                     Arc::clone(&self.current),
-                )))
+                ))
             }
 
             PhysicalOp::IndexedTraversal {
                 input,
                 direction,
                 label,
-                depth,
+                min_depth,
+                depth: traversal_depth,
                 temporal_context,
             } => {
-                let input_iter = self.execute_op(input)?;
-                Ok(Box::new(iterators::TraversalIterator::new(
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::TraversalIterator::new(
                     input_iter,
                     *direction,
                     label.clone(),
-                    *depth,
+                    *min_depth,
+                    *traversal_depth,
                     Arc::clone(&self.current),
                     Arc::clone(&self.historical),
                     *temporal_context,
-                )))
+                ))
             }
 
             PhysicalOp::PropertyScan {
                 label, key, value, ..
-            } => Ok(Box::new(iterators::PropertyScanIterator::new(
+            } => Box::new(iterators::PropertyScanIterator::new(
                 label.clone(),
                 key.clone(),
                 value,
                 Arc::clone(&self.current),
-            ))),
+            )),
 
             PhysicalOp::Filter { input, predicate } => {
-                let input_iter = self.execute_op(input)?;
-                Ok(Box::new(iterators::FilterIterator::new(
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                // Pass historical storage so a `Predicate::Provenance` leaf
+                // (Issue #3354a) can resolve each row entity's write-time
+                // provenance; property-only filters never touch it.
+                Box::new(iterators::FilterIterator::with_historical(
                     input_iter,
                     predicate.clone(),
-                )))
+                    Arc::clone(&self.historical),
+                ))
             }
 
             PhysicalOp::VectorRerank {
@@ -308,15 +458,21 @@ impl QueryExecutor {
                 embedding,
                 k,
                 property_key,
+                metric,
+                threshold,
+                score_alias,
             } => {
-                let input_iter = self.execute_op(input)?;
-                Ok(Box::new(iterators::VectorRerankIterator::new(
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::VectorRerankIterator::with_options(
                     input_iter,
                     embedding.clone(),
                     *k,
                     Arc::clone(&self.current),
                     property_key.clone(),
-                )))
+                    *metric,
+                    *threshold,
+                    score_alias.clone(),
+                ))
             }
 
             PhysicalOp::Limit {
@@ -324,31 +480,57 @@ impl QueryExecutor {
                 count,
                 offset,
             } => {
-                let input_iter = self.execute_op(input)?;
-                Ok(Box::new(iterators::LimitIterator::new(
-                    input_iter, *offset, *count,
-                )))
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::LimitIterator::new(input_iter, *offset, *count))
             }
 
             PhysicalOp::Project { input, properties } => {
-                let input_iter = self.execute_op(input)?;
-                Ok(Box::new(iterators::ProjectIterator::new(
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::ProjectIterator::new(
                     input_iter,
                     properties.clone(),
-                )))
+                ))
             }
 
             PhysicalOp::OptionalApply { input, steps } => {
-                let input_iter = self.execute_op(input)?;
-                Ok(Box::new(iterators::OptionalApplyIterator::new(
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::OptionalApplyIterator::new(
                     input_iter,
                     steps.clone(),
                     Arc::clone(&self.current),
                     Arc::clone(&self.historical),
-                )))
+                ))
             }
 
-            PhysicalOp::Empty => Ok(Box::new(iterators::EmptyIterator)),
+            PhysicalOp::Aggregate {
+                input,
+                group_keys,
+                aggregates,
+            } => {
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::AggregateIterator::new(
+                    input_iter,
+                    group_keys.clone(),
+                    aggregates.clone(),
+                ))
+            }
+
+            PhysicalOp::Distinct { input } => {
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::DistinctIterator::new(input_iter))
+            }
+
+            PhysicalOp::Sort { input, keys } => {
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::SortIterator::new(input_iter, keys.clone()))
+            }
+
+            PhysicalOp::Count { input } => {
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::CountIterator::new(input_iter))
+            }
+
+            PhysicalOp::Empty => Box::new(iterators::EmptyIterator),
             PhysicalOp::SimilarToNode {
                 source_node,
                 property_key,
@@ -359,15 +541,23 @@ impl QueryExecutor {
                 property_key,
                 *k,
                 label_filter.as_deref(),
-            ),
+            )?,
 
             // For unsupported operations, return error
-            _ => Err(crate::core::error::Error::Query(
-                crate::core::error::QueryError::SyntaxError {
-                    message: format!("Unsupported physical operator: {:?}", op.name()),
-                },
-            )),
-        }
+            _ => {
+                return Err(crate::core::error::Error::Query(
+                    crate::core::error::QueryError::SyntaxError {
+                        message: format!("Unsupported physical operator: {:?}", op.name()),
+                    },
+                ));
+            }
+        };
+
+        // Instrument this operator when profiling.
+        Ok(match handle {
+            Some(h) => Box::new(ProfilingIterator::new(iter, h)),
+            None => iter,
+        })
     }
 
     fn execute_hnsw_search(
@@ -710,6 +900,7 @@ mod tests {
                 }),
                 direction: crate::query::ir::Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             },
@@ -766,6 +957,9 @@ mod tests {
                 embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
                 k: 2,
                 property_key: None,
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             },
             estimated_cost: Default::default(),
             temporal_context: None,
@@ -894,6 +1088,7 @@ mod tests {
                         }),
                         direction: crate::query::ir::Direction::Outgoing,
                         label: Some("KNOWS".to_string()),
+                        min_depth: 1,
                         depth: 1,
                         temporal_context: None,
                     }),
@@ -913,6 +1108,92 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].entity.node_id(), Some(bob));
+    }
+
+    // ==================== Profiling (PROFILE) Tests ====================
+
+    #[test]
+    fn test_execute_profiled_records_per_operator_rows() {
+        let (current, historical, alice, bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        // Limit (count well above input) over a NodeLookup of two ids, so both
+        // operators forward both rows.
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![alice, bob],
+                }),
+                count: 100,
+                offset: 0,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let (results, registry) = executor
+            .execute_profiled(&plan)
+            .expect("Profiled execution failed");
+
+        // The registry is seeded in plan-tree pre-order: [Limit, NodeLookup].
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry[0].op_name(), "Limit");
+        assert_eq!(registry[0].depth(), 0);
+        assert_eq!(registry[1].op_name(), "NodeLookup");
+        assert_eq!(registry[1].depth(), 1);
+
+        // Stats are only meaningful after the (lazy) stream is drained.
+        assert_eq!(
+            registry[0].actual_rows(),
+            0,
+            "no rows counted before draining"
+        );
+
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+        assert_eq!(rows.len(), 2);
+
+        // Both operators emitted the two rows.
+        assert_eq!(registry[1].actual_rows(), 2, "NodeLookup emitted 2 rows");
+        assert_eq!(registry[0].actual_rows(), 2, "Limit forwarded 2 rows");
+    }
+
+    #[test]
+    fn test_execute_profiled_annotations_align_with_explain() {
+        let (current, historical, alice, _bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![alice],
+                }),
+                count: 10,
+                offset: 0,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let (results, registry) = executor
+            .execute_profiled(&plan)
+            .expect("Profiled execution failed");
+        let _ = results.collect_all().expect("Collection failed");
+
+        // Feed the per-operator annotations back into the plan renderer and
+        // confirm each operator line carries its own stats, in order.
+        let annotations: Vec<String> = registry.iter().map(|p| p.annotation()).collect();
+        let explained = plan.explain_annotated(&annotations);
+        let lines: Vec<&str> = explained.lines().collect();
+        // Header + 2 operator lines.
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("Limit"));
+        assert!(lines[1].contains("actual rows: 1"));
+        assert!(lines[2].contains("NodeLookup"));
+        assert!(lines[2].contains("actual rows: 1"));
     }
 
     // ==================== SimilarTo Tests ====================
@@ -1470,6 +1751,9 @@ mod tests {
                 embedding: vec![0.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0].into(),
                 k: 2,
                 property_key: Some("content_embedding".to_string()),
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             },
             estimated_cost: Default::default(),
             temporal_context: None,
@@ -1511,6 +1795,7 @@ mod tests {
                 steps: vec![OptionalPhysicalStep::Traverse {
                     direction: crate::query::ir::Direction::Outgoing,
                     label: Some("KNOWS".to_string()),
+                    min_depth: 1,
                     depth: 1,
                     temporal_context: None,
                 }],
@@ -1545,6 +1830,7 @@ mod tests {
                 steps: vec![OptionalPhysicalStep::Traverse {
                     direction: crate::query::ir::Direction::Outgoing,
                     label: Some("FOLLOWS".to_string()),
+                    min_depth: 1,
                     depth: 1,
                     temporal_context: None,
                 }],
@@ -1580,6 +1866,7 @@ mod tests {
                     OptionalPhysicalStep::Traverse {
                         direction: crate::query::ir::Direction::Outgoing,
                         label: Some("KNOWS".to_string()),
+                        min_depth: 1,
                         depth: 1,
                         temporal_context: None,
                     },

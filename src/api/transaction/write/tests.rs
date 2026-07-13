@@ -57,6 +57,7 @@ mod tombstone_tests {
         let op = crate::api::transaction::BufferedWrite::DeleteNode {
             node_id: NodeId::new(1).unwrap(),
             valid_from: time::now(),
+            provenance: None,
         };
 
         // Try to apply it
@@ -2301,9 +2302,11 @@ mod conflict_detection_tests {
     /// - Both transactions try to commit concurrently
     ///
     /// Expected behavior (documents actual MVCC implementation):
-    /// - Test Case A: If edge creation commits first, node deletion succeeds because
-    ///   edge addition doesn't modify the node's version (no conflict detected).
-    ///   This creates an orphaned edge, which is acceptable if traversals handle it.
+    /// - Test Case A: If edge creation commits first, the concurrent node
+    ///   deletion is ABORTED at commit by the Issue #3416 Pt1 write-skew
+    ///   re-check: the newly-committed edge (commit_ts after the deleter's
+    ///   snapshot) would be orphaned, so the delete fails with a
+    ///   `FAILED_PRECONDITION`-class error and the node/edge are left intact.
     /// - Test Case B: If node deletion commits first, edge creation fails on commit
     ///   due to referential integrity (endpoint node was deleted after snapshot).
     #[test]
@@ -2344,34 +2347,27 @@ mod conflict_detection_tests {
                 "Edge should be created"
             );
 
-            // tx2 tries to delete node2. According to the current MVCC implementation,
-            // edge addition doesn't modify node2's version, so no conflict is detected
-            // and the deletion succeeds.
+            // tx2 tries to delete node2. Issue #3416 Pt1: the commit-time
+            // write-skew re-check sees the edge tx1 committed after tx2's
+            // snapshot (referencing node2, not closed by tx2) and ABORTS the
+            // delete rather than silently orphaning the edge.
             let result = tx2.commit();
             assert!(
-                result.is_ok(),
-                "tx2 commit should succeed - edge addition doesn't create version conflict on node2"
+                result.is_err(),
+                "tx2 commit must abort - deleting node2 would orphan the concurrently-created edge"
             );
 
-            // Verify node was deleted
+            // Node2 is NOT deleted (write-skew delete was refused).
             assert!(
-                harness.current.get_node(node2).is_err(),
-                "Node should be deleted after successful tx2 commit"
+                harness.current.get_node(node2).is_ok(),
+                "Node2 must remain after the aborted delete"
             );
 
-            // Current implementation: edge becomes orphaned but still exists in storage.
-            // This documents a limitation: the system allows orphaned edges.
-            // TODO(issue): Consider adding cascade delete or stricter referential integrity
-            assert!(
-                harness.current.get_edge(edge_id).is_ok(),
-                "Edge still exists as orphan (documents current behavior)"
-            );
-
-            // Verify the edge references the deleted node (orphaned edge)
+            // The edge is preserved and still references a LIVE node2 — no orphan.
             let edge = harness.current.get_edge(edge_id).unwrap();
             assert_eq!(
                 edge.target, node2,
-                "Edge still references deleted node (orphaned)"
+                "Edge references a live node2 (no orphan created)"
             );
         }
 
@@ -4427,5 +4423,836 @@ mod lock_poisoning_tests {
             }
             err => panic!("expected LockPoisoned error, got: {err:?}"),
         }
+    }
+}
+
+/// Issue #3417: write-path reads must be buffer-aware (read-your-own-writes).
+///
+/// An entity created earlier in the SAME transaction must be visible to a
+/// later update/delete/retract in that transaction, and a same-tx
+/// create-then-update/delete must NOT raise a spurious write-write conflict at
+/// commit. Cross-transaction isolation must be preserved: an entity created by
+/// another, still-uncommitted transaction stays invisible.
+#[cfg(test)]
+mod buffer_aware_read_tests {
+    use super::*;
+    use crate::core::id::TxIdGenerator;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+    use tempfile::TempDir;
+
+    /// Shared infrastructure so multiple transactions observe the same
+    /// storage / visibility manager (needed for the cross-tx isolation test).
+    struct TestHarness {
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<TemporalIndexes>,
+        wal: Arc<ConcurrentWalSystem>,
+        current_timestamp: Arc<Mutex<Timestamp>>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        node_id_gen: Arc<IdGenerator>,
+        edge_id_gen: Arc<IdGenerator>,
+        version_id_gen: Arc<IdGenerator>,
+        tx_id_gen: TxIdGenerator,
+        _temp_dir: TempDir,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let current = Arc::new(CurrentStorage::new());
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(TemporalIndexes::new());
+
+            let temp_dir = TempDir::new().unwrap();
+            let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+            let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+
+            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let node_id_gen = Arc::new(IdGenerator::new());
+            let edge_id_gen = Arc::new(IdGenerator::new());
+            let version_id_gen = Arc::new(IdGenerator::new());
+            let tx_id_gen = TxIdGenerator::new();
+            let visibility_manager = Arc::new(TxVisibilityManager::new());
+
+            TestHarness {
+                current,
+                historical,
+                temporal_indexes,
+                wal,
+                current_timestamp,
+                visibility_manager,
+                node_id_gen,
+                edge_id_gen,
+                version_id_gen,
+                tx_id_gen,
+                _temp_dir: temp_dir,
+            }
+        }
+
+        fn create_tx(&self) -> WriteTransaction {
+            let snapshot = TransactionSnapshot {
+                snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
+                active_transactions: Arc::new(std::collections::HashSet::new()),
+            };
+
+            WriteTransaction::new(
+                self.tx_id_gen.next(),
+                snapshot,
+                self.current.clone(),
+                self.historical.clone(),
+                self.temporal_indexes.clone(),
+                self.wal.clone(),
+                self.current_timestamp.clone(),
+                self.visibility_manager.clone(),
+                self.node_id_gen.clone(),
+                self.edge_id_gen.clone(),
+                self.version_id_gen.clone(),
+            )
+        }
+    }
+
+    /// create_node then update_node in one tx: the update sees the buffered
+    /// create (no NodeNotFound) and PATCH-merges onto the buffered properties.
+    #[test]
+    fn test_3417_create_then_update_node_same_tx() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let node_id = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build(),
+            )
+            .unwrap();
+
+        // Update the just-created node in the SAME transaction.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new()
+                .insert("age", 31i64)
+                .insert("city", "NYC")
+                .build(),
+        )
+        .expect("update of same-tx-created node must succeed (read-your-own-writes)");
+
+        tx.commit().unwrap();
+
+        let node = harness.current.get_node(node_id).unwrap();
+        // Merge composed onto the buffered CREATE, not committed-only state.
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice"),
+            "original property from the buffered create must survive the merge"
+        );
+        assert_eq!(
+            node.get_property("age").and_then(|v| v.as_int()),
+            Some(31),
+            "updated property must overwrite the created value"
+        );
+        assert_eq!(
+            node.get_property("city").and_then(|v| v.as_str()),
+            Some("NYC"),
+            "new property from the update must be present"
+        );
+    }
+
+    /// create_node then delete_node in one tx: delete sees the buffered create
+    /// (no NodeNotFound) and the node is absent after commit.
+    #[test]
+    fn test_3417_create_then_delete_node_same_tx() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let node_id = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+
+        tx.delete_node(node_id)
+            .expect("delete of same-tx-created node must succeed (read-your-own-writes)");
+
+        tx.commit().unwrap();
+
+        assert!(
+            harness.current.get_node(node_id).is_err(),
+            "node created then deleted in one tx must be absent after commit"
+        );
+    }
+
+    /// create_edge then update_edge in one tx: the update sees the buffered
+    /// create and PATCH-merges onto the buffered edge properties.
+    #[test]
+    fn test_3417_create_then_update_edge_same_tx() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let n1 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = tx
+            .create_edge(
+                n1,
+                n2,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("weight", 5i64).build(),
+            )
+            .unwrap();
+
+        tx.update_edge(
+            edge_id,
+            PropertyMapBuilder::new()
+                .insert("weight", 10i64)
+                .insert("since", 2020i64)
+                .build(),
+        )
+        .expect("update of same-tx-created edge must succeed (read-your-own-writes)");
+
+        tx.commit().unwrap();
+
+        let edge = harness.current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(10),
+            "updated edge property must overwrite the created value"
+        );
+        assert_eq!(
+            edge.get_property("since").and_then(|v| v.as_int()),
+            Some(2020),
+            "new edge property from the update must be present"
+        );
+    }
+
+    /// create_edge then delete_edge in one tx: delete sees the buffered create
+    /// and the edge is absent after commit (endpoints remain).
+    #[test]
+    fn test_3417_create_then_delete_edge_same_tx() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let n1 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = tx
+            .create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        tx.delete_edge(edge_id)
+            .expect("delete of same-tx-created edge must succeed (read-your-own-writes)");
+
+        tx.commit().unwrap();
+
+        assert!(
+            harness.current.get_edge(edge_id).is_err(),
+            "edge created then deleted in one tx must be absent after commit"
+        );
+        assert!(
+            harness.current.get_node(n1).is_ok() && harness.current.get_node(n2).is_ok(),
+            "endpoints must remain after the same-tx edge delete"
+        );
+    }
+
+    /// create_node then retract_node in one tx: retract sees the buffered
+    /// create (no NodeNotFound) and closes the valid interval.
+    #[test]
+    fn test_3417_create_then_retract_node_same_tx() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let node_id = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+            )
+            .unwrap();
+
+        let valid_to = time::now();
+        let result = tx
+            .retract_node(node_id, valid_to)
+            .expect("retract of same-tx-created node must succeed (read-your-own-writes)");
+        assert!(
+            !result.already_retracted,
+            "a freshly-created node is not already retracted"
+        );
+
+        tx.commit().unwrap();
+
+        assert!(
+            harness.current.get_node(node_id).is_err(),
+            "retracted node must be absent from current state after commit"
+        );
+    }
+
+    /// create_edge then retract_edge in one tx.
+    #[test]
+    fn test_3417_create_then_retract_edge_same_tx() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let n1 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = tx
+            .create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let valid_to = time::now();
+        let result = tx
+            .retract_edge(edge_id, valid_to)
+            .expect("retract of same-tx-created edge must succeed (read-your-own-writes)");
+        assert!(!result.already_retracted);
+
+        tx.commit().unwrap();
+
+        assert!(
+            harness.current.get_edge(edge_id).is_err(),
+            "retracted edge must be absent from current state after commit"
+        );
+    }
+
+    /// A same-tx create-then-update must NOT raise a spurious
+    /// SerializationFailure at commit: `detect_conflicts` treats a missing
+    /// committed row as "deleted by another tx", but a same-tx-created entity
+    /// has no committed row by design. This exercises the conflict.rs skip.
+    #[test]
+    fn test_3417_create_then_update_no_spurious_conflict() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let node_id = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("v", 1i64).build(),
+            )
+            .unwrap();
+        tx.update_node(node_id, PropertyMapBuilder::new().insert("v", 2i64).build())
+            .unwrap();
+
+        let result = tx.commit();
+        assert!(
+            result.is_ok(),
+            "create-then-update in one tx must commit without a spurious \
+             write-write conflict, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Headline #3417 scenario for nodes: create → update → update in ONE tx.
+    /// The SECOND update must read-your-own-writes onto the FIRST update's
+    /// buffered state (not a stale committed/created read), so all three
+    /// writes compose in the committed result.
+    #[test]
+    fn test_3417_create_update_update_node_chain_merges() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let node_id = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build(),
+            )
+            .unwrap();
+        // First update: sets age onto the buffered CREATE.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .unwrap();
+        // Second update: MUST merge onto the buffered FIRST update, adding a
+        // new key while preserving the first update's age and the created name.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("city", "NYC").build(),
+        )
+        .unwrap();
+
+        tx.commit().unwrap();
+
+        let node = harness.current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice"),
+            "created property must survive both updates"
+        );
+        assert_eq!(
+            node.get_property("age").and_then(|v| v.as_int()),
+            Some(31),
+            "first update must survive the second (chained merge, not stale read)"
+        );
+        assert_eq!(
+            node.get_property("city").and_then(|v| v.as_str()),
+            Some("NYC"),
+            "second update's new key must be present"
+        );
+    }
+
+    /// Headline #3417 scenario for a COMMITTED node: two updates in one tx must
+    /// compose — the second reads the buffered first update, not committed
+    /// state (which is exactly the bug: a second write dropping the first's
+    /// merge). This is the multi-write-per-committed-entity case #3417 names.
+    #[test]
+    fn test_3417_double_update_committed_node_composes() {
+        let harness = TestHarness::new();
+
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new()
+                        .insert("name", "Bob")
+                        .insert("age", 40i64)
+                        .build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        let mut tx = harness.create_tx();
+        // First update onto committed state.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 41i64).build(),
+        )
+        .unwrap();
+        // Second update MUST see the buffered first update (age=41) and add a
+        // key, rather than re-reading committed state (age=40) and dropping it.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("city", "LA").build(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let node = harness.current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Bob"),
+            "committed property untouched by the updates must survive"
+        );
+        assert_eq!(
+            node.get_property("age").and_then(|v| v.as_int()),
+            Some(41),
+            "first update must not be dropped by the second (composed merge)"
+        );
+        assert_eq!(
+            node.get_property("city").and_then(|v| v.as_str()),
+            Some("LA"),
+            "second update's key must be present"
+        );
+    }
+
+    /// Edge equivalent of the headline scenario: create → update → update edge
+    /// in ONE tx composes all three writes.
+    #[test]
+    fn test_3417_create_update_update_edge_chain_merges() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let n1 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = tx
+            .create_edge(
+                n1,
+                n2,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("weight", 1i64).build(),
+            )
+            .unwrap();
+        tx.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 2i64).build(),
+        )
+        .unwrap();
+        tx.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+        )
+        .unwrap();
+
+        tx.commit().unwrap();
+
+        let edge = harness.current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(2),
+            "first edge update must survive the second (chained merge)"
+        );
+        assert_eq!(
+            edge.get_property("since").and_then(|v| v.as_int()),
+            Some(2020),
+            "second edge update's new key must be present"
+        );
+    }
+
+    /// A same-tx create_edge → update_edge must NOT raise a spurious
+    /// SerializationFailure at commit (dedicated edge conflict-skip coverage,
+    /// mirroring the node case).
+    #[test]
+    fn test_3417_create_then_update_edge_no_spurious_conflict() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let n1 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = tx
+            .create_edge(
+                n1,
+                n2,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("weight", 1i64).build(),
+            )
+            .unwrap();
+        tx.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 2i64).build(),
+        )
+        .unwrap();
+
+        let result = tx.commit();
+        assert!(
+            result.is_ok(),
+            "create-then-update of an edge in one tx must commit without a \
+             spurious write-write conflict, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Collapse: create then delete the same node in one tx commits cleanly
+    /// and leaves **current state** clean (no phantom, node absent).
+    ///
+    /// Scope: this asserts CURRENT-STATE cleanliness only. The historical
+    /// record is intentionally NOT collapsed: apply replays the buffer in
+    /// order, so it writes a create version AND a delete tombstone, both
+    /// stamped with the same commit_timestamp. The create version therefore
+    /// ends up with a zero-width transaction-time interval (opened and closed
+    /// at the same commit instant) and the tombstone closes the valid-time
+    /// interval — i.e. the node is never visible at any (valid, tx) coordinate
+    /// after this commit. Verifying that bi-temporal shape is out of scope for
+    /// this test (and for #3417); it belongs with the apply/temporal-index
+    /// coverage.
+    #[test]
+    fn test_3417_create_then_delete_collapse_current_state_clean() {
+        let harness = TestHarness::new();
+        let node_before = harness.current.node_count();
+
+        let mut tx = harness.create_tx();
+        let node_id = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("x", 1i64).build(),
+            )
+            .unwrap();
+        tx.delete_node(node_id).unwrap();
+
+        tx.commit()
+            .expect("create-then-delete collapse must commit cleanly");
+
+        assert!(
+            harness.current.get_node(node_id).is_err(),
+            "collapsed node must be absent from current state"
+        );
+        assert_eq!(
+            harness.current.node_count(),
+            node_before,
+            "no phantom node should remain in current state after a \
+             create-then-delete collapse"
+        );
+    }
+
+    /// Cross-transaction isolation preserved: an entity created by another,
+    /// still-uncommitted transaction stays invisible (buffer-awareness is
+    /// strictly per-transaction, it does not leak reads across txns).
+    #[test]
+    fn test_3417_cross_tx_created_entity_invisible() {
+        let harness = TestHarness::new();
+
+        let mut tx_a = harness.create_tx();
+        let node_id = tx_a
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dana").build(),
+            )
+            .unwrap();
+
+        // A concurrent, independent transaction must not see tx_a's buffered
+        // (uncommitted) create.
+        let mut tx_b = harness.create_tx();
+        assert!(
+            ReadOps::get_node(&tx_b, node_id).is_err(),
+            "an uncommitted create in another tx must be invisible"
+        );
+        assert!(
+            tx_b.update_node(
+                node_id,
+                PropertyMapBuilder::new().insert("name", "X").build()
+            )
+            .is_err(),
+            "updating an entity created by another uncommitted tx must fail NotFound"
+        );
+
+        drop(tx_a);
+        drop(tx_b);
+    }
+
+    /// Cross-transaction MVCC safety: the write-path read is deliberately
+    /// UN-filtered (it sees the latest committed version, not just versions
+    /// visible to this tx's snapshot), so a concurrent commit landing AFTER
+    /// tx_b's snapshot is read by tx_b's update — but `detect_conflicts` MUST
+    /// still abort tx_b with `SerializationFailure` at commit (first-committer
+    /// wins). This is the abort the unfiltered read relies on for correctness.
+    #[test]
+    fn test_3417_cross_tx_committed_after_snapshot_still_conflicts() {
+        let harness = TestHarness::new();
+
+        // Committed baseline node.
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 1i64).build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // tx_b captures its snapshot BEFORE tx_a commits.
+        let mut tx_b = harness.create_tx();
+
+        // tx_a commits a new version of the node AFTER tx_b's snapshot.
+        let mut tx_a = harness.create_tx();
+        tx_a.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 2i64).build(),
+        )
+        .unwrap();
+        tx_a.commit().unwrap();
+
+        // tx_b's write-path read is unfiltered, so this update succeeds (it
+        // reads the just-committed version)...
+        tx_b.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 3i64).build(),
+        )
+        .unwrap();
+
+        // ...but the commit MUST abort: tx_a committed after tx_b's snapshot.
+        let result = tx_b.commit();
+        assert!(
+            result.is_err(),
+            "tx_b must abort: a concurrent commit landed after its snapshot"
+        );
+        assert!(
+            format!("{:?}", result.unwrap_err()).contains("SerializationFailure"),
+            "expected SerializationFailure (first-committer-wins)"
+        );
+
+        // First committer (tx_a) wins.
+        assert_eq!(
+            harness
+                .current
+                .get_node(node_id)
+                .unwrap()
+                .get_property("age")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "first committer's value must stand"
+        );
+    }
+}
+
+/// Regression tests for Issue #3415.
+///
+/// A commit that fails *after* `commit_with_timestamp_inner` transitions the
+/// transaction into `TxState::Preparing` (write-write conflict, constraint,
+/// WAL, or apply failure) must still release the transaction's `TxId` from
+/// `TxVisibilityManager::active` when the consumed `WriteTransaction` is
+/// dropped. Before the fix, `Drop` only aborted `TxState::Active` transactions,
+/// so a failed commit leaked its `TxId` in the active set forever — pinning the
+/// snapshot horizon and growing `active_count()` without bound under retries.
+///
+/// These tests drive a deterministic write-write conflict (no failure-injection
+/// hook needed): two transactions update the same committed node; the first
+/// committer wins and the second commit fails in `Preparing`.
+#[cfg(test)]
+mod commit_failure_visibility_tests {
+    use crate::AletheiaDB;
+    use crate::api::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
+
+    /// A single commit that fails via write-write conflict must return the
+    /// active-transaction count to its baseline (the leaked-`TxId` regression).
+    #[test]
+    fn test_conflict_failed_commit_releases_txid() {
+        let db = AletheiaDB::new().expect("db");
+
+        // Seed a committed node that both transactions will contend on.
+        let node_id = db
+            .write(|tx| {
+                let id = tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 30i64).build(),
+                )?;
+                Ok::<_, crate::Error>(id)
+            })
+            .expect("seed node");
+
+        let baseline = db.visibility_manager.active_count();
+        assert_eq!(baseline, 0, "no transactions should be active at baseline");
+
+        // tx1 and tx2 both start (both registered active) and update the same node.
+        let mut tx1 = db.write_transaction().expect("tx1");
+        tx1.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .expect("tx1 update");
+
+        let mut tx2 = db.write_transaction().expect("tx2");
+        tx2.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 32i64).build(),
+        )
+        .expect("tx2 update");
+
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            2,
+            "both in-flight transactions must be registered active"
+        );
+
+        // First committer wins.
+        tx2.commit().expect("tx2 commit should succeed");
+
+        // Second commit fails with a write-write conflict *in the Preparing
+        // phase*, consuming and dropping tx1.
+        let result = tx1.commit();
+        assert!(
+            result.is_err(),
+            "tx1 commit should fail due to write-write conflict"
+        );
+
+        // The failed commit must have released tx1's TxId from the active set.
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "a commit failing in Preparing must release its TxId (Issue #3415)"
+        );
+    }
+
+    /// Repeated conflict-failed commits must not grow the active set: the count
+    /// stays flat at baseline rather than leaking one `TxId` per failure.
+    #[test]
+    fn test_repeated_conflict_failures_do_not_leak() {
+        let db = AletheiaDB::new().expect("db");
+
+        let node_id = db
+            .write(|tx| {
+                let id = tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 0i64).build(),
+                )?;
+                Ok::<_, crate::Error>(id)
+            })
+            .expect("seed node");
+
+        let baseline = db.visibility_manager.active_count();
+        assert_eq!(baseline, 0);
+
+        for i in 0..50i64 {
+            let mut loser = db.write_transaction().expect("loser tx");
+            loser
+                .update_node(node_id, PropertyMapBuilder::new().insert("age", i).build())
+                .expect("loser update");
+
+            let mut winner = db.write_transaction().expect("winner tx");
+            winner
+                .update_node(
+                    node_id,
+                    PropertyMapBuilder::new().insert("age", i + 1000).build(),
+                )
+                .expect("winner update");
+
+            // Winner commits first, loser fails in Preparing and is dropped.
+            winner.commit().expect("winner commit");
+            assert!(loser.commit().is_err(), "loser commit should conflict");
+
+            // After each failed commit the active set must be back to baseline —
+            // no monotonic growth (Issue #3415 amplification path).
+            assert_eq!(
+                db.visibility_manager.active_count(),
+                baseline,
+                "active_count leaked after {} conflict-failed commits",
+                i + 1
+            );
+        }
+    }
+
+    /// Guard: a successful commit and an explicit rollback both leave the active
+    /// set at baseline (no leak), so the #3415 fix does not regress the happy
+    /// paths.
+    ///
+    /// Note: this asserts the active-set-clean invariant only. It does NOT
+    /// enforce "no double-abort" — `register_abort` is an idempotent
+    /// `HashSet::remove`, so a spurious `Drop` on an already-`Committed`/
+    /// `Aborted` transaction would leave `active_count()` unchanged and this
+    /// test would still pass. Double-abort is harmless by construction (the
+    /// broadened `Drop` guard only matches `Active`/`Preparing`, and the
+    /// removal is idempotent regardless), not a property this test verifies.
+    #[test]
+    fn test_success_and_rollback_leave_active_set_clean() {
+        let db = AletheiaDB::new().expect("db");
+        let baseline = db.visibility_manager.active_count();
+
+        // Successful commit.
+        let mut tx = db.write_transaction().expect("tx");
+        tx.create_node("Person", PropertyMapBuilder::new().build())
+            .expect("create");
+        assert_eq!(db.visibility_manager.active_count(), baseline + 1);
+        tx.commit().expect("commit");
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "successful commit must release its TxId"
+        );
+
+        // Explicit rollback.
+        let mut tx = db.write_transaction().expect("tx");
+        tx.create_node("Person", PropertyMapBuilder::new().build())
+            .expect("create");
+        assert_eq!(db.visibility_manager.active_count(), baseline + 1);
+        tx.rollback().expect("rollback");
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "explicit rollback must release its TxId"
+        );
     }
 }

@@ -10,7 +10,7 @@
 //! ```text
 //! statement    := [temporal] match_stmt
 //! match_stmt   := [OPTIONAL] MATCH pattern_list [where_clause] [temporal] with_clauses return_clause
-//! with_clauses := (WITH return_items [WHERE expr])*
+//! with_clauses := (WITH [DISTINCT] return_items [order_by] [SKIP n] [LIMIT n] [WHERE expr])*
 //! pattern_list := pattern (',' pattern)*
 //! pattern      := node_pattern (rel_pattern node_pattern)*
 //! node_pattern := '(' [var] [':' label]* ['{' props '}'] ')'
@@ -36,6 +36,37 @@
 use super::ast::*;
 use super::error::CypherError;
 use super::lexer::{CypherLexer, Token, TokenKind};
+
+/// Maximum nesting depth allowed while parsing an expression.
+///
+/// The expression grammar recurses at three points: a parenthesised
+/// sub-expression (`'(' expr ')'`), a `NOT` chain (`NOT not_expr`), and the
+/// element expressions of an `IN [ ... ]` / function-argument list. Each of
+/// these threads and increments a `depth` counter; when it exceeds this bound
+/// the parser returns a [`CypherError::ParseError`] instead of recursing
+/// further. Without the cap, a pathological input such as thousands of nested
+/// parentheses or `NOT`s overflows the stack and aborts the whole process
+/// (issue #3404). Legitimate queries nest far below this limit.
+///
+/// Note: the bound is *cumulative* across all nesting constructs
+/// (parentheses, `NOT`, `IN [...]` element lists, and function arguments), not
+/// a separate budget per construct -- e.g. deeply nested parens inside an
+/// `IN`-list share the same counter.
+const MAX_EXPRESSION_DEPTH: usize = 128;
+
+/// Maximum number of operands in a single contiguous `AND` / `OR` chain.
+///
+/// The parser builds a left-nested `Box<CypherExpr>` spine for a flat
+/// `a AND b AND c ...` (or `OR`) chain, which is intentionally *not* bounded by
+/// [`MAX_EXPRESSION_DEPTH`] (the chain has no per-operand nesting). That spine
+/// is walked iteratively at conversion time, but the derived recursive `Drop`
+/// for `CypherExpr` still unwinds it one stack frame per node when the AST is
+/// dropped -- so an unbounded chain (tens of thousands of terms) would
+/// stack-overflow on teardown, relocating the very SIGABRT issue #3404 targets
+/// to destruction. Capping the operand count keeps that drop depth bounded
+/// while staying far beyond any realistic query; it doubles as an in-lane
+/// query-complexity guard.
+const MAX_EXPRESSION_TERMS: usize = 4096;
 
 /// Recursive descent parser for Cypher queries.
 ///
@@ -117,6 +148,26 @@ impl CypherParser {
         }
     }
 
+    /// If the current token is a bare identifier whose text (case-insensitively)
+    /// is `EXPLAIN` or `PROFILE`, return `Some(true)` for `EXPLAIN` /
+    /// `Some(false)` for `PROFILE`; otherwise `None`.
+    ///
+    /// `EXPLAIN` / `PROFILE` are pre-parser prefix keywords (Issue #562): they
+    /// are only meaningful at statement start and remain ordinary identifiers
+    /// everywhere else, so they are lexed as [`TokenKind::Identifier`] and
+    /// distinguished here by inspecting the token text.
+    fn leading_explain_profile_prefix(&self) -> Option<bool> {
+        let tok = self.peek();
+        if tok.kind != TokenKind::Identifier {
+            return None;
+        }
+        match tok.text.to_ascii_uppercase().as_str() {
+            "EXPLAIN" => Some(true),
+            "PROFILE" => Some(false),
+            _ => None,
+        }
+    }
+
     /// Build a [`CypherError::ParseError`] at the current token position.
     fn error(&self, message: &str) -> CypherError {
         CypherError::ParseError {
@@ -133,12 +184,212 @@ impl CypherParser {
     /// statement := [temporal] match_stmt
     /// ```
     fn parse_statement(&mut self) -> Result<CypherStatement, CypherError> {
+        // A leading `EXPLAIN` / `PROFILE` prefix (Issue #562) wraps the rest of
+        // the statement. It is handled *before* the expression grammar (it adds
+        // no expression recursion, so the depth caps are untouched) and before
+        // the temporal clause, so `EXPLAIN AS OF ... MATCH ...` works. A
+        // nested/duplicate prefix (`EXPLAIN EXPLAIN`, `EXPLAIN PROFILE`,
+        // `PROFILE EXPLAIN`, `PROFILE PROFILE`) is rejected rather than silently
+        // collapsed.
+        //
+        // These are PRE-PARSER keywords: openCypher treats them as special only
+        // at statement start, so they lex as ordinary identifiers and must stay
+        // usable as variables/labels/rel-types/property keys everywhere else.
+        // We therefore detect the prefix by inspecting the leading token's
+        // *text* (see `leading_explain_profile_prefix`) rather than a dedicated
+        // token kind. This is unambiguous: no valid statement begins with a bare
+        // identifier (statements start with MATCH / OPTIONAL / UNWIND / a
+        // temporal keyword), so a leading identifier is only ever the prefix.
+        if let Some(is_explain) = self.leading_explain_profile_prefix() {
+            self.advance(); // consume the prefix identifier
+            if self.leading_explain_profile_prefix().is_some() {
+                return Err(self.error(
+                    "EXPLAIN/PROFILE cannot be nested; use a single EXPLAIN or PROFILE prefix",
+                ));
+            }
+            let inner = self.parse_statement()?;
+            return Ok(if is_explain {
+                CypherStatement::Explain(Box::new(inner))
+            } else {
+                CypherStatement::Profile(Box::new(inner))
+            });
+        }
+
         // Check for leading temporal clause (AS OF / FOR / BETWEEN).
         let temporal = self.try_parse_temporal()?;
 
-        // Now expect a MATCH (or OPTIONAL MATCH).
+        // A standalone `UNWIND ... AS ... RETURN ...` statement (Issue #559).
+        // A leading temporal clause has no meaning for a listless UNWIND, so
+        // reject the combination rather than silently ignoring the qualifier.
+        if self.at(TokenKind::Unwind) {
+            if temporal.is_some() {
+                return Err(self.error(
+                    "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a standalone UNWIND",
+                ));
+            }
+            return self.parse_unwind();
+        }
+
+        // A statement that opens directly with `CREATE` is a write statement
+        // with no reading part (Issue #560). A leading temporal clause has no
+        // meaning for a write, so reject the combination rather than silently
+        // dropping the qualifier.
+        if self.at(TokenKind::Create) {
+            if temporal.is_some() {
+                return Err(self.error(
+                    "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a CREATE statement",
+                ));
+            }
+            return self.parse_write_statement(None);
+        }
+
+        // Now expect a MATCH (or OPTIONAL MATCH), which may turn out to be the
+        // reading part of a write statement (`MATCH ... SET/DELETE/CREATE ...`).
         let stmt = self.parse_match(temporal)?;
         Ok(stmt)
+    }
+
+    /// Returns `true` if the current token starts a write clause
+    /// (`CREATE` / `SET` / `DELETE` / `DETACH DELETE`), Issue #560.
+    fn at_write_clause(&self) -> bool {
+        matches!(
+            self.peek().kind,
+            TokenKind::Create | TokenKind::Set | TokenKind::Delete | TokenKind::Detach
+        )
+    }
+
+    /// Parse a write statement (Issue #560): one or more write clauses followed
+    /// by an optional `RETURN`.
+    ///
+    /// `reading` is the already-parsed reading part (`MATCH ... [WHERE ...]`),
+    /// or `None` for a statement opening directly with `CREATE`.
+    fn parse_write_statement(
+        &mut self,
+        reading: Option<CypherReadingClause>,
+    ) -> Result<CypherStatement, CypherError> {
+        let mut clauses = Vec::new();
+        loop {
+            match self.peek().kind {
+                TokenKind::Create => {
+                    self.advance();
+                    let patterns = self.parse_pattern_list()?;
+                    clauses.push(CypherWriteClause::Create(patterns));
+                }
+                TokenKind::Set => {
+                    self.advance();
+                    let items = self.parse_set_items()?;
+                    clauses.push(CypherWriteClause::Set(items));
+                }
+                TokenKind::Detach => {
+                    self.advance();
+                    self.expect(TokenKind::Delete)?;
+                    let targets = self.parse_delete_targets()?;
+                    clauses.push(CypherWriteClause::Delete {
+                        detach: true,
+                        targets,
+                    });
+                }
+                TokenKind::Delete => {
+                    self.advance();
+                    let targets = self.parse_delete_targets()?;
+                    clauses.push(CypherWriteClause::Delete {
+                        detach: false,
+                        targets,
+                    });
+                }
+                _ => break,
+            }
+        }
+
+        if clauses.is_empty() {
+            return Err(self.error("expected a write clause (CREATE / SET / DELETE)"));
+        }
+
+        let return_clause = if self.at(TokenKind::Return) {
+            Some(self.parse_return()?)
+        } else {
+            None
+        };
+
+        Ok(CypherStatement::Write(CypherWriteStatement {
+            reading,
+            clauses,
+            return_clause,
+        }))
+    }
+
+    /// Parse the items of a `SET` clause: `n.prop = value (, n.prop = value)*`.
+    ///
+    /// v1 supports only property assignment (`SET n.prop = value`). Label
+    /// mutation (`SET n:Label`) and whole-entity replacement (`SET n = {...}`,
+    /// `SET n += {...}`) are rejected with a structured
+    /// [`CypherError::UnsupportedFeature`] -- AletheiaDB nodes are single-labeled
+    /// and the native update API is PATCH-merge only.
+    fn parse_set_items(&mut self) -> Result<Vec<CypherSetItem>, CypherError> {
+        let mut items = Vec::new();
+        loop {
+            let var_tok = self.expect(TokenKind::Identifier)?;
+            if self.at(TokenKind::Colon) {
+                return Err(CypherError::UnsupportedFeature(
+                    "SET n:Label (label assignment) is not supported; AletheiaDB nodes are \
+                     single-labeled"
+                        .to_string(),
+                ));
+            }
+            if self.at(TokenKind::Eq) {
+                return Err(CypherError::UnsupportedFeature(
+                    "SET n = {...} / SET n += {...} (whole-entity property replacement) is not \
+                     supported; use SET n.prop = value"
+                        .to_string(),
+                ));
+            }
+            self.expect(TokenKind::Dot)?;
+            let prop_tok = self.expect(TokenKind::Identifier)?;
+            self.expect(TokenKind::Eq)?;
+            let value = self.parse_value()?;
+            items.push(CypherSetItem {
+                variable: var_tok.text,
+                property: prop_tok.text,
+                value,
+            });
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    /// Parse the target variables of a `DELETE` / `DETACH DELETE` clause:
+    /// `variable (',' variable)*`.
+    fn parse_delete_targets(&mut self) -> Result<Vec<String>, CypherError> {
+        let mut targets = vec![self.expect(TokenKind::Identifier)?.text];
+        while self.eat(TokenKind::Comma) {
+            targets.push(self.expect(TokenKind::Identifier)?.text);
+        }
+        Ok(targets)
+    }
+
+    /// Parse a standalone `UNWIND <list> AS <var> RETURN ...` statement.
+    ///
+    /// ```text
+    /// unwind_stmt := UNWIND expr AS identifier return_clause
+    /// ```
+    ///
+    /// The list source is parsed as a full expression (so a list literal
+    /// `[...]`, a parameter `$list`, or the `null` literal are all accepted and
+    /// depth-capped through [`Self::parse_expression`]); whether the resolved
+    /// value is actually list-shaped is validated at execution time.
+    fn parse_unwind(&mut self) -> Result<CypherStatement, CypherError> {
+        self.expect(TokenKind::Unwind)?;
+        let source = self.parse_expression(0)?;
+        self.expect(TokenKind::As)?;
+        let var_tok = self.expect(TokenKind::Identifier)?;
+        let return_clause = self.parse_return()?;
+        Ok(CypherStatement::Unwind {
+            source,
+            variable: var_tok.text,
+            return_clause,
+        })
     }
 
     /// ```text
@@ -160,6 +411,19 @@ impl CypherParser {
         } else {
             None
         };
+
+        // A write clause here (`MATCH ... SET/DELETE/CREATE ...`) makes this the
+        // reading part of a write statement (Issue #560). This is only valid for
+        // a plain, non-temporal `MATCH` in v1: `OPTIONAL MATCH` and temporal
+        // qualifiers are not combinable with writes, so they fall through to the
+        // read path (and a subsequent write clause would then be a parse error).
+        if !optional && temporal.is_none() && self.at_write_clause() {
+            let reading = CypherReadingClause {
+                pattern,
+                where_clause,
+            };
+            return self.parse_write_statement(Some(reading));
+        }
 
         // Check for post-pattern temporal clause (between WHERE and RETURN).
         // If a leading temporal clause was already parsed, this is skipped.
@@ -434,25 +698,40 @@ impl CypherParser {
     /// ```
     fn parse_where(&mut self) -> Result<CypherExpr, CypherError> {
         self.expect(TokenKind::Where)?;
-        self.parse_expression()
+        self.parse_expression(0)
     }
 
     /// Entry point for expression parsing.
     ///
+    /// `depth` is the current expression nesting level; it is incremented only
+    /// at genuine recursion re-entry points (parenthesised sub-expression,
+    /// `NOT`, and `IN`/argument element lists) and passed through unchanged by
+    /// the operator-precedence layers. Exceeding [`MAX_EXPRESSION_DEPTH`]
+    /// returns a [`CypherError::ParseError`] rather than overflowing the stack.
+    ///
     /// ```text
     /// expr := or_expr
     /// ```
-    fn parse_expression(&mut self) -> Result<CypherExpr, CypherError> {
-        self.parse_or_expr()
+    fn parse_expression(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        if depth > MAX_EXPRESSION_DEPTH {
+            return Err(self.error("expression nesting too deep (max 128)"));
+        }
+        self.parse_or_expr(depth)
     }
 
     /// ```text
     /// or_expr := and_expr (OR and_expr)*
     /// ```
-    fn parse_or_expr(&mut self) -> Result<CypherExpr, CypherError> {
-        let mut left = self.parse_and_expr()?;
+    fn parse_or_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        let mut left = self.parse_and_expr(depth)?;
+        // Operand count for this contiguous OR chain (starts at 1 for `left`).
+        let mut terms: usize = 1;
         while self.eat(TokenKind::Or) {
-            let right = self.parse_and_expr()?;
+            terms += 1;
+            if terms > MAX_EXPRESSION_TERMS {
+                return Err(self.error("expression has too many AND/OR terms (max 4096)"));
+            }
+            let right = self.parse_and_expr(depth)?;
             left = CypherExpr::Or(Box::new(left), Box::new(right));
         }
         Ok(left)
@@ -461,10 +740,16 @@ impl CypherParser {
     /// ```text
     /// and_expr := not_expr (AND not_expr)*
     /// ```
-    fn parse_and_expr(&mut self) -> Result<CypherExpr, CypherError> {
-        let mut left = self.parse_not_expr()?;
+    fn parse_and_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        let mut left = self.parse_not_expr(depth)?;
+        // Operand count for this contiguous AND chain (starts at 1 for `left`).
+        let mut terms: usize = 1;
         while self.eat(TokenKind::And) {
-            let right = self.parse_not_expr()?;
+            terms += 1;
+            if terms > MAX_EXPRESSION_TERMS {
+                return Err(self.error("expression has too many AND/OR terms (max 4096)"));
+            }
+            let right = self.parse_not_expr(depth)?;
             left = CypherExpr::And(Box::new(left), Box::new(right));
         }
         Ok(left)
@@ -473,12 +758,15 @@ impl CypherParser {
     /// ```text
     /// not_expr := NOT not_expr | comparison
     /// ```
-    fn parse_not_expr(&mut self) -> Result<CypherExpr, CypherError> {
+    fn parse_not_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        if depth > MAX_EXPRESSION_DEPTH {
+            return Err(self.error("expression nesting too deep (max 128)"));
+        }
         if self.eat(TokenKind::Not) {
-            let inner = self.parse_not_expr()?;
+            let inner = self.parse_not_expr(depth + 1)?;
             Ok(CypherExpr::Not(Box::new(inner)))
         } else {
-            self.parse_comparison()
+            self.parse_comparison(depth)
         }
     }
 
@@ -486,8 +774,8 @@ impl CypherParser {
     /// comparison := primary (comp_op primary | IS [NOT] NULL | IN '[' expr_list ']'
     ///            | CONTAINS string | STARTS WITH string | ENDS WITH string)?
     /// ```
-    fn parse_comparison(&mut self) -> Result<CypherExpr, CypherError> {
-        let left = self.parse_primary_expr()?;
+    fn parse_comparison(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        let left = self.parse_primary_expr(depth)?;
 
         // Standard comparison operators
         let op = match self.peek().kind {
@@ -502,7 +790,7 @@ impl CypherParser {
 
         if let Some(op) = op {
             self.advance();
-            let right = self.parse_primary_expr()?;
+            let right = self.parse_primary_expr(depth)?;
             return Ok(CypherExpr::Comparison {
                 left: Box::new(left),
                 op,
@@ -527,9 +815,9 @@ impl CypherParser {
             self.expect(TokenKind::LBracket)?;
             let mut values = vec![];
             if !self.at(TokenKind::RBracket) {
-                values.push(self.parse_expression()?);
+                values.push(self.parse_expression(depth + 1)?);
                 while self.eat(TokenKind::Comma) {
-                    values.push(self.parse_expression()?);
+                    values.push(self.parse_expression(depth + 1)?);
                 }
             }
             self.expect(TokenKind::RBracket)?;
@@ -542,7 +830,7 @@ impl CypherParser {
         // CONTAINS string
         if self.at(TokenKind::Contains) {
             self.advance();
-            let right = self.parse_primary_expr()?;
+            let right = self.parse_primary_expr(depth)?;
             if let CypherExpr::Value(CypherValue::String(s)) = right {
                 return Ok(CypherExpr::Contains {
                     expr: Box::new(left),
@@ -556,7 +844,7 @@ impl CypherParser {
         if self.at(TokenKind::StartsWith) {
             self.advance(); // consume STARTS
             self.expect(TokenKind::With)?; // consume WITH
-            let right = self.parse_primary_expr()?;
+            let right = self.parse_primary_expr(depth)?;
             if let CypherExpr::Value(CypherValue::String(s)) = right {
                 return Ok(CypherExpr::StartsWith {
                     expr: Box::new(left),
@@ -570,7 +858,7 @@ impl CypherParser {
         if self.at(TokenKind::EndsWith) {
             self.advance(); // consume ENDS
             self.expect(TokenKind::With)?; // consume WITH
-            let right = self.parse_primary_expr()?;
+            let right = self.parse_primary_expr(depth)?;
             if let CypherExpr::Value(CypherValue::String(s)) = right {
                 return Ok(CypherExpr::EndsWith {
                     expr: Box::new(left),
@@ -586,14 +874,40 @@ impl CypherParser {
     /// ```text
     /// primary := value | var '.' prop | '(' expr ')' | func_call | var
     /// ```
-    fn parse_primary_expr(&mut self) -> Result<CypherExpr, CypherError> {
+    fn parse_primary_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
         match self.peek().kind.clone() {
             // Parenthesized sub-expression
             TokenKind::LParen => {
                 self.advance();
-                let inner = self.parse_expression()?;
+                let inner = self.parse_expression(depth + 1)?;
                 self.expect(TokenKind::RParen)?;
                 Ok(CypherExpr::Grouped(Box::new(inner)))
+            }
+
+            // List literal: `[ expr (',' expr)* ]` (empty list allowed).
+            //
+            // Each element is parsed one nesting level deeper so that a
+            // pathologically nested list literal (`[[[ ... ]]]`) is bounded by
+            // MAX_EXPRESSION_DEPTH and returns a parse error instead of
+            // overflowing the stack (issue #3404).
+            TokenKind::LBracket => {
+                self.advance();
+                let mut elements = Vec::new();
+                if !self.at(TokenKind::RBracket) {
+                    elements.push(self.parse_expression(depth + 1)?);
+                    while self.eat(TokenKind::Comma) {
+                        // Cap the element count (mirroring MAX_EXPRESSION_TERMS
+                        // for AND/OR chains): a pathological multi-MB literal
+                        // would otherwise allocate ~1M AST nodes. Return a
+                        // graceful ParseError instead (issue #3404-adjacent).
+                        if elements.len() >= MAX_EXPRESSION_TERMS {
+                            return Err(self.error("list literal has too many elements (max 4096)"));
+                        }
+                        elements.push(self.parse_expression(depth + 1)?);
+                    }
+                }
+                self.expect(TokenKind::RBracket)?;
+                Ok(CypherExpr::List(elements))
             }
 
             // Identifier: could be variable, property access, dot-qualified function call,
@@ -612,12 +926,13 @@ impl CypherParser {
                         // Dot-qualified function call: namespace.func(args...)
                         // e.g., vector.similarity(d.embedding, $query)
                         self.advance(); // consume '('
-                        let args = self.parse_function_args()?;
+                        let args = self.parse_function_args(depth)?;
                         self.expect(TokenKind::RParen)?;
                         let qualified_name = format!("{name}.{}", next_tok.text);
                         Ok(CypherExpr::FunctionCall {
                             name: qualified_name,
                             args,
+                            distinct: false,
                         })
                     } else {
                         // Property access: var.prop
@@ -629,9 +944,13 @@ impl CypherParser {
                 } else if self.at(TokenKind::LParen) {
                     // Function call: name(args...)
                     self.advance();
-                    let args = self.parse_function_args()?;
+                    let args = self.parse_function_args(depth)?;
                     self.expect(TokenKind::RParen)?;
-                    Ok(CypherExpr::FunctionCall { name, args })
+                    Ok(CypherExpr::FunctionCall {
+                        name,
+                        args,
+                        distinct: false,
+                    })
                 } else {
                     // Bare variable
                     Ok(CypherExpr::Variable(name))
@@ -648,9 +967,28 @@ impl CypherParser {
                 let name_tok = self.advance().clone();
                 let name = name_tok.text.to_uppercase();
                 self.expect(TokenKind::LParen)?;
-                let args = self.parse_function_args()?;
+                // Optional DISTINCT quantifier: count(DISTINCT n.dept).
+                let distinct = self.eat(TokenKind::Distinct);
+                // `count(*)` -- the star wildcard is only valid as the sole
+                // argument (typically for count). `DISTINCT *` is rejected
+                // (openCypher does not allow `count(DISTINCT *)`).
+                let args = if self.at(TokenKind::Star) {
+                    if distinct {
+                        return Err(self.error(
+                            "DISTINCT * is not allowed (use count(*) or count(DISTINCT expr))",
+                        ));
+                    }
+                    self.advance();
+                    vec![CypherExpr::Star]
+                } else {
+                    self.parse_function_args(depth)?
+                };
                 self.expect(TokenKind::RParen)?;
-                Ok(CypherExpr::FunctionCall { name, args })
+                Ok(CypherExpr::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                })
             }
 
             // Literal values
@@ -673,12 +1011,15 @@ impl CypherParser {
     }
 
     /// Parse comma-separated function arguments (may be empty).
-    fn parse_function_args(&mut self) -> Result<Vec<CypherExpr>, CypherError> {
+    ///
+    /// Each argument is a fresh expression nested one level below the call, so
+    /// `depth` is incremented to bound deeply nested `f(g(h(...)))` chains.
+    fn parse_function_args(&mut self, depth: usize) -> Result<Vec<CypherExpr>, CypherError> {
         let mut args = Vec::new();
         if !self.at(TokenKind::RParen) {
-            args.push(self.parse_expression()?);
+            args.push(self.parse_expression(depth + 1)?);
             while self.eat(TokenKind::Comma) {
-                args.push(self.parse_expression()?);
+                args.push(self.parse_expression(depth + 1)?);
             }
         }
         Ok(args)
@@ -689,12 +1030,37 @@ impl CypherParser {
     /// Parse a single `WITH` clause.
     ///
     /// ```text
-    /// with_clause := WITH return_items [WHERE expr]
+    /// with_clause := WITH [DISTINCT] return_items [order_by] [SKIP n] [LIMIT n] [WHERE expr]
     /// ```
+    ///
+    /// The body mirrors a `RETURN` body (`DISTINCT`, items, `ORDER BY`, `SKIP`,
+    /// `LIMIT`); per openCypher a trailing `WHERE` filters the *projected* rows
+    /// and therefore comes after the ordering/pagination sub-clauses (Issue
+    /// #556).
     fn parse_with(&mut self) -> Result<CypherWith, CypherError> {
         self.expect(TokenKind::With)?;
 
+        let distinct = self.eat(TokenKind::Distinct);
+
         let items = self.parse_return_items()?;
+
+        let order_by = if self.at(TokenKind::Order) {
+            self.parse_order_by()?
+        } else {
+            Vec::new()
+        };
+
+        let skip = if self.eat(TokenKind::Skip) {
+            Some(self.parse_usize("expected integer after SKIP")?)
+        } else {
+            None
+        };
+
+        let limit = if self.eat(TokenKind::Limit) {
+            Some(self.parse_usize("expected integer after LIMIT")?)
+        } else {
+            None
+        };
 
         let where_clause = if self.at(TokenKind::Where) {
             Some(self.parse_where()?)
@@ -703,7 +1069,11 @@ impl CypherParser {
         };
 
         Ok(CypherWith {
+            distinct,
             items,
+            order_by,
+            skip,
+            limit,
             where_clause,
         })
     }
@@ -766,7 +1136,7 @@ impl CypherParser {
     /// return_item := expr [AS identifier]
     /// ```
     fn parse_return_item(&mut self) -> Result<CypherReturnItem, CypherError> {
-        let expr = self.parse_expression()?;
+        let expr = self.parse_expression(0)?;
 
         let alias = if self.eat(TokenKind::As) {
             let alias_tok = self.expect(TokenKind::Identifier)?;
@@ -796,7 +1166,7 @@ impl CypherParser {
     /// order_item := expr [ASC | DESC]
     /// ```
     fn parse_order_item(&mut self) -> Result<CypherOrderItem, CypherError> {
-        let expr = self.parse_expression()?;
+        let expr = self.parse_expression(0)?;
 
         let descending = if self.eat(TokenKind::Desc) {
             true

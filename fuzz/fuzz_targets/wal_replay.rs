@@ -82,6 +82,8 @@ fuzz_target!(|case: WalReplayCase| {
                         node_id: NodeId::new(raw_node_id)
                             .expect("bounded fuzz node ID must be valid"),
                         valid_from: timestamp_from_step(step),
+                        version_id: None,
+                        provenance: None,
                     })
                 } else {
                     None

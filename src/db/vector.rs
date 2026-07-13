@@ -240,6 +240,108 @@ impl AletheiaDB {
         self.current.is_temporal_vector_index_enabled()
     }
 
+    /// Set the per-entity temporal vector snapshot policy for a node (Issue #383).
+    ///
+    /// Temporal vector snapshots are captured by a pre-anchor hook that fires
+    /// when an entity's graph anchor is created. Historically this was global —
+    /// every anchor on any entity re-snapshotted the whole vector index, even
+    /// for entities whose embedding never changed. This method gives
+    /// **per-entity control**: marking a node [`SnapshotPolicy::Skip`] keeps its
+    /// graph anchors but suppresses its vector snapshots, while
+    /// [`SnapshotPolicy::Snapshot`] (the default) preserves the prior behavior.
+    ///
+    /// Combine with [`set_default_node_vector_snapshot_policy`](Self::set_default_node_vector_snapshot_policy)
+    /// for an opt-in model (default `Skip`, opt specific nodes back in).
+    ///
+    /// [`SnapshotPolicy`]: crate::storage::historical::SnapshotPolicy
+    /// [`SnapshotPolicy::Skip`]: crate::storage::historical::SnapshotPolicy::Skip
+    /// [`SnapshotPolicy::Snapshot`]: crate::storage::historical::SnapshotPolicy::Snapshot
+    pub fn set_node_vector_snapshot_policy(
+        &self,
+        node_id: NodeId,
+        policy: crate::storage::historical::SnapshotPolicy,
+    ) {
+        self.historical
+            .write()
+            .set_node_snapshot_policy(node_id, policy);
+    }
+
+    /// Set the per-entity temporal vector snapshot policy for an edge (Issue #383).
+    ///
+    /// The edge counterpart of
+    /// [`set_node_vector_snapshot_policy`](Self::set_node_vector_snapshot_policy).
+    pub fn set_edge_vector_snapshot_policy(
+        &self,
+        edge_id: crate::core::id::EdgeId,
+        policy: crate::storage::historical::SnapshotPolicy,
+    ) {
+        self.historical
+            .write()
+            .set_edge_snapshot_policy(edge_id, policy);
+    }
+
+    /// Remove a node's per-entity snapshot policy override, reverting it to the
+    /// current default node policy (Issue #383). Returns the removed override.
+    pub fn clear_node_vector_snapshot_policy(
+        &self,
+        node_id: NodeId,
+    ) -> Option<crate::storage::historical::SnapshotPolicy> {
+        self.historical.write().clear_node_snapshot_policy(node_id)
+    }
+
+    /// Remove an edge's per-entity snapshot policy override, reverting it to the
+    /// current default edge policy (Issue #383). Returns the removed override.
+    pub fn clear_edge_vector_snapshot_policy(
+        &self,
+        edge_id: crate::core::id::EdgeId,
+    ) -> Option<crate::storage::historical::SnapshotPolicy> {
+        self.historical.write().clear_edge_snapshot_policy(edge_id)
+    }
+
+    /// Set the fall-through default node snapshot policy (Issue #383).
+    ///
+    /// Flip to [`SnapshotPolicy::Skip`] for an opt-in model where only nodes
+    /// explicitly set to [`SnapshotPolicy::Snapshot`] are snapshotted.
+    ///
+    /// [`SnapshotPolicy::Skip`]: crate::storage::historical::SnapshotPolicy::Skip
+    /// [`SnapshotPolicy::Snapshot`]: crate::storage::historical::SnapshotPolicy::Snapshot
+    pub fn set_default_node_vector_snapshot_policy(
+        &self,
+        policy: crate::storage::historical::SnapshotPolicy,
+    ) {
+        self.historical
+            .write()
+            .set_default_node_snapshot_policy(policy);
+    }
+
+    /// Set the fall-through default edge snapshot policy (Issue #383).
+    pub fn set_default_edge_vector_snapshot_policy(
+        &self,
+        policy: crate::storage::historical::SnapshotPolicy,
+    ) {
+        self.historical
+            .write()
+            .set_default_edge_snapshot_policy(policy);
+    }
+
+    /// Resolve the effective snapshot policy for a node (override if set, else
+    /// the default node policy) (Issue #383).
+    pub fn node_vector_snapshot_policy(
+        &self,
+        node_id: NodeId,
+    ) -> crate::storage::historical::SnapshotPolicy {
+        self.historical.read().node_snapshot_policy(node_id)
+    }
+
+    /// Resolve the effective snapshot policy for an edge (override if set, else
+    /// the default edge policy) (Issue #383).
+    pub fn edge_vector_snapshot_policy(
+        &self,
+        edge_id: crate::core::id::EdgeId,
+    ) -> crate::storage::historical::SnapshotPolicy {
+        self.historical.read().edge_snapshot_policy(edge_id)
+    }
+
     /// List all property names that have temporal vector indexes enabled.
     ///
     /// Returns a vector of property names that have temporal vector indexing configured.
@@ -1028,5 +1130,89 @@ mod coverage_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(format!("{}", err).contains("HNSW configuration is required"));
+    }
+
+    // --- Issue #383: per-entity snapshot policy wrappers, end-to-end through AletheiaDB ---
+    //
+    // These exercise the public `AletheiaDB` surface end-to-end (set/get/clear/
+    // default, node + edge) through the historical `RwLock`. The *behavioral*
+    // proof that the policy gates the pre-anchor snapshot hook per entity lives
+    // in `src/storage/historical/tests.rs` (recording-hook tests), where the
+    // anchor-hook trigger is observed directly and in isolation from the
+    // orthogonal transaction-strategy snapshot path.
+
+    use crate::core::id::EdgeId;
+    use crate::storage::historical::SnapshotPolicy;
+
+    /// The default resolved policy is `Snapshot` for both nodes and edges,
+    /// preserving pre-#383 behavior when nothing is configured.
+    #[test]
+    fn test_snapshot_policy_wrappers_default_is_snapshot() {
+        let db = AletheiaDB::new().unwrap();
+        assert_eq!(
+            db.node_vector_snapshot_policy(NodeId::new(1).unwrap()),
+            SnapshotPolicy::Snapshot
+        );
+        assert_eq!(
+            db.edge_vector_snapshot_policy(EdgeId::new(1).unwrap()),
+            SnapshotPolicy::Snapshot
+        );
+    }
+
+    /// Setting, reading back, and clearing a per-node override round-trips
+    /// through the historical `RwLock`.
+    #[test]
+    fn test_snapshot_policy_wrappers_node_set_get_clear() {
+        let db = AletheiaDB::new().unwrap();
+        let node = NodeId::new(7).unwrap();
+
+        db.set_node_vector_snapshot_policy(node, SnapshotPolicy::Skip);
+        assert_eq!(db.node_vector_snapshot_policy(node), SnapshotPolicy::Skip);
+
+        assert_eq!(
+            db.clear_node_vector_snapshot_policy(node),
+            Some(SnapshotPolicy::Skip)
+        );
+        assert_eq!(
+            db.node_vector_snapshot_policy(node),
+            SnapshotPolicy::Snapshot,
+            "cleared override reverts to default"
+        );
+    }
+
+    /// The default-node policy setter creates an opt-in model; edges are a
+    /// separate registry and remain at their own default.
+    #[test]
+    fn test_snapshot_policy_wrappers_default_opt_in_node_edge_independent() {
+        let db = AletheiaDB::new().unwrap();
+
+        db.set_default_node_vector_snapshot_policy(SnapshotPolicy::Skip);
+        // Every unset node now resolves to Skip...
+        assert_eq!(
+            db.node_vector_snapshot_policy(NodeId::new(99).unwrap()),
+            SnapshotPolicy::Skip
+        );
+        // ...but a specific node can be opted back in.
+        db.set_node_vector_snapshot_policy(NodeId::new(1).unwrap(), SnapshotPolicy::Snapshot);
+        assert_eq!(
+            db.node_vector_snapshot_policy(NodeId::new(1).unwrap()),
+            SnapshotPolicy::Snapshot
+        );
+
+        // Edges are an independent registry — unaffected by the node default.
+        assert_eq!(
+            db.edge_vector_snapshot_policy(EdgeId::new(1).unwrap()),
+            SnapshotPolicy::Snapshot
+        );
+        db.set_default_edge_vector_snapshot_policy(SnapshotPolicy::Skip);
+        db.set_edge_vector_snapshot_policy(EdgeId::new(2).unwrap(), SnapshotPolicy::Snapshot);
+        assert_eq!(
+            db.edge_vector_snapshot_policy(EdgeId::new(1).unwrap()),
+            SnapshotPolicy::Skip
+        );
+        assert_eq!(
+            db.edge_vector_snapshot_policy(EdgeId::new(2).unwrap()),
+            SnapshotPolicy::Snapshot
+        );
     }
 }

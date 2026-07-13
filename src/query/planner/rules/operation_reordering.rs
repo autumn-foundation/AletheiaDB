@@ -373,6 +373,11 @@ impl OperationReordering {
             Predicate::Ne { .. } => NOT_EQUALS_SELECTIVITY,
             Predicate::In { .. } => IN_PREDICATE_SELECTIVITY,
             Predicate::Exists(_) | Predicate::NotExists(_) => EXISTENCE_CHECK_SELECTIVITY,
+            // Provenance predicates (Issue #3354a) require a per-version
+            // metadata lookup with no column statistics available; treat them
+            // like a range predicate for ordering purposes (moderately
+            // selective, so they run after cheap equality filters).
+            Predicate::Provenance(_) => RANGE_PREDICATE_SELECTIVITY,
             Predicate::True => TRUE_SELECTIVITY,
             Predicate::False => FALSE_SELECTIVITY,
         }

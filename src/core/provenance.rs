@@ -31,45 +31,31 @@ pub enum ProvenanceError {
 /// Constructed via [`Provenance::builder`], which validates `confidence`
 /// against `[0.0, 1.0]` (NaN is rejected).
 ///
-/// Serde support is feature-gated because `serde` is an optional dependency
-/// (enabled by `config-toml` — a default feature — and `mcp-server`, whose
-/// response types embed [`Provenance`] directly); `--no-default-features`
-/// builds must still compile without it.
+/// Serde support is feature-gated behind the unified `serde` flag (Issue
+/// #3390), which is pulled in by any serde-enabling feature — e.g.
+/// `config-toml` (a default feature) and `mcp-server`, whose response types
+/// embed [`Provenance`] directly; `--no-default-features` builds must still
+/// compile without it.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
+    feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
     serde(try_from = "ProvenanceRaw")
 )]
 pub struct Provenance {
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     source: Option<String>,
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     confidence: Option<f64>,
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     note: Option<String>,
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     correlation_id: Option<String>,
     /// The authenticated principal (API-key identity) that made this write,
     /// if the write arrived through an authenticated server surface
     /// (Issue #3350). Server-stamped -- never caller-supplied -- and
     /// composes with `source` (which remains whatever the caller declared).
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     principal: Option<String>,
 }
 
@@ -249,7 +235,7 @@ impl ProvenanceBuilder {
 /// Unvalidated wire representation used only as the `serde` deserialization
 /// target; [`Provenance`] itself has private fields so it cannot be
 /// deserialized directly without going through validation.
-#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[cfg(feature = "serde")]
 #[derive(Debug, serde::Deserialize)]
 struct ProvenanceRaw {
     #[serde(default)]
@@ -264,7 +250,7 @@ struct ProvenanceRaw {
     principal: Option<String>,
 }
 
-#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[cfg(feature = "serde")]
 impl TryFrom<ProvenanceRaw> for Provenance {
     type Error = ProvenanceError;
 
@@ -276,6 +262,183 @@ impl TryFrom<ProvenanceRaw> for Provenance {
             raw.correlation_id,
             raw.principal,
         )
+    }
+}
+
+// ============================================================================
+// Provenance filtering (Issue #3348)
+// ============================================================================
+
+/// Errors returned when constructing a [`ProvenanceFilter`] from
+/// caller-supplied values.
+///
+/// Each variant names the offending field so a server surface can surface it
+/// verbatim in a structured `INVALID_ARGUMENT` payload (Issue #3234 / #3348
+/// AC5) rather than returning a silently-empty result set.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum ProvenanceFilterError {
+    /// `min_confidence` was NaN or outside the inclusive `[0.0, 1.0]` range.
+    #[error("min_confidence must be between 0.0 and 1.0, got {value}")]
+    InvalidMinConfidence {
+        /// The rejected value (may be NaN).
+        value: f64,
+    },
+    /// A source list was supplied but was empty (`[]`), which can never match
+    /// anything and is almost certainly a caller mistake — rejected loudly
+    /// rather than silently returning nothing.
+    #[error("provenance source list must not be empty")]
+    EmptySourceList,
+}
+
+impl ProvenanceFilterError {
+    /// The name of the request field that caused the rejection, for a
+    /// structured error `details` payload.
+    pub fn field(&self) -> &'static str {
+        match self {
+            ProvenanceFilterError::InvalidMinConfidence { .. } => "min_confidence",
+            ProvenanceFilterError::EmptySourceList => "provenance_sources",
+        }
+    }
+}
+
+/// A reusable, surface-agnostic predicate that filters facts by their
+/// write-time [`Provenance`] (Issue #3348).
+///
+/// Constructed once from validated inputs via [`ProvenanceFilter::validated`]
+/// and then applied per *version* with [`ProvenanceFilter::matches`]. Because
+/// the predicate operates on an `Option<&Provenance>` — the exact bundle
+/// recorded on the version being returned — it composes for free with
+/// bi-temporal reads: a point-in-time read hands the historical version's own
+/// bundle, so the filter evaluates provenance *as recorded at that coordinate*
+/// (AC3), never against the latest version.
+///
+/// This type is deliberately feature-independent (it lives next to
+/// [`Provenance`] in always-compiled `core`) so the imperative MCP and HTTP
+/// surfaces (Issue #3348) and a future declarative query-language lowering
+/// (Issue #3354) share one implementation of the semantics.
+///
+/// # Semantics
+///
+/// - **Sources** (`sources`): any-of exact string match. `Some([...])` keeps a
+///   version iff its `source` is present and equals one of the listed values.
+/// - **Minimum confidence** (`min_confidence`): an **inclusive** lower bound.
+///   `Some(t)` keeps a version iff its `confidence` is present and `>= t`.
+/// - **Combined**: source and confidence constraints are ANDed.
+/// - **Unattributed** versions (no bundle at all, `prov.is_none()`) are
+///   **excluded** whenever the filter is active, unless `include_unattributed`
+///   is `true`.
+/// - A **partial** bundle (present, but missing the queried field) is treated
+///   as *attributed*: it fails the constraint on the missing field and is
+///   **not** rescued by `include_unattributed` (which concerns only the
+///   no-bundle case).
+/// - An **inactive** filter (no source and no confidence constraint) matches
+///   everything, so omitting the filter is byte-identical to pre-#3348
+///   behavior (AC2).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProvenanceFilter {
+    sources: Option<Vec<String>>,
+    min_confidence: Option<f64>,
+    include_unattributed: bool,
+}
+
+impl ProvenanceFilter {
+    /// Validate caller-supplied filter inputs and build a filter.
+    ///
+    /// Returns `Ok(None)` when there is no active constraint (no sources and
+    /// no minimum confidence) so callers can cheaply skip all filtering and
+    /// preserve byte-identical legacy behavior. `include_unattributed` on its
+    /// own does not activate a filter (it only modulates an otherwise-active
+    /// one).
+    ///
+    /// Merges the scalar `source` and the list `sources` into a single
+    /// any-of set (their union), de-duplicated while preserving order.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProvenanceFilterError::InvalidMinConfidence`] if `min_confidence`
+    ///   is NaN or outside `[0.0, 1.0]`.
+    /// - [`ProvenanceFilterError::EmptySourceList`] if a source list is
+    ///   supplied but empty.
+    pub fn validated(
+        source: Option<String>,
+        sources: Option<Vec<String>>,
+        min_confidence: Option<f64>,
+        include_unattributed: bool,
+    ) -> Result<Option<ProvenanceFilter>, ProvenanceFilterError> {
+        // An explicitly-supplied but empty list can never match; reject it
+        // rather than silently returning nothing (AC5).
+        if let Some(list) = &sources
+            && list.is_empty()
+        {
+            return Err(ProvenanceFilterError::EmptySourceList);
+        }
+
+        if let Some(c) = min_confidence
+            && (c.is_nan() || !(0.0..=1.0).contains(&c))
+        {
+            return Err(ProvenanceFilterError::InvalidMinConfidence { value: c });
+        }
+
+        // Union scalar + list, de-duplicated, order-preserving.
+        let mut merged: Vec<String> = Vec::new();
+        for s in source.into_iter().chain(sources.into_iter().flatten()) {
+            if !merged.contains(&s) {
+                merged.push(s);
+            }
+        }
+        let sources = if merged.is_empty() {
+            None
+        } else {
+            Some(merged)
+        };
+
+        if sources.is_none() && min_confidence.is_none() {
+            // No active constraint: caller should skip filtering entirely.
+            return Ok(None);
+        }
+
+        Ok(Some(ProvenanceFilter {
+            sources,
+            min_confidence,
+            include_unattributed,
+        }))
+    }
+
+    /// Whether this filter imposes any constraint (always `true` for a filter
+    /// returned by [`validated`](Self::validated), which returns `None`
+    /// otherwise).
+    pub fn is_active(&self) -> bool {
+        self.sources.is_some() || self.min_confidence.is_some()
+    }
+
+    /// Evaluate the predicate against the provenance bundle recorded on a
+    /// single version.
+    ///
+    /// `prov` is the `Option<Provenance>` for the *exact* version being
+    /// considered (e.g. the historical version resolved by a point-in-time
+    /// read), so the decision reflects provenance as recorded at that
+    /// coordinate.
+    pub fn matches(&self, prov: Option<&Provenance>) -> bool {
+        if !self.is_active() {
+            return true;
+        }
+        let Some(p) = prov else {
+            // No bundle at all: kept only if the caller opted in.
+            return self.include_unattributed;
+        };
+        if let Some(sources) = &self.sources {
+            match p.source() {
+                Some(s) if sources.iter().any(|want| want == s) => {}
+                _ => return false,
+            }
+        }
+        if let Some(min) = self.min_confidence {
+            match p.confidence() {
+                Some(c) if c >= min => {}
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
@@ -337,7 +500,7 @@ mod tests {
         assert_eq!(p.confidence(), None);
     }
 
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn test_provenance_json_omits_absent_fields() {
         let p = Provenance::builder().source("csv-import").build().unwrap();
@@ -348,7 +511,7 @@ mod tests {
         assert!(!json.contains("correlation_id"));
     }
 
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn test_provenance_deserialize_valid_round_trips() {
         let json = r#"{"source":"claude-mcp","confidence":0.8}"#;
@@ -380,7 +543,7 @@ mod tests {
         assert_eq!(p.source(), None);
     }
 
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn test_provenance_principal_json_round_trip_and_omission() {
         // Absent principal is omitted from JSON entirely.
@@ -399,11 +562,120 @@ mod tests {
         assert_eq!(legacy.principal(), None);
     }
 
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn test_provenance_deserialize_rejects_invalid_confidence() {
         let json = r#"{"confidence":2.0}"#;
         let result: Result<Provenance, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // ProvenanceFilter (Issue #3348)
+    // ------------------------------------------------------------------
+
+    fn prov(source: Option<&str>, confidence: Option<f64>) -> Provenance {
+        Provenance::from_parts(source.map(String::from), confidence, None, None, None).unwrap()
+    }
+
+    #[test]
+    fn filter_no_constraint_returns_none() {
+        assert_eq!(
+            ProvenanceFilter::validated(None, None, None, false),
+            Ok(None)
+        );
+        // include_unattributed alone does not activate a filter.
+        assert_eq!(
+            ProvenanceFilter::validated(None, None, None, true),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn filter_source_exact_and_any_of() {
+        let f = ProvenanceFilter::validated(Some("crm".into()), None, None, false)
+            .unwrap()
+            .unwrap();
+        assert!(f.matches(Some(&prov(Some("crm"), None))));
+        assert!(!f.matches(Some(&prov(Some("hr"), None))));
+        // Any-of via merged scalar + list.
+        let f =
+            ProvenanceFilter::validated(Some("crm".into()), Some(vec!["hr".into()]), None, false)
+                .unwrap()
+                .unwrap();
+        assert!(f.matches(Some(&prov(Some("crm"), None))));
+        assert!(f.matches(Some(&prov(Some("hr"), None))));
+        assert!(!f.matches(Some(&prov(Some("other"), None))));
+    }
+
+    #[test]
+    fn filter_min_confidence_is_inclusive() {
+        let f = ProvenanceFilter::validated(None, None, Some(0.8), false)
+            .unwrap()
+            .unwrap();
+        assert!(f.matches(Some(&prov(None, Some(0.8)))), "== bound included");
+        assert!(f.matches(Some(&prov(None, Some(0.9)))));
+        assert!(!f.matches(Some(&prov(None, Some(0.79)))));
+        // Missing confidence fails the constraint.
+        assert!(!f.matches(Some(&prov(Some("crm"), None))));
+    }
+
+    #[test]
+    fn filter_unattributed_excluded_unless_opted_in() {
+        let f = ProvenanceFilter::validated(None, None, Some(0.5), false)
+            .unwrap()
+            .unwrap();
+        assert!(!f.matches(None), "no bundle excluded by default");
+        let f = ProvenanceFilter::validated(None, None, Some(0.5), true)
+            .unwrap()
+            .unwrap();
+        assert!(
+            f.matches(None),
+            "include_unattributed re-includes no-bundle"
+        );
+        // But a partial bundle is attributed and still fails the field.
+        assert!(!f.matches(Some(&prov(Some("crm"), None))));
+    }
+
+    #[test]
+    fn filter_combined_source_and_confidence_is_and() {
+        let f = ProvenanceFilter::validated(Some("crm".into()), None, Some(0.8), false)
+            .unwrap()
+            .unwrap();
+        assert!(f.matches(Some(&prov(Some("crm"), Some(0.9)))));
+        assert!(
+            !f.matches(Some(&prov(Some("crm"), Some(0.5)))),
+            "conf fails"
+        );
+        assert!(
+            !f.matches(Some(&prov(Some("hr"), Some(0.9)))),
+            "source fails"
+        );
+    }
+
+    #[test]
+    fn filter_rejects_invalid_inputs() {
+        for bad in [1.5_f64, -0.1, f64::NAN] {
+            let err = ProvenanceFilter::validated(None, None, Some(bad), false).unwrap_err();
+            assert_eq!(err.field(), "min_confidence");
+        }
+        let err = ProvenanceFilter::validated(None, Some(vec![]), None, false).unwrap_err();
+        assert_eq!(err, ProvenanceFilterError::EmptySourceList);
+        assert_eq!(err.field(), "provenance_sources");
+    }
+
+    #[test]
+    fn filter_source_dedup_preserves_order() {
+        let f = ProvenanceFilter::validated(
+            Some("crm".into()),
+            Some(vec!["crm".into(), "hr".into()]),
+            None,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        // Duplicate "crm" merged; both still match.
+        assert!(f.matches(Some(&prov(Some("crm"), None))));
+        assert!(f.matches(Some(&prov(Some("hr"), None))));
     }
 }
