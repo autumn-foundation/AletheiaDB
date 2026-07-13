@@ -6966,12 +6966,22 @@ mod server_unit_tests {
             serde_json::from_str(&AletheiaMcpServer::extract_text(ok)).unwrap();
         assert!(val.get("error").is_none(), "slot released, query ok: {val}");
         assert_eq!(val["row_count"].as_u64(), Some(1));
-        // No worker is left occupying a slot after completion.
-        assert_eq!(
-            server.in_flight_queries.load(super::Ordering::Acquire),
-            0,
-            "workers must release their slot on completion"
-        );
+        // No worker is left occupying a slot after completion. The worker
+        // releases its slot when its closure ends (the `InFlightGuard` drops),
+        // which is ordered strictly *after* it sends the result the caller
+        // already received above — so under parallel test load the guard-drop
+        // can lag the received result by a scheduling quantum. Wait
+        // deterministically (bounded) for the count to fall back to 0 rather
+        // than racing the worker with an immediate assert; a real slot leak
+        // still fails the test when the deadline elapses.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while server.in_flight_queries.load(super::Ordering::Acquire) != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "workers must release their slot on completion (still occupied after 5s)"
+            );
+            std::thread::yield_now();
+        }
     }
 
     /// FIX 2 (Issue #3368): the inline `timeout_ms == 0` path never spawns a
