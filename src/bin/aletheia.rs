@@ -14,8 +14,8 @@ use std::process::{Command, Stdio};
 use aletheiadb::provenance_chain::ChainHead;
 use aletheiadb::provenance_chain::{ChainVerification, EntityKind};
 use aletheiadb::{
-    AletheiaDB, Edge, EdgeId, GLOBAL_INTERNER, Node, NodeId, PropertyMap, PropertyMapBuilder,
-    PropertyValue,
+    AletheiaDB, Edge, EdgeId, GLOBAL_INTERNER, Node, NodeId, PitrTarget, PropertyMap,
+    PropertyMapBuilder, PropertyValue, Timestamp,
 };
 
 const DEFAULT_PID_FILE: &str = ".aletheia/daemon.pid";
@@ -95,6 +95,7 @@ Usage:\n\
   aletheia daemon status [--pid-file PATH]\n\
   aletheia backup <output_path>\n\
   aletheia restore <input_path>\n\
+  aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n> | --latest] [--dry-run]\n\
   aletheia verify [--entity <node|edge>:<id>] [--export-head PATH] [--against PATH] [--json]"
     );
     // The neo4j-csv import verb is gated behind the `import` feature; only advertise it
@@ -128,6 +129,13 @@ Usage:\n\
   backup  — Write a portable .albk artifact capturing full bi-temporal state.\n\
             Opens the database via ALETHEIADB_CONFIG or ALETHEIADB_DATA_DIR.\n\
   restore — Restore a .albk artifact into ALETHEIADB_DATA_DIR (must be empty).\n\
+            With --wal-archive <dir>, perform a point-in-time restore (PITR):\n\
+            replay the archived WAL over the base to --as-of <ts> or --lsn <n>\n\
+            (inclusive, at-or-before). An in-window target does a partial\n\
+            restore; no target (or --latest) replays the full archive to its\n\
+            tail; an explicit target above the tail is an error. --dry-run\n\
+            reports the achievable window and the count of transactions\n\
+            discarded, without restoring.\n\
 \nProvenance hash chain (Issue #3351):\n\
   verify  — Verify the tamper-evident provenance hash chain over recorded history.\n\
             Default: full-chain verify. --entity <node|edge>:<id> scopes to one entity.\n\
@@ -185,20 +193,152 @@ fn handle_backup(args: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// `aletheia restore <input_path>` — restore a backup artifact into `ALETHEIADB_DATA_DIR`.
+/// `aletheia restore <input_path>` — restore a backup artifact.
+///
+/// Two modes:
+/// * **Plain restore** (no `--wal-archive`): materialize the base `.albk` into
+///   `ALETHEIADB_DATA_DIR` (unchanged #3217 behavior).
+/// * **Point-in-time restore** (`--wal-archive <dir>`, Issue #3374): replay the
+///   archived WAL chain over the base to a target transaction-time coordinate
+///   (`--as-of <iso8601|micros>` XOR `--lsn <n>`). An in-window target does a
+///   partial restore; no target (or `--latest`) replays the whole archive to
+///   its tail; an explicit target above the tail is rejected (F2). `--dry-run`
+///   prints the achievable window + blast radius as JSON without side effects.
 fn handle_restore(args: Vec<String>) -> Result<(), String> {
     let path = args
         .first()
-        .ok_or_else(|| "usage: aletheia restore <input_path>".to_string())?;
-    let data_dir = env::var("ALETHEIADB_DATA_DIR")
+        .filter(|a| !a.starts_with("--"))
+        .ok_or_else(|| "usage: aletheia restore <input_path> [--wal-archive DIR [--as-of TS | --lsn N] [--dry-run]]".to_string())?;
+    let albk = std::path::Path::new(path);
+
+    let wal_archive = arg_value(&args, "--wal-archive");
+    let as_of = arg_value(&args, "--as-of");
+    let lsn = arg_value(&args, "--lsn");
+    let latest = args.iter().any(|a| a == "--latest");
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+
+    // Plain (#3217) restore: no PITR flags at all.
+    if wal_archive.is_none() && as_of.is_none() && lsn.is_none() && !latest && !dry_run {
+        let data_dir = required_data_dir()?;
+        AletheiaDB::restore_to_data_dir(albk, &data_dir)
+            .map_err(|e| format!("restore failed: {e}"))?;
+        println!("{}", restore_success_json(&data_dir)?);
+        return Ok(());
+    }
+
+    // Point-in-time restore requires the WAL archive.
+    let wal_archive = wal_archive.ok_or_else(|| {
+        "point-in-time restore requires --wal-archive <dir> (the archived WAL chain)".to_string()
+    })?;
+    let wal_archive = PathBuf::from(wal_archive);
+
+    // Resolve the explicit target: --as-of XOR --lsn (both optional).
+    let target = parse_pitr_target(&as_of, &lsn)?;
+
+    // `--latest` is an explicit "restore to the archived tail" alias; a bare
+    // `--wal-archive` with no target means the same thing. Both are mutually
+    // exclusive with an explicit `--as-of`/`--lsn` target.
+    if latest && target.is_some() {
+        return Err(
+            "--latest is mutually exclusive with --as-of/--lsn (it targets the archived tail)"
+                .to_string(),
+        );
+    }
+
+    if dry_run {
+        #[cfg(feature = "serde")]
+        {
+            let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, target)
+                .map_err(|e| format!("dry-run failed: {e}"))?;
+            let rendered = serde_json::to_string(&plan)
+                .map_err(|e| format!("failed to render JSON output: {e}"))?;
+            println!("{rendered}");
+            return Ok(());
+        }
+        #[cfg(not(feature = "serde"))]
+        {
+            let _ = (albk, &wal_archive, target);
+            return Err(
+                "`--dry-run` JSON output requires the `serde` feature (rebuild with --features serde)"
+                    .to_string(),
+            );
+        }
+    }
+
+    let data_dir = required_data_dir()?;
+
+    match target {
+        // In-window target: partial restore, stopping at-or-before the target.
+        Some(t) => {
+            AletheiaDB::restore_to_data_dir_at(albk, &wal_archive, t, &data_dir)
+                .map_err(|e| format!("point-in-time restore failed: {e}"))?;
+        }
+        // No explicit target (or `--latest`): full replay to the archived tail.
+        // Resolve the tail coordinate from the window and restore to it — the
+        // latest coordinate is in-window (an above-tail explicit target would be
+        // rejected, Issue #3374 F2).
+        None => {
+            let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, None)
+                .map_err(|e| format!("failed to resolve archive tail: {e}"))?;
+            AletheiaDB::restore_to_data_dir_at(
+                albk,
+                &wal_archive,
+                PitrTarget::Lsn(plan.latest.lsn),
+                &data_dir,
+            )
+            .map_err(|e| format!("point-in-time restore failed: {e}"))?;
+        }
+    }
+    println!("{}", restore_success_json(&data_dir)?);
+    Ok(())
+}
+
+/// Resolve the mutually-exclusive `--as-of` / `--lsn` PITR target flags.
+///
+/// Returns `None` when neither is set (a valid state only for `--dry-run`,
+/// which then reports the whole window). Errors if both are set.
+fn parse_pitr_target(
+    as_of: &Option<String>,
+    lsn: &Option<String>,
+) -> Result<Option<PitrTarget>, String> {
+    match (as_of, lsn) {
+        (Some(_), Some(_)) => {
+            Err("--as-of and --lsn are mutually exclusive; pass exactly one".to_string())
+        }
+        (Some(ts), None) => Ok(Some(PitrTarget::AsOf(parse_cli_timestamp(ts)?))),
+        (None, Some(n)) => {
+            let n = n
+                .parse::<u64>()
+                .map_err(|e| format!("invalid --lsn value '{n}': {e}"))?;
+            Ok(Some(PitrTarget::Lsn(n)))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// Resolve the mandatory `ALETHEIADB_DATA_DIR` target directory for a restore.
+fn required_data_dir() -> Result<PathBuf, String> {
+    env::var("ALETHEIADB_DATA_DIR")
         .map(PathBuf::from)
         .map_err(|_| {
             "ALETHEIADB_DATA_DIR must be set to restore into a durable directory".to_string()
-        })?;
-    AletheiaDB::restore_to_data_dir(std::path::Path::new(path), &data_dir)
-        .map_err(|e| format!("restore failed: {e}"))?;
-    println!("{}", restore_success_json(&data_dir)?);
-    Ok(())
+        })
+}
+
+/// Parse a CLI timestamp: RFC 3339 / ISO 8601, or microseconds since the epoch.
+fn parse_cli_timestamp(s: &str) -> Result<Timestamp, String> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(Timestamp::from(dt.timestamp_micros()));
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
+    }
+    if let Ok(micros) = s.parse::<i64>() {
+        return Ok(Timestamp::from(micros));
+    }
+    Err(format!(
+        "invalid timestamp '{s}': expected ISO 8601 (e.g. 2024-01-15T10:00:00Z) or microseconds since epoch"
+    ))
 }
 
 /// `aletheia verify` — verify the tamper-evident provenance hash chain
@@ -1803,6 +1943,47 @@ mod tests {
     fn handle_restore_missing_arg_returns_usage_error() {
         let err = handle_restore(vec![]).unwrap_err();
         assert!(err.contains("usage:"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_pitr_target_rejects_both_flags() {
+        let err = parse_pitr_target(&Some("100".to_string()), &Some("5".to_string())).unwrap_err();
+        assert!(
+            err.contains("mutually exclusive"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_pitr_target_resolves_each_flag() {
+        assert!(matches!(
+            parse_pitr_target(&None, &Some("42".to_string())).unwrap(),
+            Some(PitrTarget::Lsn(42))
+        ));
+        assert!(matches!(
+            parse_pitr_target(&Some("1000".to_string()), &None).unwrap(),
+            Some(PitrTarget::AsOf(_))
+        ));
+        assert!(parse_pitr_target(&None, &None).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_cli_timestamp_accepts_rfc3339_and_micros() {
+        assert!(parse_cli_timestamp("2024-01-15T10:00:00Z").is_ok());
+        assert!(parse_cli_timestamp("1705312800000000").is_ok());
+        assert!(parse_cli_timestamp("not-a-time").is_err());
+    }
+
+    #[test]
+    fn handle_restore_pitr_without_wal_archive_errors() {
+        // A PITR target flag without --wal-archive is a usage error.
+        let err = handle_restore(vec![
+            "base.albk".to_string(),
+            "--lsn".to_string(),
+            "5".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("--wal-archive"), "unexpected error: {err}");
     }
 
     #[test]

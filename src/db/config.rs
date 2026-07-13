@@ -28,7 +28,7 @@ fn bootstrap_timestamp(
 ) -> crate::core::temporal::Timestamp {
     let mut max_timestamp = time::now();
 
-    for node in current.all_nodes() {
+    for node in current.iter_nodes() {
         if let Some(commit_ts) = node.metadata.commit_timestamp
             && commit_ts > max_timestamp
         {
@@ -36,7 +36,7 @@ fn bootstrap_timestamp(
         }
     }
 
-    for edge in current.all_edges() {
+    for edge in current.iter_edges() {
         if let Some(commit_ts) = edge.metadata.commit_timestamp
             && commit_ts > max_timestamp
         {
@@ -72,7 +72,7 @@ fn bootstrap_timestamp(
     max_timestamp
 }
 
-fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
+pub(crate) fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
     let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
     let mut current_timestamp = db.current_timestamp.lock().map_err(|_| {
         crate::core::error::Error::Storage(StorageError::LockPoisoned {
