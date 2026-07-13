@@ -22,10 +22,12 @@
 
 use crate::core::GLOBAL_INTERNER;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::StringInternerData;
 use super::{INTERNER_MAGIC, MANIFEST_VERSION};
+use crate::encryption::cipher::Cipher;
 
 /// Save the global string interner to disk with CRC32 checksum using atomic write.
 ///
@@ -48,6 +50,16 @@ use super::{INTERNER_MAGIC, MANIFEST_VERSION};
 /// - The file cannot be created or written to.
 /// - The temporary file cannot be renamed to the target path.
 pub fn save_string_interner(path: &Path) -> Result<()> {
+    save_string_interner_with_cipher(path, None)
+}
+
+/// Save the global string interner, optionally encrypting it at rest
+/// (Issue #481). With `cipher == None` this is identical to
+/// [`save_string_interner`].
+pub fn save_string_interner_with_cipher(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<()> {
     let strings = GLOBAL_INTERNER.get_all_strings();
 
     let data = StringInternerData {
@@ -57,7 +69,7 @@ pub fn save_string_interner(path: &Path) -> Result<()> {
         strings,
     };
 
-    super::common::save_encoded_with_crc(&data, path)
+    super::common::save_encoded_maybe_encrypted(&data, path, cipher)
 }
 
 /// Load the string interner from disk and validate CRC32 checksum.
@@ -86,10 +98,26 @@ pub fn save_string_interner(path: &Path) -> Result<()> {
 /// - The magic bytes or version are invalid.
 /// - The string count exceeds [`MAX_STRING_COUNT`](super::MAX_STRING_COUNT) or length exceeds [`MAX_STRING_LENGTH`](super::MAX_STRING_LENGTH) (DoS protection).
 pub fn load_string_interner(path: &Path) -> Result<StringInternerData> {
-    let data: StringInternerData = super::common::load_encoded_with_crc(
+    load_string_interner_with_cipher(path, None)
+}
+
+/// Load the string interner, transparently decrypting it if it was written
+/// encrypted (Issue #481). A legacy plaintext interner is loaded even when a
+/// cipher is supplied (header sniffing).
+///
+/// # Errors
+///
+/// Same as [`load_string_interner`], plus a structured error if the file is
+/// encrypted but no cipher is supplied or decryption fails.
+pub fn load_string_interner_with_cipher(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<StringInternerData> {
+    let data: StringInternerData = super::common::load_encoded_maybe_encrypted(
         path,
         super::MAX_STRING_INTERNER_FILE_SIZE,
         "String interner",
+        cipher,
     )?;
 
     // Validate magic bytes
@@ -216,6 +244,34 @@ mod tests {
         assert!(loaded.strings.contains(&"test_string_1".to_string()));
         assert!(loaded.strings.contains(&"test_string_2".to_string()));
         assert!(loaded.strings.contains(&"test_string_3".to_string()));
+    }
+
+    #[test]
+    fn test_string_interner_encrypted_round_trip() {
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("interner.idx");
+        let cipher: Arc<dyn Cipher> = {
+            let mut key = Zeroizing::new([0u8; 32]);
+            key[1] = 0x33;
+            Arc::new(Aes256GcmCipher::new(&key))
+        };
+
+        let s = format!("enc_str_{}", std::process::id());
+        GLOBAL_INTERNER.intern(&s).unwrap();
+
+        save_string_interner_with_cipher(&path, Some(&cipher)).unwrap();
+        assert!(super::super::common::is_encrypted_index(
+            &fs::read(&path).unwrap()
+        ));
+
+        let loaded = load_string_interner_with_cipher(&path, Some(&cipher)).unwrap();
+        assert!(loaded.strings.contains(&s));
+
+        // Fails closed without a cipher.
+        assert!(load_string_interner_with_cipher(&path, None).is_err());
     }
 
     #[test]

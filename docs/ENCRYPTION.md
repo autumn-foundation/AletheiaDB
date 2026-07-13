@@ -9,9 +9,24 @@ media.
 AletheiaDB encrypts data across all persistence layers:
 
 - **WAL segments** -- Transaction log entries (payload encrypted, headers as AAD)
-- **Index files** -- Graph structure, vector embeddings, temporal version chains
+- **Index files** -- The persisted graph, temporal version chains, string
+  interner, manifest, temporal-adjacency index, and each vector index's
+  metadata and NodeId↔key mappings. Each file is encrypted **whole-file** (the
+  entire serialized/compressed buffer) behind a small plaintext detection
+  header (Issue #481). See the note below for the one current exception (the
+  native HNSW `current.usearch` file).
 - **Cold storage (Redb)** -- Compressed historical versions
 - **Checkpoint files** -- Database state snapshots
+
+> **Vector index caveat (v1):** the native HNSW graph file
+> (`current.usearch`) and its `current.usearch.mappings` sidecar are written
+> and memory-mapped directly by the bundled `usearch` C++ library through a
+> filesystem path, so they are **not** yet encrypted at rest. The vector
+> index's `meta.idx` and `mappings.idx` (dimensions, metric, HNSW parameters,
+> and the NodeId↔usearch-key table) **are** encrypted. Raw embedding vectors
+> therefore still reside in cleartext inside `current.usearch`; encrypting that
+> file (a buffered decrypt-to-temp shuffle around the native mmap loader, which
+> forgoes mmap for encrypted indexes) is a tracked follow-up.
 
 ### Threat Model
 
@@ -233,7 +248,7 @@ Master Encryption Key (MEK) -- 256-bit, from provider
 | Layer | Encrypted | Plaintext (AAD) | Notes |
 |-------|-----------|-----------------|-------|
 | WAL | Payload bytes (offset 25+) | 24-byte header + 1-byte op type | Header is authenticated via AAD |
-| Index files | Full serialized content | -- | Encrypted before writing to disk |
+| Index files | Full serialized/compressed buffer (incl. CRC) | 10-byte header (`AEIX`, format, algorithm id, key version) | Whole-file AEAD; header is authenticated via AAD. Native `current.usearch` HNSW file + sidecar are the v1 exception (see Overview). Encrypted files can't be mmapped, so `use_mmap` reads fall back to buffered decrypt. |
 | Cold storage | Historical version data | -- | Encrypted before Redb insertion |
 | Checkpoints | Full snapshot data | -- | Encrypted before writing to disk |
 
@@ -335,7 +350,7 @@ algorithms are designed for high throughput:
 | Layer | Expected Overhead | Notes |
 |-------|-------------------|-------|
 | WAL | <3% throughput reduction | Only payload is encrypted; header stays plaintext |
-| Index persistence | <5% write time increase | One-time cost at save; no impact on in-memory queries |
+| Index persistence | <5% write time increase | One-time cost at save; no impact on in-memory queries. Encrypted index files are read whole and decrypted into a buffer, so `use_mmap` graph reads fall back to buffered decrypt (no live mmap of ciphertext). |
 | Cold storage | <5% write time increase | Encryption piggybacks on existing serialization |
 | Checkpoints | <5% write time increase | Encrypted during periodic snapshot writes |
 

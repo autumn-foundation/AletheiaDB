@@ -18,15 +18,14 @@
 //! `manifest.idx` file is updated atomically. If a crash occurs during writing, the original
 //! manifest remains untouched, preventing database corruption.
 
-use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use crc32fast::Hasher;
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::IndexManifest;
 use super::{MANIFEST_MAGIC, MANIFEST_VERSION};
+use crate::encryption::cipher::Cipher;
 
 impl IndexManifest {
     /// Create a new empty manifest.
@@ -104,7 +103,18 @@ impl IndexManifest {
 /// - The file cannot be written (e.g., permission denied, disk full).
 /// - The atomic rename operation fails.
 pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
-    super::common::save_encoded_with_crc(manifest, path)
+    save_manifest_with_cipher(manifest, path, None)
+}
+
+/// Save the manifest, optionally encrypting it at rest (Issue #481).
+///
+/// With `cipher == None` this is byte-for-byte identical to [`save_manifest`].
+pub fn save_manifest_with_cipher(
+    manifest: &IndexManifest,
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<()> {
+    super::common::save_encoded_maybe_encrypted(manifest, path, cipher)
 }
 
 /// Load manifest from disk and validate CRC32 checksum.
@@ -134,54 +144,37 @@ pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
 /// - The CRC32 checksum verification fails (indicating corruption).
 /// - The file has invalid magic bytes or an unsupported version.
 pub fn load_manifest(path: &Path) -> Result<IndexManifest> {
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > super::MAX_MANIFEST_FILE_SIZE {
-        return Err(IndexPersistenceError::SizeLimitExceeded {
-            message: format!(
-                "Manifest file size {} exceeds limit {}",
-                metadata.len(),
-                super::MAX_MANIFEST_FILE_SIZE
-            ),
-        });
-    }
+    load_manifest_with_cipher(path, None)
+}
 
-    let bytes = fs::read(path)?;
-
-    // Check minimum size (must have at least 4 bytes for CRC)
-    if bytes.len() < 4 {
-        return Err(IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: "File too small to contain CRC32 checksum".into(),
-        });
-    }
-
-    // Split data and checksum
-    let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
-    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
-        IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: "Invalid CRC32 checksum format".into(),
-        }
-    })?);
-
-    // Verify checksum
-    let mut hasher = Hasher::new();
-    hasher.update(data);
-    let computed_checksum = hasher.finalize();
-
-    if computed_checksum != stored_checksum {
-        return Err(IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: format!(
-                "CRC32 checksum mismatch: expected {}, got {}",
-                stored_checksum, computed_checksum
-            )
-            .into(),
-        });
-    }
+/// Load the manifest, transparently decrypting it if it was written encrypted
+/// (Issue #481). A legacy plaintext manifest is loaded even when a cipher is
+/// supplied (header sniffing). With `cipher == None` and a plaintext file this
+/// is identical to [`load_manifest`].
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file does not exist or cannot be read.
+/// - The file size exceeds `MAX_MANIFEST_FILE_SIZE`.
+/// - The file is encrypted but no cipher is supplied, or decryption fails.
+/// - The CRC32 checksum verification fails (indicating corruption).
+/// - The file has invalid magic bytes or an unsupported version.
+pub fn load_manifest_with_cipher(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<IndexManifest> {
+    // Reads the file (decrypting if it carries the encrypted-index header),
+    // verifies + strips the trailing CRC32, and returns the bitcode payload.
+    let data = super::common::read_and_verify_crc_maybe_encrypted(
+        path,
+        super::MAX_MANIFEST_FILE_SIZE,
+        "Manifest",
+        cipher,
+    )?;
 
     // Decode and validate
-    let manifest: IndexManifest = bitcode::decode(data)?;
+    let manifest: IndexManifest = bitcode::decode(&data)?;
 
     // Validate magic bytes
     if manifest.magic != MANIFEST_MAGIC {
@@ -207,6 +200,7 @@ pub fn load_manifest(path: &Path) -> Result<IndexManifest> {
 mod tests {
     use super::*;
     use crate::storage::index_persistence::formats::*;
+    use std::fs;
     use tempfile::tempdir;
 
     #[test]
@@ -237,6 +231,38 @@ mod tests {
         assert_eq!(loaded.vector_indexes.len(), 1);
         assert_eq!(loaded.vector_indexes[0].property_name, "embedding");
         assert!(loaded.string_interner.is_some());
+    }
+
+    #[test]
+    fn test_manifest_encrypted_round_trip() {
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("manifest.idx");
+        let cipher: Arc<dyn Cipher> = {
+            let mut key = Zeroizing::new([0u8; 32]);
+            key[4] = 0x88;
+            Arc::new(Aes256GcmCipher::new(&key))
+        };
+
+        let manifest = IndexManifest::new(4242);
+        save_manifest_with_cipher(&manifest, &path, Some(&cipher)).unwrap();
+        assert!(super::super::common::is_encrypted_index(
+            &fs::read(&path).unwrap()
+        ));
+
+        let loaded = load_manifest_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.lsn, 4242);
+        assert_eq!(loaded.magic, MANIFEST_MAGIC);
+
+        // Fails closed without a cipher; a legacy plaintext manifest still loads.
+        assert!(load_manifest_with_cipher(&path, None).is_err());
+        save_manifest(&manifest, &path).unwrap();
+        assert_eq!(
+            load_manifest_with_cipher(&path, Some(&cipher)).unwrap().lsn,
+            4242
+        );
     }
 
     #[test]

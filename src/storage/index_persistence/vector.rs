@@ -5,6 +5,7 @@
 //! - bitcode for metadata and ID mappings
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::error::{IndexPersistenceError, Result};
@@ -12,6 +13,7 @@ use super::formats::{
     PersistedHnswConfig, VectorIndexData, VectorIndexMeta, VectorMappingsData, VectorSnapshotMeta,
 };
 use super::{MANIFEST_VERSION, VECTOR_META_MAGIC};
+use crate::encryption::cipher::Cipher;
 
 /// Save vector index metadata with CRC32 checksum.
 ///
@@ -22,7 +24,20 @@ use super::{MANIFEST_VERSION, VECTOR_META_MAGIC};
 ///
 /// Returns an error if serialization or disk I/O fails.
 pub fn save_vector_meta(meta: &VectorIndexMeta, path: &Path) -> Result<()> {
-    super::common::save_encoded_with_crc(meta, path)
+    save_vector_meta_with_cipher(meta, path, None)
+}
+
+/// Save vector index metadata, optionally encrypting it at rest (Issue #481).
+///
+/// # Errors
+///
+/// Returns an error if serialization, encryption, or disk I/O fails.
+pub fn save_vector_meta_with_cipher(
+    meta: &VectorIndexMeta,
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<()> {
+    super::common::save_encoded_maybe_encrypted(meta, path, cipher)
 }
 
 /// Load vector index metadata and validate CRC32 checksum.
@@ -35,11 +50,26 @@ pub fn save_vector_meta(meta: &VectorIndexMeta, path: &Path) -> Result<()> {
 /// Returns an error if the file is missing, corrupted, exceeds `MAX_VECTOR_INDEX_FILE_SIZE`,
 /// or if the manifest version/magic bytes do not match.
 pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
+    load_vector_meta_with_cipher(path, None)
+}
+
+/// Load vector index metadata, transparently decrypting it if written
+/// encrypted (Issue #481).
+///
+/// # Errors
+///
+/// Same as [`load_vector_meta`], plus a structured error if the file is
+/// encrypted but no cipher is supplied or decryption fails.
+pub fn load_vector_meta_with_cipher(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<VectorIndexMeta> {
     // Metadata should be small, but use standard limit for consistency
-    let meta: VectorIndexMeta = super::common::load_encoded_with_crc(
+    let meta: VectorIndexMeta = super::common::load_encoded_maybe_encrypted(
         path,
         super::MAX_VECTOR_INDEX_FILE_SIZE,
         "Vector index",
+        cipher,
     )?;
 
     if meta.magic != VECTOR_META_MAGIC {
@@ -69,7 +99,20 @@ pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
 ///
 /// Returns an error if serialization or disk I/O fails.
 pub fn save_vector_mappings(mappings: &VectorMappingsData, path: &Path) -> Result<()> {
-    super::common::save_encoded_with_crc(mappings, path)
+    save_vector_mappings_with_cipher(mappings, path, None)
+}
+
+/// Save vector ID mappings, optionally encrypting them at rest (Issue #481).
+///
+/// # Errors
+///
+/// Returns an error if serialization, encryption, or disk I/O fails.
+pub fn save_vector_mappings_with_cipher(
+    mappings: &VectorMappingsData,
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<()> {
+    super::common::save_encoded_maybe_encrypted(mappings, path, cipher)
 }
 
 /// Load vector ID mappings and validate CRC32 checksum.
@@ -81,7 +124,26 @@ pub fn save_vector_mappings(mappings: &VectorMappingsData, path: &Path) -> Resul
 ///
 /// Returns an error if the file is missing, corrupted, or exceeds `MAX_VECTOR_INDEX_FILE_SIZE`.
 pub fn load_vector_mappings(path: &Path) -> Result<VectorMappingsData> {
-    super::common::load_encoded_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE, "Vector index")
+    load_vector_mappings_with_cipher(path, None)
+}
+
+/// Load vector ID mappings, transparently decrypting them if written encrypted
+/// (Issue #481).
+///
+/// # Errors
+///
+/// Same as [`load_vector_mappings`], plus a structured error if the file is
+/// encrypted but no cipher is supplied or decryption fails.
+pub fn load_vector_mappings_with_cipher(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<VectorMappingsData> {
+    super::common::load_encoded_maybe_encrypted(
+        path,
+        super::MAX_VECTOR_INDEX_FILE_SIZE,
+        "Vector index",
+        cipher,
+    )
 }
 
 /// Save vector snapshot metadata with CRC32 checksum.
@@ -230,6 +292,72 @@ mod tests {
         assert_eq!(loaded.count, 3);
         assert_eq!(loaded.mappings.len(), 3);
         assert_eq!(loaded.deleted_ids, vec![99]);
+    }
+
+    // ── Encryption-at-rest tests (Issue #481) ────────────────────────
+
+    fn enc_test_cipher() -> Arc<dyn Cipher> {
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+        let mut key = Zeroizing::new([0u8; 32]);
+        key[3] = 0x9C;
+        Arc::new(Aes256GcmCipher::new(&key))
+    }
+
+    #[test]
+    fn test_vector_meta_encrypted_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("meta.idx");
+        let cipher = enc_test_cipher();
+
+        let config = PersistedHnswConfig {
+            m: 16,
+            ef_construction: 128,
+            ef_search: 64,
+        };
+        let meta = new_vector_meta("embedding", 384, 0, config);
+
+        save_vector_meta_with_cipher(&meta, &path, Some(&cipher)).unwrap();
+        assert!(super::super::common::is_encrypted_index(
+            &std::fs::read(&path).unwrap()
+        ));
+
+        let loaded = load_vector_meta_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.property_name, "embedding");
+        assert_eq!(loaded.dimensions, 384);
+
+        // Fails closed without a cipher; legacy plaintext still loads with one.
+        assert!(load_vector_meta_with_cipher(&path, None).is_err());
+        save_vector_meta(&meta, &path).unwrap();
+        assert_eq!(
+            load_vector_meta_with_cipher(&path, Some(&cipher))
+                .unwrap()
+                .dimensions,
+            384
+        );
+    }
+
+    #[test]
+    fn test_vector_mappings_encrypted_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mappings.idx");
+        let cipher = enc_test_cipher();
+
+        let mut mappings = new_vector_mappings();
+        mappings.count = 1;
+        mappings.mappings.push(VectorMapping {
+            node_id: 5,
+            usearch_key: 500,
+        });
+
+        save_vector_mappings_with_cipher(&mappings, &path, Some(&cipher)).unwrap();
+        assert!(super::super::common::is_encrypted_index(
+            &std::fs::read(&path).unwrap()
+        ));
+
+        let loaded = load_vector_mappings_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.count, 1);
+        assert_eq!(loaded.mappings[0].usearch_key, 500);
     }
 
     #[test]

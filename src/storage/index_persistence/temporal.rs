@@ -49,6 +49,7 @@ use super::formats::{
 };
 use super::graph::{persist_property_map, restore_property_map};
 use super::{MANIFEST_VERSION, TEMPORAL_MAGIC};
+use crate::encryption::cipher::Cipher;
 
 /// Convert an in-memory [`Provenance`] into its persisted representation.
 pub(crate) fn persist_provenance(provenance: Option<&Provenance>) -> Option<PersistedProvenance> {
@@ -682,7 +683,21 @@ pub fn restore_into_historical_storage(
 ///
 /// Returns an error if serialization or disk I/O fails.
 pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> {
-    super::common::save_encoded_with_crc(data, path)
+    save_temporal_index_with_cipher(data, path, None)
+}
+
+/// Save temporal index data, optionally encrypting it at rest (Issue #481).
+/// With `cipher == None` this is identical to [`save_temporal_index`].
+///
+/// # Errors
+///
+/// Returns an error if serialization, encryption, or disk I/O fails.
+pub fn save_temporal_index_with_cipher(
+    data: &TemporalIndexData,
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<()> {
+    super::common::save_encoded_maybe_encrypted(data, path, cipher)
 }
 
 /// Load temporal index data from disk and validate CRC32 checksum.
@@ -704,7 +719,23 @@ pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> 
 ///
 /// Returns an error if the file is missing, corrupted, or incompatible.
 pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
-    decode_temporal_blob(path)
+    decode_temporal_blob(path, None)
+}
+
+/// Load temporal index data, transparently decrypting it if written encrypted
+/// (Issue #481). A legacy plaintext temporal index is loaded even when a
+/// cipher is supplied (header sniffing), and all four version fallbacks run on
+/// the decrypted bytes.
+///
+/// # Errors
+///
+/// Same as [`load_temporal_index`], plus a structured error if the file is
+/// encrypted but no cipher is supplied or decryption fails.
+pub fn load_temporal_index_with_cipher(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<TemporalIndexData> {
+    decode_temporal_blob(path, cipher)
 }
 
 /// Decode temporal index bytes, transparently upgrading pre-fidelity
@@ -726,14 +757,18 @@ pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
 /// [`super::common::read_and_verify_crc`]; all candidate decodes are
 /// attempted against that single in-memory buffer, avoiding extra disk
 /// reads and checksum passes on the (common, cheap) legacy-fallback paths.
-fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
+fn decode_temporal_blob(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<TemporalIndexData> {
     use crate::storage::index_persistence::formats::legacy_v2::TemporalIndexDataV2;
     use crate::storage::index_persistence::formats::legacy_v3::TemporalIndexDataV3;
 
-    let bytes = super::common::read_and_verify_crc(
+    let bytes = super::common::read_and_verify_crc_maybe_encrypted(
         path,
         super::MAX_TEMPORAL_INDEX_FILE_SIZE,
         "Temporal index",
+        cipher,
     )?;
 
     if let Ok(data) = bitcode::decode::<TemporalIndexData>(&bytes)
@@ -854,6 +889,63 @@ mod tests {
         assert_eq!(loaded.node_versions.len(), 1);
         assert_eq!(loaded.node_anchors.len(), 1);
         assert_eq!(loaded.node_versions[0].vector_snapshot_id, Some(42));
+    }
+
+    #[test]
+    fn test_temporal_index_encrypted_round_trip() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("temporal.idx");
+        let cipher: Arc<dyn Cipher> = {
+            let mut key = Zeroizing::new([0u8; 32]);
+            key[2] = 0x7F;
+            Arc::new(Aes256GcmCipher::new(&key))
+        };
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let mut data = new_temporal_index_data();
+        data.node_versions.push(NodeVersionEntry {
+            version_id: 100,
+            node_id: 1,
+            label_idx: label.as_u32(),
+            valid_from: 1000,
+            valid_from_logical: 0,
+            valid_to: Some(2000),
+            valid_to_logical: Some(0),
+            tx_time: 1000,
+            tx_time_logical: 0,
+            version_type: PersistedVersionType::Anchor,
+            properties: PersistedPropertyMap { entries: vec![] },
+            vector_snapshot_id: Some(42),
+            provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
+        });
+
+        save_temporal_index_with_cipher(&data, &path, Some(&cipher)).unwrap();
+        assert!(super::super::common::is_encrypted_index(
+            &std::fs::read(&path).unwrap()
+        ));
+
+        let loaded = load_temporal_index_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.node_versions.len(), 1);
+        assert_eq!(loaded.node_versions[0].vector_snapshot_id, Some(42));
+
+        // Fails closed with no cipher; legacy plaintext still loads with one.
+        assert!(load_temporal_index_with_cipher(&path, None).is_err());
+        save_temporal_index(&data, &path).unwrap();
+        assert_eq!(
+            load_temporal_index_with_cipher(&path, Some(&cipher))
+                .unwrap()
+                .node_versions
+                .len(),
+            1
+        );
     }
 
     #[test]

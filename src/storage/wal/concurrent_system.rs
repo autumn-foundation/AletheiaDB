@@ -307,6 +307,11 @@ pub struct ConcurrentWalSystem {
     group_commit: Option<Arc<GroupCommitCoordinator>>,
     /// Counter for consecutive flush errors (for health monitoring).
     consecutive_flush_errors: Arc<AtomicU64>,
+    /// Optional cipher for WAL entry encryption/decryption. Retained on the
+    /// system so the recovery read path ([`ConcurrentWalSystem::read_from`])
+    /// can decrypt encrypted (version-2) segments, mirroring the cipher held by
+    /// the flush coordinator on the write path.
+    wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
 }
 
 impl ConcurrentWalSystem {
@@ -334,6 +339,9 @@ impl ConcurrentWalSystem {
             write_buffer_size: config.write_buffer_size,
             wal_cipher: config.wal_cipher.clone(),
         };
+
+        // Retain the cipher on the system for the recovery read path.
+        let wal_cipher = config.wal_cipher.clone();
 
         let wal = Arc::new(ConcurrentWal::new(wal_config)?);
         let coordinator = Arc::new(FlushCoordinator::new(coordinator_config)?);
@@ -407,6 +415,7 @@ impl ConcurrentWalSystem {
             durability_mode: config.durability_mode,
             group_commit,
             consecutive_flush_errors,
+            wal_cipher,
         })
     }
 
@@ -748,7 +757,15 @@ impl ConcurrentWalSystem {
     /// This reads all segment files in the WAL directory and returns entries
     /// with LSN >= start_lsn. Used for recovery.
     pub fn read_from(&self, start_lsn: LSN) -> Result<Vec<super::WalEntry>> {
-        crate::storage::wal_reader::read_wal_entries(self.wal_dir(), start_lsn)
+        // Thread the configured WAL cipher so encrypted (version-2) segments are
+        // decrypted during recovery replay. Without this, reopening any
+        // encryption-enabled database fails closed on the first encrypted
+        // segment ("Cannot read encrypted WAL segment ... without a cipher").
+        crate::storage::wal_reader::read_wal_entries_with_cipher(
+            self.wal_dir(),
+            start_lsn,
+            self.wal_cipher.as_ref(),
+        )
     }
 
     /// Shutdown the WAL system gracefully.

@@ -64,8 +64,11 @@ pub(crate) fn persist_vector_indexes(
 ) -> Result<()> {
     use crate::storage::index_persistence::formats::PersistedHnswConfig;
     use crate::storage::index_persistence::vector::{
-        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
+        new_vector_mappings, new_vector_meta, save_vector_mappings_with_cipher,
+        save_vector_meta_with_cipher,
     };
+
+    let cipher = manager.index_cipher();
 
     // Save string interner first (required by all indexes)
     manager.save_string_interner().map_err(|e| {
@@ -124,12 +127,14 @@ pub(crate) fn persist_vector_indexes(
         // Set the actual vector count
         vector_meta.vector_count = vector_count as u64;
 
-        save_vector_meta(&vector_meta, &vec_path.join("meta.idx")).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to save vector metadata for {}: {}",
-                property_name, e
-            ))
-        })?;
+        save_vector_meta_with_cipher(&vector_meta, &vec_path.join("meta.idx"), cipher).map_err(
+            |e| {
+                StorageError::PersistenceError(format!(
+                    "Failed to save vector metadata for {}: {}",
+                    property_name, e
+                ))
+            },
+        )?;
 
         // Create and save mappings
         use crate::storage::index_persistence::formats::VectorMapping;
@@ -143,12 +148,13 @@ pub(crate) fn persist_vector_indexes(
             })
             .collect();
 
-        save_vector_mappings(&vector_mappings, &vec_path.join("mappings.idx")).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to save vector mappings for {}: {}",
-                property_name, e
-            ))
-        })?;
+        save_vector_mappings_with_cipher(&vector_mappings, &vec_path.join("mappings.idx"), cipher)
+            .map_err(|e| {
+                StorageError::PersistenceError(format!(
+                    "Failed to save vector mappings for {}: {}",
+                    property_name, e
+                ))
+            })?;
     }
 
     if let Some(tracker) = tracker {
@@ -206,9 +212,12 @@ struct SkippedVectorIndex {
 /// so output stays deterministic even though loads run in parallel.
 fn load_single_vector_index(
     vec_path: &std::path::Path,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
 ) -> std::result::Result<LoadedVectorIndex, SkippedVectorIndex> {
     use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
-    use crate::storage::index_persistence::vector::{load_vector_mappings, load_vector_meta};
+    use crate::storage::index_persistence::vector::{
+        load_vector_mappings_with_cipher, load_vector_meta_with_cipher,
+    };
 
     let skipped = |property_name: &str, reason: String| SkippedVectorIndex {
         property_name: property_name.to_string(),
@@ -248,7 +257,7 @@ fn load_single_vector_index(
         return Err(skipped(&property_name, "metadata not found".to_string()));
     }
 
-    let meta = match load_vector_meta(&meta_path) {
+    let meta = match load_vector_meta_with_cipher(&meta_path, cipher) {
         Ok(meta) => meta,
         Err(e) => {
             return Err(skipped(
@@ -298,7 +307,7 @@ fn load_single_vector_index(
     let mut warnings = Vec::new();
     let mappings_path = vec_path.join("mappings.idx");
     if mappings_path.exists() {
-        let mappings_data = match load_vector_mappings(&mappings_path) {
+        let mappings_data = match load_vector_mappings_with_cipher(&mappings_path, cipher) {
             Ok(data) => data,
             Err(e) => {
                 return Err(skipped(
@@ -401,11 +410,14 @@ pub(crate) fn load_vector_indexes(
     // parking_lot locks used by `HnswIndex` do not poison, so unwinding is
     // safe and must not abort startup or kill the sibling loads (rayon would
     // otherwise propagate the panic through `collect`).
+    // Clone the index cipher (cheap Arc clone) so each parallel task can decrypt
+    // encrypted vector meta/mappings files (Issue #481).
+    let cipher = manager.index_cipher().cloned();
     let staged: Vec<std::result::Result<LoadedVectorIndex, SkippedVectorIndex>> = index_dirs
         .par_iter()
         .map(|path| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                load_single_vector_index(path)
+                load_single_vector_index(path, cipher.as_ref())
             }))
             .unwrap_or_else(|payload| {
                 let panic_msg = if let Some(s) = payload.downcast_ref::<&str>() {
@@ -504,7 +516,7 @@ pub(crate) fn persist_graph_index(
     current_lsn: u64,
 ) -> Result<(u64, u64)> {
     use crate::storage::index_persistence::graph::{
-        new_graph_index_data, persist_property_map, save_graph_index,
+        new_graph_index_data, persist_property_map, save_graph_index_with_cipher,
     };
     use crate::storage::index_persistence::{PersistedEdge, PersistedNode};
 
@@ -568,9 +580,9 @@ pub(crate) fn persist_graph_index(
         StorageError::PersistenceError(format!("Failed to create graph directory: {}", e))
     })?;
 
-    save_graph_index(&graph_data, &graph_path).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save graph index: {}", e))
-    })?;
+    save_graph_index_with_cipher(&graph_data, &graph_path, manager.index_cipher()).map_err(
+        |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+    )?;
 
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
@@ -598,7 +610,8 @@ pub(crate) fn persist_temporal_index(
 ) -> Result<()> {
     use crate::storage::index_persistence::temporal::{
         convert_edge_version, convert_node_version, materialize_version_data_for_persistence,
-        needs_sparse_vector_materialization, new_temporal_index_data, save_temporal_index,
+        needs_sparse_vector_materialization, new_temporal_index_data,
+        save_temporal_index_with_cipher,
     };
 
     // Get read lock on historical storage
@@ -715,9 +728,10 @@ pub(crate) fn persist_temporal_index(
 
     // Save to disk
     let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
-    save_temporal_index(&temporal_data, &temporal_path).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
-    })?;
+    save_temporal_index_with_cipher(&temporal_data, &temporal_path, manager.index_cipher())
+        .map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
+        })?;
 
     tracker.reset_temporal_mutations();
     tracker.update_temporal_lsn(current_lsn);
@@ -758,12 +772,17 @@ pub(crate) fn persist_temporal_adjacency_index(
     historical: &Arc<RwLock<HistoricalStorage>>,
     manager: &Arc<IndexPersistenceManager>,
 ) -> Result<()> {
-    use crate::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index;
+    use crate::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index_with_cipher;
 
     // Get the temporal adjacency index from historical storage
     let historical_read = historical.read();
     if let Some(adj_index) = historical_read.get_temporal_adjacency_index() {
-        save_temporal_adjacency_index(adj_index, manager.base_path()).map_err(|e| {
+        save_temporal_adjacency_index_with_cipher(
+            adj_index,
+            manager.base_path(),
+            manager.index_cipher(),
+        )
+        .map_err(|e| {
             StorageError::PersistenceError(format!(
                 "Failed to save temporal adjacency index: {}",
                 e
@@ -922,9 +941,11 @@ pub(crate) fn load_indexes_startup(
     // Try to restore graph data even if manifest loading failed
     let graph_path = manager.graph_path().join("adjacency.idx");
     if graph_path.exists() {
-        use crate::storage::index_persistence::graph::{load_graph_index, restore_property_map};
+        use crate::storage::index_persistence::graph::{
+            load_graph_index_with_cipher, restore_property_map,
+        };
 
-        match load_graph_index(&graph_path) {
+        match load_graph_index_with_cipher(&graph_path, manager.index_cipher()) {
             Ok(graph_data) => {
                 let current_time = time::now();
                 let mut max_node_id = 0u64;
@@ -1142,10 +1163,10 @@ pub(crate) fn load_indexes_startup(
     let temporal_path = manager.temporal_path().join("versions.idx");
     if temporal_path.exists() {
         use crate::storage::index_persistence::temporal::{
-            load_temporal_index, restore_into_historical_storage,
+            load_temporal_index_with_cipher, restore_into_historical_storage,
         };
 
-        match load_temporal_index(&temporal_path) {
+        match load_temporal_index_with_cipher(&temporal_path, manager.index_cipher()) {
             Ok(temporal_data) => {
                 // Restore versions into historical storage
                 // Labels are now stored directly in the persisted entries
@@ -1243,14 +1264,15 @@ pub(crate) fn load_indexes_startup(
     }
 
     // Load temporal adjacency index
-    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index;
+    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index_with_cipher;
 
     let adjacency_file = manager
         .base_path()
         .join("temporal_adjacency")
         .join("adjacency.idx");
     if adjacency_file.exists() {
-        match load_temporal_adjacency_index(manager.base_path()) {
+        match load_temporal_adjacency_index_with_cipher(manager.base_path(), manager.index_cipher())
+        {
             Ok(adj_index) => {
                 let mut hist_write = historical.write();
                 hist_write.set_temporal_adjacency_index(adj_index);

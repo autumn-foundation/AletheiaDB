@@ -13,6 +13,7 @@ use crate::index::temporal_adjacency::{
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{NodeAdjacencyEntry, PersistedTemporalAdjacencyEntry, TemporalAdjacencyData};
 use super::{MANIFEST_VERSION, TEMPORAL_ADJACENCY_MAGIC};
+use crate::encryption::cipher::Cipher;
 
 /// Save temporal adjacency index to disk.
 ///
@@ -26,6 +27,22 @@ use super::{MANIFEST_VERSION, TEMPORAL_ADJACENCY_MAGIC};
 pub fn save_temporal_adjacency_index(
     index: &TemporalAdjacencyIndex,
     data_dir: &Path,
+) -> Result<()> {
+    save_temporal_adjacency_index_with_cipher(index, data_dir, None)
+}
+
+/// Save the temporal adjacency index, optionally encrypting it at rest
+/// (Issue #481). With `cipher == None` this is identical to
+/// [`save_temporal_adjacency_index`].
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be created, serialization or
+/// encryption fails, or writing the file fails.
+pub fn save_temporal_adjacency_index_with_cipher(
+    index: &TemporalAdjacencyIndex,
+    data_dir: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
 ) -> Result<()> {
     // Create temporal_adjacency directory
     let adjacency_dir = data_dir.join("temporal_adjacency");
@@ -41,12 +58,20 @@ pub fn save_temporal_adjacency_index(
         outgoing,
     };
 
-    // Serialize with bitcode
+    // Serialize with bitcode (this format carries no trailing CRC; the AEAD
+    // tag provides integrity when encrypted, and the magic/version guard the
+    // plaintext path as before).
     let bytes = bitcode::encode(&data);
 
-    // Write atomically
+    // Write atomically, encrypting the whole buffer when a cipher is present.
     let adjacency_file = adjacency_dir.join("adjacency.idx");
-    super::atomic_write(&adjacency_file, &bytes)?;
+    match cipher {
+        Some(cipher) => {
+            let encrypted = super::common::encrypt_index_bytes(&bytes, cipher)?;
+            super::atomic_write(&adjacency_file, &encrypted)?;
+        }
+        None => super::atomic_write(&adjacency_file, &bytes)?,
+    }
 
     Ok(())
 }
@@ -72,6 +97,21 @@ const MAX_ADJACENCY_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// - The data cannot be deserialized.
 /// - The manifest version or magic bytes do not match.
 pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdjacencyIndex>> {
+    load_temporal_adjacency_index_with_cipher(data_dir, None)
+}
+
+/// Load the temporal adjacency index, transparently decrypting it if written
+/// encrypted (Issue #481). A legacy plaintext file is loaded even when a
+/// cipher is supplied (header sniffing).
+///
+/// # Errors
+///
+/// Same as [`load_temporal_adjacency_index`], plus a structured error if the
+/// file is encrypted but no cipher is supplied or decryption fails.
+pub fn load_temporal_adjacency_index_with_cipher(
+    data_dir: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<Arc<TemporalAdjacencyIndex>> {
     let adjacency_file = data_dir.join("temporal_adjacency").join("adjacency.idx");
 
     // Check file size to prevent DoS
@@ -84,8 +124,13 @@ pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdja
         )));
     }
 
-    // Read file
-    let bytes = std::fs::read(&adjacency_file)?;
+    // Read file, decrypting transparently if it carries the encrypted header.
+    let raw = std::fs::read(&adjacency_file)?;
+    let bytes = if super::common::is_encrypted_index(&raw) {
+        super::common::decrypt_index_bytes(&raw, &adjacency_file, cipher)?
+    } else {
+        raw
+    };
 
     // Deserialize
     let data: TemporalAdjacencyData = bitcode::decode(&bytes).map_err(|e| {
