@@ -363,6 +363,7 @@ async fn query_reader_write_is_403_permission_denied() {
 async fn query_row_cap_reject_is_413_resource_exhausted() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 2,
@@ -390,6 +391,7 @@ async fn query_row_cap_reject_is_413_resource_exhausted() {
 async fn query_byte_cap_is_413_resource_exhausted() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 0,
@@ -421,6 +423,7 @@ async fn query_byte_cap_is_413_resource_exhausted() {
 async fn query_over_ceiling_override_is_422_invalid_argument() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 10,
@@ -459,6 +462,7 @@ async fn query_auth_precedes_limit_validation() {
     let auth = AuthState::new(store, AuthMode::Required);
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 10,

@@ -14,8 +14,8 @@
       "shape": "{success:false, error:<string>, code?, retriable?, details?, trace_id?}",
       "additive_fields_note": "code/retriable/details are present ONLY for auth (401/403) and resource-limit (413/422/429) variants; plain 400/404/500 keep the minimal {success,error} shape.",
       "trace_id_note": "trace_id body field + x-trace-id header are populated only under the observability/otel features (pinned by tests/http_otel_tracing.rs). Absent otherwise.",
-      "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT"],
-      "vocabulary_asymmetry_vs_mcp": "Both surfaces use RESOURCE_EXHAUSTED for per-query resource-limit errors (Issue #3368: HTTP /query since #3446, MCP `query` tool since #3368-lane4). Remaining asymmetry: HTTP emits `code` only on auth+limit variants; MCP emits `code` on every error."
+      "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "UNAVAILABLE"],
+      "vocabulary_asymmetry_vs_mcp": "Both surfaces use RESOURCE_EXHAUSTED for per-query resource-limit errors (Issue #3368: HTTP /query since #3446, MCP `query` tool since #3368-lane4). HTTP also emits UNAVAILABLE for the 503 in-flight-query-cap guard (Issue #3368 hardening of #3446); MCP has no such code. Remaining asymmetry: HTTP emits `code` only on auth+limit variants; MCP emits `code` on every error."
     },
     "routes": [
       {
@@ -37,7 +37,7 @@
         "access_class": "per-operation (query_access_class): read for find_node/get_node/bulk_get_nodes/find_neighbors; write for create/bulk_create/bulk_update/bulk_delete; execute_query/bulk_execute_query read iff no mutating clause",
         "success_status": 200,
         "success_body": "{success:true, data?, truncated?}",
-        "error_statuses": [400, 401, 403, 404, 413, 422, 429, 500],
+        "error_statuses": [400, 401, 403, 404, 413, 422, 429, 500, 503],
         "pinned_by": [
           "tests/parity_http.rs::query_success_envelope_shape",
           "tests/parity_http.rs::query_not_found_minimal_error_envelope",
@@ -52,6 +52,7 @@
         ],
         "referenced": {
           "429_wall_clock_timeout": "not forceable deterministically over the wire; pinned by enforce_query_limits unit tests in src/http/handlers.rs (see tests/http_query_limits.rs header). RESOURCE_EXHAUSTED + Retry-After:1, retriable:true for reads.",
+          "503_in_flight_query_cap": "Issue #3368 DoS guard (hardening of #3446): a new TIMED /query rejected at the max_in_flight_queries worker cap. Not forceable deterministically over the wire (needs concurrent still-running workers); pinned by src/http/handlers.rs::enforce_in_flight_cap_rejects_extra_timed_query_without_spawning + slot-release/inline-exempt unit tests, and the envelope by src/http/error.rs::in_flight_cap_maps_to_503_unavailable_retriable. UNAVAILABLE code, retriable:true, Retry-After:1, details{reason:in_flight_query_cap, max_in_flight_queries}.",
           "413_request_body_limit": "tests/http_run_server_body_limit.rs::run_server_enforces_413_over_the_wire (real-socket production run_server stack, Issue #3426)",
           "otel_trace_id": "tests/http_otel_tracing.rs (observability/otel features)",
           "provenance_filter_3348": "Issue #3348 (additive): find_node/get_node/find_neighbors accept optional provenance_source/provenance_sources/min_confidence/include_unattributed (flattened into QueryRequest). Omitting all four is byte-identical to prior behavior. Invalid values (confidence out of [0,1], empty source list) -> 400 INVALID_ARGUMENT naming the field; get_node excluded-by-filter -> 404. HTTP find_node/find_neighbors bare-array pages are OVER-FETCHED/REFILLED under an active filter (bounded by MAX_DEEP_PAGINATION) so a short/empty page means end-of-data (no false-short mid-scan). Pinned by tests/parity_http.rs::find_node_filters_by_provenance_source / find_node_include_unattributed / find_node_min_confidence_inclusive / find_node_invalid_confidence_is_400 / find_node_empty_source_list_is_400 / get_node_provenance_filter_excludes_as_404 / find_node_without_filter_is_unchanged / find_node_filtered_page_is_refilled_not_short / find_neighbors_filters_by_provenance / find_neighbors_invalid_confidence_is_400."

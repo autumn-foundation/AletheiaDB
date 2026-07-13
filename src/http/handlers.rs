@@ -27,7 +27,7 @@ use crate::http::converters::{
     query_row_to_json,
 };
 use crate::http::error::{AletheiaHttpError, ResourceLimitExceeded};
-use crate::http::state::AppState;
+use crate::http::state::{AppState, InFlightCounter};
 use crate::http::trace::HttpTrace;
 use crate::query::QueryBuilder;
 use crate::query::converter::{parse_query, parse_query_with_params};
@@ -927,20 +927,82 @@ fn apply_row_cap(
 /// fully-serialized response envelope, so it too is read-class only and is not
 /// applied here.
 ///
+/// # In-flight worker DoS guard (Issue #3368)
+///
+/// Because a timed op's worker is **detached and non-cancellable** (see above),
+/// a caller sending tiny `timeout_ms` overrides — or hammering the documented
+/// retriable-timeout retry loop — could pile up unbounded still-running
+/// expensive queries and exhaust threads/CPU/memory. So the **timed** branch is
+/// bounded: a slot is reserved from `in_flight` (cap = `cap`, `0` = unbounded)
+/// **before** the worker is spawned; at the cap the query is rejected `503`
+/// `UNAVAILABLE` (retriable) instead of spawning yet another worker. The
+/// [`InFlightGuard`](crate::http::state) is moved **into** the spawned worker so
+/// its slot is released only when the WORKER finishes — a caller that times out
+/// and discards the result keeps holding its slot until the work actually
+/// completes. The inline/unlimited branch (`timeout_ms == 0`) never spawns and
+/// is therefore never guarded.
+///
 /// A dimension whose effective value is `0` is unlimited and skipped. Returns
 /// the (possibly truncated) result plus a `truncated` flag.
 async fn enforce_query_limits<F>(
+    in_flight: InFlightCounter,
+    cap: usize,
     limits: &EffectiveQueryLimits,
     is_write: bool,
     op: F,
 ) -> Result<(Value, bool), AletheiaHttpError>
 where
-    F: Future<Output = Result<Value, AletheiaHttpError>>,
+    F: Future<Output = Result<Value, AletheiaHttpError>> + Send + 'static,
 {
     // 1. Wall-clock timeout (all ops — it bounds the client's wait).
     let data = if limits.timeout_ms > 0 {
-        match tokio::time::timeout(Duration::from_millis(limits.timeout_ms), op).await {
-            Ok(result) => result?,
+        // Admission control: reserve an in-flight slot BEFORE spawning the
+        // detached worker; at the cap, reject rather than pile up another
+        // non-cancellable query (Issue #3368 DoS guard). `cap == 0` is
+        // unbounded (a slot is always granted).
+        let guard = in_flight
+            .try_acquire(cap)
+            .ok_or(AletheiaHttpError::InFlightCapacityExceeded { cap })?;
+
+        // Spawn the op on its own task with the guard moved in, so the slot is
+        // released only when the WORKER finishes — even if the caller below
+        // times out and discards this handle, the worker runs to completion
+        // still holding its slot. Instrument with the current span so the DB's
+        // child spans keep nesting under the HTTP root span (Issue #3376).
+        #[cfg(feature = "observability")]
+        let worker = {
+            use tracing::Instrument;
+            async move {
+                let _guard = guard;
+                op.await
+            }
+            .instrument(tracing::Span::current())
+        };
+        #[cfg(not(feature = "observability"))]
+        let worker = async move {
+            let _guard = guard;
+            op.await
+        };
+        let handle = tokio::spawn(worker);
+
+        match tokio::time::timeout(Duration::from_millis(limits.timeout_ms), handle).await {
+            // Worker finished within the deadline (guard already dropped inside
+            // it, so its slot is released before we observe completion).
+            Ok(Ok(result)) => result?,
+            // The worker task panicked or was cancelled without a result. Do
+            // NOT treat this as a timeout — a deterministic panic must not be
+            // reported as an infinitely-retriable timeout. The guard still drops
+            // as the panic unwinds, so the slot is released. Carry no
+            // engine-internal detail (no panic payload) in the message, matching
+            // the MCP surface's worker-died error (Issue #3368).
+            Ok(Err(_join_err)) => {
+                return Err(AletheiaHttpError::Internal(
+                    "query worker terminated unexpectedly before producing a result".to_string(),
+                ));
+            }
+            // Deadline elapsed first. Return promptly; we deliberately do NOT
+            // abort `handle` — the detached worker keeps running to completion,
+            // holding its in-flight slot until it finishes.
             Err(_elapsed) => {
                 return Err(AletheiaHttpError::ResourceLimitExceeded(
                     ResourceLimitExceeded {
@@ -955,6 +1017,7 @@ where
             }
         }
     } else {
+        // Inline / unlimited path: never spawns, so it is never guarded.
         op.await?
     };
 
@@ -1039,6 +1102,12 @@ pub async fn handle_query(
             .effective(limits.as_ref())
             .map_err(AletheiaHttpError::InvalidLimitOverride)?;
 
+        // In-flight worker DoS guard (Issue #3368): the shared counter + the
+        // configured cap, passed to `enforce_query_limits` which reserves a slot
+        // before spawning the timed worker (or rejects `503` at the cap).
+        let in_flight = state.in_flight_counter();
+        let in_flight_cap = state.query_limits().max_in_flight_queries;
+
         let db = state.db_arc();
         // Verified principal name (if any) for provenance stamping on write
         // operations (Issue #3350). Anonymous mode yields None.
@@ -1091,7 +1160,8 @@ pub async fn handle_query(
             }
         };
 
-        let (data, truncated) = enforce_query_limits(&effective, is_write, op).await?;
+        let (data, truncated) =
+            enforce_query_limits(in_flight, in_flight_cap, &effective, is_write, op).await?;
         Ok::<(Value, bool, EffectiveQueryLimits), AletheiaHttpError>((data, truncated, effective))
     };
 
@@ -1423,6 +1493,13 @@ mod tests {
         }
     }
 
+    /// An unbounded in-flight counter (cap 0) for the limit tests that do not
+    /// exercise the Issue #3368 DoS guard — behavior is identical to the
+    /// pre-guard path.
+    fn no_cap() -> InFlightCounter {
+        InFlightCounter::new()
+    }
+
     /// A future that outlives the timeout produces a 429 timeout error, with
     /// the underlying computation left running (documented caveat). Read-class
     /// op → `retriable: true`. Uses paused time for determinism.
@@ -1433,7 +1510,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(500)).await;
             Ok(json!([]))
         };
-        let err = enforce_query_limits(&limits, false, slow)
+        let err = enforce_query_limits(no_cap(), 0, &limits, false, slow)
             .await
             .unwrap_err();
         match err {
@@ -1455,7 +1532,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(500)).await;
             Ok(json!({ "id": 1 }))
         };
-        let err = enforce_query_limits(&limits, true, slow).await.unwrap_err();
+        let err = enforce_query_limits(no_cap(), 0, &limits, true, slow)
+            .await
+            .unwrap_err();
         match err {
             AletheiaHttpError::ResourceLimitExceeded(e) => {
                 assert_eq!(e.dimension, LimitDimension::WallClockTimeout);
@@ -1473,7 +1552,9 @@ mod tests {
     async fn enforce_fast_op_under_timeout_succeeds() {
         let limits = effective(1_000, 0, 0, RowOverflowPolicy::Truncate);
         let fast = async { Ok(json!({ "ok": true })) };
-        let (data, truncated) = enforce_query_limits(&limits, false, fast).await.unwrap();
+        let (data, truncated) = enforce_query_limits(no_cap(), 0, &limits, false, fast)
+            .await
+            .unwrap();
         assert_eq!(data, json!({ "ok": true }));
         assert!(!truncated);
     }
@@ -1486,16 +1567,111 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             Ok(json!([1, 2, 3]))
         };
-        let (data, truncated) = enforce_query_limits(&limits, false, op).await.unwrap();
+        let (data, truncated) = enforce_query_limits(no_cap(), 0, &limits, false, op)
+            .await
+            .unwrap();
         assert_eq!(data, json!([1, 2, 3]));
         assert!(!truncated);
+    }
+
+    // ------------------------------------------------------------------
+    // In-flight worker DoS guard (Issue #3368 hardening of #3446)
+    // ------------------------------------------------------------------
+
+    /// (a) At the cap, an extra TIMED query is REJECTED with `503 UNAVAILABLE`
+    /// and is NOT spawned — the discarded-but-running worker keeps its slot, so
+    /// admission control fires before any new worker starts.
+    #[tokio::test]
+    async fn enforce_in_flight_cap_rejects_extra_timed_query_without_spawning() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let counter = no_cap();
+        let cap = 1;
+        // Occupy the only slot, standing in for a still-running detached worker.
+        let held = counter.try_acquire(cap).expect("first slot");
+
+        let started = Arc::new(AtomicBool::new(false));
+        let started_in_op = Arc::clone(&started);
+        let op = async move {
+            started_in_op.store(true, Ordering::SeqCst);
+            Ok(json!({ "ran": true }))
+        };
+        // A finite timeout → the guarded, spawning path.
+        let limits = effective(1_000, 0, 0, RowOverflowPolicy::Truncate);
+        let err = enforce_query_limits(counter.clone(), cap, &limits, false, op)
+            .await
+            .unwrap_err();
+        match err {
+            AletheiaHttpError::InFlightCapacityExceeded { cap: c } => assert_eq!(c, 1),
+            other => panic!("expected 503 in-flight capacity error, got {other:?}"),
+        }
+        // Give any (erroneously) spawned worker a chance to run.
+        tokio::task::yield_now().await;
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "a rejected query must NOT be spawned"
+        );
+        drop(held);
+    }
+
+    /// (b) Slots are released after workers finish, so later timed queries
+    /// succeed. A completed worker drops its guard before its result is
+    /// observed, returning the pool to zero.
+    #[tokio::test]
+    async fn enforce_in_flight_slot_releases_after_worker_finishes() {
+        let counter = no_cap();
+        let cap = 1;
+        let limits = effective(1_000, 0, 0, RowOverflowPolicy::Truncate);
+
+        let (d1, _) = enforce_query_limits(counter.clone(), cap, &limits, false, async {
+            Ok(json!({ "n": 1 }))
+        })
+        .await
+        .expect("first timed query succeeds");
+        assert_eq!(d1, json!({ "n": 1 }));
+        assert_eq!(
+            counter.live(),
+            0,
+            "the finished worker released its slot before completion was observed"
+        );
+
+        // A second timed query at the same cap now succeeds (slot free again).
+        let (d2, _) = enforce_query_limits(counter.clone(), cap, &limits, false, async {
+            Ok(json!({ "n": 2 }))
+        })
+        .await
+        .expect("second timed query succeeds after release");
+        assert_eq!(d2, json!({ "n": 2 }));
+    }
+
+    /// (c) The inline/unlimited path (`timeout_ms == 0`) never spawns and is
+    /// therefore unaffected by the cap: it runs even when the pool is full.
+    #[tokio::test]
+    async fn enforce_inline_zero_timeout_ignores_in_flight_cap() {
+        let counter = no_cap();
+        let cap = 1;
+        // Saturate the pool.
+        let held = counter.try_acquire(cap).expect("occupy the only slot");
+
+        let limits = effective(0, 0, 0, RowOverflowPolicy::Truncate);
+        let (data, truncated) = enforce_query_limits(counter.clone(), cap, &limits, false, async {
+            Ok(json!("inline"))
+        })
+        .await
+        .expect("inline path runs despite a full pool");
+        assert_eq!(data, json!("inline"));
+        assert!(!truncated);
+        // The inline path never touched the counter.
+        assert_eq!(counter.live(), 1, "inline path must not reserve a slot");
+        drop(held);
     }
 
     #[tokio::test]
     async fn enforce_row_cap_truncate_flags_truncated() {
         let limits = effective(0, 2, 0, RowOverflowPolicy::Truncate);
         let op = async { Ok(json!([1, 2, 3, 4, 5])) };
-        let (data, truncated) = enforce_query_limits(&limits, false, op).await.unwrap();
+        let (data, truncated) = enforce_query_limits(no_cap(), 0, &limits, false, op)
+            .await
+            .unwrap();
         assert_eq!(data, json!([1, 2]));
         assert!(truncated);
     }
@@ -1504,7 +1680,9 @@ mod tests {
     async fn enforce_row_cap_reject_errors() {
         let limits = effective(0, 2, 0, RowOverflowPolicy::Reject);
         let op = async { Ok(json!([1, 2, 3])) };
-        let err = enforce_query_limits(&limits, false, op).await.unwrap_err();
+        let err = enforce_query_limits(no_cap(), 0, &limits, false, op)
+            .await
+            .unwrap_err();
         match err {
             AletheiaHttpError::ResourceLimitExceeded(e) => {
                 assert_eq!(e.dimension, LimitDimension::ResultRows);
@@ -1522,7 +1700,9 @@ mod tests {
         // Reject policy with a cap of 1; a 3-element write ack must still pass.
         let limits = effective(0, 1, 0, RowOverflowPolicy::Reject);
         let op = async { Ok(json!([1, 2, 3])) };
-        let (data, truncated) = enforce_query_limits(&limits, true, op).await.unwrap();
+        let (data, truncated) = enforce_query_limits(no_cap(), 0, &limits, true, op)
+            .await
+            .unwrap();
         assert_eq!(data, json!([1, 2, 3]), "write ack must not be truncated");
         assert!(!truncated);
     }
@@ -1532,7 +1712,9 @@ mod tests {
     async fn enforce_row_cap_ignores_non_arrays() {
         let limits = effective(0, 1, 0, RowOverflowPolicy::Reject);
         let op = async { Ok(json!({ "id": 1, "big": [1, 2, 3, 4] })) };
-        let (data, truncated) = enforce_query_limits(&limits, false, op).await.unwrap();
+        let (data, truncated) = enforce_query_limits(no_cap(), 0, &limits, false, op)
+            .await
+            .unwrap();
         assert_eq!(data, json!({ "id": 1, "big": [1, 2, 3, 4] }));
         assert!(!truncated);
     }

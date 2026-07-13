@@ -125,6 +125,19 @@ pub enum AletheiaHttpError {
         .0.dimension.as_str(), .0.requested, .0.ceiling
     )]
     InvalidLimitOverride(LimitOverrideError),
+
+    /// The bounded in-flight-query worker pool is full (Issue #3368 DoS guard):
+    /// a new *timed* `/query` was rejected instead of spawning yet another
+    /// detached, non-cancellable worker. Renders `503 UNAVAILABLE`, `retriable:
+    /// true` — the caller should back off and retry once load subsides. Carries
+    /// the configured `cap` so the caller can see the operative limit.
+    #[error(
+        "server is at its cap of {cap} concurrently executing timed queries; retry with backoff"
+    )]
+    InFlightCapacityExceeded {
+        /// The configured `max_in_flight_queries` cap that was reached.
+        cap: usize,
+    },
 }
 
 impl AletheiaHttpError {
@@ -136,6 +149,8 @@ impl AletheiaHttpError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::PermissionDenied(_) => StatusCode::FORBIDDEN,
             Self::InvalidLimitOverride(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            // Transient overload → 503 Service Unavailable (retriable).
+            Self::InFlightCapacityExceeded { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::ResourceLimitExceeded(e) => match e.dimension {
                 // Timeout is transient → 429 Too Many Requests.
                 LimitDimension::WallClockTimeout => StatusCode::TOO_MANY_REQUESTS,
@@ -155,6 +170,7 @@ impl AletheiaHttpError {
             Self::PermissionDenied(_) => Some("PERMISSION_DENIED"),
             Self::ResourceLimitExceeded(_) => Some("RESOURCE_EXHAUSTED"),
             Self::InvalidLimitOverride(_) => Some("INVALID_ARGUMENT"),
+            Self::InFlightCapacityExceeded { .. } => Some("UNAVAILABLE"),
             _ => None,
         }
     }
@@ -169,6 +185,8 @@ impl AletheiaHttpError {
         match self {
             Self::ResourceLimitExceeded(e) => Some(e.retriable),
             Self::InvalidLimitOverride(_) => Some(false),
+            // Transient overload: backing off and retrying can succeed.
+            Self::InFlightCapacityExceeded { .. } => Some(true),
             _ => None,
         }
     }
@@ -198,6 +216,10 @@ impl AletheiaHttpError {
                 "requested": e.requested,
                 "ceiling": e.ceiling,
             })),
+            Self::InFlightCapacityExceeded { cap } => Some(json!({
+                "reason": "in_flight_query_cap",
+                "max_in_flight_queries": cap,
+            })),
             _ => None,
         }
     }
@@ -219,6 +241,7 @@ impl AletheiaHttpError {
             Self::PermissionDenied(_) => "PERMISSION_DENIED",
             Self::ResourceLimitExceeded(_) => "RESOURCE_EXHAUSTED",
             Self::InvalidLimitOverride(_) => "INVALID_ARGUMENT",
+            Self::InFlightCapacityExceeded { .. } => "UNAVAILABLE",
         }
     }
 
@@ -264,12 +287,14 @@ impl AletheiaHttpError {
                 .headers_mut()
                 .insert(axum::http::HeaderName::from_static("x-trace-id"), tid);
         }
-        // A wall-clock timeout is a transient 429; hint clients to back off
-        // briefly before retrying (Issue #3368 review). Fixed conservative 1 s.
+        // A transient overload — a wall-clock timeout (429) or a full in-flight
+        // worker pool (503) — hints clients to back off briefly before retrying
+        // (Issue #3368). Fixed conservative 1 s.
         if matches!(
             &self,
             Self::ResourceLimitExceeded(e) if e.dimension == LimitDimension::WallClockTimeout
-        ) {
+        ) || matches!(&self, Self::InFlightCapacityExceeded { .. })
+        {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
@@ -395,6 +420,31 @@ mod tests {
         assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
         assert_eq!(body["details"]["requested"], 999);
         assert_eq!(body["details"]["ceiling"], 100);
+    }
+
+    /// The in-flight-capacity guard renders `503 UNAVAILABLE`, `retriable:
+    /// true`, names the cap in `details`, and carries `Retry-After` (Issue
+    /// #3368 DoS guard).
+    #[tokio::test]
+    async fn in_flight_cap_maps_to_503_unavailable_retriable() {
+        let err = AletheiaHttpError::InFlightCapacityExceeded { cap: 64 };
+        let resp = err.into_response();
+        let status = resp.status();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1"),
+        );
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["success"], false);
+        assert_eq!(body["code"], "UNAVAILABLE");
+        assert_eq!(body["retriable"], true);
+        assert_eq!(body["details"]["reason"], "in_flight_query_cap");
+        assert_eq!(body["details"]["max_in_flight_queries"], 64);
+        assert!(body["error"].as_str().unwrap().contains("cap of 64"));
     }
 
     #[tokio::test]
