@@ -724,7 +724,7 @@ impl HistoricalStorage {
     }
 
     /// Add a new version of a node, optionally attaching a write-time
-    /// [`Provenance`](crate::core::provenance::Provenance) bundle (Issue #3224).
+    /// [`Provenance`] bundle (Issue #3224).
     ///
     /// Behaves identically to [`add_node_version`](Self::add_node_version) other
     /// than persisting `provenance` on the created version (anchor or delta).
@@ -781,7 +781,7 @@ impl HistoricalStorage {
     }
 
     /// Add a *retraction* version of a node (Issue #3230), optionally attaching a
-    /// write-time [`Provenance`](crate::core::provenance::Provenance) bundle
+    /// write-time [`Provenance`] bundle
     /// recording the acting principal (Issue #3427).
     ///
     /// Behaves identically to
@@ -1039,7 +1039,7 @@ impl HistoricalStorage {
     }
 
     /// Add a new version of an edge, optionally attaching a write-time
-    /// [`Provenance`](crate::core::provenance::Provenance) bundle (Issue #3224).
+    /// [`Provenance`] bundle (Issue #3224).
     ///
     /// Behaves identically to [`add_edge_version`](Self::add_edge_version) other
     /// than persisting `provenance` on the created version (anchor or delta).
@@ -1104,7 +1104,7 @@ impl HistoricalStorage {
     }
 
     /// Add a *retraction* version of an edge (Issue #3230), optionally attaching a
-    /// write-time [`Provenance`](crate::core::provenance::Provenance) bundle
+    /// write-time [`Provenance`] bundle
     /// recording the acting principal (Issue #3427). See
     /// [`add_retracted_node_version_with_provenance`](Self::add_retracted_node_version_with_provenance).
     #[allow(clippy::too_many_arguments)]
