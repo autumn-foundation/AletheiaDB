@@ -129,6 +129,17 @@ jobs:
       - name: Provenance write self-gate (scheduled, hard-fail alert)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         env:
+          # Gate the CPU-bound (Async 1ms-flush, interleaved) arm ratio bounds
+          # AND the AC5 recovery <5s budget at the reduced default scale (2000
+          # nodes / 4000 edges). Hard-fail here is an ALERT; it never blocks a PR.
+          #
+          # NOTE: the recovery dataset is populated by a single-writer GroupCommit
+          # loop (~10 ms/commit), so the 10K-node/50K-edge REFERENCE scale would
+          # take ~10 min to build -- too slow for this shared CI job. The
+          # reference scale is reproduced manually / on the performance rig via
+          # PROV_BENCH_RECOVERY_NODES=10000 PROV_BENCH_RECOVERY_EDGES=50000 (the
+          # reopen, not the build, is what the <5s budget governs). See
+          # docs/benchmarks/cost-of-trust.md.
           PROV_BENCH_GATE: '1'
           PROV_BENCH_JSON_OUT: provenance_write_throughput.json
         run: |
@@ -140,7 +151,8 @@ jobs:
         if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
-          PROV_BENCH_WRITES: '120'
+          # One interleaved pass (5000 timed writes/config) — a fast smoke.
+          PROV_BENCH_WRITES: '5000'
           BENCH_SAMPLE_SIZE: 10
           BENCH_MEASUREMENT_TIME: 1
           BENCH_WARMUP_TIME: 1
