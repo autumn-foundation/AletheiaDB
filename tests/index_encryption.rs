@@ -13,6 +13,9 @@
 //! the original plaintext data.
 
 use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::property::PropertyMap;
+use aletheiadb::core::temporal::time;
 use aletheiadb::encryption::cipher::{Aes256GcmCipher, Cipher};
 use aletheiadb::encryption::config::EncryptionConfig;
 use aletheiadb::encryption::key_provider::FileKeyProvider;
@@ -24,7 +27,11 @@ use aletheiadb::storage::index_persistence::temporal::{
     load_temporal_index_with_cipher, new_temporal_index_data, save_temporal_index_with_cipher,
 };
 use aletheiadb::storage::wal::DurabilityMode;
-use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use aletheiadb::storage::wal::{LSN, WalEntry, WalOperation};
+use aletheiadb::storage::wal_reader::read_wal_entries;
+use aletheiadb::{AletheiaDB, GLOBAL_INTERNER, PropertyMapBuilder};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -583,4 +590,199 @@ fn db_truncated_encrypted_index_recovers_from_wal() {
         )
         .unwrap();
     assert!(db2.get_node(carol).is_ok());
+}
+
+// =============================================================================
+// WAL recovery read-path coverage for the cipher matrix (Issue #481).
+//
+// PR #3564 threaded the WAL cipher into the recovery read path
+// (`ConcurrentWalSystem::read_from` -> `read_wal_entries_with_cipher` ->
+// `segment_reader::read_entries_from_dir_with_cipher`). These tests exercise
+// that method directly over a genuinely on-disk WAL, proving the reader
+// dispatches PER-SEGMENT on the version byte:
+//
+//   * Case 1 (plaintext-WAL recovers unchanged, cipher DISABLED) is covered
+//     upstream by `tests/recovery/replay_create_tests.rs`
+//     (`test_replay_create_node_basic`, which appends a CreateNode with a
+//     default no-cipher `ConcurrentWalSystem` and recovers it through
+//     `read_from`) and the whole no-cipher `storage::recovery` suite — not
+//     duplicated here.
+//   * Case 2 (encrypted-WAL recovers, cipher ENABLED) — `encrypted_wal_segments_recover_via_read_from`.
+//   * Case 3 (MIXED plaintext + encrypted segments in one dir) — the real
+//     regression risk — `mixed_plaintext_and_encrypted_wal_segments_recover`.
+// =============================================================================
+
+/// Build a WAL system config rooted at `wal_dir`, optionally encrypted. Uses
+/// the default (Synchronous) durability mode so every `append` + `flush` is on
+/// disk before `read_from` runs — the tests stay deterministic with no
+/// background-flush races.
+fn wal_system_config(wal_dir: &Path, cipher: Option<Arc<dyn Cipher>>) -> ConcurrentWalSystemConfig {
+    let mut config = ConcurrentWalSystemConfig::new(wal_dir);
+    config.wal_cipher = cipher;
+    config
+}
+
+/// Append `count` CreateNode operations with node ids `first..first+count`,
+/// flushing after so they are durably on disk, and return the ids.
+fn append_create_nodes(wal: &ConcurrentWalSystem, first: u64, count: u64) -> Vec<u64> {
+    let mut ids = Vec::with_capacity(count as usize);
+    for id in first..first + count {
+        wal.append(WalOperation::CreateNode {
+            node_id: NodeId::new(id).unwrap(),
+            label: GLOBAL_INTERNER.intern("WalRecoveryProbe").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: None,
+        })
+        .unwrap();
+        ids.push(id);
+    }
+    wal.flush().unwrap();
+    ids
+}
+
+/// The `CreateNode` node ids present in a recovered entry set.
+fn created_node_ids(entries: &[WalEntry]) -> BTreeSet<u64> {
+    entries
+        .iter()
+        .filter_map(|e| match &e.operation {
+            WalOperation::CreateNode { node_id, .. } => Some(node_id.as_u64()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The set of format-version bytes across every `*.log` segment in `wal_dir`.
+/// (Header layout: 4-byte `GWAL` magic + 1 version byte; encrypted versions
+/// are even, plaintext versions odd.)
+fn segment_version_bytes(wal_dir: &Path) -> Vec<u8> {
+    let mut versions = Vec::new();
+    for entry in std::fs::read_dir(wal_dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("log") {
+            let bytes = std::fs::read(&path).unwrap();
+            if bytes.len() >= 5 && &bytes[..4] == b"GWAL" {
+                versions.push(bytes[4]);
+            }
+        }
+    }
+    versions
+}
+
+/// Case 2: a WAL written with a cipher (all segments encrypted) replays
+/// correctly when reopened with the same cipher — and the segments are
+/// genuinely encrypted (an even version byte on disk; a no-cipher read fails
+/// closed). This is a DIRECT assertion of encrypted-segment replay through the
+/// changed `read_from` path, complementing the DB-level
+/// `db_truncated_encrypted_index_recovers_from_wal` (whose encrypted-replay is
+/// incidental to its anti-brick focus).
+#[test]
+fn encrypted_wal_segments_recover_via_read_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_dir = dir.path().join("wal");
+    let cipher = test_cipher(0x37);
+
+    // Phase 1: write an encrypted WAL, then shut it down cleanly.
+    {
+        let mut wal =
+            ConcurrentWalSystem::new(wal_system_config(&wal_dir, Some(cipher.clone()))).unwrap();
+        let ids = append_create_nodes(&wal, 1, 4);
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        wal.shutdown();
+    }
+
+    // Every on-disk segment must carry an ENCRYPTED (even) version byte.
+    let versions = segment_version_bytes(&wal_dir);
+    assert!(
+        !versions.is_empty() && versions.iter().all(|v| v % 2 == 0),
+        "all segments must be encrypted (even version byte), got {versions:?}"
+    );
+
+    // Fail-closed proof: reading the encrypted WAL WITHOUT a cipher errors,
+    // rather than silently returning garbage or empty.
+    assert!(
+        read_wal_entries(&wal_dir, LSN::initial()).is_err(),
+        "reading an encrypted WAL without a cipher must fail closed"
+    );
+
+    // Phase 2: reopen WITH the same cipher and recover through read_from.
+    let wal = ConcurrentWalSystem::new(wal_system_config(&wal_dir, Some(cipher))).unwrap();
+    let recovered = wal.read_from(LSN::initial()).unwrap();
+    assert_eq!(
+        created_node_ids(&recovered),
+        BTreeSet::from([1, 2, 3, 4]),
+        "all encrypted-segment entries must be recovered by the cipher read path"
+    );
+    // LSNs are returned in ascending order.
+    let lsns: Vec<u64> = recovered.iter().map(|e| e.lsn.0).collect();
+    let mut sorted = lsns.clone();
+    sorted.sort_unstable();
+    assert_eq!(lsns, sorted, "recovered entries must be LSN-ordered");
+}
+
+/// Case 3 (THE regression gap): a single WAL directory containing BOTH a
+/// plaintext segment (written before encryption was enabled) AND an encrypted
+/// segment (written after) must recover ALL entries when reopened with a
+/// cipher. The reader must dispatch per-segment on the version byte and NOT
+/// attempt to decrypt the old plaintext (odd-version) segment. Reproduces the
+/// real "turned encryption on over an existing WAL" upgrade path: the writer
+/// rolls to a fresh segment when the header version differs, so the two phases
+/// land in distinct segments of different versions.
+#[test]
+fn mixed_plaintext_and_encrypted_wal_segments_recover() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_dir = dir.path().join("wal");
+    let cipher = test_cipher(0x5c);
+
+    // Phase 1: PLAINTEXT WAL (encryption disabled) — legacy segment.
+    {
+        let mut wal = ConcurrentWalSystem::new(wal_system_config(&wal_dir, None)).unwrap();
+        let ids = append_create_nodes(&wal, 1, 3);
+        assert_eq!(ids, vec![1, 2, 3]);
+        wal.shutdown();
+    }
+    // After phase 1 every segment is PLAINTEXT (odd version byte).
+    assert!(
+        segment_version_bytes(&wal_dir).iter().all(|v| v % 2 == 1),
+        "phase-1 segments must all be plaintext (odd version)"
+    );
+
+    // Phase 2: reopen the SAME dir WITH a cipher and append more entries. The
+    // version mismatch forces the writer onto a fresh, ENCRYPTED segment,
+    // leaving the phase-1 plaintext segment intact on disk.
+    {
+        let mut wal =
+            ConcurrentWalSystem::new(wal_system_config(&wal_dir, Some(cipher.clone()))).unwrap();
+        let ids = append_create_nodes(&wal, 100, 3);
+        assert_eq!(ids, vec![100, 101, 102]);
+        wal.shutdown();
+    }
+
+    // Prove the directory is GENUINELY mixed: at least one plaintext (odd) and
+    // at least one encrypted (even) segment coexist. Without this the test
+    // would not distinguish the mixed case from an all-encrypted one.
+    let versions = segment_version_bytes(&wal_dir);
+    assert!(
+        versions.iter().any(|v| v % 2 == 1),
+        "expected a surviving plaintext segment (odd version), got {versions:?}"
+    );
+    assert!(
+        versions.iter().any(|v| v % 2 == 0),
+        "expected an encrypted segment (even version), got {versions:?}"
+    );
+
+    // Recover the mixed directory WITH the cipher present. The plaintext
+    // segment must be read WITHOUT decryption and the encrypted segment WITH
+    // decryption — all six entries recovered, in LSN order.
+    let wal = ConcurrentWalSystem::new(wal_system_config(&wal_dir, Some(cipher))).unwrap();
+    let recovered = wal.read_from(LSN::initial()).unwrap();
+    assert_eq!(
+        created_node_ids(&recovered),
+        BTreeSet::from([1, 2, 3, 100, 101, 102]),
+        "entries from BOTH the plaintext and encrypted segments must be recovered"
+    );
+    let lsns: Vec<u64> = recovered.iter().map(|e| e.lsn.0).collect();
+    let mut sorted = lsns.clone();
+    sorted.sort_unstable();
+    assert_eq!(lsns, sorted, "mixed-segment recovery must be LSN-ordered");
 }
