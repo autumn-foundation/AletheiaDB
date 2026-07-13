@@ -48,7 +48,9 @@ use super::error::CypherError;
 /// - `Company` Acme   {name:'Acme',   cid:1}
 /// - `Company` Globex {name:'Globex', cid:2}
 ///
-/// No node carries an `email` property (pins `IS NULL` / `IS NOT NULL`).
+/// No node carries an `email` property (pins openCypher-correct `IS NULL` /
+/// `IS NOT NULL` on an absent property: `IS NULL` matches all 4, `IS NOT NULL`
+/// matches 0 -- fixed in #3511).
 ///
 /// Edges:
 /// - Alice -[:KNOWS]-> Bob -[:KNOWS]-> Carol -[:KNOWS]-> Dave (a linear chain)
@@ -325,9 +327,12 @@ fn supported_execute_cases() -> Vec<Case> {
             "MATCH (n:Person) WHERE n.name CONTAINS 'ar' RETURN n",
             Executes(1),
         ),
-        // NOTE: `IS NULL` / `IS NOT NULL` are openCypher-correct for *present*
-        // properties (below). Their behavior for *absent* properties deviates
-        // from openCypher and is pinned separately in `compat_known_deviations`.
+        // `IS NULL` / `IS NOT NULL` are openCypher-correct for both *present*
+        // and *absent* properties. Present: `name` is set on all 4 Persons, so
+        // `IS NULL` -> 0, `IS NOT NULL` -> 4. Absent: no Person has `email`, so
+        // (per openCypher, a missing property IS null) `IS NULL` -> 4,
+        // `IS NOT NULL` -> 0. The absent-property cases were previously an
+        // openCypher deviation (inverted); fixed in #3511.
         Case::new(
             "where",
             "is_null_present_prop",
@@ -339,6 +344,18 @@ fn supported_execute_cases() -> Vec<Case> {
             "is_not_null_present_prop",
             "MATCH (n:Person) WHERE n.name IS NOT NULL RETURN n",
             Executes(4),
+        ),
+        Case::new(
+            "where",
+            "is_null_absent_prop",
+            "MATCH (n:Person) WHERE n.email IS NULL RETURN n",
+            Executes(4),
+        ),
+        Case::new(
+            "where",
+            "is_not_null_absent_prop",
+            "MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n",
+            Executes(0),
         ),
         // ---- patterns ------------------------------------------------------
         Case::new(
@@ -651,8 +668,8 @@ fn supported_parse_cases() -> Vec<Case> {
             "MATCH (n:Person) BETWEEN '2024-01-01' AND '2024-12-31' RETURN n",
             Parses,
         ),
-        // ---- where null-check parse+convert (absent-prop semantics deviate;
-        //      pinned in compat_known_deviations) -----------------------------
+        // ---- where null-check parse+convert (absent-prop execution semantics
+        //      asserted in supported_execute_cases; openCypher-correct post-#3511)
         Case::new(
             "where",
             "is_null_parses",
@@ -966,62 +983,4 @@ fn compat_rejected() {
     }
 
     assert_no_failures("rejected", total, failures);
-}
-
-// ---------------------------------------------------------------------------
-// Known deviations from openCypher (pinned, NOT asserted as correct)
-// ---------------------------------------------------------------------------
-
-/// Pin the **actual** (openCypher-*deviating*) behavior of `IS NULL` /
-/// `IS NOT NULL` against an **absent** property, so a regression is caught, but
-/// without misrepresenting it as openCypher-conformant.
-///
-/// # The deviation
-///
-/// The Cypher converter lowers `x IS NULL` to `Predicate::Eq { value: Null }`
-/// and `x IS NOT NULL` to `Predicate::Ne { value: Null }`. The executor's
-/// `evaluate_eq` treats a **missing** property as non-matching (`false`) and
-/// `evaluate_ne` treats it as matching (`true`). Consequently, for a property
-/// that is entirely absent:
-///
-/// | Query | AletheiaDB (actual) | openCypher (expected) |
-/// |-------|---------------------|-----------------------|
-/// | `n.email IS NULL`     | 0 rows | 4 rows (a missing property IS null) |
-/// | `n.email IS NOT NULL` | 4 rows | 0 rows |
-///
-/// For **present** properties the behavior is openCypher-correct (see the
-/// `is_null_present_prop` / `is_not_null_present_prop` supported cases). This
-/// test documents the absent-property inversion; see the "Known limitations"
-/// section of docs/guides/cypher-compatibility.md.
-#[test]
-fn compat_known_deviations() {
-    let db = compat_db();
-
-    // DEVIATION: openCypher would return all 4 Persons (email is null/absent).
-    let is_null_absent = db
-        .execute_cypher("MATCH (n:Person) WHERE n.email IS NULL RETURN n")
-        .unwrap()
-        .collect_all()
-        .unwrap();
-    assert_eq!(
-        is_null_absent.len(),
-        0,
-        "KNOWN DEVIATION: `IS NULL` on an absent property matches 0 rows in \
-         AletheiaDB (openCypher would match all 4). If this changed, the \
-         deviation may be fixed -- update docs/guides/cypher-compatibility.md."
-    );
-
-    // DEVIATION: openCypher would return 0 Persons (email is null/absent).
-    let is_not_null_absent = db
-        .execute_cypher("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n")
-        .unwrap()
-        .collect_all()
-        .unwrap();
-    assert_eq!(
-        is_not_null_absent.len(),
-        4,
-        "KNOWN DEVIATION: `IS NOT NULL` on an absent property matches all rows \
-         in AletheiaDB (openCypher would match 0). If this changed, the \
-         deviation may be fixed -- update docs/guides/cypher-compatibility.md."
-    );
 }
