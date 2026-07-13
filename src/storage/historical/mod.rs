@@ -33,9 +33,12 @@ use std::time::Duration;
 use tracing;
 
 mod hooks;
+mod snapshot_policy;
 
 use hooks::{AnchorHookContext, HookMetrics};
 pub use hooks::{HookMetricsSnapshot, PreAnchorHook};
+pub use snapshot_policy::SnapshotPolicy;
+use snapshot_policy::SnapshotPolicyRegistry;
 
 /// Default maximum number of versions per entity (DoS protection)
 pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
@@ -229,6 +232,20 @@ pub struct HistoricalStorage {
     hook_timeout: Option<Duration>,
     /// Observability counters for pre-anchor hook execution (Issue #3525).
     hook_metrics: HookMetrics,
+    /// Per-node temporal vector snapshot policy (Issue #383).
+    ///
+    /// Consulted at node-anchor creation to decide whether that entity's anchor
+    /// should trigger the pre-anchor snapshot hooks. Entities resolving to
+    /// [`SnapshotPolicy::Skip`] form graph anchors normally but do **not** run
+    /// the snapshot hooks, decoupling graph anchors from vector snapshots. The
+    /// default policy is [`SnapshotPolicy::Snapshot`], reproducing the pre-#383
+    /// global behavior when no per-entity policy is configured.
+    node_snapshot_policies: SnapshotPolicyRegistry<NodeId>,
+    /// Per-edge temporal vector snapshot policy (Issue #383).
+    ///
+    /// The edge counterpart of [`node_snapshot_policies`](Self::node_snapshot_policies);
+    /// resolved independently at edge-anchor creation.
+    edge_snapshot_policies: SnapshotPolicyRegistry<EdgeId>,
     /// Optional tiered storage for cold data access.
     ///
     /// When configured, versions not found in hot storage will be looked up
@@ -366,6 +383,8 @@ impl HistoricalStorage {
             pre_edge_anchor_hooks: Vec::new(),
             hook_timeout: None,
             hook_metrics: HookMetrics::default(),
+            node_snapshot_policies: SnapshotPolicyRegistry::default(),
+            edge_snapshot_policies: SnapshotPolicyRegistry::default(),
             tiered_storage: None,
             temporal_indexes: None,
             temporal_adjacency_index: None,
@@ -556,6 +575,86 @@ impl HistoricalStorage {
     /// surface for graceful degradation (Issue #3525).
     pub fn hook_metrics(&self) -> HookMetricsSnapshot {
         self.hook_metrics.snapshot()
+    }
+
+    // --- Per-entity temporal vector snapshot policy (Issue #383) ---------------
+    //
+    // These control, per node/edge, whether that entity's anchor triggers the
+    // pre-anchor snapshot hooks (registered via the #3525 multi-hook API).
+    // Replacing the single global anchor hook, they let production deployments
+    // snapshot only the vectors that actually change instead of re-snapshotting
+    // the whole index on every anchor. The default policy is
+    // [`SnapshotPolicy::Snapshot`], so a database that configures nothing behaves
+    // exactly as before Issue #383.
+
+    /// Set the temporal vector snapshot policy for a specific node (Issue #383).
+    ///
+    /// A [`SnapshotPolicy::Skip`] node still forms graph anchors normally but no
+    /// longer runs the pre-anchor snapshot hooks, so no vector snapshot is
+    /// captured for its anchors. Overrides the default policy for this node
+    /// until [`clear_node_snapshot_policy`](Self::clear_node_snapshot_policy) is
+    /// called.
+    pub fn set_node_snapshot_policy(&mut self, node_id: NodeId, policy: SnapshotPolicy) {
+        self.node_snapshot_policies.set(node_id, policy);
+    }
+
+    /// Set the temporal vector snapshot policy for a specific edge (Issue #383).
+    ///
+    /// The edge counterpart of
+    /// [`set_node_snapshot_policy`](Self::set_node_snapshot_policy).
+    pub fn set_edge_snapshot_policy(&mut self, edge_id: EdgeId, policy: SnapshotPolicy) {
+        self.edge_snapshot_policies.set(edge_id, policy);
+    }
+
+    /// Remove any per-node snapshot policy override, reverting the node to the
+    /// current default node policy (Issue #383). Returns the removed override,
+    /// if any.
+    pub fn clear_node_snapshot_policy(&mut self, node_id: NodeId) -> Option<SnapshotPolicy> {
+        self.node_snapshot_policies.clear(node_id)
+    }
+
+    /// Remove any per-edge snapshot policy override, reverting the edge to the
+    /// current default edge policy (Issue #383). Returns the removed override,
+    /// if any.
+    pub fn clear_edge_snapshot_policy(&mut self, edge_id: EdgeId) -> Option<SnapshotPolicy> {
+        self.edge_snapshot_policies.clear(edge_id)
+    }
+
+    /// Set the fall-through default snapshot policy for **nodes** without an
+    /// explicit override (Issue #383).
+    ///
+    /// Flipping this to [`SnapshotPolicy::Skip`] gives an opt-in model: no node
+    /// is snapshotted unless individually set to [`SnapshotPolicy::Snapshot`].
+    pub fn set_default_node_snapshot_policy(&mut self, policy: SnapshotPolicy) {
+        self.node_snapshot_policies.set_default(policy);
+    }
+
+    /// Set the fall-through default snapshot policy for **edges** without an
+    /// explicit override (Issue #383).
+    pub fn set_default_edge_snapshot_policy(&mut self, policy: SnapshotPolicy) {
+        self.edge_snapshot_policies.set_default(policy);
+    }
+
+    /// Return the current default node snapshot policy (Issue #383).
+    pub fn default_node_snapshot_policy(&self) -> SnapshotPolicy {
+        self.node_snapshot_policies.default_policy()
+    }
+
+    /// Return the current default edge snapshot policy (Issue #383).
+    pub fn default_edge_snapshot_policy(&self) -> SnapshotPolicy {
+        self.edge_snapshot_policies.default_policy()
+    }
+
+    /// Resolve the effective snapshot policy for a node: its explicit override
+    /// if set, otherwise the default node policy (Issue #383).
+    pub fn node_snapshot_policy(&self, node_id: NodeId) -> SnapshotPolicy {
+        self.node_snapshot_policies.resolve(node_id)
+    }
+
+    /// Resolve the effective snapshot policy for an edge: its explicit override
+    /// if set, otherwise the default edge policy (Issue #383).
+    pub fn edge_snapshot_policy(&self, edge_id: EdgeId) -> SnapshotPolicy {
+        self.edge_snapshot_policies.resolve(edge_id)
     }
 
     /// Add a new version of a node.
@@ -755,8 +854,20 @@ impl HistoricalStorage {
         };
         version.provenance = provenance;
 
-        // Handle pre-anchor hooks (BEFORE storing)
-        if version.is_anchor() {
+        // Handle pre-anchor hooks (BEFORE storing).
+        //
+        // Issue #383: the per-entity snapshot policy gates whether this anchor
+        // triggers the (potentially whole-index) snapshot hooks. A `Skip` entity
+        // still forms the anchor above but runs no snapshot hooks, so no vector
+        // snapshot is captured for it — decoupling graph anchors from vector
+        // snapshots. The default policy is `Snapshot`, so absent any per-entity
+        // configuration this is identical to the pre-#383 behavior.
+        if version.is_anchor()
+            && self
+                .node_snapshot_policies
+                .resolve(node_id)
+                .should_snapshot()
+        {
             self.run_pre_anchor_hooks_into(
                 &self.pre_node_anchor_hooks,
                 AnchorHookContext {
@@ -1081,8 +1192,17 @@ impl HistoricalStorage {
         };
         version.provenance = provenance;
 
-        // Handle pre-anchor hooks (BEFORE storing)
-        if version.is_anchor() {
+        // Handle pre-anchor hooks (BEFORE storing).
+        //
+        // Issue #383: gated by the per-edge snapshot policy, symmetric with the
+        // node path above. See `snapshot_policy` for the rationale and the
+        // backward-compatible default (`Snapshot`).
+        if version.is_anchor()
+            && self
+                .edge_snapshot_policies
+                .resolve(edge_id)
+                .should_snapshot()
+        {
             self.run_pre_anchor_hooks_into(
                 &self.pre_edge_anchor_hooks,
                 AnchorHookContext {
