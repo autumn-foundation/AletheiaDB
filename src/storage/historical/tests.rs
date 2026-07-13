@@ -2344,6 +2344,289 @@ fn test_pre_anchor_hook_large_property_map_no_panic() {
 }
 
 // ========================================================================
+// Issue #3525: hook hardening — multi-hook API, panic isolation, timeout.
+// ========================================================================
+
+/// Helper: create the first (anchor) node version on `storage`, returning the
+/// stored anchor's vector snapshot id (if any).
+fn add_first_node_anchor(storage: &mut HistoricalStorage, id: u64) -> Option<usize> {
+    let node_id = NodeId::new(id).unwrap();
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+    let vid = VersionId::new(id).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            vid,
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().build(),
+            false,
+        )
+        .unwrap();
+    let version = storage.get_node_version(vid).unwrap();
+    assert!(version.is_anchor());
+    version.data.get_vector_snapshot_id()
+}
+
+/// Multiple hooks registered via `add_pre_node_anchor_hook` fire in
+/// registration order, and the last `Ok(Some(id))` wins the single snapshot
+/// slot.
+#[test]
+fn test_multiple_pre_anchor_hooks_fire_in_registration_order() {
+    use std::sync::Mutex;
+
+    let mut storage = HistoricalStorage::new();
+    let order = Arc::new(Mutex::new(Vec::<usize>::new()));
+
+    for i in 0..3usize {
+        let order_clone = Arc::clone(&order);
+        let hook: PreAnchorHook =
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+                order_clone.lock().unwrap().push(i);
+                // Each hook returns a distinct snapshot id; last should win.
+                Ok(Some(100 + i))
+            });
+        storage.add_pre_node_anchor_hook(hook);
+    }
+
+    let snapshot = add_first_node_anchor(&mut storage, 1);
+
+    assert_eq!(*order.lock().unwrap(), vec![0, 1, 2], "hooks ran in order");
+    assert_eq!(snapshot, Some(102), "last Ok(Some) wins the snapshot slot");
+
+    let metrics = storage.hook_metrics();
+    assert_eq!(metrics.invocations, 3);
+    assert_eq!(metrics.successes, 3);
+    assert_eq!(metrics.failures, 0);
+    assert_eq!(metrics.panics, 0);
+    assert_eq!(metrics.timeouts, 0);
+}
+
+/// A panicking hook is isolated: the write succeeds, later hooks still run, and
+/// the panic is counted.
+#[test]
+fn test_pre_anchor_hook_panic_isolated() {
+    let mut storage = HistoricalStorage::new();
+
+    // Hook 0 panics.
+    let panicking: PreAnchorHook = Arc::new(|_entity_type, _entity_id, _timestamp, _properties| {
+        panic!("intentional test panic in pre-anchor hook");
+    });
+    // Hook 1 succeeds after the panic.
+    let ok_hook: PreAnchorHook =
+        Arc::new(|_entity_type, _entity_id, _timestamp, _properties| Ok(Some(99)));
+
+    storage.add_pre_node_anchor_hook(panicking);
+    storage.add_pre_node_anchor_hook(ok_hook);
+
+    let snapshot = add_first_node_anchor(&mut storage, 1);
+
+    // Second hook still ran and its snapshot id was stored despite the panic.
+    assert_eq!(snapshot, Some(99));
+
+    let metrics = storage.hook_metrics();
+    assert_eq!(metrics.invocations, 2);
+    assert_eq!(metrics.panics, 1);
+    assert_eq!(metrics.successes, 1);
+    assert_eq!(metrics.failures, 0);
+}
+
+/// Panic isolation also applies on the inline (no-timeout) path with a single
+/// hook: the write is not unwound.
+#[test]
+fn test_pre_anchor_hook_panic_isolated_inline_single_hook() {
+    let mut storage = HistoricalStorage::new();
+    assert_eq!(storage.pre_anchor_hook_timeout(), None);
+
+    let panicking: PreAnchorHook = Arc::new(|_entity_type, _entity_id, _timestamp, _properties| {
+        panic!("boom");
+    });
+    storage.register_pre_node_anchor_hook(panicking);
+
+    // Write must succeed (no unwind through the write path) and produce no snapshot.
+    let snapshot = add_first_node_anchor(&mut storage, 1);
+    assert_eq!(snapshot, None);
+
+    let metrics = storage.hook_metrics();
+    assert_eq!(metrics.invocations, 1);
+    assert_eq!(metrics.panics, 1);
+}
+
+/// An erroring hook is isolated across multiple hooks: successful hooks apply,
+/// the failure is counted, and last `Ok(Some)` wins.
+#[test]
+fn test_pre_anchor_hook_error_isolated_across_multiple() {
+    let mut storage = HistoricalStorage::new();
+
+    let ok1: PreAnchorHook =
+        Arc::new(|_entity_type, _entity_id, _timestamp, _properties| Ok(Some(1)));
+    let failing: PreAnchorHook = Arc::new(|_entity_type, _entity_id, _timestamp, _properties| {
+        Err(crate::core::error::Error::Storage(
+            StorageError::InconsistentState {
+                reason: "middle hook failed".to_string(),
+            },
+        ))
+    });
+    let ok3: PreAnchorHook =
+        Arc::new(|_entity_type, _entity_id, _timestamp, _properties| Ok(Some(3)));
+
+    storage.add_pre_node_anchor_hook(ok1);
+    storage.add_pre_node_anchor_hook(failing);
+    storage.add_pre_node_anchor_hook(ok3);
+
+    let snapshot = add_first_node_anchor(&mut storage, 1);
+    assert_eq!(
+        snapshot,
+        Some(3),
+        "last successful hook wins over the failure"
+    );
+
+    let metrics = storage.hook_metrics();
+    assert_eq!(metrics.invocations, 3);
+    assert_eq!(metrics.successes, 2);
+    assert_eq!(metrics.failures, 1);
+    assert_eq!(metrics.panics, 0);
+}
+
+/// A hook that exceeds the configured timeout is reported and degraded without
+/// deadlocking or holding the write path for the full hook duration.
+#[test]
+fn test_pre_anchor_hook_timeout_degrades() {
+    use std::time::{Duration, Instant};
+
+    let mut storage = HistoricalStorage::new();
+    storage.set_pre_anchor_hook_timeout(Some(Duration::from_millis(50)));
+    assert_eq!(
+        storage.pre_anchor_hook_timeout(),
+        Some(Duration::from_millis(50))
+    );
+
+    // Hook sleeps far longer than the timeout, then would return a snapshot.
+    let slow: PreAnchorHook = Arc::new(|_entity_type, _entity_id, _timestamp, _properties| {
+        std::thread::sleep(Duration::from_millis(1000));
+        Ok(Some(5))
+    });
+    storage.register_pre_node_anchor_hook(slow);
+
+    let start = Instant::now();
+    let snapshot = add_first_node_anchor(&mut storage, 1);
+    let elapsed = start.elapsed();
+
+    // Degraded: no snapshot stored, anchor still created.
+    assert_eq!(snapshot, None);
+    // The write path stopped waiting near the timeout, well before the 1s hook.
+    assert!(
+        elapsed < Duration::from_millis(800),
+        "write path should not block for the full hook duration (elapsed={elapsed:?})"
+    );
+
+    let metrics = storage.hook_metrics();
+    assert_eq!(metrics.invocations, 1);
+    assert_eq!(metrics.timeouts, 1);
+    assert_eq!(metrics.successes, 0);
+}
+
+/// With a generous timeout, a fast hook completes normally on the watchdog path
+/// and its snapshot id is stored.
+#[test]
+fn test_pre_anchor_hook_timeout_fast_hook_succeeds() {
+    use std::time::Duration;
+
+    let mut storage = HistoricalStorage::new();
+    storage.set_pre_anchor_hook_timeout(Some(Duration::from_secs(5)));
+
+    let fast: PreAnchorHook =
+        Arc::new(|_entity_type, _entity_id, _timestamp, _properties| Ok(Some(7)));
+    storage.register_pre_node_anchor_hook(fast);
+
+    let snapshot = add_first_node_anchor(&mut storage, 1);
+    assert_eq!(snapshot, Some(7));
+
+    let metrics = storage.hook_metrics();
+    assert_eq!(metrics.invocations, 1);
+    assert_eq!(metrics.successes, 1);
+    assert_eq!(metrics.timeouts, 0);
+    assert_eq!(metrics.panics, 0);
+}
+
+/// Backward compatibility: `register_*` replaces (old single-hook "set THE
+/// hook" semantics) while `add_*` appends.
+#[test]
+fn test_register_replaces_add_appends() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut storage = HistoricalStorage::new();
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let make = |c: &Arc<AtomicUsize>, id: usize| -> PreAnchorHook {
+        let c = Arc::clone(c);
+        Arc::new(move |_e, _i, _t, _p| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(id))
+        })
+    };
+
+    // Append two hooks.
+    storage.add_pre_node_anchor_hook(make(&count, 1));
+    storage.add_pre_node_anchor_hook(make(&count, 2));
+    // register replaces both with a single hook.
+    storage.register_pre_node_anchor_hook(make(&count, 3));
+
+    let snapshot = add_first_node_anchor(&mut storage, 1);
+
+    // Only the single replacing hook ran (count == 1), and its snapshot won.
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(snapshot, Some(3));
+    assert_eq!(storage.hook_metrics().invocations, 1);
+}
+
+/// Node and edge hook registries are independent under the multi-hook API.
+#[test]
+fn test_multi_hook_node_and_edge_independent() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut storage = HistoricalStorage::new();
+
+    let node_calls = Arc::new(AtomicUsize::new(0));
+    let edge_calls = Arc::new(AtomicUsize::new(0));
+
+    let nc = Arc::clone(&node_calls);
+    storage.add_pre_node_anchor_hook(Arc::new(move |_e, _i, _t, _p| {
+        nc.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }));
+    let ec = Arc::clone(&edge_calls);
+    storage.add_pre_edge_anchor_hook(Arc::new(move |_e, _i, _t, _p| {
+        ec.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }));
+
+    add_first_node_anchor(&mut storage, 1);
+
+    let edge_id = EdgeId::new(1).unwrap();
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+    let source = NodeId::new(1).unwrap();
+    let target = NodeId::new(2).unwrap();
+    storage
+        .add_edge_version(
+            edge_id,
+            VersionId::new(50).unwrap(),
+            2000.into(),
+            2000.into(),
+            label,
+            source,
+            target,
+            PropertyMapBuilder::new().build(),
+            false,
+        )
+        .unwrap();
+
+    assert_eq!(node_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(edge_calls.load(Ordering::SeqCst), 1);
+}
+
+// ========================================================================
 // Tests for Issue #17: Recursion depth limit in version reconstruction
 // ========================================================================
 
