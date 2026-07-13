@@ -101,11 +101,11 @@ correctly.
 | Chained `WITH` | `WITH a WHERE ... WITH a WHERE ... RETURN a` | |
 | Standalone `UNWIND` | `UNWIND [1,2,3] AS x RETURN x` | list literal / `$param` / `null`; `RETURN x`, `DISTINCT`, `ORDER BY x`, `SKIP`, `LIMIT` |
 | `OPTIONAL MATCH` (left-outer) | `MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x` | unmatched preserves base row, binds null; single pattern, unlabeled continuation node |
-| `AS OF TIMESTAMP` | `MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00Z' RETURN n` | *convert-only in the suite* (avoids seeding bi-temporal history) |
-| `AS OF VALID_TIME` / `AS OF SYSTEM_TIME` | `... AS OF VALID_TIME '2024-01-15' RETURN n` | *convert-only* |
-| `FOR SYSTEM_TIME AS OF` | `... FOR SYSTEM_TIME AS OF '2024-01-15' RETURN n` | *convert-only* |
-| Bi-temporal | `... AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...' RETURN n` | *convert-only* |
-| `BETWEEN ... AND` | `... BETWEEN '2024-01-01' AND '2024-12-31' RETURN n` | *convert-only* |
+| `AS OF TIMESTAMP` (#550) | `MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00Z' RETURN n` | *convert-only in the suite* (avoids seeding bi-temporal history). Timestamp literal accepts ISO-8601 with `Z` **or** numeric offset (`+00:00`), date-only (midnight UTC), and Unix microseconds — all pinned. **Runtime** reconstruction is proven end-to-end in `src/cypher/tests.rs` (`test_e2e_as_of_timestamp_*`) |
+| `AS OF VALID_TIME` / `AS OF SYSTEM_TIME` / `FOR VALID_TIME AS OF` (#551) | `... AS OF VALID_TIME '2024-01-15' RETURN n` | *convert-only* in the suite; runtime-proven in `tests.rs` |
+| `FOR SYSTEM_TIME AS OF` (#551) | `... FOR SYSTEM_TIME AS OF '2024-01-15' RETURN n` | *convert-only*; runtime-proven (`test_e2e_for_system_time_as_of_honored_by_label_scan`) |
+| Bi-temporal (#551) | `... AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...' RETURN n` | *convert-only*; runtime-proven (`test_e2e_as_of_bitemporal_valid_and_system`, `test_e2e_as_of_asymmetric_bitemporal`) |
+| `BETWEEN ... AND` (valid-time range, #552) | `... BETWEEN '2024-01-01' AND '2024-12-31' RETURN n` | *convert-only*; half-open `[start, end)` (start-inclusive, end-exclusive). Runtime-proven in `tests.rs` (`test_e2e_between_*`, incl. boundary inclusivity) |
 | Vector similarity in `ORDER BY` | `RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10` | *convert-only* (needs an `Embedding` param) |
 | Parameters | `MATCH (n:Person {name:$name}) RETURN n` | `$param` bindings |
 
@@ -138,6 +138,9 @@ can be produced. The suite pins the exact variant and a message substring.
 | `WITH` computed / property / aggregate projection | `MATCH (a:Person) WITH a.name AS x RETURN x` | `UnsupportedFeature` | `WITH` can only project a bound variable (optionally aliased) |
 | `RETURN` of a `WITH`-dropped variable | `MATCH (a:Person) WITH a AS p WHERE p.age > 30 RETURN a` | `SemanticError` | `a` is out of scope after the `WITH` renamed/dropped it |
 | Unbound parameter | `MATCH (n:Person {name:$name}) RETURN n` (no binding) | `ParameterError` | `$name` was never bound |
+| `FOR SYSTEM_TIME BETWEEN` (tx-time range, #551/#552) | `... FOR SYSTEM_TIME BETWEEN '2024-01-01' AND '2024-03-31' RETURN n` | `ParseError` | **Design decision**: transaction-time RANGE scans are not exposed through Cypher; the parser requires `AS OF` after `SYSTEM_TIME`. (The tx-range context is reachable only via the `QueryBuilder` API, where the planner rejects it as an `UnsupportedFeature` — see `test_e2e_transaction_time_between_rejected`.) |
+| Inverted `BETWEEN` range (#552) | `... BETWEEN '2024-12-31' AND '2024-01-01' RETURN n` | `InvalidTemporalClause` | start/end are validated (`start > end` rejected during lowering), never silently treated as empty |
+| Unparseable `AS OF TIMESTAMP` literal (#550) | `... AS OF TIMESTAMP 'not-a-timestamp' RETURN n` | `InvalidTimestamp` | a malformed timestamp is rejected during lowering, never a silent `now()` fallback |
 
 ---
 
