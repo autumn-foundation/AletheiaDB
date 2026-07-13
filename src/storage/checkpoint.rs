@@ -437,11 +437,25 @@ impl CheckpointManager {
     /// - Temporal index (all version chains)
     /// - Manifest (LSN and metadata)
     ///
+    /// # Locking contract (Issue #3425)
+    ///
+    /// `historical` is taken as a bare `&HistoricalStorage`, but a consistent
+    /// (and data-race-free) snapshot requires the **caller to hold the
+    /// `historical` `RwLock` read guard** for the whole duration of this call —
+    /// exactly as [`crate::db::AletheiaDB::backup`] does. Holding that read guard
+    /// is what makes the snapshot mutually exclusive with the commit path's
+    /// `historical.write()` guard, which (as of #3425) is now held across
+    /// `commit_timestamp` finalization. Without it, a snapshot can race the
+    /// finalize step and capture a committed node/edge whose `commit_timestamp`
+    /// is still `None`. Callers that already hold the guard by construction (e.g.
+    /// via `historical.read()`) satisfy this contract; do not call this method
+    /// with an unlocked `historical`.
+    ///
     /// # Arguments
     ///
     /// * `lsn` - Current LSN for consistency tracking
     /// * `current` - Current storage to persist
-    /// * `historical` - Historical storage to persist
+    /// * `historical` - Historical storage to persist (caller must hold its read guard)
     ///
     /// # Errors
     ///
@@ -465,7 +479,21 @@ impl CheckpointManager {
             (c, h)
         };
 
-        // 1. Save string interner first (other indexes depend on it)
+        // 1. Extract graph + temporal data from the snapshots FIRST.
+        //
+        // Issue #3490: extraction interns string property VALUES (a
+        // `PropertyValue::String` holds a plain `Arc<str>`, interned into
+        // GLOBAL_INTERNER only at persist time via `persist_property_value`),
+        // so it can mint NEW interner ids. The string interner file must
+        // therefore be saved AFTER extraction, or it would omit those ids and
+        // the load-time remap (#3490) would flag the persisted references as
+        // unmappable. This mirrors the `persist_graph_index` ordering
+        // ("Persist string interner AFTER graph conversion").
+        let graph_data = self.extract_graph_data_from_snapshot(&current_snapshot)?;
+        let temporal_data = self.extract_temporal_data_from_snapshot(&historical_snapshot)?;
+
+        // 2. Save string interner (now complete — covers every id referenced
+        // by the extracted graph/temporal data).
         self.persistence_manager
             .save_string_interner()
             .map_err(persistence_err)?;
@@ -473,8 +501,7 @@ impl CheckpointManager {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // 2. Save graph index (current state) from snapshot
-        let graph_data = self.extract_graph_data_from_snapshot(&current_snapshot)?;
+        // 3. Save graph index (current state) from snapshot
         let graph_path = self.persistence_manager.graph_path().join("adjacency.idx");
         // Encrypt checkpoint index files at rest when a cipher is configured
         // (Issue #481): a checkpoint in an encryption-enabled DB must not write
@@ -498,8 +525,7 @@ impl CheckpointManager {
         }
         bytes_written += std::fs::metadata(&graph_path).map(|m| m.len()).unwrap_or(0);
 
-        // 3. Save temporal index (historical versions) from snapshot
-        let temporal_data = self.extract_temporal_data_from_snapshot(&historical_snapshot)?;
+        // 4. Save temporal index (historical versions) from snapshot
         let temporal_path = self
             .persistence_manager
             .temporal_path()
@@ -514,7 +540,7 @@ impl CheckpointManager {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // 4. Build and save manifest
+        // 5. Build and save manifest
         let mut manifest = IndexManifest::new(lsn.0);
 
         // Add graph index entry
@@ -588,10 +614,16 @@ impl CheckpointManager {
             return self.recover_from_wal_only(wal);
         }
 
-        // Load manifest and strings
-        let manifest = self
+        // Load manifest and strings.
+        // Issue #3490: obtain the file-id -> live-id remap and apply it to the
+        // loaded graph/temporal data before resolving any persisted interner id.
+        // The interner is a process-global singleton (and WAL bootstrap may have
+        // populated it), so persisted ids are file-space and would otherwise
+        // resolve to the wrong strings — silent corruption on this PUBLIC
+        // recovery path (used by examples/recovery/*).
+        let (manifest, remap) = self
             .persistence_manager
-            .load_manifest_and_strings()
+            .load_manifest_and_strings_with_remap()
             .map_err(persistence_err)?;
         let checkpoint_lsn = LSN(manifest.lsn);
 
@@ -610,10 +642,11 @@ impl CheckpointManager {
         }
 
         // Load graph index
-        let current = self.load_current_storage(&manifest)?;
+        let current = self.load_current_storage(&manifest, &remap)?;
 
         // Load temporal index
-        let (historical, historical_max_version_id) = self.load_historical_storage(&manifest)?;
+        let (historical, historical_max_version_id) =
+            self.load_historical_storage(&manifest, &remap)?;
 
         // Ensure version ID generator accounts for historical versions
         // The current storage's generator was initialized from the count of restored entities,
@@ -635,7 +668,20 @@ impl CheckpointManager {
             current.ensure_version_id_generator_at_least(next_version_id);
         }
 
-        // Replay WAL entries after checkpoint LSN
+        // Replay WAL entries after checkpoint LSN.
+        //
+        // ⚠️ Transaction-framing invariant (Issue #3413): this EXCLUSIVE
+        // `.next()` convention starts replay one LSN PAST `checkpoint_lsn`. If
+        // `checkpoint_lsn` ever pointed at the last op of a committed
+        // `[BeginTx .. CommitTx]` band, `.next()` would begin replay mid-band
+        // (at the `CommitTx`, with its `BeginTx` skipped) — which
+        // `resolve_transaction_frames` only tolerates as a benign no-op because
+        // its buffered ops are also below the boundary. This whole `recover*`
+        // path is currently test-only and unwired (production replays from an
+        // INCLUSIVE `manifest.lsn`, always a band start; see `db::config` and
+        // the resolver's load-bearing-invariant doc). Before wiring any of these
+        // to production, ensure the start LSN lands on a transaction-frame
+        // boundary, not mid-band.
         let start_lsn = checkpoint_lsn.next();
         let (current, historical, final_lsn) =
             self.replay_wal(wal, current, historical, start_lsn)?;
@@ -710,10 +756,10 @@ impl CheckpointManager {
             return self.recover_from_wal_with_cold_storage(wal, flushed_lsn);
         }
 
-        // Load manifest and strings
-        let manifest = self
+        // Load manifest and strings (Issue #3490: remap-aware, as in `recover`).
+        let (manifest, remap) = self
             .persistence_manager
-            .load_manifest_and_strings()
+            .load_manifest_and_strings_with_remap()
             .map_err(persistence_err)?;
         let checkpoint_lsn = LSN(manifest.lsn);
 
@@ -731,10 +777,11 @@ impl CheckpointManager {
         }
 
         // Load graph index
-        let current = self.load_current_storage(&manifest)?;
+        let current = self.load_current_storage(&manifest, &remap)?;
 
         // Load temporal index
-        let (historical, historical_max_version_id) = self.load_historical_storage(&manifest)?;
+        let (historical, historical_max_version_id) =
+            self.load_historical_storage(&manifest, &remap)?;
 
         // Ensure version ID generator accounts for historical versions
         if historical_max_version_id > 0 {
@@ -970,7 +1017,16 @@ impl CheckpointManager {
     }
 
     /// Load CurrentStorage from persisted graph index.
-    fn load_current_storage(&self, manifest: &IndexManifest) -> Result<CurrentStorage> {
+    ///
+    /// Issue #3490: `remap` translates persisted file-space interner ids
+    /// (labels, property keys, string values) to live ids before the raw
+    /// resolution sites below (`InternedString::from_raw`, `restore_property_map`)
+    /// touch them; an identity remap is a no-op.
+    fn load_current_storage(
+        &self,
+        manifest: &IndexManifest,
+        remap: &crate::storage::index_persistence::strings::InternerRemap,
+    ) -> Result<CurrentStorage> {
         let current = CurrentStorage::new();
 
         if let Some(ref graph_entry) = manifest.graph_index {
@@ -978,12 +1034,17 @@ impl CheckpointManager {
                 .persistence_manager
                 .indexes_path()
                 .join(&graph_entry.adjacency_file);
-            let graph_data =
+            // Decrypt the persisted graph index with the configured index
+            // cipher (Issue #481), then translate persisted file-space interner
+            // ids to live ids (Issue #3490) before the raw resolution sites
+            // below touch them; an identity remap is a no-op.
+            let mut graph_data =
                 crate::storage::index_persistence::graph::load_graph_index_with_cipher(
                     &graph_path,
                     self.persistence_manager.index_cipher(),
                 )
                 .map_err(persistence_err)?;
+            remap.remap_graph_index_data(&mut graph_data);
 
             // Track maximum version ID to initialize generator
             let mut max_version_id: u64 = 0;
@@ -1038,6 +1099,7 @@ impl CheckpointManager {
     fn load_historical_storage(
         &self,
         manifest: &IndexManifest,
+        remap: &crate::storage::index_persistence::strings::InternerRemap,
     ) -> Result<(HistoricalStorage, u64)> {
         let mut historical = HistoricalStorage::new();
         let mut max_version_id: u64 = 0;
@@ -1047,12 +1109,19 @@ impl CheckpointManager {
                 .persistence_manager
                 .indexes_path()
                 .join(&temporal_entry.node_versions_file);
-            let temporal_data =
+            // Decrypt the persisted temporal index with the configured index
+            // cipher (Issue #481), then (Issue #3490) translate persisted
+            // file-space interner ids (version labels, property keys, string
+            // values, delta removed_keys, anchor full_state) to live ids before
+            // `restore_into_historical_storage` resolves them; an identity remap
+            // is a no-op.
+            let mut temporal_data =
                 crate::storage::index_persistence::temporal::load_temporal_index_with_cipher(
                     &temporal_path,
                     self.persistence_manager.index_cipher(),
                 )
                 .map_err(persistence_err)?;
+            remap.remap_temporal_index_data(&mut temporal_data);
 
             max_version_id = temporal_data
                 .node_versions
@@ -2129,6 +2198,8 @@ mod tests {
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
+            version_id: None,
+            provenance: None,
         })?;
         wal.flush()?;
 
@@ -2187,6 +2258,8 @@ mod tests {
         wal.append(WalOperation::DeleteEdge {
             edge_id,
             valid_from: time::now(),
+            version_id: None,
+            provenance: None,
         })?;
         wal.flush()?;
 

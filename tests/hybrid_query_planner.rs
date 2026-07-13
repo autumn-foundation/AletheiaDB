@@ -932,10 +932,21 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
             prev_version_id, prev_version.temporal
         );
 
-        // Use a timestamp in the middle of the first version's interval
+        // #3504: the previous version's valid interval now stays OPEN
+        // (append-only) after being superseded by the update, so its end() is
+        // TIMESTAMP_MAX and can no longer bound the midpoint. Anchor instead
+        // between the previous version's valid_from and the CURRENT (successor)
+        // version's valid_from -- the window during which the previous version
+        // was the visible head. At that bi-temporal coordinate only the
+        // previous version is transaction-time-visible, so the query still
+        // targets that historical version.
         let start = prev_version.temporal.valid_time().start();
-        let end = prev_version.temporal.valid_time().end();
-        let midpoint = ((start.wallclock() + end.wallclock()) / 2).into();
+        let next_start = current_version.temporal.valid_time().start();
+        assert!(
+            start.wallclock() < next_start.wallclock(),
+            "premise: the successor version's valid_from must be strictly later"
+        );
+        let midpoint = ((start.wallclock() + next_start.wallclock()) / 2).into();
         println!("DEBUG: Using midpoint timestamp: {}", midpoint);
         midpoint
     };

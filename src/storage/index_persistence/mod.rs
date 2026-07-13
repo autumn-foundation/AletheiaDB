@@ -311,6 +311,23 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 ///
 /// A tuple of (graph_data, temporal_data_option, vector_data_vec)
 ///
+/// # ⚠️ Interner remap required (Issue #3490)
+///
+/// This function returns **raw, un-remapped** `GraphIndexData` /
+/// `TemporalIndexData`: every embedded `u32` interner id (labels, property
+/// keys, string values, delta `removed_keys`) is still in the saved file's
+/// id space. It does **not** restore the string interner. Any caller that goes
+/// on to resolve those ids MUST first restore the interner (via
+/// [`strings::restore_string_interner`], obtaining an
+/// [`InternerRemap`](strings::InternerRemap)) and then translate the returned
+/// data through [`InternerRemap::remap_graph_index_data`] /
+/// [`InternerRemap::remap_temporal_index_data`] before resolving — otherwise
+/// persisted ids silently resolve to the wrong strings when the live interner
+/// order diverges from the saved file (the #3490 corruption). This is a latent
+/// trap: there are currently no production callers, and the startup path
+/// (`load_indexes_startup`) deliberately loads sequentially with the remap
+/// applied instead of using this helper.
+///
 /// # Errors
 ///
 /// Returns an error if any of the index files fail to load.

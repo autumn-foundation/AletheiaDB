@@ -453,10 +453,14 @@ fn test_replay_update_preserves_temporal_intervals() -> Result<()> {
         vf1,
         "superseded version's valid_from must survive replay exactly"
     );
-    assert_eq!(
-        superseded.temporal.valid_time().end(),
-        vf2,
-        "superseded version's valid time must be closed at the successor's LOGGED valid_from"
+    // #3504: the superseded version's valid interval stays OPEN (append-only).
+    // The valid-time close was removed from close_previous_version_intervals
+    // because it violated snapshot isolation on the valid dimension; the
+    // transaction-time close (asserted below) is what partitions the version
+    // chain, so replay must reproduce the superseded valid interval open-ended.
+    assert!(
+        superseded.temporal.valid_time().is_current(),
+        "superseded version's valid time must stay open-ended after replay (#3504)"
     );
     assert_eq!(
         superseded.temporal.transaction_time().start(),
@@ -572,10 +576,13 @@ fn test_replay_update_edge_preserves_temporal_intervals() -> Result<()> {
         vf1,
         "superseded edge version's valid_from must survive replay exactly"
     );
-    assert_eq!(
-        superseded.temporal.valid_time().end(),
-        vf2,
-        "superseded edge version's valid time must be closed at the successor's LOGGED valid_from"
+    // #3504: the superseded edge version's valid interval stays OPEN
+    // (append-only) -- the valid-time close was removed from
+    // close_previous_version_intervals as a snapshot-isolation fix; only the
+    // transaction-time close (asserted below) partitions the version chain.
+    assert!(
+        superseded.temporal.valid_time().is_current(),
+        "superseded edge version's valid time must stay open-ended after replay (#3504)"
     );
     assert_eq!(
         superseded.temporal.transaction_time().start(),
@@ -695,6 +702,158 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
     // And: Historical storage has 5 versions (3 creates + 2 updates)
     let hist_stats = historical.stats();
     assert_eq!(hist_stats.total_node_versions, 5);
+
+    Ok(())
+}
+
+/// Issue #3407 (adversarial-review crux): equal-timestamp intra-transaction
+/// supersession must close the intermediate version's transaction time on
+/// replay, exactly as the live write path does.
+///
+/// Two `update_node` calls to the SAME already-committed node in ONE
+/// transaction produce TWO update versions that share a single framed
+/// `commit_timestamp` T (the CommitTx marker's authoritative time). The live
+/// write path closes the intermediate version's tx-time UNCONDITIONALLY,
+/// yielding the empty interval `[T, T)`. Replay's `add_node_version` path also
+/// closes the prior head, but via `close_previous_version_intervals`, whose
+/// tx-time close is guarded by a STRICT `new_tx_start > prev_tx_start` — and
+/// `T > T` is false, so that guard alone would SKIP the close and leave the
+/// intermediate version OPEN `[T, MAX)`. Two versions with overlapping open
+/// transaction intervals let an `AS OF SYSTEM_TIME = T` read surface the
+/// superseded version — a live-vs-replay bitemporal-integrity divergence.
+///
+/// This pins the UNCONDITIONAL explicit `close_node_version_transaction_time`
+/// in the UpdateNode replay arm: the test PASSES with it and FAILS without it
+/// (empirically, the intermediate version stays open `[T, MAX)` on replay).
+/// It drives the real high-level transaction API (framed WAL commit) and a
+/// real crash + full WAL replay, and compares the recovered intermediate
+/// version against the live one.
+#[test]
+fn replay_double_update_same_node_in_one_tx_closes_intermediate() -> Result<()> {
+    use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::storage::wal::DurabilityMode;
+    use aletheiadb::{AletheiaDB, WriteOps};
+
+    // WAL-only (index persistence disabled) => reopen performs a full WAL
+    // replay, exercising the recovery arm under test.
+    let wal_only = |dir: &std::path::Path| -> AletheiaDBConfig {
+        AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.join("wal"))
+                    .durability_mode(DurabilityMode::Synchronous)
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: false,
+                ..PersistenceConfig::default()
+            })
+            .build()
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path();
+
+    // Capture the LIVE (pre-crash) intermediate version's transaction interval
+    // for a direct live-vs-replay comparison, plus the node id.
+    let (node_id, live_intermediate_tx_start, live_intermediate_tx_end) = {
+        let db = AletheiaDB::with_unified_config(wal_only(db_path)).unwrap();
+        let node_id = db.create_node(
+            "Counter",
+            PropertyMapBuilder::new().insert("count", 1_i64).build(),
+        )?;
+
+        // ONE transaction, TWO updates of the SAME node — the two update
+        // versions share the single framed commit timestamp.
+        let mut tx = db.write_transaction()?;
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("count", 2_i64).build(),
+        )?;
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("count", 3_i64).build(),
+        )?;
+        let commit_ts = tx.commit_with_timestamp()?;
+
+        let live = db.get_node_history(node_id)?;
+        assert_eq!(
+            live.versions.len(),
+            3,
+            "create + two same-node updates must yield three distinct versions"
+        );
+        let intermediate = &live.versions[1];
+        // Both update versions share the one framed commit timestamp.
+        assert_eq!(
+            intermediate.temporal.transaction_time().start(),
+            commit_ts,
+            "intermediate update's tx-time must start at the shared framed commit timestamp"
+        );
+        assert_eq!(
+            live.versions[2].temporal.transaction_time().start(),
+            commit_ts,
+            "head update's tx-time must start at the SAME framed commit timestamp \
+             (equal-timestamp case — the whole point)"
+        );
+        // Live path closes the intermediate UNCONDITIONALLY: empty [T, T).
+        assert!(
+            !intermediate.temporal.transaction_time().is_current(),
+            "live: intermediate version's transaction time must be closed"
+        );
+        assert_eq!(
+            intermediate.temporal.transaction_time().end(),
+            commit_ts,
+            "live: intermediate version's tx-time closes at T, forming the empty [T, T) interval"
+        );
+
+        let start = intermediate.temporal.transaction_time().start();
+        let end = intermediate.temporal.transaction_time().end();
+
+        // Hard crash: no clean shutdown / persist; the Synchronous WAL is
+        // already fsynced.
+        std::mem::forget(db);
+        (node_id, start, end)
+    };
+
+    // Reopen => full WAL replay of the framed transaction.
+    let db = AletheiaDB::with_unified_config(wal_only(db_path)).unwrap();
+    let replayed = db.get_node_history(node_id)?;
+
+    assert_eq!(
+        replayed.versions.len(),
+        3,
+        "replay must reproduce all three versions"
+    );
+    let intermediate = &replayed.versions[1];
+
+    // THE CRUX: without the explicit unconditional close in the UpdateNode
+    // replay arm, this intermediate version is left OPEN [T, MAX) because the
+    // helper's strict `>` guard skips the equal-timestamp close.
+    assert!(
+        !intermediate.temporal.transaction_time().is_current(),
+        "replay: intermediate version's transaction time MUST be closed \
+         (equal-timestamp intra-tx supersession) — leaving it open lets an \
+         AS OF SYSTEM_TIME read surface the superseded version"
+    );
+    assert_eq!(
+        intermediate.temporal.transaction_time().end(),
+        live_intermediate_tx_end,
+        "replay must close the intermediate version's tx-time to the SAME point as the live path"
+    );
+    assert_eq!(
+        intermediate.temporal.transaction_time().start(),
+        live_intermediate_tx_start,
+        "replay must preserve the intermediate version's tx-time start"
+    );
+    // The head remains the current version.
+    assert!(
+        replayed.versions[2]
+            .temporal
+            .transaction_time()
+            .is_current(),
+        "replay: head version's transaction time must stay open"
+    );
 
     Ok(())
 }

@@ -104,6 +104,17 @@ pub enum WalOperation {
         node_id: NodeId,
         /// When the deletion became valid (typically commit time)
         valid_from: Timestamp,
+        /// The tombstone version ID assigned by the live write path (Issue
+        /// #3406). Logged so replay reproduces the exact same version chain
+        /// instead of synthesizing a (potentially colliding) id. `None` for
+        /// segments written before `WAL_VERSION_DELETE_VERSION_ID` (v9/v10),
+        /// which fall back to synthesis during replay.
+        version_id: Option<VersionId>,
+        /// Write-time provenance bundle recording the acting principal for the
+        /// deletion (Issue #3427), if supplied. `None` for segments written
+        /// before `WAL_VERSION_DESTRUCTIVE_PROVENANCE` (v11/v12), which carry no
+        /// provenance blob on the delete/retract payloads.
+        provenance: Option<Provenance>,
     },
     /// Delete an edge
     DeleteEdge {
@@ -111,6 +122,12 @@ pub enum WalOperation {
         edge_id: EdgeId,
         /// When the deletion became valid (typically commit time)
         valid_from: Timestamp,
+        /// The tombstone version ID assigned by the live write path (Issue
+        /// #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
+        version_id: Option<VersionId>,
+        /// Write-time provenance bundle (Issue #3427). See
+        /// [`WalOperation::DeleteNode`]'s `provenance`.
+        provenance: Option<Provenance>,
     },
     /// Retract a node: close its valid-time interval at `valid_to` without
     /// deleting its history (Issue #3230).
@@ -119,6 +136,12 @@ pub enum WalOperation {
         node_id: NodeId,
         /// When the fact stopped being true in the real world (user-controlled)
         valid_to: Timestamp,
+        /// The retraction (closing) version ID assigned by the live write path
+        /// (Issue #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
+        version_id: Option<VersionId>,
+        /// Write-time provenance bundle (Issue #3427). See
+        /// [`WalOperation::DeleteNode`]'s `provenance`.
+        provenance: Option<Provenance>,
     },
     /// Retract an edge: close its valid-time interval at `valid_to` without
     /// deleting its history (Issue #3230).
@@ -127,6 +150,12 @@ pub enum WalOperation {
         edge_id: EdgeId,
         /// When the relationship stopped being true in the real world (user-controlled)
         valid_to: Timestamp,
+        /// The retraction (closing) version ID assigned by the live write path
+        /// (Issue #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
+        version_id: Option<VersionId>,
+        /// Write-time provenance bundle (Issue #3427). See
+        /// [`WalOperation::DeleteNode`]'s `provenance`.
+        provenance: Option<Provenance>,
     },
     /// Checkpoint marker - indicates a snapshot was taken
     Checkpoint {
@@ -148,6 +177,40 @@ pub enum WalOperation {
         label: InternedString,
         /// The property key the constraint was on.
         property: InternedString,
+    },
+    /// Open a transaction frame (Issue #3413).
+    ///
+    /// Written as the FIRST entry of a committing `WriteTransaction`'s WAL
+    /// batch (before its data ops), inside the SAME atomic `append_batch`
+    /// allocation as the ops and the terminal [`WalOperation::CommitTx`]. Its
+    /// presence tells replay "the following data ops belong to a transaction
+    /// and must be buffered until the matching commit record"; its ABSENCE
+    /// (a raw `append`/`append_async`, a control op, or a legacy pre-v7
+    /// segment) keeps the immediate-apply path, so no existing non-framed
+    /// producer is disturbed.
+    BeginTx {
+        /// The originating `WriteTransaction` id (provenance + pair matching).
+        tx_id: u64,
+    },
+    /// Close (commit) a transaction frame (Issue #3413).
+    ///
+    /// Written as the LAST entry of a committing `WriteTransaction`'s WAL
+    /// batch, in the same atomic `append_batch` allocation as its
+    /// [`WalOperation::BeginTx`] and data ops. Carries the authoritative
+    /// bi-temporal commit timestamp that replay re-stamps onto EVERY buffered
+    /// version of the transaction (fixing per-op timestamp bisection), plus
+    /// the data-op `entry_count` as a batch-integrity check. Only when this
+    /// marker is durable does replay apply the buffered ops; a batch whose
+    /// marker never reached disk (an uncommitted crash tail) is discarded
+    /// whole.
+    CommitTx {
+        /// The originating `WriteTransaction` id (must match the frame's
+        /// [`WalOperation::BeginTx`]).
+        tx_id: u64,
+        /// Number of DATA ops in this transaction (excludes Begin/Commit).
+        entry_count: u32,
+        /// The authoritative transaction commit timestamp.
+        commit_timestamp: Timestamp,
     },
 }
 
@@ -182,6 +245,16 @@ pub struct WalEntry {
     ///
     /// The checksum is computed over the entire serialized entry, excluding the checksum field itself.
     pub checksum: u32,
+    /// Whether this entry was read from a transaction-framing-capable segment
+    /// (WAL format version >= `WAL_VERSION_TX_FRAMING`, Issue #3413).
+    ///
+    /// Additive, in-memory-only metadata set by the segment parsers from the
+    /// segment header version; it is NOT part of the serialized entry. Replay
+    /// uses it to keep legacy (pre-v7) segments on the immediate-apply path:
+    /// only framed entries can participate in `BeginTx`/`CommitTx` buffering.
+    /// Entries constructed in-process (e.g. via [`WalEntry::new`]) default to
+    /// `false` — the flag is meaningful only for entries recovered from disk.
+    pub framed: bool,
 }
 
 impl WalEntry {
@@ -194,6 +267,7 @@ impl WalEntry {
             timestamp,
             operation,
             checksum: 0, // Will be set during serialization
+            framed: false,
         }
     }
 
@@ -301,14 +375,13 @@ mod sentry_tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&original_entry, &mut buffer).expect("Serialization failed");
 
-        // Deserialize. Serialization always writes the principal-carrying
-        // provenance payload shape now (Issues #3224 + #3350), so parsing
-        // must use the matching version to consume the same bytes that were
-        // written.
+        // Deserialize. Serialization always writes the newest payload shape now
+        // (string labels, Issue #3506), so parsing must use the matching
+        // version to consume the same bytes that were written.
         let (parsed_entry, consumed) = parse_entry_at(
             &buffer,
             0,
-            crate::storage::wal::segment_reader::WAL_VERSION_PROVENANCE_PRINCIPAL,
+            crate::storage::wal::segment_reader::WAL_VERSION_STRING_LABELS,
         )
         .expect("Deserialization failed");
 
@@ -321,6 +394,10 @@ mod sentry_tests {
         // This validates that the checksum in the buffer is indeed what we expect
         // for this data (since parse_entry_at verifies it).
         original_entry.checksum = parsed_entry.checksum;
+        // Parsing at a framing-capable version (v13 >= v7) flags the entry
+        // `framed`; the freshly-built original defaults to false. Normalize it
+        // (like the checksum) so the comparison targets the payload fidelity.
+        original_entry.framed = parsed_entry.framed;
 
         // Now assert strict equality
         assert_eq!(
@@ -342,6 +419,7 @@ mod sentry_tests {
             timestamp: fixed_timestamp,
             operation: op,
             checksum: 0,
+            framed: false,
         };
 
         // Serialize

@@ -346,25 +346,28 @@ fn test_temporal_edge_interval_closing() {
         )
     };
 
-    // Verify first version interval was closed
+    // #3504: after an update supersedes v1, v1's valid-time interval stays
+    // OPEN (append-only). Supersession is expressed purely on the
+    // transaction-time dimension (v1's tx window is closed at v2's tx start);
+    // the valid interval is never retroactively closed in place.
     {
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
         let v1 = hist_guard.get_edge_version(v1_id).unwrap();
 
         assert!(
-            !v1.temporal.is_currently_valid(),
-            "First version should have closed valid_time interval"
+            v1.temporal.valid_time().is_current(),
+            "First version's valid_time interval must stay open (append-only) after supersession"
         );
         assert_eq!(
-            v1.temporal.valid_time().end(),
-            v2_start,
-            "First version's valid_time end should equal second version's start"
+            v1.temporal.transaction_time().end(),
+            v2_tx,
+            "First version's tx-time window should be closed at second version's tx start"
         );
-        println!("✓ Edge version interval properly closed");
+        println!("✓ Edge version tx interval properly closed; valid interval stays open");
         println!(
-            "  V1 interval: {} (closed at v2_start={})",
-            v1.temporal, v2_start
+            "  V1 interval: {} (tx-closed at v2_tx={}, valid stays open)",
+            v1.temporal, v2_tx
         );
     }
 

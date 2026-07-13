@@ -827,3 +827,100 @@ fn t11_constructor_tolerates_torn_wal_tail() {
          < session 1 end {session1_end_lsn}"
     );
 }
+
+// ──────────────────────────────────────────────────────────────
+// Issue #3429 — single-pass WAL startup fold
+// ──────────────────────────────────────────────────────────────
+
+/// Issue #3429: startup folds the three separate full WAL scans (max-LSN
+/// allocator seed, constraint declaration net-state, differential replay) into
+/// a single decode. This test pins the two invariants that fold must preserve
+/// and that a naive fold would break:
+///
+///   1. A unique constraint DECLARED BEFORE the index snapshot LSN — i.e. below
+///      the LSN the differential replay starts at — must still be recovered.
+///      The constraint net-state is folded from the *whole* WAL history
+///      (`apply_constraint_declarations` over every entry from LSN 0), not just
+///      the post-manifest suffix fed to the differential replay. A fold that
+///      only inspected the replay suffix would silently drop it.
+///   2. A node WRITTEN AFTER the persist (a genuine post-snapshot tail) is
+///      recovered by the differential replay driven off the *same* single read
+///      (the LSN-filtered suffix), with no lost or duplicated versions, and the
+///      allocator is seeded past every durable LSN.
+///
+/// Layout: declare constraint → create A → persist_indexes (manifest LSN now
+/// sits above the constraint declaration) → create tail B → hard crash
+/// (mem::forget) → reopen.
+#[test]
+fn t3429_below_manifest_constraint_and_tail_survive_single_pass_startup() {
+    let _g = lock();
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path();
+
+    let (a, b, manifest_after_persist) = {
+        let db = open(db_path);
+        // Constraint declaration is written to the WAL here, BEFORE the persist.
+        db.unique_constraint("Person", "email")
+            .enable()
+            .expect("enable unique constraint");
+        let a = db
+            .create_node("Person", aletheiadb::properties! { "email" => "a@x" })
+            .expect("create A");
+
+        // Snapshot: the manifest LSN captured here is strictly above the
+        // constraint declaration's LSN, so the next startup's differential
+        // replay begins past it.
+        db.persist_indexes().expect("manual persist");
+        let manifest_after_persist = manifest_lsn(db_path);
+
+        // Genuine post-snapshot tail write, recovered only via differential
+        // replay of the single read's LSN-filtered suffix.
+        let b = db
+            .create_node("Person", aletheiadb::properties! { "email" => "b@x" })
+            .expect("create tail B");
+
+        // Hard crash: no Drop, no shutdown persist.
+        std::mem::forget(db);
+        (a, b, manifest_after_persist)
+    };
+
+    assert!(
+        manifest_after_persist > 1,
+        "manifest LSN must sit above the constraint declaration for this test \
+         to exercise below-manifest constraint recovery (got {manifest_after_persist})"
+    );
+
+    // Reopen: exactly one full WAL decode now feeds seed + constraints + replay.
+    let db = open(db_path);
+
+    // Invariant 1: below-manifest constraint recovered and still ENFORCED.
+    let active = db.list_unique_constraints();
+    assert!(
+        active.iter().any(|(l, p)| l == "Person" && p == "email"),
+        "below-manifest constraint Person.email must survive single-pass startup: {active:?}"
+    );
+    db.create_node("Person", aletheiadb::properties! { "email" => "a@x" })
+        .expect_err("constraint must still reject the duplicate email after reopen");
+
+    // Invariant 2: both the pre-persist node and the post-persist tail recovered
+    // cleanly (no loss, no boundary double-apply), and a distinct email is still
+    // allowed.
+    let node_a = db
+        .get_node(a)
+        .expect("pre-persist node A lost after recovery");
+    assert_eq!(node_a.properties.get("email"), Some(&"a@x".into()));
+    let node_b = db
+        .get_node(b)
+        .expect("post-persist tail node B lost after recovery");
+    assert_eq!(node_b.properties.get("email"), Some(&"b@x".into()));
+    assert_history_len(&db, a, "A", 1);
+    assert_history_len(&db, b, "B", 1);
+    db.create_node("Person", aletheiadb::properties! { "email" => "c@x" })
+        .expect("a distinct email must still be allowed after reopen");
+
+    // Allocator seeded past every durable LSN from the same single read.
+    assert!(
+        db.__test_current_wal_lsn() > manifest_after_persist,
+        "allocator must be seeded past the persisted tail after single-pass startup"
+    );
+}

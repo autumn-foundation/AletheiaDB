@@ -461,6 +461,18 @@ pub enum PredicateExpr {
     IsNull(PropertyAccess),
     /// NOT NULL check: n.prop IS NOT NULL
     IsNotNull(PropertyAccess),
+    /// Provenance null check: `provenance(x) IS [NOT] NULL` (Issue #3354a).
+    ///
+    /// Distinct from [`IsNull`](PredicateExpr::IsNull)/[`IsNotNull`](PredicateExpr::IsNotNull),
+    /// which take a property access; this addresses the whole provenance bundle
+    /// of the bound entity `x` (a bare variable), selecting versions with no
+    /// recorded provenance (`negated == false`) or with any (`negated == true`).
+    ProvenanceIsNull {
+        /// The bound entity variable whose provenance bundle is checked.
+        variable: String,
+        /// `true` for `IS NOT NULL`, `false` for `IS NULL`.
+        negated: bool,
+    },
     /// String contains: n.prop CONTAINS 'str'
     Contains {
         property: PropertyAccess,

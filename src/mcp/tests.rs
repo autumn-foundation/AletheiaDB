@@ -88,6 +88,7 @@ mod node_tests {
     /// Helper to create two `Person` nodes and return their IDs.
     fn create_two_nodes(server: &AletheiaMcpServer) -> (u64, u64) {
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -95,6 +96,7 @@ mod node_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -109,6 +111,7 @@ mod node_tests {
         let server = create_test_server();
 
         let req = CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -131,6 +134,7 @@ mod node_tests {
         props.insert("age".to_string(), serde_json::json!(30));
 
         let req = CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
@@ -157,6 +161,7 @@ mod node_tests {
         props.insert("name".to_string(), serde_json::json!("Bob"));
 
         let create_req = CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
@@ -208,6 +213,7 @@ mod node_tests {
         props.insert("age".to_string(), serde_json::json!(25));
 
         let create_req = CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
@@ -223,6 +229,7 @@ mod node_tests {
         new_props.insert("city".to_string(), serde_json::json!("London"));
 
         let update_req = UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id: created.id,
             properties: new_props,
@@ -245,6 +252,7 @@ mod node_tests {
 
         // Create a node
         let create_req = CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "ToDelete".to_string(),
             properties: None,
@@ -287,6 +295,7 @@ mod node_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id,
             target_id,
@@ -325,6 +334,7 @@ mod node_tests {
 
         // A third node so we have both an outgoing and an incoming edge.
         let third = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -334,6 +344,7 @@ mod node_tests {
         let third_id = third_id.id;
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id,
             target_id,
@@ -342,6 +353,7 @@ mod node_tests {
             provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: third_id,
             target_id: source_id,
@@ -403,6 +415,7 @@ mod node_tests {
         // A node with no edges deletes cleanly and reports zero edges removed.
         let server = create_test_server();
         let created: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Lonely".to_string(),
             properties: None,
@@ -431,6 +444,7 @@ mod node_tests {
             props.insert("index".to_string(), serde_json::json!(i));
 
             let req = CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "ListTest".to_string(),
                 properties: Some(props),
@@ -462,6 +476,7 @@ mod node_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "TypeA".to_string(),
                 properties: None,
@@ -471,6 +486,7 @@ mod node_tests {
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "TypeB".to_string(),
                 properties: None,
@@ -504,6 +520,7 @@ mod node_tests {
             props.insert("index".to_string(), serde_json::json!(i));
 
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Paginated".to_string(),
                 properties: Some(props),
@@ -555,6 +572,7 @@ mod node_tests {
         // Create some nodes
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Counted".to_string(),
                 properties: None,
@@ -575,6 +593,7 @@ mod node_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "CountA".to_string(),
                 properties: None,
@@ -584,6 +603,7 @@ mod node_tests {
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "CountB".to_string(),
                 properties: None,
@@ -614,6 +634,7 @@ mod edge_tests {
 
     fn create_two_nodes(server: &AletheiaMcpServer) -> (u64, u64) {
         let node1 = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -626,6 +647,7 @@ mod edge_tests {
         let n1: NodeResponse = parse_response(&node1).unwrap();
 
         let node2 = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -646,6 +668,7 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let req = CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id,
             target_id,
@@ -672,6 +695,7 @@ mod edge_tests {
         props.insert("strength".to_string(), serde_json::json!(0.9));
 
         let req = CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id,
             target_id,
@@ -699,6 +723,7 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id,
             target_id,
@@ -725,6 +750,7 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id,
             target_id,
@@ -738,6 +764,7 @@ mod edge_tests {
         new_props.insert("weight".to_string(), serde_json::json!(0.5));
 
         let update_response = server.update_edge(UpdateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             edge_id: created.id,
             properties: new_props,
@@ -757,6 +784,7 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id,
             target_id,
@@ -789,6 +817,7 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -798,6 +827,7 @@ mod edge_tests {
 
         // Create edges
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1,
             target_id: n2,
@@ -806,6 +836,7 @@ mod edge_tests {
             provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n2,
             target_id: n3.id,
@@ -839,6 +870,7 @@ mod edge_tests {
         assert_eq!(value.get("count"), Some(&serde_json::json!(0)));
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1,
             target_id: n2,
@@ -859,6 +891,7 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -868,6 +901,7 @@ mod edge_tests {
 
         // Create edges from n1
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1,
             target_id: n2,
@@ -876,6 +910,7 @@ mod edge_tests {
             provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1,
             target_id: n3.id,
@@ -910,6 +945,7 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -919,6 +955,7 @@ mod edge_tests {
 
         // Create edges to n2
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1,
             target_id: n2,
@@ -927,6 +964,7 @@ mod edge_tests {
             provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n3.id,
             target_id: n2,
@@ -957,6 +995,7 @@ mod traversal_tests {
         let nodes: Vec<u64> = (0..4)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    derived_from: None,
                     valid_time: None,
                     label: "Node".to_string(),
                     properties: Some({
@@ -974,6 +1013,7 @@ mod traversal_tests {
         // Create edges
         for i in 0..3 {
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
                 valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
@@ -1165,6 +1205,7 @@ mod vector_tests {
             );
 
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
@@ -1200,6 +1241,7 @@ mod temporal_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -1224,6 +1266,7 @@ mod temporal_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -1258,6 +1301,7 @@ mod temporal_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -1266,6 +1310,7 @@ mod temporal_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -1274,6 +1319,7 @@ mod temporal_tests {
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -1318,6 +1364,7 @@ mod temporal_tests {
     fn test_list_changes_success_shape() {
         let server = create_test_server();
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -1357,6 +1404,7 @@ mod temporal_tests {
     fn test_list_changes_empty_window_is_success() {
         let server = create_test_server();
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -1416,6 +1464,7 @@ mod hybrid_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -1428,6 +1477,7 @@ mod hybrid_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -1465,6 +1515,7 @@ mod hybrid_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
@@ -1474,6 +1525,7 @@ mod hybrid_tests {
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: None,
@@ -1537,6 +1589,7 @@ mod hybrid_tests {
 
         // Create a simple graph
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -1545,6 +1598,7 @@ mod hybrid_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -1553,6 +1607,7 @@ mod hybrid_tests {
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -1601,6 +1656,7 @@ mod conversion_tests {
         props.insert("array_val".to_string(), serde_json::json!([1, 2, 3]));
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Test".to_string(),
             properties: Some(props),
@@ -1635,6 +1691,7 @@ mod conversion_tests {
         );
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
@@ -1736,6 +1793,7 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Event".to_string(),
             properties: None,
@@ -1770,6 +1828,7 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Event".to_string(),
             properties: None,
@@ -1802,6 +1861,7 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Event".to_string(),
             properties: None,
@@ -1857,6 +1917,7 @@ mod coverage_tests {
         // Create a few nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "OffsetTest".to_string(),
                 properties: Some({
@@ -1895,6 +1956,7 @@ mod coverage_tests {
         let mut prev_id: Option<u64> = None;
         for i in 0..5 {
             let response = server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "ChainNode".to_string(),
                 properties: Some({
@@ -1908,6 +1970,7 @@ mod coverage_tests {
 
             if let Some(source_id) = prev_id {
                 server.create_edge(CreateEdgeRequest {
+                    derived_from: None,
                     valid_time: None,
                     source_id,
                     target_id: node.id,
@@ -1987,6 +2050,7 @@ mod error_handling_tests {
         let server = create_test_server();
 
         let req = UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id: 999999,
             properties: HashMap::new(),
@@ -2035,6 +2099,7 @@ mod error_handling_tests {
         let server = create_test_server();
 
         let req = UpdateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             edge_id: 999999,
             properties: HashMap::new(),
@@ -2068,6 +2133,7 @@ mod error_handling_tests {
 
         // Create only target node
         let target_resp = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Target".to_string(),
             properties: None,
@@ -2077,6 +2143,7 @@ mod error_handling_tests {
 
         // Try to create edge with non-existent source
         let req = CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: 999999,
             target_id: target.id,
@@ -2097,6 +2164,7 @@ mod error_handling_tests {
 
         // Create only source node
         let source_resp = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Source".to_string(),
             properties: None,
@@ -2106,6 +2174,7 @@ mod error_handling_tests {
 
         // Try to create edge with non-existent target
         let req = CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: source.id,
             target_id: 999999,
@@ -2237,6 +2306,7 @@ mod temporal_extended_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Event".to_string(),
             properties: Some({
@@ -2281,6 +2351,7 @@ mod temporal_extended_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -2289,6 +2360,7 @@ mod temporal_extended_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -2297,6 +2369,7 @@ mod temporal_extended_tests {
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -2330,6 +2403,7 @@ mod temporal_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Test".to_string(),
             properties: None,
@@ -2360,6 +2434,7 @@ mod temporal_extended_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -2368,6 +2443,7 @@ mod temporal_extended_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -2376,6 +2452,7 @@ mod temporal_extended_tests {
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -2401,6 +2478,7 @@ mod temporal_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Event".to_string(),
             properties: None,
@@ -2439,6 +2517,7 @@ mod traversal_extended_tests {
         let nodes: Vec<u64> = (0..3)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    derived_from: None,
                     valid_time: None,
                     label: "BiNode".to_string(),
                     properties: Some({
@@ -2456,6 +2535,7 @@ mod traversal_extended_tests {
         // Create bidirectional edges
         for i in 0..2 {
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
                 valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
@@ -2464,6 +2544,7 @@ mod traversal_extended_tests {
                 provenance: None,
             });
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
                 valid_time: None,
                 source_id: nodes[i + 1],
                 target_id: nodes[i],
@@ -2515,6 +2596,7 @@ mod traversal_extended_tests {
 
         let a = {
             let response = server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Node".to_string(),
                 properties: None,
@@ -2525,6 +2607,7 @@ mod traversal_extended_tests {
         };
         let b = {
             let response = server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Node".to_string(),
                 properties: None,
@@ -2535,6 +2618,7 @@ mod traversal_extended_tests {
         };
         // Only B -> A exists; A has no outgoing edge back to B.
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: b,
             target_id: a,
@@ -2571,6 +2655,7 @@ mod traversal_extended_tests {
 
         // Create a single node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Lonely".to_string(),
             properties: None,
@@ -2603,6 +2688,7 @@ mod traversal_extended_tests {
 
         // Create A -> B
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Node".to_string(),
             properties: None,
@@ -2611,6 +2697,7 @@ mod traversal_extended_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Node".to_string(),
             properties: None,
@@ -2619,6 +2706,7 @@ mod traversal_extended_tests {
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -2651,6 +2739,7 @@ mod traversal_extended_tests {
 
         // Create a star graph: center -> 10 spokes
         let center_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Center".to_string(),
             properties: None,
@@ -2660,6 +2749,7 @@ mod traversal_extended_tests {
 
         for i in 0..10 {
             let spoke_response = server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Spoke".to_string(),
                 properties: Some({
@@ -2672,6 +2762,7 @@ mod traversal_extended_tests {
             let spoke: NodeResponse = parse_response(&spoke_response).unwrap();
 
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
                 valid_time: None,
                 source_id: center.id,
                 target_id: spoke.id,
@@ -2713,6 +2804,7 @@ mod hybrid_extended_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -2762,6 +2854,7 @@ mod hybrid_extended_tests {
         let nodes: Vec<u64> = (0..4)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    derived_from: None,
                     valid_time: None,
                     label: "ChainNode".to_string(),
                     properties: Some({
@@ -2778,6 +2871,7 @@ mod hybrid_extended_tests {
 
         for i in 0..3 {
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
                 valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
@@ -2814,6 +2908,7 @@ mod hybrid_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Test".to_string(),
             properties: None,
@@ -2850,6 +2945,7 @@ mod hybrid_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Test".to_string(),
             properties: None,
@@ -2888,6 +2984,7 @@ mod hybrid_extended_tests {
         // Create some nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "LimitTest".to_string(),
                 properties: Some({
@@ -2964,6 +3061,7 @@ mod edge_extended_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -2972,6 +3070,7 @@ mod edge_extended_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -2981,6 +3080,7 @@ mod edge_extended_tests {
 
         // Create edges with different labels
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -2989,6 +3089,7 @@ mod edge_extended_tests {
             provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -3017,6 +3118,7 @@ mod edge_extended_tests {
 
         // Create nodes and edges
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -3025,6 +3127,7 @@ mod edge_extended_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -3033,6 +3136,7 @@ mod edge_extended_tests {
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -3064,6 +3168,7 @@ mod edge_extended_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -3072,6 +3177,7 @@ mod edge_extended_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -3080,6 +3186,7 @@ mod edge_extended_tests {
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let n3_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -3089,6 +3196,7 @@ mod edge_extended_tests {
 
         // Create edges with different labels pointing to n2
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -3097,6 +3205,7 @@ mod edge_extended_tests {
             provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n3.id,
             target_id: n2.id,
@@ -3135,6 +3244,7 @@ mod list_nodes_extended_tests {
         // Create some nodes
         for i in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: format!("Type{}", i),
                 properties: None,
@@ -3168,6 +3278,7 @@ mod list_nodes_extended_tests {
         // Create a few nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "LimitCap".to_string(),
                 properties: Some({
@@ -3207,6 +3318,7 @@ mod list_nodes_extended_tests {
 
         // Create nodes with different names
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -3217,6 +3329,7 @@ mod list_nodes_extended_tests {
             provenance: None,
         });
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -3227,6 +3340,7 @@ mod list_nodes_extended_tests {
             provenance: None,
         });
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -3257,6 +3371,7 @@ mod list_nodes_extended_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Sensor".to_string(),
             properties: Some({
@@ -3267,6 +3382,7 @@ mod list_nodes_extended_tests {
             provenance: None,
         });
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Sensor".to_string(),
             properties: Some({
@@ -3300,6 +3416,7 @@ mod list_nodes_extended_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Item".to_string(),
             properties: Some({
@@ -3373,6 +3490,7 @@ mod list_nodes_extended_tests {
         // Create 5 nodes with same property
         for _ in 0..5 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Widget".to_string(),
                 properties: Some({
@@ -3440,6 +3558,7 @@ mod query_tool_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!(name));
         let resp = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: label.to_string(),
             properties: Some(props),
@@ -3482,6 +3601,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
 
@@ -3524,6 +3644,7 @@ mod query_tool_tests {
                     query: stmt.to_string(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
 
@@ -3556,6 +3677,7 @@ mod query_tool_tests {
                 query: "this is not a valid query".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3575,6 +3697,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3596,6 +3719,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3618,6 +3742,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: None,
                 limit: Some(2),
+                limits: None,
             },
         );
         assert_eq!(
@@ -3643,6 +3768,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3664,12 +3790,182 @@ mod query_tool_tests {
                 query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
         assert_eq!(
             value["rows"][0]["entity"]["properties"]["name"].as_str(),
             Some("Alice")
+        );
+    }
+
+    // --- #558 MCP surface: Cypher aggregate/computed rows must render their
+    // named column values (not `entity: null`). See the aggregation limitation
+    // note in CLAUDE.md that this closes at the MCP layer.
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_aggregate_count_renders_value_not_null() {
+        let server = create_test_server();
+        for name in ["a", "b", "c", "d", "e"] {
+            seed_named(&server, "Person", name);
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN count(*)".to_string(),
+                params: None,
+                limit: None,
+                limits: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        // The aggregate value must be surfaced under its column name, not lost
+        // to an `entity: null` rendering.
+        assert_eq!(
+            value["rows"][0]["count(*)"].as_i64(),
+            Some(5),
+            "aggregate count must render its value under its column name: {value}"
+        );
+        assert!(
+            value["rows"][0]["entity"].is_null(),
+            "aggregate row must not carry a non-null entity payload: {value}"
+        );
+        // Column metadata names the aggregate column (not the static schema).
+        let cols = value["columns"].as_array().expect("columns array");
+        assert!(
+            cols.iter().any(|c| c["name"].as_str() == Some("count(*)")),
+            "columns must name the aggregate column: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_grouped_aggregate_renders_group_and_count() {
+        let server = create_test_server();
+        for (name, dept) in [
+            ("a", "Eng"),
+            ("b", "Eng"),
+            ("c", "Eng"),
+            ("d", "Sales"),
+            ("e", "Sales"),
+        ] {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), serde_json::json!(name));
+            props.insert("dept".to_string(), serde_json::json!(dept));
+            let resp = server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: Some(props),
+                provenance: None,
+                derived_from: None,
+            });
+            let _: NodeResponse = parse_response(&resp).expect("seed node should succeed");
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN n.dept, count(*)".to_string(),
+                params: None,
+                limit: None,
+                limits: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(2), "{value}");
+        let rows = value["rows"].as_array().expect("rows array");
+        let mut counts = HashMap::new();
+        for r in rows {
+            let dept = r["n.dept"]
+                .as_str()
+                .unwrap_or_else(|| panic!("group column `n.dept` must be present: {value}"))
+                .to_string();
+            let cnt = r["count(*)"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("aggregate column `count(*)` must be present: {value}"));
+            counts.insert(dept, cnt);
+        }
+        assert_eq!(counts.get("Eng"), Some(&3), "{value}");
+        assert_eq!(counts.get("Sales"), Some(&2), "{value}");
+        let cols = value["columns"].as_array().expect("columns array");
+        let names: Vec<&str> = cols.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(
+            names.contains(&"n.dept") && names.contains(&"count(*)"),
+            "columns must list both the group key and the aggregate: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_aggregate_alias_names_column() {
+        let server = create_test_server();
+        for name in ["a", "b", "c"] {
+            seed_named(&server, "Person", name);
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN count(*) AS c".to_string(),
+                params: None,
+                limit: None,
+                limits: None,
+            },
+        );
+        assert_eq!(
+            value["rows"][0]["c"].as_i64(),
+            Some(3),
+            "aliased aggregate value must render under its alias: {value}"
+        );
+        let cols = value["columns"].as_array().expect("columns array");
+        assert!(
+            cols.iter().any(|c| c["name"].as_str() == Some("c")),
+            "columns must name the aggregate alias `c`: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_plain_entity_row_rendering_unchanged() {
+        // Non-regression: a plain entity query keeps the exact
+        // entity/score/path/timestamp row shape and static column schema.
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
+                params: None,
+                limit: None,
+                limits: None,
+            },
+        );
+        let row = &value["rows"][0];
+        assert_eq!(row["entity"]["label"].as_str(), Some("Person"), "{value}");
+        assert_eq!(
+            row["entity"]["properties"]["name"].as_str(),
+            Some("Alice"),
+            "{value}"
+        );
+        assert!(row.get("score").is_some(), "score key present: {value}");
+        assert!(row.get("path").is_some(), "path key present: {value}");
+        assert!(
+            row.get("timestamp").is_some(),
+            "timestamp key present: {value}"
+        );
+        let names: Vec<&str> = value["columns"]
+            .as_array()
+            .expect("columns array")
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["entity", "score", "path", "timestamp"],
+            "plain entity query keeps the static column schema: {value}"
         );
     }
 
@@ -3688,6 +3984,7 @@ mod query_tool_tests {
                     .to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
@@ -3712,6 +4009,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person {name: $name}) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
@@ -3743,6 +4041,7 @@ mod query_tool_tests {
                     query: q.clone(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
             assert!(
@@ -3774,6 +4073,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person) AS OF TIMESTAMP 'not-a-timestamp' RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         let kind = error_obj(&value)["kind"].as_str();
@@ -3804,6 +4104,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person {note: 'it\\'s fine'}) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         // The guard must not fire (no read_only_violation for a read-only query).
@@ -3833,6 +4134,7 @@ mod query_tool_tests {
                 query: "this is not valid".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         let err = error_obj(&value);
@@ -3858,6 +4160,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3886,6 +4189,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Product) WHERE n.price < $threshold RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         // The key assertion: the error must NOT be invalid_params (the float
@@ -3913,6 +4217,7 @@ mod query_tool_tests {
                 query: "// CREATE would mutate\nMATCH (n:Widget) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         if let Some(err) = value.get("error") {
@@ -3942,6 +4247,7 @@ mod query_tool_tests {
                     query: stmt.to_string(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
             if let Some(err) = value.get("error") {
@@ -3972,6 +4278,7 @@ mod query_tool_tests {
                     query: stmt.to_string(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
             if let Some(err) = value.get("error") {
@@ -4002,6 +4309,7 @@ mod query_tool_tests {
                     query: stmt.to_string(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
             assert_eq!(
@@ -4026,6 +4334,7 @@ mod query_tool_tests {
                 query: "MATCH (n) WHERE n.x = $x RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         if let Some(err) = value.get("error") {
@@ -4052,6 +4361,7 @@ mod query_tool_tests {
                 query: "MATCH (n) WHERE n.flag = $flag AND n.count = $count RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         if let Some(err) = value.get("error") {
@@ -4077,6 +4387,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -4101,6 +4412,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -4108,6 +4420,242 @@ mod query_tool_tests {
             Some("invalid_params"),
             "non-numeric array parameter must yield invalid_params: {value}"
         );
+    }
+
+    // =======================================================================
+    // Per-query resource limits (Issue #3368) — end-to-end behavior through
+    // the public `query()` / `dispatch_tool` surfaces.
+    // =======================================================================
+
+    use crate::mcp::{QueryLimitsConfig, QueryLimitsOverride};
+
+    /// A `query` request with `limits` fields set on the override.
+    fn query_req(language: &str, query: &str, limits: Option<QueryLimitsOverride>) -> QueryRequest {
+        QueryRequest {
+            language: language.to_string(),
+            query: query.to_string(),
+            params: None,
+            limit: None,
+            limits,
+        }
+    }
+
+    /// Default (generous) limits leave a small query's output byte-identical:
+    /// no error, `truncated:false`, and the row is present.
+    #[test]
+    fn test_query_default_limits_output_unchanged() {
+        let server = create_test_server();
+        seed_named(&server, "Widget", "alpha");
+        let value = run_query(&server, query_req("aql", "MATCH (n:Widget) RETURN n", None));
+        assert!(
+            value.get("error").is_none(),
+            "no error under defaults: {value}"
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1));
+        assert_eq!(value["truncated"].as_bool(), Some(false));
+    }
+
+    /// A per-call override above the operator ceiling is rejected up front with
+    /// INVALID_ARGUMENT / kind invalid_params and `details {dimension, requested,
+    /// ceiling}` — for every dimension — and bumps the override-rejected counter.
+    #[test]
+    fn test_query_over_ceiling_overrides_are_invalid_argument() {
+        let server = create_test_server(); // default ceilings
+        let cases = [
+            (
+                QueryLimitsOverride {
+                    timeout_ms: Some(999_999_999),
+                    ..Default::default()
+                },
+                "wall_clock_timeout",
+            ),
+            (
+                QueryLimitsOverride {
+                    max_result_rows: Some(999_999_999),
+                    ..Default::default()
+                },
+                "result_rows",
+            ),
+            (
+                QueryLimitsOverride {
+                    max_response_bytes: Some(usize::MAX),
+                    ..Default::default()
+                },
+                "result_bytes",
+            ),
+        ];
+        for (over, dim) in cases {
+            let value = run_query(&server, query_req("aql", "MATCH (n) RETURN n", Some(over)));
+            let err = error_obj(&value);
+            assert_eq!(err["kind"].as_str(), Some("invalid_params"), "{value}");
+            assert_eq!(err["code"].as_str(), Some("INVALID_ARGUMENT"), "{value}");
+            assert_eq!(err["retriable"].as_bool(), Some(false), "{value}");
+            assert_eq!(err["details"]["dimension"].as_str(), Some(dim), "{value}");
+            assert!(err["details"]["ceiling"].as_u64().is_some(), "{value}");
+        }
+        assert_eq!(server.limit_termination_counts().override_rejected, 3);
+    }
+
+    /// A timeout override of `0` (unlimited) under a finite operator ceiling is
+    /// rejected — a caller cannot disable the timeout from the request.
+    #[test]
+    fn test_query_zero_timeout_override_under_ceiling_rejected() {
+        let server = create_test_server();
+        let value = run_query(
+            &server,
+            query_req(
+                "aql",
+                "MATCH (n) RETURN n",
+                Some(QueryLimitsOverride {
+                    timeout_ms: Some(0),
+                    ..Default::default()
+                }),
+            ),
+        );
+        assert_eq!(error_obj(&value)["code"].as_str(), Some("INVALID_ARGUMENT"));
+        assert_eq!(
+            error_obj(&value)["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout")
+        );
+    }
+
+    /// A per-call row override BELOW the default is honored and truncates the
+    /// result with the disclosed `truncated:true` completeness signal (#3226),
+    /// NOT a fail-closed error (the AC's alternative for list-like reads).
+    #[test]
+    fn test_query_row_override_truncates_with_disclosure() {
+        let server = create_test_server();
+        for name in ["a", "b", "c"] {
+            seed_named(&server, "Widget", name);
+        }
+        let value = run_query(
+            &server,
+            query_req(
+                "aql",
+                "MATCH (n:Widget) RETURN n",
+                Some(QueryLimitsOverride {
+                    max_result_rows: Some(1),
+                    ..Default::default()
+                }),
+            ),
+        );
+        assert!(
+            value.get("error").is_none(),
+            "row cap truncates, never errors: {value}"
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        assert_eq!(value["truncated"].as_bool(), Some(true), "{value}");
+    }
+
+    /// The result-byte cap fails closed: a response over the cap is a
+    /// non-retriable RESOURCE_EXHAUSTED with `details {dimension, limit,
+    /// consumed}` and bumps the result-bytes counter.
+    #[test]
+    fn test_query_byte_cap_exceeded_is_resource_exhausted() {
+        let server = create_test_server().with_query_limits(QueryLimitsConfig {
+            default_max_response_bytes: 40, // tiny: any real row overflows
+            ..QueryLimitsConfig::default()
+        });
+        seed_named(&server, "Widget", "alpha");
+        let value = run_query(&server, query_req("aql", "MATCH (n:Widget) RETURN n", None));
+        let err = error_obj(&value);
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{value}");
+        assert_eq!(err["retriable"].as_bool(), Some(false), "{value}");
+        assert_eq!(err["details"]["dimension"].as_str(), Some("result_bytes"));
+        let limit = err["details"]["limit"].as_u64().unwrap();
+        let consumed = err["details"]["consumed"].as_u64().unwrap();
+        assert!(
+            consumed > limit,
+            "consumed {consumed} must exceed limit {limit}"
+        );
+        assert_eq!(server.limit_termination_counts().result_bytes, 1);
+    }
+
+    /// Disabled limits ignore every per-call override (an override that would
+    /// otherwise be rejected is silently ignored) and enforce nothing.
+    #[test]
+    fn test_query_disabled_limits_ignore_overrides() {
+        let server = create_test_server().with_query_limits(QueryLimitsConfig::disabled());
+        seed_named(&server, "Widget", "alpha");
+        let value = run_query(
+            &server,
+            query_req(
+                "aql",
+                "MATCH (n:Widget) RETURN n",
+                Some(QueryLimitsOverride {
+                    timeout_ms: Some(0),
+                    max_result_rows: Some(0),
+                    max_response_bytes: Some(1), // would fail closed if enforced
+                }),
+            ),
+        );
+        assert!(
+            value.get("error").is_none(),
+            "disabled limits enforce nothing: {value}"
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1));
+    }
+
+    /// Composition with the #3353 token budget: the protective operator byte cap
+    /// runs FIRST inside `handle_query`, so a byte-cap breach fails closed as a
+    /// RESOURCE_EXHAUSTED error even when the caller supplies a (generous) token
+    /// budget — the budget shaper passes the error through, never masking the
+    /// protective limit (no silent bypass).
+    #[test]
+    fn test_query_byte_cap_wins_over_token_budget() {
+        let server = create_test_server().with_query_limits(QueryLimitsConfig {
+            default_max_response_bytes: 40,
+            ..QueryLimitsConfig::default()
+        });
+        seed_named(&server, "Widget", "alpha");
+        // Drive through dispatch_tool so the #3353 budget shaper is engaged.
+        let result = server.dispatch_tool(
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Widget) RETURN n",
+                "max_response_tokens": 100000, // generous budget: would not truncate
+            }),
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        assert_eq!(
+            error_obj(&value)["code"].as_str(),
+            Some("RESOURCE_EXHAUSTED"),
+            "operator byte cap must win over a generous token budget: {value}"
+        );
+    }
+
+    /// Composition with the #3353 token budget, other direction: within the
+    /// operator byte cap, a small token budget still shapes the response
+    /// gracefully (disclosed) — the two limits coexist.
+    #[test]
+    fn test_query_within_byte_cap_token_budget_still_shapes() {
+        let server = create_test_server(); // generous operator byte cap
+        for i in 0..5 {
+            seed_named(&server, "Widget", &format!("w{i}"));
+        }
+        let result = server.dispatch_tool(
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Widget) RETURN n",
+                "max_response_tokens": 256, // small: engages the budget ladder
+            }),
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        // Either a shaped success (budget block present) or the too-small-budget
+        // INVALID_ARGUMENT — but never a RESOURCE_EXHAUSTED (we are within the
+        // operator byte cap) and never an unbounded response.
+        if let Some(err) = value.get("error") {
+            assert_eq!(err["code"].as_str(), Some("INVALID_ARGUMENT"), "{value}");
+        } else {
+            assert!(
+                value.get("budget").is_some(),
+                "budget shaping disclosed: {value}"
+            );
+        }
     }
 }
 
@@ -4144,12 +4692,14 @@ mod constraint_tests {
         let mut props = HashMap::new();
         props.insert("email".to_string(), serde_json::json!("dup@x"));
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props.clone()),
             provenance: None,
         });
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
@@ -4222,6 +4772,7 @@ mod constraint_tests {
         props.insert("email".to_string(), serde_json::json!("alice@x"));
 
         let first_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props.clone()),
@@ -4231,6 +4782,7 @@ mod constraint_tests {
             parse_response(&first_response).expect("first create must succeed");
 
         let dup_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
@@ -4266,6 +4818,7 @@ mod constraint_tests {
         let mut props_a = HashMap::new();
         props_a.insert("email".to_string(), serde_json::json!("a@x"));
         let resp_a = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props_a),
@@ -4276,6 +4829,7 @@ mod constraint_tests {
         let mut props_b = HashMap::new();
         props_b.insert("email".to_string(), serde_json::json!("b@x"));
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props_b),
@@ -4285,6 +4839,7 @@ mod constraint_tests {
         let mut collision = HashMap::new();
         collision.insert("email".to_string(), serde_json::json!("b@x"));
         let update_response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id: node_a.id,
             properties: collision,
@@ -4314,6 +4869,7 @@ mod constraint_tests {
         let server = create_test_server();
 
         let response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id: 99999,
             properties: HashMap::new(),
@@ -4371,6 +4927,7 @@ mod schema_tests {
         let server = create_test_server();
 
         let alice_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -4383,6 +4940,7 @@ mod schema_tests {
         let alice: NodeResponse = parse_response(&alice_response).unwrap();
 
         let bob_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some({
@@ -4395,6 +4953,7 @@ mod schema_tests {
         let bob: NodeResponse = parse_response(&bob_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: alice.id,
             target_id: bob.id,
@@ -4455,6 +5014,7 @@ mod schema_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Report".to_string(),
             properties: None,
@@ -4491,6 +5051,7 @@ mod schema_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Invoice".to_string(),
             properties: None,
@@ -4531,6 +5092,7 @@ mod schema_tests {
 
         // Create a node now.
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Gadget".to_string(),
             properties: None,
@@ -4582,6 +5144,7 @@ mod schema_tests {
 
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
@@ -4590,6 +5153,7 @@ mod schema_tests {
         }
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Company".to_string(),
                 properties: None,
@@ -4597,6 +5161,7 @@ mod schema_tests {
             });
         }
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -4604,6 +5169,7 @@ mod schema_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Company".to_string(),
             properties: None,
@@ -4611,6 +5177,7 @@ mod schema_tests {
         }))
         .unwrap();
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -4671,6 +5238,7 @@ mod vector_elision_tests {
             serde_json::json!(embedding.clone()),
         );
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
@@ -4773,6 +5341,7 @@ mod vector_elision_tests {
     fn test_get_edge_and_outgoing_incoming_edges_elide_vectors_by_default() {
         let server = create_test_server();
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -4780,6 +5349,7 @@ mod vector_elision_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -4791,6 +5361,7 @@ mod vector_elision_tests {
         let mut props = HashMap::new();
         props.insert("embedding".to_string(), serde_json::json!(embedding));
         let edge_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
@@ -4880,6 +5451,7 @@ mod vector_elision_tests {
         let (n1_id, _) = create_node_with_embedding(&server, 5);
         let (n2_id, _) = create_node_with_embedding(&server, 5);
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1_id,
             target_id: n2_id,
@@ -4950,6 +5522,7 @@ mod vector_elision_tests {
                 ]),
             );
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
@@ -5015,6 +5588,7 @@ mod vector_elision_tests {
                 ]),
             );
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
@@ -5077,6 +5651,7 @@ mod vector_elision_tests {
         let (n1_id, _) = create_node_with_embedding(&server, 4);
         let (n2_id, _) = create_node_with_embedding(&server, 4);
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: n1_id,
             target_id: n2_id,
@@ -5181,6 +5756,7 @@ mod vector_elision_tests {
             serde_json::json!([0.1, 0.2, 0.3, 0.4]),
         );
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
@@ -5203,6 +5779,7 @@ mod vector_elision_tests {
             serde_json::json!([0.5, 0.6, 0.7, 0.8]),
         );
         let update_response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id: node.id,
             properties: new_props,
@@ -5232,6 +5809,7 @@ mod vector_elision_tests {
         props.insert("tags".to_string(), serde_json::json!(["a", "b", "c"]));
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
@@ -5271,6 +5849,7 @@ mod retraction_tests {
     /// Create a Person node whose valid_from is `hours` hours before `now`.
     fn create_person_at(server: &AletheiaMcpServer, now: DateTime<Utc>, hours: i64) -> u64 {
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, hours)),
@@ -5389,6 +5968,7 @@ mod retraction_tests {
         let a = create_person_at(&server, now, 2);
         let b = create_person_at(&server, now, 2);
         let _edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: a,
             target_id: b,
             label: "KNOWS".to_string(),
@@ -5434,6 +6014,7 @@ mod retraction_tests {
         let a = create_person_at(&server, now, 3);
         let b = create_person_at(&server, now, 3);
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: a,
             target_id: b,
             label: "KNOWS".to_string(),
@@ -5588,6 +6169,7 @@ mod retraction_tests {
         let a = create_person_at(&server, now, 2);
         let b = create_person_at(&server, now, 2);
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: a,
             target_id: b,
             label: "KNOWS".to_string(),
@@ -5653,6 +6235,7 @@ mod retraction_tests {
         let now = Utc::now();
         let a = create_person_at(&server, now, 3);
         let _self_loop: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: a,
             target_id: a,
             label: "SELF".to_string(),
@@ -5704,6 +6287,7 @@ mod retraction_tests {
         let b = create_person_at(&server, now, 3);
         let c = create_person_at(&server, now, 3);
         let e_out: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: x,
             target_id: b,
             label: "KNOWS".to_string(),
@@ -5713,6 +6297,7 @@ mod retraction_tests {
         }))
         .unwrap();
         let e_in: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: c,
             target_id: x,
             label: "KNOWS".to_string(),
@@ -5803,6 +6388,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, 1)),
@@ -5839,6 +6425,7 @@ mod valid_time_write_tests {
 
         let server = create_test_server();
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -5861,6 +6448,7 @@ mod valid_time_write_tests {
         let server = create_test_server();
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: Some("not-a-timestamp".to_string()),
@@ -5882,6 +6470,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_from_now(now, 24 * 400)), // > 1 year
@@ -5903,6 +6492,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -5910,6 +6500,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -5918,6 +6509,7 @@ mod valid_time_write_tests {
         .unwrap();
 
         let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -5952,6 +6544,7 @@ mod valid_time_write_tests {
         let mut props = HashMap::new();
         props.insert("city".to_string(), serde_json::json!("Paris"));
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: Some(props),
             valid_time: Some(rfc3339_hours_ago(now, 2)),
@@ -5963,6 +6556,7 @@ mod valid_time_write_tests {
         update_props.insert("city".to_string(), serde_json::json!("London"));
         let update_valid_time = rfc3339_hours_ago(now, 1);
         let response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
             node_id: node.id,
             properties: update_props,
             valid_time: Some(update_valid_time.clone()),
@@ -5993,6 +6587,7 @@ mod valid_time_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6003,6 +6598,7 @@ mod valid_time_write_tests {
         let mut update_props = HashMap::new();
         update_props.insert("name".to_string(), serde_json::json!("Bob"));
         let response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
             node_id: node.id,
             properties: update_props,
             // Far enough in the past to precede the node's creation time.
@@ -6024,6 +6620,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, 1)),
@@ -6058,6 +6655,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6065,6 +6663,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6075,6 +6674,7 @@ mod valid_time_write_tests {
         let mut props = HashMap::new();
         props.insert("strength".to_string(), serde_json::json!(1));
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -6088,6 +6688,7 @@ mod valid_time_write_tests {
         update_props.insert("strength".to_string(), serde_json::json!(9));
         let update_valid_time = rfc3339_hours_ago(now, 1);
         let response = server.update_edge(UpdateEdgeRequest {
+            derived_from: None,
             edge_id: edge.id,
             properties: update_props,
             valid_time: Some(update_valid_time.clone()),
@@ -6122,6 +6723,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6129,6 +6731,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6137,6 +6740,7 @@ mod valid_time_write_tests {
         .unwrap();
 
         let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -6166,6 +6770,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, 2)),
@@ -6215,6 +6820,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6222,6 +6828,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6229,6 +6836,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -6280,6 +6888,7 @@ mod valid_time_write_tests {
         let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6287,6 +6896,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6294,6 +6904,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -6328,6 +6939,7 @@ mod valid_time_write_tests {
         let server = create_test_server();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6335,6 +6947,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6342,6 +6955,7 @@ mod valid_time_write_tests {
         }))
         .unwrap();
         parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -6375,6 +6989,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6407,6 +7022,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6424,6 +7040,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6446,6 +7063,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6474,6 +7092,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6499,6 +7118,7 @@ mod provenance_write_tests {
 
         for confidence in [0.0, 1.0] {
             let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
                 label: "Person".to_string(),
                 properties: None,
                 valid_time: None,
@@ -6519,6 +7139,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6527,6 +7148,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let updated: NodeResponse = parse_response(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
             node_id: node.id,
             properties: HashMap::new(),
             valid_time: None,
@@ -6559,6 +7181,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6567,6 +7190,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
             node_id: node.id,
             properties: HashMap::new(),
             valid_time: None,
@@ -6591,6 +7215,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6598,6 +7223,7 @@ mod provenance_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6606,6 +7232,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -6634,6 +7261,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6641,6 +7269,7 @@ mod provenance_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6649,6 +7278,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -6671,6 +7301,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6678,6 +7309,7 @@ mod provenance_write_tests {
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6685,6 +7317,7 @@ mod provenance_write_tests {
         }))
         .unwrap();
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -6695,6 +7328,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let _updated: EdgeResponse = parse_response(&server.update_edge(UpdateEdgeRequest {
+            derived_from: None,
             edge_id: edge.id,
             properties: HashMap::new(),
             valid_time: None,
@@ -6720,6 +7354,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6745,6 +7380,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6765,6 +7401,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6787,6 +7424,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "ListProvenanceTest".to_string(),
             properties: None,
             valid_time: None,
@@ -6819,6 +7457,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let start: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6826,6 +7465,7 @@ mod provenance_write_tests {
         }))
         .unwrap();
         let end: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6838,6 +7478,7 @@ mod provenance_write_tests {
         }))
         .unwrap();
         parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: start.id,
             target_id: end.id,
             label: "KNOWS".to_string(),
@@ -6874,6 +7515,7 @@ mod provenance_write_tests {
         let server = create_test_server();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
@@ -6894,6 +7536,7 @@ mod provenance_write_tests {
         // Update with different provenance; the as-of query above must still
         // report the *original* version's provenance, not this new one.
         parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
             node_id: node.id,
             properties: HashMap::new(),
             valid_time: None,
@@ -6933,6 +7576,7 @@ mod traverse_as_of_tests {
 
     fn create_node_at(server: &AletheiaMcpServer, label: &str, valid_time: &str) -> u64 {
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: label.to_string(),
             properties: None,
             valid_time: Some(valid_time.to_string()),
@@ -6950,6 +7594,7 @@ mod traverse_as_of_tests {
         valid_time: &str,
     ) -> u64 {
         let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id,
             target_id,
             label: label.to_string(),
@@ -7483,6 +8128,7 @@ mod completeness_tests {
             let mut props = HashMap::new();
             props.insert("index".to_string(), serde_json::json!(i));
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: label.to_string(),
                 properties: Some(props),
@@ -7578,6 +8224,7 @@ mod completeness_tests {
         let server = create_test_server();
         for _ in 0..150 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "WidgetHM".to_string(),
                 properties: Some({
@@ -7664,6 +8311,7 @@ mod completeness_tests {
     fn seed_star(server: &AletheiaMcpServer, out: usize) -> u64 {
         let center = {
             let r = server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Hub".to_string(),
                 properties: None,
@@ -7675,6 +8323,7 @@ mod completeness_tests {
         for _ in 0..out {
             let leaf = {
                 let r = server.create_node(CreateNodeRequest {
+                    derived_from: None,
                     valid_time: None,
                     label: "Leaf".to_string(),
                     properties: None,
@@ -7684,6 +8333,7 @@ mod completeness_tests {
                 n.id
             };
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
                 valid_time: None,
                 source_id: center,
                 target_id: leaf,
@@ -7723,6 +8373,7 @@ mod completeness_tests {
         // Build a hub with 2 incoming edges.
         let sink = {
             let r = server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Sink".to_string(),
                 properties: None,
@@ -7734,6 +8385,7 @@ mod completeness_tests {
         for _ in 0..2 {
             let src = {
                 let r = server.create_node(CreateNodeRequest {
+                    derived_from: None,
                     valid_time: None,
                     label: "Src".to_string(),
                     properties: None,
@@ -7743,6 +8395,7 @@ mod completeness_tests {
                 n.id
             };
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
                 valid_time: None,
                 source_id: src,
                 target_id: sink,
@@ -7768,6 +8421,7 @@ mod completeness_tests {
         let ids: Vec<u64> = (0..=len)
             .map(|_| {
                 let r = server.create_node(CreateNodeRequest {
+                    derived_from: None,
                     valid_time: None,
                     label: "ChainHM".to_string(),
                     properties: None,
@@ -7779,6 +8433,7 @@ mod completeness_tests {
             .collect();
         for w in ids.windows(2) {
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
                 valid_time: None,
                 source_id: w[0],
                 target_id: w[1],
@@ -7920,6 +8575,7 @@ mod completeness_tests {
             };
             props.insert("embedding".to_string(), serde_json::json!(embedding));
             server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
@@ -8243,6 +8899,7 @@ mod find_nodes_at_time_tests {
 
     fn create_named(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: label.to_string(),
             properties: Some(HashMap::from([(
                 "name".to_string(),
@@ -8257,6 +8914,7 @@ mod find_nodes_at_time_tests {
 
     fn rename(server: &AletheiaMcpServer, node_id: u64, name: &str) {
         let _: NodeResponse = parse_response(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
             node_id,
             properties: HashMap::from([("name".to_string(), serde_json::json!(name))]),
             valid_time: None,
@@ -8661,6 +9319,7 @@ mod find_nodes_at_time_tests {
         let server = create_test_server();
         let embedding: Vec<f32> = (0..16).map(|i| (i as f32) * 0.001 + 0.1).collect();
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Document".to_string(),
             properties: Some(HashMap::from([
                 ("name".to_string(), serde_json::json!("Doc1")),
@@ -8839,6 +9498,7 @@ mod structured_error_tests {
 
     fn seed_node(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: label.to_string(),
             properties: Some(HashMap::from([(
                 "name".to_string(),
@@ -8875,11 +9535,17 @@ mod structured_error_tests {
                     !message.contains("Unknown tool"),
                     "[{tool}] advertised but not dispatched: {message}"
                 );
-                // Null args can only fail argument deserialization, so the
-                // code must be exactly INVALID_ARGUMENT.
-                assert_eq!(
-                    code, "INVALID_ARGUMENT",
-                    "[{tool}] null args must classify as INVALID_ARGUMENT: {value}"
+                // Null args normalize to the empty request for no-required-arg
+                // tools, so a tool either (a) fails argument deserialization ->
+                // INVALID_ARGUMENT, or (b) deserializes cleanly but hits an
+                // unmet precondition -> FAILED_PRECONDITION (e.g. the Issue
+                // #3351 chain tools when the provenance chain is not enabled on
+                // this server). Both are structured, non-retriable, and
+                // caller-actionable; anything else is a bug.
+                assert!(
+                    code == "INVALID_ARGUMENT" || code == "FAILED_PRECONDITION",
+                    "[{tool}] null args must classify as INVALID_ARGUMENT or \
+                     FAILED_PRECONDITION: {value}"
                 );
             }
         }
@@ -9570,6 +10236,7 @@ mod temporal_extent_tests {
 
     fn create_node_at(server: &AletheiaMcpServer, label: &str, valid_time: &str) -> NodeResponse {
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: Some(valid_time.to_string()),
             label: label.to_string(),
             properties: Some({
@@ -9647,6 +10314,7 @@ mod temporal_extent_tests {
         let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
         let acme = create_node_at(&server, "Company", "2023-06-15T00:00:00Z");
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: Some("2024-01-01T00:00:00Z".to_string()),
             source_id: alice.id,
             target_id: acme.id,
@@ -9690,6 +10358,7 @@ mod temporal_extent_tests {
         // backdated start must still bound `earliest` (extent covers ALL
         // recorded history, not just current state).
         server.update_node(UpdateNodeRequest {
+            derived_from: None,
             valid_time: Some("2025-01-01T00:00:00Z".to_string()),
             node_id: alice.id,
             properties: {
@@ -9722,6 +10391,7 @@ mod temporal_extent_tests {
         let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
         let acme = create_node_at(&server, "Company", "2023-06-15T00:00:00Z");
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: Some("2024-01-01T00:00:00Z".to_string()),
             source_id: alice.id,
             target_id: acme.id,
@@ -9906,6 +10576,7 @@ mod database_stats_tests {
 
         let (a, b) = {
             let a: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
@@ -9913,6 +10584,7 @@ mod database_stats_tests {
             }))
             .unwrap();
             let b: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
@@ -9922,6 +10594,7 @@ mod database_stats_tests {
             (a.id, b.id)
         };
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: a,
             target_id: b,
@@ -9931,6 +10604,7 @@ mod database_stats_tests {
         });
         // An update creates an extra node version beyond the creates.
         server.update_node(UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id: a,
             properties: {
@@ -10064,6 +10738,7 @@ mod database_stats_tests {
         assert!(lsn_before >= 1, "LSN starts at 1: {value}");
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -10096,6 +10771,7 @@ mod database_stats_tests {
     fn test_database_stats_matches_public_api() {
         let server = create_test_server();
         server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
@@ -10221,7 +10897,20 @@ mod database_stats_tests {
         let value = stats_response(&server);
         assert_eq!(
             keys(&value),
-            vec!["cold_storage", "current", "historical", "wal"]
+            vec!["chain", "cold_storage", "current", "historical", "wal"]
+        );
+        // Provenance hash chain block (Issue #3351 AC7): present on every
+        // stats response; disabled here, so all optional fields are null but
+        // their keys are always emitted.
+        assert_eq!(
+            keys(&value["chain"]),
+            vec![
+                "enabled",
+                "genesis_digest",
+                "head_digest",
+                "head_seq",
+                "last_verified",
+            ]
         );
         assert_eq!(keys(&value["current"]), vec!["edge_count", "node_count"]);
         assert_eq!(
@@ -10276,6 +10965,7 @@ mod database_stats_tests {
 
         let (a, b) = {
             let a: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
@@ -10283,6 +10973,7 @@ mod database_stats_tests {
             }))
             .unwrap();
             let b: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
                 valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
@@ -10292,6 +10983,7 @@ mod database_stats_tests {
             (a.id, b.id)
         };
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             valid_time: None,
             source_id: a,
             target_id: b,
@@ -10402,6 +11094,7 @@ mod temporal_bounds_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!(name));
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
@@ -10418,6 +11111,7 @@ mod temporal_bounds_tests {
         target_id: u64,
     ) -> serde_json::Value {
         let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
@@ -10574,6 +11268,7 @@ mod temporal_bounds_tests {
         let mut props = HashMap::new();
         props.insert("age".to_string(), serde_json::json!(31));
         let update_node_response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id: a,
             properties: props.clone(),
@@ -10583,6 +11278,7 @@ mod temporal_bounds_tests {
         assert_current_open_bounds(&temporal_of(&updated_node));
 
         let update_edge_response = server.update_edge(UpdateEdgeRequest {
+            derived_from: None,
             edge_id,
             properties: props,
             valid_time: None,
@@ -10593,7 +11289,7 @@ mod temporal_bounds_tests {
     }
 
     #[test]
-    fn test_superseded_version_has_closed_bounds_and_is_not_current() {
+    fn test_superseded_version_has_open_valid_closed_tx_bound_and_is_not_current() {
         let server = create_test_server();
 
         let node_id = create_person(&server, "Alice")["id"].as_u64().unwrap();
@@ -10607,6 +11303,7 @@ mod temporal_bounds_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!("Alice v2"));
         parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id,
             properties: props,
@@ -10615,7 +11312,10 @@ mod temporal_bounds_tests {
         .expect("update must succeed");
 
         // The at-time read anchored before the update returns the superseded
-        // version: both bounds closed, not current.
+        // version. #3504: supersession is append-only on the valid dimension,
+        // so the superseded version's valid interval stays OPEN
+        // (valid_to == null); only its transaction-time bound is closed by the
+        // update. It is not current (its tx interval is closed).
         let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
             node_id,
             valid_time: anchor.to_string(),
@@ -10627,18 +11327,18 @@ mod temporal_bounds_tests {
             "get_node_at_time failed: {at_time}"
         );
         let superseded = temporal_of(&at_time["node"]);
-        let valid_to = superseded["valid_to"].as_str().unwrap_or_else(|| {
-            panic!("superseded valid_to must be a closed RFC3339 bound: {superseded}")
-        });
+        assert!(
+            superseded["valid_to"].is_null(),
+            "superseded version's valid_to must stay open (#3504, append-only): {superseded}"
+        );
         let transaction_to = superseded["transaction_to"].as_str().unwrap_or_else(|| {
             panic!("superseded transaction_to must be a closed RFC3339 bound: {superseded}")
         });
-        assert!(rfc3339_to_micros(valid_to) > anchor);
         assert!(rfc3339_to_micros(transaction_to) > anchor);
         assert_eq!(
             superseded["is_current"],
             serde_json::json!(false),
-            "a superseded version must report is_current: false: {superseded}"
+            "a superseded version must report is_current: false (its tx interval is closed): {superseded}"
         );
 
         // A current read after the update shows the NEW version's bounds:
@@ -10669,6 +11369,7 @@ mod temporal_bounds_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!("Alice v2"));
         parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
             valid_time: None,
             node_id,
             properties: props,
@@ -10758,6 +11459,7 @@ mod temporal_bounds_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!("Alice"));
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: Some(future.to_string()),
             label: "Person".to_string(),
             properties: Some(props),
@@ -10813,6 +11515,7 @@ mod temporal_bounds_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!("Alice"));
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             valid_time: Some(backdated.to_string()),
             label: "Person".to_string(),
             properties: Some(props),
@@ -11237,6 +11940,7 @@ mod apply_batch_tests {
     /// single-op tool and return its id.
     fn seed_person(server: &AletheiaMcpServer, name: &str) -> u64 {
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: Some(HashMap::from([(
                 "name".to_string(),
@@ -11252,6 +11956,7 @@ mod apply_batch_tests {
     /// Seed a committed edge between two committed nodes and return its id.
     fn seed_edge(server: &AletheiaMcpServer, source: u64, target: u64) -> u64 {
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id: source,
             target_id: target,
             label: "KNOWS".to_string(),
@@ -11955,9 +12660,13 @@ mod apply_batch_tests {
 
     /// Pins the behavior when a caller *guesses* the numeric id a batch
     /// create will allocate and submits it as a write target: prevalidation
-    /// accepts it (it is a plain integer), but transaction reads see
-    /// committed state only, so the op fails NOT_FOUND at core op time and
-    /// the whole batch aborts — zero writes survive.
+    /// accepts it (it is a plain integer), but an explicit batch-created-ref
+    /// guard (Issue #3417) rejects it with the same v1-scope INVALID_ARGUMENT
+    /// the static `$alias` prevalidation emits — updating/deleting an entity
+    /// created in the same batch is not supported in v1. The whole batch
+    /// aborts and zero writes survive. Before #3417's buffer-aware reads this
+    /// was caught only incidentally as NOT_FOUND by the committed-only read;
+    /// the guard fires regardless of read semantics.
     #[test]
     fn apply_batch_guessed_id_of_batch_created_node_aborts_whole_batch() {
         let server = create_test_server();
@@ -11974,14 +12683,257 @@ mod apply_batch_tests {
                  "properties": {"name": "Ghost"}},
                 {"op": "update_node", "node_id": guessed, "properties": {"x": 1}},
             ]),
-            "NOT_FOUND",
+            "INVALID_ARGUMENT",
         );
         assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        // The guard names the create op that allocated the guessed id.
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("created in the same batch") && msg.contains("not supported in v1"),
+            "guessed-id write must get the v1-scope message: {msg}"
+        );
 
         // Zero writes survived: only the seeded node exists, and the
         // guessed id resolves to nothing.
         assert_eq!(server.db().node_count(), 1);
         assert!(server.db().get_node(NodeId::new(guessed).unwrap()).is_err());
+    }
+
+    /// The batch-created-ref guard fires BEFORE the `detach` flag is
+    /// consulted: a `delete_node` with `detach: true` targeting the guessed
+    /// integer id of a node created earlier in the SAME batch is rejected with
+    /// the v1-scope INVALID_ARGUMENT (Issue #3417), not routed into the
+    /// cascade/detach path. The whole batch aborts and zero writes survive.
+    #[test]
+    fn apply_batch_detach_delete_of_batch_created_node_aborts_before_detach() {
+        let server = create_test_server();
+        let seeded = seed_person(&server, "Seed");
+        // The batch's create will be allocated `seeded + 1`.
+        let guessed = seeded + 1;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person",
+                 "properties": {"name": "Ghost"}},
+                {"op": "delete_node", "node_id": guessed, "detach": true},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("created in the same batch") && msg.contains("not supported in v1"),
+            "detach-delete of a batch-created id must get the v1-scope message: {msg}"
+        );
+
+        // Zero writes survived: only the seeded node exists, and the
+        // guessed id resolves to nothing.
+        assert_eq!(server.db().node_count(), 1);
+        assert!(server.db().get_node(NodeId::new(guessed).unwrap()).is_err());
+    }
+
+    /// `created_at_index` reports the ACTUAL originating create op, not always
+    /// `0`: a batch that creates node A (op 0) then node B (op 1) and then
+    /// writes B's guessed integer id (op 2) is rejected naming op 1 as the
+    /// creator. The whole batch aborts and zero writes survive (Issue #3417).
+    #[test]
+    fn apply_batch_guessed_id_of_second_batch_created_node_reports_correct_index() {
+        let server = create_test_server();
+        let seeded = seed_person(&server, "Seed");
+        // Sequential allocation: op 0 gets `seeded + 1` (node A), op 1 gets
+        // `seeded + 2` (node B). Op 2 targets B's guessed id.
+        let guessed_b = seeded + 2;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "properties": {"name": "A"}},
+                {"op": "create_node", "label": "Person", "properties": {"name": "B"}},
+                {"op": "update_node", "node_id": guessed_b, "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(2));
+        // Proves the guard names the create op that allocated the guessed id
+        // (op 1), not a hardcoded 0.
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("created in the same batch") && msg.contains("not supported in v1"),
+            "guessed second-create id write must get the v1-scope message: {msg}"
+        );
+
+        // Zero writes survived: only the seeded node exists; neither guessed id
+        // resolves to a committed node.
+        assert_eq!(server.db().node_count(), 1);
+        assert!(
+            server
+                .db()
+                .get_node(NodeId::new(seeded + 1).unwrap())
+                .is_err()
+        );
+        assert!(
+            server
+                .db()
+                .get_node(NodeId::new(guessed_b).unwrap())
+                .is_err()
+        );
+    }
+
+    /// `delete_edge` against a guessed batch-created edge id emits the SAME
+    /// message substrings the node / `update_edge` variants assert, bringing
+    /// its coverage to parity (Issue #3417). Whole batch aborts, zero writes.
+    #[test]
+    fn apply_batch_guessed_id_delete_edge_message_parity() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+
+        // Anchor the guess to reality: the next create_edge (op 0 of the
+        // failing batch) is allocated `anchor + 1`.
+        let anchor = apply_ok(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+            ]),
+        );
+        let guessed_edge = anchor["results"][0]["edge_id"].as_u64().unwrap() + 1;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+                {"op": "delete_edge", "edge_id": guessed_edge},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("created in the same batch")
+                && msg.contains("not supported in v1")
+                && msg.contains("Commit the creation first"),
+            "delete_edge guard message must match the node/update_edge variants: {msg}"
+        );
+        assert!(
+            server
+                .db()
+                .get_edge(EdgeId::new(guessed_edge).unwrap())
+                .is_err(),
+            "the aborted batch's edge must not be committed"
+        );
+    }
+
+    /// The edge counterpart: a guessed integer id of a batch-created EDGE
+    /// submitted to `update_edge` / `delete_edge` is rejected by the same
+    /// batch-created-ref guard (Issue #3417), whole batch aborts, zero writes.
+    #[test]
+    fn apply_batch_guessed_id_of_batch_created_edge_aborts_whole_batch() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+
+        // Anchor the guess to reality: create one committed edge and read its
+        // id. Edge ids are allocated sequentially (including ids consumed by
+        // aborted batches), so the very next create_edge — op 0 of the failing
+        // batch that immediately follows — gets `anchor + 1`, the id a caller
+        // would guess. Each variant re-anchors because the previous aborted
+        // batch consumed an id.
+        let anchor = apply_ok(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+            ]),
+        );
+        let guessed_edge = anchor["results"][0]["edge_id"].as_u64().unwrap() + 1;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+                {"op": "update_edge", "edge_id": guessed_edge, "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("created in the same batch") && msg.contains("edge"),
+            "guessed edge-id write must get the v1-scope message: {msg}"
+        );
+        // Zero writes survived: the batch-created edge was never committed.
+        assert!(
+            server
+                .db()
+                .get_edge(EdgeId::new(guessed_edge).unwrap())
+                .is_err(),
+            "the aborted batch's edge must not be committed"
+        );
+
+        // delete_edge form is guarded identically. Re-anchor: the aborted
+        // batch above consumed an edge id, so recompute the guess.
+        let anchor = apply_ok(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+            ]),
+        );
+        let guessed_edge = anchor["results"][0]["edge_id"].as_u64().unwrap() + 1;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+                {"op": "delete_edge", "edge_id": guessed_edge},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(0));
+        assert!(
+            server
+                .db()
+                .get_edge(EdgeId::new(guessed_edge).unwrap())
+                .is_err(),
+            "the aborted batch's edge must not be committed"
+        );
+    }
+
+    /// The guard does NOT over-fire: updating and deleting a PRE-EXISTING
+    /// committed node/edge within a batch still succeeds — only ids created
+    /// earlier in the SAME batch are refused (Issue #3417).
+    #[test]
+    fn apply_batch_update_delete_of_preexisting_committed_entity_still_succeeds() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let edge = seed_edge(&server, a, b);
+
+        // Update a committed node + update a committed edge in one batch.
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "update_node", "node_id": a, "properties": {"role": "lead"}},
+                {"op": "update_edge", "edge_id": edge, "properties": {"weight": 2}},
+            ]),
+        );
+        assert_eq!(value["operation_count"], json!(2), "got: {value}");
+
+        // Delete a committed edge, then the (now-detached) committed node.
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "delete_edge", "edge_id": edge},
+                {"op": "delete_node", "node_id": b},
+            ]),
+        );
+        assert_eq!(value["operation_count"], json!(2), "got: {value}");
+        assert_eq!(server.db().edge_count(), 0);
     }
 
     #[test]
@@ -11996,6 +12948,7 @@ mod apply_batch_tests {
             "constraint enable should succeed: {response}"
         );
         let _existing: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: "Person".to_string(),
             properties: Some(HashMap::from([(
                 "email".to_string(),
@@ -12473,6 +13426,7 @@ mod per_request_now_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!(name));
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: label.to_string(),
             properties: Some(props),
             valid_time: valid_time_micros.map(|m| m.to_string()),
@@ -12595,6 +13549,7 @@ mod per_request_now_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!(name));
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
             label: label.to_string(),
             properties: Some(props),
             valid_time: None,
@@ -12608,6 +13563,7 @@ mod per_request_now_tests {
     /// Create an edge between two nodes.
     fn create_test_edge(server: &AletheiaMcpServer, source_id: u64, target_id: u64) {
         let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
             source_id,
             target_id,
             label: "NEXT".to_string(),
@@ -12788,6 +13744,7 @@ mod per_request_now_tests {
                 ]),
             );
             let response = server.create_node(CreateNodeRequest {
+                derived_from: None,
                 label: "Document".to_string(),
                 properties: Some(props),
                 valid_time: None,
@@ -12880,5 +13837,2633 @@ mod per_request_now_tests {
             6,
             || query("HCrowd"),
         );
+    }
+}
+
+// ============================================================================
+// Token-budget-aware response shaping (Issue #3353)
+// ============================================================================
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// Dispatch a tool and return the *raw* serialized response text plus its
+    /// error flag. The raw text length is exactly what is emitted on the wire,
+    /// so it is the quantity the budget contract bounds.
+    fn dispatch_raw(server: &AletheiaMcpServer, tool: &str, args: Value) -> (String, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        (text, is_error)
+    }
+
+    fn dispatch_json(server: &AletheiaMcpServer, tool: &str, args: Value) -> (Value, bool) {
+        let (text, is_error) = dispatch_raw(server, tool, args);
+        let value = serde_json::from_str(&text).expect("response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Create a node whose properties are large enough to blow a small budget.
+    fn seed_big_node(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let bio = "x".repeat(4000);
+        let args = json!({
+            "label": label,
+            "properties": {
+                "name": name,
+                "bio": bio,
+                "notes": "y".repeat(2000),
+            }
+        });
+        let (value, is_error) = dispatch_json(server, "create_node", args);
+        assert!(!is_error, "seed create_node failed: {value}");
+        value.get("id").and_then(Value::as_u64).expect("node id")
+    }
+
+    fn seed_many(server: &AletheiaMcpServer, label: &str, n: usize) -> Vec<u64> {
+        (0..n)
+            .map(|i| seed_big_node(server, label, &format!("n{i}")))
+            .collect()
+    }
+
+    // ---- AC1: omitting the budget leaves behavior unchanged ----------------
+
+    #[test]
+    fn ac1_omitting_budget_is_unchanged() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (with_none, _) = dispatch_json(&server, "get_node", json!({ "node_id": id }));
+        // Full bio present, no budget block.
+        assert!(
+            with_none.get("budget").is_none(),
+            "no budget block expected"
+        );
+        let bio = with_none["properties"]["bio"].as_str().unwrap();
+        assert_eq!(bio.len(), 4000, "full bio returned when no budget set");
+    }
+
+    // ---- AC2: hard contract, conformance sweep -----------------------------
+
+    #[test]
+    fn ac2_conformance_sweep_never_overruns() {
+        let server = create_test_server();
+        // Enable a vector index so find_similar/hybrid_query have data.
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        let ids = seed_many(&server, "Person", 40);
+        // A couple of edges for edge tools / traversal.
+        for w in ids.windows(2).take(20) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": w[0], "target_id": w[1], "label": "KNOWS",
+                        "properties": { "detail": "z".repeat(1500) } }),
+            );
+        }
+
+        let budgets = [256u64, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+        let cases: Vec<(&str, Value)> = vec![
+            ("get_node", json!({ "node_id": ids[0] })),
+            ("list_nodes", json!({ "label": "Person", "limit": 40 })),
+            ("get_edge", json!({ "edge_id": 1 })),
+            ("list_edges", json!({ "limit": 40 })),
+            ("get_outgoing_edges", json!({ "node_id": ids[0] })),
+            ("get_incoming_edges", json!({ "node_id": ids[1] })),
+            (
+                "traverse",
+                json!({ "start_node_id": ids[0], "max_depth": 3 }),
+            ),
+            ("get_node_history", json!({ "node_id": ids[0] })),
+            ("get_schema", json!({})),
+            (
+                "find_nodes_at_time",
+                json!({ "label": "Person", "valid_time": "2999-01-01T00:00:00Z" }),
+            ),
+        ];
+
+        for &budget in &budgets {
+            for (tool, base) in &cases {
+                let mut args = base.clone();
+                args.as_object_mut()
+                    .unwrap()
+                    .insert("max_response_tokens".into(), json!(budget));
+                let (text, is_error) = dispatch_raw(&server, tool, args);
+                if is_error {
+                    // Too-small budgets legitimately error (AC6); that is not an overrun.
+                    continue;
+                }
+                let cap = (budget * super::super::budget::BYTES_PER_TOKEN) as usize;
+                assert!(
+                    text.len() <= cap,
+                    "[{tool} @ {budget} tok] overran budget: {} bytes > cap {} bytes",
+                    text.len(),
+                    cap
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ac2_byte_budget_is_exact() {
+        let server = create_test_server();
+        let ids = seed_many(&server, "Doc", 20);
+        let _ = ids;
+        for cap in [400usize, 900, 1500, 3000] {
+            let (text, is_error) = dispatch_raw(
+                &server,
+                "list_nodes",
+                json!({ "label": "Doc", "limit": 20, "max_response_bytes": cap }),
+            );
+            if is_error {
+                continue;
+            }
+            assert!(
+                text.len() <= cap,
+                "byte budget {cap} overran: {} bytes",
+                text.len()
+            );
+        }
+    }
+
+    // ---- AC3: deterministic, disclosed rung --------------------------------
+
+    #[test]
+    fn ac3_rung_is_disclosed_and_deterministic() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (a, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 300 }),
+        );
+        let (b, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 300 }),
+        );
+        assert_eq!(a, b, "same request+budget+data must degrade identically");
+        let budget = a.get("budget").expect("budget block present");
+        assert_eq!(budget["applied"], json!(true));
+        assert!(budget.get("rung").and_then(Value::as_str).is_some());
+        assert_eq!(
+            budget["token_estimation_basis"],
+            json!("ceil(utf8_bytes / 4)")
+        );
+        // Structure survives: id and label kept.
+        assert_eq!(a["id"], json!(id));
+        assert!(a.get("label").is_some());
+    }
+
+    #[test]
+    fn ac3_ladder_progression() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        // Generous budget -> full.
+        let (full, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 20000 }),
+        );
+        assert_eq!(full["budget"]["rung"], json!("full"));
+        // Mid budget -> some form of elision/summary (bio gone as full string).
+        let (mid, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 400 }),
+        );
+        let rung = mid["budget"]["rung"].as_str().unwrap();
+        assert!(
+            rung == "elided_properties" || rung == "entity_summaries",
+            "expected a degraded rung, got {rung}"
+        );
+        // bio must no longer be a full 4000-char string.
+        let bio = &mid["properties"]["bio"];
+        assert!(
+            bio.as_str().map(|s| s.len()).unwrap_or(0) < 4000,
+            "bio should have degraded"
+        );
+    }
+
+    // ---- AC4: fetch handles reconstruct omitted content --------------------
+
+    #[test]
+    fn ac4_fetch_handle_recovers_full_content() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (shaped, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 400 }),
+        );
+        // Find a fetch handle somewhere in the shaped properties.
+        let handle = find_fetch_handle(&shaped).expect("a fetch handle must be present");
+        let tool = handle["tool"].as_str().unwrap().to_string();
+        let mut args = handle["arguments"].clone();
+        assert_eq!(tool, "get_node");
+        // Following the handle (no budget) returns the full bio.
+        let (recovered, is_error) = dispatch_json(&server, &tool, {
+            args.as_object_mut().unwrap();
+            args
+        });
+        assert!(!is_error, "handle call failed: {recovered}");
+        assert_eq!(
+            recovered["properties"]["bio"].as_str().unwrap().len(),
+            4000,
+            "handle reconstructs the omitted content exactly"
+        );
+    }
+
+    fn find_fetch_handle(value: &Value) -> Option<Value> {
+        match value {
+            Value::Object(map) => {
+                if let Some(fetch) = map.get("fetch")
+                    && fetch.get("tool").is_some()
+                {
+                    return Some(fetch.clone());
+                }
+                for v in map.values() {
+                    if let Some(h) = find_fetch_handle(v) {
+                        return Some(h);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => items.iter().find_map(find_fetch_handle),
+            _ => None,
+        }
+    }
+
+    // ---- AC5: priority_properties out-survive ------------------------------
+
+    #[test]
+    fn ac5_priority_properties_protected() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        // Protect "bio" even though it is the bulkiest property. The budget is
+        // tight enough to force degradation (bio ~4000B + notes ~2000B exceeds
+        // it) but roomy enough to keep the protected bio in full.
+        let (shaped, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 1500,
+                    "priority_properties": ["bio"] }),
+        );
+        assert!(!is_error, "should fit with bio protected: {shaped}");
+        assert_ne!(
+            shaped["budget"]["rung"],
+            json!("full"),
+            "budget must be tight enough to force degradation"
+        );
+        // bio kept in full; an unprotected bulky prop (notes) elided/dropped.
+        assert_eq!(
+            shaped["properties"]["bio"].as_str().map(|s| s.len()),
+            Some(4000),
+            "protected property survives"
+        );
+        let notes = &shaped["properties"]["notes"];
+        let notes_full = notes.as_str().map(|s| s.len() == 2000).unwrap_or(false);
+        assert!(
+            !notes_full,
+            "unprotected bulky property should degrade first"
+        );
+    }
+
+    // ---- AC6: too-small budget -> structured error -------------------------
+
+    #[test]
+    fn ac6_too_small_budget_errors_with_min_viable() {
+        let server = create_test_server();
+        let ids = seed_many(&server, "Person", 30);
+        let _ = ids;
+        let (value, is_error) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 30, "max_response_tokens": 1 }),
+        );
+        assert!(
+            is_error,
+            "tiny budget must error, not silently empty: {value}"
+        );
+        let err = value.get("error").expect("structured error");
+        assert_eq!(err["code"], json!("INVALID_ARGUMENT"));
+        assert_eq!(err["retriable"], json!(false));
+        assert!(
+            err["details"].get("min_viable_tokens").is_some(),
+            "error must state the minimum viable budget: {err}"
+        );
+    }
+
+    #[test]
+    fn ac6_malformed_budget_rejected() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 0 }),
+        );
+        assert!(is_error);
+        assert_eq!(value["error"]["code"], json!("INVALID_ARGUMENT"));
+    }
+
+    // ---- AC7: ranked tools never drop/reorder results ----------------------
+
+    #[test]
+    fn ac7_find_similar_never_drops_results() {
+        let server = create_test_server();
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        // Seed nodes with embeddings and bulky payloads.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let (v, e) = dispatch_json(
+                &server,
+                "create_node",
+                json!({ "label": "Doc", "properties": {
+                    "name": format!("d{i}"),
+                    "bio": "b".repeat(3000),
+                    "embedding": [i as f32, 0.0, 0.0, 1.0],
+                }}),
+            );
+            assert!(!e, "seed failed: {v}");
+            ids.push(v["id"].as_u64().unwrap());
+        }
+        let (unbudgeted, _) = dispatch_json(
+            &server,
+            "find_similar",
+            json!({ "node_id": ids[0], "limit": 5 }),
+        );
+        let full_count = count_results(&unbudgeted);
+        let (budgeted, is_error) = dispatch_json(
+            &server,
+            "find_similar",
+            json!({ "node_id": ids[0], "limit": 5, "max_response_tokens": 900 }),
+        );
+        if is_error {
+            // Acceptable only via AC6 (budget too small even for summaries).
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_count = count_results(&budgeted);
+        assert_eq!(
+            budgeted_count, full_count,
+            "ranked results must not be dropped to meet a budget"
+        );
+        // Scores preserved for every result.
+        assert!(scores_present(&budgeted), "scores must survive budgeting");
+    }
+
+    fn count_results(value: &Value) -> usize {
+        for key in ["results", "similar", "nodes"] {
+            if let Some(arr) = value.get(key).and_then(Value::as_array) {
+                return arr.len();
+            }
+        }
+        0
+    }
+
+    fn scores_present(value: &Value) -> bool {
+        for key in ["results", "similar", "nodes"] {
+            if let Some(arr) = value.get(key).and_then(Value::as_array) {
+                return arr
+                    .iter()
+                    .all(|r| r.get("score").is_some() || r.get("similarity_score").is_some());
+            }
+        }
+        false
+    }
+
+    // ---- T4: real classification test (not tautological) -------------------
+
+    #[test]
+    fn budgetable_set_is_nonempty_and_classified_read() {
+        use crate::auth::AccessClass;
+        // The set must be non-empty...
+        assert!(
+            !super::super::server::BUDGETABLE_READ_TOOLS.is_empty(),
+            "budgetable set must not be empty"
+        );
+        // ...and every entry must be classified as a Read tool in the RBAC
+        // access matrix (lockstep with the auth surface, not a self-referential
+        // `is_budgetable_read_tool` check).
+        for tool in super::super::server::BUDGETABLE_READ_TOOLS {
+            let class = super::super::auth::tool_access_class(tool);
+            assert_eq!(
+                class,
+                Some(AccessClass::Read),
+                "{tool} must be classified AccessClass::Read (got {class:?})"
+            );
+        }
+    }
+
+    // ---- F7: budget params are discoverable in every tool's inputSchema ----
+
+    #[test]
+    fn f7_budget_params_present_in_every_budgetable_input_schema() {
+        let server = create_test_server();
+        for tool in super::super::server::BUDGETABLE_READ_TOOLS {
+            let schema = server
+                .tool_input_schema_for_test(tool)
+                .unwrap_or_else(|| panic!("{tool} must be advertised"));
+            let props = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{tool} inputSchema must have properties"));
+            for key in [
+                "max_response_tokens",
+                "max_response_bytes",
+                "priority_properties",
+            ] {
+                assert!(
+                    props.contains_key(key),
+                    "{tool} inputSchema must expose `{key}` (found: {:?})",
+                    props.keys().collect::<Vec<_>>()
+                );
+            }
+            // Types are correct: two positive integers, one array of strings.
+            assert_eq!(props["max_response_tokens"]["type"], json!("integer"));
+            assert_eq!(props["max_response_bytes"]["type"], json!("integer"));
+            assert_eq!(props["priority_properties"]["type"], json!("array"));
+        }
+    }
+
+    // ---- F1 + F5: rung-4 truncation resume covers all rows, no gap/dupe ----
+
+    #[test]
+    fn f1_truncated_list_nodes_resume_has_no_gaps_or_dupes() {
+        let server = create_test_server();
+        let all_ids = seed_many(&server, "Person", 30);
+
+        // Full, unbudgeted page (limit high enough to hold all).
+        let (full, _) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100 }),
+        );
+        let full_ids = collect_node_ids(&full);
+        assert_eq!(full_ids.len(), all_ids.len(), "seeded set fully listed");
+
+        // Budgeted request tight enough to force rung-4 truncation.
+        let (page1, is_error) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100, "max_response_tokens": 400 }),
+        );
+        assert!(!is_error, "budgeted list_nodes should succeed: {page1}");
+        assert_eq!(
+            page1["budget"]["rung"],
+            json!("counts_and_handles"),
+            "budget must be tight enough to truncate the array"
+        );
+        let page1_ids = collect_node_ids(&page1);
+
+        // F1: `count` sibling reflects the retained prefix, and `next_offset`
+        // advances by exactly that (not the original limit).
+        assert_eq!(
+            page1["count"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "count sibling must match retained rows"
+        );
+        assert_eq!(page1["has_more"], json!(true), "has_more must flip to true");
+        assert_eq!(
+            page1["next_offset"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "next_offset must resume at the cut point"
+        );
+
+        // F5: the truncation fetch handle is a concrete resume call.
+        let handle = truncation_handle(&page1).expect("a truncation fetch handle must exist");
+        assert_eq!(handle["tool"], json!("list_nodes"));
+        let resume_args = handle["arguments"].clone();
+        assert_eq!(
+            resume_args["offset"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "resume offset must equal the retained count"
+        );
+
+        // Follow the disclosed resume call (unbudgeted): the union must equal
+        // the full set with NO gaps and NO dupes.
+        let (page2, e2) = dispatch_json(&server, "list_nodes", resume_args);
+        assert!(!e2, "resume call must succeed: {page2}");
+        let page2_ids = collect_node_ids(&page2);
+
+        let mut union = page1_ids.clone();
+        union.extend(page2_ids.iter().copied());
+        let mut sorted_union = union.clone();
+        sorted_union.sort_unstable();
+        let before_dedup = sorted_union.len();
+        sorted_union.dedup();
+        assert_eq!(
+            before_dedup,
+            sorted_union.len(),
+            "no duplicate rows across pages"
+        );
+
+        let mut expected = full_ids.clone();
+        expected.sort_unstable();
+        assert_eq!(
+            sorted_union, expected,
+            "union of pages == full set (no gaps)"
+        );
+    }
+
+    fn collect_node_ids(value: &Value) -> Vec<u64> {
+        value
+            .get("nodes")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.get("id").and_then(Value::as_u64))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Find the rung-4 truncation disclosure's fetch handle in `budget.sections`.
+    fn truncation_handle(value: &Value) -> Option<Value> {
+        let sections = value.get("budget")?.get("sections")?.as_array()?;
+        for s in sections {
+            if s.get("rung").and_then(Value::as_str) == Some("counts_and_handles")
+                && let Some(fetch) = s.get("fetch")
+                && fetch.get("tool").is_some()
+            {
+                return Some(fetch.clone());
+            }
+        }
+        None
+    }
+
+    // ---- F4: counts_and_handles succeeds at a tight budget (no false AC6) --
+
+    #[test]
+    fn f4_counts_and_handles_succeeds_at_tight_budget() {
+        let server = create_test_server();
+        let _ = seed_many(&server, "Person", 30);
+        // A budget large enough for the minimal rung-4 response but tight enough
+        // that the metadata block matters — must SUCCEED, not falsely AC6-error.
+        let cap = 2000usize;
+        let (value, is_error) = dispatch_raw(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100, "max_response_bytes": cap }),
+        );
+        assert!(
+            !is_error,
+            "tight-but-viable budget must succeed, not error: {value}"
+        );
+        assert!(
+            value.len() <= cap,
+            "assembled response must fit: {}",
+            value.len()
+        );
+        let parsed: Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(parsed["budget"]["rung"], json!("counts_and_handles"));
+    }
+
+    // ---- T6: re-issuing at the reported min_viable_tokens succeeds ---------
+
+    #[test]
+    fn t6_reissue_at_min_viable_budget_succeeds() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 1 }),
+        );
+        assert!(is_error, "tiny budget must error first");
+        let min_viable = value["error"]["details"]["min_viable_tokens"]
+            .as_u64()
+            .expect("min_viable_tokens present");
+        // Re-issue at the reported minimum — must now succeed.
+        let (retry, retry_err) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": min_viable }),
+        );
+        assert!(
+            !retry_err,
+            "re-issuing at min_viable_tokens={min_viable} must succeed: {retry}"
+        );
+        assert_eq!(retry["id"], json!(id));
+    }
+
+    // ---- T5: byte budget holds for multibyte/unicode property payloads -----
+
+    #[test]
+    fn t5_byte_budget_holds_for_unicode_property() {
+        let server = create_test_server();
+        let big = "🌍héllo".repeat(500); // multibyte, ~ several KB
+        let (created, e) = dispatch_json(
+            &server,
+            "create_node",
+            json!({ "label": "Doc", "properties": { "name": "u", "bio": big } }),
+        );
+        assert!(!e, "seed failed: {created}");
+        let id = created["id"].as_u64().unwrap();
+        for cap in [300usize, 700, 1200] {
+            let (text, is_error) = dispatch_raw(
+                &server,
+                "get_node",
+                json!({ "node_id": id, "max_response_bytes": cap }),
+            );
+            if is_error {
+                continue;
+            }
+            assert!(
+                text.len() <= cap,
+                "unicode byte budget {cap} overran: {} bytes",
+                text.len()
+            );
+            assert!(
+                std::str::from_utf8(text.as_bytes()).is_ok(),
+                "response must remain valid UTF-8"
+            );
+        }
+    }
+
+    // ---- F5 (non-paginated): truncation handle has no bogus offset ---------
+
+    #[test]
+    fn f5_non_paginated_truncation_handle_omits_offset() {
+        let server = create_test_server();
+        let hub = seed_big_node(&server, "Hub", "center");
+        // Many bulky outgoing edges so get_outgoing_edges (no offset paging)
+        // reaches rung-4 truncation.
+        for _ in 0..25 {
+            let tgt = seed_big_node(&server, "Person", "t");
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": hub, "target_id": tgt, "label": "KNOWS",
+                        "properties": { "detail": "z".repeat(400) } }),
+            );
+        }
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_outgoing_edges",
+            json!({ "node_id": hub, "max_response_tokens": 500 }),
+        );
+        if is_error {
+            return; // AC6 acceptable at extreme tightness
+        }
+        if value["budget"]["rung"] == json!("counts_and_handles")
+            && let Some(handle) = truncation_edge_handle(&value)
+        {
+            assert_eq!(handle["tool"], json!("get_outgoing_edges"));
+            assert!(
+                handle.get("arguments").is_none(),
+                "non-paginated tool must not fabricate an offset resume call: {handle}"
+            );
+        }
+    }
+
+    fn truncation_edge_handle(value: &Value) -> Option<Value> {
+        let sections = value.get("budget")?.get("sections")?.as_array()?;
+        for s in sections {
+            if s.get("rung").and_then(Value::as_str) == Some("counts_and_handles")
+                && let Some(fetch) = s.get("fetch")
+                && fetch.get("tool").is_some()
+            {
+                return Some(fetch.clone());
+            }
+        }
+        None
+    }
+
+    // ---- T1: AC2 sweep extended to ranked + query tools --------------------
+
+    /// Seed Doc nodes carrying both a 4-d embedding and a bulky bio, so the
+    /// ranked/query tools have data large enough to force degradation.
+    fn seed_vector_docs(server: &AletheiaMcpServer, n: usize) -> Vec<u64> {
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let (v, e) = dispatch_json(
+                server,
+                "create_node",
+                json!({ "label": "Doc", "properties": {
+                    "name": format!("d{i}"),
+                    "bio": "b".repeat(2500),
+                    "embedding": [i as f32, 1.0, 0.0, 1.0],
+                }}),
+            );
+            assert!(!e, "seed failed: {v}");
+            ids.push(v["id"].as_u64().unwrap());
+        }
+        ids
+    }
+
+    #[test]
+    fn t1_ranked_and_query_byte_cap_sweep_is_nonvacuous() {
+        let server = create_test_server();
+        let ids = seed_vector_docs(&server, 12);
+        // A few edges so hybrid traversal has neighbors.
+        for w in ids.windows(2).take(8) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": w[0], "target_id": w[1], "label": "REL",
+                        "properties": { "note": "n".repeat(600) } }),
+            );
+        }
+        let cases: Vec<(&str, Value)> = vec![
+            (
+                "find_similar",
+                json!({ "property_name": "embedding", "embedding": [0.0, 1.0, 0.0, 1.0], "k": 10 }),
+            ),
+            (
+                "hybrid_query",
+                json!({ "start_node_id": ids[0], "traverse_edge": "REL", "traverse_depth": 2,
+                        "limit": 10 }),
+            ),
+            (
+                "query",
+                json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20 }),
+            ),
+        ];
+        let budgets = [512u64, 1024, 2048, 4096, 8192];
+        let mut successful_cases = 0usize;
+        for &budget in &budgets {
+            for (tool, base) in &cases {
+                let mut args = base.clone();
+                args.as_object_mut()
+                    .unwrap()
+                    .insert("max_response_bytes".into(), json!(budget));
+                let (text, is_error) = dispatch_raw(&server, tool, args);
+                if is_error {
+                    continue;
+                }
+                successful_cases += 1;
+                assert!(
+                    text.len() as u64 <= budget,
+                    "[{tool} @ {budget}B] overran: {} bytes",
+                    text.len()
+                );
+            }
+        }
+        // The sweep must not pass vacuously (every case erroring).
+        assert!(
+            successful_cases > 0,
+            "conformance sweep produced zero successful budgeted responses"
+        );
+    }
+
+    // ---- T2: dedicated query-tool budget + hybrid_query AC7 ----------------
+
+    #[test]
+    fn t2_query_tool_budget_shapes_bulky_rows() {
+        let server = create_test_server();
+        let _ = seed_vector_docs(&server, 10);
+        let (full, ferr) = dispatch_json(
+            &server,
+            "query",
+            json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20 }),
+        );
+        assert!(!ferr, "unbudgeted query failed: {full}");
+        let full_rows = full["rows"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert!(full_rows > 0, "query returned rows");
+
+        let (shaped, is_error) = dispatch_json(
+            &server,
+            "query",
+            json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20,
+                    "max_response_tokens": 500 }),
+        );
+        if is_error {
+            assert_eq!(shaped["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        // Budget block present; rows degraded (bulky bio elided/summarized or
+        // rows truncated) but row_count stays consistent with the array length.
+        assert_eq!(shaped["budget"]["applied"], json!(true));
+        let rc = shaped["row_count"].as_u64().unwrap() as usize;
+        let arr = shaped["rows"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(rc, arr, "row_count must match retained rows (F1)");
+    }
+
+    #[test]
+    fn t2_hybrid_query_preserves_count_and_scores_under_budget() {
+        let server = create_test_server();
+        let ids = seed_vector_docs(&server, 6);
+        for w in ids.windows(2) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": ids[0], "target_id": w[1], "label": "REL",
+                        "properties": { "note": "n".repeat(500) } }),
+            );
+        }
+        let base = json!({ "start_node_id": ids[0], "traverse_edge": "REL",
+                           "traverse_depth": 1, "limit": 10 });
+        let (full, _) = dispatch_json(&server, "hybrid_query", base.clone());
+        let full_count = full["results"].as_array().map(|a| a.len()).unwrap_or(0);
+
+        let mut args = base;
+        args.as_object_mut()
+            .unwrap()
+            .insert("max_response_tokens".into(), json!(700));
+        let (budgeted, is_error) = dispatch_json(&server, "hybrid_query", args);
+        if is_error {
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_count = budgeted["results"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(
+            budgeted_count, full_count,
+            "ranked hybrid results must not be dropped to meet a budget (AC7)"
+        );
+        for r in budgeted["results"].as_array().unwrap() {
+            assert!(
+                r.get("similarity_score").is_some(),
+                "similarity_score must be present on every ranked result: {r}"
+            );
+        }
+    }
+
+    // ---- T3: AC7 ordering preserved for ranked tools -----------------------
+
+    #[test]
+    fn t3_find_similar_preserves_result_ordering_under_budget() {
+        let server = create_test_server();
+        let _ = seed_vector_docs(&server, 8);
+        let q = json!({ "property_name": "embedding", "embedding": [0.0, 1.0, 0.0, 1.0], "k": 6 });
+
+        let (full, _) = dispatch_json(&server, "find_similar", q.clone());
+        let full_seq = ordered_id_score(&full);
+        assert!(
+            !full_seq.is_empty(),
+            "unbudgeted find_similar returned results"
+        );
+
+        let mut args = q;
+        args.as_object_mut()
+            .unwrap()
+            .insert("max_response_tokens".into(), json!(700));
+        let (budgeted, is_error) = dispatch_json(&server, "find_similar", args);
+        if is_error {
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_seq = ordered_id_score(&budgeted);
+        assert_eq!(
+            budgeted_seq, full_seq,
+            "ranked ordering (id + score sequence) must be identical under budget"
+        );
+    }
+
+    /// The ordered (id, score-bits) sequence of a ranked response's results, so
+    /// ordering — not just membership — can be compared exactly.
+    fn ordered_id_score(value: &Value) -> Vec<(u64, u64)> {
+        value
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|r| {
+                        let id = r
+                            .get("node")
+                            .and_then(|n| n.get("id"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        let score = r
+                            .get("score")
+                            .or_else(|| r.get("similarity_score"))
+                            .and_then(Value::as_f64)
+                            .map(f64::to_bits)
+                            .unwrap_or(0);
+                        (id, score)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+// ============================================================================
+// Snapshot-anchored cursor continuation (Issue #3360)
+// ============================================================================
+
+mod cursor_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    /// Drive a tool through the real MCP dispatch table and parse its JSON.
+    fn call(server: &AletheiaMcpServer, name: &str, args: serde_json::Value) -> serde_json::Value {
+        let result = server.dispatch_tool(name, args);
+        let text = AletheiaMcpServer::extract_text(result);
+        serde_json::from_str(&text).expect("tool returned valid json")
+    }
+
+    /// Create `n` `Person` nodes, returning their ids in creation order.
+    fn make_people(server: &AletheiaMcpServer, n: usize) -> Vec<u64> {
+        (0..n)
+            .map(|i| {
+                server
+                    .db()
+                    .create_node(
+                        "Person",
+                        PropertyMapBuilder::new()
+                            .insert("name", format!("p{i}"))
+                            .build(),
+                    )
+                    .expect("create_node")
+                    .as_u64()
+            })
+            .collect()
+    }
+
+    // AC1 + AC7: cursor pages the full labelled set, in deterministic ascending
+    // id order, with no duplicates and no gaps; the last page carries no cursor.
+    #[test]
+    fn list_nodes_cursor_pages_full_set_deterministically() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut prev_page_max: Option<u64> = None;
+        let mut args = serde_json::json!({"label": "Person", "use_cursor": true, "limit": 10});
+        let mut pages = 0;
+        loop {
+            let v = call(&server, "list_nodes", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            assert_eq!(v["total_matching"], 25);
+            let ids: Vec<u64> = v["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["id"].as_u64().unwrap())
+                .collect();
+            // Ascending within the page, and every id strictly past the prior
+            // page's max (keyset, deterministic boundaries).
+            assert!(
+                ids.windows(2).all(|w| w[0] < w[1]),
+                "ids ascend within page"
+            );
+            if let Some(m) = prev_page_max {
+                assert!(ids.iter().all(|&id| id > m), "keyset seek past prior page");
+            }
+            prev_page_max = ids.iter().max().copied();
+            for id in ids {
+                assert!(seen.insert(id), "duplicate id {id} across pages");
+            }
+            pages += 1;
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => {
+                    assert_eq!(v["has_more"], true);
+                    assert!(v["cursor_ttl_seconds"].as_u64().unwrap() > 0);
+                    args = serde_json::json!({"cursor": tok});
+                }
+                None => {
+                    assert_eq!(v["has_more"], false);
+                    break;
+                }
+            }
+            assert!(pages < 10, "runaway paging");
+        }
+        assert_eq!(seen, expected, "union of pages equals the full set");
+        assert_eq!(pages, 3, "25 rows / 10 per page = 3 pages");
+    }
+
+    // AC2 (headline): all pages of one scan are evaluated at the first page's
+    // bi-temporal coordinate. Interleaving writes between pages leaks nothing:
+    // zero duplicates, zero omissions, and no post-snapshot writes appear.
+    #[test]
+    fn find_nodes_at_time_cursor_is_snapshot_consistent_under_concurrent_writes() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        // Pin an explicit snapshot coordinate now that the 25 exist.
+        let snap = crate::core::temporal::time::now().wallclock().to_string();
+
+        let v1 = call(
+            &server,
+            "find_nodes_at_time",
+            serde_json::json!({
+                "label": "Person",
+                "valid_time": snap,
+                "transaction_time": snap,
+                "use_cursor": true,
+                "limit": 10
+            }),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        let cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // --- Concurrent writes between page 1 and the rest ---
+        // Five brand-new Persons (recorded AFTER the snapshot).
+        make_people(&server, 5);
+        // Delete an original that page 1 has not yet returned (highest id; page 1
+        // returned the lowest 10). Recorded AFTER the snapshot.
+        let victim = *expected.iter().next_back().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": victim}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        // Drain the remaining pages via the cursor.
+        let mut args = serde_json::json!({"cursor": cursor});
+        loop {
+            let v = call(&server, "find_nodes_at_time", args.clone());
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+
+        // Exactly the original 25: the 5 later inserts are invisible (created
+        // after the snapshot), the deleted node is still present (deleted after
+        // the snapshot), no duplicates, no omissions.
+        assert_eq!(seen, expected);
+        assert!(
+            seen.contains(&victim),
+            "a node deleted after the snapshot still appears in the scan"
+        );
+    }
+
+    // AC3: a tampered token is rejected with a structured INVALID_ARGUMENT
+    // error (never wrong data), through the tool surface.
+    #[test]
+    fn tampered_cursor_returns_invalid_argument() {
+        let server = create_test_server();
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap();
+        // Corrupt the final character of the signed token.
+        let mut bad = tok.to_string();
+        bad.pop();
+        bad.push(if tok.ends_with('A') { 'B' } else { 'A' });
+
+        let v = call(&server, "list_nodes", serde_json::json!({"cursor": bad}));
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(v["error"]["retriable"], false);
+    }
+
+    // AC5: resuming after expiry returns a structured FAILED_PRECONDITION with
+    // remediation guidance (re-issue the query).
+    #[test]
+    fn expired_cursor_returns_failed_precondition() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(0), 128);
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        let v = call(&server, "list_nodes", serde_json::json!({"cursor": tok}));
+        assert_eq!(v["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(v["error"]["retriable"], false);
+    }
+
+    // AC5: exceeding the per-connection live-cursor cap is a structured
+    // FAILED_PRECONDITION echoing the cap.
+    #[test]
+    fn exceeding_live_cursor_cap_returns_failed_precondition() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(300), 1);
+        make_people(&server, 30);
+        // First scan opens the one permitted live cursor.
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        assert!(v1["cursor"].is_string());
+        // A second independent first-page scan exceeds the cap.
+        let v2 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        assert_eq!(v2["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(v2["error"]["details"]["max_live_cursors"], 1);
+    }
+
+    // AC3: a cursor minted by one tool cannot be replayed against another.
+    #[test]
+    fn cross_tool_cursor_replay_is_rejected() {
+        let server = create_test_server();
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        let v = call(
+            &server,
+            "find_nodes_at_time",
+            serde_json::json!({"cursor": tok}),
+        );
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+    }
+
+    // AC1: adjacency tools page a node's edges by edge id, no dup, no gap.
+    #[test]
+    fn get_outgoing_edges_cursor_pages_full_adjacency() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({"node_id": src.as_u64(), "use_cursor": true, "limit": 5});
+        loop {
+            let v = call(&server, "get_outgoing_edges", args.clone());
+            assert_eq!(v["total_matching"], 12);
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // AC1: traverse cursor pages every reachable node exactly once (snapshot
+    // pinned across pages).
+    #[test]
+    fn traverse_cursor_pages_all_reachable_nodes() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(dst.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({
+            "start_node_id": src.as_u64(),
+            "edge_label": "KNOWS",
+            "use_cursor": true,
+            "limit": 5
+        });
+        loop {
+            let v = call(&server, "traverse", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            for r in v["results"].as_array().unwrap() {
+                assert!(
+                    seen.insert(r["node"]["id"].as_u64().unwrap()),
+                    "duplicate node across traverse pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // AC7: the query tool refuses cursor paging with a structured
+    // unsupported_construct-class error rather than silently falling back.
+    #[test]
+    fn query_tool_cursor_is_unsupported_not_silent() {
+        let server = create_test_server();
+        let v = call(
+            &server,
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Person) RETURN n",
+                "use_cursor": true
+            }),
+        );
+        assert_eq!(v["error"]["kind"], "unsupported_construct");
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+    }
+
+    // AC1/disclosure: list_edges is not cursorable and says so, pointing at the
+    // cursor-paged adjacency tools (no silent no-op).
+    #[test]
+    fn list_edges_cursor_is_refused_with_alternatives() {
+        let server = create_test_server();
+        let v = call(
+            &server,
+            "list_edges",
+            serde_json::json!({"use_cursor": true}),
+        );
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+        let alts = v["error"]["details"]["cursorable_alternatives"]
+            .as_array()
+            .expect("alternatives listed");
+        assert!(alts.iter().any(|a| a == "get_outgoing_edges"));
+    }
+
+    // AC6: cursor mode is opt-in; without use_cursor/cursor the legacy offset
+    // response shape (offset/limit, no `paging` marker) is unchanged.
+    #[test]
+    fn offset_paging_remains_the_default_and_unchanged() {
+        let server = create_test_server();
+        make_people(&server, 3);
+        let v = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "limit": 2}),
+        );
+        assert!(v.get("paging").is_none(), "no cursor marker in offset mode");
+        assert_eq!(v["offset"], 0);
+        assert_eq!(v["has_more"], true);
+        assert_eq!(v["next_offset"], 2);
+    }
+
+    // FIX-A (discoverability): every cursorable tool advertises `use_cursor`
+    // and `cursor` in its inputSchema.properties with descriptions, so a client
+    // / LLM can discover snapshot cursor paging without reading source.
+    #[test]
+    fn all_cursorable_tools_advertise_cursor_params_in_schema() {
+        let server = create_test_server();
+        for tool in [
+            "list_nodes",
+            "find_nodes_at_time",
+            "get_outgoing_edges",
+            "get_incoming_edges",
+            "traverse",
+        ] {
+            let schema = server
+                .tool_input_schema_for_test(tool)
+                .unwrap_or_else(|| panic!("{tool} has an input schema"));
+            let props = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{tool} schema has properties"));
+            assert!(
+                props.contains_key("use_cursor"),
+                "{tool} must expose `use_cursor` in inputSchema"
+            );
+            assert!(
+                props.contains_key("cursor"),
+                "{tool} must expose `cursor` in inputSchema"
+            );
+            assert!(
+                props["use_cursor"]["description"].is_string(),
+                "{tool} `use_cursor` carries a description"
+            );
+            assert!(
+                props["cursor"]["description"].is_string(),
+                "{tool} `cursor` carries a description"
+            );
+            assert_eq!(
+                props["use_cursor"]["type"], "boolean",
+                "{tool} `use_cursor` is boolean"
+            );
+            assert_eq!(
+                props["cursor"]["type"], "string",
+                "{tool} `cursor` is string"
+            );
+        }
+    }
+
+    // FIX-F (list_nodes snapshot consistency): list_nodes cursor pins (now, now)
+    // on page 1. Creating AND deleting nodes mid-stream must leave the union of
+    // pages equal to the page-1 snapshot set: created-after excluded,
+    // deleted-after still present, no dup/gap, across >2 pages.
+    #[test]
+    fn list_nodes_cursor_snapshot_consistent_under_concurrent_create_and_delete() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        // Page 1 (limit 8 -> at least 4 pages) pins the snapshot at "now".
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 8}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Concurrent writes recorded AFTER the page-1 snapshot:
+        //  - 5 brand-new Persons (must be invisible to the scan), and
+        //  - delete an original not yet returned (highest id) -- still visible.
+        make_people(&server, 5);
+        let victim = *expected.iter().next_back().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": victim}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        let mut pages = 1;
+        loop {
+            let v = call(&server, "list_nodes", serde_json::json!({"cursor": cursor}));
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            pages += 1;
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+            assert!(pages < 10, "runaway paging");
+        }
+
+        assert!(pages > 2, "scan spanned more than two pages, got {pages}");
+        assert_eq!(seen, expected, "union of pages == page-1 snapshot set");
+        assert!(
+            seen.contains(&victim),
+            "a node deleted after the snapshot is still present"
+        );
+    }
+
+    // FIX-G (deletion of an already-returned row): deleting a node that page 1
+    // already emitted, between pages, must not remove it from the scan (it was
+    // present at the pinned snapshot) and must not duplicate/skip anything.
+    #[test]
+    fn list_nodes_cursor_deletion_of_already_returned_row_stays_in_scan() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 12).into_iter().collect();
+
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let page1: Vec<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = page1.iter().copied().collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Delete a row page 1 ALREADY returned (the lowest id) after the
+        // snapshot -- it must stay in the union.
+        let already_returned = *page1.first().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": already_returned}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        loop {
+            let v = call(&server, "list_nodes", serde_json::json!({"cursor": cursor}));
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, expected, "union still equals the full snapshot set");
+        assert!(
+            seen.contains(&already_returned),
+            "an already-returned row deleted mid-stream stays in the scan"
+        );
+    }
+
+    // FIX-G (update mid-stream): a node updated AFTER the page-1 snapshot must
+    // be returned AS IT WAS at the snapshot -- verify the reconstructed PROPERTY
+    // value, not just the id.
+    #[test]
+    fn list_nodes_cursor_returns_updated_node_as_of_snapshot() {
+        let server = create_test_server();
+        let ids = make_people(&server, 6); // names p0..p5, ascending ids
+        let sorted: Vec<u64> = {
+            let mut s = ids.clone();
+            s.sort_unstable();
+            s
+        };
+
+        // Page 1 (limit 3) pins the snapshot and returns the lowest 3 ids.
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 3}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Update a node NOT yet returned (the 4th lowest id) to a new name,
+        // recorded AFTER the snapshot.
+        let target = sorted[3];
+        let upd = call(
+            &server,
+            "update_node",
+            serde_json::json!({"node_id": target, "properties": {"name": "UPDATED_AFTER_SNAPSHOT"}}),
+        );
+        assert!(upd.get("error").is_none(), "update should succeed: {upd}");
+
+        // Drain remaining pages; find the target and assert its reconstructed
+        // name is the pre-update value (snapshot state), not "UPDATED...".
+        let mut args = serde_json::json!({"cursor": cursor});
+        let mut found_name: Option<String> = None;
+        loop {
+            let v = call(&server, "list_nodes", args.clone());
+            for n in v["nodes"].as_array().unwrap() {
+                if n["id"].as_u64().unwrap() == target {
+                    found_name = Some(n["properties"]["name"].as_str().unwrap().to_string());
+                }
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(
+            found_name.as_deref(),
+            Some("p3"),
+            "updated-after node is returned as-it-was at the pinned snapshot"
+        );
+    }
+
+    // FIX-G (incoming adjacency coverage): get_incoming_edges cursor pages a
+    // node's incoming edges by edge id, no dup / no gap (mirrors the outgoing
+    // test).
+    #[test]
+    fn get_incoming_edges_cursor_pages_full_adjacency() {
+        let server = create_test_server();
+        let dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let src = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({"node_id": dst.as_u64(), "use_cursor": true, "limit": 5});
+        loop {
+            let v = call(&server, "get_incoming_edges", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            assert_eq!(v["total_matching"], 12);
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // FIX-F (adjacency snapshot consistency): get_outgoing_edges cursor pins the
+    // snapshot on page 1; a mid-stream edge create+delete must leave the union
+    // equal to the page-1 adjacency (created-after excluded, deleted-after
+    // present), no dup/gap.
+    #[test]
+    fn get_outgoing_edges_cursor_snapshot_consistent_under_concurrent_edge_writes() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        let mut edge_ids: Vec<u64> = Vec::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+            edge_ids.push(eid.as_u64());
+        }
+
+        let v1 = call(
+            &server,
+            "get_outgoing_edges",
+            serde_json::json!({"node_id": src.as_u64(), "use_cursor": true, "limit": 5}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Concurrent writes recorded AFTER the snapshot: add a new edge
+        // (invisible) and delete an existing one not yet returned (still
+        // present at the pinned snapshot).
+        let new_dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        server
+            .db()
+            .create_edge(src, new_dst, "KNOWS", crate::core::PropertyMap::default())
+            .unwrap();
+        let victim_edge = *edge_ids.iter().max().unwrap();
+        let del = call(
+            &server,
+            "delete_edge",
+            serde_json::json!({"edge_id": victim_edge}),
+        );
+        assert!(
+            del.get("error").is_none(),
+            "delete_edge should succeed: {del}"
+        );
+
+        loop {
+            let v = call(
+                &server,
+                "get_outgoing_edges",
+                serde_json::json!({"cursor": cursor}),
+            );
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, expected, "union == page-1 adjacency snapshot");
+        assert!(
+            seen.contains(&victim_edge),
+            "an edge deleted after the snapshot is still present in the scan"
+        );
+    }
+
+    // FIX-F (traverse snapshot consistency): traverse cursor pins the snapshot
+    // on page 1; adding + deleting graph elements mid-stream must leave the
+    // reachable set equal to the page-1 snapshot reachable set, no dup/skip.
+    #[test]
+    fn traverse_cursor_snapshot_consistent_under_concurrent_graph_mutation() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        let mut edge_ids: Vec<u64> = Vec::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(dst.as_u64());
+            edge_ids.push(eid.as_u64());
+        }
+
+        let v1 = call(
+            &server,
+            "traverse",
+            serde_json::json!({
+                "start_node_id": src.as_u64(),
+                "edge_label": "KNOWS",
+                "use_cursor": true,
+                "limit": 5
+            }),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["node"]["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Mutate the graph AFTER the snapshot: add a new reachable node+edge
+        // (must be invisible) and delete an existing edge to a not-yet-returned
+        // dst (its dst stays reachable at the pinned snapshot).
+        let new_dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        server
+            .db()
+            .create_edge(src, new_dst, "KNOWS", crate::core::PropertyMap::default())
+            .unwrap();
+        let victim_edge = *edge_ids.iter().max().unwrap();
+        let del = call(
+            &server,
+            "delete_edge",
+            serde_json::json!({"edge_id": victim_edge}),
+        );
+        assert!(
+            del.get("error").is_none(),
+            "delete_edge should succeed: {del}"
+        );
+
+        loop {
+            let v = call(&server, "traverse", serde_json::json!({"cursor": cursor}));
+            for r in v["results"].as_array().unwrap() {
+                assert!(
+                    seen.insert(r["node"]["id"].as_u64().unwrap()),
+                    "duplicate node across traverse pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert!(
+            !seen.contains(&new_dst.as_u64()),
+            "a node reachable only via an edge created after the snapshot is invisible"
+        );
+        assert_eq!(
+            seen, expected,
+            "reachable set == page-1 snapshot reachable set"
+        );
+    }
+
+    // FIX-G (TTL boundary companion to the pre-expired TTL=0 test): a cursor
+    // issued under a positive TTL verifies successfully immediately (it is well
+    // within the validity window). Combined with
+    // `expired_cursor_returns_failed_precondition` (TTL=0, already expired) this
+    // brackets the TTL boundary. Limitation: no injectable clock exists, so the
+    // exact expiry instant is not asserted -- only valid-within-window and
+    // already-expired.
+    #[test]
+    fn cursor_valid_within_positive_ttl_window() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(300), 128);
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        // Resuming immediately is comfortably inside the 300s window.
+        let v2 = call(&server, "list_nodes", serde_json::json!({"cursor": tok}));
+        assert!(
+            v2.get("error").is_none(),
+            "a cursor within its TTL window must verify: {v2}"
+        );
+        assert_eq!(v2["paging"], "cursor");
+    }
+}
+
+#[cfg(feature = "audit-export")]
+mod audit_export_tool_tests {
+    use super::create_test_server;
+    use crate::audit::{AuditSigningKey, verify_json_bytes};
+    use crate::core::hex;
+    use serde_json::json;
+
+    const SEED: [u8; 32] = [23u8; 32];
+
+    fn dispatch_json(
+        server: &super::AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        (serde_json::from_str(&text).expect("valid JSON"), is_error)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn audit_export_tool_signs_and_verifies_offline() {
+        // SAFETY: env mutation serialized via #[serial]; restored below.
+        unsafe {
+            std::env::set_var("ALETHEIADB_AUDIT_SIGNING_KEY", hex::encode(&SEED));
+        }
+
+        let server = create_test_server();
+        let (created, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"name": "Alice", "ssn": "secret"}}),
+        );
+        assert!(!is_err, "create_node failed: {created}");
+        let node_id = created["id"].as_u64().expect("node_id");
+
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({
+                "entity_type": "node",
+                "entity_id": node_id,
+                "database_id": "prod-db",
+                "redact_keys": ["ssn"],
+            }),
+        );
+        assert!(!is_err, "audit_export failed: {resp}");
+        assert_eq!(resp["version_count"].as_u64(), Some(1));
+
+        let pubkey_hex = resp["public_key"].as_str().unwrap();
+        let expected_pub = AuditSigningKey::from_seed_bytes(SEED).public_key();
+        assert_eq!(pubkey_hex, expected_pub.to_hex());
+
+        // The artifact verifies offline against the operator's public key.
+        let artifact_bytes = serde_json::to_vec(&resp["artifact"]).unwrap();
+        let report = verify_json_bytes(&artifact_bytes, Some(&expected_pub))
+            .expect("MCP-produced artifact must verify offline");
+        assert!(report.passed);
+        assert!(report.redacted_keys.iter().any(|k| k == "ssn"));
+        // Redacted value must not have leaked into the artifact.
+        assert!(
+            !String::from_utf8(artifact_bytes)
+                .unwrap()
+                .contains("secret")
+        );
+
+        unsafe {
+            std::env::remove_var("ALETHEIADB_AUDIT_SIGNING_KEY");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn audit_export_tool_without_signing_key_is_failed_precondition() {
+        // SAFETY: env mutation serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ALETHEIADB_AUDIT_SIGNING_KEY");
+        }
+        let server = create_test_server();
+        let (created, _) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"name": "Bob"}}),
+        );
+        let node_id = created["id"].as_u64().unwrap();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({"entity_type": "node", "entity_id": node_id}),
+        );
+        assert!(is_err, "expected an error without a signing key");
+        assert_eq!(resp["error"]["code"].as_str(), Some("FAILED_PRECONDITION"));
+    }
+
+    #[test]
+    fn audit_export_tool_rejects_bad_entity_type() {
+        let server = create_test_server();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({"entity_type": "widget", "entity_id": 1}),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+}
+
+/// MCP surface for derivation lineage (Issue #3371): the `derived_from` write
+/// parameter, the `lineage_upstream`/`lineage_downstream` query tools, their
+/// structured errors, and RBAC.
+mod lineage_tool_tests {
+    use super::create_test_server;
+    use crate::auth::{AuthMode, AuthStore, Role, SecretString};
+    use crate::core::id::NodeId;
+    use crate::mcp::{AletheiaMcpServer, McpAuthConfig};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn dispatch_json(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        (serde_json::from_str(&text).expect("valid JSON"), is_error)
+    }
+
+    /// The current version id of a node (via the in-crate db handle), which an
+    /// LLM would obtain from `get_node_history`.
+    fn node_version(server: &AletheiaMcpServer, id: u64) -> u64 {
+        server
+            .db()
+            .node_lineage_ref(NodeId::new(id).unwrap())
+            .expect("current version")
+            .version
+            .as_u64()
+    }
+
+    #[test]
+    fn create_node_with_derived_from_records_lineage_and_queries_both_directions() {
+        let server = create_test_server();
+
+        let (a, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Doc", "properties": {"t": "A"}}),
+        );
+        assert!(!is_err, "create A failed: {a}");
+        let a_id = a["id"].as_u64().unwrap();
+        let a_ver = node_version(&server, a_id);
+
+        let (b, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Doc", "properties": {"t": "B"}}),
+        );
+        assert!(!is_err, "create B failed: {b}");
+        let b_id = b["id"].as_u64().unwrap();
+        let b_ver = node_version(&server, b_id);
+
+        // Summary derived from both documents.
+        let (c, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({
+                "label": "Summary",
+                "properties": {"t": "A+B"},
+                "derived_from": [
+                    {"entity_kind": "node", "id": a_id, "version": a_ver},
+                    {"entity_kind": "node", "id": b_id, "version": b_ver},
+                ],
+            }),
+        );
+        assert!(!is_err, "create with derived_from failed: {c}");
+        let c_id = c["id"].as_u64().unwrap();
+        let c_ver = node_version(&server, c_id);
+
+        // Upstream of the summary: both documents at depth 1.
+        let (up, is_err) = dispatch_json(
+            &server,
+            "lineage_upstream",
+            json!({"entity_kind": "node", "id": c_id, "version": c_ver}),
+        );
+        assert!(!is_err, "lineage_upstream failed: {up}");
+        assert_eq!(up["direction"], "upstream");
+        assert_eq!(up["count"].as_u64(), Some(2));
+        assert_eq!(up["has_more"], json!(false));
+        let up_ids: Vec<u64> = up["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert!(up_ids.contains(&a_id) && up_ids.contains(&b_id));
+        for e in up["entries"].as_array().unwrap() {
+            assert_eq!(e["depth"].as_u64(), Some(1));
+            assert_eq!(e["status"], "current");
+        }
+
+        // Downstream of document A: reaches the summary.
+        let (down, is_err) = dispatch_json(
+            &server,
+            "lineage_downstream",
+            json!({"entity_kind": "node", "id": a_id, "version": a_ver}),
+        );
+        assert!(!is_err, "lineage_downstream failed: {down}");
+        assert_eq!(down["direction"], "downstream");
+        assert_eq!(down["count"].as_u64(), Some(1));
+        assert_eq!(down["entries"][0]["id"].as_u64(), Some(c_id));
+        assert_eq!(down["entries"][0]["depth"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn dangling_derived_from_reference_is_not_found() {
+        let server = create_test_server();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({
+                "label": "Summary",
+                "properties": {},
+                "derived_from": [
+                    {"entity_kind": "node", "id": 1, "version": 9_999_999u64}
+                ],
+            }),
+        );
+        assert!(is_err, "dangling ref must fail: {resp}");
+        assert_eq!(resp["error"]["code"].as_str(), Some("NOT_FOUND"));
+        // No node was created.
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn invalid_entity_kind_is_invalid_argument() {
+        let server = create_test_server();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "lineage_upstream",
+            json!({"entity_kind": "widget", "id": 1, "version": 1}),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+
+    fn server_with_role(role: Role) -> AletheiaMcpServer {
+        let store = Arc::new(AuthStore::new());
+        let (_principal, key) = store.create_key("t", role).expect("create key");
+        AletheiaMcpServer::with_auth(
+            server_db(),
+            McpAuthConfig::new(AuthMode::Required, Arc::clone(&store))
+                .with_credential(SecretString::new(key.as_str())),
+        )
+    }
+
+    fn server_db() -> Arc<crate::db::AletheiaDB> {
+        Arc::new(crate::db::AletheiaDB::new().expect("db"))
+    }
+
+    #[test]
+    fn reader_denied_create_node_with_derived_from() {
+        // create_node is writer-class; a reader is denied before any write —
+        // including when it carries the `derived_from` lineage parameter.
+        let server = server_with_role(Role::Reader);
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({
+                "label": "Summary",
+                "properties": {},
+                "derived_from": [{"entity_kind": "node", "id": 1, "version": 1}],
+            }),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("PERMISSION_DENIED"));
+    }
+
+    #[test]
+    fn metrics_role_denied_lineage_query_but_reader_allowed() {
+        // lineage_upstream is reader-class: a metrics-only principal is denied,
+        // a reader is authorized (the call then fails/succeeds on its own merits,
+        // never with an auth code).
+        let metrics = server_with_role(Role::Metrics);
+        let (resp, is_err) = dispatch_json(
+            &metrics,
+            "lineage_upstream",
+            json!({"entity_kind": "node", "id": 1, "version": 1}),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("PERMISSION_DENIED"));
+
+        let reader = server_with_role(Role::Reader);
+        let (resp, _is_err) = dispatch_json(
+            &reader,
+            "lineage_upstream",
+            json!({"entity_kind": "node", "id": 1, "version": 1}),
+        );
+        // Reader is authorized: an empty closure for an unknown root is a valid
+        // (non-error) response, never an auth denial.
+        assert_ne!(
+            resp.get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str()),
+            Some("PERMISSION_DENIED")
+        );
+    }
+}
+
+// ============================================================================
+// Provenance hash chain tools (Issue #3351): verify_chain, export_chain_head
+// ============================================================================
+
+#[cfg(test)]
+mod provenance_chain_tests {
+    use super::*;
+    use crate::config::WalConfigBuilder;
+    use crate::provenance_chain::{ChainConfig, ChainFsyncMode};
+    use serde_json::json;
+
+    /// Dispatch a tool and return `(parsed_json, is_error)`.
+    fn dispatch(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result must carry text content");
+        (
+            serde_json::from_str(&text).expect("tool response must be valid JSON"),
+            is_error,
+        )
+    }
+
+    /// Build an MCP server over a durable, chain-enabled database rooted at a
+    /// tempdir. Returns the guard so the data dir outlives the server.
+    fn chain_enabled_server() -> (tempfile::TempDir, AletheiaMcpServer) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = crate::config::AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.path().join("wal"))
+                    .build(),
+            )
+            .chain(ChainConfig {
+                enabled: true,
+                fsync: ChainFsyncMode::Batched,
+                dir: None,
+            })
+            .build();
+        let db = AletheiaDB::with_unified_config(config).expect("chain-enabled db");
+        (dir, AletheiaMcpServer::new(Arc::new(db)))
+    }
+
+    #[test]
+    fn both_tools_are_advertised() {
+        let server = create_test_server();
+        let advertised = server.list_tools_for_test();
+        assert!(advertised.iter().any(|t| t == "verify_chain"));
+        assert!(advertised.iter().any(|t| t == "export_chain_head"));
+    }
+
+    #[test]
+    fn verify_chain_disabled_is_failed_precondition() {
+        // The default test server has no chain enabled.
+        let server = create_test_server();
+        let (value, is_error) = dispatch(&server, "verify_chain", json!({}));
+        assert!(
+            is_error,
+            "verify on a disabled chain must be an error: {value}"
+        );
+        assert_eq!(value["error"]["code"].as_str(), Some("FAILED_PRECONDITION"));
+        assert_eq!(value["error"]["retriable"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn export_chain_head_disabled_is_failed_precondition() {
+        let server = create_test_server();
+        let (value, is_error) = dispatch(&server, "export_chain_head", json!({}));
+        assert!(
+            is_error,
+            "export on a disabled chain must be an error: {value}"
+        );
+        assert_eq!(value["error"]["code"].as_str(), Some("FAILED_PRECONDITION"));
+    }
+
+    #[test]
+    fn verify_chain_rejects_bad_entity_kind() {
+        let (_guard, server) = chain_enabled_server();
+        let (value, is_error) = dispatch(
+            &server,
+            "verify_chain",
+            json!({"entity_kind": "vertex", "id": 1}),
+        );
+        assert!(is_error, "bad entity_kind must error: {value}");
+        assert_eq!(value["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+
+    #[test]
+    fn verify_chain_rejects_malformed_against_anchor() {
+        let (_guard, server) = chain_enabled_server();
+        let (value, is_error) = dispatch(
+            &server,
+            "verify_chain",
+            json!({"against": {"not": "a head"}}),
+        );
+        assert!(is_error, "malformed anchor must error: {value}");
+        assert_eq!(value["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+
+    #[test]
+    fn full_verify_export_and_anchor_extension_flow() {
+        let (_guard, server) = chain_enabled_server();
+
+        // Seed some writes so the chain seals real transactions.
+        for _ in 0..5 {
+            let (_v, err) = dispatch(
+                &server,
+                "create_node",
+                json!({"label": "Person", "properties": {}}),
+            );
+            assert!(!err);
+        }
+
+        // Full verify must pass.
+        let (full, err) = dispatch(&server, "verify_chain", json!({}));
+        assert!(!err, "full verify must succeed: {full}");
+        assert_eq!(full["passed"].as_bool(), Some(true), "{full}");
+        assert_eq!(full["scope"].as_str(), Some("full"));
+        assert!(full["head_digest"].as_str().is_some());
+
+        // Export the head anchor.
+        let (head, err) = dispatch(&server, "export_chain_head", json!({}));
+        assert!(!err, "export must succeed: {head}");
+        assert!(
+            head["digest"].as_str().is_some(),
+            "head has a hex digest: {head}"
+        );
+
+        // Anchor-extension verify against the exported head must pass.
+        let (against, err) = dispatch(&server, "verify_chain", json!({ "against": head.clone() }));
+        assert!(!err, "anchor verify must succeed: {against}");
+        assert_eq!(against["passed"].as_bool(), Some(true), "{against}");
+        assert_eq!(against["scope"].as_str(), Some("anchor"));
+    }
+
+    #[test]
+    fn entity_scoped_verify_passes_on_a_created_node() {
+        let (_guard, server) = chain_enabled_server();
+        let (created, err) = dispatch(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {}}),
+        );
+        assert!(!err, "create must succeed: {created}");
+        let node_id = created["id"].as_u64().expect("created node id");
+
+        let (scoped, err) = dispatch(
+            &server,
+            "verify_chain",
+            json!({"entity_kind": "node", "id": node_id}),
+        );
+        assert!(!err, "entity verify must succeed: {scoped}");
+        assert_eq!(scoped["passed"].as_bool(), Some(true), "{scoped}");
+        assert_eq!(scoped["scope"].as_str(), Some("entity"));
+    }
+}
+
+// ============================================================================
+// Provenance filtering (Issue #3348)
+// ============================================================================
+
+mod provenance_filter_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Dispatch a tool through the same table `call_tool` uses; return
+    /// `(parsed_json, is_error)`.
+    fn dispatch(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        let value = serde_json::from_str(&text).expect("tool response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Create a `Doc` node with the given `source`/`confidence` provenance
+    /// (either optional) and return its id.
+    fn create_doc(
+        server: &AletheiaMcpServer,
+        name: &str,
+        source: Option<&str>,
+        confidence: Option<f64>,
+    ) -> u64 {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), json!(name));
+        let provenance = if source.is_some() || confidence.is_some() {
+            Some(ProvenanceRequest {
+                source: source.map(String::from),
+                confidence,
+                note: None,
+                correlation_id: None,
+            })
+        } else {
+            None
+        };
+        let n: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            label: "Doc".to_string(),
+            properties: Some(props),
+            provenance,
+        }))
+        .unwrap();
+        n.id
+    }
+
+    // --- get_node --------------------------------------------------------
+
+    #[test]
+    fn get_node_passes_and_excludes_by_source() {
+        let server = create_test_server();
+        let id = create_doc(&server, "a", Some("crm"), Some(0.9));
+
+        // Matching source -> returned.
+        let (ok, err) = dispatch(
+            &server,
+            "get_node",
+            json!({"node_id": id, "provenance_source": "crm"}),
+        );
+        assert!(!err);
+        assert_eq!(ok["id"].as_u64(), Some(id));
+
+        // Non-matching source -> NOT_FOUND (never a fabricated node).
+        let (excluded, err) = dispatch(
+            &server,
+            "get_node",
+            json!({"node_id": id, "provenance_source": "hr"}),
+        );
+        assert!(err);
+        assert_eq!(excluded["error"]["code"].as_str(), Some("NOT_FOUND"));
+        assert_eq!(excluded["error"]["retriable"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn get_node_no_filter_is_unchanged() {
+        let server = create_test_server();
+        let id = create_doc(&server, "a", Some("crm"), Some(0.9));
+        let (plain, _) = dispatch(&server, "get_node", json!({"node_id": id}));
+        // A no-op provenance object (all keys absent) is byte-identical.
+        let (also_plain, _) = dispatch(
+            &server,
+            "get_node",
+            json!({"node_id": id, "provenance_source": serde_json::Value::Null}),
+        );
+        assert_eq!(plain, also_plain);
+    }
+
+    // --- list_nodes ------------------------------------------------------
+
+    fn seed_docs(server: &AletheiaMcpServer) {
+        create_doc(server, "crm-hi", Some("crm"), Some(0.9));
+        create_doc(server, "crm-lo", Some("crm"), Some(0.4));
+        create_doc(server, "hr-hi", Some("hr"), Some(0.95));
+        create_doc(server, "none", None, None); // unattributed
+    }
+
+    fn list_names(v: &serde_json::Value) -> Vec<String> {
+        v["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["properties"]["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn list_nodes_source_filter() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_source": "crm"}),
+        );
+        assert!(!err);
+        let mut names = list_names(&v);
+        names.sort();
+        assert_eq!(names, vec!["crm-hi", "crm-lo"]);
+    }
+
+    #[test]
+    fn list_nodes_multi_source_any_of() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_sources": ["crm", "hr"]}),
+        );
+        let mut names = list_names(&v);
+        names.sort();
+        assert_eq!(names, vec!["crm-hi", "crm-lo", "hr-hi"]);
+    }
+
+    #[test]
+    fn list_nodes_min_confidence_inclusive() {
+        let server = create_test_server();
+        seed_docs(&server);
+        // >= 0.9 -> crm-hi (0.9) and hr-hi (0.95); crm-lo (0.4) excluded.
+        let (v, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "min_confidence": 0.9}),
+        );
+        let mut names = list_names(&v);
+        names.sort();
+        assert_eq!(names, vec!["crm-hi", "hr-hi"]);
+    }
+
+    #[test]
+    fn list_nodes_combined_is_and() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_source": "crm", "min_confidence": 0.8}),
+        );
+        assert_eq!(list_names(&v), vec!["crm-hi"]);
+    }
+
+    #[test]
+    fn list_nodes_unattributed_excluded_then_included() {
+        let server = create_test_server();
+        seed_docs(&server);
+        // Default: the unattributed "none" node is excluded by an active filter.
+        let (v, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "min_confidence": 0.0}),
+        );
+        assert!(!list_names(&v).contains(&"none".to_string()));
+        // include_unattributed re-includes it.
+        let (v2, _) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "min_confidence": 0.0, "include_unattributed": true}),
+        );
+        assert!(list_names(&v2).contains(&"none".to_string()));
+    }
+
+    #[test]
+    fn list_nodes_empty_result_is_success_not_error() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_source": "nonexistent-source"}),
+        );
+        assert!(
+            !err,
+            "an empty filtered result must be a success, not an error"
+        );
+        assert_eq!(v["count"].as_u64(), Some(0));
+    }
+
+    // --- validation (AC5) ------------------------------------------------
+
+    #[test]
+    fn invalid_confidence_is_invalid_argument_with_field() {
+        let server = create_test_server();
+        for bad in [json!(1.5), json!(-0.1)] {
+            let (v, err) = dispatch(
+                &server,
+                "list_nodes",
+                json!({"label": "Doc", "min_confidence": bad}),
+            );
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+            assert_eq!(
+                v["error"]["details"]["field"].as_str(),
+                Some("min_confidence")
+            );
+            assert_eq!(v["error"]["retriable"].as_bool(), Some(false));
+        }
+    }
+
+    #[test]
+    fn empty_source_list_is_invalid_argument() {
+        let server = create_test_server();
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_sources": []}),
+        );
+        assert!(err);
+        assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+        assert_eq!(
+            v["error"]["details"]["field"].as_str(),
+            Some("provenance_sources")
+        );
+    }
+
+    #[test]
+    fn wrong_typed_min_confidence_is_invalid_argument() {
+        let server = create_test_server();
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "min_confidence": "high"}),
+        );
+        assert!(err);
+        assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+        assert_eq!(
+            v["error"]["details"]["field"].as_str(),
+            Some("min_confidence")
+        );
+    }
+
+    // --- adjacency edges -------------------------------------------------
+
+    #[test]
+    fn outgoing_edges_filtered_by_source() {
+        let server = create_test_server();
+        let a = create_doc(&server, "a", None, None);
+        let b = create_doc(&server, "b", None, None);
+        let c = create_doc(&server, "c", None, None);
+        for (target, source) in [(b, "crm"), (c, "hr")] {
+            server.create_edge(CreateEdgeRequest {
+                source_id: a,
+                target_id: target,
+                label: "LINK".to_string(),
+                properties: None,
+                valid_time: None,
+                provenance: Some(ProvenanceRequest {
+                    source: Some(source.to_string()),
+                    confidence: Some(0.9),
+                    note: None,
+                    correlation_id: None,
+                }),
+                derived_from: None,
+            });
+        }
+        let (v, err) = dispatch(
+            &server,
+            "get_outgoing_edges",
+            json!({"node_id": a, "provenance_source": "crm"}),
+        );
+        assert!(!err);
+        assert_eq!(v["count"].as_u64(), Some(1));
+        assert_eq!(v["edges"][0]["target_id"].as_u64(), Some(b));
+    }
+
+    // --- traverse (composes with temporal, AC3) --------------------------
+
+    #[test]
+    fn traverse_min_confidence_filters_returned_nodes() {
+        let server = create_test_server();
+        let a = create_doc(&server, "a", Some("crm"), Some(0.9));
+        let hi = create_doc(&server, "hi", Some("crm"), Some(0.95));
+        let lo = create_doc(&server, "lo", Some("crm"), Some(0.2));
+        for t in [hi, lo] {
+            server.create_edge(CreateEdgeRequest {
+                source_id: a,
+                target_id: t,
+                label: "LINK".to_string(),
+                properties: None,
+                valid_time: None,
+                provenance: None,
+                derived_from: None,
+            });
+        }
+        let (v, err) = dispatch(
+            &server,
+            "traverse",
+            json!({"start_node_id": a, "edge_label": "LINK", "depth": 1, "min_confidence": 0.9}),
+        );
+        assert!(!err);
+        let names: Vec<String> = v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                r["node"]["properties"]["name"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["hi"],
+            "only the high-confidence node is returned"
+        );
+    }
+
+    // --- find_similar (AC6) ----------------------------------------------
+
+    #[test]
+    fn find_similar_returns_k_filter_passing_candidates() {
+        let server = create_test_server();
+        server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        // 6 docs: alternate trusted/untrusted sources.
+        for i in 0..6 {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), json!(format!("d{i}")));
+            props.insert(
+                "embedding".to_string(),
+                json!([0.1 + i as f32 * 0.01, 0.2, 0.3, 0.4]),
+            );
+            let source = if i % 2 == 0 { "trusted" } else { "other" };
+            server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Doc".to_string(),
+                properties: Some(props),
+                provenance: Some(ProvenanceRequest {
+                    source: Some(source.to_string()),
+                    confidence: Some(0.9),
+                    note: None,
+                    correlation_id: None,
+                }),
+            });
+        }
+        // k=3, filter to "trusted" (3 exist). AC6: exactly the trusted ones,
+        // all passing, no post-truncation below k.
+        let (v, err) = dispatch(
+            &server,
+            "find_similar",
+            json!({
+                "property_name": "embedding",
+                "embedding": [0.1, 0.2, 0.3, 0.4],
+                "k": 3,
+                "provenance_source": "trusted"
+            }),
+        );
+        assert!(!err, "response: {v}");
+        let results = v["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3, "all 3 trusted candidates returned: {v}");
+        for r in results {
+            assert_eq!(r["node"]["provenance"]["source"].as_str(), Some("trusted"));
+        }
+    }
+
+    // --- cursor interaction (fail closed) --------------------------------
+
+    #[test]
+    fn provenance_filter_with_cursor_is_rejected() {
+        let server = create_test_server();
+        seed_docs(&server);
+        let (v, err) = dispatch(
+            &server,
+            "list_nodes",
+            json!({"label": "Doc", "provenance_source": "crm", "use_cursor": true}),
+        );
+        assert!(err);
+        assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
     }
 }

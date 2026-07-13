@@ -252,6 +252,8 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: time::now(),
+        version_id: None,
+        provenance: None,
     })?;
 
     wal.flush()?;
@@ -318,6 +320,8 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: time::now(),
+        version_id: None,
+        provenance: None,
     })?;
 
     wal.flush()?;

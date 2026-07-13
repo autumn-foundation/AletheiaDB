@@ -75,6 +75,14 @@ pub enum McpErrorCode {
     /// `{required_class, principal_role}`. Not retriable: the same call
     /// under the same principal can never succeed.
     PermissionDenied,
+    /// A per-query resource limit was exceeded (Issue #3368): the wall-clock
+    /// timeout elapsed, or the result exceeded the response-byte cap.
+    /// `details` carries `{dimension, limit, consumed?}`. Retriability is
+    /// case-specific and set explicitly (a read-only wall-clock timeout is
+    /// retriable; a byte-cap breach is not), so the default is the
+    /// conservative non-retriable — treat an unqualified `RESOURCE_EXHAUSTED`
+    /// as non-retriable.
+    ResourceExhausted,
 }
 
 impl McpErrorCode {
@@ -90,6 +98,7 @@ impl McpErrorCode {
             McpErrorCode::Internal => "INTERNAL",
             McpErrorCode::Unauthenticated => "UNAUTHENTICATED",
             McpErrorCode::PermissionDenied => "PERMISSION_DENIED",
+            McpErrorCode::ResourceExhausted => "RESOURCE_EXHAUSTED",
         }
     }
 
@@ -210,10 +219,37 @@ fn classify_db_error(e: &Error) -> (McpErrorCode, bool) {
         Error::Constraint(ce) => classify_constraint_error(ce),
         // A provenance bundle failing validation is a caller fault.
         Error::Provenance(_) => (McpErrorCode::InvalidArgument, false),
+        Error::Lineage(le) => classify_lineage_error(le),
+        // A PITR (#3374) target outside the achievable window, or a window that
+        // crosses a post-backup vocabulary change, is a caller-fault precondition
+        // failure; each error's Display explains the remediation. All other
+        // backup errors remain Internal.
+        Error::Backup(
+            crate::storage::backup::BackupError::TargetOutsideWindow { .. }
+            | crate::storage::backup::BackupError::WindowCrossesVocabularyChange { .. },
+        ) => (McpErrorCode::FailedPrecondition, false),
         Error::Io(_) | Error::Backup(_) => (McpErrorCode::Internal, false),
         // The feature exists but this build/deployment doesn't provide it.
         Error::NotImplemented { .. } => (McpErrorCode::FailedPrecondition, false),
+        // An opt-in feature is disabled (e.g. the provenance hash chain).
+        Error::FailedPrecondition(_) => (McpErrorCode::FailedPrecondition, false),
         Error::Other(_) => (McpErrorCode::Internal, false),
+    }
+}
+
+/// Map a derivation-lineage error (Issue #3371). All lineage errors are
+/// caller faults and never retriable: a dangling source reference is
+/// `NOT_FOUND`, a self/cyclic declaration is `INVALID_ARGUMENT`, and
+/// re-declaring lineage for an already-recorded version is a
+/// `FAILED_PRECONDITION`.
+fn classify_lineage_error(e: &crate::core::lineage::LineageError) -> (McpErrorCode, bool) {
+    use crate::core::lineage::LineageError;
+    match e {
+        LineageError::SourceNotFound { .. } => (McpErrorCode::NotFound, false),
+        LineageError::SelfDerivation(_) | LineageError::CycleDetected { .. } => {
+            (McpErrorCode::InvalidArgument, false)
+        }
+        LineageError::AlreadyRecorded(_) => (McpErrorCode::FailedPrecondition, false),
     }
 }
 
@@ -377,6 +413,18 @@ mod tests {
         assert_eq!(McpErrorCode::Internal.as_str(), "INTERNAL");
         assert_eq!(McpErrorCode::Unauthenticated.as_str(), "UNAUTHENTICATED");
         assert_eq!(McpErrorCode::PermissionDenied.as_str(), "PERMISSION_DENIED");
+        assert_eq!(
+            McpErrorCode::ResourceExhausted.as_str(),
+            "RESOURCE_EXHAUSTED"
+        );
+    }
+
+    #[test]
+    fn resource_exhausted_defaults_non_retriable() {
+        // The default is the conservative non-retriable; the read-only
+        // wall-clock-timeout case opts into retriable at its call site (see
+        // `server::wall_clock_timeout_error`), the byte-cap case does not.
+        assert!(!McpErrorCode::ResourceExhausted.default_retriable());
     }
 
     #[test]

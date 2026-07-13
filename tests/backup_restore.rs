@@ -344,10 +344,15 @@ fn restore_rejects_nonempty_target() {
     db.backup(&backup_path).unwrap();
 
     // Simulate a non-empty target: write a fake manifest at the path that
-    // IndexPersistenceManager checks (data_dir/indexes/manifest.idx).
+    // IndexPersistenceManager checks. `restore_to_data_dir` roots the index
+    // persistence base at `data_dir/indexes` (matching
+    // `durable_config_for_data_dir`), and the manager appends its own
+    // `indexes/`, so the manifest it checks lives at
+    // `data_dir/indexes/indexes/manifest.idx`.
     let data_dir = tmp.path().join("target_data");
-    std::fs::create_dir_all(data_dir.join("indexes")).unwrap();
-    std::fs::write(data_dir.join("indexes").join("manifest.idx"), b"fake").unwrap();
+    let manifest_dir = data_dir.join("indexes").join("indexes");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(manifest_dir.join("manifest.idx"), b"fake").unwrap();
 
     let err = AletheiaDB::restore_to_data_dir(&backup_path, &data_dir).unwrap_err();
 

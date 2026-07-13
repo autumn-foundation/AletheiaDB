@@ -936,13 +936,27 @@ pub(crate) fn load_indexes_startup(
 ) -> Option<u64> {
     // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
     // (manifest is only saved on shutdown, not during background persistence)
-    let manifest_lsn = match manager.load_manifest_and_strings() {
-        Ok(manifest) => Some(manifest.lsn), // Successfully loaded
+    // Issue #3490: obtain the file-id -> live-id remap alongside the manifest.
+    // Before this runs, the process-global GLOBAL_INTERNER is generally already
+    // populated at ids unrelated to the saved interner file: WAL bootstrap
+    // deserialization (`wal.read_from` in db::config) interns every property KEY
+    // decoded by `PropertyMap::deserialize`, and the interner is a process-wide
+    // singleton shared across instances/opens. Re-interning the saved strings
+    // therefore assigns them DIFFERENT live ids than their saved file positions,
+    // so persisted interner ids must be translated through this remap before
+    // being resolved against the live interner. When no interner/manifest could
+    // be loaded, we fall back to an identity remap (ids pass through unchanged),
+    // reproducing the pre-#3490 behavior for that path.
+    let (manifest_lsn, interner_remap) = match manager.load_manifest_and_strings_with_remap() {
+        Ok((manifest, remap)) => (Some(manifest.lsn), remap), // Successfully loaded
         Err(e) => {
             if !e.is_not_found() {
                 eprintln!("Warning: Failed to load manifest: {}", e);
             }
-            None // Not found or error
+            (
+                None,
+                crate::storage::index_persistence::strings::InternerRemap::identity(),
+            )
         }
     };
 
@@ -954,7 +968,12 @@ pub(crate) fn load_indexes_startup(
         };
 
         match load_graph_index_with_cipher(&graph_path, manager.index_cipher()) {
-            Ok(graph_data) => {
+            Ok(mut graph_data) => {
+                // Issue #3490: translate persisted (file-space) interner ids
+                // (node/edge labels, property keys, and string property values)
+                // to live interner ids before any of the resolution sites below
+                // touch them. A no-op for an identity remap.
+                interner_remap.remap_graph_index_data(&mut graph_data);
                 let current_time = time::now();
                 let mut max_node_id = 0u64;
                 let mut max_edge_id = 0u64;
@@ -1184,7 +1203,12 @@ pub(crate) fn load_indexes_startup(
         };
 
         match load_temporal_index_with_cipher(&temporal_path, manager.index_cipher()) {
-            Ok(temporal_data) => {
+            Ok(mut temporal_data) => {
+                // Issue #3490: translate persisted (file-space) interner ids in
+                // the historical versions/anchors (labels, property keys, string
+                // values, and delta removed_keys) to live interner ids before
+                // restoring them. A no-op for an identity remap.
+                interner_remap.remap_temporal_index_data(&mut temporal_data);
                 // Restore versions into historical storage
                 // Labels are now stored directly in the persisted entries
                 let mut historical_guard = historical.write();
@@ -1287,16 +1311,27 @@ pub(crate) fn load_indexes_startup(
         }
     }
 
-    // Load temporal adjacency index
-    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index_with_cipher;
+    // Load temporal adjacency index.
+    // Issue #481: the persisted file may be encrypted at rest and must be
+    // decrypted with the configured index cipher.
+    // Issue #3490: the persisted edge-type labels are file-space interner ids
+    // and MUST be translated through the same remap as the graph/temporal
+    // indexes before they are resolved, or AS-OF (#3225) edge-type traversal
+    // filtering silently matches the wrong edge type after a reload whose
+    // interner order diverged from the saved file. The combined loader decrypts
+    // first, then applies the remap to the decoded data.
+    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index_with_cipher_and_remap;
 
     let adjacency_file = manager
         .base_path()
         .join("temporal_adjacency")
         .join("adjacency.idx");
     if adjacency_file.exists() {
-        match load_temporal_adjacency_index_with_cipher(manager.base_path(), manager.index_cipher())
-        {
+        match load_temporal_adjacency_index_with_cipher_and_remap(
+            manager.base_path(),
+            manager.index_cipher(),
+            &interner_remap,
+        ) {
             Ok(adj_index) => {
                 let mut hist_write = historical.write();
                 hist_write.set_temporal_adjacency_index(adj_index);

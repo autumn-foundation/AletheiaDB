@@ -38,7 +38,7 @@ use std::time::Duration;
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DurabilityMode {
     /// Fsync after every commit. Maximum durability, minimum throughput.
     ///

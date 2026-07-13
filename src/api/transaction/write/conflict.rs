@@ -16,7 +16,10 @@
 //! greater than our `snapshot_timestamp`, a conflict has occurred.
 
 use super::WriteTransaction;
+use crate::api::transaction::BufferedWrite;
 use crate::core::error::{Result, TransactionError};
+use crate::core::id::{EdgeId, NodeId};
+use std::collections::HashSet;
 
 /// Detect write-write conflicts for Snapshot Isolation.
 ///
@@ -36,10 +39,36 @@ use crate::core::error::{Result, TransactionError};
 ///
 /// Returns `TransactionError::SerializationFailure` if a write-write conflict is detected.
 pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
+    // Entities CREATED in this same transaction cannot conflict with another
+    // transaction (Issue #3417): their ids were freshly allocated by this
+    // tx's id generators, so no other committed transaction can hold a version
+    // for them. A later update/delete/retract of a same-tx-created entity
+    // reads its buffered create (read-your-own-writes), which means the
+    // absence of a *committed* row is expected — not a concurrent deletion.
+    // Without this skip, the "missing committed row => deleted by another tx"
+    // branches below would raise a spurious SerializationFailure for a
+    // create-then-update/delete/retract in one transaction.
+    let mut created_nodes: HashSet<NodeId> = HashSet::new();
+    let mut created_edges: HashSet<EdgeId> = HashSet::new();
+    for write in tx.buffer.operations() {
+        match write {
+            BufferedWrite::CreateNode { node_id, .. } => {
+                created_nodes.insert(*node_id);
+            }
+            BufferedWrite::CreateEdge { edge_id, .. } => {
+                created_edges.insert(*edge_id);
+            }
+            _ => {}
+        }
+    }
+
     for write in tx.buffer.operations() {
         match write {
             // UpdateNode: check if node was modified or deleted after our snapshot
             crate::api::transaction::BufferedWrite::UpdateNode { node_id, .. } => {
+                if created_nodes.contains(node_id) {
+                    continue;
+                }
                 match tx.current.get_node(*node_id) {
                     Ok(current_node) => {
                         // Node exists - check if it was modified after our snapshot
@@ -71,6 +100,9 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
 
             // UpdateEdge: check if edge was modified or deleted after our snapshot
             crate::api::transaction::BufferedWrite::UpdateEdge { edge_id, .. } => {
+                if created_edges.contains(edge_id) {
+                    continue;
+                }
                 match tx.current.get_edge(*edge_id) {
                     Ok(current_edge) => {
                         // Edge exists - check if it was modified after our snapshot
@@ -100,6 +132,9 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
 
             // DeleteNode: check if node was modified after our snapshot
             crate::api::transaction::BufferedWrite::DeleteNode { node_id, .. } => {
+                if created_nodes.contains(node_id) {
+                    continue;
+                }
                 // Get current version from storage
                 if let Ok(current_node) = tx.current.get_node(*node_id)
                     && let Some(commit_ts) = current_node.metadata.commit_timestamp
@@ -118,6 +153,9 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
 
             // DeleteEdge: check if edge was modified after our snapshot
             crate::api::transaction::BufferedWrite::DeleteEdge { edge_id, .. } => {
+                if created_edges.contains(edge_id) {
+                    continue;
+                }
                 // Get current version from storage
                 if let Ok(current_edge) = tx.current.get_edge(*edge_id)
                     && let Some(commit_ts) = current_edge.metadata.commit_timestamp
@@ -139,6 +177,9 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
             // (entity gone) or a concurrent update (newer commit) both
             // invalidate the valid_from this retraction was validated against.
             crate::api::transaction::BufferedWrite::RetractNode { node_id, .. } => {
+                if created_nodes.contains(node_id) {
+                    continue;
+                }
                 match tx.current.get_node(*node_id) {
                     Ok(current_node) => {
                         if let Some(commit_ts) = current_node.metadata.commit_timestamp
@@ -166,6 +207,9 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
 
             // RetractEdge: same contract as RetractNode.
             crate::api::transaction::BufferedWrite::RetractEdge { edge_id, .. } => {
+                if created_edges.contains(edge_id) {
+                    continue;
+                }
                 match tx.current.get_edge(*edge_id) {
                     Ok(current_edge) => {
                         if let Some(commit_ts) = current_edge.metadata.commit_timestamp

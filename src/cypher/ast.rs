@@ -50,6 +50,120 @@ pub enum CypherStatement {
         /// [`CypherOptionalMatch::preceding_withs`].
         optional_matches: Vec<CypherOptionalMatch>,
     },
+
+    /// A standalone `UNWIND <list> AS <var> RETURN ...` statement (Issue #559).
+    ///
+    /// `UNWIND` expands a list value into one row per element, binding each
+    /// element to `variable`. This variant models the *standalone* form only
+    /// (an `UNWIND` that is not preceded by `MATCH`/`WITH` and does not feed a
+    /// subsequent graph pattern); it is executed directly by the dedicated
+    /// Cypher UNWIND runtime rather than lowered into the graph query pipeline.
+    ///
+    /// openCypher list semantics apply: an empty list and the `null` value both
+    /// expand to zero rows.
+    Unwind {
+        /// The list-valued source expression. Supported forms are a list
+        /// literal (`[...]`), a parameter reference (`$list`), or the `null`
+        /// literal; other (row-context-dependent) expressions are rejected at
+        /// execution time.
+        source: CypherExpr,
+        /// The variable each list element is bound to (the `AS <var>` target).
+        variable: String,
+        /// The trailing `RETURN` projection (with optional `DISTINCT`,
+        /// `ORDER BY`, `SKIP`, `LIMIT`).
+        return_clause: CypherReturn,
+    },
+
+    /// `EXPLAIN <statement>` -- return the query plan for the wrapped statement
+    /// **without executing it** (Issue #562).
+    ///
+    /// The inner statement is any ordinary readable statement (a `MATCH`,
+    /// optionally with a leading temporal clause). A nested/duplicate prefix
+    /// (`EXPLAIN EXPLAIN`, `EXPLAIN PROFILE`) is rejected at parse time, so the
+    /// boxed inner is never itself an `Explain`/`Profile`.
+    Explain(Box<CypherStatement>),
+
+    /// `PROFILE <statement>` -- **execute** the wrapped statement and return its
+    /// plan annotated with per-operator executed statistics (row counts and
+    /// timing) (Issue #562).
+    ///
+    /// Same nesting rules as [`CypherStatement::Explain`].
+    Profile(Box<CypherStatement>),
+
+    /// A write statement (Issue #560): `CREATE` / `SET` / `DELETE` /
+    /// `DETACH DELETE`, optionally preceded by a reading `MATCH` and followed by
+    /// a `RETURN`.
+    ///
+    /// Write statements are **not** lowered into the read-only [`Query`] IR;
+    /// they are executed directly against the database's native write APIs (so
+    /// each mutation records the correct bi-temporal version). They are reachable
+    /// only through `AletheiaDB::execute_cypher` / `execute_cypher_with_params`;
+    /// the MCP `query` tool rejects every mutating clause *before* the parser
+    /// runs (`crate::query::read_only::detect_mutating_clause`), so this variant
+    /// never executes through that read-only surface.
+    ///
+    /// [`Query`]: crate::query::Query
+    Write(CypherWriteStatement),
+}
+
+/// A complete Cypher write statement (Issue #560).
+///
+/// Grammar (v1):
+///
+/// ```text
+/// write_stmt := [reading] write_clause+ [RETURN ...]
+/// reading    := MATCH pattern_list [WHERE expr]
+/// write_clause := CREATE pattern_list
+///               | SET set_item (',' set_item)*
+///               | [DETACH] DELETE variable (',' variable)*
+/// set_item   := variable '.' property '=' value
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherWriteStatement {
+    /// An optional leading reading clause (`MATCH ... [WHERE ...]`) whose matched
+    /// rows drive the write clauses. `None` for a statement that opens directly
+    /// with `CREATE`.
+    pub reading: Option<CypherReadingClause>,
+    /// One or more write clauses, applied in source order per matched row.
+    pub clauses: Vec<CypherWriteClause>,
+    /// An optional trailing `RETURN` projecting the affected entities.
+    pub return_clause: Option<CypherReturn>,
+}
+
+/// The reading (`MATCH ... [WHERE ...]`) part of a write statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherReadingClause {
+    /// One or more comma-separated graph patterns to match.
+    pub pattern: Vec<CypherPattern>,
+    /// An optional `WHERE` clause filtering matched rows.
+    pub where_clause: Option<CypherExpr>,
+}
+
+/// A single write clause within a [`CypherWriteStatement`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherWriteClause {
+    /// `CREATE <pattern_list>` -- create the described nodes and relationships.
+    Create(Vec<CypherPattern>),
+    /// `SET <set_item> (',' <set_item>)*` -- assign properties on bound entities.
+    Set(Vec<CypherSetItem>),
+    /// `[DETACH] DELETE <variable> (',' <variable>)*` -- delete bound entities.
+    Delete {
+        /// Whether this is a `DETACH DELETE` (cascade-remove connected edges).
+        detach: bool,
+        /// The variables to delete (nodes or relationships).
+        targets: Vec<String>,
+    },
+}
+
+/// A single `SET n.prop = value` assignment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherSetItem {
+    /// The variable whose property is being set.
+    pub variable: String,
+    /// The property key to assign.
+    pub property: String,
+    /// The literal (or parameter) value assigned.
+    pub value: CypherValue,
 }
 
 /// A subsequent `OPTIONAL MATCH` clause within a `MATCH` statement.
@@ -261,10 +375,25 @@ pub enum CypherExpr {
         /// The function name (case-insensitive at parse time).
         name: String,
         /// The arguments passed to the function.
+        ///
+        /// For the `count(*)` aggregate the single argument is
+        /// [`CypherExpr::Star`].
         args: Vec<CypherExpr>,
+        /// Whether the call used the `DISTINCT` quantifier, e.g.
+        /// `count(DISTINCT n.dept)`. Only meaningful for aggregate functions;
+        /// always `false` for ordinary/vector functions.
+        distinct: bool,
     },
+    /// The `*` wildcard argument, used only inside `count(*)`.
+    Star,
     /// A parenthesized sub-expression used for grouping.
     Grouped(Box<CypherExpr>),
+    /// A list literal, e.g. `[1, 2, 3]` or `[[1, 2], [3, 4]]`.
+    ///
+    /// Currently produced (and consumed) by the `UNWIND` source position; a
+    /// list literal appearing where a scalar predicate operand is expected is
+    /// rejected during conversion rather than silently mishandled.
+    List(Vec<CypherExpr>),
 }
 
 /// A comparison operator in a Cypher expression.
@@ -369,11 +498,22 @@ pub enum CypherTemporal {
 /// An intermediate `WITH` projection clause.
 ///
 /// `WITH` acts like a sub-`RETURN` that pipes results into subsequent clauses,
-/// optionally filtering with a `WHERE`.
+/// optionally filtering with a `WHERE`. Per openCypher the clause body mirrors
+/// a `RETURN` body -- `WITH [DISTINCT] items [ORDER BY ...] [SKIP n] [LIMIT n]`
+/// -- followed by an optional trailing `WHERE` that filters the *projected*
+/// rows (Issue #556).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CypherWith {
+    /// Whether `DISTINCT` was specified to deduplicate the projected rows.
+    pub distinct: bool,
     /// The items to project through the `WITH`.
     pub items: Vec<CypherReturnItem>,
+    /// Zero or more `ORDER BY` items ordering the projected rows.
+    pub order_by: Vec<CypherOrderItem>,
+    /// An optional `SKIP n` offset applied to the projected rows.
+    pub skip: Option<usize>,
+    /// An optional `LIMIT n` cap applied to the projected rows.
+    pub limit: Option<usize>,
     /// An optional `WHERE` clause that filters after projection.
     pub where_clause: Option<CypherExpr>,
 }

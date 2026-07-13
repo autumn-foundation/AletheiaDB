@@ -55,9 +55,9 @@ use crate::core::property::PropertyMap;
 use crate::core::provenance::Provenance;
 
 use super::serialization::{
-    OP_CHECKPOINT, OP_CREATE_EDGE, OP_CREATE_NODE, OP_DECLARE_UNIQUE_CONSTRAINT, OP_DELETE_EDGE,
-    OP_DELETE_NODE, OP_DROP_UNIQUE_CONSTRAINT, OP_RETRACT_EDGE, OP_RETRACT_NODE, OP_UPDATE_EDGE,
-    OP_UPDATE_NODE,
+    OP_BEGIN_TX, OP_CHECKPOINT, OP_COMMIT_TX, OP_CREATE_EDGE, OP_CREATE_NODE,
+    OP_DECLARE_UNIQUE_CONSTRAINT, OP_DELETE_EDGE, OP_DELETE_NODE, OP_DROP_UNIQUE_CONSTRAINT,
+    OP_RETRACT_EDGE, OP_RETRACT_NODE, OP_UPDATE_EDGE, OP_UPDATE_NODE, TOMBSTONE_VERSION_ID_ABSENT,
 };
 use super::{LSN, WalEntry, WalOperation};
 
@@ -103,16 +103,160 @@ pub(crate) const WAL_VERSION_PROVENANCE_PRINCIPAL: u8 = 5;
 /// [`WAL_VERSION_PROVENANCE_PRINCIPAL`]).
 pub(crate) const WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL: u8 = 6;
 
+/// WAL format version for plaintext segments that may contain transaction
+/// framing markers (`BeginTx`/`CommitTx`, Issue #3413).
+///
+/// Identical entry payload layout to [`WAL_VERSION_PROVENANCE_PRINCIPAL`] for
+/// every pre-existing op; it additionally permits the two framing op tags
+/// (`OP_BEGIN_TX` / `OP_COMMIT_TX`). Bumping the header version (rather than
+/// silently emitting the new tags into a v5 segment) makes an older reader
+/// reject the file cleanly with "Unsupported WAL version" instead of
+/// misparsing an unknown op tag, following the #3224 / #3421 precedent.
+///
+/// NOTE: sibling Issue #3406 will also extend the delete/retract payloads and
+/// must coordinate the WAL version-byte bump with this one — if both land in
+/// the same release train they should share a single combined version; if they
+/// land separately the second takes 9/10. The `framed` predicate here and any
+/// #3406 payload gate are independent booleans on the same version byte and
+/// compose without conflict.
+pub(crate) const WAL_VERSION_TX_FRAMING: u8 = 7;
+
+/// WAL format version for encrypted segments whose decrypted payload uses the
+/// transaction-framing entry format (i.e. [`WAL_VERSION_TX_FRAMING`]).
+pub(crate) const WAL_VERSION_ENCRYPTED_TX_FRAMING: u8 = 8;
+
+/// WAL format version for plaintext segments whose delete/retract payloads
+/// carry the tombstone/retraction `version_id` (Issue #3406).
+///
+/// A strict superset of [`WAL_VERSION_TX_FRAMING`]: it keeps the tx-framing
+/// markers and additionally appends an 8-byte `version_id` to the
+/// `DeleteNode`/`DeleteEdge`/`RetractNode`/`RetractEdge` payloads, so crash
+/// recovery reproduces the live tombstone version chain bit-for-bit instead of
+/// synthesizing a (possibly colliding) id. The `framed` predicate
+/// ([`is_framed_version`]) and this delete-version-id gate
+/// ([`carries_delete_version_id`]) are independent booleans on the same version
+/// byte and compose without conflict (per the #3413 reservation note above).
+/// Bumping the header version makes an older reader reject the file cleanly
+/// rather than mis-length the extended payload, following the #3224/#3413
+/// precedent.
+pub(crate) const WAL_VERSION_DELETE_VERSION_ID: u8 = 9;
+
+/// WAL format version for encrypted segments whose decrypted payload uses the
+/// delete-version-id entry format (i.e. [`WAL_VERSION_DELETE_VERSION_ID`]).
+pub(crate) const WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID: u8 = 10;
+
+/// WAL format version for plaintext segments whose delete/retract payloads
+/// additionally carry an optional [`Provenance`] bundle recording the acting
+/// principal for the destructive op (Issue #3427).
+///
+/// A strict superset of [`WAL_VERSION_DELETE_VERSION_ID`]: it keeps the tx
+/// framing markers and the tombstone/retraction `version_id`, and appends the
+/// same `[presence][source][confidence][note][correlation_id][principal]`
+/// provenance blob used by create/update after the `version_id` tail on the
+/// `DeleteNode`/`DeleteEdge`/`RetractNode`/`RetractEdge` payloads. This lets
+/// crash recovery reconstruct the tombstone/retraction version WITH its
+/// acting-principal attribution instead of dropping it. The
+/// [`carries_destructive_provenance`] gate is an independent monotonic `>=`
+/// boolean on the same version byte, composing with the framing and
+/// delete-version-id gates. Bumping the header version makes an older reader
+/// reject the file cleanly rather than mis-length the extended payload,
+/// following the #3224/#3406/#3413 precedent.
+pub(crate) const WAL_VERSION_DESTRUCTIVE_PROVENANCE: u8 = 11;
+
+/// WAL format version for encrypted segments whose decrypted payload uses the
+/// destructive-op provenance entry format (i.e.
+/// [`WAL_VERSION_DESTRUCTIVE_PROVENANCE`]).
+pub(crate) const WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE: u8 = 12;
+
+/// WAL format version that serializes node/edge/constraint **label** strings as
+/// length-prefixed UTF-8 (`[len: u32-LE][utf8 bytes]`) and re-interns them on
+/// read, instead of persisting a raw [`InternedString`] id (Issue #3506).
+///
+/// A strict superset of [`WAL_VERSION_DESTRUCTIVE_PROVENANCE`]: it keeps every
+/// prior field (tx framing, tombstone/retraction `version_id`, destructive-op
+/// provenance) and only changes how the label field of `CreateNode`,
+/// `CreateEdge`, `UpdateNode`, `UpdateEdge`, `DeclareUniqueConstraint`, and
+/// `DropUniqueConstraint` is encoded. Prior versions wrote the label as a raw
+/// 4-byte interner id and replayed it via [`InternedString::from_raw`] WITHOUT
+/// re-interning the underlying string — correct only when the replaying
+/// process reproduced the exact id→string layout of the writer. In a
+/// non-identity interner layout (multiple `AletheiaDB` instances sharing the
+/// process-global interner, repeated open/close, or the WAL-only replay path
+/// that performs no interner restore) a raw-id label silently resolved to the
+/// wrong string. v13+ segments carry the string itself, so labels are correct
+/// under any interner layout, exactly as property keys/values already are.
+///
+/// The [`carries_string_labels`] gate is an independent monotonic `>=` boolean
+/// on the same version byte, composing with the framing/delete-version-id/
+/// destructive-provenance gates. ≤v12 segments keep the raw-id decode path
+/// (best-effort, identity-layout only — we cannot retroactively recover a
+/// string that was never written); v13+ segments are unconditionally correct.
+/// Bumping the header version makes an older reader reject the file cleanly
+/// rather than mis-length the variable-width label payload, following the
+/// #3224/#3406/#3413/#3427 precedent.
+pub(crate) const WAL_VERSION_STRING_LABELS: u8 = 13;
+
+/// WAL format version for encrypted segments whose decrypted payload uses the
+/// string-label entry format (i.e. [`WAL_VERSION_STRING_LABELS`], Issue #3506).
+pub(crate) const WAL_VERSION_ENCRYPTED_STRING_LABELS: u8 = 14;
+
 /// Maximum supported WAL version (inclusive).
-const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL;
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_STRING_LABELS;
 
 /// Returns `true` if `version` denotes an encrypted segment (the original
-/// encrypted format or one of its provenance-carrying successors).
+/// encrypted format or one of its provenance/framing-carrying successors).
 #[inline]
 fn is_encrypted_version(version: u8) -> bool {
     version == WAL_VERSION_ENCRYPTED
         || version == WAL_VERSION_ENCRYPTED_PROVENANCE
         || version == WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
+        || version == WAL_VERSION_ENCRYPTED_TX_FRAMING
+        || version == WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID
+        || version == WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE
+        || version == WAL_VERSION_ENCRYPTED_STRING_LABELS
+}
+
+/// Returns `true` if `version` (a plaintext/payload version) supports the
+/// [`WalOperation::BeginTx`]/[`WalOperation::CommitTx`] transaction-framing
+/// markers (Issue #3413). Drives the additive `WalEntry::framed` flag.
+#[inline]
+fn is_framed_version(version: u8) -> bool {
+    version >= WAL_VERSION_TX_FRAMING
+}
+
+/// Returns `true` if `version` (a plaintext/payload version) carries the
+/// tombstone/retraction `version_id` in delete/retract payloads (Issue #3406).
+///
+/// Independent of [`is_framed_version`]: both are monotonic `>=` predicates on
+/// the same version byte, so v9/v10 segments are simultaneously framed AND
+/// delete-version-id-carrying.
+#[inline]
+fn carries_delete_version_id(version: u8) -> bool {
+    version >= WAL_VERSION_DELETE_VERSION_ID
+}
+
+/// Returns `true` if `version` (a plaintext/payload version) carries the
+/// optional [`Provenance`] blob trailing the delete/retract payloads (Issue
+/// #3427).
+///
+/// Independent of [`is_framed_version`] / [`carries_delete_version_id`]: all
+/// three are monotonic `>=` predicates on the same version byte, so v11/v12
+/// segments are simultaneously framed, delete-version-id-carrying, AND
+/// destructive-provenance-carrying.
+#[inline]
+fn carries_destructive_provenance(version: u8) -> bool {
+    version >= WAL_VERSION_DESTRUCTIVE_PROVENANCE
+}
+
+/// Returns `true` if `version` (a plaintext/payload version) serializes labels
+/// as length-prefixed UTF-8 and re-interns them on read (Issue #3506).
+///
+/// Independent of the framing/delete-version-id/destructive-provenance gates:
+/// all are monotonic `>=` predicates on the same version byte, so v13/v14
+/// segments carry every prior field AND string labels.
+#[inline]
+fn carries_string_labels(version: u8) -> bool {
+    version >= WAL_VERSION_STRING_LABELS
 }
 
 /// Map a segment/container format version to the logical *payload* version
@@ -127,8 +271,38 @@ fn payload_version(version: u8) -> u8 {
         WAL_VERSION_ENCRYPTED => WAL_VERSION,
         WAL_VERSION_ENCRYPTED_PROVENANCE => WAL_VERSION_PROVENANCE,
         WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL => WAL_VERSION_PROVENANCE_PRINCIPAL,
+        WAL_VERSION_ENCRYPTED_TX_FRAMING => WAL_VERSION_TX_FRAMING,
+        WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID => WAL_VERSION_DELETE_VERSION_ID,
+        WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE => WAL_VERSION_DESTRUCTIVE_PROVENANCE,
+        WAL_VERSION_ENCRYPTED_STRING_LABELS => WAL_VERSION_STRING_LABELS,
         v => v,
     }
+}
+
+/// The newest *plaintext* WAL entry payload version — the exact shape that
+/// `serialization::serialize_operation_into` writes and that
+/// `flush_coordinator` stamps on new plaintext segments
+/// (currently [`WAL_VERSION_DELETE_VERSION_ID`], v9).
+///
+/// Derived from [`WAL_VERSION_MAX`] (the newest *encrypted* container version,
+/// v10) via [`payload_version`], so it can NEVER lag a format bump: any change
+/// that raises `WAL_VERSION_MAX` and extends `payload_version`'s mapping is
+/// tracked automatically. Round-trip harnesses that serialize a fresh entry and
+/// re-parse it (e.g. the `wal_entry_parsing` fuzz target via
+/// `crate::fuzzing::wal::parse_current_entry`) MUST parse at this version:
+/// parsing at a stale version skips the framing (#3413, v7) and delete/retract
+/// `version_id` (#3406, v9) bytes the serializer wrote, misaligns the buffer,
+/// and fails the entry checksum.
+///
+/// History of the newest plaintext version: #3224→3, #3421→5, #3413→7,
+/// #3406→9, #3427→11, #3506→13. Bump on every WAL plaintext format increase.
+#[inline]
+// Only referenced by the fuzz-only `crate::fuzzing` module, so it is compiled
+// only under `any(fuzzing, feature = "fuzzing")`; on non-fuzzing builds it is
+// omitted entirely (no dead-code hit) while fuzz targets still get it.
+#[cfg(any(fuzzing, feature = "fuzzing"))]
+pub(crate) fn newest_plaintext_wal_version() -> u8 {
+    payload_version(WAL_VERSION_MAX)
 }
 
 /// Size of the WAL segment header (magic + version).
@@ -202,11 +376,52 @@ pub fn read_entries_from_dir_with_cipher(
     start_lsn: LSN,
     cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
 ) -> Result<Vec<WalEntry>> {
+    // Default recovery policy: tolerate a crash-torn trailing entry in the
+    // FINAL segment (Issue #3433). Operators who prefer fail-stop recovery opt
+    // out via the `tolerate_torn_tail = false` recovery config flag, which
+    // reaches this reader through `read_entries_from_dir_with_options`.
+    read_entries_from_dir_with_options(wal_dir, start_lsn, cipher, true)
+}
+
+/// Read all WAL entries from a directory with optional decryption and an
+/// explicit crash-torn-tail recovery policy (Issue #3433).
+///
+/// When `tolerate_torn_tail` is `true` (the default), an undecodable trailing
+/// entry in the **final** segment — the shape a crash during append leaves: a
+/// zeroed/garbage op-type byte, a mid-field truncation, or a checksum mismatch
+/// on a half-written payload — is treated as end-of-log: everything decoded
+/// before it is applied, a WARNING is logged (segment path + byte offset +
+/// underlying error), and the read stops. This generalizes #3413's
+/// truncation-only tolerance to every crash-torn shape.
+///
+/// The tolerance is strictly **tail-scoped**:
+/// * corruption in a NON-final segment (a newer segment exists past it) always
+///   hard-errors — that is real damage, not a torn append;
+/// * for encrypted (length-prefixed) segments, an undecodable frame that is
+///   FOLLOWED BY a valid frame in the final segment also hard-errors (it is
+///   resyncable mid-log corruption). Plaintext entries carry no per-entry
+///   length prefix, so once an entry is undecodable a following entry cannot be
+///   found — for plaintext, an undecodable entry in the final segment is
+///   therefore unavoidably treated as the tail (documented asymmetry).
+///
+/// When `tolerate_torn_tail` is `false`, ANY parse failure hard-errors, exactly
+/// as a strict per-segment [`read_segment`] does — fail-stop recovery.
+pub fn read_entries_from_dir_with_options(
+    wal_dir: &Path,
+    start_lsn: LSN,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+    tolerate_torn_tail: bool,
+) -> Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
 
-    // Read entries from each segment
-    for (_, path) in sorted_segment_paths(wal_dir) {
-        let segment_entries = read_segment_with_cipher(&path, start_lsn, cipher)?;
+    // Only the FINAL segment is allowed to tolerate a torn trailing entry, and
+    // only when the caller's recovery policy leaves tolerance on.
+    let segment_paths = sorted_segment_paths(wal_dir);
+    let last_idx = segment_paths.len().saturating_sub(1);
+    for (i, (_, path)) in segment_paths.iter().enumerate() {
+        let segment_tolerates = tolerate_torn_tail && i == last_idx;
+        let segment_entries =
+            read_segment_with_cipher_tolerant(path, start_lsn, cipher, segment_tolerates)?;
         entries.extend(segment_entries);
     }
 
@@ -571,6 +786,29 @@ pub fn read_segment_with_cipher(
     start_lsn: LSN,
     cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
 ) -> Result<Vec<WalEntry>> {
+    // Standalone single-segment reads keep the strict contract: a torn trailing
+    // entry hard-errors, exactly as before. Only the recovery dir-reader
+    // (`read_entries_from_dir_with_cipher`) opts the FINAL segment into
+    // torn-tail tolerance (Issue #3413).
+    read_segment_with_cipher_tolerant(path, start_lsn, cipher, false)
+}
+
+/// Read WAL entries from a single segment, optionally tolerating a torn
+/// trailing entry (a crash during the final flush, Issue #3413).
+///
+/// When `tolerate_torn_tail` is `true` and the segment's LAST entry fails to
+/// parse **because its declared payload runs past end-of-buffer** (a truncated
+/// trailing entry — e.g. a half-written `CommitTx` marker), the decodable
+/// prefix is kept and the read stops without error. Any other parse failure
+/// (checksum mismatch, unknown op type, invalid UTF-8 — all of which mean the
+/// entry's bytes were fully present but wrong) still hard-errors, and so does
+/// every parse failure when `tolerate_torn_tail` is `false`.
+fn read_segment_with_cipher_tolerant(
+    path: &Path,
+    start_lsn: LSN,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+    tolerate_torn_tail: bool,
+) -> Result<Vec<WalEntry>> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
@@ -645,7 +883,7 @@ pub fn read_segment_with_cipher(
         return Ok(Vec::new()); // Empty segment
     };
 
-    // Encrypted segments (version 2 or 4) require a cipher for decryption.
+    // Encrypted segments (versions 2/4/6/8) require a cipher for decryption.
     if is_encrypted_version(version) && cipher.is_none() {
         return Err(StorageError::Encryption(format!(
             "Cannot read encrypted WAL segment (version {}) without a cipher",
@@ -656,7 +894,7 @@ pub fn read_segment_with_cipher(
 
     // Dispatch to the appropriate parsing loop based on version.
     if is_encrypted_version(version) {
-        // Version 2/4: length-prefixed encrypted entries.
+        // Encrypted (2/4/6/8): length-prefixed encrypted entries.
         let cipher = cipher.expect("cipher presence checked above");
         parse_encrypted_entries(
             buffer,
@@ -666,16 +904,45 @@ pub fn read_segment_with_cipher(
             path,
             &mut entries,
             version,
+            tolerate_torn_tail,
         )?;
     } else {
-        // Version 1/3: plaintext entries.
-        parse_plaintext_entries(buffer, &mut offset, version, start_lsn, path, &mut entries)?;
+        // Plaintext (1/3/5/7): plaintext entries.
+        parse_plaintext_entries(
+            buffer,
+            &mut offset,
+            version,
+            start_lsn,
+            path,
+            &mut entries,
+            tolerate_torn_tail,
+        )?;
     }
 
     Ok(entries)
 }
 
-/// Parse plaintext (version 1) entries from a WAL segment buffer.
+/// Log a WARNING that replay stopped at a crash-torn trailing entry, under both
+/// logging configurations (Issue #3433). Carries the segment path, byte offset,
+/// and the underlying parse/decrypt error so operators can audit exactly where
+/// the log tail was truncated.
+fn log_torn_tail_warning(path: &Path, offset: usize, err: &Error) {
+    let msg = format!(
+        "Crash-torn trailing WAL entry in final segment {:?} at byte offset {}: {}; \
+         stopping replay here and keeping the decodable prefix (torn entries were never \
+         acknowledged, so discarding them is correct)",
+        path, offset, err
+    );
+    #[cfg(feature = "observability")]
+    tracing::warn!("{}", msg);
+    #[cfg(not(feature = "observability"))]
+    eprintln!("WARNING: {}", msg);
+}
+
+/// Parse plaintext (versions 1/3/5/7) entries from a WAL segment buffer.
+///
+/// See [`read_segment_with_cipher_tolerant`] for the meaning of
+/// `tolerate_torn_tail`.
 fn parse_plaintext_entries(
     buffer: &[u8],
     offset: &mut usize,
@@ -683,10 +950,18 @@ fn parse_plaintext_entries(
     start_lsn: LSN,
     path: &Path,
     entries: &mut Vec<WalEntry>,
+    tolerate_torn_tail: bool,
 ) -> Result<()> {
+    // LSN of the last entry we successfully decoded (regardless of the
+    // `start_lsn` push filter). A genuine continuation entry after an
+    // undecodable one has a strictly higher LSN; this guards the forward probe
+    // (below) against a ~2^-32 CRC false positive from mis-aligned bytes.
+    let mut last_parsed_lsn: Option<LSN> = None;
+
     while *offset < buffer.len() {
         match parse_entry_at(buffer, *offset, version) {
             Ok((entry, bytes_consumed)) => {
+                last_parsed_lsn = Some(entry.lsn);
                 if entry.lsn >= start_lsn {
                     entries.push(entry);
                 }
@@ -695,14 +970,31 @@ fn parse_plaintext_entries(
             Err(e) => {
                 // Distinguish between expected EOF truncation vs. unexpected corruption
                 if *offset + 24 > buffer.len() {
-                    #[cfg(feature = "observability")]
-                    tracing::debug!(
-                        "Partial entry at end of WAL segment {:?} (offset {}/{}), stopping read",
-                        path,
-                        offset,
-                        buffer.len()
-                    );
-                    break;
+                    // Partial header (torn write, < 24 bytes left): the entry
+                    // cannot even form a header, so nothing valid can follow —
+                    // this is a genuine torn tail. An all-zero remainder is
+                    // benign pre-allocation padding and is ALWAYS treated as
+                    // end-of-log (hard-erroring on it would brick normal
+                    // startup). A NONZERO partial header is a torn append:
+                    // tolerated under the flag, fail-stop when opted out
+                    // (Issue #3433 / PR #3461 config fix — this branch used to
+                    // `break` unconditionally, ignoring `tolerate_torn_tail`).
+                    let remainder = &buffer[*offset..];
+                    if remainder.iter().all(|&b| b == 0) {
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Zeroed partial region at end of WAL segment {:?} (offset {}/{}), stopping read",
+                            path,
+                            offset,
+                            buffer.len()
+                        );
+                        break;
+                    }
+                    if tolerate_torn_tail {
+                        log_torn_tail_warning(path, *offset, &e);
+                        break;
+                    }
+                    return Err(e);
                 } else {
                     let header_slice = &buffer[*offset..*offset + 24];
                     if header_slice.iter().all(|&b| b == 0) {
@@ -713,6 +1005,37 @@ fn parse_plaintext_entries(
                             offset,
                             buffer.len()
                         );
+                        break;
+                    }
+
+                    // An undecodable full entry (Issue #3433 / PR #3461
+                    // corruption-safety fix). Plaintext entries carry NO
+                    // per-entry length prefix, so we cannot resync by a length
+                    // field — but we CAN still tell a crash-torn tail apart
+                    // from mid-log corruption by scanning forward for a real
+                    // continuation entry (`plaintext_valid_entry_follows`):
+                    //
+                    // * A valid entry with a HIGHER LSN survives after this one
+                    //   => acknowledged committed data lies past the corruption.
+                    //   This is mid-log damage, NOT a torn tail, and MUST
+                    //   hard-error even with `tolerate_torn_tail = true` — the
+                    //   tolerant default must never silently drop the bytes of a
+                    //   real transaction (which, plaintext being length-prefix
+                    //   free, could be up to a whole 64 MB segment).
+                    // * Nothing valid follows (scan reaches EOF) => a genuine
+                    //   crash-torn tail (zeroed/garbage op-type, mid-field
+                    //   truncation, or a checksum mismatch on a half-written
+                    //   payload). The torn entry was never acknowledged, so we
+                    //   keep the decodable prefix and stop — but only under the
+                    //   flag (a non-final segment or `tolerate_torn_tail = false`
+                    //   still hard-errors).
+                    //
+                    // This mirrors the encrypted path's `encrypted_valid_frame_follows`
+                    // lookahead, closing the plaintext data-loss asymmetry.
+                    if !plaintext_valid_entry_follows(buffer, *offset, version, last_parsed_lsn)
+                        && tolerate_torn_tail
+                    {
+                        log_torn_tail_warning(path, *offset, &e);
                         break;
                     }
 
@@ -739,12 +1062,57 @@ fn parse_plaintext_entries(
     Ok(())
 }
 
-/// Parse encrypted (version 2 or 4) entries from a WAL segment buffer.
+/// Scanning forward from `start` (byte by byte, because plaintext WAL entries
+/// carry no per-entry length prefix), does any position decode via
+/// [`parse_entry_at`] into a valid, CRC-checked entry whose LSN is strictly
+/// greater than `last_parsed_lsn`? (Issue #3433 / PR #3461 corruption-safety.)
+///
+/// This is the plaintext analogue of [`encrypted_valid_frame_follows`]. A
+/// `true` answer means a real committed entry survives PAST an undecodable one
+/// — i.e. mid-log corruption, not a crash-torn tail — so replay must hard-error
+/// regardless of `tolerate_torn_tail`. A `false` answer (the scan reaches
+/// end-of-buffer with nothing valid after) means a genuine torn tail, and the
+/// caller applies the flag.
+///
+/// The `> last_parsed_lsn` guard rejects a ~2^-32 CRC false positive from
+/// mis-aligned bytes: a genuine continuation always has a strictly higher LSN
+/// than the last entry we decoded (WAL LSNs increase monotonically). When
+/// nothing has been decoded yet (`None`), any valid following entry counts —
+/// a corrupt first entry with a valid entry after it is still mid-log damage.
+///
+/// The scan runs only on the error path during recovery (rare) and is bounded
+/// by the remaining segment bytes.
+fn plaintext_valid_entry_follows(
+    buffer: &[u8],
+    start: usize,
+    version: u8,
+    last_parsed_lsn: Option<LSN>,
+) -> bool {
+    // `start` itself already failed to parse; begin at the next byte.
+    let mut scan = start + 1;
+    while scan + 24 <= buffer.len() {
+        if let Ok((entry, _)) = parse_entry_at(buffer, scan, version) {
+            match last_parsed_lsn {
+                Some(last) if entry.lsn > last => return true,
+                None => return true,
+                _ => {}
+            }
+        }
+        scan += 1;
+    }
+    false
+}
+
+/// Parse encrypted (versions 2/4/6/8) entries from a WAL segment buffer.
 ///
 /// Each entry is stored as `[4-byte LE length][encrypted entry bytes]`.
 /// The encrypted entry bytes are decrypted using the provided cipher,
 /// then parsed as a normal WAL entry using the payload version implied by
 /// `container_version` (see [`payload_version`]).
+///
+/// See [`read_segment_with_cipher_tolerant`] for the meaning of
+/// `tolerate_torn_tail`.
+#[allow(clippy::too_many_arguments)]
 fn parse_encrypted_entries(
     buffer: &[u8],
     offset: &mut usize,
@@ -753,20 +1121,34 @@ fn parse_encrypted_entries(
     path: &Path,
     entries: &mut Vec<WalEntry>,
     container_version: u8,
+    tolerate_torn_tail: bool,
 ) -> Result<()> {
     let entry_version = payload_version(container_version);
     while *offset < buffer.len() {
+        // Byte offset of this frame's length prefix, for torn-tail warnings.
+        let frame_start = *offset;
         // Need at least 4 bytes for the length prefix
         if *offset + 4 > buffer.len() {
-            // Partial length prefix at EOF -- truncated write
-            #[cfg(feature = "observability")]
-            tracing::debug!(
-                "Partial length prefix at end of encrypted WAL segment {:?} (offset {}/{}), stopping read",
+            // Partial length prefix at EOF -- a torn write. An all-zero
+            // remainder is benign pre-allocation padding (always end-of-log);
+            // a nonzero partial prefix is a torn tail: tolerated under the flag,
+            // fail-stop when opted out (Issue #3433 / PR #3461 config fix —
+            // this used to `break` unconditionally, ignoring the flag).
+            let remainder = &buffer[*offset..];
+            if remainder.iter().all(|&b| b == 0) {
+                break;
+            }
+            let err = Error::Storage(StorageError::CorruptedData(format!(
+                "Partial encrypted length prefix at end of WAL segment {:?} (offset {}/{})",
                 path,
-                offset,
+                *offset,
                 buffer.len()
-            );
-            break;
+            )));
+            if tolerate_torn_tail {
+                log_torn_tail_warning(path, frame_start, &err);
+                break;
+            }
+            return Err(err);
         }
 
         // Check for zeroed length prefix (indicates end of data in pre-allocated files)
@@ -776,7 +1158,8 @@ fn parse_encrypted_entries(
         let entry_len = u32::from_le_bytes(len_bytes) as usize;
 
         if entry_len == 0 {
-            // Zero-length entry marks end of valid data
+            // Zero-length entry marks end of valid data (pre-allocation
+            // padding). Always benign — never gated on the flag.
             break;
         }
 
@@ -784,30 +1167,53 @@ fn parse_encrypted_entries(
 
         // Validate entry length
         if *offset + entry_len > buffer.len() {
-            // Truncated encrypted entry at EOF
-            #[cfg(feature = "observability")]
-            tracing::debug!(
-                "Truncated encrypted entry at end of WAL segment {:?} (offset {}, entry_len {}, buf_len {}), stopping read",
+            // Truncated encrypted entry at EOF -- a torn write. A length-prefix
+            // that points past the end of the buffer means the frame body was
+            // never fully written, so nothing valid can follow: a genuine torn
+            // tail. Tolerated under the flag, fail-stop when opted out
+            // (Issue #3433 / PR #3461 config fix — used to `break`
+            // unconditionally, ignoring the flag).
+            let err = Error::Storage(StorageError::CorruptedData(format!(
+                "Truncated encrypted entry at end of WAL segment {:?} (offset {}, entry_len {}, buf_len {})",
                 path,
-                offset,
+                *offset,
                 entry_len,
                 buffer.len()
-            );
-            break;
+            )));
+            if tolerate_torn_tail {
+                log_torn_tail_warning(path, frame_start, &err);
+                break;
+            }
+            return Err(err);
         }
 
         let encrypted_entry = &buffer[*offset..*offset + entry_len];
         *offset += entry_len;
 
-        // Decrypt the entry
+        // Decrypt the entry. A crash-torn tail can leave a length-complete but
+        // undecryptable final frame (Issue #3433). Encrypted frames ARE
+        // length-prefixed, so unlike plaintext we can — and MUST — distinguish a
+        // torn tail from mid-log corruption: tolerate only when NO valid frame
+        // follows this one; if a later frame still decrypts and parses, this is
+        // resyncable mid-log damage and must hard-error even in the final
+        // segment.
         let decrypted =
-            crate::encryption::wal_encryption::decrypt_wal_payload(encrypted_entry, cipher)
-                .map_err(|e| {
-                    Error::Storage(StorageError::Encryption(format!(
+            match crate::encryption::wal_encryption::decrypt_wal_payload(encrypted_entry, cipher) {
+                Ok(d) => d,
+                Err(e) => {
+                    let err = Error::Storage(StorageError::Encryption(format!(
                         "Failed to decrypt WAL entry in segment {:?}: {}",
                         path, e
-                    )))
-                })?;
+                    )));
+                    if tolerate_torn_tail
+                        && !encrypted_valid_frame_follows(buffer, *offset, cipher, entry_version)
+                    {
+                        log_torn_tail_warning(path, frame_start, &err);
+                        break;
+                    }
+                    return Err(err);
+                }
+            };
 
         // Parse the decrypted bytes as a normal entry, using the payload
         // version implied by the container version (plaintext-equivalent).
@@ -818,6 +1224,15 @@ fn parse_encrypted_entries(
                 }
             }
             Err(e) => {
+                // Same crash-torn-tail policy as the decrypt branch above:
+                // tolerate a length-complete-but-undecodable final frame only
+                // when no valid frame follows it.
+                if tolerate_torn_tail
+                    && !encrypted_valid_frame_follows(buffer, *offset, cipher, entry_version)
+                {
+                    log_torn_tail_warning(path, frame_start, &e);
+                    break;
+                }
                 #[cfg(feature = "observability")]
                 tracing::error!(
                     "Failed to parse decrypted WAL entry in segment {:?}: {}",
@@ -834,6 +1249,61 @@ fn parse_encrypted_entries(
         }
     }
     Ok(())
+}
+
+/// Does any length-prefixed encrypted frame at or after `offset` still decrypt
+/// AND parse into a valid WAL entry? (Issue #3433)
+///
+/// Used by [`parse_encrypted_entries`] to distinguish a crash-torn tail from
+/// resyncable mid-log corruption: because encrypted frames are length-prefixed,
+/// a failed frame that is FOLLOWED BY a recoverable frame is real damage (and
+/// must hard-error), whereas a failed frame with nothing decodable after it is
+/// the torn tail (and may be dropped). Partial/zero-length trailing frames end
+/// the scan without counting as "valid following".
+///
+/// KNOWN LIMITATION (defensive follow-up, not fixed here): the 4-byte little-
+/// endian length prefix that frames each ciphertext lives OUTSIDE the AEAD
+/// envelope — it is neither encrypted nor authenticated. A mid-stream corrupted
+/// or tampered length prefix can therefore point the scan at the wrong offset
+/// and desync this lookahead (skip a real following frame, or realign onto
+/// garbage), weakening the torn-tail-vs-mid-log-corruption discrimination for
+/// encrypted segments specifically. Hardening this needs a WAL format change
+/// (bind the length into the frame's AAD, or length-prefix-inside-envelope) and
+/// is tracked separately; do NOT rely on this probe as an integrity guarantee
+/// against an adversary who can edit length prefixes.
+fn encrypted_valid_frame_follows(
+    buffer: &[u8],
+    mut offset: usize,
+    cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
+    entry_version: u8,
+) -> bool {
+    while offset < buffer.len() {
+        if offset + 4 > buffer.len() {
+            return false;
+        }
+        let entry_len = u32::from_le_bytes(
+            buffer[offset..offset + 4]
+                .try_into()
+                .expect("slice length verified above"),
+        ) as usize;
+        if entry_len == 0 {
+            return false;
+        }
+        offset += 4;
+        if offset + entry_len > buffer.len() {
+            return false;
+        }
+        let frame = &buffer[offset..offset + entry_len];
+        offset += entry_len;
+        if let Ok(decrypted) = crate::encryption::wal_encryption::decrypt_wal_payload(frame, cipher)
+            && parse_entry_at(&decrypted, 0, entry_version).is_ok()
+        {
+            return true;
+        }
+        // Otherwise keep scanning: a single bad frame followed by more bad
+        // frames is still a tail unless SOMETHING valid appears later.
+    }
+    false
 }
 
 /// Advance `offset` by `n` bytes with overflow protection.
@@ -953,17 +1423,40 @@ fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Opt
     Ok(Some(provenance))
 }
 
-/// Read a 4-byte InternedString label ID from `buffer` at `offset`, advancing `offset` by 4.
+/// Read a label from `buffer` at `offset`, advancing `offset` past it.
+///
+/// For v13+ segments ([`carries_string_labels`], Issue #3506) the label is a
+/// length-prefixed UTF-8 string (`[len: u32-LE][utf8 bytes]`) which is
+/// re-interned into the process-global interner on read, so it resolves to the
+/// correct string under ANY interner layout (byte-identical to the property-key
+/// codec). For ≤v12 segments the label is a raw 4-byte [`InternedString`] id
+/// wrapped via [`InternedString::from_raw`] — correct only when the replaying
+/// process reproduces the writer's interner layout (the pre-#3506 behavior,
+/// preserved for backward compatibility).
 #[inline]
 fn read_label(
     buffer: &[u8],
     offset: &mut usize,
+    version: u8,
     context: &str,
 ) -> Result<crate::core::interning::InternedString> {
-    require_bytes(buffer, *offset, 4, context)?;
-    let label_id = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap());
-    advance(offset, 4)?;
-    Ok(crate::core::interning::InternedString::from_raw(label_id))
+    if carries_string_labels(version) {
+        require_bytes(buffer, *offset, 4, context)?;
+        let len = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap()) as usize;
+        advance(offset, 4)?;
+        require_bytes(buffer, *offset, len, context)?;
+        let s = std::str::from_utf8(&buffer[*offset..*offset + len]).map_err(|e| {
+            StorageError::CorruptedData(format!("Invalid UTF-8 in WAL label ({context}): {e}"))
+        })?;
+        let interned = crate::core::interning::GLOBAL_INTERNER.intern(s)?;
+        advance(offset, len)?;
+        Ok(interned)
+    } else {
+        require_bytes(buffer, *offset, 4, context)?;
+        let label_id = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap());
+        advance(offset, 4)?;
+        Ok(crate::core::interning::InternedString::from_raw(label_id))
+    }
 }
 
 /// Read a PropertyMap and valid_from HybridTimestamp for version 1+ entries.
@@ -995,7 +1488,7 @@ fn parse_create_node_op(
 ) -> Result<WalOperation> {
     let node_id = deserialize_node_id(buffer, *offset, "CreateNode")?;
     advance(offset, 8)?;
-    let label = read_label(buffer, offset, "CreateNode label")?;
+    let label = read_label(buffer, offset, version, "CreateNode label")?;
     let (properties, valid_from) =
         read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
     let provenance = read_provenance(buffer, offset, version)?;
@@ -1020,7 +1513,7 @@ fn parse_create_edge_op(
     advance(offset, 8)?;
     let target = deserialize_node_id(buffer, *offset, "CreateEdge target")?;
     advance(offset, 8)?;
-    let label = read_label(buffer, offset, "CreateEdge label")?;
+    let label = read_label(buffer, offset, version, "CreateEdge label")?;
     let (properties, valid_from) =
         read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
     let provenance = read_provenance(buffer, offset, version)?;
@@ -1046,7 +1539,7 @@ fn parse_update_node_op(
     let version_id = deserialize_version_id(buffer, *offset, "UpdateNode")?;
     advance(offset, 8)?;
     let (label, properties, valid_from) = if version >= WAL_VERSION {
-        let label = read_label(buffer, offset, "UpdateNode label")?;
+        let label = read_label(buffer, offset, version, "UpdateNode label")?;
         let (props, valid_from) = read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
         (label, props, valid_from)
     } else {
@@ -1076,14 +1569,21 @@ fn parse_update_edge_op(
     // Upfront check is required: for V1 it pre-validates EdgeId+VersionId+LabelId (20 bytes)
     // as a unit, producing the "UpdateEdge" error message that tests assert on.
     // Removing it would shift the failure to read_label with a different message.
-    let required = if version >= WAL_VERSION { 20 } else { 16 };
+    // For v13+ (Issue #3506) the label is a variable-width UTF-8 string, so the
+    // fixed 4-byte label slot no longer exists — pre-validate only the fixed
+    // EdgeId+VersionId (16 bytes) and let read_label validate the label bytes.
+    let required = if version >= WAL_VERSION && !carries_string_labels(version) {
+        20
+    } else {
+        16
+    };
     require_bytes(buffer, *offset, required, "UpdateEdge")?;
     let edge_id = deserialize_edge_id(buffer, *offset, "UpdateEdge")?;
     advance(offset, 8)?;
     let version_id = deserialize_version_id(buffer, *offset, "UpdateEdge")?;
     advance(offset, 8)?;
     let (label, properties, valid_from) = if version >= WAL_VERSION {
-        let label = read_label(buffer, offset, "UpdateEdge label")?;
+        let label = read_label(buffer, offset, version, "UpdateEdge label")?;
         let (props, valid_from) = read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
         (label, props, valid_from)
     } else {
@@ -1104,6 +1604,37 @@ fn parse_update_edge_op(
     })
 }
 
+/// Parse an optional tombstone/retraction `version_id` trailing a delete/retract
+/// payload (Issue #3406).
+///
+/// For segments below [`WAL_VERSION_DELETE_VERSION_ID`] the field is absent, so
+/// this returns `None` and replay falls back to synthesizing the id. For v9+
+/// segments it reads a fixed 8-byte LE u64; the
+/// [`TOMBSTONE_VERSION_ID_ABSENT`] sentinel maps back to `None`.
+fn parse_opt_tombstone_version_id(
+    buffer: &[u8],
+    offset: &mut usize,
+    version: u8,
+    context: &str,
+) -> Result<Option<VersionId>> {
+    if !carries_delete_version_id(version) {
+        return Ok(None);
+    }
+    require_bytes(buffer, *offset, 8, context)?;
+    let raw = u64::from_le_bytes(buffer[*offset..*offset + 8].try_into().unwrap());
+    advance(offset, 8)?;
+    if raw == TOMBSTONE_VERSION_ID_ABSENT {
+        return Ok(None);
+    }
+    let vid = VersionId::new(raw).map_err(|e| {
+        Error::Storage(StorageError::CorruptedData(format!(
+            "Invalid tombstone version ID in WAL {}: {}",
+            context, e
+        )))
+    })?;
+    Ok(Some(vid))
+}
+
 fn parse_delete_node_op(
     buffer: &[u8],
     offset: &mut usize,
@@ -1119,9 +1650,20 @@ fn parse_delete_node_op(
     } else {
         tx_timestamp
     };
+    let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "DeleteNode")?;
+    // Issue #3427: v11+ segments append the same provenance blob create/update
+    // carry. Older (v9/v10/legacy) segments stop at the version_id tail and must
+    // parse byte-identically, so gate the read on `carries_destructive_provenance`.
+    let provenance = if carries_destructive_provenance(version) {
+        read_provenance(buffer, offset, version)?
+    } else {
+        None
+    };
     Ok(WalOperation::DeleteNode {
         node_id,
         valid_from,
+        version_id,
+        provenance,
     })
 }
 
@@ -1140,33 +1682,70 @@ fn parse_delete_edge_op(
     } else {
         tx_timestamp
     };
+    let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "DeleteEdge")?;
+    // Issue #3427: version-gated trailing provenance blob (see parse_delete_node_op).
+    let provenance = if carries_destructive_provenance(version) {
+        read_provenance(buffer, offset, version)?
+    } else {
+        None
+    };
     Ok(WalOperation::DeleteEdge {
         edge_id,
         valid_from,
+        version_id,
+        provenance,
     })
 }
 
-/// Parse a `RetractNode` payload: `[node_id: 8][valid_to: 12]`.
+/// Parse a `RetractNode` payload: `[node_id: 8][valid_to: 12]` plus, for v9+
+/// segments, an 8-byte tombstone `version_id` (Issue #3406).
 ///
-/// No version gating is needed: the `OP_RETRACT_NODE` tag (Issue #3230) only
-/// ever appears in segments written by versions that serialize `valid_to`.
-fn parse_retract_node_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+/// The `valid_to` needs no version gating: the `OP_RETRACT_NODE` tag (Issue
+/// #3230) only ever appears in segments written by versions that serialize
+/// `valid_to`. The trailing `version_id` is gated on
+/// [`WAL_VERSION_DELETE_VERSION_ID`].
+fn parse_retract_node_op(buffer: &[u8], offset: &mut usize, version: u8) -> Result<WalOperation> {
     let node_id = deserialize_node_id(buffer, *offset, "RetractNode")?;
     advance(offset, 8)?;
     let (valid_to, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
     advance(offset, ts_len)?;
-    Ok(WalOperation::RetractNode { node_id, valid_to })
+    let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "RetractNode")?;
+    // Issue #3427: version-gated trailing provenance blob (see parse_delete_node_op).
+    let provenance = if carries_destructive_provenance(version) {
+        read_provenance(buffer, offset, version)?
+    } else {
+        None
+    };
+    Ok(WalOperation::RetractNode {
+        node_id,
+        valid_to,
+        version_id,
+        provenance,
+    })
 }
 
-/// Parse a `RetractEdge` payload: `[edge_id: 8][valid_to: 12]`.
+/// Parse a `RetractEdge` payload: `[edge_id: 8][valid_to: 12]` plus, for v9+
+/// segments, an 8-byte tombstone `version_id` (Issue #3406).
 ///
-/// See [`parse_retract_node_op`] for why no version gating is needed.
-fn parse_retract_edge_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+/// See [`parse_retract_node_op`] for version-gating details.
+fn parse_retract_edge_op(buffer: &[u8], offset: &mut usize, version: u8) -> Result<WalOperation> {
     let edge_id = deserialize_edge_id(buffer, *offset, "RetractEdge")?;
     advance(offset, 8)?;
     let (valid_to, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
     advance(offset, ts_len)?;
-    Ok(WalOperation::RetractEdge { edge_id, valid_to })
+    let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "RetractEdge")?;
+    // Issue #3427: version-gated trailing provenance blob (see parse_delete_node_op).
+    let provenance = if carries_destructive_provenance(version) {
+        read_provenance(buffer, offset, version)?
+    } else {
+        None
+    };
+    Ok(WalOperation::RetractEdge {
+        edge_id,
+        valid_to,
+        version_id,
+        provenance,
+    })
 }
 
 fn parse_checkpoint_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
@@ -1181,6 +1760,34 @@ fn parse_checkpoint_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation
     Ok(WalOperation::Checkpoint {
         lsn: cp_lsn,
         timestamp: cp_timestamp,
+    })
+}
+
+/// Parse a `BeginTx` payload: `[tx_id: 8]` (Issue #3413).
+///
+/// No version gating is needed: the `OP_BEGIN_TX` tag only ever appears in
+/// segments at or above [`WAL_VERSION_TX_FRAMING`].
+fn parse_begin_tx_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+    require_bytes(buffer, *offset, 8, "BeginTx")?;
+    let tx_id = u64::from_le_bytes(buffer[*offset..*offset + 8].try_into().unwrap());
+    advance(offset, 8)?;
+    Ok(WalOperation::BeginTx { tx_id })
+}
+
+/// Parse a `CommitTx` payload: `[tx_id: 8][entry_count: 4][commit_timestamp: 12]`
+/// (Issue #3413). See [`parse_begin_tx_op`] for why no version gating is needed.
+fn parse_commit_tx_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+    require_bytes(buffer, *offset, 12, "CommitTx header")?;
+    let tx_id = u64::from_le_bytes(buffer[*offset..*offset + 8].try_into().unwrap());
+    advance(offset, 8)?;
+    let entry_count = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap());
+    advance(offset, 4)?;
+    let (commit_timestamp, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
+    advance(offset, ts_len)?;
+    Ok(WalOperation::CommitTx {
+        tx_id,
+        entry_count,
+        commit_timestamp,
     })
 }
 
@@ -1251,19 +1858,26 @@ pub(crate) fn parse_entry_at(
         OP_UPDATE_EDGE => parse_update_edge_op(buffer, &mut cur, version, timestamp)?,
         OP_DELETE_NODE => parse_delete_node_op(buffer, &mut cur, version, timestamp)?,
         OP_DELETE_EDGE => parse_delete_edge_op(buffer, &mut cur, version, timestamp)?,
-        OP_RETRACT_NODE => parse_retract_node_op(buffer, &mut cur)?,
-        OP_RETRACT_EDGE => parse_retract_edge_op(buffer, &mut cur)?,
+        OP_RETRACT_NODE => parse_retract_node_op(buffer, &mut cur, version)?,
+        OP_RETRACT_EDGE => parse_retract_edge_op(buffer, &mut cur, version)?,
         OP_CHECKPOINT => parse_checkpoint_op(buffer, &mut cur)?,
         OP_DECLARE_UNIQUE_CONSTRAINT => {
-            let label = read_label(buffer, &mut cur, "DeclareUniqueConstraint.label")?;
-            let property = read_label(buffer, &mut cur, "DeclareUniqueConstraint.property")?;
+            let label = read_label(buffer, &mut cur, version, "DeclareUniqueConstraint.label")?;
+            let property = read_label(
+                buffer,
+                &mut cur,
+                version,
+                "DeclareUniqueConstraint.property",
+            )?;
             WalOperation::DeclareUniqueConstraint { label, property }
         }
         OP_DROP_UNIQUE_CONSTRAINT => {
-            let label = read_label(buffer, &mut cur, "DropUniqueConstraint.label")?;
-            let property = read_label(buffer, &mut cur, "DropUniqueConstraint.property")?;
+            let label = read_label(buffer, &mut cur, version, "DropUniqueConstraint.label")?;
+            let property = read_label(buffer, &mut cur, version, "DropUniqueConstraint.property")?;
             WalOperation::DropUniqueConstraint { label, property }
         }
+        OP_BEGIN_TX => parse_begin_tx_op(buffer, &mut cur)?,
+        OP_COMMIT_TX => parse_commit_tx_op(buffer, &mut cur)?,
         _ => {
             return Err(StorageError::CorruptedData(format!(
                 "Unknown WAL operation type: {}",
@@ -1294,6 +1908,11 @@ pub(crate) fn parse_entry_at(
         timestamp,
         operation,
         checksum,
+        // Segments at or above WAL_VERSION_TX_FRAMING carry transaction
+        // framing markers; `version` here is the plaintext/payload version
+        // (encrypted container versions are mapped via `payload_version`
+        // before reaching this function), so the comparison is uniform.
+        framed: is_framed_version(version),
     };
     let bytes_consumed = cur - start_offset;
     Ok((entry, bytes_consumed))
@@ -1368,6 +1987,272 @@ mod tests {
         assert!(entries.is_empty());
     }
 
+    /// Issue #3506 (review) — the load-bearing corruption-proof test. Under a
+    /// deliberately NON-IDENTITY interner layout, the pre-#3506 raw-id label
+    /// encoding decodes a `CreateNode` label to the WRONG string, while the v13
+    /// string-label encoding decodes it to the RIGHT string. This is the test
+    /// that would FAIL on the pre-#3506 raw-id decode and PASSES with the string
+    /// decode — unlike the WAL-only reopen smoke test in
+    /// `tests/wal_string_labels_recovery.rs`, which passes on both codecs because
+    /// the process-global interner never reassigns ids in-process.
+    #[test]
+    fn raw_id_decode_corrupts_under_nonidentity_layout_string_decode_does_not() {
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+
+        // The foreign writer's raw id for "PersonTarget3506" happens to mean
+        // "DecoyMeaning3506" in THIS process's interner layout (non-identity):
+        // we store `decoy`'s id as the raw-id label, standing in for a foreign
+        // id whose numeric value resolves to a different string in this process.
+        let target = GLOBAL_INTERNER.intern("PersonTarget3506").unwrap();
+        let decoy = GLOBAL_INTERNER.intern("DecoyMeaning3506").unwrap();
+        assert_ne!(target.as_u32(), decoy.as_u32());
+
+        let node_id = NodeId::new(3506).unwrap();
+        let valid_from = time::now();
+
+        // Build a CreateNode entry whose label portion is written by `write_label`;
+        // the surrounding framing (header, node id, props, valid_from, provenance,
+        // CRC) is identical to a real entry. Only the label codec differs between
+        // the two variants below.
+        let build_entry = |write_label: &dyn Fn(&mut Vec<u8>)| -> Vec<u8> {
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&LSN(3506).0.to_le_bytes());
+            valid_from.serialize_into(&mut buffer);
+            let cs = buffer.len();
+            buffer.extend_from_slice(&[0u8; 4]); // checksum placeholder
+            buffer.push(OP_CREATE_NODE);
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            write_label(&mut buffer);
+            PropertyMap::new().serialize_into(&mut buffer).unwrap();
+            valid_from.serialize_into(&mut buffer);
+            buffer.push(0u8); // provenance: absent
+            let mut h = crc32fast::Hasher::new();
+            h.update(&buffer[0..20]);
+            h.update(&buffer[cs + 4..]);
+            buffer[cs..cs + 4].copy_from_slice(&h.finalize().to_le_bytes());
+            buffer
+        };
+
+        // ---- Old format (v11 raw id): stores decoy's raw id as the label. ----
+        let old = build_entry(&|buf| buf.extend_from_slice(&decoy.as_u32().to_le_bytes()));
+        let (old_entry, _) = parse_entry_at(&old, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        let old_label = match old_entry.operation {
+            WalOperation::CreateNode { label, .. } => label,
+            other => panic!("expected CreateNode, got {other:?}"),
+        };
+        // THE BUG: the raw-id decode resolves to the DECOY string, not the
+        // intended target — the corruption the raw-id encoding caused under a
+        // non-identity interner layout.
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(old_label, |s| s == "DecoyMeaning3506")
+                .unwrap(),
+            "pre-#3506 raw-id decode must corrupt the label to \"DecoyMeaning3506\""
+        );
+
+        // ---- New format (v13 string): stores the STRING "PersonTarget3506". ----
+        let new = build_entry(&|buf| {
+            let bytes = "PersonTarget3506".as_bytes();
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        });
+        let (new_entry, _) = parse_entry_at(&new, 0, WAL_VERSION_STRING_LABELS).unwrap();
+        let new_label = match new_entry.operation {
+            WalOperation::CreateNode { label, .. } => label,
+            other => panic!("expected CreateNode, got {other:?}"),
+        };
+        // THE FIX: the string decode re-interns and resolves to the intended
+        // target string under ANY interner layout.
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(new_label, |s| s == "PersonTarget3506")
+                .unwrap(),
+            "v13 string decode must recover the correct label \"PersonTarget3506\""
+        );
+    }
+
+    /// Issue #3506 — crash-recovery corruption path: a v13+ label whose
+    /// length-prefixed bytes are not valid UTF-8 must be rejected as
+    /// `CorruptedData` (not silently mis-decoded), so a torn/garbled segment
+    /// fails the replay loudly instead of interning a bogus label.
+    #[test]
+    fn read_label_v13_rejects_invalid_utf8() {
+        // [len = 2][0xFF, 0xFF] — 0xFF 0xFF is never valid UTF-8.
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&2u32.to_le_bytes());
+        buffer.extend_from_slice(&[0xFF, 0xFF]);
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateNode label",
+        )
+        .expect_err("invalid UTF-8 label bytes must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("Invalid UTF-8 in WAL label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — crash-recovery corruption path: a v13+ label whose declared
+    /// length overruns the remaining buffer must fail `require_bytes` with a
+    /// `CorruptedData` error naming the read context, rather than slicing out of
+    /// bounds or allocating on a crafted length.
+    #[test]
+    fn read_label_v13_rejects_length_overrun() {
+        // [len = 100] but zero label bytes follow.
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&100u32.to_le_bytes());
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateEdge label",
+        )
+        .expect_err("length-overrun label must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("CreateEdge label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — crash-recovery corruption path: a v13+ segment truncated
+    /// mid-way through the 4-byte label length prefix must fail the initial
+    /// `require_bytes` guard rather than reading past the buffer end.
+    #[test]
+    fn read_label_v13_rejects_truncated_length_prefix() {
+        // Only 2 of the 4 length-prefix bytes are present.
+        let buffer = [0x01u8, 0x00];
+        let mut offset = 0usize;
+        let err = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "UpdateNode label",
+        )
+        .expect_err("truncated label length prefix must be rejected");
+        match err {
+            Error::Storage(StorageError::CorruptedData(msg)) => assert!(
+                msg.contains("UpdateNode label"),
+                "unexpected CorruptedData message: {msg}"
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    /// Issue #3506 — happy-path unit coverage for the v13 label decode in
+    /// isolation: a well-formed `[len][utf8]` label re-interns to the exact
+    /// string and advances `offset` past the whole field.
+    #[test]
+    fn read_label_v13_round_trips_and_advances_offset() {
+        let label_str = "Straße3506"; // multi-byte to exercise len != char count
+        let bytes = label_str.as_bytes();
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(bytes);
+        buffer.push(0xAB); // trailing sentinel: offset must stop before this
+        let mut offset = 0usize;
+        let interned = read_label(
+            &buffer,
+            &mut offset,
+            WAL_VERSION_STRING_LABELS,
+            "CreateNode label",
+        )
+        .expect("well-formed v13 label must decode");
+        assert_eq!(
+            offset,
+            4 + bytes.len(),
+            "offset must advance past [len][utf8]"
+        );
+        assert!(
+            GLOBAL_INTERNER
+                .resolve_with(interned, |s| s == label_str)
+                .unwrap(),
+            "decoded label must re-intern to the original string"
+        );
+    }
+
+    /// Issue #3413: `CommitTx` serializes and parses back byte-for-byte under
+    /// the transaction-framing version, and the parsed entry is flagged
+    /// `framed`.
+    #[test]
+    fn test_commit_tx_round_trip() {
+        let commit_timestamp = crate::core::hlc::HybridTimestamp::new(1_234_567, 9).unwrap();
+        let op = WalOperation::CommitTx {
+            tx_id: 42,
+            entry_count: 3,
+            commit_timestamp,
+        };
+        let mut entry = WalEntry::new(LSN(100), op.clone());
+        entry.timestamp = crate::core::hlc::HybridTimestamp::new(2_000_000, 0).unwrap();
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        let (parsed, consumed) = parse_entry_at(&buffer, 0, WAL_VERSION_TX_FRAMING).unwrap();
+        assert_eq!(consumed, buffer.len());
+        assert_eq!(parsed.operation, op);
+        assert_eq!(parsed.lsn, LSN(100));
+        assert!(parsed.framed, "v7 entries must be flagged framed");
+    }
+
+    /// Issue #3413: `BeginTx` round-trips too.
+    #[test]
+    fn test_begin_tx_round_trip() {
+        let op = WalOperation::BeginTx { tx_id: 77 };
+        let entry = WalEntry::new(LSN(5), op.clone());
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) = parse_entry_at(&buffer, 0, WAL_VERSION_TX_FRAMING).unwrap();
+        assert_eq!(consumed, buffer.len());
+        assert_eq!(parsed.operation, op);
+        assert!(parsed.framed);
+    }
+
+    /// Issue #3413: a pre-framing (v6) segment parses entries with
+    /// `framed == false`, keeping them on the legacy immediate-apply path.
+    #[test]
+    fn test_pre_framing_version_not_flagged_framed() {
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+        // Hand-build a genuine v6 (pre-framing) CreateNode carrying a RAW 4-byte
+        // interner-id label — the pre-#3506 label encoding. The modern
+        // serializer writes string labels only at v13+, so we cannot use it to
+        // produce a v6-parseable entry; the framing flag under test is a pure
+        // function of the segment version, independent of the label codec.
+        let label = GLOBAL_INTERNER.intern("Legacy").unwrap();
+        let node_id = NodeId::new(1).unwrap();
+        let valid_from = time::now();
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&LSN(1).0.to_le_bytes());
+        valid_from.serialize_into(&mut buffer);
+        let cs = buffer.len();
+        buffer.extend_from_slice(&[0u8; 4]);
+        buffer.push(OP_CREATE_NODE);
+        buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        buffer.extend_from_slice(&label.as_u32().to_le_bytes()); // raw id label
+        PropertyMap::new().serialize_into(&mut buffer).unwrap();
+        valid_from.serialize_into(&mut buffer);
+        buffer.push(0u8); // provenance: absent (v6 blob presence byte)
+        let mut h = crc32fast::Hasher::new();
+        h.update(&buffer[0..20]);
+        h.update(&buffer[cs + 4..]);
+        buffer[cs..cs + 4].copy_from_slice(&h.finalize().to_le_bytes());
+
+        let (parsed, _) = parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).unwrap();
+        assert!(
+            !parsed.framed,
+            "pre-v7 segments must not be treated as framed"
+        );
+    }
+
     #[test]
     fn test_read_nonexistent_segment() {
         let dir = TempDir::new().unwrap();
@@ -1401,7 +2286,7 @@ mod tests {
             let segment_path = dir.path().join(format!("{}.log", seg_id));
             let mut file = File::create(&segment_path).unwrap();
             file.write_all(&WAL_MAGIC).unwrap();
-            file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+            file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
             for lsn in *lsns {
                 let operation = WalOperation::CreateNode {
                     node_id: NodeId::new(*lsn).unwrap(),
@@ -1432,7 +2317,7 @@ mod tests {
         use std::io::Write;
         let mut file = File::create(path).unwrap();
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
         let mut last_entry_bytes = Vec::new();
         for lsn in lsns {
             let operation = WalOperation::CreateNode {
@@ -1555,6 +2440,372 @@ mod tests {
     }
 
     // =============================================================================
+    // Issue #3433: generalized crash-torn-tail tolerance on the REPLAY path.
+    //
+    // Trunk (#3413) tolerated only a TRUNCATED trailing entry (payload past
+    // EOF). These tests pin that replay (`read_entries_from_dir*`) now stops at
+    // ANY undecodable trailing entry in the FINAL segment — zeroed op-type,
+    // garbage op-type, checksum mismatch on a length-complete payload — while
+    // still hard-erroring on corruption in a NON-final segment and (encrypted)
+    // an undecodable frame FOLLOWED BY a valid frame.
+    // =============================================================================
+
+    /// Serialize one valid `CreateNode` WAL entry for `lsn` and return its raw
+    /// bytes (no segment header).
+    fn serialized_entry_bytes(lsn: u64) -> Vec<u8> {
+        let entry = WalEntry::new(
+            LSN(lsn),
+            WalOperation::CreateNode {
+                node_id: NodeId::new(lsn).unwrap(),
+                label: GLOBAL_INTERNER.intern("TornTail3433").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+        );
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        buffer
+    }
+
+    /// Append `bytes` to an existing segment file.
+    fn append_bytes(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    /// #3433: a zeroed operation-type byte after a fully-written 24-byte entry
+    /// header (the exact CI shape) is a crash-torn tail in the FINAL segment.
+    /// Replay must keep the decodable prefix and succeed, NOT hard-error.
+    #[test]
+    fn test_replay_tolerates_zeroed_optype_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // 24-byte header from a real entry + op-type 0.
+        let mut torn = last[..24].to_vec();
+        torn.push(0);
+        append_bytes(&segment_path, &torn);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("replay must tolerate a zeroed-op-type torn tail in the final segment");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(
+            lsns,
+            vec![5, 7],
+            "decodable prefix kept; torn entry dropped"
+        );
+    }
+
+    /// #3433: a garbage (non-zero, unknown) operation-type byte at the tail is
+    /// also a crash-torn tail — tolerated in the final segment.
+    #[test]
+    fn test_replay_tolerates_garbage_optype_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        let mut torn = last[..24].to_vec();
+        torn.push(0xEE); // no OP_* code equals this
+        append_bytes(&segment_path, &torn);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("replay must tolerate a garbage-op-type torn tail in the final segment");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(lsns, vec![5, 7]);
+    }
+
+    /// #3433: a length-COMPLETE trailing entry whose payload byte is corrupted
+    /// (so the CRC32 checksum fails, but no truncation occurred) is a torn tail
+    /// too — half-written-then-crashed. Replay must tolerate it in the final
+    /// segment. (This is the shape #3413's `is_truncation_error` gate did NOT
+    /// cover.)
+    #[test]
+    fn test_replay_tolerates_checksum_mismatch_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // A full valid entry for LSN 9, with one payload byte flipped so the
+        // checksum mismatches. The entry is length-complete (not truncated).
+        let mut torn = serialized_entry_bytes(9);
+        let flip = 30; // past the 24-byte header, inside the op payload
+        torn[flip] ^= 0xFF;
+        append_bytes(&segment_path, &torn);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("replay must tolerate a checksum-mismatch torn tail in the final segment");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(
+            lsns,
+            vec![5, 7],
+            "the corrupted LSN-9 tail entry must be dropped"
+        );
+    }
+
+    /// #3433 must-hard-error (a): the SAME torn shape in a NON-final segment (a
+    /// newer segment exists after it) is real corruption, not a crash-torn
+    /// append. Replay must still hard-error.
+    #[test]
+    fn test_replay_hard_errors_torn_tail_in_non_final_segment() {
+        let dir = TempDir::new().unwrap();
+        let seg0 = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&seg0, &[5, 7]);
+        let mut torn = last[..24].to_vec();
+        torn.push(0);
+        append_bytes(&seg0, &torn);
+
+        // A later, fully valid segment makes seg0 non-final.
+        write_segment_with_lsns(&dir.path().join("1.log"), &[9]);
+
+        assert!(
+            read_entries_from_dir(dir.path(), LSN(1)).is_err(),
+            "an undecodable entry in a NON-final segment must hard-error, not be tolerated"
+        );
+    }
+
+    /// #3433: a single-segment plaintext WAL whose ONLY segment ends in a torn
+    /// entry (the segment IS the final segment) is tolerated — the common
+    /// single-segment crash case.
+    #[test]
+    fn test_replay_tolerates_torn_tail_single_segment() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&segment_path, &[1, 2, 3]);
+        let mut torn = last[..24].to_vec();
+        torn.push(0);
+        append_bytes(&segment_path, &torn);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1)).expect("single final segment");
+        assert_eq!(entries.len(), 3);
+    }
+
+    /// #3433 must-hard-error (c): the operator opt-out. With
+    /// `tolerate_torn_tail = false`, even a torn tail in the FINAL segment
+    /// hard-errors (fail-stop recovery); with `true` the same input is
+    /// tolerated. Same bytes, opposite outcome — proves the flag gates the
+    /// policy.
+    #[test]
+    fn test_replay_torn_tail_respects_tolerate_flag() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&segment_path, &[5, 7]);
+        let mut torn = last[..24].to_vec();
+        torn.push(0);
+        append_bytes(&segment_path, &torn);
+
+        // Fail-stop: opt-out hard-errors on the torn tail.
+        assert!(
+            read_entries_from_dir_with_options(dir.path(), LSN(1), None, false).is_err(),
+            "tolerate_torn_tail=false must hard-error on a torn tail (fail-stop recovery)"
+        );
+
+        // Default: the same torn tail is tolerated.
+        let entries = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect("tolerate_torn_tail=true must keep the decodable prefix");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(lsns, vec![5, 7]);
+    }
+
+    // ---- Encrypted (length-prefixed) segments ----
+
+    fn aes_cipher() -> Arc<dyn crate::encryption::cipher::Cipher> {
+        use zeroize::Zeroizing;
+        // Fixed key: the same cipher must decrypt what we encrypt in-test.
+        let key = Zeroizing::new([7u8; 32]);
+        Arc::new(crate::encryption::Aes256GcmCipher::new(&key))
+    }
+
+    /// Encode one encrypted, length-prefixed frame: `[u32 LE len][ciphertext]`.
+    fn encrypted_frame(lsn: u64, cipher: &Arc<dyn crate::encryption::cipher::Cipher>) -> Vec<u8> {
+        let plaintext = serialized_entry_bytes(lsn);
+        let ct =
+            crate::encryption::wal_encryption::encrypt_wal_payload(&plaintext, cipher).unwrap();
+        let mut out = Vec::new();
+        out.extend_from_slice(&(ct.len() as u32).to_le_bytes());
+        out.extend_from_slice(&ct);
+        out
+    }
+
+    /// A length-prefixed frame whose bytes will FAIL to decrypt (garbage
+    /// ciphertext with a plausible length). `len` is >= the cipher's minimum.
+    fn undecryptable_frame() -> Vec<u8> {
+        let body = vec![0xABu8; 80];
+        let mut out = Vec::new();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    fn write_encrypted_header(path: &Path) {
+        use std::io::Write;
+        let mut file = File::create(path).unwrap();
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION_ENCRYPTED_STRING_LABELS])
+            .unwrap();
+        file.sync_all().unwrap();
+    }
+
+    /// #3433 item #4: an encrypted final segment whose LAST frame fails to
+    /// decrypt (crash-torn tail) is tolerated — the decodable prefix survives.
+    #[test]
+    fn test_replay_tolerates_encrypted_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+        write_encrypted_header(&path);
+        append_bytes(&path, &encrypted_frame(5, &cipher));
+        append_bytes(&path, &encrypted_frame(7, &cipher));
+        append_bytes(&path, &undecryptable_frame()); // torn tail
+
+        let entries = read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher))
+            .expect("encrypted final-segment torn tail must be tolerated");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(lsns, vec![5, 7]);
+
+        // Issue #3506: the decrypted v14 (encrypted string-label) entries must
+        // recover their label STRING, not just their LSNs — the string-label
+        // survival across the encrypted decode path is asserted explicitly.
+        for entry in &entries {
+            match &entry.operation {
+                WalOperation::CreateNode { label, .. } => assert!(
+                    GLOBAL_INTERNER
+                        .resolve_with(*label, |s| s == "TornTail3433")
+                        .unwrap(),
+                    "decrypted v14 CreateNode label must resolve to \"TornTail3433\""
+                ),
+                other => panic!("expected CreateNode, got {other:?}"),
+            }
+        }
+    }
+
+    /// #3433 must-hard-error (b): in an encrypted final segment, an undecodable
+    /// frame FOLLOWED BY a valid frame is resyncable mid-log corruption, NOT a
+    /// torn tail — it must hard-error even though it is the final segment.
+    #[test]
+    fn test_replay_hard_errors_encrypted_undecodable_then_valid() {
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+        write_encrypted_header(&path);
+        append_bytes(&path, &encrypted_frame(5, &cipher));
+        append_bytes(&path, &undecryptable_frame()); // corrupt, but NOT the tail
+        append_bytes(&path, &encrypted_frame(9, &cipher)); // valid frame follows
+
+        assert!(
+            read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher)).is_err(),
+            "an undecodable encrypted frame followed by a valid frame is mid-log corruption"
+        );
+    }
+
+    // =============================================================================
+    // Issue #3433 CORRECTNESS HARDENING (PR #3461 review): the plaintext replay
+    // path must NOT swallow mid-log corruption, and `tolerate_torn_tail = false`
+    // must be a TRUE fail-stop for every genuine-torn-tail shape.
+    //
+    // The plaintext generalization added by #3461 `break`s at the first
+    // undecodable entry in the final segment. Because plaintext entries carry no
+    // length prefix, that silently dropped EVERY byte after a mid-segment
+    // corrupt entry — including valid COMMITTED entries after it (up to a 64 MB
+    // segment of acknowledged transactions). These tests pin the fix: a
+    // forward-probe distinguishes a genuine torn tail (nothing valid follows →
+    // tolerate under the flag) from mid-log corruption (a valid entry with a
+    // higher LSN follows → HARD ERROR regardless of the flag).
+    // =============================================================================
+
+    /// HIGH (the load-bearing test): a plaintext FINAL segment holding
+    /// `[valid LSN 5][CRC-corrupt full entry LSN 7][valid LSN 9]`. The corrupt
+    /// LSN-7 entry is length-complete (only a payload byte flipped, so it fails
+    /// its CRC but does NOT truncate), and a fully valid LSN-9 entry follows it.
+    /// This is mid-log corruption, NOT a crash-torn tail: replay must HARD ERROR
+    /// rather than silently drop LSN 7 AND LSN 9. Pre-fix, the plaintext path
+    /// `break`s at LSN 7 and returns `Ok([5])`, losing acknowledged LSN 9.
+    #[test]
+    fn plaintext_mid_segment_corruption_with_valid_entries_after_hard_errors() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        // Header + valid LSN 5.
+        write_segment_with_lsns(&segment_path, &[5]);
+
+        // CRC-corrupt (but length-complete) full entry for LSN 7.
+        let mut corrupt7 = serialized_entry_bytes(7);
+        corrupt7[30] ^= 0xFF; // past the 24-byte header, inside the op payload
+        append_bytes(&segment_path, &corrupt7);
+
+        // A fully valid entry for LSN 9 AFTER the corruption — this is the
+        // acknowledged data #3461 was silently dropping.
+        append_bytes(&segment_path, &serialized_entry_bytes(9));
+
+        let result = read_entries_from_dir(dir.path(), LSN(1));
+        assert!(
+            result.is_err(),
+            "mid-segment corruption with a valid committed entry after it MUST hard-error \
+             (not silently drop the trailing valid entries); got {:?}",
+            result.map(|e| e.iter().map(|w| w.lsn.0).collect::<Vec<_>>())
+        );
+    }
+
+    /// MEDIUM (config): `tolerate_torn_tail = false` must be a true fail-stop on
+    /// a genuine torn tail. A truncated final write (fewer than a full 24-byte
+    /// header, nonzero) is the shape the pre-fix code `break`s on unconditionally
+    /// — BEFORE the flag check — so the opt-out was silently ignored. With the
+    /// fix, `false` hard-errors and `true` tolerates the SAME bytes.
+    #[test]
+    fn plaintext_torn_tail_fail_stop_when_opted_out() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // A torn/truncated final write: only 12 nonzero bytes made it to disk
+        // (partial header) before the crash. Nothing valid can follow.
+        let truncated = serialized_entry_bytes(9)[..12].to_vec();
+        assert!(truncated.iter().any(|&b| b != 0), "torn bytes are nonzero");
+        append_bytes(&segment_path, &truncated);
+
+        // Fail-stop opt-out MUST error.
+        let opted_out = read_entries_from_dir_with_options(dir.path(), LSN(1), None, false);
+        assert!(
+            opted_out.is_err(),
+            "tolerate_torn_tail=false must fail-stop on a genuine torn tail (partial header); \
+             got {:?}",
+            opted_out.map(|e| e.iter().map(|w| w.lsn.0).collect::<Vec<_>>())
+        );
+
+        // Default tolerance keeps the decodable prefix.
+        let tolerated = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect("tolerate_torn_tail=true must keep the decodable prefix");
+        let lsns: Vec<u64> = tolerated.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(lsns, vec![5, 7]);
+    }
+
+    /// item 5: a mid-field-truncation torn tail (a full 24-byte header + op-type
+    /// byte + a payload cut off mid-field, nothing valid after) is a genuine torn
+    /// append — tolerated under the default flag in the final segment.
+    #[test]
+    fn plaintext_tolerates_mid_field_truncation_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // 30 bytes: 24-byte header + op-type + a few payload bytes, then EOF
+        // (payload truncated mid-field). Nothing valid follows.
+        let mid_field = serialized_entry_bytes(9)[..30].to_vec();
+        append_bytes(&segment_path, &mid_field);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("a mid-field-truncation torn tail must be tolerated in the final segment");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(
+            lsns,
+            vec![5, 7],
+            "decodable prefix kept; torn entry dropped"
+        );
+    }
+
+    // =============================================================================
     // TDD Tests for parse_entry_at() - Issue #218
     // =============================================================================
 
@@ -1579,7 +2830,7 @@ mod tests {
         // payload shape now (Issue #3224), so parsing must use the matching
         // version to consume the same bytes that were written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(1));
@@ -1624,7 +2875,7 @@ mod tests {
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         assert_eq!(parsed_entry.lsn, LSN(5));
         assert_eq!(bytes_consumed, buffer.len());
@@ -1645,32 +2896,40 @@ mod tests {
     /// their own payload version with `principal: None`.
     #[test]
     fn test_parse_pre_v5_provenance_bytes_yields_no_principal() {
-        // Build genuine v3-format bytes. Start from the current (v5)
-        // serializer with `principal: None` -- whose only difference from
-        // v3 is a single trailing absent-principal presence byte -- drop
-        // that byte, and re-stamp the CRC (bytes 20..24, computed over
-        // LSN+timestamp and the operation data).
-        let operation = WalOperation::CreateNode {
-            node_id: NodeId::new(9).unwrap(),
-            label: GLOBAL_INTERNER.intern("Doc").unwrap(),
-            properties: PropertyMap::new(),
-            valid_from: time::now(),
-            provenance: Some(Provenance::builder().source("importer").build().unwrap()),
-        };
-        let entry = WalEntry::new(LSN(9), operation);
+        // Hand-build genuine v3-format bytes: a CreateNode with a RAW 4-byte
+        // interner-id label (the pre-#3506 encoding) and a v3 provenance
+        // bundle that ends at `correlation_id` (no principal slot). The modern
+        // serializer writes string labels + a principal slot (v13), so we
+        // assemble the v3 shape by hand and stamp its CRC.
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+        let label = GLOBAL_INTERNER.intern("Doc").unwrap();
+        let node_id = NodeId::new(9).unwrap();
+        let valid_from = time::now();
         let mut buffer = Vec::new();
-        serialize_entry_into(&entry, &mut buffer).unwrap();
-        assert_eq!(
-            *buffer.last().unwrap(),
-            0,
-            "v5 buffer must end with the absent-principal presence byte"
-        );
-        buffer.pop(); // v3 bundles end at correlation_id
+        buffer.extend_from_slice(&LSN(9).0.to_le_bytes());
+        valid_from.serialize_into(&mut buffer);
+        let cs = buffer.len();
+        buffer.extend_from_slice(&[0u8; 4]);
+        buffer.push(OP_CREATE_NODE);
+        buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        buffer.extend_from_slice(&label.as_u32().to_le_bytes()); // raw id label
+        PropertyMap::new().serialize_into(&mut buffer).unwrap();
+        valid_from.serialize_into(&mut buffer);
+        // v3 provenance blob: presence(1) + source("importer") + confidence(absent)
+        // + note(absent) + correlation_id(absent). NO trailing principal slot.
+        buffer.push(1); // provenance present
+        let src = b"importer";
+        buffer.push(1); // source present
+        buffer.extend_from_slice(&(src.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(src);
+        buffer.push(0); // confidence absent
+        buffer.push(0); // note absent
+        buffer.push(0); // correlation_id absent
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&buffer[0..20]);
-        hasher.update(&buffer[24..]);
+        hasher.update(&buffer[cs + 4..]);
         let checksum = hasher.finalize();
-        buffer[20..24].copy_from_slice(&checksum.to_le_bytes());
+        buffer[cs..cs + 4].copy_from_slice(&checksum.to_le_bytes());
 
         let (parsed_entry, bytes_consumed) =
             parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
@@ -1715,7 +2974,7 @@ mod tests {
         // payload shape now (Issue #3224), so parsing must use the matching
         // version to consume the same bytes that were written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(2));
@@ -1742,14 +3001,25 @@ mod tests {
         // Issue #3230: RetractNode must round-trip its valid_to exactly.
         let node_id = NodeId::new(7).unwrap();
         let valid_to = crate::core::hlc::HybridTimestamp::new(1_234_567, 42).unwrap();
-        let operation = WalOperation::RetractNode { node_id, valid_to };
+        // Issue #3406: the retraction version_id round-trips too. Serialization
+        // always writes the highest (v9+) payload shape, so parse at that
+        // version to consume the same bytes.
+        let version_id = Some(VersionId::new(321).unwrap());
+        let operation = WalOperation::RetractNode {
+            node_id,
+            valid_to,
+            version_id,
+            provenance: None,
+        };
         let entry = WalEntry::new(LSN(10), operation);
 
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
+        // Serialization always writes the newest (v11+) payload shape, which now
+        // trails a provenance blob (Issue #3427), so parse at that version.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
 
         assert_eq!(parsed_entry.lsn, LSN(10));
         assert_eq!(bytes_consumed, buffer.len());
@@ -1757,9 +3027,13 @@ mod tests {
             WalOperation::RetractNode {
                 node_id: parsed_id,
                 valid_to: parsed_valid_to,
+                version_id: parsed_version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(parsed_valid_to, valid_to, "valid_to must survive verbatim");
+                assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
+                assert_eq!(provenance, None, "absent provenance round-trips as None");
             }
             other => panic!("Expected RetractNode operation, got {other:?}"),
         }
@@ -1770,14 +3044,21 @@ mod tests {
         // Issue #3230: RetractEdge must round-trip its valid_to exactly.
         let edge_id = EdgeId::new(11).unwrap();
         let valid_to = crate::core::hlc::HybridTimestamp::new(9_876_543, 3).unwrap();
-        let operation = WalOperation::RetractEdge { edge_id, valid_to };
+        // Issue #3406: the retraction version_id round-trips too.
+        let version_id = Some(VersionId::new(654).unwrap());
+        let operation = WalOperation::RetractEdge {
+            edge_id,
+            valid_to,
+            version_id,
+            provenance: None,
+        };
         let entry = WalEntry::new(LSN(11), operation);
 
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
 
         assert_eq!(parsed_entry.lsn, LSN(11));
         assert_eq!(bytes_consumed, buffer.len());
@@ -1785,12 +3066,597 @@ mod tests {
             WalOperation::RetractEdge {
                 edge_id: parsed_id,
                 valid_to: parsed_valid_to,
+                version_id: parsed_version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(parsed_valid_to, valid_to, "valid_to must survive verbatim");
+                assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
+                assert_eq!(provenance, None, "absent provenance round-trips as None");
             }
             other => panic!("Expected RetractEdge operation, got {other:?}"),
         }
+    }
+
+    // ---- Issue #3427: destructive-op provenance (v11 / v12) ----
+
+    /// A fully-populated provenance bundle used by the #3427 round-trip tests.
+    fn full_destructive_provenance() -> Provenance {
+        Provenance::builder()
+            .source("mcp")
+            .confidence(0.9)
+            .note("closed by operator")
+            .correlation_id("req-3427")
+            .principal("svc-deleter")
+            .build()
+            .unwrap()
+    }
+
+    fn assert_full_destructive_provenance(p: &Provenance) {
+        assert_eq!(p.source(), Some("mcp"));
+        assert_eq!(p.confidence(), Some(0.9));
+        assert_eq!(p.note(), Some("closed by operator"));
+        assert_eq!(p.correlation_id(), Some("req-3427"));
+        assert_eq!(
+            p.principal(),
+            Some("svc-deleter"),
+            "the acting principal must survive WAL round-trip (#3427)"
+        );
+    }
+
+    /// Issue #3427 (R1): a `DeleteNode` carrying a `Some(Provenance)` bundle
+    /// round-trips serialize -> parse at v11 with the full bundle intact.
+    #[test]
+    fn test_v11_delete_node_roundtrips_provenance() {
+        let node_id = NodeId::new(42).unwrap();
+        let valid_from = HybridTimestamp::new(1_234_567, 7).unwrap();
+        let operation = WalOperation::DeleteNode {
+            node_id,
+            valid_from,
+            version_id: Some(VersionId::new(555).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        };
+        let entry = WalEntry::new(LSN(5), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+
+        assert_eq!(consumed, buffer.len(), "v11 delete must consume all bytes");
+        match parsed.operation {
+            WalOperation::DeleteNode {
+                node_id: parsed_id,
+                valid_from: parsed_vf,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vf, valid_from);
+                assert_eq!(version_id, Some(VersionId::new(555).unwrap()));
+                assert_full_destructive_provenance(
+                    &provenance.expect("DeleteNode provenance must round-trip"),
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R1): `DeleteEdge` provenance round-trips at v11.
+    #[test]
+    fn test_v11_delete_edge_roundtrips_provenance() {
+        let edge_id = EdgeId::new(100).unwrap();
+        let valid_from = HybridTimestamp::new(9_876_543, 1).unwrap();
+        let operation = WalOperation::DeleteEdge {
+            edge_id,
+            valid_from,
+            version_id: Some(VersionId::new(556).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        };
+        let entry = WalEntry::new(LSN(6), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+
+        assert_eq!(consumed, buffer.len());
+        match parsed.operation {
+            WalOperation::DeleteEdge {
+                edge_id: parsed_id,
+                valid_from: parsed_vf,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, edge_id);
+                assert_eq!(parsed_vf, valid_from);
+                assert_eq!(version_id, Some(VersionId::new(556).unwrap()));
+                assert_full_destructive_provenance(
+                    &provenance.expect("DeleteEdge provenance must round-trip"),
+                );
+            }
+            other => panic!("Expected DeleteEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R1): `RetractNode` provenance round-trips at v11.
+    #[test]
+    fn test_v11_retract_node_roundtrips_provenance() {
+        let node_id = NodeId::new(7).unwrap();
+        let valid_to = HybridTimestamp::new(1_700_000, 3).unwrap();
+        let operation = WalOperation::RetractNode {
+            node_id,
+            valid_to,
+            version_id: Some(VersionId::new(321).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        };
+        let entry = WalEntry::new(LSN(10), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+
+        assert_eq!(consumed, buffer.len());
+        match parsed.operation {
+            WalOperation::RetractNode {
+                node_id: parsed_id,
+                valid_to: parsed_vt,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vt, valid_to);
+                assert_eq!(version_id, Some(VersionId::new(321).unwrap()));
+                assert_full_destructive_provenance(
+                    &provenance.expect("RetractNode provenance must round-trip"),
+                );
+            }
+            other => panic!("Expected RetractNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R1): `RetractEdge` provenance round-trips at v11.
+    #[test]
+    fn test_v11_retract_edge_roundtrips_provenance() {
+        let edge_id = EdgeId::new(11).unwrap();
+        let valid_to = HybridTimestamp::new(2_500_000, 5).unwrap();
+        let operation = WalOperation::RetractEdge {
+            edge_id,
+            valid_to,
+            version_id: Some(VersionId::new(654).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        };
+        let entry = WalEntry::new(LSN(11), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+
+        assert_eq!(consumed, buffer.len());
+        match parsed.operation {
+            WalOperation::RetractEdge {
+                edge_id: parsed_id,
+                valid_to: parsed_vt,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, edge_id);
+                assert_eq!(parsed_vt, valid_to);
+                assert_eq!(version_id, Some(VersionId::new(654).unwrap()));
+                assert_full_destructive_provenance(
+                    &provenance.expect("RetractEdge provenance must round-trip"),
+                );
+            }
+            other => panic!("Expected RetractEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R2): a v11 `DeleteNode` with `provenance: None` writes a
+    /// single presence byte (0) and parses back to `None`.
+    #[test]
+    fn test_v11_delete_node_none_provenance_roundtrips() {
+        let operation = WalOperation::DeleteNode {
+            node_id: NodeId::new(1).unwrap(),
+            valid_from: HybridTimestamp::new(1000, 0).unwrap(),
+            version_id: Some(VersionId::new(9).unwrap()),
+            provenance: None,
+        };
+        let entry = WalEntry::new(LSN(1), operation);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert_eq!(
+            *buffer.last().unwrap(),
+            0,
+            "None provenance must serialize as a single absent presence byte"
+        );
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        assert_eq!(consumed, buffer.len());
+        match parsed.operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                assert_eq!(provenance, None, "absent provenance must parse as None");
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R3): a hand-assembled v9 `DeleteNode` payload (node_id +
+    /// valid_from + tombstone version_id, NO trailing provenance blob — the
+    /// pre-#3427 on-disk shape shared by plaintext v9 and the decrypted payload
+    /// of encrypted v10) parses under the v9 reader with `provenance: None` and
+    /// NO over-read of the trailing bytes.
+    #[test]
+    fn test_v9_delete_node_parses_without_provenance() {
+        let timestamp = time::now();
+        let node_id = NodeId::new(77).unwrap();
+        let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap();
+        let version_id = VersionId::new(999).unwrap();
+
+        // v9 DeleteNode op_data: node_id (8) + valid_from (12) + version_id (8).
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        valid_from.serialize_into(&mut op_data);
+        op_data.extend_from_slice(&version_id.as_u64().to_le_bytes());
+        let buf = make_v0_buffer(6, &op_data, timestamp); // OP_DELETE_NODE = 6
+
+        let (entry, consumed) = parse_entry_at(&buf, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+        assert_eq!(
+            consumed,
+            buf.len(),
+            "v9 reader must consume exactly the v9 payload — no phantom provenance blob"
+        );
+        match entry.operation {
+            WalOperation::DeleteNode {
+                node_id: parsed_id,
+                valid_from: parsed_vf,
+                version_id: parsed_vid,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vf, valid_from);
+                assert_eq!(parsed_vid, Some(version_id));
+                assert_eq!(
+                    provenance, None,
+                    "a pre-#3427 (v9/v10) delete carries no provenance"
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R3): same as above for a v9 `RetractNode` payload.
+    #[test]
+    fn test_v9_retract_node_parses_without_provenance() {
+        let timestamp = time::now();
+        let node_id = NodeId::new(88).unwrap();
+        let valid_to = HybridTimestamp::new(1_700_000_000_000_000, 0).unwrap();
+        let version_id = VersionId::new(1000).unwrap();
+
+        // v9 RetractNode op_data: node_id (8) + valid_to (12) + version_id (8).
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        valid_to.serialize_into(&mut op_data);
+        op_data.extend_from_slice(&version_id.as_u64().to_le_bytes());
+        let buf = make_v0_buffer(10, &op_data, timestamp); // OP_RETRACT_NODE = 10
+
+        let (entry, consumed) = parse_entry_at(&buf, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+        assert_eq!(consumed, buf.len());
+        match entry.operation {
+            WalOperation::RetractNode {
+                version_id: parsed_vid,
+                provenance,
+                ..
+            } => {
+                assert_eq!(parsed_vid, Some(version_id));
+                assert_eq!(provenance, None);
+            }
+            other => panic!("Expected RetractNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R4): an encrypted v12 segment carrying a `DeleteNode` with a
+    /// provenance bundle survives the cipher-aware read path — the trailing
+    /// provenance blob is parsed downstream of decrypt.
+    #[test]
+    fn test_v12_encrypted_destructive_provenance_survives_decrypt() {
+        use std::io::Write;
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+
+        // Write an encrypted (v12) segment header.
+        {
+            let mut file = File::create(&path).unwrap();
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE])
+                .unwrap();
+            file.sync_all().unwrap();
+        }
+
+        // Build a v11 DeleteNode-with-provenance entry, encrypt it into a frame.
+        let entry = WalEntry::new(
+            LSN(5),
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(42).unwrap(),
+                valid_from: HybridTimestamp::new(1_234_567, 0).unwrap(),
+                version_id: Some(VersionId::new(555).unwrap()),
+                provenance: Some(full_destructive_provenance()),
+            },
+        );
+        let mut plaintext = Vec::new();
+        serialize_entry_into(&entry, &mut plaintext).unwrap();
+        let ct =
+            crate::encryption::wal_encryption::encrypt_wal_payload(&plaintext, &cipher).unwrap();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(ct.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&ct);
+        append_bytes(&path, &frame);
+
+        let entries = read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher))
+            .expect("encrypted v12 destructive-provenance segment must decrypt+parse");
+        assert_eq!(entries.len(), 1);
+        match &entries[0].operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                assert_full_destructive_provenance(
+                    provenance
+                        .as_ref()
+                        .expect("provenance must survive encrypted v12 decrypt+parse"),
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+    }
+
+    /// Round-trip a destructive `WalOperation` through an encrypted (v12)
+    /// segment via the cipher-aware read path, returning the decrypted+parsed
+    /// operation. Shared by the RetractNode/DeleteEdge/RetractEdge hardening
+    /// tests below (DeleteNode is covered by
+    /// `test_v12_encrypted_destructive_provenance_survives_decrypt`).
+    fn roundtrip_encrypted_v12_op(op: WalOperation) -> WalOperation {
+        use std::io::Write;
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+        {
+            let mut file = File::create(&path).unwrap();
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE])
+                .unwrap();
+            file.sync_all().unwrap();
+        }
+        let entry = WalEntry::new(LSN(5), op);
+        let mut plaintext = Vec::new();
+        serialize_entry_into(&entry, &mut plaintext).unwrap();
+        let ct =
+            crate::encryption::wal_encryption::encrypt_wal_payload(&plaintext, &cipher).unwrap();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(ct.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&ct);
+        append_bytes(&path, &frame);
+
+        let mut entries = read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher))
+            .expect("encrypted v12 destructive-provenance segment must decrypt+parse");
+        assert_eq!(entries.len(), 1);
+        entries.remove(0).operation
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `RetractNode` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_retract_node_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::RetractNode {
+            node_id: NodeId::new(7).unwrap(),
+            valid_to: HybridTimestamp::new(1_700_000, 3).unwrap(),
+            version_id: Some(VersionId::new(321).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::RetractNode { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("RetractNode provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected RetractNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `DeleteEdge` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_delete_edge_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::DeleteEdge {
+            edge_id: EdgeId::new(100).unwrap(),
+            valid_from: HybridTimestamp::new(9_876_543, 1).unwrap(),
+            version_id: Some(VersionId::new(556).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::DeleteEdge { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("DeleteEdge provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected DeleteEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `RetractEdge` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_retract_edge_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::RetractEdge {
+            edge_id: EdgeId::new(11).unwrap(),
+            valid_to: HybridTimestamp::new(2_500_000, 5).unwrap(),
+            version_id: Some(VersionId::new(654).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::RetractEdge { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("RetractEdge provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected RetractEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (hardening): a v11 destructive entry whose trailing
+    /// provenance blob is truncated must fail to parse with a
+    /// `CorruptedData` error (NEVER a panic — a torn provenance string must
+    /// be a bounds-checked read, not an out-of-bounds slice), and the
+    /// torn-tail machinery must classify it correctly:
+    ///
+    /// * tolerated as a crash-torn tail when it is the FINAL segment's last
+    ///   entry (the torn write was never acknowledged), but
+    /// * a HARD error when the same torn bytes sit in a NON-final (mid-log)
+    ///   segment — acknowledged data lies past it, so silently dropping it is
+    ///   forbidden.
+    #[test]
+    fn test_v11_torn_provenance_blob_is_corrupt_not_panic_and_classified() {
+        use std::io::Write;
+
+        // A fully-serialized v11 RetractNode carrying provenance. The blob's
+        // last field is the principal string, so dropping trailing bytes
+        // truncates it mid-field.
+        let entry = WalEntry::new(
+            LSN(5),
+            WalOperation::RetractNode {
+                node_id: NodeId::new(7).unwrap(),
+                valid_to: HybridTimestamp::new(1_700_000, 3).unwrap(),
+                version_id: Some(VersionId::new(321).unwrap()),
+                provenance: Some(full_destructive_provenance()),
+            },
+        );
+        let mut full = Vec::new();
+        serialize_entry_into(&entry, &mut full).unwrap();
+        let torn = &full[..full.len() - 4];
+
+        // (1) Direct parse of the truncated buffer: CorruptedData, no panic.
+        let err = parse_entry_at(torn, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE)
+            .expect_err("a truncated trailing provenance blob must fail to parse");
+        assert!(
+            matches!(err, Error::Storage(StorageError::CorruptedData(_))),
+            "a torn provenance blob must surface as CorruptedData (no panic), got {err:?}"
+        );
+
+        // (2) As the sole/final segment: tolerated as a crash-torn tail.
+        let dir = TempDir::new().unwrap();
+        let seg0 = dir.path().join("0.log");
+        {
+            let mut f = File::create(&seg0).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_DESTRUCTIVE_PROVENANCE]).unwrap();
+            f.write_all(torn).unwrap();
+            f.sync_all().unwrap();
+        }
+        let tolerated = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect("a torn provenance blob in the FINAL segment is a tolerable torn tail");
+        assert!(
+            tolerated.is_empty(),
+            "the torn (never-acknowledged) entry is dropped, not applied: {tolerated:?}"
+        );
+
+        // (3) Same torn bytes in a NON-final (mid-log) segment: hard error. A
+        // valid, higher-LSN entry lives in a later segment (1.log), so 0.log
+        // is no longer the final segment and torn-tail tolerance does not
+        // apply to it — mid-log corruption must fail-stop.
+        let seg1 = dir.path().join("1.log");
+        {
+            let mut f = File::create(&seg1).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_DESTRUCTIVE_PROVENANCE]).unwrap();
+            let good = WalEntry::new(
+                LSN(9),
+                WalOperation::DeleteNode {
+                    node_id: NodeId::new(1).unwrap(),
+                    valid_from: HybridTimestamp::new(2000, 0).unwrap(),
+                    version_id: Some(VersionId::new(2).unwrap()),
+                    provenance: None,
+                },
+            );
+            let mut buf = Vec::new();
+            serialize_entry_into(&good, &mut buf).unwrap();
+            f.write_all(&buf).unwrap();
+            f.sync_all().unwrap();
+        }
+        let err = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect_err("a torn blob in a non-final segment is mid-log corruption -> hard error");
+        assert!(
+            matches!(err, Error::Storage(StorageError::CorruptedData(_))),
+            "mid-log torn provenance must hard-error as CorruptedData, got {err:?}"
+        );
+    }
+
+    /// Issue #3427 (hardening): an empty-string principal (`Some("")`) is a
+    /// distinct, meaningful value from an absent principal (`None`) and must
+    /// round-trip as such — the field's presence byte (1 vs 0) carries the
+    /// distinction, so a zero-length string is not collapsed into `None`.
+    #[test]
+    fn test_v11_empty_string_principal_roundtrips_distinct_from_none() {
+        // Bundle A: principal explicitly the empty string.
+        let empty_principal = Provenance::builder()
+            .source("mcp")
+            .principal("")
+            .build()
+            .unwrap();
+        let entry_a = WalEntry::new(
+            LSN(1),
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(1).unwrap(),
+                valid_from: HybridTimestamp::new(1000, 0).unwrap(),
+                version_id: Some(VersionId::new(1).unwrap()),
+                provenance: Some(empty_principal),
+            },
+        );
+        let mut buf_a = Vec::new();
+        serialize_entry_into(&entry_a, &mut buf_a).unwrap();
+        let (parsed_a, _) = parse_entry_at(&buf_a, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        match parsed_a.operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                let p = provenance.expect("bundle with source+empty-principal must be present");
+                assert_eq!(
+                    p.principal(),
+                    Some(""),
+                    "an empty-string principal must round-trip as Some(\"\"), not None"
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+
+        // Bundle B: no principal at all (source only).
+        let no_principal = Provenance::builder().source("mcp").build().unwrap();
+        let entry_b = WalEntry::new(
+            LSN(2),
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(2).unwrap(),
+                valid_from: HybridTimestamp::new(1000, 0).unwrap(),
+                version_id: Some(VersionId::new(2).unwrap()),
+                provenance: Some(no_principal),
+            },
+        );
+        let mut buf_b = Vec::new();
+        serialize_entry_into(&entry_b, &mut buf_b).unwrap();
+        let (parsed_b, _) = parse_entry_at(&buf_b, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        match parsed_b.operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                let p = provenance.expect("bundle with source must be present");
+                assert_eq!(
+                    p.principal(),
+                    None,
+                    "an absent principal must round-trip as None"
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+
+        // The two serializations differ (presence byte 1+len vs 0), proving
+        // the distinction is carried on the wire, not just in the parsed type.
+        assert_ne!(
+            buf_a, buf_b,
+            "Some(\"\") and None principals must serialize to different bytes"
+        );
     }
 
     #[test]
@@ -1816,7 +3682,7 @@ mod tests {
         // payload shape now (Issue #3224), so parsing must use the matching
         // version to consume the same bytes that were written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(3));
@@ -1859,7 +3725,7 @@ mod tests {
         // payload shape now (Issue #3224), so parsing must use the matching
         // version to consume the same bytes that were written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(4));
@@ -1886,9 +3752,15 @@ mod tests {
         // through serialization exactly, it is honored by WAL replay).
         let node_id = NodeId::new(42).unwrap();
         let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap(); // 1h ago
+        // Issue #3406: the tombstone version_id round-trips too. Serialization
+        // always writes the highest (v9+) payload shape, so parse at that
+        // version to consume the same bytes.
+        let version_id = Some(VersionId::new(555).unwrap());
         let operation = WalOperation::DeleteNode {
             node_id,
             valid_from,
+            version_id,
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(5), operation);
 
@@ -1896,8 +3768,10 @@ mod tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
-        // Parse it back
-        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        // Parse it back at the newest (v11+) payload version, which trails a
+        // provenance blob (Issue #3427).
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(5));
@@ -1906,12 +3780,16 @@ mod tests {
             WalOperation::DeleteNode {
                 node_id: parsed_id,
                 valid_from: parsed_valid_from,
+                version_id: parsed_version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(
                     parsed_valid_from, valid_from,
                     "backdated delete valid_from must roundtrip exactly"
                 );
+                assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
+                assert_eq!(provenance, None, "absent provenance round-trips as None");
             }
             _ => panic!("Expected DeleteNode operation"),
         }
@@ -1924,9 +3802,13 @@ mod tests {
         // through serialization exactly, it is honored by WAL replay).
         let edge_id = EdgeId::new(100).unwrap();
         let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap(); // 1h ago
+        // Issue #3406: the tombstone version_id round-trips too.
+        let version_id = Some(VersionId::new(556).unwrap());
         let operation = WalOperation::DeleteEdge {
             edge_id,
             valid_from,
+            version_id,
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(6), operation);
 
@@ -1934,8 +3816,9 @@ mod tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
-        // Parse it back
-        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        // Parse it back at the newest (v11+) payload version (Issue #3427).
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(6));
@@ -1944,12 +3827,16 @@ mod tests {
             WalOperation::DeleteEdge {
                 edge_id: parsed_id,
                 valid_from: parsed_valid_from,
+                version_id: parsed_version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(
                     parsed_valid_from, valid_from,
                     "backdated delete valid_from must roundtrip exactly"
                 );
+                assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
+                assert_eq!(provenance, None, "absent provenance round-trips as None");
             }
             _ => panic!("Expected DeleteEdge operation"),
         }
@@ -2019,7 +3906,7 @@ mod tests {
         // provenance-carrying payload shape now (Issue #3224), so parsing
         // must use the matching version to consume the same bytes written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, offset1_end, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, offset1_end, WAL_VERSION_STRING_LABELS).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(2));
@@ -2172,8 +4059,10 @@ mod tests {
         // Corrupt the checksum (bytes 20-24)
         buffer[20] ^= 0xFF; // Flip all bits in first checksum byte
 
-        // Should return error for checksum mismatch
-        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        // Should return error for checksum mismatch. Parse at the version the
+        // serializer stamps (v13 string labels) so the op parses cleanly and
+        // the failure is the corrupted checksum, not a label-misalignment.
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS);
         assert!(result.is_err());
         if let Err(e) = result {
             let error_msg = format!("{}", e);
@@ -2292,7 +4181,7 @@ mod tests {
         // (always-provenance-carrying) format, so the header must declare
         // WAL_VERSION_PROVENANCE for the reader to parse them correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
 
         // Create and write many entries to simulate a large segment
         // We'll create 1000 entries, which should be several MB
@@ -2353,7 +4242,7 @@ mod tests {
             // declare WAL_VERSION_PROVENANCE for the reader to parse them
             // correctly.
             file.write_all(&WAL_MAGIC).unwrap();
-            file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+            file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
 
             // Write entries for this segment
             for i in 0..entries_per_segment {
@@ -2407,7 +4296,7 @@ mod tests {
         // (always-provenance-carrying) format, so the header must declare
         // WAL_VERSION_PROVENANCE for the reader to parse them correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
 
         // Write 100 entries with LSN 1-100
         for i in 1..=100 {
@@ -2462,15 +4351,22 @@ mod tests {
         assert!(entries.is_empty());
     }
 
-    /// Test that partial/truncated entries at end of segment are handled gracefully.
-    ///
-    /// This can happen if a write was interrupted mid-entry.
+    /// A partial/truncated trailing entry (a mid-entry interrupted write) is
+    /// a torn tail. The strict single-segment [`read_segment`] reader (its
+    /// documented contract: "every parse failure when `tolerate_torn_tail` is
+    /// false" hard-errors) must REJECT it — while the recovery dir-reader, which
+    /// opts the final segment into torn-tail tolerance, keeps the decodable
+    /// prefix. (PR #3461: the strict reader previously `break`ed unconditionally
+    /// on a partial header, contradicting its own contract and silently swallowing
+    /// a torn write; that unconditional break is now gated on the flag.)
     #[test]
     fn test_read_segment_with_truncated_entry() {
         use std::io::Write;
 
         let dir = TempDir::new().unwrap();
-        let segment_path = dir.path().join("truncated_segment.log");
+        // Numeric stem so the recovery dir-reader (`read_entries_from_dir`)
+        // enumerates it as a segment.
+        let segment_path = dir.path().join("0.log");
 
         let mut file = File::create(&segment_path).unwrap();
 
@@ -2478,7 +4374,7 @@ mod tests {
         // (always-provenance-carrying) format, so the header must declare
         // WAL_VERSION_PROVENANCE for the reader to parse it correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        file.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
 
         // Write one complete entry
         let operation = WalOperation::CreateNode {
@@ -2493,16 +4389,23 @@ mod tests {
         serialize_entry_into(&entry, &mut buffer).unwrap();
         file.write_all(&buffer).unwrap();
 
-        // Write a partial entry (just the LSN, incomplete)
+        // Write a partial entry (just the LSN, incomplete) -- a nonzero partial
+        // header, i.e. a torn write.
         file.write_all(&42u64.to_le_bytes()).unwrap();
 
         file.sync_all().unwrap();
         drop(file);
 
-        // Read the segment - should get the complete entry and stop at truncation
-        let entries = read_segment(&segment_path, LSN(1)).unwrap();
+        // Strict single-segment read: fail-stop on the torn partial tail.
+        assert!(
+            read_segment(&segment_path, LSN(1)).is_err(),
+            "the strict read_segment reader must hard-error on a torn partial tail"
+        );
 
-        // Should only get the one complete entry
+        // Recovery dir-read (final segment tolerant): keeps the complete prefix
+        // and drops the torn partial tail.
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("the recovery reader tolerates a torn tail in the final segment");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].lsn, LSN(1));
     }
@@ -2824,9 +4727,16 @@ mod tests {
             WalOperation::DeleteNode {
                 node_id: parsed_id,
                 valid_from,
+                version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(valid_from, timestamp);
+                // v0 segments carry no tombstone version_id (Issue #3406);
+                // replay synthesizes it.
+                assert_eq!(version_id, None);
+                // v0 segments carry no provenance blob (Issue #3427).
+                assert_eq!(provenance, None);
             }
             _ => panic!("Expected DeleteNode"),
         }
@@ -2843,11 +4753,117 @@ mod tests {
             WalOperation::DeleteEdge {
                 edge_id: parsed_id,
                 valid_from,
+                version_id,
+                provenance,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(valid_from, timestamp);
+                // v0 segments carry no tombstone version_id (Issue #3406).
+                assert_eq!(version_id, None);
+                // v0 segments carry no provenance blob (Issue #3427).
+                assert_eq!(provenance, None);
             }
             _ => panic!("Expected DeleteEdge"),
+        }
+    }
+
+    /// Issue #3406 back-compat: a GENUINE pre-v9 but *framed* (v7) `DeleteNode`
+    /// payload — `node_id` + `valid_from` and NO trailing tombstone
+    /// `version_id` — parses under the current (v9-max) reader without error and
+    /// yields `version_id == None`, so replay synthesizes the tombstone. This
+    /// closes the gap left by the v0-only `..._version_0_delete_node` test: v0
+    /// skips `valid_from` entirely, whereas v7 reads it and THEN hits the
+    /// `carries_delete_version_id` gate, exercising the realistic
+    /// old-reader-parsing-a-recent-but-pre-#3406-segment path.
+    ///
+    /// Limitation: this covers the PARSE half of the mixed-format recovery path
+    /// (the `carries_delete_version_id(version) == false` gate) at a genuine
+    /// older header version. The SYNTHESIS half is covered by the recovery
+    /// integration test `back_compat_synthesizes_when_version_id_absent`. A
+    /// single test driving a real old-header segment through
+    /// `CheckpointManager::recover` is impractical here: the WAL serializer is
+    /// test-only (`pub(crate)`) and always emits the highest (v9) payload shape,
+    /// so a genuine short old payload must be hand-assembled at the parse layer.
+    #[test]
+    fn test_parse_entry_at_pre_v9_framed_delete_node_has_no_version_id() {
+        let timestamp = time::now();
+        let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap();
+        let node_id = NodeId::new(77).unwrap();
+
+        // v7 DeleteNode op_data: node_id (8) + valid_from (12), NO version_id.
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        valid_from.serialize_into(&mut op_data);
+        let buf = make_v0_buffer(6, &op_data, timestamp); // OP_DELETE_NODE = 6
+
+        let (entry, consumed) = parse_entry_at(&buf, 0, WAL_VERSION_TX_FRAMING).unwrap();
+        assert_eq!(
+            consumed,
+            buf.len(),
+            "parser must consume exactly the v7 payload — no phantom trailing version_id"
+        );
+        match entry.operation {
+            WalOperation::DeleteNode {
+                node_id: parsed_id,
+                valid_from: parsed_vf,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vf, valid_from, "v7 delete carries valid_from");
+                assert_eq!(
+                    version_id, None,
+                    "a genuine pre-v9 delete carries no tombstone version_id"
+                );
+                assert_eq!(
+                    provenance, None,
+                    "a genuine pre-v11 delete carries no provenance blob"
+                );
+            }
+            _ => panic!("Expected DeleteNode"),
+        }
+    }
+
+    /// Issue #3406 back-compat: same as above for a genuine pre-v9 (v7)
+    /// `RetractNode` payload — `node_id` + `valid_to` and NO trailing
+    /// `version_id` — must parse to `version_id == None`.
+    #[test]
+    fn test_parse_entry_at_pre_v9_framed_retract_node_has_no_version_id() {
+        let timestamp = time::now();
+        let valid_to = HybridTimestamp::new(1_700_000_000_000_000, 0).unwrap();
+        let node_id = NodeId::new(88).unwrap();
+
+        // v7 RetractNode op_data: node_id (8) + valid_to (12), NO version_id.
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        valid_to.serialize_into(&mut op_data);
+        let buf = make_v0_buffer(10, &op_data, timestamp); // OP_RETRACT_NODE = 10
+
+        let (entry, consumed) = parse_entry_at(&buf, 0, WAL_VERSION_TX_FRAMING).unwrap();
+        assert_eq!(
+            consumed,
+            buf.len(),
+            "parser must consume exactly the v7 retract payload — no phantom version_id"
+        );
+        match entry.operation {
+            WalOperation::RetractNode {
+                node_id: parsed_id,
+                valid_to: parsed_vt,
+                version_id,
+                provenance,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vt, valid_to, "v7 retract carries valid_to");
+                assert_eq!(
+                    version_id, None,
+                    "a genuine pre-v9 retract carries no version_id"
+                );
+                assert_eq!(
+                    provenance, None,
+                    "a genuine pre-v11 retract carries no provenance blob"
+                );
+            }
+            _ => panic!("Expected RetractNode"),
         }
     }
 
@@ -2964,6 +4980,9 @@ mod fuzz_tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::temporal::time;
+    use crate::storage::wal::serialization::serialize_entry_into;
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
@@ -3089,5 +5108,274 @@ mod sentry_tests {
             "⚡ Bolt: Vector should be pre-allocated with capacity based on file size. Capacity was {}",
             entries.capacity()
         );
+    }
+
+    // =====================================================================
+    // Issue #3506 — labels serialized as UTF-8 + re-interned on read (v13/v14)
+    // =====================================================================
+
+    /// T1: every label-bearing operation round-trips its label STRING through a
+    /// v13 serialize → parse. The parsed label must resolve to the original
+    /// string.
+    #[test]
+    fn v13_roundtrip_preserves_all_labels() {
+        use crate::core::id::VersionId;
+        use crate::core::property::PropertyMap;
+        use crate::core::{EdgeId, NodeId};
+
+        let node_label = GLOBAL_INTERNER.intern("PersonV13").unwrap();
+        let edge_label = GLOBAL_INTERNER.intern("KNOWS_V13").unwrap();
+        let c_label = GLOBAL_INTERNER.intern("CustomerV13").unwrap();
+        let c_prop = GLOBAL_INTERNER.intern("emailV13").unwrap();
+
+        let ops = vec![
+            WalOperation::CreateNode {
+                node_id: NodeId::new(1).unwrap(),
+                label: node_label,
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+            WalOperation::CreateEdge {
+                edge_id: EdgeId::new(1).unwrap(),
+                source: NodeId::new(1).unwrap(),
+                target: NodeId::new(2).unwrap(),
+                label: edge_label,
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+            WalOperation::UpdateNode {
+                node_id: NodeId::new(1).unwrap(),
+                version_id: VersionId::new(1).unwrap(),
+                label: node_label,
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+            WalOperation::UpdateEdge {
+                edge_id: EdgeId::new(1).unwrap(),
+                version_id: VersionId::new(1).unwrap(),
+                label: edge_label,
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+            WalOperation::DeclareUniqueConstraint {
+                label: c_label,
+                property: c_prop,
+            },
+            WalOperation::DropUniqueConstraint {
+                label: c_label,
+                property: c_prop,
+            },
+        ];
+
+        for op in ops {
+            let entry = WalEntry::new(LSN(1), op.clone());
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            let (parsed, consumed) = parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).unwrap();
+            assert_eq!(consumed, buffer.len(), "must consume whole entry: {op:?}");
+
+            let (got_label, got_extra) = match parsed.operation {
+                WalOperation::CreateNode { label, .. } | WalOperation::UpdateNode { label, .. } => {
+                    (label, None)
+                }
+                WalOperation::CreateEdge { label, .. } | WalOperation::UpdateEdge { label, .. } => {
+                    (label, None)
+                }
+                WalOperation::DeclareUniqueConstraint { label, property }
+                | WalOperation::DropUniqueConstraint { label, property } => (label, Some(property)),
+                other => panic!("unexpected parsed op: {other:?}"),
+            };
+            let expected_label = match &op {
+                WalOperation::CreateNode { label, .. }
+                | WalOperation::UpdateNode { label, .. }
+                | WalOperation::CreateEdge { label, .. }
+                | WalOperation::UpdateEdge { label, .. }
+                | WalOperation::DeclareUniqueConstraint { label, .. }
+                | WalOperation::DropUniqueConstraint { label, .. } => *label,
+                other => panic!("unexpected op: {other:?}"),
+            };
+            // The re-interned label resolves to the same string, hence the same
+            // id in this append-only process interner.
+            let resolve = |s| GLOBAL_INTERNER.resolve_with(s, |v| v.to_owned());
+            assert_eq!(
+                resolve(got_label),
+                resolve(expected_label),
+                "label string must round-trip for {op:?}"
+            );
+            if let Some(p) = got_extra {
+                assert_eq!(
+                    resolve(p),
+                    resolve(c_prop),
+                    "constraint property string must round-trip"
+                );
+            }
+        }
+    }
+
+    /// A v13 buffer (variable-width UTF-8 label) must NOT parse at a ≤v12
+    /// version: the old raw-id decoder reads the label's 4-byte length prefix
+    /// as an id and misaligns the rest, so the entry checksum fails. This
+    /// proves the on-disk format genuinely changed at v13 (not a silent
+    /// same-bytes overlap).
+    #[test]
+    fn v13_buffer_rejected_at_v12() {
+        use crate::core::NodeId;
+        use crate::core::property::PropertyMap;
+
+        // A label whose UTF-8 length is large enough that the raw-id
+        // misinterpretation shifts the parse.
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(7).unwrap(),
+            label: GLOBAL_INTERNER.intern("SufficientlyLongLabel3506").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: None,
+        };
+        let entry = WalEntry::new(LSN(3), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Correct at v13.
+        assert!(parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).is_ok());
+        // Misparsed / checksum failure at v12 (encrypted-container payload maps
+        // to v11 raw-id decode).
+        assert!(
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).is_err(),
+            "a v13 string-label buffer must not silently parse at v11 (raw id)"
+        );
+    }
+
+    /// T2: a hand-built ≤v12 (v11) CreateNode with a RAW 4-byte interner-id
+    /// label must still parse via the `from_raw` path — the identity-layout
+    /// backward-compat contract. Bytes are fully consumed, no over-read.
+    #[test]
+    fn v11_raw_id_label_still_parses() {
+        use crate::core::NodeId;
+        use crate::core::property::PropertyMap;
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+
+        let label = GLOBAL_INTERNER.intern("LegacyRawLabel3506").unwrap();
+        let node_id = NodeId::new(11).unwrap();
+        let valid_from = time::now();
+
+        // Assemble a v11-shaped entry by hand: the label is a raw 4-byte id
+        // (the pre-#3506 encoding), everything else identical to the current
+        // create-node payload (props, valid_from, absent-provenance byte).
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&LSN(9).0.to_le_bytes()); // LSN (8)
+        valid_from.serialize_into(&mut buffer); // entry timestamp (12)
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&[0u8; 4]); // checksum placeholder (4)
+
+        // Payload:
+        buffer.push(OP_CREATE_NODE);
+        buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        buffer.extend_from_slice(&label.as_u32().to_le_bytes()); // RAW id label
+        PropertyMap::new().serialize_into(&mut buffer).unwrap();
+        valid_from.serialize_into(&mut buffer);
+        buffer.push(0u8); // provenance: absent (v11 blob)
+
+        // CRC over LSN+timestamp (bytes 0..20) + payload (bytes 24..).
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..20]);
+        hasher.update(&buffer[checksum_offset + 4..]);
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        let (parsed, consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        assert_eq!(
+            consumed,
+            buffer.len(),
+            "v11 buffer fully consumed, no over-read"
+        );
+        match parsed.operation {
+            WalOperation::CreateNode { label: got, .. } => {
+                // raw-id path: the decoded label is the same raw id, which in
+                // this identity-layout process resolves to the original string.
+                assert_eq!(got.as_u32(), label.as_u32());
+                assert_eq!(
+                    GLOBAL_INTERNER.resolve_with(got, |v| v.to_owned()),
+                    GLOBAL_INTERNER.resolve_with(label, |v| v.to_owned())
+                );
+            }
+            other => panic!("expected CreateNode, got {other:?}"),
+        }
+    }
+
+    /// T4: a mixed-version WAL directory (one v11 raw-id segment + one v13
+    /// string-label segment) replays correctly together — each segment header
+    /// carries its own version, threaded independently into every parse.
+    #[test]
+    fn mixed_version_segments_replay_together() {
+        use crate::core::NodeId;
+        use crate::core::property::PropertyMap;
+
+        let dir = TempDir::new().unwrap();
+
+        // --- Segment 1: v13 (string labels), written via the real serializer. ---
+        let op_new = WalOperation::CreateNode {
+            node_id: NodeId::new(100).unwrap(),
+            label: GLOBAL_INTERNER.intern("NewSegLabel3506").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: None,
+        };
+        let mut seg1 = Vec::new();
+        seg1.extend_from_slice(&WAL_MAGIC);
+        seg1.push(WAL_VERSION_STRING_LABELS);
+        let entry_new = WalEntry::new(LSN(2), op_new);
+        let mut body = Vec::new();
+        serialize_entry_into(&entry_new, &mut body).unwrap();
+        seg1.extend_from_slice(&body);
+        let mut f1 = std::fs::File::create(dir.path().join("000001.log")).unwrap();
+        f1.write_all(&seg1).unwrap();
+        f1.sync_all().unwrap();
+
+        // --- Segment 2: v11 (raw id label), hand-built. ---
+        let label_old = GLOBAL_INTERNER.intern("OldSegLabel3506").unwrap();
+        let node_old = NodeId::new(50).unwrap();
+        let valid_from = time::now();
+        let mut seg2 = Vec::new();
+        seg2.extend_from_slice(&WAL_MAGIC);
+        seg2.push(WAL_VERSION_DESTRUCTIVE_PROVENANCE);
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&LSN(1).0.to_le_bytes());
+        valid_from.serialize_into(&mut entry);
+        let cs_off = entry.len();
+        entry.extend_from_slice(&[0u8; 4]);
+        entry.push(crate::storage::wal::serialization::OP_CREATE_NODE);
+        entry.extend_from_slice(&node_old.as_u64().to_le_bytes());
+        entry.extend_from_slice(&label_old.as_u32().to_le_bytes());
+        PropertyMap::new().serialize_into(&mut entry).unwrap();
+        valid_from.serialize_into(&mut entry);
+        entry.push(0u8);
+        let mut h = crc32fast::Hasher::new();
+        h.update(&entry[0..20]);
+        h.update(&entry[cs_off + 4..]);
+        entry[cs_off..cs_off + 4].copy_from_slice(&h.finalize().to_le_bytes());
+        seg2.extend_from_slice(&entry);
+        let mut f2 = std::fs::File::create(dir.path().join("000002.log")).unwrap();
+        f2.write_all(&seg2).unwrap();
+        f2.sync_all().unwrap();
+
+        let entries = read_entries_from_dir(dir.path(), LSN(0)).unwrap();
+        assert_eq!(entries.len(), 2, "both segments must replay");
+
+        let mut labels: Vec<String> = entries
+            .iter()
+            .map(|e| match &e.operation {
+                WalOperation::CreateNode { label, .. } => GLOBAL_INTERNER
+                    .resolve_with(*label, |v| v.to_string())
+                    .unwrap(),
+                other => panic!("unexpected op: {other:?}"),
+            })
+            .collect();
+        labels.sort();
+        assert_eq!(labels, vec!["NewSegLabel3506", "OldSegLabel3506"]);
     }
 }

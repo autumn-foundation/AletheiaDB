@@ -256,6 +256,125 @@ fn test_deleted_edges_returned_before_deletion() {
     assert!(edges.contains(&edge));
 }
 
+/// #3504 affirmative snapshot-isolation regression guard for the temporal
+/// adjacency index (hunk 2 of the fix).
+///
+/// The pre-existing "before deletion" tests query with valid == tx, so they
+/// pass under the old in-place valid-close too and do not distinguish the fix.
+/// This test exercises the case the fix exists for: a bi-temporal AS-OF
+/// adjacency read at a valid coordinate AT/AFTER the delete's `valid_from`,
+/// but at a transaction coordinate BEFORE the delete was committed. Under
+/// snapshot isolation such a reader must STILL observe the since-deleted edge.
+///
+/// Timeline (deterministic, valid and tx coordinates deliberately diverge):
+///   create edge:  valid_from = t0,     tx = T0
+///   delete edge:  valid_from = t_del,  tx = T_del   (t0 < t_del, T0 < T_del)
+///   read snapshot: valid = t_del,      tx = t_mid    (T0 < t_mid < T_del)
+///
+/// #3504: under the removed in-place valid-close (the full pre-fix behavior),
+/// `close_previous_version_intervals` shrank the superseded entry's valid_to to
+/// t_del and the adjacency index mirrored that with `close_edge_valid_time`, so
+/// the read below returned 0 -- a node/edge alive at the snapshot vanished
+/// (valid-dimension snapshot-isolation violation). The fix keeps the valid
+/// interval open and instead tx-closes the adjacency entry, so the earlier-tx
+/// reader still sees the edge while a current-tx reader does not.
+#[test]
+fn deleted_edge_still_traversable_at_earlier_tx_snapshot_after_valid_from() {
+    let mut storage = HistoricalStorage::new();
+    let index = Arc::new(TemporalAdjacencyIndex::new(
+        TemporalAdjacencyConfig::default(),
+    ));
+    storage.set_temporal_adjacency_index(index.clone());
+
+    let source = NodeId::new(500).unwrap();
+    let target = NodeId::new(501).unwrap();
+    let edge = EdgeId::new(40).unwrap();
+    let label = InternedString::from_raw(5);
+
+    // Deterministic bi-temporal coordinates so valid/tx diverge and t0 < t_del,
+    // T0 < t_mid < T_del hold exactly (no wallclock/sleep flakiness).
+    let t0 = time::from_secs(1_000_000);
+    let big_t0 = time::from_secs(1_000_000);
+    let t_mid = time::from_secs(1_000_100);
+    let t_del = time::from_secs(1_000_200);
+    let big_t_del = time::from_secs(1_000_200);
+    let after_del = time::from_secs(1_000_300);
+
+    // Create the edge at (valid = t0, tx = T0). Source/target nodes stay alive.
+    storage
+        .add_edge_version(
+            edge,
+            VersionId::new(1).unwrap(),
+            t0,
+            big_t0,
+            label,
+            source,
+            target,
+            PropertyMap::default(),
+            false,
+        )
+        .unwrap();
+
+    // Delete (tombstone) the EDGE at (valid = t_del, tx = T_del), strictly after
+    // both the create's valid and tx coordinates.
+    storage
+        .add_edge_version(
+            edge,
+            VersionId::new(2).unwrap(),
+            t_del,
+            big_t_del,
+            label,
+            source,
+            target,
+            PropertyMap::default(),
+            true, // tombstone
+        )
+        .unwrap();
+
+    // Core #3504 assertion: an earlier-tx snapshot (T0 < t_mid < T_del) reading
+    // at a valid coordinate at/after the delete's valid_from must STILL see the
+    // edge. Under the removed valid-close this returned 0.
+    let out_earlier_tx = storage.get_outgoing_edges_at_time(source, t_del, t_mid);
+    assert_eq!(
+        out_earlier_tx.len(),
+        1,
+        "deleted edge must remain traversable outgoing at an earlier-tx snapshot"
+    );
+    assert!(out_earlier_tx.contains(&edge));
+
+    // Symmetric incoming direction.
+    let in_earlier_tx = storage.get_incoming_edges_at_time(target, t_del, t_mid);
+    assert_eq!(
+        in_earlier_tx.len(),
+        1,
+        "deleted edge must remain traversable incoming at an earlier-tx snapshot"
+    );
+    assert!(in_earlier_tx.contains(&edge));
+
+    // Guard against over-correction: at/after the delete's commit tx, the edge
+    // must be invisible (current-state traversal must not resurrect it). This is
+    // exactly what hunk 2's tx-close of the adjacency entry provides; reverting
+    // hunk 2 makes these return 1.
+    let out_at_del_tx = storage.get_outgoing_edges_at_time(source, t_del, big_t_del);
+    assert_eq!(
+        out_at_del_tx.len(),
+        0,
+        "deleted edge must be invisible at the delete's own commit tx"
+    );
+    let out_after_del_tx = storage.get_outgoing_edges_at_time(source, t_del, after_del);
+    assert_eq!(
+        out_after_del_tx.len(),
+        0,
+        "deleted edge must be invisible after the delete's commit tx"
+    );
+    let in_after_del_tx = storage.get_incoming_edges_at_time(target, t_del, after_del);
+    assert_eq!(
+        in_after_del_tx.len(),
+        0,
+        "deleted edge must be invisible incoming after the delete's commit tx"
+    );
+}
+
 /// Test that methods return empty vectors when index is not set.
 #[test]
 fn test_query_methods_return_empty_without_index() {

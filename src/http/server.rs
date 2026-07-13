@@ -78,6 +78,22 @@ use crate::http::state::AppState;
 /// (e.g. failing to bind the port) terminate the process via
 /// [`std::process::exit`]; they are not surfaced as `Err` here.
 pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
+    // Install OpenTelemetry tracing from the standard OTEL_* environment
+    // (Issue #3376). Disabled unless ALETHEIADB_OTEL is truthy or an OTLP
+    // endpoint is configured; the guard flushes + shuts the exporter down when
+    // `run_server` returns. A subscriber-already-installed error is non-fatal
+    // (the host process may own the subscriber).
+    #[cfg(feature = "otel")]
+    let _otel_guard =
+        match crate::observability::otel::init(&crate::observability::otel::OtelConfig::from_env())
+        {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("WARNING: OpenTelemetry tracing not installed: {e}");
+                None
+            }
+        };
+
     // Validate config before wiring anything else.
     config
         .rate_limit()
@@ -108,7 +124,10 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     }
 
     let db = Arc::new(build_database(&config)?);
-    let our_state = AppState::new(db);
+    // Deliver the per-query resource limits (Issue #3368) to handlers via
+    // shared state, exactly as the request-body-size limit is delivered via
+    // config into the layer stack below.
+    let our_state = AppState::new(db).with_query_limits(config.query_limits().clone());
     let startup_state = our_state.clone();
     let startup_auth = auth_state.clone();
     let shutdown_state = our_state.clone();
@@ -380,6 +399,11 @@ pub fn build_test_router_with_auth(
     config: &ServerConfig,
 ) -> Result<Router, String> {
     config.rate_limit().validate()?;
+
+    // Fold the per-query resource limits (Issue #3368) from `config` into the
+    // shared state, mirroring how `run_server` wires them — so tests that pass
+    // a custom `QueryLimitsConfig` through `ServerConfig` see it enforced.
+    let state = state.with_query_limits(config.query_limits().clone());
 
     let autumn_state = AutumnAppState::detached();
     autumn_state.insert_extension(state);

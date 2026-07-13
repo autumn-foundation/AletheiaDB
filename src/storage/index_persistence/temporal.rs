@@ -370,7 +370,7 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
 ///
 /// Returns an error if property restoration fails (e.g., corrupted interned strings).
 pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
-    let label = InternedString::from_raw(entry.label_idx);
+    let label = resolve_label_or_error(entry.label_idx, "node")?;
     let node_id = NodeId::new(entry.node_id).map_err(|e| {
         IndexPersistenceError::Serialization(format!("Invalid node ID {}: {}", entry.node_id, e))
     })?;
@@ -471,6 +471,29 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
     })
 }
 
+/// Validate that a persisted label id resolves against the live interner,
+/// returning the [`InternedString`] on success.
+///
+/// Issue #3490: persisted labels are file-space interner ids translated to
+/// live ids by the load-time [`InternerRemap`](super::strings::InternerRemap).
+/// An unmappable id (the remap's `UNMAPPABLE_FILE_ID` sentinel, or genuine
+/// on-disk corruption) must fail LOUDLY here rather than be stored as a garbage
+/// [`InternedString`] via `from_raw`, mirroring the graph restore path and
+/// `restore_property_map`'s property-key check.
+fn resolve_label_or_error(label_idx: u32, kind: &str) -> Result<InternedString> {
+    let label = InternedString::from_raw(label_idx);
+    if crate::core::GLOBAL_INTERNER
+        .resolve_with(label, |_| ())
+        .is_none()
+    {
+        return Err(IndexPersistenceError::Serialization(format!(
+            "Failed to resolve interned {kind} label with ID: {label_idx}. \
+             This likely indicates data corruption."
+        )));
+    }
+    Ok(label)
+}
+
 /// Restore an optional persisted version-chain link, validating the raw ID.
 fn restore_version_link(
     raw: Option<u64>,
@@ -500,7 +523,7 @@ fn restore_version_link(
 ///
 /// Returns an error if property restoration fails (e.g., corrupted interned strings).
 pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
-    let label = InternedString::from_raw(entry.label_idx);
+    let label = resolve_label_or_error(entry.label_idx, "edge")?;
     let edge_id = EdgeId::new(entry.edge_id).map_err(|e| {
         IndexPersistenceError::Serialization(format!("Invalid edge ID {}: {}", entry.edge_id, e))
     })?;

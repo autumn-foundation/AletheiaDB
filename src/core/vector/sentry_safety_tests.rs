@@ -1,6 +1,7 @@
 //! # Context
-//! This module contains "Sentry" tests focused on the memory safety and correctness of low-level SIMD operations
-//! and unsafe blocks, particularly regarding uninitialized memory handling.
+//! This module contains "Sentry" tests focused on the memory safety and
+//! correctness of the vector-math operations (now `unsafe`-free after Issue
+//! #426), particularly around zero/NaN/Inf handling in normalization.
 //!
 //! # Usage
 //! These tests verify that core vector operations safely handle invalid floats (`NaN`, `Infinity`)
@@ -10,7 +11,7 @@
 //! Specifically, it ensures that:
 //! - `normalize()` properly returns `NaN` if inputs are `NaN` or `Infinity`.
 //! - `normalize()` handles Zero vectors correctly.
-//! - `scale_and_copy()` safely overwrites and initializes vectors, even handling SIMD remainder loops correctly.
+//! - `normalize()` writes every element correctly across a range of lengths.
 //!
 //! ## Panics
 //! These tests assert that invalid values map gracefully to predictable floating-point representations
@@ -24,16 +25,6 @@
 //! ```
 
 use super::ops::*;
-use super::simd::*;
-use std::mem::MaybeUninit;
-
-// Helper to cast &mut [f32] to &mut [MaybeUninit<f32>]
-// This is safe because initialized memory is a valid state of MaybeUninit.
-fn as_uninit_mut(slice: &mut [f32]) -> &mut [MaybeUninit<f32>] {
-    unsafe {
-        std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut MaybeUninit<f32>, slice.len())
-    }
-}
 
 #[test]
 fn test_normalize_nan_handling() {
@@ -76,28 +67,26 @@ fn test_normalize_zero_handling() {
 }
 
 #[test]
-fn test_scale_and_copy_correctness() {
-    // 🛡️ Sentry: Verify scale_and_copy writes to ALL elements correctly.
-    // This is critical because normalize() relies on this to initialize the vector.
-
-    let src = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-    let mut dst = vec![0.0; 5]; // Pre-fill with 0 to verify overwrite
-
-    scale_and_copy(&src, as_uninit_mut(&mut dst), 2.0);
-
-    assert_eq!(dst, vec![2.0, 4.0, 6.0, 8.0, 10.0]);
+fn test_normalize_writes_all_elements() {
+    // 🛡️ Sentry: Verify normalize() produces a fully-initialized, correctly
+    // scaled vector (it no longer relies on any uninitialized-memory path).
+    // src = [3, 4] has magnitude 5, so normalize -> [0.6, 0.8].
+    let normalized = normalize(&[3.0, 4.0]);
+    assert!((normalized[0] - 0.6).abs() < 1e-6);
+    assert!((normalized[1] - 0.8).abs() < 1e-6);
 }
 
 #[test]
-fn test_scale_and_copy_large_vector() {
-    // 🛡️ Sentry: Test with larger vector to trigger SIMD loop + remainder
-    let len = 1024 + 7; // 1031 elements
-    let src: Vec<f32> = (0..len).map(|i| i as f32).collect();
-    let mut dst = vec![0.0; len];
+fn test_normalize_large_vector_all_elements() {
+    // 🛡️ Sentry: Test with a larger vector to exercise the full length.
+    let len = 1024 + 7; // 1031 elements, a non-power-of-two length
+    let src: Vec<f32> = (0..len).map(|i| (i + 1) as f32).collect();
 
-    scale_and_copy(&src, as_uninit_mut(&mut dst), 2.0);
-
-    for (i, val) in dst.iter().enumerate() {
-        assert_eq!(*val, (i as f32) * 2.0);
-    }
+    let normalized = normalize(&src);
+    // Every element scaled by the same positive factor => unit length overall.
+    let mag_sq: f64 = normalized.iter().map(|&x| (x as f64) * (x as f64)).sum();
+    assert!((mag_sq.sqrt() - 1.0).abs() < 1e-4);
+    assert_eq!(normalized.len(), len);
+    // Direction preserved: strictly increasing input stays strictly increasing.
+    assert!(normalized[0] < normalized[len - 1]);
 }

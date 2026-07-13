@@ -1,0 +1,51 @@
+{
+  "benchmark": "mcp_round_trip",
+  "fixture": {
+    "edges": 50000,
+    "embedding_dim": 16,
+    "nodes": 10000
+  },
+  "gate_on": "p50",
+  "gated_scenarios": {
+    "gate_query__aql": {
+      "p50_us": 281.536,
+      "p99_us": 394.248,
+      "tool": "query"
+    },
+    "gate_read__get_node": {
+      "p50_us": 140.42,
+      "p99_us": 234.752,
+      "tool": "get_node"
+    },
+    "gate_temporal__get_node_at_time": {
+      "p50_us": 150.01,
+      "p99_us": 252.77,
+      "tool": "get_node_at_time"
+    },
+    "gate_vector__find_similar": {
+      "p50_us": 275.865,
+      "p99_us": 415.7,
+      "tool": "find_similar"
+    },
+    "gate_write__create_node": {
+      "p50_us": 167.89,
+      "p99_us": 257.553,
+      "tool": "create_node"
+    }
+  },
+  "generated_at": "2026-07-13T07:27:22.810285Z",
+  "git_sha": "8fb4e5c",
+  "hardware": {
+    "arch": "x86_64",
+    "logical_cpus": 4,
+    "os": "linux"
+  },
+  "issue": 3361,
+  "kind": "reference_baseline",
+  "note": "Reference baseline MEDIAN (p50) latencies for the GATED scenarios only. The relative regression gate fails a gated scenario whose current p50 exceeds regression_multiplier x its baseline p50. This is a REFERENCE baseline tied to the hardware/scale below; refresh it per release or when the reference runner changes (regenerate with MCP_BENCH_WRITE_BASELINE).",
+  "regression_multiplier": 2.0,
+  "sample_size": 300,
+  "scale": "nightly",
+  "schema_version": 1,
+  "warmup": 30
+}

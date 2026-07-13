@@ -53,10 +53,7 @@ use crate::storage::wal::DurabilityMode;
 /// not a transactionally frozen view — concurrent writers may advance
 /// individual counters between reads.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct DatabaseStats {
     /// Current-state graph size (the hot, in-RAM tier queried by
@@ -71,14 +68,47 @@ pub struct DatabaseStats {
     pub cold_storage: ColdStorageTierStats,
     /// Write-ahead-log durability state.
     pub wal: WalStateStats,
+    /// Tamper-evident provenance hash chain status (Issue #3351). `enabled:
+    /// false` with all-`None` fields when the chain is not configured.
+    pub chain: ProvenanceChainStats,
+}
+
+/// Status of the opt-in provenance hash chain (Issue #3351).
+///
+/// All fields are O(1) reads of the in-memory chain head (no scans), so this
+/// is safe to include in the frequently-called `stats()` snapshot. When the
+/// chain is disabled every optional field is `None`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ProvenanceChainStats {
+    /// Whether the provenance hash chain is active on this database.
+    pub enabled: bool,
+    /// Sequence number of the current chain head (`0` = genesis, no sealed
+    /// transactions yet). `None` when disabled.
+    pub head_seq: Option<u64>,
+    /// Lowercase-hex digest of the current chain head. `None` when disabled.
+    pub head_digest: Option<String>,
+    /// Lowercase-hex digest of the genesis seed. `None` when disabled.
+    pub genesis_digest: Option<String>,
+    /// The most recent verification result, if a verify has run this session.
+    pub last_verified: Option<LastVerifiedStats>,
+}
+
+/// Outcome of the most recent chain verification (Issue #3351).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct LastVerifiedStats {
+    /// Whether the pass verified cleanly.
+    pub passed: bool,
+    /// Wallclock micros when the pass completed.
+    pub at_micros: i64,
 }
 
 /// Current-state (hot tier) graph size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct CurrentStateStats {
     /// Number of nodes in the current state. O(1) index-length read.
@@ -94,10 +124,7 @@ pub struct CurrentStateStats {
 /// maintained incrementally (Issue #212) — reading them is O(1) and never
 /// iterates versions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct HistoricalDepthStats {
     /// Total node versions retained in the hot historical store.
@@ -135,27 +162,21 @@ pub struct HistoricalDepthStats {
 /// — count fields are structurally absent so they can never be misread as
 /// "zero cold versions".
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct ColdStorageTierStats {
     /// Whether a cold-storage tier (tiered storage + Redb backend) is
     /// configured for this database.
     pub enabled: bool,
     /// Counters for the enabled tier; absent when `enabled` is false.
-    #[cfg_attr(any(feature = "config-toml", feature = "mcp-server"), serde(flatten))]
+    #[cfg_attr(feature = "serde", serde(flatten))]
     pub details: Option<ColdStorageDetails>,
 }
 
 /// Counters for an enabled cold-storage tier. All values are atomic counter
 /// snapshots — O(1) reads, no disk access.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct ColdStorageDetails {
     /// Node versions in the cold (disk) tier. Seeded from the persisted
@@ -180,10 +201,7 @@ pub struct ColdStorageDetails {
 /// Where historical-version reads were served from. Together these reveal
 /// the hot / warm-cache / cold distribution of temporal query traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct TierAccessStats {
     /// Reads served from the hot (in-RAM) tier.
@@ -203,10 +221,7 @@ pub struct TierAccessStats {
 /// still emitted explicitly so the schema contract covers any future no-WAL
 /// build and a consumer never has to infer WAL presence from other fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct WalStateStats {
     /// Whether a WAL is active. Always `true` in current builds (see type
@@ -335,6 +350,32 @@ impl AletheiaDB {
             },
         };
 
+        // Provenance hash chain (Issue #3351): O(1) reads of the in-memory head.
+        let chain = match self.chain.as_ref() {
+            Some(chain) => {
+                let head = chain.head();
+                ProvenanceChainStats {
+                    enabled: true,
+                    head_seq: Some(head.seq),
+                    head_digest: Some(crate::provenance_chain::to_hex(&head.digest)),
+                    genesis_digest: Some(crate::provenance_chain::to_hex(
+                        &chain.genesis().genesis_digest,
+                    )),
+                    last_verified: chain.last_verified().map(|lv| LastVerifiedStats {
+                        passed: lv.passed,
+                        at_micros: lv.at_micros,
+                    }),
+                }
+            }
+            None => ProvenanceChainStats {
+                enabled: false,
+                head_seq: None,
+                head_digest: None,
+                genesis_digest: None,
+                last_verified: None,
+            },
+        };
+
         DatabaseStats {
             current: CurrentStateStats {
                 node_count: current_stats.node_count,
@@ -343,6 +384,7 @@ impl AletheiaDB {
             historical,
             cold_storage,
             wal,
+            chain,
         }
     }
 }
@@ -381,7 +423,7 @@ mod tests {
 
     /// WAL counters are `u64`; extreme values must survive JSON
     /// serialization without precision loss or sign flips.
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn wal_stats_u64_max_survives_json_round_trip() {
         let stats = WalStateStats {
@@ -405,7 +447,7 @@ mod tests {
 
     /// Disabled cold storage serializes as exactly `{"enabled": false}` —
     /// no count keys an LLM could misread as "0 cold versions".
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn disabled_cold_storage_serializes_without_count_fields() {
         let value = serde_json::to_value(ColdStorageTierStats {

@@ -30,7 +30,10 @@
 //! rather than exact bounds. Valid-time bounds ARE asserted exactly for every
 //! version, including delete tombstones — they are logged in the WAL and must
 //! be honored faithfully (issue #3400, pinned by the backdated-delete tests
-//! at the bottom of this file).
+//! at the bottom of this file). Note that a version superseded by an
+//! update/delete keeps its valid interval OPEN (#3504: supersession is
+//! append-only on the valid dimension); only its transaction-time window is
+//! closed.
 
 use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::core::history::EntityHistory;
@@ -99,8 +102,10 @@ fn snapshot_history(history: &EntityHistory) -> Vec<VersionSnapshot> {
 ///
 /// Valid-time bounds are compared exactly for EVERY version, including delete
 /// tombstones: the tombstone's valid_from is logged in the WAL and honored by
-/// replay (issue #3400), so both its (empty) valid interval and the valid_to
-/// of the version it closes must survive recovery bit-for-bit.
+/// replay (issue #3400), so its (empty) valid interval must survive recovery
+/// bit-for-bit. Note (#3504): supersession is append-only on the valid
+/// dimension, so the predecessor of a tombstone keeps its valid_to OPEN -- the
+/// delete never retroactively closes it.
 ///
 /// Transaction-time bounds are compared structurally (open/closed + chain
 /// continuity), not exactly — see the module docs for why exact equality
@@ -146,8 +151,10 @@ fn assert_history_matches(entity: &str, pre: &[VersionSnapshot], recovered: &Ent
     // Chain continuity on the recovered history:
     // - each superseded version's tx-time closure must equal its successor's
     //   transaction start (both stamped from the same WAL entry);
-    // - a version closed by a tombstone must have its valid_to equal to the
-    //   tombstone's valid_from.
+    // - #3504: a version superseded by a delete tombstone keeps its valid_to
+    //   OPEN (append-only) -- supersession is expressed purely on the
+    //   transaction-time dimension, never by retroactively closing the prior
+    //   version's valid interval in place.
     for i in 0..recovered.versions.len().saturating_sub(1) {
         let closed_at = recovered.versions[i].temporal.transaction_time().end();
         let successor = &recovered.versions[i + 1];
@@ -157,10 +164,10 @@ fn assert_history_matches(entity: &str, pre: &[VersionSnapshot], recovered: &Ent
             "{entity} v{i}: tx-time closure must equal the successor's tx start after recovery"
         );
         if successor.temporal.valid_time().is_empty() {
-            assert_eq!(
-                recovered.versions[i].temporal.valid_time().end(),
-                successor.temporal.valid_time().start(),
-                "{entity} v{i}: valid_to must equal the closing tombstone's valid_from"
+            assert!(
+                recovered.versions[i].temporal.valid_time().is_current(),
+                "{entity} v{i}: superseded version's valid interval must stay open (#3504); \
+                 a delete tombstone does not retroactively close its predecessor's valid_to"
             );
         }
     }
@@ -617,14 +624,21 @@ fn backdated_delete_valid_from_survives_replay() {
             "live path stamps the tombstone with the backdated valid_from"
         );
 
-        // Divergence window: the pre-fix bug (replay substituting the entry
-        // timestamp for the LOGGED valid_from) is user-visible exactly at
-        // valid times strictly between the backdated t_delete and the
-        // delete's commit timestamp, with transaction time anchored before
-        // the delete's commit (here: at the create's tx start). At that
-        // coordinate the node must be invisible — the buggy replay would
-        // leave the prior head's valid_to open until the commit timestamp
-        // and make it visible.
+        // Divergence window: a valid-time probe strictly between the backdated
+        // t_delete and the delete's commit timestamp. Two distinct guarantees
+        // meet here, distinguished by which transaction time the read anchors:
+        //
+        // (1) #3504 snapshot isolation on the valid dimension: anchored BEFORE
+        //     the delete was recorded (at the create's tx start), the node must
+        //     still be VISIBLE at the probe -- the delete is append-only and
+        //     must not retroactively shrink the prior head's open valid interval
+        //     as observed by an earlier tx snapshot.
+        // (2) #3400 backdated tombstone valid_from: as of the CURRENT tx the
+        //     node's valid timeline ends at the LOGGED t_delete, so the same
+        //     probe (strictly after t_delete) is INVISIBLE. A buggy replay
+        //     substituting the entry timestamp for the logged valid_from would
+        //     move that boundary to ~commit time and wrongly make the probe
+        //     visible.
         let create_tx = history.versions[0].temporal.transaction_time().start();
         let tombstone_tx = history.versions[1].temporal.transaction_time().start();
         assert!(
@@ -640,8 +654,14 @@ fn backdated_delete_valid_from_survives_replay() {
         );
         assert!(
             db.get_node_at_time(node_id, probe_in_window, create_tx)
-                .is_err(),
-            "AS OF in the backdate-to-commit window must be invisible (live)"
+                .is_ok(),
+            "#3504: anchored before the delete's recorded tx the node must stay \
+             visible (append-only valid interval; live)"
+        );
+        assert!(
+            db.get_node_at_valid_time(node_id, probe_in_window).is_err(),
+            "#3400: at the current tx a valid probe past the backdated t_delete \
+             must be invisible (live)"
         );
         // Simulated crash: drop without a checkpoint.
     }
@@ -654,6 +674,12 @@ fn backdated_delete_valid_from_survives_replay() {
         t_delete,
         "replay must honor the LOGGED backdated delete valid_from, not the entry timestamp"
     );
+    // #3504: the prior head's valid interval stays OPEN after replay too --
+    // supersession by the tombstone is append-only on the valid dimension.
+    assert!(
+        history.versions[0].temporal.valid_time().is_current(),
+        "prior head's valid interval must stay open (append-only) after replay (#3504)"
+    );
     // Re-derive the tx anchor from the RECOVERED history: replay stamps
     // transaction time with the WAL entry's logged timestamp, which can
     // differ from the live commit timestamp by a few microseconds in either
@@ -662,15 +688,21 @@ fn backdated_delete_valid_from_survives_replay() {
     let recovered_create_tx = history.versions[0].temporal.transaction_time().start();
     assert!(
         db.get_node_at_time(node_id, probe_in_window, recovered_create_tx)
-            .is_err(),
-        "AS OF in the backdate-to-commit window must be invisible (post-replay)"
+            .is_ok(),
+        "#3504: snapshot-isolation visibility must survive replay -- the node is \
+         visible anchored before the delete's recorded tx (post-replay)"
+    );
+    assert!(
+        db.get_node_at_valid_time(node_id, probe_in_window).is_err(),
+        "#3400: after replay a current-tx valid probe past t_delete stays invisible"
     );
 }
 
 /// Edge counterpart of `backdated_delete_valid_from_survives_replay`
 /// (issue #3400): a backdated `delete_edge_with_valid_time` must recover with
-/// the tombstone stamped at the LOGGED backdated `valid_from`, and the prior
-/// head's valid_to closed at that same point.
+/// the tombstone stamped at the LOGGED backdated `valid_from`. Per #3504 the
+/// prior head's valid interval stays OPEN (append-only) -- supersession is
+/// expressed only on the transaction-time dimension.
 #[test]
 fn backdated_edge_delete_valid_from_survives_replay() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -718,10 +750,11 @@ fn backdated_edge_delete_valid_from_survives_replay() {
             "live path stamps the tombstone with the backdated valid_from"
         );
 
-        // Divergence window (see the node twin above): a valid-time probe
-        // strictly between the backdated t_delete and the delete's commit
-        // timestamp, with transaction time anchored at the create's tx
-        // start, must NOT see the edge.
+        // Divergence window (see the node twin above): the same probe pins two
+        // guarantees by which tx it anchors -- (1) #3504 snapshot isolation:
+        // anchored before the delete's recorded tx the edge stays VISIBLE
+        // (append-only valid interval); (2) #3400: at the current tx the
+        // backdated t_delete bounds the timeline, so the probe is INVISIBLE.
         let create_tx = history.versions[0].temporal.transaction_time().start();
         let tombstone_tx = history.versions[1].temporal.transaction_time().start();
         assert!(
@@ -737,8 +770,14 @@ fn backdated_edge_delete_valid_from_survives_replay() {
         );
         assert!(
             db.get_edge_at_time(edge_id, probe_in_window, create_tx)
-                .is_err(),
-            "AS OF in the backdate-to-commit window must be invisible (live)"
+                .is_ok(),
+            "#3504: anchored before the delete's recorded tx the edge must stay \
+             visible (append-only valid interval; live)"
+        );
+        assert!(
+            db.get_edge_at_valid_time(edge_id, probe_in_window).is_err(),
+            "#3400: at the current tx a valid probe past the backdated t_delete \
+             must be invisible (live)"
         );
         // Simulated crash: drop without a checkpoint.
     }
@@ -751,17 +790,23 @@ fn backdated_edge_delete_valid_from_survives_replay() {
         t_delete,
         "replay must honor the LOGGED backdated edge-delete valid_from, not the entry timestamp"
     );
-    assert_eq!(
-        history.versions[0].temporal.valid_time().end(),
-        t_delete,
-        "prior head's valid_to must be closed at the backdated tombstone valid_from after replay"
+    // #3504: the prior head's valid interval stays OPEN after replay --
+    // supersession by the tombstone is append-only on the valid dimension.
+    assert!(
+        history.versions[0].temporal.valid_time().is_current(),
+        "prior head's valid interval must stay open (append-only) after replay (#3504)"
     );
     // Re-derive the tx anchor from the RECOVERED history (see the node twin
     // above for why the pre-crash anchor is not reusable post-replay).
     let recovered_create_tx = history.versions[0].temporal.transaction_time().start();
     assert!(
         db.get_edge_at_time(edge_id, probe_in_window, recovered_create_tx)
-            .is_err(),
-        "AS OF in the backdate-to-commit window must be invisible (post-replay)"
+            .is_ok(),
+        "#3504: snapshot-isolation visibility must survive replay -- the edge is \
+         visible anchored before the delete's recorded tx (post-replay)"
+    );
+    assert!(
+        db.get_edge_at_valid_time(edge_id, probe_in_window).is_err(),
+        "#3400: after replay a current-tx valid probe past t_delete stays invisible"
     );
 }

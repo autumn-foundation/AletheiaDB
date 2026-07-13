@@ -13,12 +13,40 @@ readme = "README.md"
 keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations", "data-structures"]
 
+# Workspace root (added for the autumn-web 0.5.0 migration spike, Issue #3524).
+# `aletheia-autumn-spike` is an isolated member crate that depends on
+# autumn-web 0.5 UNRENAMED (so its proc-macros' hard-coded `::autumn_web`
+# paths resolve) — see docs/spikes/autumn-web-migration-spike.md for why an
+# isolated crate is required. `default-members = ["."]` keeps bare
+# `cargo build/test/clippy` scoped to the root `aletheiadb` package only, so
+# the existing CI gates are entirely unaffected; the spike gets its own gates
+# (`cargo … -p aletheia-autumn-spike`, `just spike-check`).
+[workspace]
+# `aletheia-server` is the production autumn-web 0.5 server crate (Issue #3524,
+# PR1 skeleton) — an isolated member for the same reason as the spike: autumn
+# 0.5's proc-macros hard-code `::autumn_web`, so the 0.5 surface must live in a
+# crate whose extern prelude binds `autumn_web` to 0.5. It requires an explicit
+# `-p aletheia-server`; bare cargo stays root-scoped via `default-members`.
+members = ["crates/autumn-spike", "crates/aletheia-server"]
+default-members = ["."]
+# `python/` and `fuzz/` are independent crates with their own manifests (the
+# Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
+# this workspace so those workflows still resolve.
+exclude = ["python", "fuzz"]
+
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
 usearch = "2.25.2"
+# SIMD-accelerated vector distance kernels (Issue #426). Optional: enabled via
+# the `simsimd` feature (on by default). Provides runtime-dispatched x86
+# AVX2/AVX-512 AND ARM NEON/SVE kernels, replacing the crate's hand-written
+# x86-only unsafe SIMD. When the feature is off the scalar fallback is used.
+# Pinned to patch-only within 6.5 (defense-in-depth for a C-compiling dep;
+# still admits security patches). Resolves to 6.5.16 in Cargo.lock.
+simsimd = { version = "~6.5", optional = true }
 arc-swap = "1.9"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
@@ -44,6 +72,18 @@ tracy-client = { version = "0.18", optional = true, default-features = false }
 # Observability contract (optional via feature flags)
 tracing = { version = "0.1", optional = true }
 metrics = { version = "0.24", optional = true }
+
+# OpenTelemetry distributed tracing (Issue #3376), optional via the `otel`
+# feature. The OTLP exporter uses the HTTP/protobuf transport over the
+# already-present `reqwest` client, so no tonic/protoc build dependency is
+# introduced. `tracing-opentelemetry` bridges the crate's existing `tracing`
+# spans (ADR 0056) into OpenTelemetry; `tracing-subscriber` provides the
+# registry the OTel layer installs into.
+opentelemetry = { version = "0.30", optional = true }
+opentelemetry_sdk = { version = "0.30", optional = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", optional = true, default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+tracing-opentelemetry = { version = "0.31", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["registry", "env-filter", "fmt", "std"] }
 
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
@@ -82,6 +122,18 @@ sqlparser = { version = "0.40", optional = true }
 # CSV parsing for the bulk graph importer (optional, Issue #3211)
 csv = { version = "1.3", optional = true }
 
+# Parquet columnar import/export for analytics interoperability (optional, Issue #3364).
+# arrow-rs `parquet` crate with the `arrow` integration (ArrowWriter /
+# ParquetRecordBatchReader, list<float32> embedding columns, streaming row groups)
+# and `snap` (Snappy) compression. Default features are disabled to keep the
+# dependency surface minimal; enabled via the `parquet` feature flag only.
+parquet = { version = "59", default-features = false, features = ["arrow", "snap"], optional = true }
+# arrow-rs umbrella crate: gives `arrow::array` (RecordBatch, typed arrays) and
+# `arrow::datatypes` used to physically decode Parquet columns on import. Kept in
+# lockstep with the `parquet` version. Default features off; `array`/`datatypes`
+# are unconditional so the compute/csv/json/ipc kernels are not pulled in.
+arrow = { version = "59", default-features = false, optional = true }
+
 # Parallel iteration for sharded vector index
 rayon = "1.12"
 comfy-table = "7.2.2"
@@ -101,6 +153,16 @@ aws-sdk-kms = { version = "1.106.0", optional = true }
 
 # Constant-time equality for API-key digest comparison (Issue #3350).
 subtle = "2.6"
+
+# Per-platform O_NOFOLLOW for hardened key-file writes (Issue #3351). Already
+# present transitively; pinned as a direct dep so the audit signing path can name
+# the correct constant instead of hardcoding a platform-specific integer.
+libc = "0.2"
+
+# Ed25519 asymmetric signatures for signed audit-export artifacts (Issue #3358).
+# Chosen over HMAC so third parties verify offline with ONLY the signer's public
+# key. Pure-Rust, RFC 8032 deterministic signatures → reproducible artifacts.
+ed25519-dalek = { version = "2", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -176,14 +238,50 @@ tracy = ["tracy-client/enable"]
 observability = ["dep:tracing"]
 metrics-rs = ["observability", "dep:metrics"]
 
+# OpenTelemetry distributed tracing + OTLP export (Issue #3376).
+# Composes with `observability` (reuses its span vocabulary / ADR 0056
+# contract) and adds an OTLP exporter, sampler, W3C context propagation, and
+# a process-wide subscriber installer. Zero cost when absent: the whole
+# `observability::otel` module and every call site are `#[cfg]`-compiled out.
+otel = [
+    "observability",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
+    "dep:tokio",
+]
+
+# SIMD-accelerated vector kernels via the `simsimd` crate (Issue #426).
+# On by default so stock builds get x86 AVX2/AVX-512 and ARM NEON/SVE
+# acceleration through simsimd's runtime dispatch. Building with
+# `--no-default-features` (or otherwise omitting this feature) falls back to the
+# portable scalar kernels, which the compiler auto-vectorizes.
+simsimd = ["dep:simsimd"]
+
 # Default features
-default = ["config-toml"]
+default = ["config-toml", "audit-export", "simsimd"]
+
+# Signed audit export of entity history for compliance (Issue #3358).
+# Pulls Ed25519 (asymmetric offline-verifiable signatures) and serde (artifact
+# (de)serialization). On by default so the `aletheia` CLI ships audit-export /
+# audit-verify; cleanly excluded under --no-default-features.
+audit-export = ["dep:ed25519-dalek", "dep:serde"]
 
 # Async runtime support
 tokio = ["dep:tokio"]
 
+# Unified serde support (Issue #3390).
+# Single flag that pulls in the optional `serde` dependency and gates every
+# `#[derive(Serialize, Deserialize)]` / serde attribute in the crate. Any
+# feature that needs serde derives depends on this rather than `dep:serde`
+# directly, so serde-enabled code compiles identically regardless of which
+# high-level feature turned it on.
+serde = ["dep:serde"]
+
 # Configuration file support (TOML)
-config-toml = ["dep:serde", "dep:toml"]
+config-toml = ["serde", "dep:toml"]
 
 # Embedding generation via embed_anything.
 embeddings = [
@@ -197,11 +295,11 @@ embeddings = [
 # ONNX embedding support pulls in embed_anything's ort backend.
 embeddings-onnx = ["embeddings", "embed_anything/ort"]
 
-# MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:base64"]
+# MCP server support (exposes the audit_export tool, so it implies audit-export)
+mcp-server = ["dep:rmcp", "dep:tokio", "serde", "dep:base64", "audit-export"]
 
 # Sharding RPC client support (uses blocking reqwest)
-sharding-rpc = ["dep:reqwest", "dep:serde", "dep:native-tls"]
+sharding-rpc = ["dep:reqwest", "serde", "dep:native-tls"]
 
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
@@ -211,8 +309,15 @@ cypher = []
 
 # Bulk graph importer for CSV/JSONL with per-row valid-time backfill (Issue #3211).
 # serde_json (JSONL) and chrono (timestamp parsing) are already non-optional deps,
-# so the only extra dependency is the `csv` reader.
-import = ["dep:csv"]
+# so the only extra dependency is the `csv` reader. `serde` is pulled so the
+# Neo4j importer's fidelity report (Issue #3356) is always machine-serializable.
+import = ["dep:csv", "serde"]
+
+# Parquet columnar import/export for analytics interoperability (Issue #3364).
+# Builds on the #3211 import layer (shares NodeMapping/EdgeMapping/ColumnType) and
+# adds a columnar codec via the arrow-rs `parquet` crate. Off by default so the
+# arrow/parquet dependency stays out of default builds.
+parquet = ["dep:parquet", "dep:arrow", "import"]
 
 # HTTP server support (Issue #465) — built on autumn-web.
 http-server = [
@@ -221,7 +326,7 @@ http-server = [
     "dep:tower",
     "dep:tower-http",
     "dep:tokio",
-    "dep:serde",
+    "serde",
     "dep:base64",
     "dep:tracing",
 ]
@@ -230,7 +335,7 @@ http-server = [
 mvcc-snapshots-tdd = []
 
 # Encryption at rest (ADR-0028)
-encryption = ["dep:serde"]
+encryption = ["serde"]
 
 # AWS KMS key provider (optional)
 encryption-aws-kms = ["encryption", "dep:tokio"]
@@ -316,6 +421,22 @@ harness = false
 path = "benches/performance_targets.rs"
 required-features = []
 
+# OpenTelemetry tracing overhead gate (Issue #3376): disabled vs enabled.
+[[bench]]
+name = "otel_overhead"
+harness = false
+path = "benches/otel_overhead.rs"
+required-features = ["otel"]
+
+# MCP round-trip p99 latency harness (Issue #3361): black-box over the shipped
+# aletheia-mcp binary's stdio JSON-RPC transport, with per-tool coverage, an
+# MCP-overhead sub-metric, registry-completeness enforcement, and a p99<5ms gate.
+[[bench]]
+name = "mcp_round_trip"
+harness = false
+path = "benches/mcp_round_trip.rs"
+required-features = ["mcp-server", "config-toml"]
+
 # Storage layer - raw storage primitives and fast path
 [[bench]]
 name = "current_state"
@@ -349,6 +470,19 @@ name = "durability_modes"
 harness = false
 path = "benches/durability_modes.rs"
 
+# Provenance hash chain write-throughput overhead (Issue #3351)
+[[bench]]
+name = "provenance_chain"
+harness = false
+path = "benches/provenance_chain.rs"
+
+# Provenance-enabled write-throughput "cost of trust" matrix + self-gate (Issue #3383)
+[[bench]]
+name = "provenance_write_throughput"
+harness = false
+path = "benches/provenance_write_throughput.rs"
+required-features = []
+
 [[bench]]
 name = "checkpoints"
 harness = false
@@ -380,6 +514,19 @@ required-features = []
 name = "temporal_extent"
 harness = false
 path = "benches/temporal_extent.rs"
+required-features = []
+
+[[bench]]
+name = "derivation_lineage"
+harness = false
+path = "benches/derivation_lineage.rs"
+required-features = []
+
+# Point-in-time restore (Issue #3374) - end-to-end PITR wall-clock (<30s metric)
+[[bench]]
+name = "pitr"
+harness = false
+path = "benches/pitr.rs"
 required-features = []
 
 [[bench]]
@@ -455,6 +602,13 @@ harness = false
 path = "benches/uniqueness_constraints.rs"
 required-features = []
 
+# Per-query resource limits on the HTTP /query surface (Issue #3368)
+[[bench]]
+name = "http_query_limits"
+harness = false
+path = "benches/http_query_limits.rs"
+required-features = ["http-server"]
+
 # Unified CLI binary for local operations + daemon management
 [[bin]]
 name = "aletheia"
@@ -503,3 +657,15 @@ name = "import_throughput"
 harness = false
 path = "benches/import_throughput.rs"
 required-features = ["import"]
+
+# Parquet import/export throughput (Issue #3364)
+[[bench]]
+name = "parquet_throughput"
+harness = false
+path = "benches/parquet_throughput.rs"
+required-features = ["parquet"]
+
+[[bench]]
+name = "node_scan"
+harness = false
+path = "benches/node_scan.rs"

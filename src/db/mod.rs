@@ -21,6 +21,11 @@ use std::time::Instant;
 pub mod admin;
 /// Backup and restore operations.
 pub mod backup;
+/// Provenance hash chain integration: capture, rebuild, and verification API
+/// (Issue #3351).
+pub mod chain;
+/// A `VersionSource` over historical storage for the provenance chain.
+pub(crate) mod chain_source;
 /// Configuration and initialization.
 pub mod config;
 /// Uniqueness constraint builder.
@@ -29,8 +34,12 @@ pub mod constraint_builder;
 pub mod extent;
 /// GraphView implementation.
 pub mod graph_view;
+/// Fact-to-fact derivation lineage API (Issue #3371).
+pub mod lineage;
 /// Basic graph operations (CRUD).
 pub mod ops;
+/// Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374).
+pub mod pitr;
 /// Query builder and executor hooks.
 pub mod query;
 /// Graph schema discovery (labels, edge types, property keys).
@@ -54,7 +63,9 @@ pub mod vector_builder;
 pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
+pub use lineage::{FactStatus, LineageView, LineageViewEntry};
 pub use ops::NodesAtTime;
+pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use stats::{
@@ -180,6 +191,23 @@ pub struct AletheiaDB {
     pub(crate) encryption_manager: Option<Arc<crate::encryption::EncryptionManager>>,
     /// Uniqueness constraint registry (declarations + reservation index).
     pub(crate) constraint_registry: Arc<crate::core::constraint::ConstraintRegistry>,
+    /// Fact-to-fact derivation lineage index (Issue #3371).
+    ///
+    /// Records that a fact version was derived from a set of source fact
+    /// versions and answers upstream/downstream closure queries. Immutable,
+    /// append-only, and independent of the graph/version stores so retracting
+    /// or superseding a fact never disturbs lineage pointing at it. v1 is
+    /// in-memory (does not survive restart) to keep the WAL format untouched
+    /// (Issue #3413); see [`crate::core::lineage`].
+    pub(crate) lineage: Arc<crate::core::lineage::LineageStore>,
+    /// Opt-in tamper-evident provenance hash chain (Issue #3351).
+    ///
+    /// `None` unless `config.chain.enabled`. When present, each committed
+    /// transaction's version refs are enqueued to a background sealer that
+    /// folds them into a domain-separated SHA-256 hash chain over recorded
+    /// history. Declared before `_tempdir` so it is dropped (flushing the
+    /// sealer) before the tempdir is removed.
+    pub(crate) chain: Option<Arc<crate::provenance_chain::ProvenanceChain>>,
     /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
     /// Declared last so it is dropped last (Rust drops struct fields in
     /// declaration order); this guarantees the WAL/persistence file handles
@@ -207,6 +235,13 @@ impl std::fmt::Debug for AletheiaDB {
 
 impl Drop for AletheiaDB {
     fn drop(&mut self) {
+        // Flush and stop the provenance-chain sealer first so its final records
+        // and head checkpoint are durable before storage handles are torn down
+        // (Issue #3351). Idempotent with the chain's own Drop.
+        if let Some(ref chain) = self.chain {
+            chain.shutdown();
+        }
+
         // Signal shutdown to background persistence thread
         if let Some(ref tracker) = self.persistence_tracker {
             tracker.signal_shutdown();

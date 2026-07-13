@@ -1008,6 +1008,27 @@ impl Parser {
         };
         self.expect(&Token::Null)?;
 
+        // `provenance(x) IS [NOT] NULL` (Issue #3354a): the head is a
+        // `provenance(var)` function call rather than a property access. Route
+        // it to the dedicated provenance variant; any other function-call head
+        // (or a non-property expression) falls through to the property path,
+        // which reports a structured error.
+        match &expr {
+            Expression::FunctionCall { name, args } if name.eq_ignore_ascii_case("provenance") => {
+                if let [Expression::Identifier(var)] = args.as_slice() {
+                    return Ok(PredicateExpr::ProvenanceIsNull {
+                        variable: var.clone(),
+                        negated: is_not,
+                    });
+                }
+                return Err(self.error(
+                    "provenance(x) IS NULL requires a single bound variable argument".to_string(),
+                    Some("provenance(n) IS NULL".to_string()),
+                ));
+            }
+            _ => {}
+        }
+
         let prop = self.require_property_expr(expr, "IS NULL")?;
         Ok(if is_not {
             PredicateExpr::IsNotNull(prop)
@@ -1096,7 +1117,9 @@ impl Parser {
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
         match self.current() {
             Some(Token::Identifier(_)) => {
-                // Could be property access (n.prop) or just identifier (n)
+                // Could be property access (n.prop), a function call (func(args),
+                // e.g. the provenance accessors source(x)/confidence(x)/reason(x)
+                // and provenance(x), Issue #3354a), or just an identifier (n).
                 let ident = self.parse_identifier()?;
                 if self.check(&Token::Dot) {
                     self.advance();
@@ -1105,6 +1128,12 @@ impl Parser {
                         variable: ident,
                         property: prop,
                     }))
+                } else if self.check(&Token::LeftParen) {
+                    // Function call: name(arg, ...). Arguments are general
+                    // expressions; provenance-accessor arity/shape is validated
+                    // later at convert time so an unknown function or a malformed
+                    // argument yields a structured error, not a parse panic.
+                    self.parse_function_call(ident)
                 } else {
                     // Just an identifier - a variable reference
                     Ok(Expression::Identifier(ident))
@@ -1117,6 +1146,30 @@ impl Parser {
             }
             _ => self.parse_literal_expression(),
         }
+    }
+
+    /// Parse the argument list of a function call `name(arg, ...)`, given the
+    /// already-consumed function `name`. The opening `(` is the current token.
+    ///
+    /// Arguments are parsed as general expressions and returned verbatim; the
+    /// converter validates whether `name` is a known accessor and whether its
+    /// arguments have the expected shape (Issue #3354a). An empty argument list
+    /// `name()` is permitted syntactically and rejected (if invalid) at convert
+    /// time.
+    fn parse_function_call(&mut self, name: String) -> Result<Expression, ParseError> {
+        self.expect(&Token::LeftParen)?;
+        let mut args = Vec::new();
+        if !self.check(&Token::RightParen) {
+            loop {
+                args.push(self.parse_expression()?);
+                if !self.check(&Token::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect(&Token::RightParen)?;
+        Ok(Expression::FunctionCall { name, args })
     }
 
     fn parse_literal_expression(&mut self) -> Result<Expression, ParseError> {
@@ -1720,6 +1773,50 @@ mod tests {
         if let Some(WhereClause { predicate }) = &query.where_clause {
             assert!(matches!(predicate, PredicateExpr::IsNotNull(_)));
         }
+    }
+
+    #[test]
+    fn test_parse_where_provenance_accessor_call() {
+        // Issue #3354a: `confidence(n)` parses as a function call in WHERE.
+        let query = Parser::parse("MATCH (n) WHERE confidence(n) >= 0.9 RETURN n").unwrap();
+        let Some(WhereClause { predicate }) = &query.where_clause else {
+            panic!("expected WHERE");
+        };
+        let PredicateExpr::Comparison { left, .. } = predicate else {
+            panic!("expected comparison, got {predicate:?}");
+        };
+        match left {
+            Expression::FunctionCall { name, args } => {
+                assert_eq!(name, "confidence");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], Expression::Identifier(v) if v == "n"));
+            }
+            other => panic!("expected FunctionCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_where_provenance_is_null() {
+        let query = Parser::parse("MATCH (n) WHERE provenance(n) IS NULL RETURN n").unwrap();
+        let Some(WhereClause { predicate }) = &query.where_clause else {
+            panic!("expected WHERE");
+        };
+        assert!(matches!(
+            predicate,
+            PredicateExpr::ProvenanceIsNull { variable, negated: false } if variable == "n"
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_provenance_is_not_null() {
+        let query = Parser::parse("MATCH (n) WHERE provenance(n) IS NOT NULL RETURN n").unwrap();
+        let Some(WhereClause { predicate }) = &query.where_clause else {
+            panic!("expected WHERE");
+        };
+        assert!(matches!(
+            predicate,
+            PredicateExpr::ProvenanceIsNull { variable, negated: true } if variable == "n"
+        ));
     }
 
     #[test]

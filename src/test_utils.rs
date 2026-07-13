@@ -173,6 +173,66 @@ pub fn create_test_db_at(wal_dir: PathBuf) -> Result<AletheiaDB> {
     AletheiaDB::with_unified_config(config)
 }
 
+/// Return a fresh, process-unique temporary directory to use as an isolated WAL
+/// directory in a test that builds its own [`AletheiaDBConfig`].
+///
+/// # Why this exists (Issue #3500)
+///
+/// The default `WalConfig::wal_dir` is the **CWD-relative** path
+/// `"aletheiadb/wal"` (`src/config.rs`). Every durable-config test that forgets
+/// to set an explicit `wal_dir` therefore writes into the SAME `./aletheiadb/wal`
+/// directory within a single `cargo test` process. Because DB startup eagerly
+/// decodes the ENTIRE WAL directory, a stray segment left behind by one test is
+/// then read by a later test's startup and can hard-error with
+/// `CorruptedData("Unknown WAL operation type: ...")`. That makes it an
+/// order-dependent, cross-pollinating flake rather than a deterministic failure.
+///
+/// Recovery-style tests that reopen the same `wal_dir` across DB drops cannot use
+/// [`create_test_db`] (which returns a live DB and owns its own tempdir), so they
+/// build their own config. `unique_wal_dir()` gives those tests a one-liner for an
+/// isolated directory: each call returns a DISTINCT OS temp dir, so two tests can
+/// never share a WAL directory.
+///
+/// ```ignore
+/// use aletheiadb::test_utils::unique_wal_dir;
+/// use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
+///
+/// let wal_home = unique_wal_dir();
+/// let config = AletheiaDBConfig::builder()
+///     .wal(WalConfigBuilder::new().wal_dir(wal_home.path().join("wal")).build())
+///     .build();
+/// // ... keep `wal_home` in scope for the lifetime of the DB(s) using it ...
+/// ```
+///
+/// # Note
+///
+/// **You MUST keep the returned `TempDir` in scope** for as long as any database
+/// uses it; dropping it deletes the directory (mirroring [`create_test_db`]).
+///
+/// # Panics
+///
+/// Panics if the OS temporary directory cannot be created. This is acceptable in
+/// test code and consistent with `tempfile::tempdir()` usage across the suite.
+pub fn unique_wal_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("failed to create unique temp dir for WAL isolation")
+}
+
+/// Return a fresh, process-unique temporary directory to use as an isolated
+/// persistence/data directory in a test that builds its own config.
+///
+/// Analogous to [`unique_wal_dir`]; see its docs for the CWD-relative-default
+/// cross-pollution rationale (Issue #3500). Provided as a companion so a test
+/// that isolates both a `wal_dir` and a `data_dir` reads clearly at the call
+/// site. Like [`unique_wal_dir`], each call returns a DISTINCT directory that
+/// **must be kept in scope** for the lifetime of the database.
+///
+/// # Panics
+///
+/// Panics if the OS temporary directory cannot be created.
+pub fn unique_data_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("failed to create unique temp dir for data isolation")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +281,93 @@ mod tests {
         }
 
         assert!(!temp_dir_path.exists());
+    }
+
+    /// T1: `unique_wal_dir()` returns DISTINCT paths across two calls, each an
+    /// existing empty directory.
+    #[test]
+    fn test_unique_wal_dir_returns_distinct_existing_dirs() {
+        let a = unique_wal_dir();
+        let b = unique_wal_dir();
+
+        assert!(a.path().exists(), "first unique_wal_dir should exist");
+        assert!(b.path().exists(), "second unique_wal_dir should exist");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "two unique_wal_dir() calls must return distinct paths"
+        );
+
+        // Each is a fresh, empty directory.
+        assert_eq!(
+            std::fs::read_dir(a.path()).unwrap().count(),
+            0,
+            "first unique_wal_dir should start empty"
+        );
+        assert_eq!(
+            std::fs::read_dir(b.path()).unwrap().count(),
+            0,
+            "second unique_wal_dir should start empty"
+        );
+
+        // `unique_data_dir()` behaves the same and is distinct from the wal dirs.
+        let d = unique_data_dir();
+        assert!(d.path().exists());
+        assert_ne!(d.path(), a.path());
+        assert_ne!(d.path(), b.path());
+    }
+
+    /// T2: two databases built with `unique_wal_dir()` do NOT cross-pollute.
+    ///
+    /// DB A writes into its own isolated WAL dir and drops; DB B writes into a
+    /// DIFFERENT isolated WAL dir, drops, and is reopened via WAL replay. B must
+    /// see only its own data and must NOT hard-error decoding A's segments
+    /// (the `CorruptedData("Unknown WAL operation type")` cross-pollution
+    /// symptom from Issue #3500).
+    #[test]
+    fn test_unique_wal_dir_prevents_cross_pollution() {
+        fn durable_config(home: &std::path::Path) -> AletheiaDBConfig {
+            AletheiaDBConfig::builder()
+                .wal(WalConfigBuilder::new().wal_dir(home.join("wal")).build())
+                .persistence(PersistenceConfig {
+                    enabled: true,
+                    data_dir: home.join("data"),
+                    load_on_startup: true,
+                    ..Default::default()
+                })
+                .build()
+        }
+
+        // DB A: write 3 nodes into its own isolated WAL dir, then drop.
+        let home_a = unique_wal_dir();
+        {
+            let db = AletheiaDB::with_unified_config(durable_config(home_a.path())).unwrap();
+            for _ in 0..3 {
+                db.create_node("A", PropertyMapBuilder::new().build())
+                    .unwrap();
+            }
+        }
+
+        // DB B: write 5 nodes into a DIFFERENT isolated WAL dir, then drop.
+        let home_b = unique_wal_dir();
+        {
+            let db = AletheiaDB::with_unified_config(durable_config(home_b.path())).unwrap();
+            for _ in 0..5 {
+                db.create_node("B", PropertyMapBuilder::new().build())
+                    .unwrap();
+            }
+        }
+
+        // Force B to reconstruct from its WAL by removing its persisted indexes,
+        // then reopen. With isolated dirs this decodes ONLY B's segments.
+        std::fs::remove_dir_all(home_b.path().join("data").join("indexes")).ok();
+        let db_b = AletheiaDB::with_unified_config(durable_config(home_b.path()))
+            .expect("reopening B must not decode A's segments (no CorruptedData)");
+
+        assert_eq!(
+            db_b.node_count(),
+            5,
+            "DB B must see only its own 5 nodes, never A's segments"
+        );
     }
 }

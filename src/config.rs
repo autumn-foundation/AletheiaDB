@@ -36,7 +36,7 @@
 //! let db = AletheiaDB::with_unified_config(config);
 //! ```
 
-#[cfg(feature = "config-toml")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "config-toml")]
 use std::fs;
@@ -57,8 +57,8 @@ use crate::storage::version::AnchorConfig;
 /// its behavior, such as concurrency (stripes), sync intervals, and directory paths,
 /// to balance between latency and throughput.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[non_exhaustive]
 pub struct WalConfig {
     /// Number of stripes for concurrent appends (must be power of 2).
@@ -97,6 +97,35 @@ pub struct WalConfig {
     /// This determines the tradeoff between durability guarantees and performance.
     /// Default: GroupCommit (10ms delay, 200 batch size)
     pub durability_mode: crate::storage::wal::DurabilityMode,
+
+    /// Recovery policy for a crash-torn trailing entry (Issue #3433).
+    ///
+    /// When `true` (the default), WAL replay stops at a crash-torn trailing
+    /// entry in the FINAL segment — the shapes a crash during append leaves: a
+    /// partial header, a payload truncated past end-of-file, a zeroed/garbage
+    /// op-type byte, or a checksum mismatch on a half-written payload — applying
+    /// everything decoded before it and logging a warning, instead of
+    /// hard-failing startup. A torn tail was never acknowledged, so discarding
+    /// it is correct, not data loss.
+    ///
+    /// Tolerance never swallows real corruption: an undecodable entry FOLLOWED
+    /// BY a valid committed entry (a valid frame after it in an encrypted
+    /// segment, or a higher-LSN entry found by the plaintext forward probe) is
+    /// mid-log damage, not a torn tail, and ALWAYS hard-errors — even with this
+    /// flag `true`. Corruption in a non-final segment always hard-errors too.
+    ///
+    /// When `false`, recovery is fail-stop: every genuine-torn-tail shape above
+    /// aborts startup so an operator can inspect the log manually, instead of
+    /// automatic tail truncation. The ONE exception, in both modes, is an
+    /// all-zero pre-allocation padding window at the end of a segment: that is
+    /// treated as end-of-log, never an error (hard-erroring on it would brick
+    /// normal startup).
+    ///
+    /// Scope: this opt-out governs the RECOVERY REPLAY path only. The #3428
+    /// LSN-seeding scan (`max_lsn_in_dir`) stays torn-tail-tolerant regardless,
+    /// so setting this to `false` does not re-brick the writer at seed time.
+    /// Default: true
+    pub tolerate_torn_tail: bool,
 }
 
 impl Default for WalConfig {
@@ -110,6 +139,7 @@ impl Default for WalConfig {
             wal_dir: std::path::PathBuf::from("aletheiadb/wal"),
             segments_to_retain: 10,
             durability_mode: crate::storage::wal::DurabilityMode::group_commit_default(),
+            tolerate_torn_tail: true,
         }
     }
 }
@@ -305,6 +335,16 @@ impl WalConfigBuilder {
         self
     }
 
+    /// Set the crash-torn-tail recovery policy (Issue #3433).
+    ///
+    /// `true` (default) tolerates a torn trailing entry in the final WAL
+    /// segment on replay; `false` selects fail-stop recovery (any parse
+    /// failure aborts startup). See [`WalConfig::tolerate_torn_tail`].
+    pub fn tolerate_torn_tail(mut self, tolerate: bool) -> Self {
+        self.config.tolerate_torn_tail = tolerate;
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> WalConfig {
         self.config
@@ -327,8 +367,8 @@ impl Default for WalConfigBuilder {
 /// This configuration dictates how those versions are managed, including pruning
 /// thresholds and the directory where historical data is stored on disk.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[non_exhaustive]
 pub struct HistoricalConfig {
     /// Maximum versions to retain per entity before pruning.
@@ -667,8 +707,8 @@ impl Default for HistoricalConfigBuilder {
 /// configure parameters like the number of layers, connections per node, and memory
 /// limits to optimize the recall-vs-latency tradeoff.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[non_exhaustive]
 pub struct VectorIndexConfig {
     /// Maximum value of k for k-NN queries.
@@ -771,8 +811,8 @@ impl Default for VectorIndexConfigBuilder {
 /// (WAL, Historical, Vector, Persistence). It acts as the single source of truth
 /// when bootstrapping a new database instance.
 #[derive(Debug, Clone, PartialEq, Default)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[non_exhaustive]
 pub struct AletheiaDBConfig {
     /// WAL configuration
@@ -785,6 +825,10 @@ pub struct AletheiaDBConfig {
     pub persistence: PersistenceConfig,
     /// Encryption at rest configuration
     pub encryption: crate::encryption::config::EncryptionConfig,
+    /// Opt-in tamper-evident provenance hash chain (Issue #3351). Disabled by
+    /// default, so a database keeps byte-identical behavior and on-disk layout
+    /// unless the chain is explicitly enabled.
+    pub chain: crate::provenance_chain::ChainConfig,
 }
 
 /// Builder for unified database configuration.
@@ -834,6 +878,16 @@ impl AletheiaDBConfigBuilder {
         encryption_config: crate::encryption::config::EncryptionConfig,
     ) -> Self {
         self.config.encryption = encryption_config;
+        self
+    }
+
+    /// Set the provenance hash chain configuration (Issue #3351).
+    ///
+    /// The default is disabled; passing a [`ChainConfig`](crate::provenance_chain::ChainConfig)
+    /// with `enabled: true` opts the database into the tamper-evident sidecar
+    /// chain over its recorded history.
+    pub fn chain(mut self, chain_config: crate::provenance_chain::ChainConfig) -> Self {
+        self.config.chain = chain_config;
         self
     }
 
@@ -1280,6 +1334,45 @@ mod tests {
         assert!(toml_string.contains("max_versions_per_entity"));
         assert!(toml_string.contains("max_k"));
         assert!(toml_string.contains("anchor_interval"));
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn test_toml_chain_section_round_trips() {
+        // The opt-in provenance hash chain (Issue #3351) must round-trip
+        // through TOML via the `[chain]` section so `aletheia verify` can be
+        // driven by an on-disk config that enables the chain.
+        use crate::provenance_chain::ChainFsyncMode;
+
+        let toml_str = r#"
+[chain]
+enabled = true
+fsync = "per_transaction"
+dir = "/var/lib/aletheia/chain"
+        "#;
+
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
+        assert!(config.chain.enabled, "[chain] enabled must deserialize");
+        assert_eq!(config.chain.fsync, ChainFsyncMode::PerTransaction);
+        assert_eq!(
+            config.chain.dir,
+            Some(std::path::PathBuf::from("/var/lib/aletheia/chain"))
+        );
+
+        // Serialize back out and confirm the section is present and re-parses
+        // to an identical config (full round-trip, no field loss).
+        let rendered = config.to_toml_string().unwrap();
+        assert!(rendered.contains("[chain]"), "rendered TOML: {rendered}");
+        assert!(rendered.contains("enabled = true"));
+        let reparsed = AletheiaDBConfig::from_toml_str(&rendered).unwrap();
+        assert_eq!(reparsed.chain, config.chain);
+
+        // Omitting the section keeps the chain disabled by default (byte-
+        // identical behavior for existing configs).
+        let no_chain = AletheiaDBConfig::from_toml_str("[wal]\nnum_stripes = 16\n").unwrap();
+        assert!(!no_chain.chain.enabled);
+        assert_eq!(no_chain.chain.fsync, ChainFsyncMode::Batched);
+        assert!(no_chain.chain.dir.is_none());
     }
 
     #[test]

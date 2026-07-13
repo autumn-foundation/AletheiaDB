@@ -8,7 +8,8 @@ use super::error::Result;
 use super::formats::IndexManifest;
 use super::manifest::{load_manifest_with_cipher, save_manifest_with_cipher};
 use super::strings::{
-    load_string_interner_with_cipher, restore_string_interner, save_string_interner_with_cipher,
+    InternerRemap, load_string_interner_with_cipher, restore_string_interner,
+    save_string_interner_with_cipher,
 };
 use crate::encryption::cipher::Cipher;
 
@@ -121,17 +122,42 @@ impl IndexPersistenceManager {
     /// - Failed to load or restore string interner
     /// - Failed to load manifest (if it exists)
     pub fn load_manifest_and_strings(&self) -> Result<IndexManifest> {
+        let (manifest, _remap) = self.load_manifest_and_strings_with_remap()?;
+        Ok(manifest)
+    }
+
+    /// Load the manifest and restore the string interner, returning the
+    /// file-id -> live-id [`InternerRemap`] alongside the manifest.
+    ///
+    /// This is the Issue #3490-aware entry point: callers that go on to restore
+    /// the graph and/or temporal indexes (e.g. `load_indexes_startup`) MUST use
+    /// this variant and translate the loaded index data through the returned
+    /// remap (see [`InternerRemap::remap_graph_index_data`] /
+    /// [`InternerRemap::remap_temporal_index_data`]) before resolving any
+    /// persisted interner id. The plain [`Self::load_manifest_and_strings`]
+    /// wrapper discards the remap and is only safe for callers that do not
+    /// resolve persisted interner ids afterward, or that restore against a
+    /// pristine interner (where the remap is identity).
+    ///
+    /// When no interner file exists, the returned remap is
+    /// [`InternerRemap::identity`] (ids pass through unchanged), preserving the
+    /// legacy behavior for that best-effort path.
+    pub fn load_manifest_and_strings_with_remap(&self) -> Result<(IndexManifest, InternerRemap)> {
         // 1. Load and restore string interner FIRST (if it exists)
         // This must happen before manifest check to enable recovery when manifest is missing
         // but other index files exist (partial save failure scenario)
         let interner_path = self.interner_path();
-        let interner_was_loaded = if interner_path.exists() {
+        let (interner_was_loaded, remap) = if interner_path.exists() {
+            // Decrypt the persisted interner with the configured index cipher
+            // (Issue #481); `restore_string_interner` returns the file-id ->
+            // live-id remap (Issue #3490) the caller threads through the graph /
+            // temporal index data.
             let interner_data =
                 load_string_interner_with_cipher(&interner_path, self.index_cipher())?;
-            restore_string_interner(&interner_data)?;
-            true
+            let remap = restore_string_interner(&interner_data)?;
+            (true, remap)
         } else {
-            false
+            (false, InternerRemap::identity())
         };
 
         // 2. Check if manifest exists
@@ -144,7 +170,7 @@ impl IndexPersistenceManager {
                 eprintln!(
                     "Warning: Manifest missing but string interner exists - attempting best-effort recovery"
                 );
-                return Ok(super::formats::IndexManifest::new(0));
+                return Ok((super::formats::IndexManifest::new(0), remap));
             }
 
             // No index files exist at all - this is expected on first run
@@ -156,7 +182,7 @@ impl IndexPersistenceManager {
         // 3. Load manifest
         let manifest = load_manifest_with_cipher(&manifest_path, self.index_cipher())?;
 
-        Ok(manifest)
+        Ok((manifest, remap))
     }
 
     /// Save the manifest.

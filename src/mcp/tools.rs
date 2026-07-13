@@ -49,6 +49,87 @@ pub struct ProvenanceRequest {
 }
 
 // ============================================================================
+// Derivation lineage (Issue #3371)
+// ============================================================================
+
+/// A version-pinned reference to a single existing fact, used to declare
+/// derivation lineage on a write (`derived_from`) and as the root of a
+/// lineage query.
+///
+/// Pins **both** the entity and the exact version that was read, so lineage
+/// refers to precisely the fact a derivation consumed — immune to later
+/// updates of that entity.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct LineageRefRequest {
+    /// Whether the reference points at a node or an edge.
+    #[schemars(description = "The kind of entity referenced: 'node' or 'edge'.")]
+    pub entity_kind: String,
+
+    /// The referenced entity's id (node id or edge id).
+    #[schemars(
+        description = "The referenced entity's id (a node id when entity_kind='node', an edge id when 'edge')."
+    )]
+    pub id: u64,
+
+    /// The specific version id of that entity that was read/derived from.
+    #[schemars(
+        description = "The specific version id of the entity that was read. Lineage pins the \
+                       exact version, not just the entity, so it stays precise across later updates. \
+                       Obtain it from get_node_history / get_edge_history (each entry's version_id)."
+    )]
+    pub version: u64,
+}
+
+/// Request for a lineage closure query (`lineage_upstream` / `lineage_downstream`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct LineageQueryRequest {
+    /// Whether the root fact is a node or an edge.
+    #[schemars(description = "The root fact's entity kind: 'node' or 'edge'.")]
+    pub entity_kind: String,
+
+    /// The root entity's id.
+    #[schemars(description = "The root entity's id (node id or edge id per entity_kind).")]
+    pub id: u64,
+
+    /// The root entity's version id (lineage is version-pinned).
+    #[schemars(
+        description = "The root fact's version id. Lineage is version-pinned; use the version \
+                       whose upstream/downstream closure you want."
+    )]
+    pub version: u64,
+
+    /// Maximum transitive depth to expand (hops from the root).
+    #[schemars(
+        description = "Maximum transitive hop depth from the root (1 = direct parents/children). \
+                       Defaults to the store's default depth cap. Hitting the cap sets has_more."
+    )]
+    pub max_depth: Option<usize>,
+
+    /// Maximum number of entries to return in this page.
+    #[schemars(
+        description = "Maximum number of closure entries to return (default 100). Hitting the \
+                       limit sets has_more and next_offset."
+    )]
+    pub limit: Option<usize>,
+
+    /// Number of entries to skip (breadth-first order) for pagination.
+    #[schemars(
+        description = "Number of closure entries to skip (breadth-first order) for pagination (default 0)."
+    )]
+    pub offset: Option<usize>,
+
+    /// Optional AS OF transaction-time bound: only follow lineage records
+    /// recorded at or before this transaction time.
+    #[schemars(
+        description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or integer \
+                       microseconds since epoch): only lineage records recorded at or before this \
+                       transaction time are followed, so the closure reflects lineage as it was \
+                       recorded by that time. Omit for all records."
+    )]
+    pub as_of_transaction_time: Option<String>,
+}
+
+// ============================================================================
 // Node Operations
 // ============================================================================
 
@@ -96,6 +177,17 @@ pub struct CreateNodeRequest {
                        writes. Retrievable later via get_node/get_node_history. Omit for no provenance."
     )]
     pub provenance: Option<ProvenanceRequest>,
+
+    /// Optional derivation lineage: the existing fact versions this new fact
+    /// was computed from (Issue #3371).
+    #[schemars(
+        description = "Optional derivation lineage (Issue #3371): an array of version-pinned \
+                       references to existing facts this node was computed/derived from, each \
+                       {entity_kind:'node'|'edge', id, version}. A nonexistent reference fails the \
+                       write with a structured error before any commit — no silent dangling lineage. \
+                       Omit for no lineage. Query it later via lineage_upstream/lineage_downstream."
+    )]
+    pub derived_from: Option<Vec<LineageRefRequest>>,
 }
 
 /// Request to update an existing node's properties.
@@ -127,6 +219,15 @@ pub struct UpdateNodeRequest {
                        Not inherited from the version being updated. Omit for no provenance."
     )]
     pub provenance: Option<ProvenanceRequest>,
+
+    /// Optional derivation lineage for the *new* version (Issue #3371).
+    #[schemars(
+        description = "Optional derivation lineage (Issue #3371): the existing fact versions the \
+                       NEW version was derived from, each {entity_kind:'node'|'edge', id, version}. \
+                       Recorded against the new version; a nonexistent reference fails the write \
+                       before any commit. Omit for no lineage."
+    )]
+    pub derived_from: Option<Vec<LineageRefRequest>>,
 }
 
 /// Request to delete a node.
@@ -330,6 +431,16 @@ pub struct CreateEdgeRequest {
                        writes. Retrievable later via get_edge_history. Omit for no provenance."
     )]
     pub provenance: Option<ProvenanceRequest>,
+
+    /// Optional derivation lineage: the existing fact versions this new edge
+    /// was computed from (Issue #3371).
+    #[schemars(
+        description = "Optional derivation lineage (Issue #3371): an array of version-pinned \
+                       references to existing facts this edge was derived from, each \
+                       {entity_kind:'node'|'edge', id, version}. A nonexistent reference fails the \
+                       write with a structured error before any commit. Omit for no lineage."
+    )]
+    pub derived_from: Option<Vec<LineageRefRequest>>,
 }
 
 /// Request to update an existing edge's properties.
@@ -361,6 +472,15 @@ pub struct UpdateEdgeRequest {
                        Not inherited from the version being updated. Omit for no provenance."
     )]
     pub provenance: Option<ProvenanceRequest>,
+
+    /// Optional derivation lineage for the *new* edge version (Issue #3371).
+    #[schemars(
+        description = "Optional derivation lineage (Issue #3371): the existing fact versions the \
+                       NEW edge version was derived from, each {entity_kind:'node'|'edge', id, \
+                       version}. Recorded against the new version; a nonexistent reference fails the \
+                       write before any commit. Omit for no lineage."
+    )]
+    pub derived_from: Option<Vec<LineageRefRequest>>,
 }
 
 /// Request to delete an edge.
@@ -805,6 +925,31 @@ pub struct GetNodeHistoryRequest {
     pub node_id: u64,
 }
 
+/// Request to produce a signed audit export of an entity's history (Issue #3358).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct AuditExportRequest {
+    /// The entity kind to export: `node` or `edge`.
+    #[schemars(description = "Entity kind to export: 'node' or 'edge'")]
+    pub entity_type: String,
+
+    /// The unique identifier of the entity.
+    #[schemars(description = "The unique identifier of the node or edge to export")]
+    pub entity_id: u64,
+
+    /// Operator-supplied database identity recorded in the artifact.
+    #[serde(default)]
+    #[schemars(description = "Optional database identity recorded in the artifact metadata")]
+    pub database_id: Option<String>,
+
+    /// Property keys to redact at export (values omitted, redaction recorded).
+    #[serde(default)]
+    #[schemars(
+        description = "Optional list of property keys to redact at export; their values are \
+                       omitted but the redaction is recorded and remains verifiable"
+    )]
+    pub redact_keys: Vec<String>,
+}
+
 /// Request to compute the difference between two versions of a node.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct DiffNodeVersionsRequest {
@@ -963,6 +1108,19 @@ pub struct QueryRequest {
     /// Maximum number of rows to return (default: 100, capped at 10000).
     #[schemars(description = "Maximum number of rows to return (default: 100, capped at 10000)")]
     pub limit: Option<usize>,
+
+    /// Optional per-call resource-limit overrides (Issue #3368): `timeout_ms`,
+    /// `max_result_rows`, and `max_response_bytes`. Each is folded against the
+    /// server default and an operator ceiling; an override above the ceiling is
+    /// rejected with `INVALID_ARGUMENT`. Omitting `limits` uses the server
+    /// defaults unchanged.
+    #[schemars(
+        description = "Optional per-call resource-limit overrides: {timeout_ms, max_result_rows, \
+                       max_response_bytes}. Each is bounded by an operator ceiling (over-ceiling \
+                       values are rejected with INVALID_ARGUMENT). 0 means unlimited (only under \
+                       an unbounded ceiling)."
+    )]
+    pub limits: Option<super::limits::QueryLimitsOverride>,
 }
 
 // ============================================================================
@@ -1043,6 +1201,56 @@ pub struct TemporalExtentRequest {
 /// single call.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct DatabaseStatsRequest {}
+
+// ============================================================================
+// Provenance hash chain (Issue #3351)
+// ============================================================================
+
+/// Request to verify the tamper-evident provenance hash chain.
+///
+/// Three independent modes, resolved in this precedence order:
+///
+/// 1. **Anchor extension** — pass `against` (a previously exported chain head,
+///    the object `export_chain_head` returns) to prove the current chain is an
+///    append-only extension of that anchor, detecting rollback (truncation)
+///    and fork (divergence).
+/// 2. **Entity-scoped** — pass `entity_kind` (`"node"`/`"edge"`) and `id` to
+///    recompute only that entity's contribution to the chain.
+/// 3. **Full** — pass nothing to walk the whole chain from genesis and
+///    localize the earliest broken sequence number on tamper.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct VerifyChainRequest {
+    /// Entity kind for an entity-scoped verify: `node` or `edge`.
+    #[serde(default)]
+    #[schemars(
+        description = "For an entity-scoped verify, the entity kind: 'node' or 'edge' \
+                       (requires `id`). Omit for a full-chain verify."
+    )]
+    pub entity_kind: Option<String>,
+
+    /// Entity id for an entity-scoped verify.
+    #[serde(default)]
+    #[schemars(
+        description = "For an entity-scoped verify, the entity id (requires `entity_kind`)."
+    )]
+    pub id: Option<u64>,
+
+    /// A previously exported chain head to verify append-only extension
+    /// against (as returned by `export_chain_head`).
+    #[serde(default)]
+    #[schemars(
+        description = "Optional previously-exported chain head object (as returned by \
+                       export_chain_head) to verify the current chain append-only-extends it, \
+                       detecting rollback (truncation) and fork (divergence)."
+    )]
+    pub against: Option<serde_json::Value>,
+}
+
+/// Request to export the current chain head as an external anchor.
+///
+/// Takes no arguments — the tool always returns the current head checkpoint.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct ExportChainHeadRequest {}
 
 // ============================================================================
 // Response Types (for serialization)

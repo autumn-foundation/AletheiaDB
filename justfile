@@ -22,6 +22,27 @@ test-one TEST:
 bench:
     cargo bench
 
+# Run the MCP round-trip p99 latency harness (Issue #3361).
+# Black-box over the shipped aletheia-mcp binary's stdio JSON-RPC transport.
+# Args: scale (smoke|nightly), sample size, warmup, enforce (0|1 hard-fail p99<5ms
+# absolute gate AND the relative committed-baseline p50<=2x gate).
+# Requires the mcp-server + config-toml features; serves the seeded fixture under
+# an Async durability profile so latencies isolate MCP overhead from fsync cost.
+# When enforce=1 the relative gate reads benchmarks/baselines/mcp_round_trip_baseline.json.
+mcp-bench scale='smoke' sample='200' warmup='20' enforce='0':
+    MCP_BENCH_SCALE={{scale}} MCP_BENCH_SAMPLE_SIZE={{sample}} MCP_BENCH_WARMUP={{warmup}} \
+    MCP_BENCH_ENFORCE_LATENCY={{enforce}} MCP_BENCH_ENFORCE_RELATIVE={{enforce}} \
+    MCP_BENCH_BASELINE=benchmarks/baselines/mcp_round_trip_baseline.json \
+    MCP_BENCH_JSON=mcp_round_trip_results.json \
+    cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
+# Regenerate the MCP round-trip reference baseline (gated p50s) — run on the
+# reference runner at nightly scale; commit the result. Refresh per release/hardware.
+mcp-bench-baseline sample='300' warmup='30':
+    MCP_BENCH_SCALE=nightly MCP_BENCH_SAMPLE_SIZE={{sample}} MCP_BENCH_WARMUP={{warmup}} \
+    MCP_BENCH_WRITE_BASELINE=benchmarks/baselines/mcp_round_trip_baseline.json \
+    cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
 # Run benchmarks and generate HTML tables
 bench-tables:
     cargo bench --all-features
@@ -59,6 +80,25 @@ check-features:
     @echo "=== semantic-characterization ===" && cargo check --features semantic-characterization
     @echo "=== nova umbrella ===" && cargo check --features nova
     @echo "=== nova + semantic-search ===" && cargo check --features nova,semantic-search
+    # Serde-enabling features (Issue #3390): each must compile standalone
+    # against the unified `serde` flag with no default features.
+    @echo "=== serde (standalone) ===" && cargo check --no-default-features --tests --features serde
+    @echo "=== config-toml (standalone) ===" && cargo check --no-default-features --tests --features config-toml
+    @echo "=== mcp-server (standalone) ===" && cargo check --no-default-features --tests --features mcp-server
+    @echo "=== sharding-rpc (standalone) ===" && cargo check --no-default-features --tests --features sharding-rpc
+    @echo "=== import (standalone) ===" && cargo check --no-default-features --tests --features import
+    @echo "=== http-server (standalone) ===" && cargo check --no-default-features --tests --features http-server
+    @echo "=== encryption (standalone) ===" && cargo check --no-default-features --tests --features encryption
+    @echo "=== encryption-vault (standalone) ===" && cargo check --no-default-features --tests --features encryption-vault
+    @echo "=== encryption-aws-kms (standalone) ===" && cargo check --no-default-features --tests --features encryption-aws-kms
+    @echo "=== parquet (standalone) ===" && cargo check --no-default-features --tests --features parquet
+
+# autumn-web 0.5.0 migration spike (Issue #3524): the isolated member crate has
+# its OWN gates (it links autumn-web 0.5 alongside the root's 0.4). CI wiring for
+# this crate is a follow-up; run locally with `just spike-check`.
+spike-check:
+    @echo "=== spike clippy ===" && cargo clippy -p aletheia-autumn-spike --all-targets -- -D warnings
+    @echo "=== spike tests ===" && cargo test -p aletheia-autumn-spike
 
 # Format code
 fmt:
@@ -263,6 +303,11 @@ audit:
     cargo audit
 
 # === Mutation Testing ===
+# CI runs these with --test-tool nextest and with
+# --features config-toml,mcp-server,sharding-rpc; locally we stay on plain
+# cargo test with default features so the recipes work without cargo-nextest
+# installed. For runs closer to CI, install nextest and add
+# `--test-tool nextest --features config-toml,mcp-server,sharding-rpc`.
 
 # Run mutation tests on all code
 mutants:
@@ -281,6 +326,14 @@ mutants-branch:
     trap 'rm -f mutants-diff.tmp' EXIT
     git diff origin/trunk.. > mutants-diff.tmp
     cargo mutants --in-place -vV --in-diff mutants-diff.tmp
+
+# Run the CI mutation-score gate against a local mutants.out directory
+mutants-gate dir="mutants.out":
+    python3 .github/scripts/mutants_gate.py gate --mutants-out "{{dir}}" --config .github/mutants-gate.toml
+
+# Run the gate script's unit tests
+mutants-gate-test:
+    python3 .github/scripts/test_mutants_gate.py
 
 # === Miri (Undefined Behavior Detection) ===
 

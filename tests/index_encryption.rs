@@ -289,6 +289,71 @@ fn db_end_to_end_encrypted_persist_and_reopen() {
     );
 }
 
+/// Regression guard for the encryption-at-rest (#481) × interner-remap (#3490)
+/// merge: a node with MANY distinct string property keys and String values must
+/// round-trip EVERY key and value verbatim across an encrypted persist + reopen.
+///
+/// #3490 broke exactly this: persisted property keys / String values are
+/// file-space interner ids that must be translated through the load-time remap
+/// before resolution, or they silently resolve to the WRONG string once the
+/// live interner order diverges from the saved file. The #481 cipher threading
+/// must decrypt the index bytes FIRST and then run that decode+remap unchanged —
+/// this test fails loudly if the cipher path bypasses or reorders the remap
+/// (values would come back mismatched, not merely absent).
+#[test]
+fn encrypted_reopen_roundtrips_multi_property_keys_and_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+    let key_path = dir.path().join("index.key");
+    FileKeyProvider::generate_key_file(&key_path).unwrap();
+
+    // Distinct string keys AND distinct string values, plus a non-string, so a
+    // dropped/mis-ordered remap can't accidentally pass by coincidence.
+    let expected: &[(&str, &str)] = &[
+        ("title", "Introduction to Rust"),
+        ("author", "Grace Hopper"),
+        ("publisher", "Aletheia Press"),
+        ("language", "English"),
+        ("isbn", "978-0-13-468599-1"),
+        ("summary", "A bitemporal tale"),
+    ];
+
+    let doc = {
+        let db = AletheiaDB::with_unified_config(encrypted_durable_config(&data_dir, &key_path))
+            .unwrap();
+        let mut builder = PropertyMapBuilder::new();
+        for &(k, v) in expected {
+            builder = builder.insert(k, v);
+        }
+        builder = builder.insert("edition", 3i64);
+        let doc = db.create_node("Document", builder.build()).unwrap();
+        db.persist_indexes().unwrap();
+        doc
+        // dropped: final flush.
+    };
+
+    // Reopen with the SAME key and assert every key -> value survives exactly.
+    let db2 =
+        AletheiaDB::with_unified_config(encrypted_durable_config(&data_dir, &key_path)).unwrap();
+    let node = db2
+        .get_node(doc)
+        .expect("Document must survive encrypted reopen");
+    for &(k, v) in expected {
+        assert_eq!(
+            node.properties.get(k).and_then(|val| val.as_str()),
+            Some(v),
+            "property key {:?} must round-trip its String value verbatim after \
+             encrypted reopen (guards #481 x #3490 remap reconciliation)",
+            k
+        );
+    }
+    assert_eq!(
+        node.properties.get("edition").and_then(|val| val.as_int()),
+        Some(3),
+        "non-string property must also survive"
+    );
+}
+
 /// Full-DB UPGRADE path (Issue #481, P3.1): a durable database created with
 /// encryption DISABLED (legacy plaintext index files) reopens cleanly under a
 /// cipher — every plaintext index file loads via header sniffing — and a

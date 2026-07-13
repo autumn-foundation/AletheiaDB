@@ -332,8 +332,22 @@ impl AletheiaDB {
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn execute_cypher(&self, query_string: &str) -> Result<QueryResults> {
-        let query = crate::cypher::parse_cypher(query_string)?;
-        self.execute_query(query)
+        // A standalone `UNWIND` (Issue #559) expands a list into scalar rows
+        // that have no `Query`-IR representation, so it is planned into a
+        // pre-computed result stream; every other statement lowers to a `Query`
+        // executed through the standard pipeline.
+        match crate::cypher::plan_cypher(query_string)? {
+            crate::cypher::CypherExecution::Query(query) => self.execute_query(query),
+            crate::cypher::CypherExecution::Rows(results) => Ok(results),
+            crate::cypher::CypherExecution::MultiPattern { statement, params } => {
+                self.execute_multi_pattern(&statement, &params)
+            }
+            crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
+            crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
+            crate::cypher::CypherExecution::Mutation { statement, params } => {
+                self.execute_mutation(&statement, &params)
+            }
+        }
     }
 
     /// Execute a Cypher query string with parameter bindings.
@@ -374,8 +388,99 @@ impl AletheiaDB {
         query_string: &str,
         params: std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
     ) -> Result<QueryResults> {
-        let query = crate::cypher::parse_cypher_with_params(query_string, params)?;
-        self.execute_query(query)
+        match crate::cypher::plan_cypher_with_params(query_string, params)? {
+            crate::cypher::CypherExecution::Query(query) => self.execute_query(query),
+            crate::cypher::CypherExecution::Rows(results) => Ok(results),
+            crate::cypher::CypherExecution::MultiPattern { statement, params } => {
+                self.execute_multi_pattern(&statement, &params)
+            }
+            crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
+            crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
+            crate::cypher::CypherExecution::Mutation { statement, params } => {
+                self.execute_mutation(&statement, &params)
+            }
+        }
+    }
+
+    /// Execute a Cypher write statement (Issue #560): `CREATE` / `SET` /
+    /// `DELETE` / `DETACH DELETE`.
+    ///
+    /// Dispatched here (rather than through the read-only `Query` pipeline)
+    /// because mutations are applied against the native write APIs so each
+    /// records the correct bi-temporal version. Reached only via
+    /// [`Self::execute_cypher`] / [`Self::execute_cypher_with_params`]; the MCP
+    /// `query` tool rejects mutating clauses before the parser runs
+    /// (`crate::query::read_only::detect_mutating_clause`).
+    fn execute_mutation(
+        &self,
+        statement: &crate::cypher::ast::CypherStatement,
+        params: &std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
+    ) -> Result<QueryResults> {
+        crate::cypher::mutation::execute(self, statement, params)
+    }
+
+    /// Execute a multi-variable, multi-pattern `MATCH` (Issue #549).
+    ///
+    /// Delegates to the dedicated [`crate::cypher::multi_pattern`] evaluator,
+    /// which binds several named variables per row (carried on
+    /// [`QueryRow::bindings`](crate::query::executor::QueryRow::bindings)) --
+    /// something the single-entity `Query` pipeline cannot represent. Reached
+    /// only for statements the router
+    /// ([`crate::cypher::exec::needs_multi_binding`]) classifies as
+    /// multi-variable.
+    fn execute_multi_pattern(
+        &self,
+        statement: &crate::cypher::ast::CypherStatement,
+        params: &std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
+    ) -> Result<QueryResults> {
+        Ok(crate::cypher::multi_pattern::evaluate(
+            self, statement, params,
+        )?)
+    }
+
+    /// Plan (but do not execute) a Cypher `EXPLAIN` query, returning the
+    /// physical plan as a single `plan` text row (Issue #562).
+    ///
+    /// This mirrors [`Self::execute_query`]'s planner construction but stops
+    /// after planning -- no executor is run, so there are no side effects and
+    /// the plan is returned even against an empty database.
+    fn explain_cypher_query(&self, query: Query) -> Result<QueryResults> {
+        let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
+        let physical_plan = planner.plan(query)?;
+        Ok(Self::plan_text_result("plan", physical_plan.explain()))
+    }
+
+    /// Execute a Cypher `PROFILE` query with per-operator instrumentation,
+    /// returning the plan annotated with executed row counts and timing as a
+    /// single `plan` text row (Issue #562).
+    ///
+    /// The instrumented stream is drained (its data rows discarded -- `PROFILE`
+    /// reports statistics, not the query's data, in v1) so the per-operator
+    /// counters are fully populated before the annotated plan is rendered.
+    fn profile_cypher_query(&self, query: Query) -> Result<QueryResults> {
+        let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
+        let physical_plan = planner.plan(query)?;
+
+        let executor = QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
+        let (results, registry) = executor.execute_profiled(&physical_plan)?;
+
+        // Fully drain so every operator's counters are populated before render.
+        let _ = results.collect_all()?;
+
+        let annotations: Vec<String> = registry.iter().map(|op| op.annotation()).collect();
+        Ok(Self::plan_text_result(
+            "plan",
+            physical_plan.explain_annotated(&annotations),
+        ))
+    }
+
+    /// Wrap a rendered plan string in a single computed-column result row.
+    fn plan_text_result(column: &str, text: String) -> QueryResults {
+        let row = crate::query::executor::QueryRow::from_columns(vec![(
+            column.to_string(),
+            crate::core::property::PropertyValue::String(std::sync::Arc::from(text.as_str())),
+        )]);
+        QueryResults::from_rows(vec![row])
     }
 }
 
