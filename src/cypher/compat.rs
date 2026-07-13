@@ -624,6 +624,52 @@ fn supported_execute_cases() -> Vec<Case> {
             Executes(2),
         )
         .with_params(vec![("dept", CypherParameterValue::String("Eng".into()))]),
+        // ---- write clauses (Issue #560) ------------------------------------
+        // Row-count contracts against a FRESH seed graph per case (the runner
+        // rebuilds `compat_db` per case so these mutations are isolated).
+        // Deeper side-effect assertions live in `cypher::tests::mutations`.
+        Case::new(
+            "mutating",
+            "create_returns_created",
+            "CREATE (n:Person {name: 'Zed'}) RETURN n",
+            Executes(1),
+        ),
+        Case::new(
+            "mutating",
+            "create_no_return",
+            "CREATE (n:Person {name: 'Zed'})",
+            Executes(0),
+        ),
+        Case::new(
+            "mutating",
+            "create_relationship",
+            "CREATE (a:Team {name: 'X'})-[:HAS]->(b:Member {name: 'Y'}) RETURN a, b",
+            Executes(1),
+        ),
+        Case::new(
+            "mutating",
+            "set_all_persons",
+            "MATCH (n:Person) SET n.active = 1 RETURN n",
+            Executes(4),
+        ),
+        Case::new(
+            "mutating",
+            "set_no_match",
+            "MATCH (n:Person {name: 'Nobody'}) SET n.age = 1 RETURN n",
+            Executes(0),
+        ),
+        Case::new(
+            "mutating",
+            "delete_relationship",
+            "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b) DELETE r",
+            Executes(0),
+        ),
+        Case::new(
+            "mutating",
+            "detach_delete_company",
+            "MATCH (c:Company {name: 'Acme'}) DETACH DELETE c",
+            Executes(0),
+        ),
     ]
 }
 
@@ -774,19 +820,14 @@ fn rejected_cases() -> Vec<Case> {
     use RejectKind::{Parameter, Parse, Semantic, Temporal, Timestamp, Unsupported};
 
     vec![
-        // ---- mutating clauses -> ParseError --------------------------------
-        Case::new(
-            "mutating",
-            "create",
-            "CREATE (n:Person {name: 'Zed'}) RETURN n",
-            Rejected(Parse, ""),
-        ),
-        Case::new(
-            "mutating",
-            "set",
-            "MATCH (n:Person) SET n.age = 1 RETURN n",
-            Rejected(Parse, ""),
-        ),
+        // ---- mutating clauses still intentionally unsupported ---------------
+        // CREATE / SET / DELETE / DETACH DELETE are now *supported* and executed
+        // (see supported_execute_cases). MERGE and REMOVE are deferred to
+        // follow-ups (Issue #560): MERGE (match-or-create) is its own design
+        // problem; REMOVE (property/label deletion) needs a replace/tombstone
+        // write API the native surface does not yet expose (update is
+        // PATCH-merge only) and label mutation conflicts with the single-label
+        // model. Both must still reject cleanly rather than partially apply.
         Case::new(
             "mutating",
             "merge",
@@ -795,20 +836,8 @@ fn rejected_cases() -> Vec<Case> {
         ),
         Case::new(
             "mutating",
-            "delete",
-            "MATCH (n:Person) DELETE n",
-            Rejected(Parse, ""),
-        ),
-        Case::new(
-            "mutating",
             "remove",
             "MATCH (n:Person) REMOVE n.age",
-            Rejected(Parse, ""),
-        ),
-        Case::new(
-            "mutating",
-            "detach_delete",
-            "MATCH (n:Person) DETACH DELETE n",
             Rejected(Parse, ""),
         ),
         Case::new(
@@ -966,12 +995,16 @@ fn assert_no_failures(runner: &str, total: usize, failures: Vec<String>) {
 
 #[test]
 fn compat_supported_execute() {
-    let db = compat_db();
     let cases = supported_execute_cases();
     let total = cases.len();
     let mut failures = Vec::new();
 
     for case in &cases {
+        // A FRESH seed graph per case (Issue #560): the corpus now includes
+        // executing write cases (CREATE / SET / DELETE / DETACH DELETE) that
+        // mutate the graph, so cases must not share state. Read-only cases are
+        // unaffected -- the seed is deterministic.
+        let db = compat_db();
         let result = if case.params.is_empty() {
             db.execute_cypher(case.query)
         } else {

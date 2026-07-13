@@ -38,6 +38,16 @@ pub enum TokenKind {
     /// `UNWIND`
     Unwind,
 
+    // -- Keywords: write clauses (Issue #560) -------------------------------
+    /// `CREATE`
+    Create,
+    /// `SET`
+    Set,
+    /// `DELETE`
+    Delete,
+    /// `DETACH` (used in `DETACH DELETE`)
+    Detach,
+
     // -- Keywords: ordering / projection ------------------------------------
     /// `ORDER`
     Order,
@@ -638,6 +648,12 @@ impl<'a> CypherLexer<'a> {
             "WITH" => TokenKind::With,
             "UNWIND" => TokenKind::Unwind,
 
+            // Write clauses (Issue #560)
+            "CREATE" => TokenKind::Create,
+            "SET" => TokenKind::Set,
+            "DELETE" => TokenKind::Delete,
+            "DETACH" => TokenKind::Detach,
+
             // Ordering / projection
             "ORDER" => TokenKind::Order,
             "BY" => TokenKind::By,
@@ -705,6 +721,10 @@ mod unit_tests {
             "RETURN",
             "WITH",
             "UNWIND",
+            "CREATE",
+            "SET",
+            "DELETE",
+            "DETACH",
             "ORDER",
             "BY",
             "LIMIT",
