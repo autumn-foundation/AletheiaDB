@@ -208,6 +208,62 @@ ORDER BY score DESC
 LIMIT 10
 ```
 
+### Querying Provenance (Issue #3354a)
+
+Write-time provenance (source / confidence / reason, Issue #3224) is queryable
+from an AQL `WHERE` clause through three read-only accessor functions plus a
+null check. This is the AQL half of Issue #3354; the Cypher surface (#3354b) and
+`RETURN`/`ORDER BY` provenance projection are tracked as follow-ups.
+
+| Accessor | Reads | Operand type | Operators |
+|----------|-------|--------------|-----------|
+| `source(x)` | version's `source` | string | `=`, `<>` |
+| `confidence(x)` | version's `confidence` | number `[0,1]` | `=`, `<>`, `<`, `<=`, `>`, `>=` |
+| `reason(x)` | version's `reason` | string | `=`, `<>` |
+| `provenance(x) IS [NOT] NULL` | whole bundle | — | — |
+
+`x` is a bound node/relationship variable. The accessors resolve **only** in
+function-call position, so a property literally named `source` (`n.source`) is
+unaffected.
+
+**Semantics (identical to the #3348 structured filter):**
+
+- Provenance is evaluated **per-version at the query's bi-temporal coordinate**:
+  under `AS OF`, the accessors read the bundle recorded on the version visible
+  at that coordinate, not the latest version.
+- A version with **no recorded provenance** (or a bundle missing the queried
+  field) makes the accessor null, so **every comparison is false** and the row
+  is excluded — matching #3348's exclude-unattributed default. Select the
+  unattributed rows deliberately with `provenance(x) IS NULL`.
+- `confidence` bounds are validated against `[0.0, 1.0]` (NaN rejected); an
+  out-of-range literal is a structured error, never a silent empty result.
+- Comparing an accessor to the wrong type (`confidence(n) = 'high'`,
+  `source(n) = 5`) is a type error, never a silent empty result.
+
+```cypher
+-- Only facts sourced from HR with high confidence
+MATCH (n:Person)
+WHERE source(n) = 'hr-system' AND confidence(n) >= 0.9
+RETURN n
+
+-- Deliberately select unattributed facts
+MATCH (n:Person)
+WHERE provenance(n) IS NULL
+RETURN n
+
+-- AS OF + graph pattern + confidence threshold in one statement
+AS OF '1704067200000000'
+MATCH (n:Person)
+WHERE confidence(n) >= 0.8 AND n.name = 'Alice'
+RETURN n
+```
+
+> **v1 limitation.** Like ordinary property predicates, an AQL provenance
+> accessor is evaluated against the row's bound entity, not resolved
+> per-variable (`confidence(r)` and `confidence(n)` both read the row entity's
+> provenance). Provenance in `RETURN`/`ORDER BY` projections is a deferred
+> follow-up (needs scalar-projection-into-row lowering).
+
 ## Semantic Mapping
 
 ### Query to Internal IR Mapping

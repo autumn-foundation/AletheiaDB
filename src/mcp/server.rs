@@ -5552,6 +5552,17 @@ impl AletheiaMcpServer {
                 None,
                 Some(language),
             ),
+            // A type mismatch is a caller-repairable argument fault (e.g. a
+            // provenance accessor compared to the wrong type, `confidence(r) =
+            // 'high'`, Issue #3354a) -- surface it as `invalid_params` per the
+            // query tool's structured-error contract, never a silent empty
+            // result.
+            Error::Query(QueryError::TypeMismatch { expected, actual }) => self.query_error(
+                "invalid_params",
+                &format!("Type mismatch: expected {expected}, got {actual}"),
+                None,
+                Some(language),
+            ),
             Error::Query(QueryError::ExecutionError { message }) => {
                 self.query_error("runtime_error", &message, None, Some(language))
             }
@@ -6885,6 +6896,11 @@ fn tool_definitions() -> Vec<Tool> {
              (->, <-, -), WHERE, RETURN [DISTINCT] / AS aliases, ORDER BY, SKIP/LIMIT, WITH \
              chaining, vector similarity ranking, and bi-temporal scoping \
              (AS OF TIMESTAMP/VALID_TIME/SYSTEM_TIME, FOR SYSTEM_TIME AS OF, BETWEEN ... AND ...). \
+             AQL WHERE clauses can filter on write-time provenance (Issue #3354a) via the \
+             read-only accessors source(x)/confidence(x)/reason(x) (e.g. \
+             WHERE confidence(n) >= 0.9 AND source(n) = 'hr-system') and provenance(x) IS [NOT] NULL; \
+             provenance is evaluated on the version visible at the query's AS OF coordinate, \
+             unattributed versions are excluded (select them with provenance(x) IS NULL). \
              Mutating statements (CREATE/MERGE/SET/DELETE/REMOVE/DETACH/DROP/CALL/FOREACH/LOAD) \
              are rejected before execution and never write. Results are capped (default 100, \
              max 10000 rows; `truncated` indicates a cap hit). Per-query resource limits \
@@ -7580,6 +7596,19 @@ mod server_unit_tests {
             message: "boom".to_string(),
         });
         assert_eq!(error_kind(&server, err), "runtime_error");
+    }
+
+    #[test]
+    fn map_query_error_type_mismatch_yields_invalid_params() {
+        // A provenance accessor compared to the wrong type (e.g.
+        // `confidence(r) = 'high'`, Issue #3354a) surfaces as `invalid_params`,
+        // never a silent empty result (AC5).
+        let server = make_server();
+        let err = Error::Query(QueryError::TypeMismatch {
+            expected: "number".to_string(),
+            actual: "string".to_string(),
+        });
+        assert_eq!(error_kind(&server, err), "invalid_params");
     }
 
     #[test]

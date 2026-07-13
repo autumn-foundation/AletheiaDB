@@ -15,6 +15,7 @@ use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
+use crate::core::provenance::Provenance;
 use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{
@@ -1651,19 +1652,101 @@ impl ResultIterator for TraversalIterator {
 pub struct FilterIterator {
     input: Box<dyn ResultIterator>,
     predicate: Predicate,
+    /// Historical storage, needed only to resolve a row entity's write-time
+    /// provenance for [`Predicate::Provenance`] leaves (Issue #3354a). `None`
+    /// when the predicate carries no provenance leaf (the overwhelming common
+    /// case), so a plain property filter never touches historical storage.
+    historical: Option<Arc<RwLock<HistoricalStorage>>>,
+    /// Cached: does the predicate tree contain any provenance leaf? Computed
+    /// once so `next()` avoids resolving provenance for property-only filters.
+    needs_provenance: bool,
 }
 
 impl FilterIterator {
     /// Create a new FilterIterator that filters results based on the predicate.
+    ///
+    /// This constructor carries no historical-storage handle, so a
+    /// [`Predicate::Provenance`] leaf would have no bundle to resolve and be
+    /// evaluated as absent (excluded). Use
+    /// [`with_historical`](Self::with_historical) when the predicate may
+    /// reference provenance.
     pub fn new(input: Box<dyn ResultIterator>, predicate: Predicate) -> Self {
-        FilterIterator { input, predicate }
+        let needs_provenance = Self::predicate_needs_provenance(&predicate);
+        FilterIterator {
+            input,
+            predicate,
+            historical: None,
+            needs_provenance,
+        }
     }
 
-    fn evaluate(&self, node: &Node) -> bool {
-        self.evaluate_predicate(&self.predicate, node)
+    /// Create a FilterIterator with access to historical storage so
+    /// [`Predicate::Provenance`] leaves (Issue #3354a) can resolve each row
+    /// entity's write-time provenance bundle at the version the row represents.
+    pub fn with_historical(
+        input: Box<dyn ResultIterator>,
+        predicate: Predicate,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        let needs_provenance = Self::predicate_needs_provenance(&predicate);
+        FilterIterator {
+            input,
+            predicate,
+            historical: Some(historical),
+            needs_provenance,
+        }
     }
 
-    fn evaluate_predicate(&self, predicate: &Predicate, node: &Node) -> bool {
+    /// Returns `true` if the predicate tree contains any provenance leaf.
+    fn predicate_needs_provenance(predicate: &Predicate) -> bool {
+        match predicate {
+            Predicate::Provenance(_) => true,
+            Predicate::And(preds) | Predicate::Or(preds) => {
+                preds.iter().any(Self::predicate_needs_provenance)
+            }
+            Predicate::Not(pred) => Self::predicate_needs_provenance(pred),
+            _ => false,
+        }
+    }
+
+    /// Resolve the write-time provenance bundle recorded on the version a node
+    /// row represents (Issue #3354a).
+    ///
+    /// Uses the node's `current_version` — which, for a point-in-time (`AS OF`)
+    /// reconstructed node, is the historical version at that coordinate — so
+    /// provenance is evaluated as recorded at the query's bi-temporal
+    /// coordinate (AC3). A missing handle or a lookup error resolves to `None`
+    /// (treated as unattributed, i.e. excluded by any provenance comparison).
+    fn resolve_node_provenance(&self, node: &Node) -> Option<Provenance> {
+        let historical = self.historical.as_ref()?;
+        historical
+            .read()
+            .get_node_version_provenance(node.current_version)
+            .ok()
+            .flatten()
+    }
+
+    /// Resolve the write-time provenance bundle recorded on the version an edge
+    /// row represents (Issue #3354a). See [`resolve_node_provenance`](Self::resolve_node_provenance).
+    fn resolve_edge_provenance(&self, edge: &crate::core::graph::Edge) -> Option<Provenance> {
+        let historical = self.historical.as_ref()?;
+        historical
+            .read()
+            .get_edge_version_provenance(edge.current_version)
+            .ok()
+            .flatten()
+    }
+
+    fn evaluate(&self, node: &Node, prov: Option<&Provenance>) -> bool {
+        self.evaluate_predicate(&self.predicate, node, prov)
+    }
+
+    fn evaluate_predicate(
+        &self,
+        predicate: &Predicate,
+        node: &Node,
+        prov: Option<&Provenance>,
+    ) -> bool {
         match predicate {
             Predicate::True => true,
             Predicate::False => false,
@@ -1679,9 +1762,30 @@ impl FilterIterator {
             Predicate::StartsWith { key, prefix } => self.evaluate_starts_with(node, key, prefix),
             Predicate::EndsWith { key, suffix } => self.evaluate_ends_with(node, key, suffix),
             Predicate::In { key, values } => self.evaluate_in(node, key, values),
-            Predicate::And(preds) => preds.iter().all(|p| self.evaluate_predicate(p, node)),
-            Predicate::Or(preds) => preds.iter().any(|p| self.evaluate_predicate(p, node)),
-            Predicate::Not(pred) => !self.evaluate_predicate(pred, node),
+            Predicate::Provenance(p) => p.evaluate(prov),
+            Predicate::And(preds) => preds.iter().all(|p| self.evaluate_predicate(p, node, prov)),
+            Predicate::Or(preds) => preds.iter().any(|p| self.evaluate_predicate(p, node, prov)),
+            Predicate::Not(pred) => !self.evaluate_predicate(pred, node, prov),
+        }
+    }
+
+    /// Evaluate a predicate against an edge row for the provenance leaves only.
+    ///
+    /// The AQL single-entity pipeline historically passes edge rows through the
+    /// filter untouched; this preserves that for non-provenance leaves (which
+    /// evaluate to `true`, i.e. pass-through) while honoring
+    /// [`Predicate::Provenance`] leaves against the edge's own provenance
+    /// bundle (Issue #3354a). Only invoked when the predicate contains a
+    /// provenance leaf.
+    fn evaluate_edge_predicate(&self, predicate: &Predicate, prov: Option<&Provenance>) -> bool {
+        match predicate {
+            Predicate::Provenance(p) => p.evaluate(prov),
+            Predicate::And(preds) => preds.iter().all(|p| self.evaluate_edge_predicate(p, prov)),
+            Predicate::Or(preds) => preds.iter().any(|p| self.evaluate_edge_predicate(p, prov)),
+            Predicate::Not(pred) => !self.evaluate_edge_predicate(pred, prov),
+            Predicate::False => false,
+            // Non-provenance leaves retain the pre-existing edge pass-through.
+            _ => true,
         }
     }
 
@@ -1845,6 +1949,10 @@ impl FilterIterator {
             | Predicate::Contains { .. }
             | Predicate::StartsWith { .. }
             | Predicate::EndsWith { .. } => false,
+            // A null OPTIONAL MATCH binding carries no entity and therefore no
+            // provenance bundle: `provenance(x) IS NULL` is true, every other
+            // provenance comparison is not-true (Issue #3354a).
+            Predicate::Provenance(p) => p.evaluate(None),
             Predicate::And(preds) => preds.iter().all(|p| self.evaluate_null(p)),
             Predicate::Or(preds) => preds.iter().any(|p| self.evaluate_null(p)),
             Predicate::Not(pred) => !self.evaluate_null(pred),
@@ -1858,7 +1966,16 @@ impl ResultIterator for FilterIterator {
             match self.input.next() {
                 Some(Ok(row)) => {
                     if let Some(node) = row.entity.as_node() {
-                        if self.evaluate(node) {
+                        // Resolve the row entity's provenance once (only when the
+                        // predicate actually references it), so an AND/OR of a
+                        // property filter and a provenance filter shares one
+                        // lookup (Issue #3354a).
+                        let prov = if self.needs_provenance {
+                            self.resolve_node_provenance(node)
+                        } else {
+                            None
+                        };
+                        if self.evaluate(node, prov.as_ref()) {
                             return Some(Ok(row));
                         }
                         // Filter didn't pass, continue to next
@@ -1870,8 +1987,21 @@ impl ResultIterator for FilterIterator {
                             return Some(Ok(row));
                         }
                         // Filter didn't pass, continue to next
+                    } else if self.needs_provenance {
+                        // Edge rows historically pass through the filter. When
+                        // the predicate carries a provenance leaf, evaluate that
+                        // leaf against the edge's own provenance (Issue #3354a);
+                        // non-provenance leaves keep the pass-through behavior.
+                        let prov = row
+                            .entity
+                            .as_edge()
+                            .and_then(|edge| self.resolve_edge_provenance(edge));
+                        if self.evaluate_edge_predicate(&self.predicate, prov.as_ref()) {
+                            return Some(Ok(row));
+                        }
+                        // Filter didn't pass, continue to next
                     } else {
-                        // Non-node entities pass through
+                        // Non-node entities pass through (no provenance leaf).
                         return Some(Ok(row));
                     }
                 }
@@ -2005,7 +2135,11 @@ impl OptionalApplyIterator {
                     *temporal_context,
                 )),
                 OptionalPhysicalStep::Filter(predicate) => {
-                    Box::new(FilterIterator::new(iter, predicate.clone()))
+                    Box::new(FilterIterator::with_historical(
+                        iter,
+                        predicate.clone(),
+                        Arc::clone(&self.historical),
+                    ))
                 }
             };
         }
@@ -3246,7 +3380,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3255,7 +3389,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Bob");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3264,7 +3398,7 @@ mod tests {
         let predicate = Predicate::eq("missing", "value");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3273,7 +3407,7 @@ mod tests {
         let predicate = Predicate::ne("name", "Bob");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3282,7 +3416,7 @@ mod tests {
         let predicate = Predicate::ne("name", "Alice");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3292,7 +3426,7 @@ mod tests {
         let predicate = Predicate::ne("missing", "value");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3301,7 +3435,7 @@ mod tests {
         let predicate = Predicate::gt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3310,7 +3444,7 @@ mod tests {
         let predicate = Predicate::gt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3319,7 +3453,7 @@ mod tests {
         let predicate = Predicate::gt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3328,7 +3462,7 @@ mod tests {
         let predicate = Predicate::lt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3337,7 +3471,7 @@ mod tests {
         let predicate = Predicate::lt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3349,7 +3483,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3361,7 +3495,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3373,7 +3507,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3385,7 +3519,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3397,7 +3531,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3409,7 +3543,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3418,7 +3552,7 @@ mod tests {
         let predicate = Predicate::exists("name");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3427,7 +3561,7 @@ mod tests {
         let predicate = Predicate::exists("missing");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3436,7 +3570,7 @@ mod tests {
         let predicate = Predicate::NotExists("missing".to_string());
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3445,7 +3579,7 @@ mod tests {
         let predicate = Predicate::NotExists("name".to_string());
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3454,7 +3588,7 @@ mod tests {
         let predicate = Predicate::contains("name", "John");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3463,7 +3597,7 @@ mod tests {
         let predicate = Predicate::contains("name", "Bob");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3475,7 +3609,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3487,7 +3621,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3499,7 +3633,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3511,7 +3645,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3527,7 +3661,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3542,7 +3676,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3563,7 +3697,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").and(Predicate::gt("age", 18i64));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3572,7 +3706,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").and(Predicate::gt("age", 18i64));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3581,7 +3715,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3590,7 +3724,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3599,7 +3733,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3608,7 +3742,7 @@ mod tests {
         let predicate = Predicate::Not(Box::new(Predicate::eq("name", "Bob")));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3617,7 +3751,7 @@ mod tests {
         let predicate = Predicate::Not(Box::new(Predicate::eq("name", "Alice")));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3626,7 +3760,7 @@ mod tests {
         let predicate = Predicate::True;
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3635,7 +3769,7 @@ mod tests {
         let predicate = Predicate::False;
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3651,11 +3785,11 @@ mod tests {
 
         let predicate = Predicate::gt("score", 3.0f64);
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
 
         let predicate = Predicate::lt("score", 4.0f64);
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -3671,11 +3805,11 @@ mod tests {
 
         let predicate = Predicate::eq("active", true);
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
 
         let predicate = Predicate::eq("active", false);
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     // ==================== FilterIterator Integration Tests ====================
@@ -4087,7 +4221,7 @@ mod tests {
         let predicate = Predicate::gt("name", 10i64); // Comparing String to Int
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node)); // Type mismatch returns false
+        assert!(!filter.evaluate(&node, None)); // Type mismatch returns false
     }
 
     #[test]
@@ -4096,7 +4230,7 @@ mod tests {
         let predicate = Predicate::contains("age", "30"); // age is Int, not String
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -4108,7 +4242,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     #[test]
@@ -4120,7 +4254,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     // ==================== Null handling ====================
@@ -4145,7 +4279,7 @@ mod tests {
             value: PredicateValue::Null,
         };
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     // ==================== Complex nested predicates ====================
@@ -4164,7 +4298,7 @@ mod tests {
         ]);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -4174,7 +4308,7 @@ mod tests {
         let predicate = Predicate::And(vec![]);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node, None));
     }
 
     #[test]
@@ -4184,7 +4318,7 @@ mod tests {
         let predicate = Predicate::Or(vec![]);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node, None));
     }
 
     // ==================== NodeLookupIterator Tests ====================
