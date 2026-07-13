@@ -98,6 +98,18 @@ pub enum CypherExecution {
     /// per-operator instrumentation and return the annotated plan as a single
     /// `plan` row.
     Profile(Query),
+    /// A write statement (Issue #560): `CREATE` / `SET` / `DELETE` /
+    /// `DETACH DELETE`, optionally with a reading `MATCH` and a `RETURN`.
+    ///
+    /// Carried unconverted (writes do not lower to the read-only [`Query`] IR)
+    /// and dispatched to `AletheiaDB::execute_mutation`, which needs the database
+    /// handle to apply the mutation through the native write APIs.
+    Mutation {
+        /// The parsed write statement to execute.
+        statement: Box<CypherStatement>,
+        /// Parameter bindings for `$param` references.
+        params: HashMap<String, CypherParameterValue>,
+    },
 }
 
 /// Parse and plan a Cypher string with no bound parameters.
@@ -141,6 +153,15 @@ pub fn plan_cypher_with_params(
         CypherStatement::Profile(inner) => {
             let query = lower_for_plan(*inner, params, "PROFILE")?;
             Ok(CypherExecution::Profile(query))
+        }
+        stmt @ CypherStatement::Write(_) => {
+            // A write statement is executed directly against the native write
+            // APIs (see `crate::cypher::mutation`); it has no read-only `Query`
+            // representation, so it is carried unconverted.
+            Ok(CypherExecution::Mutation {
+                statement: Box::new(stmt),
+                params,
+            })
         }
         other if needs_multi_binding(&other) => {
             // A multi-variable / multi-pattern MATCH has no faithful
@@ -188,6 +209,13 @@ fn lower_for_plan(
         CypherStatement::Explain(_) | CypherStatement::Profile(_) => Err(
             CypherError::UnsupportedFeature(format!("{verb} cannot wrap another EXPLAIN/PROFILE")),
         ),
+        // A write statement has no read-only `Query` plan to display or profile,
+        // and EXPLAIN/PROFILE must never execute a mutation as a side effect, so
+        // reject rather than mis-lower.
+        CypherStatement::Write(_) => Err(CypherError::UnsupportedFeature(format!(
+            "{verb} is not supported for write statements (CREATE / SET / DELETE); \
+             EXPLAIN/PROFILE describe read-only query plans"
+        ))),
         // A multi-variable / multi-pattern MATCH (Issue #549) is dispatched to
         // the dedicated evaluator, which has no physical `Query` plan; there is
         // nothing to lower here, so reject rather than mis-lower.

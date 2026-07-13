@@ -1,11 +1,20 @@
 # openCypher Compatibility Matrix (Issue #561)
 
-AletheiaDB implements a **read-only subset** of openCypher with bi-temporal and
-vector extensions. This document is the authoritative, machine-verified contract
-for **what that subset is** and **how out-of-subset queries fail**. Every row in
-the tables below is pinned by an executable case in the compatibility suite
-(`src/cypher/compat.rs`); the doc and the suite are kept in lockstep — if they
-disagree, that is a bug.
+AletheiaDB implements a growing subset of openCypher with bi-temporal and
+vector extensions. The read subset is complemented by a **core write subset**
+(Issue #560: `CREATE` / `SET` / `DELETE` / `DETACH DELETE`), executed through the
+native bi-temporal write APIs. This document is the authoritative,
+machine-verified contract for **what that subset is** and **how out-of-subset
+queries fail**. Every row in the tables below is pinned by an executable case in
+the compatibility suite (`src/cypher/compat.rs`); the doc and the suite are kept
+in lockstep — if they disagree, that is a bug.
+
+> **Writes are `execute_cypher`-only.** The MCP `query` tool and HTTP `/query`
+> endpoint remain strictly read-only: every mutating clause is rejected by the
+> text-level guard `crate::query::read_only::detect_mutating_clause` *before the
+> parser runs*, so a write can never execute through those surfaces. Mutations
+> are reachable only via `AletheiaDB::execute_cypher` /
+> `execute_cypher_with_params`.
 
 The design goal is **honesty over coverage**: a construct is either *supported*
 (parses/executes correctly) or *rejected with a structured error*. AletheiaDB
@@ -111,6 +120,29 @@ correctly.
 | Vector similarity in `ORDER BY` | `RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10` | *convert-only* (needs an `Embedding` param) |
 | Parameters | `MATCH (n:Person {name:$name}) RETURN n` | `$param` bindings |
 
+### Write clauses (Issue #560, `execute_cypher`-only)
+
+Executed through the native write APIs in one transaction (all-or-nothing, one
+commit timestamp), so each mutation records the correct bi-temporal version.
+Deeper side-effect and bi-temporal assertions live in `src/cypher/tests.rs`
+(`cypher::tests::mutations`); the compat suite pins the row-count contract
+against a **fresh seed graph per case**.
+
+| Construct | Example | Notes / caveats |
+|-----------|---------|-----------------|
+| `CREATE` node | `CREATE (n:Person {name:'Zed'}) RETURN n` | exactly one label per new node (single-label model); inline properties supported; `RETURN` yields the created node |
+| `CREATE` relationship | `CREATE (a:Team {name:'X'})-[:HAS]->(b:Member {name:'Y'})` | directed (`->`/`<-`), exactly one type; endpoints may be new or reference matched/earlier-created variables |
+| `MATCH ... CREATE` | `MATCH (a:Person {name:'A'}),(b:Person {name:'B'}) CREATE (a)-[:KNOWS]->(b)` | creates once per matched row |
+| `SET` property | `MATCH (n:Person {name:'Alice'}) SET n.age = 31` | PATCH-merge (adds/overwrites the named key, preserves others); multiple `n.p = v` items coalesce into one new version; also applies to relationship variables |
+| `DELETE` | `MATCH (a)-[r:KNOWS]->(b) DELETE r` | deletes node and/or relationship variables; a plain `DELETE` of a node that still has relationships is **refused** (openCypher safety rule) |
+| `DETACH DELETE` | `MATCH (n:Person {name:'A'}) DETACH DELETE n` | cascade-removes the node and its relationships (maps to `delete_node_cascade`) |
+| `RETURN` after write | `CREATE (n:X {..}) RETURN n`, `... SET n.p=1 RETURN n` | bound variables (bare or `AS`-aliased) / `*`; re-read post-write (a `SET`-updated node reflects the new value) |
+
+Deferred to follow-ups (rejected cleanly — see §2): `MERGE`, `REMOVE`, label
+mutation (`SET n:Label`), whole-entity replacement (`SET n = {...}` / `+=`),
+variable-length relationships in a write, and aggregate/property `RETURN`
+projections after a write.
+
 ---
 
 ## 2. Intentionally-unsupported constructs (rejected, never silent)
@@ -120,12 +152,8 @@ can be produced. The suite pins the exact variant and a message substring.
 
 | Construct | Example | Error variant | Why |
 |-----------|---------|---------------|-----|
-| `CREATE` | `CREATE (n) RETURN n` | `ParseError` | read-only subset; `CREATE` is not a lexer keyword, so it fails `expect(MATCH)` |
-| `SET` | `MATCH (n) SET n.x = 1` | `ParseError` | mutating clause not in the read-only grammar |
-| `MERGE` | `MERGE (n:Person {name:'Z'}) RETURN n` | `ParseError` | mutating clause |
-| `DELETE` | `MATCH (n) DELETE n` | `ParseError` | mutating clause |
-| `REMOVE` | `MATCH (n) REMOVE n.age` | `ParseError` | mutating clause |
-| `DETACH DELETE` | `MATCH (n) DETACH DELETE n` | `ParseError` | mutating clause |
+| `MERGE` | `MERGE (n:Person {name:'Z'}) RETURN n` | `ParseError` | **deferred** (Issue #560): match-or-create is its own design problem; not yet a lexer keyword, so it fails `expect(MATCH)`. Rejects cleanly, never partially applies |
+| `REMOVE` | `MATCH (n) REMOVE n.age` | `ParseError` | **deferred** (Issue #560): property removal needs a replace/tombstone write API the native surface does not expose (update is PATCH-merge only), and label removal conflicts with the single-label model |
 | `FOREACH` | `FOREACH (x IN [1] | SET ...)` | `ParseError` | mutating/procedural clause |
 | `CALL` | `CALL db.labels()` | `ParseError` | procedure calls not supported |
 | `LOAD CSV` | `LOAD CSV FROM 'f.csv' AS row RETURN row` | `ParseError` | data-loading clause not supported |

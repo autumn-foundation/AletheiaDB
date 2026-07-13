@@ -344,6 +344,9 @@ impl AletheiaDB {
             }
             crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
             crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
+            crate::cypher::CypherExecution::Mutation { statement, params } => {
+                self.execute_mutation(&statement, &params)
+            }
         }
     }
 
@@ -393,7 +396,27 @@ impl AletheiaDB {
             }
             crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
             crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
+            crate::cypher::CypherExecution::Mutation { statement, params } => {
+                self.execute_mutation(&statement, &params)
+            }
         }
+    }
+
+    /// Execute a Cypher write statement (Issue #560): `CREATE` / `SET` /
+    /// `DELETE` / `DETACH DELETE`.
+    ///
+    /// Dispatched here (rather than through the read-only `Query` pipeline)
+    /// because mutations are applied against the native write APIs so each
+    /// records the correct bi-temporal version. Reached only via
+    /// [`Self::execute_cypher`] / [`Self::execute_cypher_with_params`]; the MCP
+    /// `query` tool rejects mutating clauses before the parser runs
+    /// (`crate::query::read_only::detect_mutating_clause`).
+    fn execute_mutation(
+        &self,
+        statement: &crate::cypher::ast::CypherStatement,
+        params: &std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
+    ) -> Result<QueryResults> {
+        crate::cypher::mutation::execute(self, statement, params)
     }
 
     /// Execute a multi-variable, multi-pattern `MATCH` (Issue #549).

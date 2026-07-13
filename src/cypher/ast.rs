@@ -89,6 +89,81 @@ pub enum CypherStatement {
     ///
     /// Same nesting rules as [`CypherStatement::Explain`].
     Profile(Box<CypherStatement>),
+
+    /// A write statement (Issue #560): `CREATE` / `SET` / `DELETE` /
+    /// `DETACH DELETE`, optionally preceded by a reading `MATCH` and followed by
+    /// a `RETURN`.
+    ///
+    /// Write statements are **not** lowered into the read-only [`Query`] IR;
+    /// they are executed directly against the database's native write APIs (so
+    /// each mutation records the correct bi-temporal version). They are reachable
+    /// only through `AletheiaDB::execute_cypher` / `execute_cypher_with_params`;
+    /// the MCP `query` tool rejects every mutating clause *before* the parser
+    /// runs (`crate::query::read_only::detect_mutating_clause`), so this variant
+    /// never executes through that read-only surface.
+    ///
+    /// [`Query`]: crate::query::Query
+    Write(CypherWriteStatement),
+}
+
+/// A complete Cypher write statement (Issue #560).
+///
+/// Grammar (v1):
+///
+/// ```text
+/// write_stmt := [reading] write_clause+ [RETURN ...]
+/// reading    := MATCH pattern_list [WHERE expr]
+/// write_clause := CREATE pattern_list
+///               | SET set_item (',' set_item)*
+///               | [DETACH] DELETE variable (',' variable)*
+/// set_item   := variable '.' property '=' value
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherWriteStatement {
+    /// An optional leading reading clause (`MATCH ... [WHERE ...]`) whose matched
+    /// rows drive the write clauses. `None` for a statement that opens directly
+    /// with `CREATE`.
+    pub reading: Option<CypherReadingClause>,
+    /// One or more write clauses, applied in source order per matched row.
+    pub clauses: Vec<CypherWriteClause>,
+    /// An optional trailing `RETURN` projecting the affected entities.
+    pub return_clause: Option<CypherReturn>,
+}
+
+/// The reading (`MATCH ... [WHERE ...]`) part of a write statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherReadingClause {
+    /// One or more comma-separated graph patterns to match.
+    pub pattern: Vec<CypherPattern>,
+    /// An optional `WHERE` clause filtering matched rows.
+    pub where_clause: Option<CypherExpr>,
+}
+
+/// A single write clause within a [`CypherWriteStatement`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherWriteClause {
+    /// `CREATE <pattern_list>` -- create the described nodes and relationships.
+    Create(Vec<CypherPattern>),
+    /// `SET <set_item> (',' <set_item>)*` -- assign properties on bound entities.
+    Set(Vec<CypherSetItem>),
+    /// `[DETACH] DELETE <variable> (',' <variable>)*` -- delete bound entities.
+    Delete {
+        /// Whether this is a `DETACH DELETE` (cascade-remove connected edges).
+        detach: bool,
+        /// The variables to delete (nodes or relationships).
+        targets: Vec<String>,
+    },
+}
+
+/// A single `SET n.prop = value` assignment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherSetItem {
+    /// The variable whose property is being set.
+    pub variable: String,
+    /// The property key to assign.
+    pub property: String,
+    /// The literal (or parameter) value assigned.
+    pub value: CypherValue,
 }
 
 /// A subsequent `OPTIONAL MATCH` clause within a `MATCH` statement.

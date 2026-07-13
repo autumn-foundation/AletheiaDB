@@ -230,9 +230,143 @@ impl CypherParser {
             return self.parse_unwind();
         }
 
-        // Now expect a MATCH (or OPTIONAL MATCH).
+        // A statement that opens directly with `CREATE` is a write statement
+        // with no reading part (Issue #560). A leading temporal clause has no
+        // meaning for a write, so reject the combination rather than silently
+        // dropping the qualifier.
+        if self.at(TokenKind::Create) {
+            if temporal.is_some() {
+                return Err(self.error(
+                    "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a CREATE statement",
+                ));
+            }
+            return self.parse_write_statement(None);
+        }
+
+        // Now expect a MATCH (or OPTIONAL MATCH), which may turn out to be the
+        // reading part of a write statement (`MATCH ... SET/DELETE/CREATE ...`).
         let stmt = self.parse_match(temporal)?;
         Ok(stmt)
+    }
+
+    /// Returns `true` if the current token starts a write clause
+    /// (`CREATE` / `SET` / `DELETE` / `DETACH DELETE`), Issue #560.
+    fn at_write_clause(&self) -> bool {
+        matches!(
+            self.peek().kind,
+            TokenKind::Create | TokenKind::Set | TokenKind::Delete | TokenKind::Detach
+        )
+    }
+
+    /// Parse a write statement (Issue #560): one or more write clauses followed
+    /// by an optional `RETURN`.
+    ///
+    /// `reading` is the already-parsed reading part (`MATCH ... [WHERE ...]`),
+    /// or `None` for a statement opening directly with `CREATE`.
+    fn parse_write_statement(
+        &mut self,
+        reading: Option<CypherReadingClause>,
+    ) -> Result<CypherStatement, CypherError> {
+        let mut clauses = Vec::new();
+        loop {
+            match self.peek().kind {
+                TokenKind::Create => {
+                    self.advance();
+                    let patterns = self.parse_pattern_list()?;
+                    clauses.push(CypherWriteClause::Create(patterns));
+                }
+                TokenKind::Set => {
+                    self.advance();
+                    let items = self.parse_set_items()?;
+                    clauses.push(CypherWriteClause::Set(items));
+                }
+                TokenKind::Detach => {
+                    self.advance();
+                    self.expect(TokenKind::Delete)?;
+                    let targets = self.parse_delete_targets()?;
+                    clauses.push(CypherWriteClause::Delete {
+                        detach: true,
+                        targets,
+                    });
+                }
+                TokenKind::Delete => {
+                    self.advance();
+                    let targets = self.parse_delete_targets()?;
+                    clauses.push(CypherWriteClause::Delete {
+                        detach: false,
+                        targets,
+                    });
+                }
+                _ => break,
+            }
+        }
+
+        if clauses.is_empty() {
+            return Err(self.error("expected a write clause (CREATE / SET / DELETE)"));
+        }
+
+        let return_clause = if self.at(TokenKind::Return) {
+            Some(self.parse_return()?)
+        } else {
+            None
+        };
+
+        Ok(CypherStatement::Write(CypherWriteStatement {
+            reading,
+            clauses,
+            return_clause,
+        }))
+    }
+
+    /// Parse the items of a `SET` clause: `n.prop = value (, n.prop = value)*`.
+    ///
+    /// v1 supports only property assignment (`SET n.prop = value`). Label
+    /// mutation (`SET n:Label`) and whole-entity replacement (`SET n = {...}`,
+    /// `SET n += {...}`) are rejected with a structured
+    /// [`CypherError::UnsupportedFeature`] -- AletheiaDB nodes are single-labeled
+    /// and the native update API is PATCH-merge only.
+    fn parse_set_items(&mut self) -> Result<Vec<CypherSetItem>, CypherError> {
+        let mut items = Vec::new();
+        loop {
+            let var_tok = self.expect(TokenKind::Identifier)?;
+            if self.at(TokenKind::Colon) {
+                return Err(CypherError::UnsupportedFeature(
+                    "SET n:Label (label assignment) is not supported; AletheiaDB nodes are \
+                     single-labeled"
+                        .to_string(),
+                ));
+            }
+            if self.at(TokenKind::Eq) {
+                return Err(CypherError::UnsupportedFeature(
+                    "SET n = {...} / SET n += {...} (whole-entity property replacement) is not \
+                     supported; use SET n.prop = value"
+                        .to_string(),
+                ));
+            }
+            self.expect(TokenKind::Dot)?;
+            let prop_tok = self.expect(TokenKind::Identifier)?;
+            self.expect(TokenKind::Eq)?;
+            let value = self.parse_value()?;
+            items.push(CypherSetItem {
+                variable: var_tok.text,
+                property: prop_tok.text,
+                value,
+            });
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    /// Parse the target variables of a `DELETE` / `DETACH DELETE` clause:
+    /// `variable (',' variable)*`.
+    fn parse_delete_targets(&mut self) -> Result<Vec<String>, CypherError> {
+        let mut targets = vec![self.expect(TokenKind::Identifier)?.text];
+        while self.eat(TokenKind::Comma) {
+            targets.push(self.expect(TokenKind::Identifier)?.text);
+        }
+        Ok(targets)
     }
 
     /// Parse a standalone `UNWIND <list> AS <var> RETURN ...` statement.
@@ -277,6 +411,19 @@ impl CypherParser {
         } else {
             None
         };
+
+        // A write clause here (`MATCH ... SET/DELETE/CREATE ...`) makes this the
+        // reading part of a write statement (Issue #560). This is only valid for
+        // a plain, non-temporal `MATCH` in v1: `OPTIONAL MATCH` and temporal
+        // qualifiers are not combinable with writes, so they fall through to the
+        // read path (and a subsequent write clause would then be a parse error).
+        if !optional && temporal.is_none() && self.at_write_clause() {
+            let reading = CypherReadingClause {
+                pattern,
+                where_clause,
+            };
+            return self.parse_write_statement(Some(reading));
+        }
 
         // Check for post-pattern temporal clause (between WHERE and RETURN).
         // If a leading temporal clause was already parsed, this is skipped.

@@ -112,4 +112,50 @@ mod tests {
         );
         assert_eq!(detect_mutating_clause("match (n) set n.x = 1"), Some("SET"));
     }
+
+    /// Issue #560 guardrail: now that `execute_cypher` supports these write
+    /// clauses, the text-level read-only guard shared by the MCP `query` tool
+    /// and the HTTP `/query` RBAC classification MUST still reject every one of
+    /// them *before the parser runs*, so a mutation can never slip through the
+    /// read-only surface. This is intentionally redundant with the MCP-layer
+    /// tests (`src/mcp/tests.rs`) -- it pins the contract from the guard's own
+    /// module, which the Cypher lane owns.
+    #[test]
+    fn issue_560_write_clauses_stay_rejected_by_the_read_only_guard() {
+        let cases = [
+            ("CREATE (n:Person {name: 'Zed'}) RETURN n", "CREATE"),
+            ("MATCH (n:Person) SET n.age = 41 RETURN n", "SET"),
+            ("MATCH (n:Person {name: 'Alice'}) DELETE n", "DELETE"),
+            ("MATCH (n:Person) DETACH DELETE n", "DETACH"),
+            ("MATCH (n:Person) REMOVE n.age", "REMOVE"),
+            ("MERGE (n:Person {name: 'Zed'}) RETURN n", "MERGE"),
+            (
+                "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b) DELETE r",
+                "DELETE",
+            ),
+            ("CREATE (a:Team)-[:HAS]->(b:Member) RETURN a, b", "CREATE"),
+        ];
+        for (query, expected) in cases {
+            assert_eq!(
+                detect_mutating_clause(query),
+                Some(expected),
+                "read-only guard must reject `{query}` (found no mutating clause)"
+            );
+        }
+    }
+
+    /// The read-only guard must not be fooled into a *false positive* by a
+    /// mutating keyword that only appears as string-literal content, a node
+    /// label, or a property key -- a plain read stays allowed even next to those.
+    #[test]
+    fn issue_560_reads_with_keywordish_identifiers_still_pass() {
+        assert_eq!(
+            detect_mutating_clause("MATCH (n:Person {note: 'please CREATE later'}) RETURN n"),
+            None
+        );
+        assert_eq!(
+            detect_mutating_clause("MATCH (n:Create) RETURN n.delete"),
+            None
+        );
+    }
 }
