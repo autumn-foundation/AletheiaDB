@@ -45,12 +45,15 @@ pub use server::AletheiaMcpServer;
 
 // Re-export tool request/response types for testing (alphabetically sorted)
 pub use tools::{
-    CountEdgesRequest, CountNodesRequest, CreateEdgeRequest, CreateNodeRequest, DeleteEdgeRequest,
-    DeleteNodeCascadeRequest, DeleteNodeRequest, EnableVectorIndexRequest, FindNodesAtTimeRequest,
-    FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest,
-    GetNodeAtTimeRequest, GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest,
-    ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest,
-    ProvenanceRequest, QueryRequest, TemporalBounds, TraverseRequest, UpdateEdgeRequest,
+    CountEdgesRequest, CountNodesRequest, CreateEdgeRequest, CreateNodeRequest,
+    DatabaseStatsRequest, DeleteEdgeRequest, DeleteNodeCascadeRequest, DeleteNodeRequest,
+    EnableUniqueConstraintRequest, EnableVectorIndexRequest, FindNodesAtTimeRequest,
+    FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeHistoryRequest, GetEdgeRequest,
+    GetIncomingEdgesRequest, GetNodeAtTimeRequest, GetNodeHistoryRequest, GetNodeRequest,
+    GetOutgoingEdgesRequest, GetSchemaRequest, HybridQueryRequest, LineageQueryRequest,
+    ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListUniqueConstraintsRequest,
+    ListVectorIndexesRequest, ProvenanceRequest, QueryRequest, RetractEdgeRequest,
+    RetractNodeRequest, TemporalBounds, TemporalExtentRequest, TraverseRequest, UpdateEdgeRequest,
     UpdateNodeRequest,
 };
 
