@@ -6974,12 +6974,12 @@ mod server_unit_tests {
         // deterministically (bounded) for the count to fall back to 0 rather
         // than racing the worker with an immediate assert; a real slot leak
         // still fails the test when the deadline elapses.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
         while server.in_flight_queries.load(super::Ordering::Acquire) != 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "workers must release their slot on completion (still occupied after 5s)"
-            );
+            if start.elapsed() >= timeout {
+                panic!("workers must release their slot on completion (still occupied after 5s)");
+            }
             std::thread::yield_now();
         }
     }
