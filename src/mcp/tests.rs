@@ -3601,6 +3601,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
 
@@ -3643,6 +3644,7 @@ mod query_tool_tests {
                     query: stmt.to_string(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
 
@@ -3675,6 +3677,7 @@ mod query_tool_tests {
                 query: "this is not a valid query".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3694,6 +3697,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3715,6 +3719,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3737,6 +3742,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: None,
                 limit: Some(2),
+                limits: None,
             },
         );
         assert_eq!(
@@ -3762,6 +3768,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3783,6 +3790,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
@@ -3810,6 +3818,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person) RETURN count(*)".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
@@ -3862,6 +3871,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person) RETURN n.dept, count(*)".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(value["row_count"].as_u64(), Some(2), "{value}");
@@ -3901,6 +3911,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person) RETURN count(*) AS c".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -3929,6 +3940,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         let row = &value["rows"][0];
@@ -3972,6 +3984,7 @@ mod query_tool_tests {
                     .to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
@@ -3996,6 +4009,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person {name: $name}) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
@@ -4027,6 +4041,7 @@ mod query_tool_tests {
                     query: q.clone(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
             assert!(
@@ -4058,6 +4073,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person) AS OF TIMESTAMP 'not-a-timestamp' RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         let kind = error_obj(&value)["kind"].as_str();
@@ -4088,6 +4104,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Person {note: 'it\\'s fine'}) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         // The guard must not fire (no read_only_violation for a read-only query).
@@ -4117,6 +4134,7 @@ mod query_tool_tests {
                 query: "this is not valid".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         let err = error_obj(&value);
@@ -4142,6 +4160,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -4170,6 +4189,7 @@ mod query_tool_tests {
                 query: "MATCH (n:Product) WHERE n.price < $threshold RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         // The key assertion: the error must NOT be invalid_params (the float
@@ -4197,6 +4217,7 @@ mod query_tool_tests {
                 query: "// CREATE would mutate\nMATCH (n:Widget) RETURN n".to_string(),
                 params: None,
                 limit: None,
+                limits: None,
             },
         );
         if let Some(err) = value.get("error") {
@@ -4226,6 +4247,7 @@ mod query_tool_tests {
                     query: stmt.to_string(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
             if let Some(err) = value.get("error") {
@@ -4256,6 +4278,7 @@ mod query_tool_tests {
                     query: stmt.to_string(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
             if let Some(err) = value.get("error") {
@@ -4286,6 +4309,7 @@ mod query_tool_tests {
                     query: stmt.to_string(),
                     params: None,
                     limit: None,
+                    limits: None,
                 },
             );
             assert_eq!(
@@ -4310,6 +4334,7 @@ mod query_tool_tests {
                 query: "MATCH (n) WHERE n.x = $x RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         if let Some(err) = value.get("error") {
@@ -4336,6 +4361,7 @@ mod query_tool_tests {
                 query: "MATCH (n) WHERE n.flag = $flag AND n.count = $count RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         if let Some(err) = value.get("error") {
@@ -4361,6 +4387,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -4385,6 +4412,7 @@ mod query_tool_tests {
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
                 limit: None,
+                limits: None,
             },
         );
         assert_eq!(
@@ -4392,6 +4420,242 @@ mod query_tool_tests {
             Some("invalid_params"),
             "non-numeric array parameter must yield invalid_params: {value}"
         );
+    }
+
+    // =======================================================================
+    // Per-query resource limits (Issue #3368) — end-to-end behavior through
+    // the public `query()` / `dispatch_tool` surfaces.
+    // =======================================================================
+
+    use crate::mcp::{QueryLimitsConfig, QueryLimitsOverride};
+
+    /// A `query` request with `limits` fields set on the override.
+    fn query_req(language: &str, query: &str, limits: Option<QueryLimitsOverride>) -> QueryRequest {
+        QueryRequest {
+            language: language.to_string(),
+            query: query.to_string(),
+            params: None,
+            limit: None,
+            limits,
+        }
+    }
+
+    /// Default (generous) limits leave a small query's output byte-identical:
+    /// no error, `truncated:false`, and the row is present.
+    #[test]
+    fn test_query_default_limits_output_unchanged() {
+        let server = create_test_server();
+        seed_named(&server, "Widget", "alpha");
+        let value = run_query(&server, query_req("aql", "MATCH (n:Widget) RETURN n", None));
+        assert!(
+            value.get("error").is_none(),
+            "no error under defaults: {value}"
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1));
+        assert_eq!(value["truncated"].as_bool(), Some(false));
+    }
+
+    /// A per-call override above the operator ceiling is rejected up front with
+    /// INVALID_ARGUMENT / kind invalid_params and `details {dimension, requested,
+    /// ceiling}` — for every dimension — and bumps the override-rejected counter.
+    #[test]
+    fn test_query_over_ceiling_overrides_are_invalid_argument() {
+        let server = create_test_server(); // default ceilings
+        let cases = [
+            (
+                QueryLimitsOverride {
+                    timeout_ms: Some(999_999_999),
+                    ..Default::default()
+                },
+                "wall_clock_timeout",
+            ),
+            (
+                QueryLimitsOverride {
+                    max_result_rows: Some(999_999_999),
+                    ..Default::default()
+                },
+                "result_rows",
+            ),
+            (
+                QueryLimitsOverride {
+                    max_response_bytes: Some(usize::MAX),
+                    ..Default::default()
+                },
+                "result_bytes",
+            ),
+        ];
+        for (over, dim) in cases {
+            let value = run_query(&server, query_req("aql", "MATCH (n) RETURN n", Some(over)));
+            let err = error_obj(&value);
+            assert_eq!(err["kind"].as_str(), Some("invalid_params"), "{value}");
+            assert_eq!(err["code"].as_str(), Some("INVALID_ARGUMENT"), "{value}");
+            assert_eq!(err["retriable"].as_bool(), Some(false), "{value}");
+            assert_eq!(err["details"]["dimension"].as_str(), Some(dim), "{value}");
+            assert!(err["details"]["ceiling"].as_u64().is_some(), "{value}");
+        }
+        assert_eq!(server.limit_termination_counts().override_rejected, 3);
+    }
+
+    /// A timeout override of `0` (unlimited) under a finite operator ceiling is
+    /// rejected — a caller cannot disable the timeout from the request.
+    #[test]
+    fn test_query_zero_timeout_override_under_ceiling_rejected() {
+        let server = create_test_server();
+        let value = run_query(
+            &server,
+            query_req(
+                "aql",
+                "MATCH (n) RETURN n",
+                Some(QueryLimitsOverride {
+                    timeout_ms: Some(0),
+                    ..Default::default()
+                }),
+            ),
+        );
+        assert_eq!(error_obj(&value)["code"].as_str(), Some("INVALID_ARGUMENT"));
+        assert_eq!(
+            error_obj(&value)["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout")
+        );
+    }
+
+    /// A per-call row override BELOW the default is honored and truncates the
+    /// result with the disclosed `truncated:true` completeness signal (#3226),
+    /// NOT a fail-closed error (the AC's alternative for list-like reads).
+    #[test]
+    fn test_query_row_override_truncates_with_disclosure() {
+        let server = create_test_server();
+        for name in ["a", "b", "c"] {
+            seed_named(&server, "Widget", name);
+        }
+        let value = run_query(
+            &server,
+            query_req(
+                "aql",
+                "MATCH (n:Widget) RETURN n",
+                Some(QueryLimitsOverride {
+                    max_result_rows: Some(1),
+                    ..Default::default()
+                }),
+            ),
+        );
+        assert!(
+            value.get("error").is_none(),
+            "row cap truncates, never errors: {value}"
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        assert_eq!(value["truncated"].as_bool(), Some(true), "{value}");
+    }
+
+    /// The result-byte cap fails closed: a response over the cap is a
+    /// non-retriable RESOURCE_EXHAUSTED with `details {dimension, limit,
+    /// consumed}` and bumps the result-bytes counter.
+    #[test]
+    fn test_query_byte_cap_exceeded_is_resource_exhausted() {
+        let server = create_test_server().with_query_limits(QueryLimitsConfig {
+            default_max_response_bytes: 40, // tiny: any real row overflows
+            ..QueryLimitsConfig::default()
+        });
+        seed_named(&server, "Widget", "alpha");
+        let value = run_query(&server, query_req("aql", "MATCH (n:Widget) RETURN n", None));
+        let err = error_obj(&value);
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{value}");
+        assert_eq!(err["retriable"].as_bool(), Some(false), "{value}");
+        assert_eq!(err["details"]["dimension"].as_str(), Some("result_bytes"));
+        let limit = err["details"]["limit"].as_u64().unwrap();
+        let consumed = err["details"]["consumed"].as_u64().unwrap();
+        assert!(
+            consumed > limit,
+            "consumed {consumed} must exceed limit {limit}"
+        );
+        assert_eq!(server.limit_termination_counts().result_bytes, 1);
+    }
+
+    /// Disabled limits ignore every per-call override (an override that would
+    /// otherwise be rejected is silently ignored) and enforce nothing.
+    #[test]
+    fn test_query_disabled_limits_ignore_overrides() {
+        let server = create_test_server().with_query_limits(QueryLimitsConfig::disabled());
+        seed_named(&server, "Widget", "alpha");
+        let value = run_query(
+            &server,
+            query_req(
+                "aql",
+                "MATCH (n:Widget) RETURN n",
+                Some(QueryLimitsOverride {
+                    timeout_ms: Some(0),
+                    max_result_rows: Some(0),
+                    max_response_bytes: Some(1), // would fail closed if enforced
+                }),
+            ),
+        );
+        assert!(
+            value.get("error").is_none(),
+            "disabled limits enforce nothing: {value}"
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1));
+    }
+
+    /// Composition with the #3353 token budget: the protective operator byte cap
+    /// runs FIRST inside `handle_query`, so a byte-cap breach fails closed as a
+    /// RESOURCE_EXHAUSTED error even when the caller supplies a (generous) token
+    /// budget — the budget shaper passes the error through, never masking the
+    /// protective limit (no silent bypass).
+    #[test]
+    fn test_query_byte_cap_wins_over_token_budget() {
+        let server = create_test_server().with_query_limits(QueryLimitsConfig {
+            default_max_response_bytes: 40,
+            ..QueryLimitsConfig::default()
+        });
+        seed_named(&server, "Widget", "alpha");
+        // Drive through dispatch_tool so the #3353 budget shaper is engaged.
+        let result = server.dispatch_tool(
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Widget) RETURN n",
+                "max_response_tokens": 100000, // generous budget: would not truncate
+            }),
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        assert_eq!(
+            error_obj(&value)["code"].as_str(),
+            Some("RESOURCE_EXHAUSTED"),
+            "operator byte cap must win over a generous token budget: {value}"
+        );
+    }
+
+    /// Composition with the #3353 token budget, other direction: within the
+    /// operator byte cap, a small token budget still shapes the response
+    /// gracefully (disclosed) — the two limits coexist.
+    #[test]
+    fn test_query_within_byte_cap_token_budget_still_shapes() {
+        let server = create_test_server(); // generous operator byte cap
+        for i in 0..5 {
+            seed_named(&server, "Widget", &format!("w{i}"));
+        }
+        let result = server.dispatch_tool(
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Widget) RETURN n",
+                "max_response_tokens": 256, // small: engages the budget ladder
+            }),
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        // Either a shaped success (budget block present) or the too-small-budget
+        // INVALID_ARGUMENT — but never a RESOURCE_EXHAUSTED (we are within the
+        // operator byte cap) and never an unbounded response.
+        if let Some(err) = value.get("error") {
+            assert_eq!(err["code"].as_str(), Some("INVALID_ARGUMENT"), "{value}");
+        } else {
+            assert!(
+                value.get("budget").is_some(),
+                "budget shaping disclosed: {value}"
+            );
+        }
     }
 }
 
