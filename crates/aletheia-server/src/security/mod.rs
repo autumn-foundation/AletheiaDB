@@ -15,8 +15,9 @@
 //!   [`AuthMode::Required`] (auth-on-by-default parity), pass-through otherwise.
 //! - [`init_state`] installs the shared [`ServerAuthState`] extension.
 //! - [`validate_startup`] refuses required-mode startup with zero credentials.
-//! - [`auth::Authorized`] **authenticates** but does NOT yet enforce the RBAC
-//!   class — that enforcement is Lane B's (see the TODO there).
+//! - [`auth::Authorized`] **authenticates and enforces the RBAC class** via
+//!   [`authorize`] (Lane B, this PR): a role that does not permit the handler's
+//!   declared `C::CLASS` gets a byte-identical 403.
 //! - [`rate_limit`], [`resource_limits`], [`cursor`] are empty `TODO(Lane B)`.
 
 pub mod auth;
@@ -33,7 +34,7 @@ use std::sync::Arc;
 
 pub use auth::{
     AccessClassMarker, AdminClass, ApiKeyStore, AuthStoreTokenAdapter, Authorized, MetricsClass,
-    ReadClass, ServerAuthState, WriteClass,
+    ReadClass, ServerAuthState, WriteClass, authorize, authorize_class, extract_credential,
 };
 
 /// Security configuration for the server surface.
