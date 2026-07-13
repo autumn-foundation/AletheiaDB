@@ -657,6 +657,41 @@ impl HistoricalStorage {
         self.edge_snapshot_policies.resolve(edge_id)
     }
 
+    /// Whether a node's anchor should trigger a temporal vector snapshot
+    /// (Issue #383).
+    ///
+    /// This is the single per-entity decision consulted by BOTH anchor-driven
+    /// snapshot triggers so they can never diverge:
+    /// 1. the **pre-anchor hook** run in `add_node_version*` (returns a snapshot
+    ///    id stored on the anchor), and
+    /// 2. the **`NodeAnchorCreated` observer event** delivered right after the
+    ///    anchor is stored, which the [`VectorIndexObserver`] reacts to by
+    ///    calling `create_snapshot_for_anchor`.
+    ///
+    /// A `Skip` node still forms its graph anchor normally; only these two
+    /// vector-snapshot triggers are suppressed. The default policy is
+    /// `Snapshot`, so absent any per-entity configuration this is always `true`
+    /// — byte-identical to the pre-#383 behavior.
+    ///
+    /// [`VectorIndexObserver`]: crate::index::vector::temporal::VectorIndexObserver
+    #[inline]
+    fn node_anchor_triggers_vector_snapshot(&self, node_id: NodeId) -> bool {
+        self.node_snapshot_policies
+            .resolve(node_id)
+            .should_snapshot()
+    }
+
+    /// Edge counterpart of
+    /// [`node_anchor_triggers_vector_snapshot`](Self::node_anchor_triggers_vector_snapshot)
+    /// (Issue #383). Gates both the edge pre-anchor hook and the
+    /// `EdgeAnchorCreated` observer event on the shared per-edge policy.
+    #[inline]
+    fn edge_anchor_triggers_vector_snapshot(&self, edge_id: EdgeId) -> bool {
+        self.edge_snapshot_policies
+            .resolve(edge_id)
+            .should_snapshot()
+    }
+
     /// Add a new version of a node.
     ///
     /// This will automatically determine whether to create an anchor or delta
@@ -862,12 +897,7 @@ impl HistoricalStorage {
         // snapshot is captured for it — decoupling graph anchors from vector
         // snapshots. The default policy is `Snapshot`, so absent any per-entity
         // configuration this is identical to the pre-#383 behavior.
-        if version.is_anchor()
-            && self
-                .node_snapshot_policies
-                .resolve(node_id)
-                .should_snapshot()
-        {
+        if version.is_anchor() && self.node_anchor_triggers_vector_snapshot(node_id) {
             self.run_pre_anchor_hooks_into(
                 &self.pre_node_anchor_hooks,
                 AnchorHookContext {
@@ -955,7 +985,14 @@ impl HistoricalStorage {
                 is_anchor,
             },
         );
-        if is_anchor {
+        // Issue #383: the `NodeAnchorCreated` event is the second temporal
+        // vector snapshot trigger (the `VectorIndexObserver` reacts to it by
+        // calling `create_snapshot_for_anchor`). Gate it on the SAME per-entity
+        // policy as the pre-anchor hook above so a `Skip` node captures no
+        // snapshot via EITHER path. The general `NodeVersionCreated` event
+        // (emitted unconditionally above) stays available for metrics/audit
+        // observers, so this never over-suppresses non-vector observers.
+        if is_anchor && self.node_anchor_triggers_vector_snapshot(node_id) {
             notify_observers(
                 &self.observers,
                 &StorageEvent::NodeAnchorCreated {
@@ -1197,12 +1234,7 @@ impl HistoricalStorage {
         // Issue #383: gated by the per-edge snapshot policy, symmetric with the
         // node path above. See `snapshot_policy` for the rationale and the
         // backward-compatible default (`Snapshot`).
-        if version.is_anchor()
-            && self
-                .edge_snapshot_policies
-                .resolve(edge_id)
-                .should_snapshot()
-        {
+        if version.is_anchor() && self.edge_anchor_triggers_vector_snapshot(edge_id) {
             self.run_pre_anchor_hooks_into(
                 &self.pre_edge_anchor_hooks,
                 AnchorHookContext {
@@ -1306,7 +1338,10 @@ impl HistoricalStorage {
                 is_anchor,
             },
         );
-        if is_anchor {
+        // Issue #383: symmetric with the node path — gate the second snapshot
+        // trigger (`EdgeAnchorCreated`, consumed by `VectorIndexObserver`) on
+        // the per-edge policy. `EdgeVersionCreated` above remains ungated.
+        if is_anchor && self.edge_anchor_triggers_vector_snapshot(edge_id) {
             notify_observers(
                 &self.observers,
                 &StorageEvent::EdgeAnchorCreated {
