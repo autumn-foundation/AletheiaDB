@@ -6296,3 +6296,269 @@ fn test_snapshot_policy_mixed_sequence_completes() {
     assert_eq!(*seen, expected);
     assert_eq!(storage.hook_metrics().invocations, 10);
 }
+
+// ============================================================================
+// Issue #383 (follow-up): the SECOND vector-snapshot trigger — the
+// `VectorIndexObserver` path — must ALSO honor the per-entity snapshot policy.
+//
+// The observer fires from `notify_observers(NodeAnchorCreated{node_id,..})`
+// right after an anchor is stored (same critical section as the pre-anchor
+// hook) and calls `create_snapshot_for_anchor`. These tests use a *recording
+// observer* that captures the entity id of each `*AnchorCreated` event (and
+// separately the entity id of each `*VersionCreated` event), so we can assert
+// the anchor-event (vector-snapshot) trigger is delivered for EXACTLY the
+// entities whose policy opted in, while the general per-version event is never
+// over-suppressed.
+// ============================================================================
+
+/// Observer that records which entity ids it received anchor events and
+/// version events for. Mirrors `recording_hook` but on the post-commit
+/// observer path (the second snapshot trigger).
+struct RecordingObserver {
+    node_anchors: StdMutex<Vec<u64>>,
+    edge_anchors: StdMutex<Vec<u64>>,
+    node_versions: StdMutex<Vec<u64>>,
+    edge_versions: StdMutex<Vec<u64>>,
+}
+
+impl RecordingObserver {
+    fn new() -> Self {
+        Self {
+            node_anchors: StdMutex::new(Vec::new()),
+            edge_anchors: StdMutex::new(Vec::new()),
+            node_versions: StdMutex::new(Vec::new()),
+            edge_versions: StdMutex::new(Vec::new()),
+        }
+    }
+}
+
+impl StorageObserver for RecordingObserver {
+    fn on_event(&self, event: &StorageEvent) -> Result<()> {
+        match event {
+            StorageEvent::NodeAnchorCreated { node_id, .. } => {
+                self.node_anchors.lock().unwrap().push(node_id.as_u64());
+            }
+            StorageEvent::EdgeAnchorCreated { edge_id, .. } => {
+                self.edge_anchors.lock().unwrap().push(edge_id.as_u64());
+            }
+            StorageEvent::NodeVersionCreated { node_id, .. } => {
+                self.node_versions.lock().unwrap().push(node_id.as_u64());
+            }
+            StorageEvent::EdgeVersionCreated { edge_id, .. } => {
+                self.edge_versions.lock().unwrap().push(edge_id.as_u64());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// RED: a `Skip` node must NOT deliver a `NodeAnchorCreated` event to the
+/// observer (the second snapshot trigger), so the observer's
+/// `create_snapshot_for_anchor` never runs for it — mirroring the gated hook.
+#[test]
+fn test_snapshot_policy_skip_node_suppresses_observer() {
+    let mut storage = HistoricalStorage::new();
+    let observer = Arc::new(RecordingObserver::new());
+    storage.add_observer(observer.clone());
+
+    storage.set_node_snapshot_policy(NodeId::new(1).unwrap(), SnapshotPolicy::Skip);
+
+    add_first_node_anchor(&mut storage, 1);
+
+    assert!(
+        observer.node_anchors.lock().unwrap().is_empty(),
+        "Skip entity must not deliver a NodeAnchorCreated (no observer snapshot)"
+    );
+    // The general per-version event is NOT gated: metrics/audit observers still
+    // see the write.
+    assert_eq!(
+        *observer.node_versions.lock().unwrap(),
+        vec![1],
+        "the general NodeVersionCreated event must NOT be over-suppressed"
+    );
+}
+
+/// A default (Snapshot) node still delivers the anchor event to the observer.
+#[test]
+fn test_snapshot_policy_default_node_delivers_observer_anchor() {
+    let mut storage = HistoricalStorage::new();
+    let observer = Arc::new(RecordingObserver::new());
+    storage.add_observer(observer.clone());
+
+    add_first_node_anchor(&mut storage, 1);
+    add_first_node_anchor(&mut storage, 2);
+
+    assert_eq!(
+        *observer.node_anchors.lock().unwrap(),
+        vec![1, 2],
+        "default Snapshot policy delivers every anchor to the observer"
+    );
+}
+
+/// Two nodes with different policies are gated independently on the observer
+/// path: the anchor event reaches the observer for exactly the opted-in node.
+#[test]
+fn test_snapshot_policy_two_nodes_independent_observer() {
+    let mut storage = HistoricalStorage::new();
+    let observer = Arc::new(RecordingObserver::new());
+    storage.add_observer(observer.clone());
+
+    storage.set_node_snapshot_policy(NodeId::new(1).unwrap(), SnapshotPolicy::Skip);
+    // Node 2 keeps the default (Snapshot).
+
+    add_first_node_anchor(&mut storage, 1);
+    add_first_node_anchor(&mut storage, 2);
+
+    assert_eq!(
+        *observer.node_anchors.lock().unwrap(),
+        vec![2],
+        "exactly the opted-in node reaches the observer"
+    );
+    // Both writes still produce a general version event.
+    assert_eq!(*observer.node_versions.lock().unwrap(), vec![1, 2]);
+}
+
+/// Default flipped to `Skip` gives an opt-in model on the observer path too.
+#[test]
+fn test_snapshot_policy_default_skip_opt_in_observer() {
+    let mut storage = HistoricalStorage::new();
+    let observer = Arc::new(RecordingObserver::new());
+    storage.add_observer(observer.clone());
+
+    storage.set_default_node_snapshot_policy(SnapshotPolicy::Skip);
+    storage.set_node_snapshot_policy(NodeId::new(5).unwrap(), SnapshotPolicy::Snapshot);
+
+    for id in [4u64, 5, 6] {
+        add_first_node_anchor(&mut storage, id);
+    }
+
+    assert_eq!(
+        *observer.node_anchors.lock().unwrap(),
+        vec![5],
+        "only the explicitly opted-in node reaches the observer"
+    );
+}
+
+/// BOTH snapshot paths agree: with a recording hook AND a recording observer
+/// registered together, a `Skip` node triggers NEITHER and a `Snapshot` node
+/// triggers BOTH, for the same entity id.
+#[test]
+fn test_snapshot_policy_hook_and_observer_agree() {
+    let mut storage = HistoricalStorage::new();
+    let seen_hook = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    storage.add_pre_node_anchor_hook(recording_hook(&seen_hook, 9));
+    let observer = Arc::new(RecordingObserver::new());
+    storage.add_observer(observer.clone());
+
+    storage.set_node_snapshot_policy(NodeId::new(1).unwrap(), SnapshotPolicy::Skip);
+    // Node 2 keeps default Snapshot.
+
+    let s1 = add_first_node_anchor(&mut storage, 1); // Skip
+    let s2 = add_first_node_anchor(&mut storage, 2); // Snapshot
+
+    // Skip node: neither trigger fired.
+    assert_eq!(s1, None, "Skip node stores no hook snapshot id");
+    assert!(
+        !seen_hook.lock().unwrap().contains(&1),
+        "Skip node ran no hook"
+    );
+    assert!(
+        !observer.node_anchors.lock().unwrap().contains(&1),
+        "Skip node reached no observer anchor"
+    );
+
+    // Snapshot node: both triggers fired for the same entity.
+    assert_eq!(s2, Some(9), "Snapshot node stores the hook snapshot id");
+    assert!(
+        seen_hook.lock().unwrap().contains(&2),
+        "Snapshot node ran the hook"
+    );
+    assert!(
+        observer.node_anchors.lock().unwrap().contains(&2),
+        "Snapshot node reached the observer anchor"
+    );
+}
+
+/// Edge symmetry: a `Skip` edge suppresses the edge anchor event to the observer.
+#[test]
+fn test_snapshot_policy_skip_edge_suppresses_observer() {
+    let mut storage = HistoricalStorage::new();
+    let observer = Arc::new(RecordingObserver::new());
+    storage.add_observer(observer.clone());
+
+    storage.set_edge_snapshot_policy(EdgeId::new(1).unwrap(), SnapshotPolicy::Skip);
+    // Edge 2 keeps the default (Snapshot).
+
+    add_first_edge_anchor(&mut storage, 1);
+    add_first_edge_anchor(&mut storage, 2);
+
+    assert_eq!(
+        *observer.edge_anchors.lock().unwrap(),
+        vec![2],
+        "exactly the opted-in edge reaches the observer"
+    );
+    assert_eq!(*observer.edge_versions.lock().unwrap(), vec![1, 2]);
+}
+
+/// Delta versions never deliver an anchor event, regardless of policy — the
+/// observer gate rides on `is_anchor`, unchanged.
+#[test]
+fn test_snapshot_policy_observer_delta_never_anchors() {
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 100, // deltas after the first version
+        max_delta_chain: 200,
+    });
+    let observer = Arc::new(RecordingObserver::new());
+    storage.add_observer(observer.clone());
+
+    let node_id = NodeId::new(1).unwrap();
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+    // Snapshot policy (default) — proves deltas are excluded by is_anchor, not policy.
+    for v in 1..=4u64 {
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(v).unwrap(),
+                (1000 * v as i64).into(),
+                (1000 * v as i64).into(),
+                label,
+                PropertyMapBuilder::new().insert("v", v as i64).build(),
+                false,
+            )
+            .unwrap();
+    }
+
+    // Only the first version is an anchor.
+    assert_eq!(
+        *observer.node_anchors.lock().unwrap(),
+        vec![1],
+        "only the anchor version delivers a NodeAnchorCreated"
+    );
+    assert_eq!(
+        observer.node_versions.lock().unwrap().len(),
+        4,
+        "every version delivers a general NodeVersionCreated"
+    );
+}
+
+/// Lock-order / no-deadlock smoke: a mixed-policy anchor sequence with an
+/// observer registered completes and delivers anchor events for exactly the
+/// opted-in entities.
+#[test]
+fn test_snapshot_policy_observer_mixed_sequence_completes() {
+    let mut storage = HistoricalStorage::new();
+    let observer = Arc::new(RecordingObserver::new());
+    storage.add_observer(observer.clone());
+
+    for id in 1..=20u64 {
+        if id % 2 == 0 {
+            storage.set_node_snapshot_policy(NodeId::new(id).unwrap(), SnapshotPolicy::Skip);
+        }
+    }
+    for id in 1..=20u64 {
+        add_first_node_anchor(&mut storage, id);
+    }
+
+    let expected: Vec<u64> = (1..=20u64).filter(|id| id % 2 == 1).collect();
+    assert_eq!(*observer.node_anchors.lock().unwrap(), expected);
+}
