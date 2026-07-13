@@ -101,12 +101,17 @@ pub(crate) fn persist_vector_indexes(
                 ))
             })?;
 
-        // Save HNSW index using usearch native format
+        // Save HNSW index using usearch native format, encrypting the native
+        // `current.usearch` file + its `.usearch.mappings` sidecar at rest when
+        // a cipher is configured (Issue #481, closes AC #1).
         let usearch_path = vec_path.join("current.usearch");
 
-        // Use the VectorIndex trait's save method
-        use crate::index::vector::VectorIndex;
-        index.save(&usearch_path).map_err(|e| {
+        crate::storage::index_persistence::vector::save_hnsw_index_maybe_encrypted(
+            index.as_ref(),
+            &usearch_path,
+            cipher,
+        )
+        .map_err(|e| {
             StorageError::PersistenceError(format!("Failed to save usearch index: {}", e))
         })?;
 
@@ -216,7 +221,8 @@ fn load_single_vector_index(
 ) -> std::result::Result<LoadedVectorIndex, SkippedVectorIndex> {
     use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
     use crate::storage::index_persistence::vector::{
-        load_vector_mappings_with_cipher, load_vector_meta_with_cipher,
+        load_hnsw_index_maybe_encrypted, load_vector_mappings_with_cipher,
+        load_vector_meta_with_cipher,
     };
 
     let skipped = |property_name: &str, reason: String| SkippedVectorIndex {
@@ -284,11 +290,13 @@ fn load_single_vector_index(
         .with_ef_construction(meta.hnsw_config.ef_construction as usize)
         .with_ef_search(meta.hnsw_config.ef_search as usize);
 
-    // Load or create index
+    // Load or create index. When the native `current.usearch` file was written
+    // encrypted (Issue #481), it is transparently decrypted to a temp file and
+    // handed to usearch; a legacy plaintext file loads directly (sniffed).
     let usearch_path = vec_path.join("current.usearch");
     let index_result = if usearch_path.exists() {
-        // Load existing index
-        HnswIndex::load(&usearch_path, config.clone())
+        // Load existing index (decrypting first if encrypted at rest)
+        load_hnsw_index_maybe_encrypted(&usearch_path, config.clone(), cipher)
     } else {
         // Create new empty index
         HnswIndex::new(config.clone())
@@ -1152,9 +1160,18 @@ pub(crate) fn load_indexes_startup(
                     current.compact_adjacency();
                 }
             }
-            Err(_e) => {
-                // Graph index loading failed - start with empty graph
-                // This is normal if no index files exist yet
+            Err(e) => {
+                // The graph index file EXISTS (checked above) but could not be
+                // loaded: corruption, or — under encryption-at-rest (Issue #481)
+                // — a missing/wrong/misconfigured key. Warn before falling back
+                // to an empty graph + WAL replay so an operator gets a
+                // diagnostic instead of silent data loss. The error Display
+                // carries only the path and a cipher-opaque failure string
+                // (never key material).
+                eprintln!(
+                    "Warning: index 'graph' load failed, recovering from WAL: {}",
+                    e
+                );
             }
         }
     }
@@ -1236,7 +1253,14 @@ pub(crate) fn load_indexes_startup(
                 }
             }
             Err(e) => {
-                eprintln!("Warning: Failed to load temporal index: {}", e);
+                // File exists but failed to load (corruption, or a missing/
+                // wrong encryption key under Issue #481). Warn, then fall back
+                // to WAL replay for this component. Error text carries no key
+                // material.
+                eprintln!(
+                    "Warning: index 'temporal' load failed, recovering from WAL: {}",
+                    e
+                );
             }
         }
     }
@@ -1279,7 +1303,14 @@ pub(crate) fn load_indexes_startup(
                 eprintln!("Loaded temporal adjacency index from disk");
             }
             Err(e) => {
-                eprintln!("Warning: Failed to load temporal adjacency index: {}", e);
+                // File exists but failed to load (corruption, or a missing/
+                // wrong encryption key under Issue #481). Warn, then continue
+                // without the adjacency index (rebuilt lazily). No key material
+                // in the error text.
+                eprintln!(
+                    "Warning: index 'temporal_adjacency' load failed, recovering from WAL: {}",
+                    e
+                );
             }
         }
     }

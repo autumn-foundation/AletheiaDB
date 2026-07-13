@@ -57,6 +57,29 @@ fn encrypted_durable_config(data_dir: &Path, key_path: &Path) -> AletheiaDBConfi
         .build()
 }
 
+/// Same durable persistence layout as [`encrypted_durable_config`] but with
+/// encryption DISABLED — used to establish a legacy plaintext dataset that is
+/// later reopened under a cipher (the real customer upgrade path).
+fn plaintext_durable_config(data_dir: &Path) -> AletheiaDBConfig {
+    AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(data_dir.join("wal"))
+                .durability_mode(DurabilityMode::GroupCommit {
+                    max_delay_ms: 10,
+                    max_batch_size: 200,
+                })
+                .build(),
+        )
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: data_dir.join("indexes"),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .build()
+}
+
 /// A byte-for-byte scan of a directory tree returning `true` if any file under
 /// it begins with the plaintext encrypted-index magic `AEIX`.
 fn any_file_has_enc_header(root: &Path) -> bool {
@@ -196,6 +219,43 @@ fn db_end_to_end_encrypted_persist_and_reopen() {
         );
     }
 
+    // Issue #481 (P0.1): the native HNSW `current.usearch` file — which holds
+    // the raw embedding vectors, the most sensitive data — and its
+    // `.usearch.mappings` sidecar must ALSO be encrypted on disk, not just the
+    // bitcode meta.idx/mappings.idx.
+    let vec_dir = indexes_dir.join("indexes").join("vector").join("embedding");
+    let usearch = vec_dir.join("current.usearch");
+    assert!(
+        usearch.exists(),
+        "expected native usearch index at {:?}",
+        usearch
+    );
+    assert!(
+        file_has_enc_header(&usearch),
+        "native current.usearch must be encrypted on disk (raw embeddings)"
+    );
+    let usearch_mappings = vec_dir.join("current.usearch.mappings");
+    assert!(
+        file_has_enc_header(&usearch_mappings),
+        "native current.usearch.mappings sidecar must be encrypted on disk"
+    );
+    // No plaintext temp files (`.aeix-usearch-tmp-*`) must be left behind by the
+    // save-to-temp/encrypt shuffle.
+    let leftover_tmp: Vec<_> = std::fs::read_dir(&vec_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".aeix-usearch-tmp-")
+        })
+        .collect();
+    assert!(
+        leftover_tmp.is_empty(),
+        "native usearch encryption must not leak plaintext temp files: {:?}",
+        leftover_tmp.iter().map(|e| e.path()).collect::<Vec<_>>()
+    );
+
     // Reopen with the SAME key: all data transparently decrypts.
     let db2 =
         AletheiaDB::with_unified_config(encrypted_durable_config(&data_dir, &key_path)).unwrap();
@@ -220,6 +280,192 @@ fn db_end_to_end_encrypted_persist_and_reopen() {
         similar.iter().any(|(id, _)| *id == bob),
         "find_similar should recover Bob as a neighbour after encrypted reopen"
     );
+}
+
+/// Full-DB UPGRADE path (Issue #481, P3.1): a durable database created with
+/// encryption DISABLED (legacy plaintext index files) reopens cleanly under a
+/// cipher — every plaintext index file loads via header sniffing — and a
+/// subsequent forced `persist_indexes()` rewrites those files ENCRYPTED while
+/// the data stays intact. This is the real customer "turn encryption on over
+/// an existing dataset" flow.
+#[test]
+fn db_plaintext_dataset_upgrades_to_encrypted() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+    let key_path = dir.path().join("index.key");
+
+    // Phase 1: create a PLAINTEXT durable dataset with graph + edge data.
+    let (alice, bob) = {
+        let db = AletheiaDB::with_unified_config(plaintext_durable_config(&data_dir)).unwrap();
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let bob = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        db.create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+        )
+        .unwrap();
+        db.persist_indexes().unwrap();
+        (alice, bob)
+    };
+
+    // Index files written in phase 1 must be PLAINTEXT (no AEIX header).
+    let indexes_dir = data_dir.join("indexes");
+    let adjacency = indexes_dir
+        .join("indexes")
+        .join("graph")
+        .join("adjacency.idx");
+    assert!(
+        adjacency.exists() && !file_has_enc_header(&adjacency),
+        "phase-1 adjacency.idx should exist and be plaintext"
+    );
+
+    // Phase 2: reopen the SAME data dir WITH encryption enabled. Legacy
+    // plaintext index files must load under the cipher (header sniffing), and
+    // all data survives.
+    FileKeyProvider::generate_key_file(&key_path).unwrap();
+    {
+        let db = AletheiaDB::with_unified_config(encrypted_durable_config(&data_dir, &key_path))
+            .unwrap();
+        assert_eq!(
+            db.get_node(alice)
+                .unwrap()
+                .properties
+                .get("name")
+                .and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(
+            db.get_node(bob)
+                .unwrap()
+                .properties
+                .get("name")
+                .and_then(|v| v.as_str()),
+            Some("Bob")
+        );
+        assert_eq!(db.get_outgoing_edges(alice).len(), 1);
+
+        // Force a full re-encrypt: every on-disk index file is rewritten
+        // through the cipher.
+        db.persist_indexes().unwrap();
+    }
+
+    // The previously-plaintext graph adjacency index now carries the AEIX
+    // header (encrypted at rest after the forced re-persist).
+    assert!(
+        file_has_enc_header(&adjacency),
+        "after persist_indexes() the graph adjacency.idx must be encrypted"
+    );
+    assert!(
+        any_file_has_enc_header(&indexes_dir),
+        "at least one index file must be encrypted after the upgrade re-persist"
+    );
+
+    // Phase 3: reopen once more with the key; the now-encrypted data survives.
+    let db2 =
+        AletheiaDB::with_unified_config(encrypted_durable_config(&data_dir, &key_path)).unwrap();
+    assert_eq!(
+        db2.get_node(alice)
+            .unwrap()
+            .properties
+            .get("name")
+            .and_then(|v| v.as_str()),
+        Some("Alice")
+    );
+    assert_eq!(db2.get_outgoing_edges(alice).len(), 1);
+}
+
+/// Crash-safety variant (Issue #481, P3.2): with encryption enabled and the
+/// MANIFEST left INTACT, truncating ONLY the graph `adjacency.idx` must not
+/// brick startup. The DB reopens (no panic, no Err) and recovers per the
+/// documented differential-replay property — pinning the manifest-intact /
+/// snapshot-corrupt case that the other e2e test (which also corrupts the
+/// manifest) routes around.
+#[test]
+fn db_manifest_intact_corrupt_graph_snapshot_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+    let key_path = dir.path().join("index.key");
+    FileKeyProvider::generate_key_file(&key_path).unwrap();
+
+    let alice = {
+        let db = AletheiaDB::with_unified_config(encrypted_durable_config(&data_dir, &key_path))
+            .unwrap();
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        db.persist_indexes().unwrap();
+        alice
+    };
+
+    // Truncate ONLY the encrypted graph adjacency snapshot; leave manifest.idx
+    // untouched so startup takes the differential-replay path (manifest LSN
+    // floor preserved) rather than full-from-scratch replay.
+    let indexes_dir = data_dir.join("indexes");
+    let adjacency = indexes_dir
+        .join("indexes")
+        .join("graph")
+        .join("adjacency.idx");
+    assert!(
+        file_has_enc_header(&adjacency),
+        "precondition: adjacency.idx encrypted"
+    );
+    let manifest = indexes_dir.join("indexes").join("manifest.idx");
+    let manifest_before = std::fs::read(&manifest).unwrap();
+    let bytes = std::fs::read(&adjacency).unwrap();
+    std::fs::write(&adjacency, &bytes[..bytes.len() / 2]).unwrap();
+    // Manifest must be untouched.
+    assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+
+    // Reopen: the corrupt encrypted graph snapshot must NOT brick startup — no
+    // panic, no Err. The documented differential-replay property applies: with
+    // the manifest (LSN floor) intact, replay resumes AFTER the persisted
+    // snapshot, so pre-snapshot data that lived only in the now-unreadable graph
+    // snapshot MAY be absent from current state (the documented loss window,
+    // identical to a corrupt *plaintext* snapshot — not an encryption
+    // regression). We therefore assert the anti-brick + functional guarantees,
+    // and that if Alice *is* present she is never corrupt/wrong data.
+    let db2 =
+        AletheiaDB::with_unified_config(encrypted_durable_config(&data_dir, &key_path)).unwrap();
+
+    match db2.get_node(alice) {
+        Ok(node) => {
+            // If recovered, it must be the correct value — never garbage from a
+            // half-decrypted ciphertext.
+            assert_eq!(
+                node.properties.get("name").and_then(|v| v.as_str()),
+                Some("Alice"),
+                "a recovered node must carry correct data, never ciphertext garbage"
+            );
+        }
+        Err(_) => {
+            // Acceptable: pre-snapshot data lost via the documented
+            // differential-replay window (manifest intact, snapshot corrupt).
+        }
+    }
+
+    // The reopened DB must be fully functional regardless of the loss window.
+    let carol = db2
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Carol").build(),
+        )
+        .unwrap();
+    assert!(db2.get_node(carol).is_ok());
 }
 
 /// Reopening an encrypted dataset with the WRONG key must never return the

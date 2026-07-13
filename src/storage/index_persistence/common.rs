@@ -26,11 +26,14 @@ use crate::encryption::cipher::Cipher;
 //
 // Detection on read peeks the first 4 bytes: `AEIX` => encrypted, anything
 // else => legacy/plaintext. This magic can never collide with a legacy
-// plaintext bitcode index file: every in-struct magic used by this module is
-// ASCII "G..." (GIDX/GSTR/GGRP/GDLT/GTMP/GTAJ/GVEC) and a bitcode-encoded
-// struct begins with those bytes, so a plaintext file never starts with
-// "AEIX". This lets a single directory hold a mix of plaintext and encrypted
-// files (the upgrade scenario) and makes encryption-disabled a pure no-op.
+// plaintext index file. Verified empirically (bitcode 0.6.9): the FIRST
+// on-disk byte of any plaintext index encoding is the bitcode scheme byte
+// `0x00` (bitcode emits a leading scheme byte BEFORE any in-struct magic), or
+// `0x28` for a zstd-compressed graph buffer — never `0x41` (`'A'`, the first
+// byte of `AEIX`). (The in-struct `G...`/`AMAP` magics live several bytes in,
+// after that scheme byte, so they are irrelevant to the first-byte test.)
+// This lets a single directory hold a mix of plaintext and encrypted files
+// (the upgrade scenario) and makes encryption-disabled a pure no-op.
 
 /// Magic prefix identifying an encrypted index file.
 pub(crate) const ENC_INDEX_MAGIC: [u8; 4] = *b"AEIX";
@@ -105,6 +108,24 @@ pub(crate) fn decrypt_index_bytes(
         path: path.to_path_buf(),
         source: "File is encrypted but no encryption key is configured".into(),
     })?;
+
+    // Diagnostics only (Issue #481, P1.2): the algorithm id is already part of
+    // the AAD, so a cross-algorithm file would fail authentication regardless.
+    // Comparing it up front turns a generic "Decryption failed" into a clear
+    // "algorithm mismatch", which is the actual operator misconfiguration (e.g.
+    // switching `algorithm` in place over an existing encrypted dataset). No
+    // key material is involved — only the two 1-byte algorithm identifiers.
+    let file_algorithm_id = header[5];
+    let configured_algorithm_id = cipher.algorithm_id();
+    if file_algorithm_id != configured_algorithm_id {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: format!(
+                "algorithm mismatch (file={file_algorithm_id}, configured={configured_algorithm_id})"
+            )
+            .into(),
+        });
+    }
 
     cipher
         .decrypt(&bytes[ENC_HEADER_LEN..], header)
@@ -692,6 +713,38 @@ mod tests {
             result.unwrap_err(),
             IndexPersistenceError::Corrupted { .. }
         ));
+    }
+
+    #[test]
+    fn test_algorithm_mismatch_clear_error() {
+        // Issue #481 (P1.2): a file whose header algorithm_id differs from the
+        // configured cipher's must surface a clear "algorithm mismatch" error
+        // (diagnostics only — the algo byte is already AAD) rather than a
+        // generic "Decryption failed". We simulate a cross-algorithm file by
+        // rewriting the header algorithm_id to a value the configured cipher
+        // does not use, which the up-front check rejects before decryption.
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let cipher = test_cipher(); // AES-256-GCM, algorithm_id == 1
+        save_encoded_encrypted(&7u64, path, &cipher).unwrap();
+
+        let mut raw = fs::read(path).unwrap();
+        let configured = cipher.algorithm_id();
+        raw[5] = configured.wrapping_add(1); // pretend a different algorithm
+        fs::write(path, &raw).unwrap();
+
+        let err =
+            load_encoded_maybe_encrypted::<u64>(path, 4096, "Test", Some(&cipher)).unwrap_err();
+        match err {
+            IndexPersistenceError::Corrupted { source, .. } => {
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("algorithm mismatch"),
+                    "expected algorithm-mismatch message, got: {msg}"
+                );
+            }
+            other => panic!("expected Corrupted algorithm-mismatch error, got {other:?}"),
+        }
     }
 
     #[test]
