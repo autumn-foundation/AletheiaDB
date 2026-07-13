@@ -156,6 +156,9 @@ use super::batch::ApplyBatchRequest;
 use super::budget;
 use super::cursor::{CursorManager, CursorPayload};
 use super::error::{McpError, McpErrorCode, query_kind_classification};
+use super::limits::{
+    EffectiveQueryLimits, LimitCounters, LimitCountsSnapshot, LimitDimension, QueryLimitsConfig,
+};
 use super::tools::*;
 use crate::auth::{AuthMode, Principal};
 
@@ -224,6 +227,14 @@ pub struct AletheiaMcpServer {
     /// (one manager == one MCP connection) so its live-cursor cap is a
     /// per-connection cap.
     cursors: Arc<CursorManager>,
+    /// Per-query resource limits for the `query` tool (Issue #3368): wall-clock
+    /// timeout, result-row cap, and result-byte cap, each with a server default,
+    /// an operator ceiling, and a per-call override.
+    query_limits: Arc<QueryLimitsConfig>,
+    /// Per-dimension counters of over-limit terminations (Issue #3368
+    /// observability). Shared so a cloned server (used for the timeout
+    /// thread-race) increments the same counters.
+    limit_counters: Arc<LimitCounters>,
 }
 
 impl AletheiaMcpServer {
@@ -261,7 +272,34 @@ impl AletheiaMcpServer {
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
             auth: SessionAuth::Anonymous,
             cursors: Arc::new(CursorManager::new()),
+            query_limits: Arc::new(QueryLimitsConfig::default()),
+            limit_counters: Arc::new(LimitCounters::default()),
         }
+    }
+
+    /// Override the per-query resource limits for the `query` tool (Issue
+    /// #3368): the wall-clock timeout, result-row, and result-byte defaults +
+    /// operator ceilings that a per-call `limits` override is folded against.
+    ///
+    /// Defaults are [`QueryLimitsConfig::default`] (enabled, generous). Pass
+    /// [`QueryLimitsConfig::disabled`] to turn all enforcement off (unlimited,
+    /// per-call overrides ignored).
+    #[must_use]
+    pub fn with_query_limits(mut self, limits: QueryLimitsConfig) -> Self {
+        self.query_limits = Arc::new(limits);
+        self
+    }
+
+    /// Snapshot of the per-dimension over-limit termination counters (Issue
+    /// #3368 observability): how many `query` calls were terminated by the
+    /// wall-clock timeout or rejected by the response-byte cap, and how many
+    /// per-call overrides were rejected for exceeding an operator ceiling.
+    ///
+    /// Surfacing these through `database_stats` needs a storage-layer counter
+    /// and is a cross-lane follow-up; this MCP-surface accessor is the interim.
+    #[must_use]
+    pub fn limit_termination_counts(&self) -> LimitCountsSnapshot {
+        self.limit_counters.snapshot()
     }
 
     /// Override the cursor lifecycle bounds (Issue #3360): the continuation
@@ -322,6 +360,8 @@ impl AletheiaMcpServer {
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
             auth: SessionAuth::from(auth),
             cursors: Arc::new(CursorManager::new()),
+            query_limits: Arc::new(QueryLimitsConfig::default()),
+            limit_counters: Arc::new(LimitCounters::default()),
         }
     }
 
@@ -5078,6 +5118,35 @@ impl AletheiaMcpServer {
         )])
     }
 
+    /// [`query_error_classified`](Self::query_error_classified) plus a
+    /// structured `details` object (Issue #3368): the resource-limit errors
+    /// carry `details: {dimension, limit, consumed?}` (or `{dimension,
+    /// requested, ceiling}` for a rejected override) so an LLM can read the
+    /// violated dimension and its bound and self-correct without parsing the
+    /// human message.
+    fn query_error_with_details(
+        &self,
+        kind: &str,
+        code: McpErrorCode,
+        retriable: bool,
+        message: &str,
+        language: Option<&str>,
+        details: serde_json::Value,
+    ) -> CallToolResult {
+        let mut obj = serde_json::Map::new();
+        obj.insert("kind".to_string(), json!(kind));
+        obj.insert("code".to_string(), json!(code.as_str()));
+        obj.insert("retriable".to_string(), json!(retriable));
+        obj.insert("message".to_string(), json!(message));
+        if let Some(language) = language {
+            obj.insert("language".to_string(), json!(language));
+        }
+        obj.insert("details".to_string(), details);
+        CallToolResult::error(vec![Content::text(
+            json!({ "error": serde_json::Value::Object(obj) }).to_string(),
+        )])
+    }
+
     /// Map an engine error from query execution into a structured query-tool error.
     fn map_query_error(&self, error: crate::core::error::Error, language: &str) -> CallToolResult {
         use crate::core::error::{Error, QueryError};
@@ -5343,13 +5412,155 @@ impl AletheiaMcpServer {
             );
         }
 
-        let limit = req
+        // Resolve the per-query resource limits (Issue #3368): fold the server
+        // defaults, operator ceilings, and the per-call `limits` override. An
+        // override that exceeds a ceiling is rejected up front, BEFORE any
+        // execution, as a structured `invalid_params`/INVALID_ARGUMENT error
+        // whose `details` name the dimension, the requested value, and the
+        // ceiling so the caller can shrink and retry.
+        let effective = match self.query_limits.effective(req.limits.as_ref()) {
+            Ok(eff) => eff,
+            Err(over) => {
+                self.limit_counters.record_override_rejected();
+                return self.query_error_with_details(
+                    "invalid_params",
+                    McpErrorCode::InvalidArgument,
+                    false,
+                    &format!(
+                        "Per-call {} limit override ({}) exceeds the operator ceiling ({}).",
+                        over.dimension.as_str(),
+                        over.requested,
+                        over.ceiling,
+                    ),
+                    Some(&language),
+                    json!({
+                        "dimension": over.dimension.as_str(),
+                        "requested": over.requested,
+                        "ceiling": over.ceiling,
+                    }),
+                );
+            }
+        };
+
+        // The caller's own `limit` param keeps its existing contract (default
+        // 100, absolute hard cap `MAX_RESULT_LIMIT`); the effective row cap
+        // tightens it further when configured. With default limits the two are
+        // equal, so behavior is unchanged.
+        let requested = req
             .limit
             .unwrap_or(DEFAULT_RESULT_LIMIT)
             .min(MAX_RESULT_LIMIT);
+        let row_limit = if effective.max_result_rows > 0 {
+            requested.min(effective.max_result_rows)
+        } else {
+            requested
+        };
+
+        self.run_query_under_timeout(effective, language, req, row_limit)
+    }
+
+    /// Run the `query` tool's execution under the effective wall-clock timeout
+    /// (Issue #3368).
+    ///
+    /// When `timeout_ms` is `0` (unlimited), the query runs inline with no
+    /// overhead. Otherwise it runs on a dedicated thread raced against the
+    /// deadline: if the deadline elapses first the caller gets a prompt,
+    /// structured `RESOURCE_EXHAUSTED` timeout error (retriable — the `query`
+    /// tool is read-only, so a tightened retry is always sound). Mirroring the
+    /// HTTP `/query` surface, the underlying computation is **not** cancelled
+    /// (it runs to completion on its thread and is then discarded); this bounds
+    /// the caller's wait without engine-level cooperative cancellation, which
+    /// is the query-executor lane's concern. The read-only guard has already
+    /// run, so a discarded computation can never leave a partial write.
+    fn run_query_under_timeout(
+        &self,
+        effective: EffectiveQueryLimits,
+        language: String,
+        req: QueryRequest,
+        row_limit: usize,
+    ) -> CallToolResult {
+        if effective.timeout_ms == 0 {
+            return self.execute_query_core(effective, &language, &req, row_limit);
+        }
+        let server = self.clone();
+        let lang = language.clone();
+        let outcome = self.race_deadline(effective.timeout_ms, move || {
+            server.execute_query_core(effective, &lang, &req, row_limit)
+        });
+        match outcome {
+            Some(result) => result,
+            None => self.wall_clock_timeout_error(&language, effective.timeout_ms),
+        }
+    }
+
+    /// Race a computation `f` against a wall-clock deadline (Issue #3368).
+    ///
+    /// Returns `Some(result)` if `f` finished within `timeout_ms`, or `None` if
+    /// the deadline elapsed first. `f` runs on a dedicated thread and is **not**
+    /// cancelled on timeout — it runs to completion and its result is discarded
+    /// — so the caller's wait is bounded without engine-level cancellation
+    /// (mirroring the HTTP `/query` surface). `f` must therefore be free of
+    /// externally-visible side effects that would be unsafe to discard; the
+    /// `query` tool's read-only guard runs before this, so a discarded query can
+    /// never leave a partial write.
+    fn race_deadline<F>(&self, timeout_ms: u64, f: F) -> Option<CallToolResult>
+    where
+        F: FnOnce() -> CallToolResult + Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // A send error only means the receiver already timed out and went
+            // away; the computed result is simply discarded.
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_millis(timeout_ms))
+            .ok()
+    }
+
+    /// Build the structured wall-clock-timeout error and record the termination
+    /// (Issue #3368). `retriable: true` — the `query` tool is read-only, so a
+    /// tightened retry is always sound.
+    fn wall_clock_timeout_error(&self, language: &str, timeout_ms: u64) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::WallClockTimeout);
+        self.query_error_with_details(
+            "runtime_error",
+            McpErrorCode::ResourceExhausted,
+            true,
+            &format!(
+                "Query exceeded the wall-clock timeout of {timeout_ms} ms and was terminated. \
+                 Retry with a narrower query (smaller depth/LIMIT/time window) or a larger \
+                 `limits.timeout_ms` (up to the operator ceiling).",
+            ),
+            Some(language),
+            json!({
+                "dimension": LimitDimension::WallClockTimeout.as_str(),
+                "limit": timeout_ms,
+            }),
+        )
+    }
+
+    /// Execute the query, collect up to `row_limit` rows (disclosing truncation
+    /// via `truncated`), serialize, and enforce the effective result-byte cap
+    /// (Issue #3368).
+    ///
+    /// The byte cap is a **protective**, fail-closed bound (over cap →
+    /// `RESOURCE_EXHAUSTED`, non-retriable), enforced here BEFORE the response
+    /// returns to [`dispatch_tool`](Self::dispatch_tool)'s #3353 token-budget
+    /// shaper — so the two compose without double-truncation: a byte-cap breach
+    /// short-circuits to an error (which the budget shaper passes through
+    /// untouched), while a within-cap response is then optionally shaped by the
+    /// caller's own token budget with the #3353 disclosed ladder.
+    fn execute_query_core(
+        &self,
+        effective: EffectiveQueryLimits,
+        language: &str,
+        req: &QueryRequest,
+        row_limit: usize,
+    ) -> CallToolResult {
         let has_params = req.params.as_ref().is_some_and(|p| !p.is_empty());
 
-        let execution = match language.as_str() {
+        let execution = match language {
             "aql" => {
                 if has_params {
                     return self.query_error(
@@ -5394,15 +5605,15 @@ impl AletheiaMcpServer {
 
         let results = match execution {
             Ok(results) => results,
-            Err(e) => return self.map_query_error(e, &language),
+            Err(e) => return self.map_query_error(e, language),
         };
 
         // Collect one extra row to detect (and report) truncation at the cap.
-        let collected = match results.take_n(limit.saturating_add(1)) {
+        let collected = match results.take_n(row_limit.saturating_add(1)) {
             Ok(rows) => rows,
-            Err(e) => return self.map_query_error(e, &language),
+            Err(e) => return self.map_query_error(e, language),
         };
-        let truncated = collected.len() > limit;
+        let truncated = collected.len() > row_limit;
         // Detect computed/aggregate rows (#558): a row carrying named `columns`
         // (e.g. `RETURN count(*)`, `RETURN n.dept, count(*)`) reports its own
         // column schema in projection order. Ordinary entity rows leave this
@@ -5416,7 +5627,7 @@ impl AletheiaMcpServer {
         let mut computed_columns: Option<Vec<String>> = None;
         let rows: Vec<serde_json::Value> = collected
             .into_iter()
-            .take(limit)
+            .take(row_limit)
             .map(|row| {
                 if computed_columns.is_none() {
                     if let Some(bindings) = &row.bindings {
@@ -5441,13 +5652,44 @@ impl AletheiaMcpServer {
             None => query_columns(),
         };
 
-        self.success_json(json!({
+        let value = json!({
             "language": language,
             "columns": columns,
             "rows": rows,
             "row_count": row_count,
             "truncated": truncated,
-        }))
+        });
+
+        // Protective result-byte cap (Issue #3368): measure the exact bytes the
+        // response will carry (the pretty-printed form `success_json` emits) and
+        // fail closed if it exceeds the effective cap. Non-retriable — the same
+        // query would produce the same oversized result; the caller must narrow
+        // it or raise `limits.max_response_bytes`.
+        let serialized = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+        if effective.max_response_bytes > 0 && serialized.len() > effective.max_response_bytes {
+            self.limit_counters
+                .record_termination(LimitDimension::ResultBytes);
+            return self.query_error_with_details(
+                "runtime_error",
+                McpErrorCode::ResourceExhausted,
+                false,
+                &format!(
+                    "Query response ({} bytes) exceeds the result-byte cap of {} bytes. Narrow \
+                     the query (smaller LIMIT / fewer returned properties) or raise \
+                     `limits.max_response_bytes` (up to the operator ceiling).",
+                    serialized.len(),
+                    effective.max_response_bytes,
+                ),
+                Some(language),
+                json!({
+                    "dimension": LimitDimension::ResultBytes.as_str(),
+                    "limit": effective.max_response_bytes,
+                    "consumed": serialized.len(),
+                }),
+            );
+        }
+
+        CallToolResult::success(vec![Content::text(serialized)])
     }
 
     /// Test-only accessor returning the names of all advertised tools.
@@ -6112,8 +6354,14 @@ fn tool_definitions() -> Vec<Tool> {
              (AS OF TIMESTAMP/VALID_TIME/SYSTEM_TIME, FOR SYSTEM_TIME AS OF, BETWEEN ... AND ...). \
              Mutating statements (CREATE/MERGE/SET/DELETE/REMOVE/DETACH/DROP/CALL/FOREACH/LOAD) \
              are rejected before execution and never write. Results are capped (default 100, \
-             max 10000 rows; `truncated` indicates a cap hit). Errors are returned as a \
-             structured {error:{kind,code,retriable,message,clause?,language}} payload \
+             max 10000 rows; `truncated` indicates a cap hit). Per-query resource limits \
+             (Issue #3368) bound each call: a wall-clock timeout, a result-row cap (disclosed \
+             via `truncated`), and a result-byte cap. Pass optional `limits` \
+             ({timeout_ms, max_result_rows, max_response_bytes}) to tighten within the operator \
+             ceilings; a timeout or byte-cap breach fails closed with a RESOURCE_EXHAUSTED \
+             error (timeouts are retriable, byte-cap breaches are not), and an over-ceiling \
+             override is rejected INVALID_ARGUMENT. Errors are returned as a \
+             structured {error:{kind,code,retriable,message,clause?,language,details?}} payload \
              (kinds: invalid_request, read_only_violation, language_unavailable, parse_error, \
              unsupported_construct, invalid_params, runtime_error; code/retriable follow the \
              uniform MCP error contract) so callers can self-correct.",
@@ -6379,7 +6627,7 @@ impl ServerHandler for AletheiaMcpServer {
 mod server_unit_tests {
     use std::sync::Arc;
 
-    use super::AletheiaMcpServer;
+    use super::{AletheiaMcpServer, CallToolResult, Content};
     use crate::core::PropertyValue;
     use crate::core::error::{Error, QueryError};
     use crate::core::id::{EdgeId, NodeId};
@@ -6404,6 +6652,97 @@ mod server_unit_tests {
         let text = AletheiaMcpServer::extract_text(result);
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
         val["error"].clone()
+    }
+
+    // ===================================================================
+    // Per-query resource limits (Issue #3368) — low-level unit tests of the
+    // timeout race + timeout-error shape. These access private methods, so
+    // they live in the descendant `server_unit_tests` module (the sibling
+    // `mcp::tests` integration tests cover the end-to-end behavior).
+    // ===================================================================
+
+    /// A computation that finishes within the deadline is returned intact.
+    #[test]
+    fn race_deadline_returns_fast_result() {
+        let server = make_server();
+        let out = server.race_deadline(1_000, || {
+            CallToolResult::success(vec![Content::text("done".to_string())])
+        });
+        let out = out.expect("fast computation must complete within the deadline");
+        assert_eq!(AletheiaMcpServer::extract_text(out), "done");
+    }
+
+    /// A computation that overruns the deadline yields `None` (the caller then
+    /// synthesizes the timeout error). Deterministic: 300 ms work vs 10 ms
+    /// deadline.
+    #[test]
+    fn race_deadline_times_out_slow_result() {
+        let server = make_server();
+        let out = server.race_deadline(10, || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            CallToolResult::success(vec![Content::text("late".to_string())])
+        });
+        assert!(
+            out.is_none(),
+            "a computation exceeding the deadline must race to None"
+        );
+    }
+
+    /// The wall-clock-timeout error is a retriable RESOURCE_EXHAUSTED with
+    /// `details.dimension = wall_clock_timeout`, and it bumps the counter.
+    #[test]
+    fn wall_clock_timeout_error_shape_and_counter() {
+        let server = make_server();
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 0);
+        let result = server.wall_clock_timeout_error("aql", 25);
+        assert_eq!(result.is_error, Some(true));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        let err = &val["error"];
+        assert_eq!(err["kind"].as_str(), Some("runtime_error"));
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"));
+        assert_eq!(err["retriable"].as_bool(), Some(true));
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout")
+        );
+        assert_eq!(err["details"]["limit"].as_u64(), Some(25));
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 1);
+    }
+
+    /// A configured wall-clock timeout wraps real execution: `execute_query_core`
+    /// runs on a raced thread and a tight deadline over a non-trivial dataset
+    /// terminates with the structured timeout error. Uses a 1 ms timeout with a
+    /// seeded dataset so the parse+execute+serialize pipeline reliably overruns.
+    #[test]
+    fn query_wall_clock_timeout_terminates_with_resource_exhausted() {
+        use crate::core::property::PropertyMap;
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        for _ in 0..4_000 {
+            db.create_node("Widget", PropertyMap::new()).unwrap();
+        }
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 1,
+            max_timeout_ms: 0,
+            ..super::QueryLimitsConfig::default()
+        });
+        let result = server.handle_query(serde_json::json!({
+            "language": "aql",
+            "query": "MATCH (n:Widget) RETURN n",
+            "limit": 4_000,
+        }));
+        // With a 1 ms budget over 4k rows the query is terminated; assert the
+        // structured timeout error (the discarded worker thread never wrote).
+        assert_eq!(result.is_error, Some(true));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        assert_eq!(val["error"]["code"].as_str(), Some("RESOURCE_EXHAUSTED"));
+        assert_eq!(
+            val["error"]["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout")
+        );
+        assert_eq!(val["error"]["retriable"].as_bool(), Some(true));
+        assert!(server.limit_termination_counts().wall_clock_timeout >= 1);
     }
 
     /// EXPLAIN (Issue #562) flows through the MCP `query` tool's

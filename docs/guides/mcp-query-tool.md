@@ -677,6 +677,7 @@ object of this shape (Issue #3234):
 | `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
 | `UNAUTHENTICATED` | No valid session credential in `required` auth mode (Issue #3350) — missing, unknown, or revoked; deliberately indistinguishable, and returned for *every* tool including unknown tool names (no inventory leak). Never carries `details`, never echoes the credential | `false` | Supply a valid `ALETHEIADB_MCP_API_KEY` (or bootstrap key) and restart the session; retrying with the same credential cannot succeed |
 | `PERMISSION_DENIED` | Authenticated, but the principal's role does not allow the tool's access class (Issue #3350). `details` carries `required_class` and `principal_role` | `false` | Use a credential whose role allows the class (see [docs/guides/access-control-matrix.md](access-control-matrix.md)); do not retry with the same key |
+| `RESOURCE_EXHAUSTED` | A per-query resource limit was exceeded on the `query` tool (Issue #3368): the wall-clock timeout elapsed, or the result exceeded the response-byte cap. `details` carries `dimension` (`wall_clock_timeout`/`result_bytes`), `limit`, and (for byte caps) `consumed` | timeout: `true` (read-only, so a tightened retry is sound); byte cap: `false` | Narrow the query (smaller depth/`LIMIT`/time window, fewer returned properties) or raise the matching `limits.*` override (up to the operator ceiling) |
 
 Codes may be **added** over time; existing codes never change. Treat an
 unrecognized code as non-retriable. `UNAUTHENTICATED` and
@@ -712,6 +713,99 @@ Legacy top-level fields that predate this contract (the DETACH refusal's
 `connected_edges` / `detach_required`, the unique-violation's
 `constraint_violation` / `existing_node_id`) remain present alongside
 `error.details`, so pre-#3234 consumers keep working.
+
+## Per-query resource limits (Issue #3368)
+
+A single pathological `query` — an unbounded variable-depth traversal, an
+accidental cross product, a temporal scan across a million versions — can
+starve every other concurrent agent. The `query` tool enforces three per-call
+resource limits so a runaway query fails predictably instead of hurting its
+neighbors, and returns a **structured, self-correctable** error.
+
+Each dimension has a **server default**, an operator **hard ceiling**, and an
+optional **per-call override** (supplied under `limits`) that may tighten below
+the default but is rejected if it exceeds the ceiling:
+
+```jsonc
+// tools/call -> "query"
+{
+  "language": "cypher",
+  "query": "MATCH (n:Person)-[:KNOWS*1..5]->(m) RETURN m",
+  "limits": {
+    "timeout_ms": 2000,          // wall-clock budget for this call
+    "max_result_rows": 500,      // truncates with truncated:true past this
+    "max_response_bytes": 262144 // fail-closed cap on the serialized response
+  }
+}
+```
+
+`0` on any override means *unlimited* — but only under an unbounded ceiling; a
+`0` under a finite operator ceiling is rejected (a caller cannot disable a limit
+the operator set). Omitting `limits` entirely uses the server defaults, and with
+default (generous) limits the response is byte-identical to pre-#3368 behavior.
+
+### What each breach returns
+
+| Dimension | Over-limit outcome | `code` | `retriable` | `details` |
+|-----------|--------------------|--------|-------------|-----------|
+| Wall-clock timeout | Query terminated, structured error | `RESOURCE_EXHAUSTED` (kind `runtime_error`) | `true` — the tool is read-only, so a tightened retry is sound | `{dimension:"wall_clock_timeout", limit}` |
+| Result rows | **Success**, truncated to the cap and flagged | *(none — success)* | n/a | response carries `truncated: true` (the #3226 completeness signal) |
+| Result bytes | Response rejected, structured error | `RESOURCE_EXHAUSTED` (kind `runtime_error`) | `false` — the same query yields the same oversized result | `{dimension:"result_bytes", limit, consumed}` |
+| Over-ceiling override | Rejected before any execution | `INVALID_ARGUMENT` (kind `invalid_params`) | `false` | `{dimension, requested, ceiling}` |
+
+Row-cap overflow degrades to a **disclosed truncation** (never a silent drop);
+the timeout and byte cap **fail closed** with an error. The read-only guard runs
+*before* execution, so a query terminated by the timeout can never leave a
+partial write. Timeout enforcement bounds the caller's wait via a thread-race;
+the underlying computation is not force-cancelled (it runs to completion and is
+discarded), mirroring the HTTP `/query` surface — engine-level cooperative
+cancellation is a separate query-executor concern.
+
+### LLM self-correction path
+
+The error payload contains everything an agent needs to shrink the query and
+succeed within the same session — no human help, no substring matching:
+
+```jsonc
+// 1. query { "query": "MATCH (n)-[:KNOWS*1..8]->(m) RETURN m", "limits": {"timeout_ms": 1000} }
+// -> { "error": { "code": "RESOURCE_EXHAUSTED", "retriable": true,
+//                 "details": { "dimension": "wall_clock_timeout", "limit": 1000 } } }
+// Agent reads details.dimension == wall_clock_timeout -> narrow the traversal depth:
+// 2. query { "query": "MATCH (n)-[:KNOWS*1..3]->(m) RETURN m", "limits": {"timeout_ms": 1000} }
+// -> success.
+
+// A byte-cap breach names the consumed size so the agent can shrink deterministically:
+// -> { "error": { "code": "RESOURCE_EXHAUSTED", "retriable": false,
+//                 "details": { "dimension": "result_bytes", "limit": 262144, "consumed": 900000 } } }
+// Agent adds a smaller LIMIT (or raises limits.max_response_bytes toward the ceiling) and re-issues.
+```
+
+### Composition with token budgets (#3353) and cursors (#3360)
+
+The **protective** result-byte cap here and the **ergonomic** #3353
+`max_response_tokens` / `max_response_bytes` budget compose without
+double-truncation: the operator byte cap is enforced first (inside the tool), so
+a breach fails closed as `RESOURCE_EXHAUSTED` and the budget shaper passes that
+error through untouched — a generous token budget can never mask the protective
+limit. A response *within* the byte cap is then shaped by the caller's token
+budget along the #3353 disclosed ladder as usual. Cursor paging on the `query`
+tool remains an `unsupported_construct` (#3360).
+
+### Coverage matrix
+
+| Surface | Wall-clock timeout | Result-row cap | Result-byte cap | Override + operator ceiling |
+|---------|--------------------|----------------|------------------|-----------------------------|
+| MCP `query` tool | ✅ (thread-race, read-only) | ✅ truncate + disclose | ✅ fail-closed | ✅ `limits` |
+| HTTP `/query` | ✅ (Issue #3446) | ✅ truncate/reject | ✅ | ✅ `limits` |
+| MCP `traverse` / `hybrid_query` / `find_similar` | ⚠️ row `limit`/`top_k` caps only; timeout + byte cap are a documented follow-up | ✅ via `limit`/`top_k` | via #3353 budget | — |
+| Rust query builder | ⚠️ builder-level limit options are a documented follow-up (embedders hold the `Arc<AletheiaDB>` and can bound work directly) | — | — | — |
+
+Over-limit terminations are counted per dimension in-process
+(`AletheiaMcpServer::limit_termination_counts()`); surfacing them through
+`database_stats` needs a storage-layer counter and is a cross-lane follow-up.
+True engine-level **memory** accounting is likewise a query-executor follow-up;
+the response-byte cap is the working-memory proxy for a read-only query on this
+surface.
 
 ## Discovering the queryable temporal extent (`temporal_extent`)
 
