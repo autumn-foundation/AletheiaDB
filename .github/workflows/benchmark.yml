@@ -270,3 +270,94 @@ jobs:
             benchmark-results/
             target/criterion/
             output.txt
+
+  # MCP round-trip p99 latency harness (Issue #3361) — reference/nightly lane.
+  # Full fixture scale, ENFORCED p99<5ms gate: a gated scenario over budget
+  # HARD-FAILS this job. Runs on the schedule/manual triggers only.
+  mcp-roundtrip-nightly:
+    name: MCP round-trip latency (nightly, gated)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-mcpbench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run MCP round-trip benchmark (nightly scale, enforced gate)
+        env:
+          MCP_BENCH_SCALE: nightly
+          MCP_BENCH_SAMPLE_SIZE: 1000
+          MCP_BENCH_WARMUP: 50
+          MCP_BENCH_ENFORCE_LATENCY: '1'
+          MCP_BENCH_JSON: mcp_round_trip_results.json
+        run: |
+          # Hard-fail on: registry-completeness (exit 2) or an over-budget gated
+          # scenario p99>=5ms (exit 3). This is the reference enforcement lane.
+          cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
+      - name: Upload MCP latency artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-round-trip-nightly
+          path: mcp_round_trip_results.json
+
+  # MCP round-trip smoke lane — reduced scale, INFORMATIONAL on every push/PR.
+  # continue-on-error means it never blocks a PR; flip to `false` to make it a
+  # required check (a deliberate one-line owner decision).
+  mcp-roundtrip-smoke:
+    name: MCP round-trip latency (PR smoke, informational)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-mcpbench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run MCP round-trip benchmark (smoke scale, informational)
+        env:
+          MCP_BENCH_SCALE: smoke
+          MCP_BENCH_SAMPLE_SIZE: 100
+          MCP_BENCH_WARMUP: 15
+          # Not enforcing the p99 gate on the per-PR lane (informational only);
+          # registry-completeness (exit 2) is always enforced.
+          MCP_BENCH_ENFORCE_LATENCY: '0'
+          MCP_BENCH_JSON: mcp_round_trip_results.json
+        run: |
+          cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
+      - name: Upload MCP latency artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-round-trip-smoke
+          path: mcp_round_trip_results.json

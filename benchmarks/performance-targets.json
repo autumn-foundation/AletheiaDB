@@ -35,6 +35,18 @@
       "metric": "Storage overhead",
       "target": "<2X vs non-temporal",
       "rationale": "Acceptable overhead for bi-temporal tracking"
+    },
+    {
+      "metric": "MCP round-trip p99 (representative read/write/temporal/vector/query)",
+      "target": "<5ms",
+      "rationale": "End-to-end tool latency through the shipped aletheia-mcp stdio server keeps LLM tool calls interactive (Issue #3361). Measured by the mcp_round_trip bench under an Async durability profile; gated per-scenario, hard-failed in the nightly lane.",
+      "benchmark": "mcp_round_trip"
+    },
+    {
+      "metric": "MCP transport overhead (round-trip minus in-process direct call)",
+      "target": "<1ms",
+      "rationale": "JSON-RPC serialization + stdio + process-boundary cost above the direct API floor for single-entity reads (Issue #3361). Independently checkable per scenario via the overhead sub-metric.",
+      "benchmark": "mcp_round_trip"
     }
   ]
 }

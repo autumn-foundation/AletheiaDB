@@ -22,6 +22,16 @@ test-one TEST:
 bench:
     cargo bench
 
+# Run the MCP round-trip p99 latency harness (Issue #3361).
+# Black-box over the shipped aletheia-mcp binary's stdio JSON-RPC transport.
+# Args: scale (smoke|nightly), sample size, warmup, enforce (0|1 hard-fail p99<5ms gate).
+# Requires the mcp-server + config-toml features; serves the seeded fixture under
+# an Async durability profile so latencies isolate MCP overhead from fsync cost.
+mcp-bench scale='smoke' sample='200' warmup='20' enforce='0':
+    MCP_BENCH_SCALE={{scale}} MCP_BENCH_SAMPLE_SIZE={{sample}} MCP_BENCH_WARMUP={{warmup}} \
+    MCP_BENCH_ENFORCE_LATENCY={{enforce}} MCP_BENCH_JSON=mcp_round_trip_results.json \
+    cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
 # Run benchmarks and generate HTML tables
 bench-tables:
     cargo bench --all-features
