@@ -15,8 +15,8 @@ use crate::encryption::factory::Algorithm;
 /// implemented** -- when selected, the logger degrades to stderr with a
 /// warning (see Issue #489 follow-ups).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum AuditDestination {
     /// Write structured JSON lines to standard output.
     #[default]
@@ -33,8 +33,8 @@ pub enum AuditDestination {
 /// Disabled by default: an [`EncryptionConfig`] without an `[encryption.audit]`
 /// block produces **zero** audit output, preserving prior behavior exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct AuditConfig {
     /// Whether audit logging is enabled. When `false`, no events are emitted.
     pub enabled: bool,

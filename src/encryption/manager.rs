@@ -18,8 +18,9 @@ use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvid
 
 /// The key version tracked by the manager for the currently-loaded MEK.
 ///
-/// Versioning is owned by the (not-yet-built) rotation engine (#488); until it
-/// lands the manager always reports version 1 for the freshly-loaded key.
+/// A `KeyRotationManager` exists (see `rotation.rs`) but is only a version
+/// counter today; rotation-event audit wiring is deferred to #488, so the
+/// manager always reports version 1 for the freshly-loaded key.
 const CURRENT_KEY_VERSION: u32 = 1;
 
 /// Reduce a [`KeyProviderError`] to a stable, key-safe category token.
@@ -135,9 +136,11 @@ impl EncryptionManager {
         };
 
         // NOTE: rotation audit events (`key.rotation.started` /
-        // `key.rotation.completed` / `key.rotation.failed`) are emitted by the
-        // key-rotation engine, which does not exist yet -- wired by #488 via
-        // `EncryptionManager::audit_logger()`.
+        // `key.rotation.completed` / `key.rotation.failed`) are not emitted
+        // here. A `KeyRotationManager` exists in `rotation.rs` but is only a
+        // version counter today; rotation-event audit wiring is deferred to
+        // #488 (via `EncryptionManager::audit_logger()`), so we deliberately do
+        // not wire the counter-only rotation now.
 
         // 3. Derive per-component DEKs.
         let kd = KeyDerivation::new(mek);
