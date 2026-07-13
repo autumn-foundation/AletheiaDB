@@ -666,7 +666,8 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
 ///
 /// This function modifies the vector in place without allocation, making it
 /// more efficient than [`normalize`] when a new vector isn't needed.
-/// Uses SIMD-accelerated scalar multiplication (AVX2/SSE2) for optimal performance.
+/// The element-wise scale is a plain scalar loop that the compiler
+/// auto-vectorizes; there is no `unsafe` code on this path (Issue #426).
 #[inline]
 pub fn normalize_in_place(v: &mut [f32]) {
     let sq_mag = squared_magnitude(v);

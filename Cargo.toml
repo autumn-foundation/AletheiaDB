@@ -39,7 +39,9 @@ usearch = "2.25.2"
 # the `simsimd` feature (on by default). Provides runtime-dispatched x86
 # AVX2/AVX-512 AND ARM NEON/SVE kernels, replacing the crate's hand-written
 # x86-only unsafe SIMD. When the feature is off the scalar fallback is used.
-simsimd = { version = "6", optional = true }
+# Pinned to patch-only within 6.5 (defense-in-depth for a C-compiling dep;
+# still admits security patches). Resolves to 6.5.16 in Cargo.lock.
+simsimd = { version = "~6.5", optional = true }
 arc-swap = "1.9"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
