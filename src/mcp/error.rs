@@ -211,6 +211,14 @@ fn classify_db_error(e: &Error) -> (McpErrorCode, bool) {
         // A provenance bundle failing validation is a caller fault.
         Error::Provenance(_) => (McpErrorCode::InvalidArgument, false),
         Error::Lineage(le) => classify_lineage_error(le),
+        // A PITR (#3374) target outside the achievable window, or a window that
+        // crosses a post-backup vocabulary change, is a caller-fault precondition
+        // failure; each error's Display explains the remediation. All other
+        // backup errors remain Internal.
+        Error::Backup(
+            crate::storage::backup::BackupError::TargetOutsideWindow { .. }
+            | crate::storage::backup::BackupError::WindowCrossesVocabularyChange { .. },
+        ) => (McpErrorCode::FailedPrecondition, false),
         Error::Io(_) | Error::Backup(_) => (McpErrorCode::Internal, false),
         // The feature exists but this build/deployment doesn't provide it.
         Error::NotImplemented { .. } => (McpErrorCode::FailedPrecondition, false),
