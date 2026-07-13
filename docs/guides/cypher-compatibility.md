@@ -138,10 +138,37 @@ against a **fresh seed graph per case**.
 | `DETACH DELETE` | `MATCH (n:Person {name:'A'}) DETACH DELETE n` | cascade-removes the node and its relationships (maps to `delete_node_cascade`) |
 | `RETURN` after write | `CREATE (n:X {..}) RETURN n`, `... SET n.p=1 RETURN n` | bound variables (bare or `AS`-aliased) / `*`; re-read post-write (a `SET`-updated node reflects the new value) |
 
-Deferred to follow-ups (rejected cleanly — see §2): `MERGE`, `REMOVE`, label
-mutation (`SET n:Label`), whole-entity replacement (`SET n = {...}` / `+=`),
-variable-length relationships in a write, and aggregate/property `RETURN`
-projections after a write.
+Deferred to follow-ups (rejected cleanly — see §2): `MERGE` (#3548), `REMOVE`
+(#3549), label mutation (`SET n:Label`), whole-entity replacement
+(`SET n = {...}` / `+=`), variable-length relationships in a write, and
+aggregate/property `RETURN` projections after a write.
+
+#### Write-clause v1 deviations & limitations
+
+- **`SET n.prop = null` stores an explicit `Null`, it does not remove the key.**
+  openCypher treats `SET x.p = null` as *deleting* the property. AletheiaDB's
+  native update is PATCH-merge with no per-key tombstone, so v1 stores an
+  explicit `PropertyValue::Null` under the key instead. True key deletion (and
+  the `REMOVE` clause) are blocked on a replace/tombstone write API tracked in
+  **#3549**. Pinned by `set_null_stores_explicit_null_v1_deviation`.
+- **`RETURN` after a write re-reads current state post-commit.** The returned
+  rows reflect the entity's state *after* the statement commits (a `SET`-updated
+  node shows the new value); a returned entity that the statement *deleted* falls
+  back to the pre-delete snapshot captured during matching.
+- **The reading `MATCH` is evaluated before the write transaction opens
+  (check-then-act window).** Matching reads current state, then all writes run in
+  one transaction. The *writes* are atomic (all-or-nothing, one commit
+  timestamp), but a concurrent committer could change the matched set between the
+  match and the write. v1 accepts this window; a snapshot-consistent match-inside-
+  the-write-tx is a follow-up.
+- **Per-row versioning.** A `SET`/`DELETE` whose reading `MATCH` binds the same
+  entity in multiple rows applies once per row (can record multiple versions).
+  Multiple `SET` items targeting one entity in a single row are coalesced into
+  one version.
+- **Same-statement create-then-delete-endpoint.** `CREATE (a)-[:R]->(b) DELETE a`
+  (plain) is **refused** with the friendly "use `DETACH DELETE`" message via a
+  statement-local created-edge ledger (rather than aborting at commit);
+  `DETACH DELETE` of such an endpoint works (cascade unions the buffered CREATE).
 
 ---
 
@@ -152,8 +179,8 @@ can be produced. The suite pins the exact variant and a message substring.
 
 | Construct | Example | Error variant | Why |
 |-----------|---------|---------------|-----|
-| `MERGE` | `MERGE (n:Person {name:'Z'}) RETURN n` | `ParseError` | **deferred** (Issue #560): match-or-create is its own design problem; not yet a lexer keyword, so it fails `expect(MATCH)`. Rejects cleanly, never partially applies |
-| `REMOVE` | `MATCH (n) REMOVE n.age` | `ParseError` | **deferred** (Issue #560): property removal needs a replace/tombstone write API the native surface does not expose (update is PATCH-merge only), and label removal conflicts with the single-label model |
+| `MERGE` | `MERGE (n:Person {name:'Z'}) RETURN n` | `ParseError` | **deferred to #3548**: match-or-create is its own design problem; not yet a lexer keyword, so it fails `expect(MATCH)`. Rejects cleanly, never partially applies |
+| `REMOVE` | `MATCH (n) REMOVE n.age` | `ParseError` | **deferred to #3549**: property/label removal needs a replace/tombstone write API the native surface does not expose (update is PATCH-merge only); label removal also conflicts with the single-label model |
 | `FOREACH` | `FOREACH (x IN [1] | SET ...)` | `ParseError` | mutating/procedural clause |
 | `CALL` | `CALL db.labels()` | `ParseError` | procedure calls not supported |
 | `LOAD CSV` | `LOAD CSV FROM 'f.csv' AS row RETURN row` | `ParseError` | data-loading clause not supported |

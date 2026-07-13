@@ -102,6 +102,12 @@ pub fn execute(
         // same statement already removed.
         let mut deleted_nodes: HashSet<NodeId> = HashSet::new();
         let mut deleted_edges: HashSet<EdgeId> = HashSet::new();
+        // Relationships CREATEd by THIS statement, as (edge, source, target).
+        // The committed adjacency reads used by the plain-DELETE safety check do
+        // not yet see a buffered same-statement CREATE, so this statement-local
+        // ledger lets a plain DELETE of such an endpoint refuse cleanly instead
+        // of aborting at commit with a cryptic dangling-edge error (Minor 1).
+        let mut created_edges: Vec<(EdgeId, NodeId, NodeId)> = Vec::new();
 
         for base in &base_rows {
             let mut binding = base.clone();
@@ -113,6 +119,7 @@ pub fn execute(
                     params,
                     &mut deleted_nodes,
                     &mut deleted_edges,
+                    &mut created_edges,
                 )?;
             }
             if let Some(ret) = &write.return_clause {
@@ -224,6 +231,7 @@ fn validate_return(ret: &CypherReturn) -> std::result::Result<(), CypherError> {
 // Clause application
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn apply_clause(
     tx: &mut crate::api::transaction::WriteTransaction,
     clause: &CypherWriteClause,
@@ -231,18 +239,27 @@ fn apply_clause(
     params: &Params,
     deleted_nodes: &mut HashSet<NodeId>,
     deleted_edges: &mut HashSet<EdgeId>,
+    created_edges: &mut Vec<(EdgeId, NodeId, NodeId)>,
 ) -> Result<()> {
     match clause {
         CypherWriteClause::Create(patterns) => {
             for pattern in patterns {
-                create_pattern(tx, pattern, binding, params)?;
+                create_pattern(tx, pattern, binding, params, created_edges)?;
             }
             Ok(())
         }
-        CypherWriteClause::Set(items) => apply_set(tx, items, binding, params, deleted_nodes),
-        CypherWriteClause::Delete { detach, targets } => {
-            apply_delete(tx, *detach, targets, binding, deleted_nodes, deleted_edges)
+        CypherWriteClause::Set(items) => {
+            apply_set(tx, items, binding, params, deleted_nodes, deleted_edges)
         }
+        CypherWriteClause::Delete { detach, targets } => apply_delete(
+            tx,
+            *detach,
+            targets,
+            binding,
+            deleted_nodes,
+            deleted_edges,
+            created_edges,
+        ),
     }
 }
 
@@ -253,6 +270,7 @@ fn create_pattern(
     pattern: &CypherPattern,
     binding: &mut Binding,
     params: &Params,
+    created_edges: &mut Vec<(EdgeId, NodeId, NodeId)>,
 ) -> Result<()> {
     let mut prev_node: Option<NodeId> = None;
     let mut idx = 0;
@@ -292,6 +310,7 @@ fn create_pattern(
                 };
                 let props = build_props(&rel.properties, params)?;
                 let edge_id = tx.create_edge(source, target, rel_type, props)?;
+                created_edges.push((edge_id, source, target));
                 if let Some(var) = &rel.variable {
                     bind(binding, var, EntityResult::EdgeId(edge_id));
                 }
@@ -357,6 +376,7 @@ fn apply_set(
     binding: &Binding,
     params: &Params,
     deleted_nodes: &HashSet<NodeId>,
+    deleted_edges: &HashSet<EdgeId>,
 ) -> Result<()> {
     // Accumulate per-target property maps in first-seen order.
     let mut node_updates: Vec<(NodeId, PropertyMapBuilder)> = Vec::new();
@@ -384,6 +404,9 @@ fn apply_set(
             };
             take_insert(slot, &item.property, value);
         } else if let Some(edge_id) = edge_id_of(entity) {
+            if deleted_edges.contains(&edge_id) {
+                continue; // no-op on an edge this statement already deleted
+            }
             let slot = match edge_updates.iter_mut().find(|(id, _)| *id == edge_id) {
                 Some((_, builder)) => builder,
                 None => {
@@ -423,6 +446,7 @@ fn apply_delete(
     binding: &Binding,
     deleted_nodes: &mut HashSet<NodeId>,
     deleted_edges: &mut HashSet<EdgeId>,
+    created_edges: &[(EdgeId, NodeId, NodeId)],
 ) -> Result<()> {
     // Partition targets into edges and nodes.
     let mut edge_targets: Vec<EdgeId> = Vec::new();
@@ -461,18 +485,39 @@ fn apply_delete(
         }
         if detach {
             // Record the connected edges as deleted so a later plain DELETE does
-            // not mis-count them, then cascade.
+            // not mis-count them, then cascade. `delete_node_cascade` itself
+            // unions committed adjacency with same-transaction buffered CREATEs,
+            // so a relationship created earlier in this statement is removed too;
+            // we mirror that here into `deleted_edges` for the plain-DELETE check.
             for edge_id in connected_edges(tx, node_id)? {
                 deleted_edges.insert(edge_id);
+            }
+            for (edge_id, source, target) in created_edges {
+                if *source == node_id || *target == node_id {
+                    deleted_edges.insert(*edge_id);
+                }
             }
             tx.delete_node_cascade(node_id)?;
         } else {
             // openCypher safety rule: refuse to orphan edges. Ignore edges this
-            // same statement already deleted.
-            let remaining: Vec<EdgeId> = connected_edges(tx, node_id)?
+            // same statement already deleted. Committed adjacency does not yet
+            // include a relationship CREATEd earlier in this same statement
+            // (it is still buffered), so fold the statement-local created-edge
+            // ledger in too — otherwise this plain DELETE would slip past the
+            // check and abort at commit with a cryptic dangling-edge error
+            // (Minor 1).
+            let mut remaining: Vec<EdgeId> = connected_edges(tx, node_id)?
                 .into_iter()
                 .filter(|e| !deleted_edges.contains(e))
                 .collect();
+            for (edge_id, source, target) in created_edges {
+                if (*source == node_id || *target == node_id)
+                    && !deleted_edges.contains(edge_id)
+                    && !remaining.contains(edge_id)
+                {
+                    remaining.push(*edge_id);
+                }
+            }
             if !remaining.is_empty() {
                 return Err(TransactionError::ValidationFailed {
                     reason: format!(

@@ -6953,4 +6953,240 @@ mod mutations {
         assert_query_error(&db, "EXPLAIN CREATE (n:Person {name: 'Zed'})");
         assert_eq!(db.node_count(), 0);
     }
+
+    // ---- Test hardening (coordinator review follow-ups) ------------------
+
+    /// Multiple SET items in one statement must record exactly ONE new version
+    /// (create = v1, the coalesced multi-property SET = v2), not one per item.
+    #[test]
+    fn set_multiple_items_produce_exactly_one_version() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        let id = node_id_by_name(&db, "Person", "Alice");
+        assert_eq!(db.get_node_history(id).unwrap().version_count(), 1);
+        run(
+            &db,
+            "MATCH (n:Person {name: 'Alice'}) SET n.a = 1, n.b = 2, n.c = 3",
+        );
+        // Exactly one additional version, not three.
+        assert_eq!(db.get_node_history(id).unwrap().version_count(), 2);
+        let node = db.get_node(id).unwrap();
+        assert_eq!(node.get_property("a"), Some(&PropertyValue::Int(1)));
+        assert_eq!(node.get_property("b"), Some(&PropertyValue::Int(2)));
+        assert_eq!(node.get_property("c"), Some(&PropertyValue::Int(3)));
+    }
+
+    /// A self-loop is one connected edge (counted/removed once) under DETACH.
+    #[test]
+    fn detach_delete_self_loop_removed_once() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("P", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        db.create_edge(a, a, "LOOP", crate::core::property::PropertyMap::new())
+            .unwrap();
+        // Self-loop is one distinct connected edge.
+        assert_eq!(db.count_connected_edges(a).unwrap(), 1);
+        run(&db, "MATCH (n:P) DETACH DELETE n");
+        assert!(db.get_node(a).is_err());
+        assert_eq!(db.edge_count(), 0);
+    }
+
+    /// Same-statement CREATE with a comma-separated pattern that reuses an
+    /// earlier-created variable (`(a:X), (a)-[:R]->(b:Y)`).
+    #[test]
+    fn create_with_reused_variable_ref() {
+        let db = AletheiaDB::new().unwrap();
+        run(&db, "CREATE (a:X {name: 'A'}), (a)-[:R]->(b:Y {name: 'B'})");
+        assert_eq!(db.scan_nodes_by_label("X").count(), 1);
+        assert_eq!(db.scan_nodes_by_label("Y").count(), 1);
+        assert_eq!(db.edge_count(), 1);
+        let a = node_id_by_name(&db, "X", "A");
+        let out = db.get_outgoing_edges(a);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            db.get_edge(out[0]).unwrap().target,
+            node_id_by_name(&db, "Y", "B")
+        );
+    }
+
+    /// RETURN after DELETE yields the pre-delete snapshot (materialize_row
+    /// fallback path), and the node is actually gone.
+    #[test]
+    fn return_after_delete_yields_snapshot() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        let rows = run(&db, "MATCH (n:Person {name: 'Alice'}) DELETE n RETURN n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "Alice");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 0);
+    }
+
+    /// An empty MATCH performs zero mutations for both CREATE and DELETE.
+    #[test]
+    fn empty_match_zero_mutations() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        // CREATE driven by an empty match creates nothing.
+        run(&db, "MATCH (g:Ghost) CREATE (m:New {x: 1})");
+        assert_eq!(db.scan_nodes_by_label("New").count(), 0);
+        // DELETE driven by an empty match deletes nothing.
+        run(&db, "MATCH (g:Ghost) DELETE g");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// A multi-row `DELETE` where one matched row is connected must roll back
+    /// ALL rows' deletes (atomic across rows), not just refuse the connected one.
+    #[test]
+    fn multi_row_delete_is_atomic_across_rows() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        let _c = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "C").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        // A (and B) are connected; a plain DELETE of all Persons must refuse and
+        // leave EVERY node + the edge intact.
+        assert!(db.execute_cypher("MATCH (n:Person) DELETE n").is_err());
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 3);
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    /// `SET` on a relationship variable.
+    #[test]
+    fn set_on_edge_property() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b) SET r.since = 2020",
+        );
+        let edge = db.get_edge(db.get_outgoing_edges(a)[0]).unwrap();
+        assert_eq!(edge.get_property("since"), Some(&PropertyValue::Int(2020)));
+    }
+
+    /// Minor 1: create-edge-then-plain-delete-endpoint refuses cleanly (friendly
+    /// DETACH-DELETE message) instead of aborting at commit, and stays atomic.
+    #[test]
+    fn create_edge_then_plain_delete_endpoint_is_refused() {
+        let db = AletheiaDB::new().unwrap();
+        let err = db.execute_cypher("CREATE (a:P {name: 'A'})-[:R]->(b:P {name: 'B'}) DELETE a");
+        assert!(
+            err.is_err(),
+            "plain DELETE of a just-created edge endpoint must be refused"
+        );
+        // Atomic: neither node nor the edge was committed.
+        assert_eq!(db.node_count(), 0);
+        assert_eq!(db.edge_count(), 0);
+    }
+
+    /// Minor 1 companion: DETACH DELETE of a same-statement-created edge endpoint
+    /// works (delete_node_cascade unions the buffered CREATE), no orphan.
+    #[test]
+    fn create_edge_then_detach_delete_endpoint_works() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "CREATE (a:P {name: 'A'})-[:R]->(b:P {name: 'B'}) DETACH DELETE a",
+        );
+        // `a` and the relationship are gone; `b` survives; no orphaned edge.
+        assert_eq!(db.scan_nodes_by_label("P").count(), 1);
+        assert_eq!(db.edge_count(), 0);
+        assert_eq!(str_prop_of_only_p(&db), "B");
+    }
+
+    fn str_prop_of_only_p(db: &AletheiaDB) -> String {
+        let id = db.scan_nodes_by_label("P").next().unwrap();
+        match db.get_node(id).unwrap().get_property("name") {
+            Some(PropertyValue::String(s)) => s.to_string(),
+            _ => panic!("missing name"),
+        }
+    }
+
+    /// Minor 3: `SET r.x = 1` after `DELETE r` in one statement is a no-op on the
+    /// deleted edge (symmetric with the node path), not a not-found abort.
+    #[test]
+    fn set_on_edge_deleted_earlier_in_statement_is_noop() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        // DELETE r then SET r.x must succeed (the SET is skipped), edge gone.
+        db.execute_cypher("MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b) DELETE r SET r.x = 1")
+            .expect("SET on an already-deleted edge must be a no-op, not an error");
+        assert_eq!(db.edge_count(), 0);
+    }
+
+    /// Document + pin the openCypher `SET x = null` deviation: we store an
+    /// explicit Null value rather than removing the property key (true key
+    /// deletion is future work tied to REMOVE / a replace-tombstone write API).
+    #[test]
+    fn set_null_stores_explicit_null_v1_deviation() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+        run(&db, "MATCH (n:Person {name: 'Alice'}) SET n.age = null");
+        let node = db
+            .get_node(node_id_by_name(&db, "Person", "Alice"))
+            .unwrap();
+        // v1: the key is present with an explicit Null (NOT removed).
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Null));
+    }
 }

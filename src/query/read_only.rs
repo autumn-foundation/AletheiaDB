@@ -158,4 +158,32 @@ mod tests {
             None
         );
     }
+
+    /// Issue #560 false-positive hardening: a mutating keyword that appears only
+    /// inside a DOUBLE-quoted string literal, or as a substring of an ordinary
+    /// identifier / property key, must NOT trip the guard — a read stays allowed.
+    /// But a mutating keyword in any letter-case IS a whole-token match and must
+    /// be rejected.
+    #[test]
+    fn issue_560_guard_false_positive_and_case_hardening() {
+        // Double-quoted literal containing a keyword → read is allowed.
+        assert_eq!(
+            detect_mutating_clause(r#"MATCH (n {note: "DELETE"}) RETURN n"#),
+            None
+        );
+        // Substring identifiers (`created` / `deleted`) as a property key or
+        // variable are not the whole tokens CREATE / DELETE → allowed.
+        assert_eq!(
+            detect_mutating_clause("MATCH (n:Event) RETURN n.created, n.deleted"),
+            None
+        );
+        assert_eq!(
+            detect_mutating_clause("MATCH (created) RETURN created"),
+            None
+        );
+        // A mixed-case mutating keyword is still a whole-token match → rejected
+        // (the guard is case-insensitive, matching the case-insensitive lexer).
+        assert_eq!(detect_mutating_clause("CrEaTe (n)"), Some("CREATE"));
+        assert_eq!(detect_mutating_clause("match (n) DeLeTe n"), Some("DELETE"));
+    }
 }
