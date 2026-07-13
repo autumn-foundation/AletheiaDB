@@ -710,7 +710,8 @@ fn supported_parse_cases() -> Vec<Case> {
             "MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n",
             Parses,
         ),
-        // ---- vector (convert-only; needs an Embedding param) ---------------
+        // ---- vector (convert-only; needs a seeded vector index to execute;
+        //      execution is proven in tests.rs `test_e2e_vector_*`) -----------
         Case::new(
             "vector",
             "similarity_order_by",
@@ -721,6 +722,46 @@ fn supported_parse_cases() -> Vec<Case> {
             "query",
             CypherParameterValue::Embedding(vec![0.1f32, 0.2, 0.3].into()),
         )]),
+        // #554: an inline numeric vector literal is usable without a parameter.
+        Case::new(
+            "vector",
+            "similarity_literal_embedding",
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [0.1, 0.2, 0.3]) DESC LIMIT 10",
+            Parses,
+        ),
+        // #553: each distance function name is recognized and selects a metric.
+        Case::new(
+            "vector",
+            "cosine_order_by",
+            "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [0.1, 0.2, 0.3]) DESC LIMIT 10",
+            Parses,
+        ),
+        Case::new(
+            "vector",
+            "euclidean_order_by",
+            "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [0.1, 0.2, 0.3]) ASC LIMIT 10",
+            Parses,
+        ),
+        Case::new(
+            "vector",
+            "dot_product_order_by",
+            "MATCH (d:Document) RETURN d ORDER BY vector.dot_product(d.embedding, [0.1, 0.2, 0.3]) DESC LIMIT 10",
+            Parses,
+        ),
+        // #553: similarity threshold in WHERE.
+        Case::new(
+            "vector",
+            "similarity_threshold_where",
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, [0.1, 0.2, 0.3]) > 0.8 RETURN d",
+            Parses,
+        ),
+        // #555: aliased score projection, sortable by the alias.
+        Case::new(
+            "vector",
+            "score_alias_projection",
+            "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [0.1, 0.2, 0.3]) AS score ORDER BY score DESC LIMIT 10",
+            Parses,
+        ),
     ]
 }
 

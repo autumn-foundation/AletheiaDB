@@ -15,11 +15,11 @@ use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
-use crate::core::vector::cosine_similarity;
+use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate,
-    PredicateValue, SortKey,
+    PredicateValue, ScoreThreshold, SortKey,
 };
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
@@ -2128,6 +2128,13 @@ pub struct VectorRerankIterator {
     _current: Arc<CurrentStorage>,
     /// Vector property name, or None if no vector index is configured
     vector_property: Option<String>,
+    /// Metric used to score each candidate row (Cosine reproduces the historical default).
+    metric: VectorMetric,
+    /// Optional similarity-score threshold; rows failing it are dropped.
+    threshold: Option<ScoreThreshold>,
+    /// When set, the computed score is also materialized as an output column
+    /// under this alias (in addition to [`QueryRow::score`]).
+    score_alias: Option<String>,
 }
 
 impl VectorRerankIterator {
@@ -2146,6 +2153,33 @@ impl VectorRerankIterator {
         current: Arc<CurrentStorage>,
         property_key: Option<String>,
     ) -> Self {
+        Self::with_options(
+            input,
+            embedding,
+            k,
+            current,
+            property_key,
+            VectorMetric::Cosine,
+            None,
+            None,
+        )
+    }
+
+    /// Create a new VectorRerankIterator with explicit metric / threshold /
+    /// score-alias options (Cypher `vector.cosine`/`vector.euclidean`/
+    /// `vector.dot_product`, `WHERE vector.similarity(...) > t`, and
+    /// `vector.cosine(...) AS score` respectively).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_options(
+        input: Box<dyn ResultIterator>,
+        embedding: Arc<[f32]>,
+        k: usize,
+        current: Arc<CurrentStorage>,
+        property_key: Option<String>,
+        metric: VectorMetric,
+        threshold: Option<ScoreThreshold>,
+        score_alias: Option<String>,
+    ) -> Self {
         // Use explicit property if provided, otherwise get default from storage
         let vector_property = property_key.or_else(|| current.get_vector_property_name());
 
@@ -2156,29 +2190,48 @@ impl VectorRerankIterator {
             k,
             _current: current,
             vector_property,
+            metric,
+            threshold,
+            score_alias,
         }
     }
 
-    /// Compute similarity score for a query row if it has a vector property.
-    /// Returns None if the node has no vector, or if the similarity is invalid (NaN/Inf).
-    fn compute_similarity(&self, row: &QueryRow, vector_property: &str) -> Option<f32> {
-        let node = row.entity.as_node()?;
-        let PropertyValue::Vector(vec) = node.properties.get(vector_property)? else {
-            return None;
+    /// Compute the similarity score for a query row if it has a vector property.
+    ///
+    /// Returns:
+    /// - `Ok(Some(score))` when a finite score passing the threshold is computed,
+    /// - `Ok(None)` when the row has no vector property, an invalid (NaN/Inf)
+    ///   score, or a score that fails the threshold (all skip the row),
+    /// - `Err(_)` when the metric computation fails -- notably a **dimension
+    ///   mismatch** between the query embedding and the stored vector, which is
+    ///   surfaced as a clear error rather than silently dropping the row.
+    fn compute_similarity(&self, row: &QueryRow, vector_property: &str) -> Result<Option<f32>> {
+        let Some(node) = row.entity.as_node() else {
+            return Ok(None);
         };
-        let similarity = cosine_similarity(&self.embedding, vec).ok()?;
+        let Some(PropertyValue::Vector(vec)) = node.properties.get(vector_property) else {
+            return Ok(None);
+        };
+        // A length mismatch is a genuine dimension error (clear message from the
+        // underlying vector op); propagate it instead of swallowing it.
+        let similarity = self.metric.compute_similarity(&self.embedding, vec)?;
         // Reject NaN/Inf values - these indicate invalid input (e.g., zero-length vectors)
-        if similarity.is_finite() {
-            Some(similarity)
-        } else {
+        if !similarity.is_finite() {
             #[cfg(feature = "observability")]
             tracing::debug!(
                 "Skipping node {:?} with non-finite similarity score: {}",
                 node.id,
                 similarity
             );
-            None
+            return Ok(None);
         }
+        // Apply an optional score threshold (Cypher WHERE vector.similarity > t).
+        if let Some(threshold) = self.threshold
+            && !threshold.passes(similarity)
+        {
+            return Ok(None);
+        }
+        Ok(Some(similarity))
     }
 }
 
@@ -2201,30 +2254,36 @@ impl ResultIterator for VectorRerankIterator {
             };
 
             let mut input = self.input.take()?;
-            // Use a min-heap to keep the top-k results
-            let mut heap = BinaryHeap::with_capacity(self.k);
+            // Use a min-heap to keep the top-k results. `k` may be unbounded
+            // (usize::MAX) for a pure threshold filter (keep every passing row),
+            // so cap the *pre-allocation* while leaving the logical bound intact.
+            let mut heap = BinaryHeap::with_capacity(self.k.min(1024));
 
             while let Some(result) = input.next() {
                 match result {
                     Ok(row) => {
-                        // Get vector from node and compute similarity
-                        if let Some(similarity) = self.compute_similarity(&row, vector_property) {
-                            debug_assert!(similarity.is_finite(), "Non-finite similarity score");
-                            if heap.len() < self.k {
-                                heap.push(Reverse(ScoredRow {
-                                    row,
-                                    score: similarity,
-                                }));
-                            } else {
-                                #[allow(clippy::collapsible_if)]
-                                if let Some(Reverse(min_row)) = heap.peek() {
-                                    if similarity > min_row.score {
-                                        heap.pop();
-                                        heap.push(Reverse(ScoredRow {
-                                            row,
-                                            score: similarity,
-                                        }));
-                                    }
+                        // Get vector from node and compute similarity. A
+                        // dimension mismatch propagates as a clear error.
+                        let similarity = match self.compute_similarity(&row, vector_property) {
+                            Ok(Some(s)) => s,
+                            Ok(None) => continue,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        debug_assert!(similarity.is_finite(), "Non-finite similarity score");
+                        if heap.len() < self.k {
+                            heap.push(Reverse(ScoredRow {
+                                row,
+                                score: similarity,
+                            }));
+                        } else {
+                            #[allow(clippy::collapsible_if)]
+                            if let Some(Reverse(min_row)) = heap.peek() {
+                                if similarity > min_row.score {
+                                    heap.pop();
+                                    heap.push(Reverse(ScoredRow {
+                                        row,
+                                        score: similarity,
+                                    }));
                                 }
                             }
                         }
@@ -2242,9 +2301,24 @@ impl ResultIterator for VectorRerankIterator {
             self.sorted = Some(heap.into_sorted_vec().into_iter());
         }
 
+        let score_alias = self.score_alias.clone();
         self.sorted.as_mut()?.next().map(|Reverse(item)| {
             let mut row = item.row;
             row.score = Some(item.score);
+            // Materialize the score as a named output column when the query
+            // aliased the vector function (Cypher `vector.cosine(...) AS score`),
+            // preserving the row's entity (unlike aggregation's Null-entity rows).
+            // NOTE (cross-lane follow-up): the MCP serializer (`query_row_to_json`
+            // in src/mcp/server.rs) currently ignores `QueryRow.columns`, so this
+            // aliased score is NOT yet surfaced through the MCP `query` tool --
+            // same gap as aggregation columns (#558). Lane-4 follow-up.
+            if let Some(alias) = score_alias {
+                let col = (alias, PropertyValue::Float(f64::from(item.score)));
+                match row.columns {
+                    Some(ref mut cols) => cols.push(col),
+                    None => row.columns = Some(vec![col]),
+                }
+            }
             Ok(row)
         })
     }
@@ -2253,7 +2327,10 @@ impl ResultIterator for VectorRerankIterator {
         if let Some(ref sorted) = self.sorted {
             sorted.size_hint()
         } else {
-            (0, Some(self.k))
+            // `k` may be unbounded (usize::MAX) for a pure threshold filter; the
+            // real upper bound is then the input size, which we do not know here.
+            let upper = (self.k != usize::MAX).then_some(self.k);
+            (0, upper)
         }
     }
 }

@@ -535,7 +535,11 @@ impl CostModel {
                 (self.estimate_cardinality(input, stats) as f64 * DEFAULT_FILTER_SELECTIVITY)
                     as usize
             }
-            PhysicalOp::VectorRerank { k, .. } => *k,
+            // A rerank emits at most `k` rows, never more than its input. Clamp
+            // so an unbounded `k` (threshold filter) does not report usize::MAX.
+            PhysicalOp::VectorRerank { k, input, .. } => {
+                (*k).min(self.estimate_cardinality(input, stats))
+            }
             PhysicalOp::Limit { count, input, .. } => {
                 (*count).min(self.estimate_cardinality(input, stats))
             }
@@ -706,10 +710,15 @@ impl CostModel {
     }
 
     fn estimate_vector_rerank(&self, input_cost: Cost, input_card: usize, k: usize) -> Cost {
+        // The rerank heap holds at most `k` rows, but never more than the input
+        // cardinality. Clamp before sizing so an unbounded `k` (usize::MAX, used
+        // for a pure similarity-threshold filter that keeps every passing row)
+        // does not overflow the memory estimate.
+        let retained = k.min(input_card);
         Cost {
             cpu: input_cost.cpu + self.operation_costs.vector_similarity * input_card as f64,
             io: input_cost.io,
-            memory: input_cost.memory + k * std::mem::size_of::<(u64, f32)>(),
+            memory: input_cost.memory + retained * std::mem::size_of::<(u64, f32)>(),
             network: 0.0,
         }
     }
