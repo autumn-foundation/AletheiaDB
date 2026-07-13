@@ -398,3 +398,492 @@ pub(crate) fn jsonl_rows(path: &Path) -> Result<RowIter, ImportError> {
 
     Ok(Box::new(iter))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Coercion / error-path coverage (Issue #3535 mutation backfill).
+    //!
+    //! These tests pin the exact `Err(...)` messages and `Ok(...)` values of the
+    //! row-reader coercion helpers so the surviving mutants on this file's error
+    //! branches (surfaced by the PR #3527 Mutants run) are killed: each test
+    //! fails if the branch it targets is deleted or its return value swapped.
+
+    use super::*;
+
+    // --- get_str -----------------------------------------------------------
+
+    #[test]
+    fn get_str_returns_present_column_value() {
+        let mut cells = HashMap::new();
+        cells.insert("name".to_string(), Cell::Str("Alice".to_string()));
+        let row = Row::new(1, cells);
+        assert_eq!(row.get_str("name").unwrap(), "Alice");
+    }
+
+    #[test]
+    fn get_str_missing_column_is_err_with_column_name() {
+        let row = Row::new(1, HashMap::new());
+        let err = row.get_str("nope").unwrap_err();
+        assert_eq!(err, "missing column 'nope'");
+    }
+
+    // --- cell_to_string ----------------------------------------------------
+
+    #[test]
+    fn cell_to_string_covers_every_arm() {
+        assert_eq!(cell_to_string(&Cell::Str("hi".to_string())), "hi");
+        assert_eq!(
+            cell_to_string(&Cell::Json(serde_json::Value::String("js".to_string()))),
+            "js"
+        );
+        // JSON null renders as an empty string (treated as a blank cell).
+        assert_eq!(cell_to_string(&Cell::Json(serde_json::Value::Null)), "");
+        // A non-string JSON value renders via its JSON `to_string`.
+        assert_eq!(
+            cell_to_string(&Cell::Json(serde_json::json!(5))),
+            "5".to_string()
+        );
+        assert_eq!(
+            cell_to_string(&Cell::Json(serde_json::json!(true))),
+            "true".to_string()
+        );
+    }
+
+    // --- coerce_str error + success arms -----------------------------------
+
+    #[test]
+    fn coerce_str_string_preserves_raw_untrimmed() {
+        // The String arm uses `raw`, not the trimmed value.
+        assert_eq!(
+            coerce_str(" pad ", ColumnType::String).unwrap(),
+            PropertyValue::string(" pad ")
+        );
+    }
+
+    #[test]
+    fn coerce_str_int_ok_empty_and_error() {
+        assert_eq!(
+            coerce_str("42", ColumnType::Int).unwrap(),
+            PropertyValue::Int(42)
+        );
+        assert_eq!(
+            coerce_str("   ", ColumnType::Int).unwrap(),
+            PropertyValue::Null
+        );
+        assert_eq!(
+            coerce_str("x", ColumnType::Int).unwrap_err(),
+            "cannot coerce 'x' to Int"
+        );
+    }
+
+    #[test]
+    fn coerce_str_float_ok_empty_and_error() {
+        assert_eq!(
+            coerce_str("1.5", ColumnType::Float).unwrap(),
+            PropertyValue::Float(1.5)
+        );
+        assert_eq!(
+            coerce_str("", ColumnType::Float).unwrap(),
+            PropertyValue::Null
+        );
+        assert_eq!(
+            coerce_str("x", ColumnType::Float).unwrap_err(),
+            "cannot coerce 'x' to Float"
+        );
+    }
+
+    #[test]
+    fn coerce_str_bool_ok_empty_and_error() {
+        assert_eq!(
+            coerce_str("true", ColumnType::Bool).unwrap(),
+            PropertyValue::Bool(true)
+        );
+        assert_eq!(
+            coerce_str("", ColumnType::Bool).unwrap(),
+            PropertyValue::Null
+        );
+        assert_eq!(
+            coerce_str("maybe", ColumnType::Bool).unwrap_err(),
+            "cannot coerce 'maybe' to Bool"
+        );
+    }
+
+    #[test]
+    fn coerce_str_timestamp_ok_and_empty() {
+        assert_eq!(
+            coerce_str("1000", ColumnType::Timestamp).unwrap(),
+            PropertyValue::Int(1000)
+        );
+        assert_eq!(
+            coerce_str("", ColumnType::Timestamp).unwrap(),
+            PropertyValue::Null
+        );
+    }
+
+    #[test]
+    fn coerce_str_embedding_ok_empty_and_non_json_error() {
+        assert_eq!(
+            coerce_str("[1, 2, 3]", ColumnType::Embedding).unwrap(),
+            PropertyValue::try_vector([1.0f32, 2.0, 3.0]).unwrap()
+        );
+        assert_eq!(
+            coerce_str("", ColumnType::Embedding).unwrap(),
+            PropertyValue::Null
+        );
+        assert_eq!(
+            coerce_str("not-json", ColumnType::Embedding).unwrap_err(),
+            "cannot coerce 'not-json' to Embedding (expected JSON array)"
+        );
+    }
+
+    // --- json_to_embedding -------------------------------------------------
+
+    #[test]
+    fn json_to_embedding_non_array_is_err() {
+        assert_eq!(
+            json_to_embedding(&serde_json::json!({"a": 1})).unwrap_err(),
+            "cannot coerce non-array JSON to Embedding"
+        );
+        assert_eq!(
+            json_to_embedding(&serde_json::json!(7)).unwrap_err(),
+            "cannot coerce non-array JSON to Embedding"
+        );
+    }
+
+    #[test]
+    fn json_to_embedding_non_number_element_is_err() {
+        assert_eq!(
+            json_to_embedding(&serde_json::json!([1, "x", 3])).unwrap_err(),
+            "embedding element \"x\" is not a number"
+        );
+    }
+
+    #[test]
+    fn json_to_embedding_valid_array_builds_vector() {
+        assert_eq!(
+            json_to_embedding(&serde_json::json!([1.0, 2.0, 3.0])).unwrap(),
+            PropertyValue::try_vector([1.0f32, 2.0, 3.0]).unwrap()
+        );
+    }
+
+    // --- coerce_json error + success arms ----------------------------------
+
+    #[test]
+    fn coerce_json_null_is_null_for_any_type() {
+        assert_eq!(
+            coerce_json(&serde_json::Value::Null, ColumnType::Int).unwrap(),
+            PropertyValue::Null
+        );
+        assert_eq!(
+            coerce_json(&serde_json::Value::Null, ColumnType::Embedding).unwrap(),
+            PropertyValue::Null
+        );
+    }
+
+    #[test]
+    fn coerce_json_string_arms() {
+        assert_eq!(
+            coerce_json(&serde_json::json!("hi"), ColumnType::String).unwrap(),
+            PropertyValue::string("hi")
+        );
+        // Non-string JSON coerced to a String column stringifies.
+        assert_eq!(
+            coerce_json(&serde_json::json!(5), ColumnType::String).unwrap(),
+            PropertyValue::string("5")
+        );
+    }
+
+    #[test]
+    fn coerce_json_int_number_non_integer_is_err() {
+        // 1.5 has no i64 representation -> the `as_i64` error arm fires.
+        assert_eq!(
+            coerce_json(&serde_json::json!(1.5), ColumnType::Int).unwrap_err(),
+            "cannot coerce '1.5' to Int"
+        );
+        assert_eq!(
+            coerce_json(&serde_json::json!(9), ColumnType::Int).unwrap(),
+            PropertyValue::Int(9)
+        );
+    }
+
+    #[test]
+    fn coerce_json_int_string_delegates() {
+        assert_eq!(
+            coerce_json(&serde_json::json!("7"), ColumnType::Int).unwrap(),
+            PropertyValue::Int(7)
+        );
+        assert_eq!(
+            coerce_json(&serde_json::json!("x"), ColumnType::Int).unwrap_err(),
+            "cannot coerce 'x' to Int"
+        );
+    }
+
+    #[test]
+    fn coerce_json_float_and_bool_arms() {
+        assert_eq!(
+            coerce_json(&serde_json::json!(2.5), ColumnType::Float).unwrap(),
+            PropertyValue::Float(2.5)
+        );
+        assert_eq!(
+            coerce_json(&serde_json::json!("3.5"), ColumnType::Float).unwrap(),
+            PropertyValue::Float(3.5)
+        );
+        assert_eq!(
+            coerce_json(&serde_json::json!(true), ColumnType::Bool).unwrap(),
+            PropertyValue::Bool(true)
+        );
+        assert_eq!(
+            coerce_json(&serde_json::json!("false"), ColumnType::Bool).unwrap(),
+            PropertyValue::Bool(false)
+        );
+    }
+
+    #[test]
+    fn coerce_json_timestamp_number_non_integer_is_err() {
+        assert_eq!(
+            coerce_json(&serde_json::json!(1.25), ColumnType::Timestamp).unwrap_err(),
+            "cannot coerce '1.25' to Timestamp"
+        );
+        assert_eq!(
+            coerce_json(&serde_json::json!(1000), ColumnType::Timestamp).unwrap(),
+            PropertyValue::Int(1000)
+        );
+    }
+
+    #[test]
+    fn coerce_json_embedding_arms() {
+        assert_eq!(
+            coerce_json(&serde_json::json!([1.0, 2.0, 3.0]), ColumnType::Embedding).unwrap(),
+            PropertyValue::try_vector([1.0f32, 2.0, 3.0]).unwrap()
+        );
+        assert_eq!(
+            coerce_json(&serde_json::json!("[4, 5, 6]"), ColumnType::Embedding).unwrap(),
+            PropertyValue::try_vector([4.0f32, 5.0, 6.0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn coerce_json_catch_all_type_mismatch_is_err() {
+        // A JSON bool coerced to an Int column hits the final catch-all arm.
+        assert_eq!(
+            coerce_json(&serde_json::json!(true), ColumnType::Int).unwrap_err(),
+            "cannot coerce JSON true to Int"
+        );
+    }
+
+    #[test]
+    fn coerce_dispatches_str_and_json() {
+        assert_eq!(
+            coerce(&Cell::Str("5".to_string()), ColumnType::Int).unwrap(),
+            PropertyValue::Int(5)
+        );
+        assert_eq!(
+            coerce(&Cell::Json(serde_json::json!(6)), ColumnType::Int).unwrap(),
+            PropertyValue::Int(6)
+        );
+    }
+
+    // --- parse_bool --------------------------------------------------------
+
+    #[test]
+    fn parse_bool_truthy_tokens() {
+        for t in ["true", "1", "yes", "t", "TRUE", "Yes"] {
+            assert_eq!(parse_bool(t), Some(true), "token {t}");
+        }
+    }
+
+    #[test]
+    fn parse_bool_falsy_tokens() {
+        for f in ["false", "0", "no", "f", "FALSE", "No"] {
+            assert_eq!(parse_bool(f), Some(false), "token {f}");
+        }
+    }
+
+    #[test]
+    fn parse_bool_unknown_is_none() {
+        assert_eq!(parse_bool("maybe"), None);
+        assert_eq!(parse_bool("2"), None);
+        assert_eq!(parse_bool(""), None);
+    }
+
+    // --- parse_valid_time --------------------------------------------------
+
+    #[test]
+    fn parse_valid_time_empty_is_err() {
+        assert_eq!(
+            parse_valid_time("   ").unwrap_err(),
+            "empty valid_time value"
+        );
+    }
+
+    #[test]
+    fn parse_valid_time_bare_integer_micros() {
+        assert_eq!(parse_valid_time("1000000").unwrap().wallclock(), 1_000_000);
+    }
+
+    #[test]
+    fn parse_valid_time_rfc3339_utc_and_offset() {
+        let z = parse_valid_time("2024-01-15T00:00:00Z").unwrap();
+        let off = parse_valid_time("2024-01-15T02:00:00+02:00").unwrap();
+        // Same instant expressed two ways -> identical micros.
+        assert_eq!(z.wallclock(), off.wallclock());
+    }
+
+    #[test]
+    fn parse_valid_time_naive_datetime_assumed_utc() {
+        let naive = parse_valid_time("2024-01-15T00:00:00").unwrap();
+        let utc = parse_valid_time("2024-01-15T00:00:00Z").unwrap();
+        assert_eq!(naive.wallclock(), utc.wallclock());
+    }
+
+    #[test]
+    fn parse_valid_time_bare_date_is_midnight_utc() {
+        let date = parse_valid_time("2024-01-15").unwrap();
+        let midnight = parse_valid_time("2024-01-15T00:00:00Z").unwrap();
+        assert_eq!(date.wallclock(), midnight.wallclock());
+    }
+
+    #[test]
+    fn parse_valid_time_garbage_is_err() {
+        assert_eq!(
+            parse_valid_time("not-a-date").unwrap_err(),
+            "could not parse valid_time 'not-a-date'"
+        );
+    }
+
+    // --- parquet-only helpers ---------------------------------------------
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn property_value_to_string_covers_every_arm() {
+        assert_eq!(property_value_to_string(&PropertyValue::Null), "");
+        assert_eq!(property_value_to_string(&PropertyValue::Bool(true)), "true");
+        assert_eq!(property_value_to_string(&PropertyValue::Int(7)), "7");
+        assert_eq!(property_value_to_string(&PropertyValue::Float(1.5)), "1.5");
+        assert_eq!(property_value_to_string(&PropertyValue::string("hi")), "hi");
+        // The catch-all arm Debug-formats (e.g. a Vector).
+        let vector = PropertyValue::try_vector([1.0f32, 2.0, 3.0]).unwrap();
+        let rendered = property_value_to_string(&vector);
+        assert!(
+            rendered.contains("Vector"),
+            "expected Debug of a Vector, got {rendered}"
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn cell_to_string_native_arm() {
+        assert_eq!(cell_to_string(&Cell::Native(PropertyValue::Int(9))), "9");
+        assert_eq!(cell_to_string(&Cell::Native(PropertyValue::Null)), "");
+    }
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn coerce_native_null_is_null() {
+        assert_eq!(
+            coerce_native(&PropertyValue::Null, ColumnType::Int).unwrap(),
+            PropertyValue::Null
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn coerce_native_string_arms() {
+        assert_eq!(
+            coerce_native(&PropertyValue::string("hi"), ColumnType::String).unwrap(),
+            PropertyValue::string("hi")
+        );
+        // A non-string widens via property_value_to_string.
+        assert_eq!(
+            coerce_native(&PropertyValue::Int(4), ColumnType::String).unwrap(),
+            PropertyValue::string("4")
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn coerce_native_int_arms_and_error() {
+        assert_eq!(
+            coerce_native(&PropertyValue::Int(3), ColumnType::Int).unwrap(),
+            PropertyValue::Int(3)
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::string("7"), ColumnType::Int).unwrap(),
+            PropertyValue::Int(7)
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::Bool(true), ColumnType::Int).unwrap_err(),
+            "cannot coerce bool to Int"
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn coerce_native_float_arms_and_error() {
+        assert_eq!(
+            coerce_native(&PropertyValue::Float(2.5), ColumnType::Float).unwrap(),
+            PropertyValue::Float(2.5)
+        );
+        // Int widens to Float.
+        assert_eq!(
+            coerce_native(&PropertyValue::Int(4), ColumnType::Float).unwrap(),
+            PropertyValue::Float(4.0)
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::string("1.5"), ColumnType::Float).unwrap(),
+            PropertyValue::Float(1.5)
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::Bool(false), ColumnType::Float).unwrap_err(),
+            "cannot coerce bool to Float"
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn coerce_native_bool_arms_and_error() {
+        assert_eq!(
+            coerce_native(&PropertyValue::Bool(true), ColumnType::Bool).unwrap(),
+            PropertyValue::Bool(true)
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::string("no"), ColumnType::Bool).unwrap(),
+            PropertyValue::Bool(false)
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::Int(1), ColumnType::Bool).unwrap_err(),
+            "cannot coerce int to Bool"
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn coerce_native_timestamp_arms_and_error() {
+        assert_eq!(
+            coerce_native(&PropertyValue::Int(1000), ColumnType::Timestamp).unwrap(),
+            PropertyValue::Int(1000)
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::string("2000"), ColumnType::Timestamp).unwrap(),
+            PropertyValue::Int(2000)
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::Bool(true), ColumnType::Timestamp).unwrap_err(),
+            "cannot coerce bool to Timestamp"
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn coerce_native_embedding_arms_and_error() {
+        let vector = PropertyValue::try_vector([1.0f32, 2.0, 3.0]).unwrap();
+        assert_eq!(
+            coerce_native(&vector, ColumnType::Embedding).unwrap(),
+            vector
+        );
+        assert_eq!(
+            coerce_native(&PropertyValue::Int(1), ColumnType::Embedding).unwrap_err(),
+            "cannot coerce int to Embedding"
+        );
+    }
+}
