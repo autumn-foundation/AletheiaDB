@@ -128,10 +128,8 @@ enum RejectKind {
     /// [`CypherError::ParameterError`].
     Parameter,
     /// [`CypherError::InvalidTemporalClause`].
-    #[allow(dead_code)]
     Temporal,
     /// [`CypherError::InvalidTimestamp`].
-    #[allow(dead_code)]
     Timestamp,
 }
 
@@ -668,8 +666,38 @@ fn supported_parse_cases() -> Vec<Case> {
             "MATCH (n:Person) BETWEEN '2024-01-01' AND '2024-12-31' RETURN n",
             Parses,
         ),
-        // ---- where null-check parse+convert (absent-prop execution semantics
-        //      asserted in supported_execute_cases; openCypher-correct post-#3511)
+        // #550 timestamp-format coverage: every documented AS OF TIMESTAMP
+        // literal form (ISO 8601 with `Z`, ISO 8601 with numeric offset, date
+        // only, and Unix microseconds) must parse+lower without error.
+        Case::new(
+            "temporal",
+            "as_of_timestamp_offset",
+            "MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00+00:00' RETURN n",
+            Parses,
+        ),
+        Case::new(
+            "temporal",
+            "as_of_timestamp_date_only",
+            "MATCH (n:Person) AS OF TIMESTAMP '2024-01-15' RETURN n",
+            Parses,
+        ),
+        Case::new(
+            "temporal",
+            "as_of_timestamp_unix_micros",
+            "MATCH (n:Person) AS OF TIMESTAMP '1705315200000000' RETURN n",
+            Parses,
+        ),
+        // #551: the `FOR VALID_TIME AS OF` spelling (SQL:2011-style) is the
+        // symmetric counterpart to `FOR SYSTEM_TIME AS OF` and lowers to a
+        // valid-time AS OF context.
+        Case::new(
+            "temporal",
+            "for_valid_time_as_of",
+            "MATCH (n:Person) FOR VALID_TIME AS OF '2024-01-15' RETURN n",
+            Parses,
+        ),
+        // ---- where null-check parse+convert (absent-prop semantics deviate;
+        //      pinned in compat_known_deviations) -----------------------------
         Case::new(
             "where",
             "is_null_parses",
@@ -702,7 +730,7 @@ fn supported_parse_cases() -> Vec<Case> {
 
 fn rejected_cases() -> Vec<Case> {
     use Expect::Rejected;
-    use RejectKind::{Parameter, Parse, Semantic, Unsupported};
+    use RejectKind::{Parameter, Parse, Semantic, Temporal, Timestamp, Unsupported};
 
     vec![
         // ---- mutating clauses -> ParseError --------------------------------
@@ -839,6 +867,36 @@ fn rejected_cases() -> Vec<Case> {
             "unbound_parameter",
             "MATCH (n:Person {name: $name}) RETURN n",
             Rejected(Parameter, "unbound parameter"),
+        ),
+        // ---- temporal: intentionally-unsupported / invalid shapes ----------
+        // #551/#552 design decision: transaction-time RANGE scans are NOT
+        // exposed through Cypher. `FOR SYSTEM_TIME BETWEEN` is rejected at the
+        // parser (it expects `AS OF` after `SYSTEM_TIME`), never silently
+        // answered. (The tx-range context is reachable only via the
+        // `QueryBuilder` API, where the planner rejects it as an
+        // `UnsupportedFeature`; see the executor-level e2e test.)
+        Case::new(
+            "temporal",
+            "for_system_time_between_rejected",
+            "MATCH (n:Person) FOR SYSTEM_TIME BETWEEN '2024-01-01' AND '2024-03-31' RETURN n",
+            Rejected(Parse, ""),
+        ),
+        // #552: `BETWEEN` start/end are validated -- an inverted range
+        // (start > end) is rejected during lowering with a structured
+        // `InvalidTemporalClause`, not silently treated as empty.
+        Case::new(
+            "temporal",
+            "between_inverted_range",
+            "MATCH (n:Person) BETWEEN '2024-12-31' AND '2024-01-01' RETURN n",
+            Rejected(Temporal, "invalid time range"),
+        ),
+        // #550: an unparseable timestamp literal is rejected with a structured
+        // `InvalidTimestamp` during lowering (not a silent now()-fallback).
+        Case::new(
+            "temporal",
+            "as_of_timestamp_invalid",
+            "MATCH (n:Person) AS OF TIMESTAMP 'not-a-timestamp' RETURN n",
+            Rejected(Timestamp, "not-a-timestamp"),
         ),
     ]
 }
