@@ -286,7 +286,8 @@ fn keys_verify_garbage_key_fails_without_leak() {
     let dir = TempDir::new().unwrap();
     let key_path = dir.path().join("garbage.key");
     // 17 bytes: neither 64 hex chars nor 32 raw bytes -> invalid format.
-    std::fs::write(&key_path, [0xABu8; 17]).unwrap();
+    let garbage = [0xABu8; 17];
+    std::fs::write(&key_path, garbage).unwrap();
 
     let r = run(&["keys", "verify", "--key-file", key_path.to_str().unwrap()]);
     assert_ne!(r.code, 0, "verify of a malformed key must fail");
@@ -295,6 +296,22 @@ fn keys_verify_garbage_key_fails_without_leak() {
         "verify must fail cleanly, not panic; stderr={:?}",
         r.stderr
     );
+
+    // No-leak contract: the file's raw bytes must never appear in output, in
+    // any encoding a future error message might use (a hex dump or the literal
+    // bytes), so the guarantee is airtight against error-message changes.
+    let hex: String = garbage.iter().map(|b| format!("{b:02x}")).collect();
+    let byte_string = String::from_utf8_lossy(&garbage).into_owned();
+    for out in [&r.stdout, &r.stderr] {
+        assert!(
+            !out.contains(&hex),
+            "verify output must NEVER contain the file's hex bytes; got={out:?}"
+        );
+        assert!(
+            !out.contains(&byte_string),
+            "verify output must NEVER contain the file's raw bytes; got={out:?}"
+        );
+    }
 }
 
 #[test]
@@ -311,6 +328,28 @@ fn keys_verify_requires_key_file() {
 fn keys_unknown_subcommand_fails() {
     let r = run(&["keys", "frobnicate"]);
     assert_ne!(r.code, 0, "unknown keys subcommand must fail");
+}
+
+#[test]
+fn keys_rotate_reports_deferred_not_unknown() {
+    let r = run(&["keys", "rotate"]);
+    assert_ne!(
+        r.code, 0,
+        "keys rotate must exit non-zero (not yet available)"
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr).to_lowercase();
+    // Must be an honest, specific deferred message -- NOT the generic
+    // "unknown keys subcommand" fallback.
+    assert!(
+        combined.contains("rotate") && combined.contains("not yet available"),
+        "keys rotate must give a specific deferred message; stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !combined.contains("unknown keys subcommand"),
+        "keys rotate must not use the generic unknown-subcommand message; got={combined:?}"
+    );
 }
 
 #[test]

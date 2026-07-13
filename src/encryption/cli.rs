@@ -50,7 +50,28 @@ pub struct KeyGenResult {
 ///
 /// Returns [`KeyProviderError`] if directory creation or file writing fails.
 pub fn generate_key(output_path: &Path) -> Result<KeyGenResult, KeyProviderError> {
-    let _key = FileKeyProvider::generate_key_file(output_path)?;
+    generate_key_with_overwrite(output_path, true)
+}
+
+/// Generate a new master key file, refusing to overwrite an existing file when
+/// `overwrite` is `false`.
+///
+/// When `overwrite` is `false` the file is created atomically with `O_EXCL`, so
+/// a file racing into existence between an external existence check and this
+/// call cannot be silently clobbered (fail-closed). When `overwrite` is `true`
+/// any existing file is re-created fresh. On Unix the file is created with mode
+/// `0600` before any key bytes are written -- the key is never world-readable at
+/// any instant.
+///
+/// # Errors
+///
+/// Returns [`KeyProviderError`] if directory creation or file writing fails, or
+/// (when `overwrite` is `false`) if a file already exists at `output_path`.
+pub fn generate_key_with_overwrite(
+    output_path: &Path,
+    overwrite: bool,
+) -> Result<KeyGenResult, KeyProviderError> {
+    let _key = FileKeyProvider::generate_key_file_with_overwrite(output_path, overwrite)?;
     Ok(KeyGenResult {
         path: output_path.display().to_string(),
         algorithm: "AES-256-GCM / ChaCha20-Poly1305".into(),

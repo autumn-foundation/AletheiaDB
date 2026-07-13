@@ -440,6 +440,12 @@ fn handle_keys(args: Vec<String>) -> Result<(), String> {
         // `info` is accepted as an alias for `status`.
         Some("status") | Some("info") => keys_status(&args[1..]),
         Some("verify") => keys_verify(&args[1..]),
+        // `rotate` is a known-but-deferred verb: give an honest, specific
+        // message (not a generic "unknown subcommand") so operators know it is
+        // planned, not a typo. Still exits non-zero.
+        Some("rotate") => {
+            Err("keys rotate is not yet available (key rotation engine, Issue #488)".to_string())
+        }
         Some(sub) => Err(format!("unknown keys subcommand '{sub}'")),
         None => Err("usage: aletheia keys <generate|status|verify> ...".to_string()),
     }
@@ -463,12 +469,19 @@ fn keys_generate(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    let result = aletheiadb::encryption::cli::generate_key(path)
+    // Pass `force` as the overwrite flag: when `--force` is absent the file is
+    // created atomically with `O_EXCL`, so a file racing into existence between
+    // the check above and the write below fails closed rather than being
+    // silently clobbered (closes the check-then-write TOCTOU). The key file is
+    // created with mode 0600 *before* any key bytes are written on Unix, so it
+    // is never world-readable at any instant.
+    let result = aletheiadb::encryption::cli::generate_key_with_overwrite(path, force)
         .map_err(|e| format!("failed to generate key: {e}"))?;
 
-    // A master key must never be world-readable; tighten to owner-only on Unix.
-    // (`generate_key_file` writes with the process umask, so we set the mode
-    // explicitly here rather than relying on it.)
+    // Defense-in-depth: re-assert owner-only permissions. `generate_key_with_overwrite`
+    // already creates the file 0600 at creation time on Unix, so this is a
+    // belt-and-suspenders check that introduces no new window (it only ever
+    // tightens, never loosens, and the file is already 0600 by here).
     restrict_key_permissions(path)?;
 
     println!(
