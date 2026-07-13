@@ -1013,19 +1013,20 @@ impl Parser {
         // it to the dedicated provenance variant; any other function-call head
         // (or a non-property expression) falls through to the property path,
         // which reports a structured error.
-        if let Expression::FunctionCall { name, args } = &expr
-            && name.eq_ignore_ascii_case("provenance")
-        {
-            if let [Expression::Identifier(var)] = args.as_slice() {
-                return Ok(PredicateExpr::ProvenanceIsNull {
-                    variable: var.clone(),
-                    negated: is_not,
-                });
+        match &expr {
+            Expression::FunctionCall { name, args } if name.eq_ignore_ascii_case("provenance") => {
+                if let [Expression::Identifier(var)] = args.as_slice() {
+                    return Ok(PredicateExpr::ProvenanceIsNull {
+                        variable: var.clone(),
+                        negated: is_not,
+                    });
+                }
+                return Err(self.error(
+                    "provenance(x) IS NULL requires a single bound variable argument".to_string(),
+                    Some("provenance(n) IS NULL".to_string()),
+                ));
             }
-            return Err(self.error(
-                "provenance(x) IS NULL requires a single bound variable argument".to_string(),
-                Some("provenance(n) IS NULL".to_string()),
-            ));
+            _ => {}
         }
 
         let prop = self.require_property_expr(expr, "IS NULL")?;

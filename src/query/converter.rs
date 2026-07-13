@@ -935,7 +935,12 @@ impl AstConverter {
     /// [`ProvenanceFilter::validated`](crate::core::provenance::ProvenanceFilter::validated)
     /// rules. The two foldable positive shapes (`source(x) = 'S'`,
     /// `confidence(x) >= t`) are lowered to a `ProvenanceFilter` evaluated via
-    /// its shared `matches`; all other operators use the general accessor form.
+    /// its shared `matches`; other operators use the general accessor form.
+    ///
+    /// Ordering operators (`<`, `<=`, `>`, `>=`) are **rejected at convert
+    /// time** for the string accessors (`source`/`reason`), which support only
+    /// `=`/`<>` (fail-closed: they are never silently accepted as lexicographic
+    /// comparisons). `confidence` accepts the full numeric ordering set.
     fn build_provenance_comparison(
         &self,
         field: ProvenanceField,
@@ -947,9 +952,9 @@ impl AstConverter {
 
         match (field, operand) {
             (ProvenanceField::Confidence, ProvenanceOperand::Num(n)) => {
-                // Validate the confidence literal (range + NaN) once, reusing
-                // the core rules and the offending-field name; the resulting
-                // filter is only used by the foldable `>=` shape below.
+                // Validate the confidence literal (range + NaN) once for every
+                // operator, reusing the core rules and the offending-field name;
+                // the resulting filter is only folded for the `>=` shape below.
                 let filter = crate::core::provenance::ProvenanceFilter::validated(
                     None,
                     None,
@@ -961,18 +966,22 @@ impl AstConverter {
                         parameter: e.field().to_string(),
                         reason: format!("confidence(x) must be between 0.0 and 1.0, got {n}"),
                     })
-                })?
-                .expect("min_confidence yields an active filter");
+                })?;
                 // Foldable positive shape: `confidence(x) >= t` reuses the core
-                // filter's inclusive min-confidence semantics via matches().
-                if matches!(cmp, ProvenanceCmp::Ge) {
-                    Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
-                } else {
-                    Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
+                // filter's inclusive min-confidence semantics via matches(). If
+                // the validated filter is inactive (defensive: a set
+                // min_confidence always yields an active filter), fall back to
+                // the general accessor form rather than panicking (coding
+                // standard: no expect/unwrap on the production path).
+                match (matches!(cmp, ProvenanceCmp::Ge), filter) {
+                    (true, Some(filter)) => {
+                        Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
+                    }
+                    _ => Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
                         field,
                         op: cmp,
                         operand: ProvenanceOperand::Num(n),
-                    }))
+                    })),
                 }
             }
             (ProvenanceField::Confidence, ProvenanceOperand::Str(_)) => {
@@ -982,8 +991,28 @@ impl AstConverter {
                 }))
             }
             (ProvenanceField::Source | ProvenanceField::Reason, ProvenanceOperand::Str(s)) => {
+                // `source`/`reason` are string accessors: only equality and
+                // inequality are supported (documented `=`/`<>`). Ordering
+                // operators are rejected at convert time (fail-closed) rather
+                // than being silently accepted as lexicographic comparisons.
+                if matches!(
+                    cmp,
+                    ProvenanceCmp::Lt | ProvenanceCmp::Le | ProvenanceCmp::Gt | ProvenanceCmp::Ge
+                ) {
+                    return Err(Error::Query(QueryError::SyntaxError {
+                        message: format!(
+                            "ordering operators (<, <=, >, >=) are not supported for \
+                             {}(x); only = and <> are supported for source/reason",
+                            field.accessor_name()
+                        ),
+                    }));
+                }
                 // Foldable positive shape: `source(x) = 'S'` reuses the core
-                // filter's any-of exact-match semantics via matches().
+                // filter's any-of exact-match semantics via matches(). `reason`
+                // and the `<>` operator use the general accessor form. If the
+                // validated filter is inactive (defensive), fall back to the
+                // accessor form rather than panicking (coding standard: no
+                // expect/unwrap on the production path).
                 if field == ProvenanceField::Source && matches!(cmp, ProvenanceCmp::Eq) {
                     let filter = crate::core::provenance::ProvenanceFilter::validated(
                         Some(s.clone()),
@@ -996,9 +1025,16 @@ impl AstConverter {
                             parameter: e.field().to_string(),
                             reason: e.to_string(),
                         })
-                    })?
-                    .expect("active source filter");
-                    Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
+                    })?;
+                    if let Some(filter) = filter {
+                        Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
+                    } else {
+                        Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
+                            field,
+                            op: cmp,
+                            operand: ProvenanceOperand::Str(s),
+                        }))
+                    }
                 } else {
                     Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
                         field,

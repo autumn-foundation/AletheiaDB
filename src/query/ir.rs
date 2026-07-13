@@ -706,10 +706,12 @@ impl ProvenanceCmp {
 
     /// Apply this comparator to two strings (for `source`/`reason`).
     ///
-    /// Only equality/inequality are meaningful for strings; ordering
-    /// comparators fall back to lexicographic order for completeness but are
-    /// not reachable through the AQL surface (only `=`/`<>` are accepted for
-    /// string accessors at convert time).
+    /// Only equality/inequality are meaningful for strings. The ordering
+    /// comparators (`Lt`/`Le`/`Gt`/`Ge`) are **rejected at convert time** for
+    /// the string accessors (see `build_provenance_comparison` in
+    /// `src/query/converter.rs`), so they are unreachable through the AQL
+    /// surface; the lexicographic arms below exist only for total-match
+    /// completeness and are never exercised by a converted query.
     #[must_use]
     pub fn compare_str(self, lhs: &str, rhs: &str) -> bool {
         match self {

@@ -239,6 +239,10 @@ unaffected.
   out-of-range literal is a structured error, never a silent empty result.
 - Comparing an accessor to the wrong type (`confidence(n) = 'high'`,
   `source(n) = 5`) is a type error, never a silent empty result.
+- The string accessors `source`/`reason` accept only `=`/`<>`. An **ordering
+  operator** on them (`source(n) < 'x'`, `reason(n) >= 'y'`) is **rejected at
+  convert time** (fail-closed), never silently accepted as a lexicographic
+  comparison. `confidence` accepts the full numeric ordering set.
 
 ```cypher
 -- Only facts sourced from HR with high confidence
@@ -263,6 +267,14 @@ RETURN n
 > per-variable (`confidence(r)` and `confidence(n)` both read the row entity's
 > provenance). Provenance in `RETURN`/`ORDER BY` projections is a deferred
 > follow-up (needs scalar-projection-into-row lowering).
+>
+> **Edge rows.** In the single-entity pipeline, a non-provenance property leaf
+> on an **edge** row is a pass-through (it evaluates `true`); only provenance
+> leaves actually filter edge rows. So a mixed predicate over an edge filters
+> **only on its provenance clause** (e.g. the provenance leaf of
+> `foo = 'x' AND confidence(e) >= 0.9` decides the edge; the `foo` leaf passes
+> through). Note that AQL `RETURN e` currently projects the traversal node, so
+> this edge behavior is reached only where edge rows exist in the pipeline.
 
 ## Semantic Mapping
 

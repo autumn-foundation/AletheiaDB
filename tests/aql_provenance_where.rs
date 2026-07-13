@@ -50,9 +50,10 @@ fn names(db: &AletheiaDB, aql: &str) -> Vec<String> {
     let results = db.execute_aql(aql).expect("query executes");
     let mut out = Vec::new();
     for row in results.collect_all().expect("collect rows") {
-        if let EntityResult::Node(n) = row.entity
-            && let Some(v) = n.get_property("name")
-        {
+        let EntityResult::Node(n) = row.entity else {
+            continue;
+        };
+        if let Some(v) = n.get_property("name") {
             out.push(format!("{v:?}"));
         }
     }
@@ -322,4 +323,49 @@ fn as_of_evaluates_provenance_at_that_coordinate() {
         &format!("AS OF '{t3}' MATCH (n:Person) WHERE confidence(n) >= 0.90 RETURN n"),
     );
     assert_eq!(after, vec!["String(\"alice\")"]);
+}
+
+#[test]
+fn ordering_operator_on_source_is_rejected() {
+    // FIX 1 (Issue #3354a): the string accessors `source`/`reason` support only
+    // `=`/`<>`. An ordering operator must be rejected at convert time with a
+    // structured error, never silently accepted as a lexicographic comparison.
+    let db = make_db();
+    let msg = err_msg(&db, "MATCH (n:Person) WHERE source(n) < 'x' RETURN n");
+    let lower = msg.to_lowercase();
+    assert!(
+        lower.contains("source") && (lower.contains("ordering") || lower.contains("= and <>")),
+        "expected a structured rejection naming source and the allowed operators, got: {msg}"
+    );
+}
+
+#[test]
+fn ordering_operator_on_reason_is_rejected() {
+    // FIX 1 (Issue #3354a): `reason(n) >= 'y'` must be rejected, not accepted as
+    // a lexicographic comparison.
+    let db = make_db();
+    let msg = err_msg(&db, "MATCH (n:Person) WHERE reason(n) >= 'y' RETURN n");
+    let lower = msg.to_lowercase();
+    assert!(
+        lower.contains("reason") && (lower.contains("ordering") || lower.contains("= and <>")),
+        "expected a structured rejection naming reason and the allowed operators, got: {msg}"
+    );
+}
+
+#[test]
+fn provenance_and_always_false_cheap_predicate_is_empty() {
+    // FIX 4 (Issue #3354a, DoS perf follow-up): a provenance leaf AND-combined
+    // with an always-false cheap property predicate must return no rows.
+    // Correctness first -- with lazy provenance resolution the cheap conjunct
+    // rejects every row before any historical read, but the result set is the
+    // same empty set either way.
+    let db = make_db();
+    let got = names(
+        &db,
+        "MATCH (n:Person) WHERE n.name = '__no_such_person__' AND source(n) = 'hr-system' RETURN n",
+    );
+    assert!(
+        got.is_empty(),
+        "an always-false cheap conjunct must yield an empty result, got: {got:?}"
+    );
 }

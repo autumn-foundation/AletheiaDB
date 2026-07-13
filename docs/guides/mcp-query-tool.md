@@ -134,10 +134,17 @@ Misuse fails closed with the tool's structured error payload, never a silent
 empty result: a `confidence` literal outside `[0,1]` (or NaN) → `invalid_params`
 naming `min_confidence`; an accessor compared to the wrong type
 (`confidence(n) = 'high'`, `source(n) = 5`) → `invalid_params`
-(`Type mismatch: …`); a malformed accessor argument (`source(n.foo)`,
-`confidence(n, m)`, `source()`) → `parse_error`. The accessors introduce no
-mutating clause, so the tool's read-only guarantee is unchanged, and the query
-tool stays `reader`-class.
+(`Type mismatch: …`); an **ordering operator on a string accessor**
+(`source(n) < 'x'`, `reason(n) >= 'y'`) → `parse_error` (the string accessors
+support only `=`/`<>`, and ordering ops are rejected at convert time rather than
+silently accepted as lexicographic comparisons); a malformed accessor argument
+(`source(n.foo)`, `confidence(n, m)`, `source()`) → `parse_error`. The accessors
+introduce no mutating clause, so the tool's read-only guarantee is unchanged, and
+the query tool stays `reader`-class.
+
+In the single-entity pipeline, a non-provenance property leaf on an **edge** row
+is a pass-through (evaluates `true`); only provenance leaves actually filter edge
+rows, so a mixed edge predicate filters **only on its provenance clause**.
 
 > **Deferred (v1):** provenance in `RETURN`/`ORDER BY` projections (needs the
 > scalar-projection-into-row lowering) and the Cypher surface (#3354b). Like
