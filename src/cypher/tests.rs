@@ -4237,6 +4237,106 @@ fn test_e2e_transaction_time_between_rejected() {
     }
 }
 
+/// #550 (timestamp-format equivalence): the four documented `AS OF TIMESTAMP`
+/// literal forms that all denote the SAME instant resolve identically
+/// end-to-end. A far-FUTURE instant is used deliberately: `AS OF TIMESTAMP`
+/// pins BOTH valid and transaction time to the literal, so a future coordinate
+/// includes every already-committed current node -- each equivalent spelling
+/// must therefore return the full current set, proving the ISO-8601 (`Z` and
+/// numeric-offset), date-only, and Unix-microsecond forms parse to one instant
+/// AND flow through the executor.
+#[test]
+fn test_e2e_as_of_timestamp_formats_equivalent() {
+    let db = AletheiaDB::new().unwrap();
+    db.create_node("Person", person("Alice")).unwrap();
+    db.create_node("Person", person("Bob")).unwrap();
+
+    // 2999-01-01T00:00:00Z expressed in every accepted spelling.
+    let micros = "2999-01-01T00:00:00Z"
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap()
+        .timestamp_micros();
+    let forms = [
+        "2999-01-01".to_string(),                // date only (midnight UTC)
+        "2999-01-01T00:00:00Z".to_string(),      // ISO 8601 with 'Z'
+        "2999-01-01T00:00:00+00:00".to_string(), // ISO 8601 with numeric offset
+        micros.to_string(),                      // Unix microseconds
+    ];
+
+    let expected = vec!["Alice".to_string(), "Bob".to_string()];
+    for form in &forms {
+        let q = format!("MATCH (n:Person) AS OF TIMESTAMP '{form}' RETURN n");
+        let names = sorted_names(&collect_rows(db.execute_cypher(&q).unwrap()));
+        assert_eq!(
+            names, expected,
+            "AS OF TIMESTAMP form `{form}` must resolve to the same current set"
+        );
+    }
+}
+
+/// #551/#552 (Cypher-surface design decision): `FOR SYSTEM_TIME BETWEEN`
+/// (a transaction-time RANGE) is NOT part of the Cypher surface. The parser
+/// requires `AS OF` after `SYSTEM_TIME`, so the query is rejected -- an LLM
+/// never receives present-day data in response to a tx-range query. This
+/// complements `test_e2e_transaction_time_between_rejected`, which pins the
+/// same decision at the QueryBuilder/planner layer.
+#[test]
+fn test_e2e_cypher_for_system_time_between_rejected() {
+    let db = AletheiaDB::new().unwrap();
+    db.create_node("Person", person("Alice")).unwrap();
+
+    let result = db.execute_cypher(
+        "MATCH (n:Person) FOR SYSTEM_TIME BETWEEN '2024-01-01' AND '2024-03-31' RETURN n",
+    );
+    assert!(
+        result.is_err(),
+        "FOR SYSTEM_TIME BETWEEN must be rejected at the Cypher surface, not answered"
+    );
+}
+
+/// #552 (exact boundaries): `BETWEEN` is the half-open valid-time window
+/// `[start, end)`. A version whose validity begins exactly at `start` is
+/// INCLUDED (start-inclusive); one whose validity begins exactly at `end` is
+/// EXCLUDED (end-exclusive). Cross-checked against the oracle union over
+/// sampled in-range instants.
+#[test]
+fn test_e2e_between_boundary_inclusivity() {
+    let db = AletheiaDB::new().unwrap();
+
+    // "AtStart": valid_from == start (exact lower boundary -- included).
+    let start = temporal_anchor(&db);
+    db.create_node_with_valid_time("Person", person("AtStart"), Some(start))
+        .unwrap();
+    // "InWindow": valid_from strictly inside (start, end).
+    let mid = temporal_anchor(&db);
+    db.create_node_with_valid_time("Person", person("InWindow"), Some(mid))
+        .unwrap();
+    // "AtEnd": valid_from == end (exact upper boundary -- excluded).
+    let end = temporal_anchor(&db);
+    db.create_node_with_valid_time("Person", person("AtEnd"), Some(end))
+        .unwrap();
+
+    let q = format!(
+        "MATCH (n:Person) BETWEEN '{}' AND '{}' RETURN n",
+        anchor_micros(start),
+        anchor_micros(end)
+    );
+    let names = sorted_names(&collect_rows(db.execute_cypher(&q).unwrap()));
+
+    assert_eq!(
+        names,
+        vec!["AtStart".to_string(), "InWindow".to_string()],
+        "BETWEEN [start, end) must include the start-boundary version and \
+         exclude the end-boundary version"
+    );
+    // Oracle: union of AS OF (v, now) over in-range instants (both < end).
+    let oracle = oracle_union_names_at(&db, "Person", &[start, mid], time_now());
+    assert_eq!(
+        names, oracle,
+        "BETWEEN must equal the oracle in-range union"
+    );
+}
+
 // ============================================================================
 // WITH clause semantics (Issue #556): projection, scoping, ORDER BY/SKIP/LIMIT
 // ============================================================================

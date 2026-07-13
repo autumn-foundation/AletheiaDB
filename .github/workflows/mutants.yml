@@ -88,7 +88,8 @@ jobs:
       - name: Generate diff against base branch
         run: |
           BASE_REF="${{ github.base_ref }}"
-          git diff "origin/${BASE_REF:-trunk}"..HEAD > mutants-diff.patch
+          # Three-dot: diff from merge-base so only PR-introduced changes are mutated, not drifted trunk code.
+          git diff "origin/${BASE_REF:-trunk}"...HEAD > mutants-diff.patch
           wc -c mutants-diff.patch
 
       - name: Run mutation tests on diff

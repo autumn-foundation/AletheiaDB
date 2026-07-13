@@ -220,6 +220,14 @@ fn classify_db_error(e: &Error) -> (McpErrorCode, bool) {
         // A provenance bundle failing validation is a caller fault.
         Error::Provenance(_) => (McpErrorCode::InvalidArgument, false),
         Error::Lineage(le) => classify_lineage_error(le),
+        // A PITR (#3374) target outside the achievable window, or a window that
+        // crosses a post-backup vocabulary change, is a caller-fault precondition
+        // failure; each error's Display explains the remediation. All other
+        // backup errors remain Internal.
+        Error::Backup(
+            crate::storage::backup::BackupError::TargetOutsideWindow { .. }
+            | crate::storage::backup::BackupError::WindowCrossesVocabularyChange { .. },
+        ) => (McpErrorCode::FailedPrecondition, false),
         Error::Io(_) | Error::Backup(_) => (McpErrorCode::Internal, false),
         // The feature exists but this build/deployment doesn't provide it.
         Error::NotImplemented { .. } => (McpErrorCode::FailedPrecondition, false),
@@ -405,6 +413,15 @@ mod tests {
         assert_eq!(McpErrorCode::Internal.as_str(), "INTERNAL");
         assert_eq!(McpErrorCode::Unauthenticated.as_str(), "UNAUTHENTICATED");
         assert_eq!(McpErrorCode::PermissionDenied.as_str(), "PERMISSION_DENIED");
+        assert_eq!(McpErrorCode::ResourceExhausted.as_str(), "RESOURCE_EXHAUSTED");
+    }
+
+    #[test]
+    fn resource_exhausted_defaults_non_retriable() {
+        // The default is the conservative non-retriable; the read-only
+        // wall-clock-timeout case opts into retriable at its call site (see
+        // `server::wall_clock_timeout_error`), the byte-cap case does not.
+        assert!(!McpErrorCode::ResourceExhausted.default_retriable());
     }
 
     #[test]

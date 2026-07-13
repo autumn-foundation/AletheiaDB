@@ -61,7 +61,9 @@ Nodes:
 - `Company` **Acme** `{name:'Acme', cid:1}`
 - `Company` **Globex** `{name:'Globex', cid:2}`
 
-No node has an `email` property (used to pin `IS NULL` / `IS NOT NULL`).
+No node has an `email` property (used to pin openCypher-correct `IS NULL` /
+`IS NOT NULL` on an absent property: `IS NULL` matches all 4 Persons,
+`IS NOT NULL` matches 0 — fixed in #3511).
 
 Edges:
 
@@ -88,7 +90,7 @@ correctly.
 | `WHERE` boolean logic | `WHERE n.age > 30 AND n.dept = 'Sales'` | `AND` / `OR` / `NOT` |
 | `WHERE ... IN` | `WHERE n.dept IN ['Eng','Sales']` | list membership |
 | `STARTS WITH` / `ENDS WITH` / `CONTAINS` | `WHERE n.name STARTS WITH 'A'` | case-sensitive |
-| `IS NULL` / `IS NOT NULL` | `WHERE n.name IS NULL` | parses/executes; **openCypher-correct only for *present* properties** — absent-property semantics deviate (see [§3](#3-known-limitations-executes-with-documented-caveats)) |
+| `IS NULL` / `IS NOT NULL` | `WHERE n.email IS NULL` | openCypher-correct for both **present** and **absent** properties: a missing property *is* null, so `n.email IS NULL` matches all rows and `IS NOT NULL` matches none (absent-property inversion fixed in #3511) |
 | Outgoing / incoming / undirected | `-[:KNOWS]->`, `<-[:KNOWS]-`, `-[:KNOWS]-` | |
 | Relationship-type traversal | `MATCH (a)-[:KNOWS]->(b) RETURN b` | |
 | Variable-length paths | `-[:KNOWS*1..3]->`, `*2`, `*`, `*2..`, `*..2` | **node-distinct / shortest-path reachability** (v1 simplification of trail semantics); open-ended bounds capped at depth 10 |
@@ -101,11 +103,11 @@ correctly.
 | Chained `WITH` | `WITH a WHERE ... WITH a WHERE ... RETURN a` | |
 | Standalone `UNWIND` | `UNWIND [1,2,3] AS x RETURN x` | list literal / `$param` / `null`; `RETURN x`, `DISTINCT`, `ORDER BY x`, `SKIP`, `LIMIT` |
 | `OPTIONAL MATCH` (left-outer) | `MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x` | unmatched preserves base row, binds null; single pattern, unlabeled continuation node |
-| `AS OF TIMESTAMP` | `MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00Z' RETURN n` | *convert-only in the suite* (avoids seeding bi-temporal history) |
-| `AS OF VALID_TIME` / `AS OF SYSTEM_TIME` | `... AS OF VALID_TIME '2024-01-15' RETURN n` | *convert-only* |
-| `FOR SYSTEM_TIME AS OF` | `... FOR SYSTEM_TIME AS OF '2024-01-15' RETURN n` | *convert-only* |
-| Bi-temporal | `... AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...' RETURN n` | *convert-only* |
-| `BETWEEN ... AND` | `... BETWEEN '2024-01-01' AND '2024-12-31' RETURN n` | *convert-only* |
+| `AS OF TIMESTAMP` (#550) | `MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00Z' RETURN n` | *convert-only in the suite* (avoids seeding bi-temporal history). Timestamp literal accepts ISO-8601 with `Z` **or** numeric offset (`+00:00`), date-only (midnight UTC), and Unix microseconds — all pinned. **Runtime** reconstruction is proven end-to-end in `src/cypher/tests.rs` (`test_e2e_as_of_timestamp_*`) |
+| `AS OF VALID_TIME` / `AS OF SYSTEM_TIME` / `FOR VALID_TIME AS OF` (#551) | `... AS OF VALID_TIME '2024-01-15' RETURN n` | *convert-only* in the suite; runtime-proven in `tests.rs` |
+| `FOR SYSTEM_TIME AS OF` (#551) | `... FOR SYSTEM_TIME AS OF '2024-01-15' RETURN n` | *convert-only*; runtime-proven (`test_e2e_for_system_time_as_of_honored_by_label_scan`) |
+| Bi-temporal (#551) | `... AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...' RETURN n` | *convert-only*; runtime-proven (`test_e2e_as_of_bitemporal_valid_and_system`, `test_e2e_as_of_asymmetric_bitemporal`) |
+| `BETWEEN ... AND` (valid-time range, #552) | `... BETWEEN '2024-01-01' AND '2024-12-31' RETURN n` | *convert-only*; half-open `[start, end)` (start-inclusive, end-exclusive). Runtime-proven in `tests.rs` (`test_e2e_between_*`, incl. boundary inclusivity) |
 | Vector similarity in `ORDER BY` | `RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10` | *convert-only* (needs an `Embedding` param) |
 | Parameters | `MATCH (n:Person {name:$name}) RETURN n` | `$param` bindings |
 
@@ -138,6 +140,9 @@ can be produced. The suite pins the exact variant and a message substring.
 | `WITH` computed / property / aggregate projection | `MATCH (a:Person) WITH a.name AS x RETURN x` | `UnsupportedFeature` | `WITH` can only project a bound variable (optionally aliased) |
 | `RETURN` of a `WITH`-dropped variable | `MATCH (a:Person) WITH a AS p WHERE p.age > 30 RETURN a` | `SemanticError` | `a` is out of scope after the `WITH` renamed/dropped it |
 | Unbound parameter | `MATCH (n:Person {name:$name}) RETURN n` (no binding) | `ParameterError` | `$name` was never bound |
+| `FOR SYSTEM_TIME BETWEEN` (tx-time range, #551/#552) | `... FOR SYSTEM_TIME BETWEEN '2024-01-01' AND '2024-03-31' RETURN n` | `ParseError` | **Design decision**: transaction-time RANGE scans are not exposed through Cypher; the parser requires `AS OF` after `SYSTEM_TIME`. (The tx-range context is reachable only via the `QueryBuilder` API, where the planner rejects it as an `UnsupportedFeature` — see `test_e2e_transaction_time_between_rejected`.) |
+| Inverted `BETWEEN` range (#552) | `... BETWEEN '2024-12-31' AND '2024-01-01' RETURN n` | `InvalidTemporalClause` | start/end are validated (`start > end` rejected during lowering), never silently treated as empty |
+| Unparseable `AS OF TIMESTAMP` literal (#550) | `... AS OF TIMESTAMP 'not-a-timestamp' RETURN n` | `InvalidTimestamp` | a malformed timestamp is rejected during lowering, never a silent `now()` fallback |
 
 ---
 
@@ -155,25 +160,16 @@ can be produced. The suite pins the exact variant and a message substring.
   (`DEFAULT_MAX_TRAVERSAL_DEPTH`).
 - **`RETURN DISTINCT <scalar projection>`** deduplicates by entity id, not the
   projected value (property projection is not yet lowered into the row model).
-- **`IS NULL` / `IS NOT NULL` on an *absent* property deviate from openCypher.**
-  The Cypher converter lowers `x IS NULL` → `Eq{value: Null}` and
-  `x IS NOT NULL` → `Ne{value: Null}`; the executor treats a **missing**
-  property as non-matching for `Eq` and matching for `Ne`. So for a property
-  that no node carries:
 
-  | Query | AletheiaDB (actual) | openCypher (expected) |
-  |-------|---------------------|-----------------------|
-  | `n.email IS NULL`     | 0 rows | all rows (a missing property *is* null) |
-  | `n.email IS NOT NULL` | all rows | 0 rows |
+> **Fixed (#3511):** `IS NULL` / `IS NOT NULL` on an *absent* property was
+> previously inverted vs openCypher (a missing property matched `IS NOT NULL`
+> instead of `IS NULL`). #3511 re-lowered property-access `x IS NULL` →
+> `Or(NotExists, Eq(Null))` and `x IS NOT NULL` → `And(Exists, Ne(Null))`, so a
+> missing property now correctly *is* null. This is now asserted as
+> openCypher-correct in the supported corpus (`is_null_absent_prop` /
+> `is_not_null_absent_prop` in `src/cypher/compat.rs`), no longer a deviation.
 
-  For **present** properties the behavior is openCypher-correct. This inversion
-  is a genuine deviation (not merely a missing feature); it is pinned — as a
-  deviation, **not** asserted as correct — by `compat_known_deviations` in
-  `src/cypher/compat.rs`, so a future fix will trip that test and prompt an
-  update here.
-
-Apart from that documented deviation, no case in the suite asserts a wrong
-answer as correct.
+No case in the suite asserts a wrong answer as correct.
 
 ---
 

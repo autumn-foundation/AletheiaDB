@@ -2699,4 +2699,432 @@ mod tests {
             "no duplicate history version may be appended"
         );
     }
+
+    /// Guards the LOAD-BEARING tx-time close in the UpdateEdge replay arm
+    /// (recovery.rs ~498, Issue #3407/#3492). Two UpdateEdge ops on the SAME
+    /// edge in ONE framed transaction share a single `commit_timestamp` T, so
+    /// the successor's tx-start EQUALS the intermediate version's tx-start and
+    /// `close_previous_version_intervals`' STRICT `>` guard SKIPS the close.
+    /// The explicit unconditional close in the arm is what closes the
+    /// intermediate (first-update) version's transaction time to the empty
+    /// `[T, T)` interval, matching the live write path. Removing the close
+    /// leaves it OPEN `[T, MAX)`, so an `AS OF SYSTEM_TIME = T` read could
+    /// wrongly surface the superseded edge version.
+    #[test]
+    fn replay_framed_double_update_same_edge_in_one_tx_closes_intermediate() {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let source = crate::core::NodeId::new(1).unwrap();
+        let target = crate::core::NodeId::new(2).unwrap();
+        let edge_id = crate::core::EdgeId::new(1).unwrap();
+        let node_label = GLOBAL_INTERNER.intern("RcvDblUpdEdgeNode").unwrap();
+        let edge_label = GLOBAL_INTERNER.intern("RCV_DBL_UPD_EDGE").unwrap();
+        let now = time::now().wallclock();
+        let valid_from = crate::core::hlc::HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+        // Shared framed commit timestamp, strictly AFTER the (unframed) create
+        // timestamps so only the equal-timestamp intermediate close is at stake.
+        let commit_ts = crate::core::hlc::HybridTimestamp::new(now + 3_600_000_000, 0).unwrap();
+        let tx_id = 91u64;
+
+        // Committed creates (unframed → each applies with its own earlier ts).
+        for node_id in [source, target] {
+            wal.append(WalOperation::CreateNode {
+                node_id,
+                label: node_label,
+                properties: PropertyMapBuilder::new().build(),
+                valid_from,
+                provenance: None,
+            })
+            .unwrap();
+        }
+        wal.append(WalOperation::CreateEdge {
+            edge_id,
+            source,
+            target,
+            label: edge_label,
+            properties: PropertyMapBuilder::new().insert("v", 1i64).build(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+
+        // ONE framed transaction: two updates of the SAME edge share commit_ts.
+        wal.append(WalOperation::BeginTx { tx_id }).unwrap();
+        wal.append(WalOperation::UpdateEdge {
+            edge_id,
+            version_id: crate::core::VersionId::new(10).unwrap(),
+            label: edge_label,
+            properties: PropertyMapBuilder::new().insert("v", 2i64).build(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::UpdateEdge {
+            edge_id,
+            version_id: crate::core::VersionId::new(11).unwrap(),
+            label: edge_label,
+            properties: PropertyMapBuilder::new().insert("v", 3i64).build(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::CommitTx {
+            tx_id,
+            entry_count: 2,
+            commit_timestamp: commit_ts,
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        let history = historical.get_edge_history(edge_id).unwrap();
+        assert_eq!(
+            history.version_count(),
+            3,
+            "create + two same-edge updates must yield three versions"
+        );
+        // versions[1] is the first (now superseded) update.
+        let intermediate = &history.versions[1];
+        assert!(
+            !intermediate.temporal.transaction_time().is_current(),
+            "superseded intermediate edge update's tx time must be CLOSED even when \
+             both updates share one framed commit_timestamp (#3407/#3492 kept close)"
+        );
+        assert_eq!(
+            intermediate.temporal.transaction_time().end(),
+            commit_ts,
+            "must close at the shared framed commit timestamp, forming the empty [T, T)"
+        );
+        // The head update stays current.
+        assert!(
+            history.versions[2].temporal.transaction_time().is_current(),
+            "head update's tx time must stay open"
+        );
+    }
+
+    /// Guards the LOAD-BEARING tx-time close in the DeleteEdge replay arm
+    /// (recovery.rs ~669, Issue #3407/#3492). An UpdateEdge then a DeleteEdge
+    /// of the SAME edge in ONE framed transaction share `commit_timestamp` T;
+    /// the helper's STRICT `>` guard skips closing the superseded pre-delete
+    /// (update) version's transaction time (`T > T` is false). The explicit
+    /// unconditional close in the arm closes it at T — leaving it open to MAX
+    /// would let an `AS OF SYSTEM_TIME = T` read surface the pre-delete edge.
+    #[test]
+    fn replay_framed_update_then_delete_same_edge_closes_superseded_tx_time() {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let source = crate::core::NodeId::new(1).unwrap();
+        let target = crate::core::NodeId::new(2).unwrap();
+        let edge_id = crate::core::EdgeId::new(1).unwrap();
+        let node_label = GLOBAL_INTERNER.intern("RcvUpdDelEdgeNode").unwrap();
+        let edge_label = GLOBAL_INTERNER.intern("RCV_UPD_DEL_EDGE").unwrap();
+        let now = time::now().wallclock();
+        let valid_from = crate::core::hlc::HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+        // Shared framed commit timestamp, strictly AFTER the create timestamps.
+        let commit_ts = crate::core::hlc::HybridTimestamp::new(now + 3_600_000_000, 0).unwrap();
+        let tx_id = 93u64;
+
+        for node_id in [source, target] {
+            wal.append(WalOperation::CreateNode {
+                node_id,
+                label: node_label,
+                properties: PropertyMapBuilder::new().build(),
+                valid_from,
+                provenance: None,
+            })
+            .unwrap();
+        }
+        wal.append(WalOperation::CreateEdge {
+            edge_id,
+            source,
+            target,
+            label: edge_label,
+            properties: PropertyMapBuilder::new().insert("v", 1i64).build(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+
+        // ONE framed transaction: update then delete the SAME edge, sharing T.
+        wal.append(WalOperation::BeginTx { tx_id }).unwrap();
+        wal.append(WalOperation::UpdateEdge {
+            edge_id,
+            version_id: crate::core::VersionId::new(10).unwrap(),
+            label: edge_label,
+            properties: PropertyMapBuilder::new().insert("v", 2i64).build(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::DeleteEdge {
+            edge_id,
+            valid_from: commit_ts,
+            version_id: None,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::CommitTx {
+            tx_id,
+            entry_count: 2,
+            commit_timestamp: commit_ts,
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        assert!(
+            current.get_edge(edge_id).is_err(),
+            "edge deleted from current"
+        );
+        let history = historical.get_edge_history(edge_id).unwrap();
+        assert_eq!(
+            history.version_count(),
+            3,
+            "create + update + tombstone versions"
+        );
+        // versions[1] is the pre-delete (update) head that the delete supersedes.
+        let pre_delete_head = &history.versions[1];
+        assert!(
+            !pre_delete_head.temporal.transaction_time().is_current(),
+            "superseded pre-delete edge head's tx time must be CLOSED even when the \
+             update + delete share one framed commit_timestamp (#3407/#3492 kept close)"
+        );
+        assert_eq!(
+            pre_delete_head.temporal.transaction_time().end(),
+            commit_ts,
+            "must close at the shared framed commit timestamp (not left open to MAX)"
+        );
+    }
+
+    /// Guards the LOAD-BEARING tx-time close in the CreateNode (recreate-
+    /// after-tombstone) replay arm (recovery.rs ~298, Issue #3407/#3492).
+    /// Within ONE framed transaction, create → delete → re-create the SAME
+    /// node id: the delete tombstone and the re-creation share
+    /// `commit_timestamp` T, so `close_previous_version_intervals`' STRICT `>`
+    /// guard SKIPS closing the tombstone head. The explicit unconditional
+    /// close in the recreate branch closes the tombstone's transaction time to
+    /// the empty `[T, T)` interval, so `AS OF SYSTEM_TIME = T` yields only the
+    /// re-created version. Removing the close leaves the tombstone OPEN
+    /// `[T, MAX)`, overlapping the re-creation.
+    #[test]
+    fn replay_framed_recreate_same_node_id_in_one_tx_closes_superseded() {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let node_id = crate::core::NodeId::new(1).unwrap();
+        let label_first = GLOBAL_INTERNER.intern("RcvFramedRecreateFirst").unwrap();
+        let label_second = GLOBAL_INTERNER.intern("RcvFramedRecreateSecond").unwrap();
+        let now = time::now().wallclock();
+        let vf_first = crate::core::hlc::HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+        let vf_second = crate::core::hlc::HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+        // Shared framed commit timestamp for the whole create→delete→recreate.
+        let commit_ts = crate::core::hlc::HybridTimestamp::new(now, 0).unwrap();
+        let tx_id = 92u64;
+
+        wal.append(WalOperation::BeginTx { tx_id }).unwrap();
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label: label_first,
+            properties: PropertyMapBuilder::new().insert("v", 1i64).build(),
+            valid_from: vf_first,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::DeleteNode {
+            node_id,
+            valid_from: commit_ts,
+            version_id: None,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label: label_second,
+            properties: PropertyMapBuilder::new().insert("v", 2i64).build(),
+            valid_from: vf_second,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::CommitTx {
+            tx_id,
+            entry_count: 3,
+            commit_timestamp: commit_ts,
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        let history = historical.get_node_history(node_id).unwrap();
+        assert_eq!(
+            history.version_count(),
+            3,
+            "history must be create + tombstone + re-create"
+        );
+        // versions[1] is the delete tombstone that the re-creation supersedes.
+        let tombstone = &history.versions[1];
+        assert!(
+            !tombstone.temporal.valid_time().is_current(),
+            "middle version must be the delete tombstone (closed valid interval)"
+        );
+        assert!(
+            !tombstone.temporal.transaction_time().is_current(),
+            "superseded tombstone head's tx time must be CLOSED when the delete + \
+             re-creation share one framed commit_timestamp (#3407/#3492 kept close)"
+        );
+        assert_eq!(
+            tombstone.temporal.transaction_time().end(),
+            commit_ts,
+            "must close at the shared framed commit timestamp, forming the empty [T, T)"
+        );
+        // Re-created head stays current; AS OF SYSTEM_TIME = T yields it only.
+        assert_eq!(history.versions[2].label, "RcvFramedRecreateSecond");
+        assert!(
+            history.versions[2].temporal.transaction_time().is_current(),
+            "re-created head's tx time must stay open"
+        );
+        let recalled = historical
+            .get_node_at_time(node_id, time::now(), commit_ts)
+            .expect("re-creation must be visible AS OF SYSTEM_TIME = T");
+        assert_eq!(recalled.label, label_second);
+    }
+
+    /// Guards the LOAD-BEARING tx-time close in the CreateEdge (recreate-
+    /// after-tombstone) replay arm (recovery.rs ~374, Issue #3407/#3492) — the
+    /// edge analogue of the CreateNode-recreate guard above. Within ONE framed
+    /// transaction, create → delete → re-create the SAME edge id sharing
+    /// `commit_timestamp` T; the helper's STRICT `>` guard skips closing the
+    /// tombstone head, and the explicit unconditional close in the recreate
+    /// branch closes it to the empty `[T, T)` interval so `AS OF SYSTEM_TIME =
+    /// T` yields only the re-creation.
+    #[test]
+    fn replay_framed_recreate_same_edge_id_in_one_tx_closes_superseded() {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let source = crate::core::NodeId::new(1).unwrap();
+        let target = crate::core::NodeId::new(2).unwrap();
+        let edge_id = crate::core::EdgeId::new(1).unwrap();
+        let node_label = GLOBAL_INTERNER.intern("RcvFramedRecreateEdgeNode").unwrap();
+        let label_first = GLOBAL_INTERNER.intern("RCV_FRAMED_RECREATE_FIRST").unwrap();
+        let label_second = GLOBAL_INTERNER
+            .intern("RCV_FRAMED_RECREATE_SECOND")
+            .unwrap();
+        let now = time::now().wallclock();
+        let vf_first = crate::core::hlc::HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+        let vf_second = crate::core::hlc::HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+        let commit_ts = crate::core::hlc::HybridTimestamp::new(now, 0).unwrap();
+        let tx_id = 94u64;
+
+        // Endpoints exist before the frame (unframed → own earlier timestamps).
+        for node_id in [source, target] {
+            wal.append(WalOperation::CreateNode {
+                node_id,
+                label: node_label,
+                properties: PropertyMapBuilder::new().build(),
+                valid_from: vf_first,
+                provenance: None,
+            })
+            .unwrap();
+        }
+
+        wal.append(WalOperation::BeginTx { tx_id }).unwrap();
+        wal.append(WalOperation::CreateEdge {
+            edge_id,
+            source,
+            target,
+            label: label_first,
+            properties: PropertyMapBuilder::new().insert("v", 1i64).build(),
+            valid_from: vf_first,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::DeleteEdge {
+            edge_id,
+            valid_from: commit_ts,
+            version_id: None,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::CreateEdge {
+            edge_id,
+            source,
+            target,
+            label: label_second,
+            properties: PropertyMapBuilder::new().insert("v", 2i64).build(),
+            valid_from: vf_second,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::CommitTx {
+            tx_id,
+            entry_count: 3,
+            commit_timestamp: commit_ts,
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        let history = historical.get_edge_history(edge_id).unwrap();
+        assert_eq!(
+            history.version_count(),
+            3,
+            "history must be create + tombstone + re-create"
+        );
+        // versions[1] is the delete tombstone that the re-creation supersedes.
+        let tombstone = &history.versions[1];
+        assert!(
+            !tombstone.temporal.valid_time().is_current(),
+            "middle version must be the delete tombstone (closed valid interval)"
+        );
+        assert!(
+            !tombstone.temporal.transaction_time().is_current(),
+            "superseded tombstone head's tx time must be CLOSED when the delete + \
+             re-creation share one framed commit_timestamp (#3407/#3492 kept close)"
+        );
+        assert_eq!(
+            tombstone.temporal.transaction_time().end(),
+            commit_ts,
+            "must close at the shared framed commit timestamp, forming the empty [T, T)"
+        );
+        // Re-created head stays current; AS OF SYSTEM_TIME = T yields it only.
+        assert_eq!(history.versions[2].label, "RCV_FRAMED_RECREATE_SECOND");
+        assert!(
+            history.versions[2].temporal.transaction_time().is_current(),
+            "re-created edge head's tx time must stay open"
+        );
+        let recalled = historical
+            .get_edge_at_time(edge_id, time::now(), commit_ts)
+            .expect("re-creation must be visible AS OF SYSTEM_TIME = T");
+        assert_eq!(recalled.label, label_second);
+    }
 }

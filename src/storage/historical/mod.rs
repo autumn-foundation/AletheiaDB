@@ -27,9 +27,15 @@ use crate::core::version::{
 use quick_cache::sync::Cache;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 #[cfg(feature = "observability")]
 use tracing;
+
+mod hooks;
+
+use hooks::{AnchorHookContext, HookMetrics};
+pub use hooks::{HookMetricsSnapshot, PreAnchorHook};
 
 /// Default maximum number of versions per entity (DoS protection)
 pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
@@ -91,63 +97,6 @@ impl RetentionPolicy {
             max_age_ms: i64::MAX,
         }
     }
-}
-
-/// Pre-anchor hook for creating snapshots before anchor storage.
-///
-/// This hook is called **before** storing an anchor to create synchronized snapshots
-/// and return a snapshot ID to be stored atomically with the anchor. This enables
-/// strong consistency for provenance tracking between graph versioning and vector indexing.
-///
-/// # Arguments
-///
-/// * `entity_type` - Type of entity ("node" or "edge")
-/// * `entity_id` - ID of the entity as u64
-/// * `timestamp` - Transaction timestamp when the anchor is being created
-/// * `properties` - Property map that will be stored in the anchor
-///
-/// # Returns
-///
-/// * `Ok(Some(snapshot_id))` - Snapshot created successfully, link to anchor
-/// * `Ok(None)` - No snapshot needed or empty index
-/// * `Err(e)` - Snapshot creation failed (anchor will still be created, graceful degradation)
-///
-/// # Examples
-///
-/// ```ignore
-/// use aletheiadb::storage::historical::PreAnchorHook;
-/// use std::sync::Arc;
-///
-/// let hook: PreAnchorHook = Arc::new(|entity_type, entity_id, timestamp, properties| {
-///     // Create vector snapshot before anchor is stored
-///     let snapshot_id = create_vector_snapshot(timestamp, properties)?;
-///     Ok(Some(snapshot_id))
-/// });
-/// ```
-pub type PreAnchorHook = Arc<
-    dyn Fn(
-            /* entity_type */ &str,
-            /* entity_id */ u64,
-            /* timestamp */ Timestamp,
-            /* properties */ &PropertyMap,
-        ) -> Result<Option<usize>>
-        + Send
-        + Sync,
->;
-
-/// Context for pre-anchor hook invocation.
-///
-/// Groups the parameters needed to invoke a pre-anchor hook, improving
-/// readability and reducing the number of function parameters.
-struct AnchorHookContext<'a> {
-    /// Entity type ("node" or "edge")
-    entity_type: &'a str,
-    /// Entity ID as u64
-    entity_id: u64,
-    /// Transaction timestamp
-    timestamp: Timestamp,
-    /// Properties being stored in the anchor
-    properties: &'a PropertyMap,
 }
 
 /// Default cache size for reconstructed properties (10,000 entries)
@@ -253,18 +202,33 @@ pub struct HistoricalStorage {
     /// for indexing, metrics, logging, or coordination. Observers are notified
     /// asynchronously and errors don't block storage operations.
     observers: Vec<Observer>,
-    /// Pre-anchor hook for node anchors (called before storage).
+    /// Ordered pre-anchor hooks for node anchors (called before storage).
     ///
-    /// This hook is called **before** storing a node anchor to create synchronized
-    /// snapshots. The returned snapshot ID is stored atomically with the anchor,
-    /// enabling strong consistency for provenance tracking.
-    pre_node_anchor_hook: Option<PreAnchorHook>,
-    /// Pre-anchor hook for edge anchors (called before storage).
+    /// These hooks are called **before** storing a node anchor, in registration
+    /// order, to create synchronized snapshots. The returned snapshot ID is
+    /// stored atomically with the anchor, enabling strong consistency for
+    /// provenance tracking. A failure, panic, or timeout of one hook is isolated
+    /// and does not prevent the others from running (Issue #3525).
+    pre_node_anchor_hooks: Vec<PreAnchorHook>,
+    /// Ordered pre-anchor hooks for edge anchors (called before storage).
     ///
-    /// This hook is called **before** storing an edge anchor to create synchronized
-    /// snapshots. The returned snapshot ID is stored atomically with the anchor,
-    /// enabling strong consistency for provenance tracking.
-    pre_edge_anchor_hook: Option<PreAnchorHook>,
+    /// These hooks are called **before** storing an edge anchor, in registration
+    /// order, to create synchronized snapshots. The returned snapshot ID is
+    /// stored atomically with the anchor, enabling strong consistency for
+    /// provenance tracking. A failure, panic, or timeout of one hook is isolated
+    /// and does not prevent the others from running (Issue #3525).
+    pre_edge_anchor_hooks: Vec<PreAnchorHook>,
+    /// Optional bound on how long the write path waits for a single pre-anchor
+    /// hook before degrading gracefully (Issue #3525).
+    ///
+    /// `None` (default) runs hooks inline under the `historical` lock exactly as
+    /// before (panics still isolated). `Some(d)` runs each hook on a detached
+    /// worker thread and waits at most `d`; if the deadline elapses the write
+    /// path stops waiting, records a timeout, and creates the anchor without a
+    /// snapshot id from that hook. See [`hooks`] for the locking rationale.
+    hook_timeout: Option<Duration>,
+    /// Observability counters for pre-anchor hook execution (Issue #3525).
+    hook_metrics: HookMetrics,
     /// Optional tiered storage for cold data access.
     ///
     /// When configured, versions not found in hot storage will be looked up
@@ -398,8 +362,10 @@ impl HistoricalStorage {
             anchor_cache_hits: Arc::new(AtomicU64::new(0)),
             full_reconstructions: Arc::new(AtomicU64::new(0)),
             observers: Vec::new(),
-            pre_node_anchor_hook: None,
-            pre_edge_anchor_hook: None,
+            pre_node_anchor_hooks: Vec::new(),
+            pre_edge_anchor_hooks: Vec::new(),
+            hook_timeout: None,
+            hook_metrics: HookMetrics::default(),
             tiered_storage: None,
             temporal_indexes: None,
             temporal_adjacency_index: None,
@@ -477,8 +443,28 @@ impl HistoricalStorage {
     /// let mut storage = HistoricalStorage::new();
     /// storage.register_pre_node_anchor_hook(hook);
     /// ```
+    ///
+    /// # Backward compatibility (Issue #3525)
+    ///
+    /// This setter **replaces** all currently registered node pre-anchor hooks
+    /// with the single `hook`, preserving the original single-hook "set THE
+    /// hook" semantics. To register multiple ordered hooks without discarding
+    /// existing ones, use [`add_pre_node_anchor_hook`](Self::add_pre_node_anchor_hook).
     pub fn register_pre_node_anchor_hook(&mut self, hook: PreAnchorHook) {
-        self.pre_node_anchor_hook = Some(hook);
+        self.pre_node_anchor_hooks = vec![hook];
+    }
+
+    /// Append a pre-anchor hook for nodes, preserving registration order (Issue #3525).
+    ///
+    /// Unlike [`register_pre_node_anchor_hook`](Self::register_pre_node_anchor_hook)
+    /// (which replaces), this **appends** `hook` after any previously registered
+    /// node hooks. When an anchor is created, all registered node hooks run in
+    /// registration order. Each invocation is isolated: a failure, panic, or
+    /// timeout of one hook is recorded and logged but does not prevent later
+    /// hooks from running. Because an anchor has a single snapshot-id slot, the
+    /// **last** hook that returns `Ok(Some(id))` wins.
+    pub fn add_pre_node_anchor_hook(&mut self, hook: PreAnchorHook) {
+        self.pre_node_anchor_hooks.push(hook);
     }
 
     /// Register a pre-anchor hook for edges.
@@ -517,8 +503,59 @@ impl HistoricalStorage {
     /// let mut storage = HistoricalStorage::new();
     /// storage.register_pre_edge_anchor_hook(hook);
     /// ```
+    ///
+    /// # Backward compatibility (Issue #3525)
+    ///
+    /// This setter **replaces** all currently registered edge pre-anchor hooks
+    /// with the single `hook`, preserving the original single-hook "set THE
+    /// hook" semantics. To register multiple ordered hooks without discarding
+    /// existing ones, use [`add_pre_edge_anchor_hook`](Self::add_pre_edge_anchor_hook).
     pub fn register_pre_edge_anchor_hook(&mut self, hook: PreAnchorHook) {
-        self.pre_edge_anchor_hook = Some(hook);
+        self.pre_edge_anchor_hooks = vec![hook];
+    }
+
+    /// Append a pre-anchor hook for edges, preserving registration order (Issue #3525).
+    ///
+    /// Unlike [`register_pre_edge_anchor_hook`](Self::register_pre_edge_anchor_hook)
+    /// (which replaces), this **appends** `hook` after any previously registered
+    /// edge hooks. See [`add_pre_node_anchor_hook`](Self::add_pre_node_anchor_hook)
+    /// for the multi-hook ordering and partial-failure semantics.
+    pub fn add_pre_edge_anchor_hook(&mut self, hook: PreAnchorHook) {
+        self.pre_edge_anchor_hooks.push(hook);
+    }
+
+    /// Set the bound on how long the write path waits for a single pre-anchor
+    /// hook before degrading gracefully (Issue #3525).
+    ///
+    /// * `None` (default) runs hooks **inline** under the `historical` lock,
+    ///   exactly as before — identical lock-hold profile, with panics isolated.
+    /// * `Some(timeout)` runs each hook on a detached worker thread and waits at
+    ///   most `timeout`. If the deadline elapses the write path stops waiting,
+    ///   records a timeout in [`hook_metrics`](Self::hook_metrics), and creates
+    ///   the anchor without a snapshot id from that hook.
+    ///
+    /// # Locking / cancellation
+    ///
+    /// A configured timeout **bounds** the time the `historical` lock is held
+    /// across a hung hook (previously unbounded), so it never holds the lock
+    /// longer than before. Rust cannot safely cancel a running closure, so a
+    /// timed-out hook thread is detached and may run to completion in the
+    /// background; "timeout" means the write path stops waiting, not that the
+    /// hook is killed.
+    pub fn set_pre_anchor_hook_timeout(&mut self, timeout: Option<Duration>) {
+        self.hook_timeout = timeout;
+    }
+
+    /// Return the currently configured pre-anchor hook timeout, if any (Issue #3525).
+    pub fn pre_anchor_hook_timeout(&self) -> Option<Duration> {
+        self.hook_timeout
+    }
+
+    /// Return a point-in-time snapshot of pre-anchor hook execution metrics
+    /// (invocations, successes, failures, panics, timeouts) — the observability
+    /// surface for graceful degradation (Issue #3525).
+    pub fn hook_metrics(&self) -> HookMetricsSnapshot {
+        self.hook_metrics.snapshot()
     }
 
     /// Add a new version of a node.
@@ -718,9 +755,10 @@ impl HistoricalStorage {
         };
         version.provenance = provenance;
 
-        // Handle pre-anchor hook (BEFORE storing)
+        // Handle pre-anchor hooks (BEFORE storing)
         if version.is_anchor() {
-            Self::handle_pre_anchor_hook(
+            self.run_pre_anchor_hooks_into(
+                &self.pre_node_anchor_hooks,
                 AnchorHookContext {
                     entity_type: "node",
                     entity_id: node_id.as_u64(),
@@ -728,7 +766,6 @@ impl HistoricalStorage {
                     properties: &properties,
                 },
                 &mut version.data,
-                &self.pre_node_anchor_hook,
             );
         }
 
@@ -1044,9 +1081,10 @@ impl HistoricalStorage {
         };
         version.provenance = provenance;
 
-        // Handle pre-anchor hook (BEFORE storing)
+        // Handle pre-anchor hooks (BEFORE storing)
         if version.is_anchor() {
-            Self::handle_pre_anchor_hook(
+            self.run_pre_anchor_hooks_into(
+                &self.pre_edge_anchor_hooks,
                 AnchorHookContext {
                     entity_type: "edge",
                     entity_id: edge_id.as_u64(),
@@ -1054,7 +1092,6 @@ impl HistoricalStorage {
                     properties: &properties,
                 },
                 &mut version.data,
-                &self.pre_edge_anchor_hook,
             );
         }
 
@@ -2928,52 +2965,28 @@ impl HistoricalStorage {
         self.count_versions_since_anchor(version_id, |vid| self.edge_versions.get(&vid))
     }
 
-    /// Handle pre-anchor hook invocation with proper logging.
+    /// Run the given ordered pre-anchor hooks and, if any resolves a snapshot
+    /// id, store it on the anchor's [`VersionData`] (Issue #3525).
     ///
-    /// This helper method encapsulates the common pattern of calling pre-anchor hooks
-    /// and handling their results (success with snapshot ID, success without snapshot,
-    /// or graceful degradation on failure).
-    fn handle_pre_anchor_hook(
+    /// This is a thin, allocation-free-when-empty wrapper over
+    /// [`hooks::run_pre_anchor_hooks`]. Hooks run in registration order under
+    /// the configured timeout policy; panics and errors are isolated (see the
+    /// [`hooks`] module for the locking and partial-failure semantics). Because
+    /// an anchor has a single snapshot-id slot, the last hook returning
+    /// `Ok(Some(id))` wins.
+    fn run_pre_anchor_hooks_into(
+        &self,
+        hooks: &[PreAnchorHook],
         context: AnchorHookContext<'_>,
         version_data: &mut VersionData,
-        hook: &Option<PreAnchorHook>,
     ) {
-        if let Some(hook_fn) = hook {
-            match hook_fn(
-                context.entity_type,
-                context.entity_id,
-                context.timestamp,
-                context.properties,
-            ) {
-                Ok(Some(snapshot_id)) => {
-                    version_data.set_vector_snapshot_id(snapshot_id);
-                    #[cfg(feature = "observability")]
-                    tracing::debug!(
-                        "Pre-anchor hook returned snapshot ID {} for {} {}",
-                        snapshot_id,
-                        context.entity_type,
-                        context.entity_id
-                    );
-                }
-                Ok(None) => {
-                    #[cfg(feature = "observability")]
-                    tracing::debug!(
-                        "Pre-anchor hook returned None for {} {} (no snapshot needed)",
-                        context.entity_type,
-                        context.entity_id
-                    );
-                }
-                Err(_e) => {
-                    #[cfg(feature = "observability")]
-                    tracing::warn!(
-                        "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
-                        context.entity_type,
-                        context.entity_id,
-                        context.timestamp,
-                        _e
-                    );
-                }
-            }
+        if hooks.is_empty() {
+            return;
+        }
+        if let Some(snapshot_id) =
+            hooks::run_pre_anchor_hooks(hooks, &context, self.hook_timeout, &self.hook_metrics)
+        {
+            version_data.set_vector_snapshot_id(snapshot_id);
         }
     }
 
