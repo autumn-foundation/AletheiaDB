@@ -489,12 +489,21 @@ async fn mcp_tools_list_advertises_three_node_tools_with_read_class() {
     );
 }
 
-/// Bypass-proofing (Lane B adversarial-review requirement): the set of tools
-/// the dispatcher will actually route (the live `/mcp` `tools/list`) must equal
-/// the RBAC registry `MCP_TOOL_CLASSES`. A routable tool missing from the
-/// registry would bypass the class gate on the autumn surface; a stale registry
-/// entry would classify a non-existent tool. This test fails on either drift,
-/// so a new `#[api_doc(mcp)]` handler cannot ship routable-but-unclassified.
+/// Bypass-proofing (Lane B adversarial-review requirement): every tool the
+/// dispatcher will actually route (the live `/mcp` `tools/list`) must be
+/// classified in the RBAC registry `MCP_TOOL_CLASSES` — `routable ⊆ registry`,
+/// STRICT. A routable tool missing from the registry would bypass the class
+/// gate on the autumn surface (a privilege-escalation hole), so this test fails
+/// on any routable-but-unclassified tool: a new `#[api_doc(mcp)]` handler cannot
+/// ship class-ungated.
+///
+/// The reverse inclusion (registry ⊆ routable) is deliberately NOT asserted
+/// (coordinator-directed): the registry is inventory-anchored to all 46 tools
+/// upfront (`registry_matches_inventory_exactly` in `tests/security_rbac.rs`
+/// pins it to `tests/parity/inventory.json`), while handlers become routable one
+/// slice at a time during the autumn port. The registry legitimately contains
+/// not-yet-routable classified entries; it never contains a routable
+/// unclassified one.
 #[tokio::test]
 async fn mcp_routable_tools_are_all_classified() {
     use std::collections::BTreeSet;
@@ -524,12 +533,12 @@ async fn mcp_routable_tools_are_all_classified() {
         .collect();
 
     // routable ⊆ registry: no routable tool may lack a class (the escalation
-    // hole). registry ⊆ routable: no stale/phantom class entries.
-    assert_eq!(
-        routable, registered,
-        "the live /mcp routable tool set must equal the RBAC registry \
-         (routable-but-unclassified = class-gate bypass): routable={routable:?} \
-         registry={registered:?}"
+    // hole). Reported precisely so a drift names the offending tools.
+    let unclassified: BTreeSet<&String> = routable.difference(&registered).collect();
+    assert!(
+        unclassified.is_empty(),
+        "every live /mcp routable tool must be classified in the RBAC registry \
+         (routable-but-unclassified = class-gate bypass); unclassified={unclassified:?}"
     );
     // And every routable name resolves to a concrete class (defensive: None at
     // the dispatch gate must be treated as reject, never allow).

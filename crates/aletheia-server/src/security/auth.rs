@@ -1,4 +1,4 @@
-// OWNED BY LANE B (security). Scaffold only — do not implement here.
+// OWNED BY LANE B (security).
 //
 //! Authentication + RBAC scaffolding for the production server.
 //!
@@ -140,11 +140,11 @@ impl<C: AccessClassMarker> FromRequestParts<AppState> for Authorized<C> {
             }
         };
 
-        // TODO(Lane B): enforce the RBAC class here —
-        //   `principal.role.allows(C::CLASS)` → else
-        //   `AletheiaHttpError::PermissionDenied(..)` (403), with
-        //   `details.{required_class, principal_role}` per Issue #3234/#3350.
-        // PR1 authenticates only; class enforcement is Lane B's.
+        // RBAC-class enforcement: reject with a byte-identical 403 unless the
+        // authenticated principal's role permits `C::CLASS`. In anonymous mode
+        // `Principal::anonymous()` carries `Role::Admin`, so every class passes —
+        // matching anonymous mode's documented full access.
+        authorize::<C>(&principal)?;
         Ok(Self(principal, PhantomData))
     }
 }
@@ -169,11 +169,49 @@ impl FromRequestParts<AppState> for ApiKeyStore {
     }
 }
 
+/// Authorize an authenticated `principal` for an [`AccessClass`].
+///
+/// The per-request RBAC decision. On refusal returns
+/// [`AletheiaHttpError::PermissionDenied`] (HTTP 403 / `PERMISSION_DENIED`,
+/// non-retriable) with the **byte-identical** legacy message
+/// `"role '{role}' does not permit {class} access"`, so 403 bodies stay
+/// identical to the existing `/query` surface.
+///
+/// # Errors
+///
+/// Returns [`AletheiaHttpError::PermissionDenied`] when `principal.role` does
+/// not permit `class`.
+pub fn authorize_class(principal: &Principal, class: AccessClass) -> Result<(), AletheiaHttpError> {
+    if principal.role.allows(class) {
+        Ok(())
+    } else {
+        Err(AletheiaHttpError::PermissionDenied(format!(
+            "role '{}' does not permit {} access",
+            principal.role, class
+        )))
+    }
+}
+
+/// Marker-generic wrapper over [`authorize_class`] — the shape the
+/// [`Authorized<C>`] extractor calls. Reads the required class from the type
+/// parameter's [`AccessClassMarker::CLASS`], so a handler's declared class
+/// (`Authorized<WriteClass>`) is the one enforced.
+///
+/// # Errors
+///
+/// Returns [`AletheiaHttpError::PermissionDenied`] when `principal.role` does
+/// not permit `C::CLASS`.
+pub fn authorize<C: AccessClassMarker>(principal: &Principal) -> Result<(), AletheiaHttpError> {
+    authorize_class(principal, C::CLASS)
+}
+
 /// Extract the bearer/`x-api-key` credential from request headers.
 ///
 /// Returns `None` for missing or malformed headers — every failure collapses
-/// into the same uniform 401 upstream, deliberately.
-fn extract_credential(parts: &Parts) -> Option<String> {
+/// into the same uniform 401 upstream, deliberately. The bearer scheme match is
+/// ASCII-case-insensitive; a whitespace-only or empty credential is rejected.
+#[must_use = "the extracted credential must be verified against the auth store"]
+pub fn extract_credential(parts: &Parts) -> Option<String> {
     if let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) {
         let s = value.to_str().ok()?;
         let (scheme, rest) = s.split_once(' ')?;
