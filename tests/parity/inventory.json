@@ -14,7 +14,7 @@
       "shape": "{success:false, error:<string>, code?, retriable?, details?, trace_id?}",
       "additive_fields_note": "code/retriable/details are present ONLY for auth (401/403) and resource-limit (413/422/429) variants; plain 400/404/500 keep the minimal {success,error} shape.",
       "trace_id_note": "trace_id body field + x-trace-id header are populated only under the observability/otel features (pinned by tests/http_otel_tracing.rs). Absent otherwise.",
-      "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT"],
+      "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "UNAVAILABLE"],
       "vocabulary_asymmetry_vs_mcp": "HTTP uses RESOURCE_EXHAUSTED for limit errors; MCP has no such code. HTTP emits `code` only on auth+limit variants; MCP emits `code` on every error."
     },
     "routes": [
@@ -37,7 +37,7 @@
         "access_class": "per-operation (query_access_class): read for find_node/get_node/bulk_get_nodes/find_neighbors; write for create/bulk_create/bulk_update/bulk_delete; execute_query/bulk_execute_query read iff no mutating clause",
         "success_status": 200,
         "success_body": "{success:true, data?, truncated?}",
-        "error_statuses": [400, 401, 403, 404, 413, 422, 429, 500],
+        "error_statuses": [400, 401, 403, 404, 413, 422, 429, 500, 503],
         "pinned_by": [
           "tests/parity_http.rs::query_success_envelope_shape",
           "tests/parity_http.rs::query_not_found_minimal_error_envelope",
@@ -52,6 +52,7 @@
         ],
         "referenced": {
           "429_wall_clock_timeout": "not forceable deterministically over the wire; pinned by enforce_query_limits unit tests in src/http/handlers.rs (see tests/http_query_limits.rs header). RESOURCE_EXHAUSTED + Retry-After:1, retriable:true for reads.",
+          "503_in_flight_query_cap": "Issue #3368 DoS guard (hardening of #3446): a new TIMED /query rejected at the max_in_flight_queries worker cap. Not forceable deterministically over the wire (needs concurrent still-running workers); pinned by src/http/handlers.rs::enforce_in_flight_cap_rejects_extra_timed_query_without_spawning + slot-release/inline-exempt unit tests, and the envelope by src/http/error.rs::in_flight_cap_maps_to_503_unavailable_retriable. UNAVAILABLE code, retriable:true, Retry-After:1, details{reason:in_flight_query_cap, max_in_flight_queries}.",
           "413_request_body_limit": "tests/parity_http.rs::run_server_enforces_request_body_413 (real-socket production run_server stack, Issue #3426)",
           "otel_trace_id": "tests/http_otel_tracing.rs (observability/otel features)"
         }

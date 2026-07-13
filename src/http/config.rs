@@ -52,6 +52,23 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Operator hard ceiling for a per-call `max_response_bytes` override (64 MiB).
 pub const DEFAULT_MAX_RESPONSE_BYTES_CEILING: usize = 64 * 1024 * 1024;
 
+/// Default cap on the number of `/query` requests concurrently occupying a
+/// wall-clock-timeout worker (Issue #3368 DoS guard; the HTTP-surface
+/// counterpart of the MCP `max_in_flight_queries` cap).
+///
+/// When a request supplies (or the server defaults to) a finite `timeout_ms`,
+/// the `/query` handler races the underlying blocking computation against the
+/// deadline on a detached, **non-cancellable** worker: when the caller times
+/// out the worker is discarded but keeps running to completion on the blocking
+/// pool (see [`QueryLimitsConfig`] / `enforce_query_limits`). Without a bound, a
+/// caller sending tiny `timeout_ms` overrides — or simply hammering the
+/// documented retriable-timeout retry loop — could pile up unbounded still-
+/// running expensive queries and exhaust threads/CPU/memory. This caps the
+/// number of live workers; at the cap a new timed query is rejected `503`
+/// `UNAVAILABLE` (retriable) instead of spawning yet another worker. `0` =
+/// unbounded.
+pub const DEFAULT_MAX_IN_FLIGHT_QUERIES: usize = 64;
+
 /// Which per-query resource-limit dimension a value applies to (Issue #3368).
 ///
 /// The [`as_str`](Self::as_str) token is the stable `details.dimension` value
@@ -229,6 +246,13 @@ pub struct QueryLimitsConfig {
     pub max_response_bytes: usize,
     /// What to do when a result exceeds the effective row cap.
     pub row_overflow: RowOverflowPolicy,
+    /// Cap on the number of `/query` requests concurrently occupying a
+    /// wall-clock-timeout worker (Issue #3368 DoS guard). Only the timed path
+    /// (`timeout_ms > 0`) spawns a worker and is bounded; the inline/unlimited
+    /// path never spawns and is unaffected. `0` = unbounded. Not a per-call
+    /// dimension — it has no override and no ceiling; it is a pure server-side
+    /// admission control on concurrent detached workers.
+    pub max_in_flight_queries: usize,
 }
 
 impl QueryLimitsConfig {
@@ -245,6 +269,9 @@ impl QueryLimitsConfig {
             default_max_response_bytes: 0,
             max_response_bytes: 0,
             row_overflow: RowOverflowPolicy::Truncate,
+            // Enforcement disabled → unbounded worker pool (the inline path is
+            // used anyway when all timeouts are unlimited).
+            max_in_flight_queries: 0,
         }
     }
 
@@ -309,6 +336,7 @@ impl Default for QueryLimitsConfig {
             default_max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES_CEILING,
             row_overflow: RowOverflowPolicy::Truncate,
+            max_in_flight_queries: DEFAULT_MAX_IN_FLIGHT_QUERIES,
         }
     }
 }
@@ -926,10 +954,19 @@ mod tests {
         assert_eq!(limits.max_timeout_ms, DEFAULT_MAX_QUERY_TIMEOUT_MS);
         assert_eq!(limits.default_max_result_rows, DEFAULT_MAX_RESULT_ROWS);
         assert_eq!(limits.row_overflow, RowOverflowPolicy::Truncate);
+        // The in-flight worker cap is bounded by default (Issue #3368 DoS guard).
+        assert_eq!(limits.max_in_flight_queries, DEFAULT_MAX_IN_FLIGHT_QUERIES);
 
         // ServerConfig wires the default through.
         let config = ServerConfig::default();
         assert_eq!(config.query_limits(), &QueryLimitsConfig::default());
+    }
+
+    #[test]
+    fn disabled_limits_are_unbounded_in_flight() {
+        // `disabled()` enforces nothing: the worker cap is unbounded (`0`). The
+        // inline/unlimited path is used anyway when all timeouts are unlimited.
+        assert_eq!(QueryLimitsConfig::disabled().max_in_flight_queries, 0);
     }
 
     #[test]

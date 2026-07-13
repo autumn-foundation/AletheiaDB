@@ -95,6 +95,7 @@ fn find_people() -> Value {
 fn row_cap(max_rows: usize, policy: RowOverflowPolicy) -> QueryLimitsConfig {
     QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: max_rows,
@@ -169,6 +170,7 @@ async fn row_cap_reject_returns_413_with_details() {
 async fn byte_cap_exceeded_returns_413_with_details() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 0,
@@ -204,6 +206,7 @@ async fn override_within_ceiling_is_honored_tighter_than_default() {
     // Default cap 100, ceiling 100. Caller self-limits to 1.
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 100,
@@ -235,6 +238,7 @@ async fn override_within_ceiling_is_honored_tighter_than_default() {
 async fn override_above_ceiling_returns_422() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 10,
@@ -351,6 +355,7 @@ async fn concurrent_queries_under_limits_all_succeed() {
 async fn authenticated_request_gets_same_limit_behavior() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 10,
@@ -386,6 +391,7 @@ async fn authenticated_request_gets_same_limit_behavior() {
 async fn unauthenticated_over_limit_request_is_401_not_422() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 10,
@@ -494,6 +500,7 @@ async fn write_op_is_exempt_from_row_reject_and_persists() {
     // Reject policy, cap 1, no ceiling (so the per-call override is honored).
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 100,
@@ -540,6 +547,7 @@ async fn write_op_is_exempt_from_row_reject_and_persists() {
 async fn write_op_is_not_truncated_under_truncate_policy() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 1, // tiny default cap
@@ -585,6 +593,7 @@ async fn write_op_is_not_truncated_under_truncate_policy() {
 async fn concurrent_requests_with_distinct_overrides_are_isolated() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 2, // default cap → truncates the 5-row read
@@ -686,6 +695,7 @@ async fn concurrent_requests_with_distinct_overrides_are_isolated() {
 async fn authorized_check_precedes_limit_validation() {
     let limits = QueryLimitsConfig {
         enabled: true,
+        max_in_flight_queries: 0, // Issue #3368: unbounded — these tests don't exercise the worker cap
         default_timeout_ms: 0,
         max_timeout_ms: 0,
         default_max_result_rows: 10,
