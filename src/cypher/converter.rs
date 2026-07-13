@@ -40,10 +40,11 @@ use super::ast::*;
 use super::error::CypherError;
 use super::parser::CypherParser;
 use crate::core::temporal::{TimeRange, Timestamp};
+use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::query::builder::Query;
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Predicate, PredicateValue,
-    QueryOp, SortKey, TraversalDepth,
+    QueryOp, ScoreComparison, ScoreThreshold, SortKey, TraversalDepth,
 };
 use crate::query::plan::{QueryHints, TemporalContext};
 
@@ -200,8 +201,10 @@ impl CypherConverter {
                     self.convert_pattern(pat, &mut base_ops)?;
                 }
                 if let Some(expr) = where_clause {
-                    let predicate = self.convert_expr_to_predicate(&expr)?;
-                    base_ops.push(QueryOp::Filter(predicate));
+                    // Lifts any vector similarity threshold (Issue #553) into a
+                    // RankBySimilarity; otherwise emits a single Filter exactly
+                    // as before.
+                    self.convert_where_clause(&expr, &mut base_ops)?;
                 }
                 if optional {
                     ops.push(QueryOp::Optional { ops: base_ops });
@@ -1494,23 +1497,35 @@ impl CypherConverter {
             return Ok(false);
         }
 
+        // A `vector.fn(...) AS <alias>` item in the RETURN list materializes its
+        // score under `<alias>` (Issue #555). Find it once so both ORDER-BY arms
+        // below can attach the alias to the emitted rank.
+        let aliased = Self::aliased_vector_return_item(return_clause);
+
         let order_item = &return_clause.order_by[0];
+
+        // Arm 1: `ORDER BY vector.fn(entity.prop, <emb>) DESC` directly.
         if let CypherExpr::FunctionCall { name, args, .. } = &order_item.expr
             && is_vector_function(name)
         {
             let (property_key, embedding) = self.extract_vector_args(args)?;
-            let top_k = return_clause.limit;
+            // If a vector function is also projected `AS <alias>` in this RETURN,
+            // surface the score under that alias too (Issue #555).
+            let score_alias = aliased.map(|(alias, _)| alias.clone());
             ops.push(QueryOp::RankBySimilarity {
                 embedding,
-                top_k,
+                top_k: return_clause.limit,
                 property_key: Some(property_key),
+                metric: vector_metric_for(name),
+                threshold: None,
+                score_alias,
             });
             return Ok(true);
         }
 
-        // Also check if the ORDER BY references an alias that was defined as a
-        // vector function in the RETURN items (e.g., `vector.cosine(...) AS score`
-        // then `ORDER BY score DESC`).
+        // Arm 2: `ORDER BY <alias>` where `<alias>` was defined as a vector
+        // function in the RETURN items (e.g. `vector.cosine(...) AS score` then
+        // `ORDER BY score DESC`). The score is materialized under `<alias>`.
         if let CypherExpr::Variable(ref alias_name) = order_item.expr {
             for item in &return_clause.items {
                 if let CypherReturnItem::Expression {
@@ -1521,11 +1536,13 @@ impl CypherConverter {
                     && is_vector_function(name)
                 {
                     let (property_key, embedding) = self.extract_vector_args(args)?;
-                    let top_k = return_clause.limit;
                     ops.push(QueryOp::RankBySimilarity {
                         embedding,
-                        top_k,
+                        top_k: return_clause.limit,
                         property_key: Some(property_key),
+                        metric: vector_metric_for(name),
+                        threshold: None,
+                        score_alias: Some(alias.clone()),
                     });
                     return Ok(true);
                 }
@@ -1535,9 +1552,26 @@ impl CypherConverter {
         Ok(false)
     }
 
+    /// Find the first `RETURN` item of the form `vector.fn(...) AS <alias>`,
+    /// returning `(alias, args)`. Used to materialize the similarity score under
+    /// its alias (Issue #555).
+    fn aliased_vector_return_item(
+        return_clause: &CypherReturn,
+    ) -> Option<(&String, &[CypherExpr])> {
+        return_clause.items.iter().find_map(|item| match item {
+            CypherReturnItem::Expression {
+                expr: CypherExpr::FunctionCall { name, args, .. },
+                alias: Some(alias),
+            } if is_vector_function(name) => Some((alias, args.as_slice())),
+            _ => None,
+        })
+    }
+
     /// Extract the property key and embedding from vector function arguments.
     ///
-    /// Expected args: `(entity.property, $param)` or `(entity.property, [...])`
+    /// Expected args: `(entity.property, <embedding>)` where `<embedding>` is a
+    /// parameter reference (`$q`) or an inline numeric vector literal
+    /// (`[0.1, 0.2, 0.3]`, Issue #554).
     fn extract_vector_args(
         &self,
         args: &[CypherExpr],
@@ -1557,31 +1591,189 @@ impl CypherConverter {
             )),
         };
 
-        // Second arg: parameter reference or vector literal
-        let embedding = match &args[1] {
+        let embedding = self.extract_embedding_arg(&args[1])?;
+        Ok((property_key, embedding))
+    }
+
+    /// Resolve an expression used as an embedding input to a vector function.
+    ///
+    /// Accepts a bound `Embedding` parameter, a pre-built `Vector` literal, or
+    /// an inline all-numeric list literal (`[0.1, 0.2, 0.3]` -- Int and Float
+    /// elements are coerced to `f32`, Issue #554). Any other form -- a
+    /// non-embedding parameter, a non-numeric list element, or an empty list --
+    /// is a clear semantic/parameter error.
+    fn extract_embedding_arg(&self, expr: &CypherExpr) -> Result<Arc<[f32]>, CypherError> {
+        match expr {
             CypherExpr::Value(CypherValue::Parameter(param_name)) => {
                 let param = self.params.get(param_name).ok_or_else(|| {
                     CypherError::ParameterError(format!("unbound parameter: ${param_name}"))
                 })?;
                 match param {
-                    CypherParameterValue::Embedding(emb) => Arc::clone(emb),
-                    _ => {
-                        return Err(CypherError::ParameterError(format!(
-                            "parameter ${param_name} must be an Embedding, got: {param:?}"
-                        )));
-                    }
+                    CypherParameterValue::Embedding(emb) => Ok(Arc::clone(emb)),
+                    _ => Err(CypherError::ParameterError(format!(
+                        "parameter ${param_name} must be an Embedding, got: {param:?}"
+                    ))),
                 }
             }
-            CypherExpr::Value(CypherValue::Vector(v)) => Arc::clone(v),
-            _ => {
-                return Err(CypherError::SemanticError(
-                    "second argument to vector function must be a parameter or vector literal"
-                        .to_string(),
-                ));
+            CypherExpr::Value(CypherValue::Vector(v)) => Ok(Arc::clone(v)),
+            // Inline numeric vector literal: `[0.1, 0.2, 0.3]` (Issue #554).
+            CypherExpr::List(elements) => Self::coerce_numeric_list_to_vector(elements),
+            _ => Err(CypherError::SemanticError(
+                "the embedding argument to a vector function must be a parameter \
+                 or a numeric vector literal (e.g. [0.1, 0.2, 0.3])"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Coerce an all-numeric Cypher list literal into an embedding `Arc<[f32]>`.
+    ///
+    /// Both integer and float elements are accepted (mirroring JSON numeric
+    /// arrays). A non-numeric element or an empty list is rejected with a clear
+    /// error so a mistyped embedding never silently degrades a similarity query.
+    fn coerce_numeric_list_to_vector(elements: &[CypherExpr]) -> Result<Arc<[f32]>, CypherError> {
+        if elements.is_empty() {
+            return Err(CypherError::SemanticError(
+                "vector literal must have at least one element (empty embedding)".to_string(),
+            ));
+        }
+        let mut out: Vec<f32> = Vec::with_capacity(elements.len());
+        for (idx, el) in elements.iter().enumerate() {
+            let v = match el {
+                CypherExpr::Value(CypherValue::Float(f)) => *f as f32,
+                CypherExpr::Value(CypherValue::Int(i)) => *i as f32,
+                other => {
+                    return Err(CypherError::SemanticError(format!(
+                        "vector literal element {idx} is not numeric: {other:?}; \
+                         a vector literal must contain only numbers \
+                         (e.g. [0.1, 0.2, 0.3])"
+                    )));
+                }
+            };
+            out.push(v);
+        }
+        Ok(Arc::from(out))
+    }
+
+    /// Convert a base-pattern `WHERE` clause into ops, lifting any vector
+    /// similarity **threshold** comparison (`vector.similarity(d.emb, $q) > 0.8`,
+    /// Issue #553) out of the predicate into a [`QueryOp::RankBySimilarity`]
+    /// carrying a [`ScoreThreshold`], and emitting a `Filter` for the residual
+    /// (non-vector) part of the predicate.
+    ///
+    /// A threshold conjunct may appear alone or as one term of a top-level
+    /// `AND` chain (`vector.similarity(...) > 0.8 AND d.lang = 'en'`); the
+    /// residual conjuncts become an ordinary `Filter` evaluated **before** the
+    /// rank so the score is only computed over surviving rows.
+    fn convert_where_clause(
+        &self,
+        expr: &CypherExpr,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<(), CypherError> {
+        // Split the top-level AND spine so a vector threshold can be lifted out
+        // of `A AND B AND ...` while the rest becomes an ordinary Filter.
+        let conjuncts = flatten_logical_operands(expr, |e| match e {
+            CypherExpr::And(left, right) => Some((left.as_ref(), right.as_ref())),
+            _ => None,
+        });
+
+        let mut ranks: Vec<QueryOp> = Vec::new();
+        let mut residual: Vec<&CypherExpr> = Vec::new();
+        for conj in conjuncts {
+            if let Some(rank) = self.try_vector_threshold(conj)? {
+                ranks.push(rank);
+            } else {
+                residual.push(conj);
+            }
+        }
+
+        // No vector threshold: preserve the original single-Filter behavior.
+        if ranks.is_empty() {
+            let predicate = self.convert_expr_to_predicate(expr)?;
+            ops.push(QueryOp::Filter(predicate));
+            return Ok(());
+        }
+
+        // Residual property predicate first (filter, then score survivors)...
+        if !residual.is_empty() {
+            let predicate = if residual.len() == 1 {
+                self.convert_expr_to_predicate(residual[0])?
+            } else {
+                let preds = residual
+                    .iter()
+                    .map(|e| self.convert_expr_to_predicate(e))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Predicate::And(preds)
+            };
+            ops.push(QueryOp::Filter(predicate));
+        }
+        // ...then the vector similarity threshold rank(s).
+        ops.append(&mut ranks);
+        Ok(())
+    }
+
+    /// If `expr` is a vector-similarity threshold comparison
+    /// (`vector.fn(entity.prop, <emb>) <cmp> <number>`, or the mirrored
+    /// `<number> <cmp> vector.fn(...)`), build the [`QueryOp::RankBySimilarity`]
+    /// that computes the score and keeps only rows satisfying the threshold.
+    /// Returns `Ok(None)` for any non-vector-threshold expression.
+    fn try_vector_threshold(&self, expr: &CypherExpr) -> Result<Option<QueryOp>, CypherError> {
+        let CypherExpr::Comparison { left, op, right } = expr else {
+            return Ok(None);
+        };
+
+        // Identify which side is the vector function and orient the comparison
+        // so it reads `score <cmp> value`.
+        let (func_name, args, cmp) = match (left.as_ref(), right.as_ref()) {
+            (CypherExpr::FunctionCall { name, args, .. }, _) if is_vector_function(name) => {
+                (name, args, *op)
+            }
+            (_, CypherExpr::FunctionCall { name, args, .. }) if is_vector_function(name) => {
+                // `value <cmp> score` == `score <flipped-cmp> value`.
+                (name, args, flip_comparison(*op))
+            }
+            _ => return Ok(None),
+        };
+
+        let Some(threshold_op) = score_comparison_for(cmp) else {
+            // `=`/`<>` against a similarity score is not a threshold filter.
+            return Err(CypherError::UnsupportedFeature(
+                "vector similarity comparisons support only >, >=, <, <= \
+                 thresholds (not = or <>)"
+                    .to_string(),
+            ));
+        };
+
+        // The other operand must be a numeric literal threshold value.
+        let value_expr = if matches!(left.as_ref(), CypherExpr::FunctionCall { name, .. } if is_vector_function(name))
+        {
+            right.as_ref()
+        } else {
+            left.as_ref()
+        };
+        let value = match value_expr {
+            CypherExpr::Value(CypherValue::Float(f)) => *f as f32,
+            CypherExpr::Value(CypherValue::Int(i)) => *i as f32,
+            other => {
+                return Err(CypherError::SemanticError(format!(
+                    "vector similarity threshold must compare against a numeric \
+                     literal, got: {other:?}"
+                )));
             }
         };
 
-        Ok((property_key, embedding))
+        let (property_key, embedding) = self.extract_vector_args(args)?;
+        Ok(Some(QueryOp::RankBySimilarity {
+            embedding,
+            top_k: None,
+            property_key: Some(property_key),
+            metric: vector_metric_for(func_name),
+            threshold: Some(ScoreThreshold {
+                op: threshold_op,
+                value,
+            }),
+            score_alias: None,
+        }))
     }
 }
 
@@ -1658,8 +1850,50 @@ fn parse_timestamp_string(s: &str) -> Result<Timestamp, CypherError> {
 fn is_vector_function(name: &str) -> bool {
     matches!(
         name,
-        "vector.similarity" | "vector.cosine" | "vector.euclidean"
+        "vector.similarity" | "vector.cosine" | "vector.euclidean" | "vector.dot_product"
     )
+}
+
+/// Maps a vector function name to the distance/similarity metric it selects.
+///
+/// `vector.similarity` and `vector.cosine` both select cosine similarity;
+/// `vector.euclidean` selects Euclidean distance (scored as `1/(1+distance)`,
+/// higher = nearer); `vector.dot_product` selects the inner product. Any name
+/// for which [`is_vector_function`] is `true` is covered; unknown names default
+/// to cosine (never reached for a validated call).
+fn vector_metric_for(name: &str) -> VectorMetric {
+    match name {
+        "vector.euclidean" => VectorMetric::Euclidean,
+        "vector.dot_product" => VectorMetric::DotProduct,
+        // "vector.similarity" | "vector.cosine" and any fallback
+        _ => VectorMetric::Cosine,
+    }
+}
+
+/// Map an ordering comparison operator to a [`ScoreThreshold`] operator.
+///
+/// Only the four ordering operators define a similarity threshold; `=`/`<>`
+/// return `None` (rejected by the caller).
+fn score_comparison_for(op: CypherCompOp) -> Option<ScoreComparison> {
+    match op {
+        CypherCompOp::Gt => Some(ScoreComparison::Gt),
+        CypherCompOp::Ge => Some(ScoreComparison::Ge),
+        CypherCompOp::Lt => Some(ScoreComparison::Lt),
+        CypherCompOp::Le => Some(ScoreComparison::Le),
+        CypherCompOp::Eq | CypherCompOp::Ne => None,
+    }
+}
+
+/// Flip a comparison operator so `value <op> score` becomes `score <flipped> value`.
+fn flip_comparison(op: CypherCompOp) -> CypherCompOp {
+    match op {
+        CypherCompOp::Gt => CypherCompOp::Lt,
+        CypherCompOp::Ge => CypherCompOp::Le,
+        CypherCompOp::Lt => CypherCompOp::Gt,
+        CypherCompOp::Le => CypherCompOp::Ge,
+        CypherCompOp::Eq => CypherCompOp::Eq,
+        CypherCompOp::Ne => CypherCompOp::Ne,
+    }
 }
 
 // ---------------------------------------------------------------------------

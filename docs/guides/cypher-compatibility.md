@@ -108,7 +108,11 @@ correctly.
 | `FOR SYSTEM_TIME AS OF` (#551) | `... FOR SYSTEM_TIME AS OF '2024-01-15' RETURN n` | *convert-only*; runtime-proven (`test_e2e_for_system_time_as_of_honored_by_label_scan`) |
 | Bi-temporal (#551) | `... AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...' RETURN n` | *convert-only*; runtime-proven (`test_e2e_as_of_bitemporal_valid_and_system`, `test_e2e_as_of_asymmetric_bitemporal`) |
 | `BETWEEN ... AND` (valid-time range, #552) | `... BETWEEN '2024-01-01' AND '2024-12-31' RETURN n` | *convert-only*; half-open `[start, end)` (start-inclusive, end-exclusive). Runtime-proven in `tests.rs` (`test_e2e_between_*`, incl. boundary inclusivity) |
-| Vector similarity in `ORDER BY` | `RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10` | *convert-only* (needs an `Embedding` param) |
+| Vector similarity in `ORDER BY` (#553) | `RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10` | *convert-only* in the suite (needs a seeded vector index); runtime-proven in `tests.rs` (`test_e2e_vector_rank_*`) |
+| Vector distance functions (#553) | `vector.cosine` / `vector.euclidean` / `vector.dot_product` | the function name selects the metric (cosine / euclidean / dot-product) for the rank, overriding the index default |
+| Vector literal embedding (#554) | `ORDER BY vector.similarity(d.embedding, [0.1, 0.2, 0.3]) DESC` | inline numeric list literal (Int/Float coerced to `f32`); usable anywhere an `Embedding` param is; non-numeric/empty rejected with a clear `SemanticError` |
+| Vector similarity threshold (#553) | `MATCH (d:Document) WHERE vector.similarity(d.embedding, $q) > 0.8 RETURN d` | `>`,`>=`,`<`,`<=` against a numeric literal; alone or as one `AND` conjunct (residual predicate survives as a `Filter`); *convert-only* in suite, runtime-proven (`test_e2e_where_threshold_filters_rows`) |
+| Vector score projection (#555) | `RETURN d, vector.cosine(d.embedding, $q) AS score ORDER BY score DESC` | the aliased similarity is materialized as a returned column and is sortable via the alias; runtime-proven (`test_e2e_score_alias_materialized_column`) |
 | Parameters | `MATCH (n:Person {name:$name}) RETURN n` | `$param` bindings |
 
 ---

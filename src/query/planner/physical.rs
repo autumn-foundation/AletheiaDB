@@ -29,8 +29,9 @@ use std::sync::Arc;
 
 use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
+use crate::core::vector::DistanceMetric as VectorMetric;
 
-use super::super::ir::{Direction, Predicate};
+use super::super::ir::{Direction, Predicate, ScoreThreshold};
 use super::super::plan::{SortKey, TemporalContext};
 use super::cost::Cost;
 
@@ -634,6 +635,12 @@ pub enum PhysicalOp {
         /// Property key for multi-property vector indexes.
         /// If None, uses the default/first indexed property.
         property_key: Option<String>,
+        /// Distance/similarity metric used to score each candidate.
+        metric: VectorMetric,
+        /// Optional similarity-score threshold (keeps only passing rows).
+        threshold: Option<ScoreThreshold>,
+        /// Optional output-column alias for the materialized similarity score.
+        score_alias: Option<String>,
     },
 
     /// Sort by one or more keys (stable, multi-key).
@@ -1241,6 +1248,9 @@ mod tests {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
                 property_key: None,
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             }
             .name(),
             "VectorRerank"
@@ -1389,6 +1399,9 @@ mod tests {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
                 property_key: None,
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             }
             .is_leaf()
         );
@@ -1673,6 +1686,9 @@ mod tests {
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 5,
             property_key: None,
+            metric: crate::core::vector::DistanceMetric::Cosine,
+            threshold: None,
+            score_alias: None,
         };
 
         let explain = plan.explain();

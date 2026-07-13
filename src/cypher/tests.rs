@@ -5502,6 +5502,485 @@ mod explain_profile {
 }
 
 // ============================================================================
+// Vector extensions: literals, metric selection, WHERE-threshold, score
+// projection (Issues #553 / #554 / #555)
+// ============================================================================
+
+/// Build a seeded 3-dimensional cosine vector index with three Documents whose
+/// embeddings give an unambiguous ordering relative to the query `[1,0,0]`:
+/// `alpha` (identical) > `gamma` (near) > `beta` (orthogonal).
+fn vector_test_db() -> (
+    crate::AletheiaDB,
+    crate::core::NodeId,
+    crate::core::NodeId,
+    crate::core::NodeId,
+) {
+    use crate::index::vector::{DistanceMetric as IndexMetric, HnswConfig};
+    let db = crate::AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(3, IndexMetric::Cosine))
+        .unwrap();
+    let alpha = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "alpha")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+    let beta = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "beta")
+                .insert_vector("embedding", &[0.0f32, 1.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+    let gamma = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "gamma")
+                .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                .build(),
+        )
+        .unwrap();
+    (db, alpha, beta, gamma)
+}
+
+fn query_embedding_param(v: &[f32]) -> std::collections::HashMap<String, CypherParameterValue> {
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "q".to_string(),
+        CypherParameterValue::Embedding(Arc::from(v)),
+    );
+    params
+}
+
+// ---- #554: vector literals -------------------------------------------------
+
+#[test]
+fn test_convert_vector_literal_embedding_accepted() {
+    // A numeric list literal is usable wherever an embedding is expected, with
+    // no bound parameter (Issue #554).
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [0.1, 0.2, 0.3]) DESC LIMIT 5",
+    )
+    .unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::RankBySimilarity { .. })),
+        "a numeric vector literal should lower into a RankBySimilarity op"
+    );
+}
+
+#[test]
+fn test_convert_vector_literal_int_elements_accepted() {
+    // Integer elements are coerced to f32 (mixed int/float embedding literal).
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1, 0, 0]) DESC LIMIT 5",
+    )
+    .unwrap();
+    let rank = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { embedding, .. } => Some(embedding.clone()),
+            _ => None,
+        })
+        .expect("expected a RankBySimilarity op");
+    assert_eq!(&*rank, &[1.0f32, 0.0, 0.0]);
+}
+
+#[test]
+fn test_convert_vector_literal_non_numeric_rejected() {
+    // A non-numeric element yields a clear semantic error, never a silently
+    // wrong embedding.
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [0.1, 'x', 0.3]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::SemanticError(ref m) if m.contains("not numeric")),
+        "expected a clear non-numeric error, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_vector_literal_empty_rejected() {
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, []) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::SemanticError(ref m) if m.contains("at least one element")),
+        "expected an empty-vector-literal error, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_non_embedding_param_rejected() {
+    // A String parameter passed where an embedding is expected is a clear error
+    // (Issue #554 acceptance: non-embedding parameters fail clearly).
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "q".to_string(),
+        CypherParameterValue::String("not-a-vector".into()),
+    );
+    let err = parse_cypher_with_params(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 5",
+        params,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::ParameterError(_)),
+        "expected a ParameterError for a non-embedding parameter, got: {err:?}"
+    );
+}
+
+// ---- #553: dot_product recognition + metric selection ----------------------
+
+#[test]
+fn test_convert_vector_dot_product_recognized() {
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.dot_product(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap();
+    let metric = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { metric, .. } => Some(*metric),
+            _ => None,
+        })
+        .expect("vector.dot_product should lower into a RankBySimilarity op");
+    assert_eq!(metric, crate::core::vector::DistanceMetric::DotProduct);
+}
+
+#[test]
+fn test_convert_vector_metric_from_function_name() {
+    // Each vector function name selects the corresponding metric on the op.
+    let cases = [
+        (
+            "vector.similarity",
+            crate::core::vector::DistanceMetric::Cosine,
+        ),
+        ("vector.cosine", crate::core::vector::DistanceMetric::Cosine),
+        (
+            "vector.euclidean",
+            crate::core::vector::DistanceMetric::Euclidean,
+        ),
+        (
+            "vector.dot_product",
+            crate::core::vector::DistanceMetric::DotProduct,
+        ),
+    ];
+    for (func, expected) in cases {
+        let q = format!(
+            "MATCH (d:Document) RETURN d ORDER BY {func}(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5"
+        );
+        let query = parse_cypher(&q).unwrap();
+        let metric = query
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                QueryOp::RankBySimilarity { metric, .. } => Some(*metric),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no RankBySimilarity for {func}"));
+        assert_eq!(metric, expected, "metric mismatch for {func}");
+    }
+}
+
+// ---- #553: WHERE threshold filtering ---------------------------------------
+
+#[test]
+fn test_convert_where_vector_threshold() {
+    // `WHERE vector.similarity(...) > 0.8` lowers into a RankBySimilarity with a
+    // threshold and no top_k (keep every passing row).
+    let query = parse_cypher(
+        "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.8 RETURN d",
+    )
+    .unwrap();
+    let (top_k, threshold) = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity {
+                top_k, threshold, ..
+            } => Some((*top_k, *threshold)),
+            _ => None,
+        })
+        .expect("WHERE vector threshold should emit a RankBySimilarity");
+    assert_eq!(top_k, None, "a threshold filter keeps all passing rows");
+    let threshold = threshold.expect("threshold must be present");
+    assert_eq!(threshold.op, crate::query::ir::ScoreComparison::Gt);
+    assert!((threshold.value - 0.8).abs() < 1e-6);
+}
+
+#[test]
+fn test_convert_where_vector_threshold_flipped() {
+    // `0.8 < vector.similarity(...)` is the mirror of `> 0.8`.
+    let query = parse_cypher(
+        "MATCH (d:Document) WHERE 0.8 < vector.similarity(d.embedding, [1.0, 0.0, 0.0]) RETURN d",
+    )
+    .unwrap();
+    let threshold = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { threshold, .. } => *threshold,
+            _ => None,
+        })
+        .expect("flipped threshold should still emit a RankBySimilarity");
+    assert_eq!(threshold.op, crate::query::ir::ScoreComparison::Gt);
+    assert!((threshold.value - 0.8).abs() < 1e-6);
+}
+
+#[test]
+fn test_convert_where_vector_threshold_with_residual_filter() {
+    // A threshold conjoined with a property predicate: the property predicate
+    // survives as a Filter, the vector part becomes a RankBySimilarity.
+    let query = parse_cypher(
+        "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.5 AND d.name = 'alpha' RETURN d",
+    )
+    .unwrap();
+    assert!(
+        query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::RankBySimilarity {
+                threshold: Some(_),
+                ..
+            }
+        )),
+        "vector conjunct should become a threshold rank"
+    );
+    assert!(
+        query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))),
+        "residual property predicate should survive as a Filter"
+    );
+}
+
+// ---- #555: score alias projection ------------------------------------------
+
+#[test]
+fn test_convert_vector_score_alias_projected() {
+    // `vector.cosine(...) AS score` sets the score_alias on the rank op so the
+    // similarity is materialized under that column name.
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY score DESC LIMIT 5",
+    )
+    .unwrap();
+    let alias = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { score_alias, .. } => score_alias.clone(),
+            _ => None,
+        })
+        .expect("expected a RankBySimilarity with a score alias");
+    assert_eq!(alias, "score");
+}
+
+#[test]
+fn test_convert_hybrid_op_ordering() {
+    // Planner/explain-style check: a hybrid graph + vector query lowers to the
+    // expected op ordering -- the source scan and traversal precede the
+    // RankBySimilarity, which precedes the final Limit (Issue #555).
+    let query = parse_cypher(
+        "MATCH (p:Person {name: 'Alice'})-[:KNOWS]->(d) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap();
+    let scan = query
+        .ops
+        .iter()
+        .position(|op| matches!(op, QueryOp::ScanNodes { .. }))
+        .expect("scan");
+    let traverse = query
+        .ops
+        .iter()
+        .position(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        .expect("traverse");
+    let rank = query
+        .ops
+        .iter()
+        .position(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+        .expect("rank");
+    let limit = query
+        .ops
+        .iter()
+        .position(|op| matches!(op, QueryOp::Limit(_)))
+        .expect("limit");
+    assert!(
+        scan < traverse && traverse < rank && rank < limit,
+        "expected scan < traverse < rank < limit, got ops: {:?}",
+        query.ops
+    );
+}
+
+// ---- End-to-end execution --------------------------------------------------
+
+#[test]
+fn test_e2e_vector_rank_cosine_param_order() {
+    let (db, alpha, beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10",
+            query_embedding_param(&[1.0f32, 0.0, 0.0]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    assert_eq!(rows[1].entity.node_id(), Some(gamma));
+    assert_eq!(rows[2].entity.node_id(), Some(beta));
+    // Scores are materialized and descending.
+    let s0 = rows[0].score().unwrap();
+    let s1 = rows[1].score().unwrap();
+    let s2 = rows[2].score().unwrap();
+    assert!(
+        s0 >= s1 && s1 >= s2,
+        "scores must be descending: {s0} {s1} {s2}"
+    );
+}
+
+#[test]
+fn test_e2e_vector_rank_literal_order() {
+    // Same query using an inline numeric vector literal instead of a parameter.
+    let (db, alpha, _beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 2",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 2, "LIMIT 2 keeps the two nearest");
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    assert_eq!(rows[1].entity.node_id(), Some(gamma));
+}
+
+#[test]
+fn test_e2e_where_threshold_filters_rows() {
+    let (db, alpha, _beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, $q) > 0.5 RETURN d",
+            query_embedding_param(&[1.0f32, 0.0, 0.0]),
+        )
+        .unwrap(),
+    );
+    // alpha (1.0) and gamma (~0.994) pass; beta (0.0) is filtered out.
+    assert_eq!(rows.len(), 2, "only rows above the 0.5 threshold survive");
+    let ids: std::collections::HashSet<_> =
+        rows.iter().filter_map(|r| r.entity.node_id()).collect();
+    assert!(ids.contains(&alpha) && ids.contains(&gamma));
+}
+
+#[test]
+fn test_e2e_score_alias_materialized_column() {
+    let (db, alpha, _beta, _gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, $q) AS score ORDER BY score DESC LIMIT 10",
+            query_embedding_param(&[1.0f32, 0.0, 0.0]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 3);
+    // The entity survives alongside the projected score column.
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    let cols = rows[0]
+        .columns
+        .as_ref()
+        .expect("score alias should materialize a column");
+    let (name, value) = cols
+        .iter()
+        .find(|(n, _)| n == "score")
+        .expect("a 'score' column must be present");
+    assert_eq!(name, "score");
+    match value {
+        crate::core::property::PropertyValue::Float(f) => {
+            assert!(
+                (*f - 1.0).abs() < 1e-4,
+                "alpha's cosine score should be ~1.0, got {f}"
+            );
+        }
+        other => panic!("score column should be a Float, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_e2e_hybrid_traverse_then_rank() {
+    // Graph traversal + vector ranking in one query (Issue #555 hybrid path).
+    let (db, alpha, beta, gamma) = vector_test_db();
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    for target in [alpha, beta, gamma] {
+        db.create_edge(alice, target, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (p:Person {name: 'Alice'})-[:KNOWS]->(d) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10",
+            query_embedding_param(&[1.0f32, 0.0, 0.0]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 3, "Alice knows all three documents");
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    assert_eq!(rows[1].entity.node_id(), Some(gamma));
+    assert_eq!(rows[2].entity.node_id(), Some(beta));
+}
+
+#[test]
+fn test_e2e_metric_euclidean_ranks() {
+    // The euclidean metric name selects the euclidean scoring path and still
+    // returns the nearest document first.
+    let (db, alpha, _beta, _gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].entity.node_id(),
+        Some(alpha),
+        "alpha is the nearest by euclidean distance"
+    );
+}
+
+#[test]
+fn test_e2e_dimension_mismatch_clear_error() {
+    // A query embedding whose dimension differs from the stored vectors surfaces
+    // a clear error instead of silently dropping rows (Issue #554).
+    let (db, _alpha, _beta, _gamma) = vector_test_db();
+    let results = db
+        .execute_cypher_with_params(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10",
+            // 4-dim query vs 3-dim stored embeddings.
+            query_embedding_param(&[1.0f32, 0.0, 0.0, 0.0]),
+        )
+        .unwrap();
+    let err = results
+        .collect_all()
+        .expect_err("a dimension mismatch must surface as an error");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("dimension") || msg.contains("length") || msg.contains("mismatch"),
+        "error should mention the dimension mismatch, got: {msg}"
+    );
+}
+
+// ============================================================================
 // EXPLAIN / PROFILE parsing (Issue #562)
 // ============================================================================
 
