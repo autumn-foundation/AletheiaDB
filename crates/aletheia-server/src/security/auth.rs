@@ -212,6 +212,13 @@ impl RateLimitSettings {
 /// `"role '{role}' does not permit {class} access"`, so 403 bodies stay
 /// identical to the existing `/query` surface.
 ///
+/// **Two-shape 403 contract (coordinator #8a / ruling F4):** this HTTP-surface
+/// 403 is deliberately **message-only** — it carries no `details` block, exactly
+/// mirroring the legacy `src/http/auth.rs`. Only the MCP-surface 403
+/// ([`crate::security::mcp_permission_denied_response`]) carries
+/// `details: {required_class, principal_role}`. The asymmetry is intentional;
+/// do not add `details` here.
+///
 /// # Errors
 ///
 /// Returns [`AletheiaHttpError::PermissionDenied`] when `principal.role` does

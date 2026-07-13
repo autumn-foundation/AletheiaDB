@@ -38,10 +38,36 @@
 //!    shape the legacy MCP `permission_denied_error` emits. (The replayed
 //!    dispatch handler's own `Authorized<C>` gate remains as defense-in-depth;
 //!    see the crate/README notes on the tools/call replay boundary.)
+//! 4. **Fails closed** on frames it cannot RBAC-precheck (#6): an oversize
+//!    buffered body (> [`MAX_MCP_REQUEST_BYTES`]) returns a `413`
+//!    ([`mcp_payload_too_large_response`]) instead of being swallowed and
+//!    forwarded as an empty body; a `tools/call` with no string `params.name`,
+//!    or a JSON-RPC **batch array** containing a `tools/call`, returns a `400`
+//!    ([`mcp_unroutable_tool_call_response`]) rather than passing through
+//!    un-gated (batched tool calls must be sent as individual requests in v1).
+//! 5. **Normalizes the verified credential** onto `Authorization: Bearer
+//!    <token>` for the tools/call replay (see [`normalize_authorization`]),
+//!    dropping the `x-api-key` header. autumn 0.5 forwards only `authorization`
+//!    (its `FORWARDED_HEADERS`), so this gives `x-api-key` full parity on
+//!    `tools/call` (the replayed handler re-verifies the normalized bearer)
+//!    while guaranteeing the losing/unverified header never survives. Only the
+//!    credential the layer actually verified is normalized.
+//!
+//! # Two-shape 403 contract (ruling F4 / coordinator #8a)
+//!
+//! The MCP-surface 403 ([`mcp_permission_denied_response`]) **carries**
+//! `details: {required_class, principal_role}`; the HTTP-surface 403
+//! ([`crate::security::authorize_class`] →
+//! [`AletheiaHttpError::PermissionDenied`]) stays **message-only**, matching the
+//! legacy `src/http/auth.rs`. The two shapes are intentional and asymmetric — do
+//! not add `details` to the HTTP surface. Because the gate now fails closed on
+//! every tool-executing frame it cannot identify (point 4), no MCP tools/call
+//! reaches the dispatch handler's message-only 403 path without first passing
+//! the gate's detail-carrying precheck.
 //!
 //! In [`AuthMode::Anonymous`] the layer inserts [`Principal::anonymous`] and
 //! passes through unconditionally (catalog reachable — matching the legacy
-//! anonymous surface).
+//! anonymous surface); no credential is verified, so no normalization occurs.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -53,12 +79,17 @@ use aletheiadb::auth::{AuthMode, AuthStore, Principal};
 use aletheiadb::http::AletheiaHttpError;
 use axum::Json;
 use axum::body::Body;
-use axum::http::{Request, Response, StatusCode};
+use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::response::IntoResponse;
 use serde_json::json;
 
 use crate::security::auth::extract_credential_headers;
 use crate::security::rbac::{self, Denied};
+
+/// Case-insensitive name of the `x-api-key` transport header (the alternative to
+/// `Authorization: Bearer` the gate accepts and then normalizes away).
+const X_API_KEY: &str = "x-api-key";
 
 /// Upper bound on a buffered `/mcp` JSON-RPC request body (MCP requests are
 /// tiny control messages). A body larger than this is not a legitimate
@@ -98,21 +129,123 @@ pub fn mcp_permission_denied_response(denied: Denied) -> Response<Body> {
     (StatusCode::FORBIDDEN, Json(body)).into_response()
 }
 
-/// Parse a buffered `/mcp` JSON-RPC body and, **iff** it is a single
-/// `tools/call`, return the target tool name. Any other method
-/// (`initialize`, `tools/list`, notifications), a batch array, or an
-/// unparseable body yields `None` — those carry no per-tool RBAC decision (the
-/// catalog methods are gated by authentication alone).
-fn tools_call_target(bytes: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    if value.get("method").and_then(|m| m.as_str()) != Some("tools/call") {
-        return None;
+/// The `413 RESOURCE_EXHAUSTED` envelope for an over-limit buffered `/mcp` body
+/// (SHOULD-FIX #2). A body larger than [`MAX_MCP_REQUEST_BYTES`] is refused
+/// fail-closed — never swallowed and forwarded as an empty body — so an
+/// oversize request cannot silently reach dispatch. Non-retriable (a caller
+/// fault), mirroring the shared `ResultBytes` 413.
+#[must_use]
+pub fn mcp_payload_too_large_response() -> Response<Body> {
+    let body = json!({
+        "success": false,
+        "error": format!(
+            "request body exceeds the {MAX_MCP_REQUEST_BYTES}-byte /mcp limit"
+        ),
+        "code": "RESOURCE_EXHAUSTED",
+        "retriable": false,
+        "details": {
+            "reason": "request_body_too_large",
+            "limit": MAX_MCP_REQUEST_BYTES,
+        },
+    });
+    (StatusCode::PAYLOAD_TOO_LARGE, Json(body)).into_response()
+}
+
+/// The `400 INVALID_ARGUMENT` envelope for a tool-executing frame the gate
+/// cannot RBAC-precheck (#6): a `tools/call` with no resolvable string
+/// `params.name`, or a JSON-RPC **batch array** carrying a `tools/call`. Rather
+/// than pass such a frame through un-checked (potential under-gating), the gate
+/// refuses it fail-closed. Non-retriable.
+#[must_use]
+pub fn mcp_unroutable_tool_call_response(reason: &'static str) -> Response<Body> {
+    let body = json!({
+        "success": false,
+        "error": format!("unroutable tools/call frame refused: {reason}"),
+        "code": "INVALID_ARGUMENT",
+        "retriable": false,
+        "details": { "reason": reason },
+    });
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
+/// The classification of a buffered `/mcp` JSON-RPC frame for RBAC prechecking.
+enum McpFrame {
+    /// Not a tool-executing frame (`initialize`, `tools/list`, a notification, a
+    /// batch with no `tools/call`, or an unparseable/empty body) — gated by
+    /// authentication alone, no per-tool RBAC decision.
+    PassThrough,
+    /// A single `tools/call` naming this tool — RBAC-prechecked at the envelope.
+    ToolCall(String),
+    /// A tool-executing frame the gate cannot identify: a `tools/call` with no
+    /// string `params.name`, or a batch array containing a `tools/call`. Refused
+    /// fail-closed (#6) with the carried reason.
+    Unroutable(&'static str),
+}
+
+/// Classify a buffered `/mcp` body for the per-tool RBAC precheck.
+///
+/// A single JSON-RPC object with `method == "tools/call"` yields
+/// [`McpFrame::ToolCall`] (or [`McpFrame::Unroutable`] if its `params.name` is
+/// missing/non-string). A **batch array** containing any `tools/call` element is
+/// [`McpFrame::Unroutable`] — the envelope precheck cannot express multiple
+/// per-tool decisions, so the gate refuses it fail-closed rather than risk
+/// under-gating. Everything else is [`McpFrame::PassThrough`].
+fn classify_mcp_frame(bytes: &[u8]) -> McpFrame {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        // Unparseable/empty: not a routable tool call; authentication already
+        // applied, and dispatch will produce its own JSON-RPC error.
+        return McpFrame::PassThrough;
+    };
+
+    // JSON-RPC batch: an array of frames. If any is a tools/call, refuse
+    // fail-closed (the per-tool RBAC precheck cannot fan out over a batch).
+    if let Some(elements) = value.as_array() {
+        let has_tool_call = elements
+            .iter()
+            .any(|e| e.get("method").and_then(|m| m.as_str()) == Some("tools/call"));
+        return if has_tool_call {
+            McpFrame::Unroutable("batched tools/call must be sent as individual requests")
+        } else {
+            McpFrame::PassThrough
+        };
     }
-    value
+
+    if value.get("method").and_then(|m| m.as_str()) != Some("tools/call") {
+        return McpFrame::PassThrough;
+    }
+    match value
         .get("params")
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
-        .map(str::to_owned)
+    {
+        Some(name) => McpFrame::ToolCall(name.to_owned()),
+        None => McpFrame::Unroutable("tools/call is missing a string params.name"),
+    }
+}
+
+/// Normalize the verified credential onto `Authorization: Bearer <token>` for
+/// the tools/call replay, and drop the `x-api-key` header.
+///
+/// autumn 0.5 forwards only `authorization` (its `FORWARDED_HEADERS`) into the
+/// replayed dispatch, so an `x-api-key`-authenticated caller would otherwise
+/// lose its credential at the replay boundary. Rewriting the header the gate
+/// **actually verified** into a bearer gives `x-api-key` full parity while
+/// ensuring the loser/unverified header never survives into the replay. Only
+/// called with a credential the layer verified; the token is a valid header
+/// value (it came from one), so the rewrite cannot fail in practice — an
+/// unexpected non-header token is dropped rather than forwarded unverified.
+fn normalize_authorization(headers: &mut HeaderMap, verified_token: &str) {
+    match HeaderValue::try_from(format!("Bearer {verified_token}")) {
+        Ok(value) => {
+            headers.insert(AUTHORIZATION, value);
+        }
+        Err(_) => {
+            // Unreachable in practice; fail closed by removing any credential
+            // rather than forwarding an unverified one.
+            headers.remove(AUTHORIZATION);
+        }
+    }
+    headers.remove(X_API_KEY);
 }
 
 /// Custom tower [`Layer`](tower::Layer) gating the whole `/mcp` endpoint with
@@ -179,38 +312,53 @@ where
 
         Box::pin(async move {
             // 1. Authenticate (uniform 401 on any failure in Required mode).
-            let principal = match mode {
-                AuthMode::Anonymous => Principal::anonymous(),
-                AuthMode::Required => {
-                    match extract_credential_headers(req.headers())
-                        .and_then(|cred| store.verify(&cred))
-                    {
-                        Some(principal) => principal,
+            //    Retain the *verified* token so it can be normalized onto the
+            //    `authorization` header for the tools/call replay (below).
+            let (principal, verified_token) = match mode {
+                AuthMode::Anonymous => (Principal::anonymous(), None),
+                AuthMode::Required => match extract_credential_headers(req.headers()) {
+                    Some(credential) => match store.verify(&credential) {
+                        Some(principal) => (principal, Some(credential)),
                         None => return Ok(mcp_unauthenticated_response()),
-                    }
-                }
+                    },
+                    None => return Ok(mcp_unauthenticated_response()),
+                },
             };
 
             // 2. Buffer the body so a `tools/call` can be RBAC-pre-checked at
             //    the envelope (F4). Authentication above needed only headers;
-            //    only this per-tool decision needs the body.
-            let (parts, body) = req.into_parts();
+            //    only this per-tool decision needs the body. An oversize body is
+            //    refused fail-closed with a 413 envelope (#2) — never swallowed
+            //    and forwarded empty.
+            let (mut parts, body) = req.into_parts();
             let bytes = match axum::body::to_bytes(body, MAX_MCP_REQUEST_BYTES).await {
                 Ok(bytes) => bytes,
-                // An unreadable/oversized body is not a valid JSON-RPC call;
-                // pass an empty body through so dispatch produces its own error
-                // (auth already succeeded).
-                Err(_) => axum::body::Bytes::new(),
+                Err(_) => return Ok(mcp_payload_too_large_response()),
             };
 
-            // 3. Per-tool RBAC pre-check for tools/call (F4).
-            if let Some(tool) = tools_call_target(&bytes)
-                && let Err(denied) = rbac::authorize_tool(principal.role, &tool)
-            {
-                return Ok(mcp_permission_denied_response(denied));
+            // 3. Classify the frame and enforce per-tool RBAC (F4) / fail-close
+            //    unroutable tool-executing frames (#6).
+            match classify_mcp_frame(&bytes) {
+                McpFrame::ToolCall(tool) => {
+                    if let Err(denied) = rbac::authorize_tool(principal.role, &tool) {
+                        return Ok(mcp_permission_denied_response(denied));
+                    }
+                }
+                McpFrame::Unroutable(reason) => {
+                    return Ok(mcp_unroutable_tool_call_response(reason));
+                }
+                McpFrame::PassThrough => {}
             }
 
-            // 4. Rebuild the request, cache the verified principal in
+            // 4. Normalize the verified credential onto `authorization: Bearer`
+            //    for the replay (x-api-key parity), stripping the loser header so
+            //    only the verified credential survives. No-op in anonymous mode
+            //    (no verified credential).
+            if let Some(token) = verified_token.as_deref() {
+                normalize_authorization(&mut parts.headers, token);
+            }
+
+            // 5. Rebuild the request, cache the verified principal in
             //    extensions (F3 seam), and pass through.
             let mut req = Request::from_parts(parts, Body::from(bytes));
             req.extensions_mut().insert(principal);

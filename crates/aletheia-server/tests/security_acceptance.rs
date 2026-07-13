@@ -436,10 +436,12 @@ async fn mcp_catalog_reachable_with_valid_credential() {
 }
 
 /// `x-api-key` reaches the `/mcp` catalog (the gate is credential-transport
-/// agnostic). NOTE: `tools/call` dispatch forwards only `authorization` (autumn
-/// 0.5 `FORWARDED_HEADERS`), so an `x-api-key`-only `tools/call` authenticates at
-/// the envelope but the replayed handler cannot see the credential — a
-/// documented v1 boundary. The catalog (`tools/list`) needs no replay.
+/// agnostic). As of the B4 finalize, an `x-api-key`-only `tools/call` also
+/// dispatches: the gate normalizes the verified credential onto
+/// `authorization: Bearer` before the replay (only `authorization` is in autumn
+/// 0.5's `FORWARDED_HEADERS`), so the replayed handler re-verifies it — see
+/// `tests/security_mcp_gate.rs::x_api_key_tools_call_authenticates_via_normalization`.
+/// This test pins the simpler catalog reach (`tools/list` needs no replay).
 #[tokio::test]
 async fn mcp_catalog_reachable_with_x_api_key() {
     let (db, store, _) = fixture();

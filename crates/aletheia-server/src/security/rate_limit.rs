@@ -21,16 +21,35 @@
 //! Keyed per **peer IP** ([`PeerIpKeyExtractor`]) with the `NoOpMiddleware`
 //! (no extra rate-limit response headers beyond governor's own `retry-after` /
 //! `x-ratelimit-after`). The raw over-limit response is governor's plain `429`
-//! with a `retry-after` header and a text body; B4 wiring wraps that into the
-//! #3234 `{code: "UNAVAILABLE", retriable: true, ...}` envelope (Issue #3561 §8).
+//! with a `retry-after` header and a text body; the B4 wiring wraps that into
+//! the shared structured envelope via [`GovernorLayer::error_handler`]
+//! ([`wrap_governor_error`]) — `code: "RESOURCE_EXHAUSTED"`, `retriable: true`,
+//! matching the legacy `ResourceLimitExceeded` 429 shape (Issue #3561 §8,
+//! MUST-FIX 8b) — while preserving the `retry-after` header.
+//!
+//! The mounted layer is retained (not dropped) so its unbounded per-IP keyed
+//! state can be reclaimed: [`RateLimit::into_parts`] splits the mountable layer
+//! from a weak [`RateLimitGc`] handle that [`spawn_gc_task`] drives on a coarse
+//! interval, self-terminating when the layer is dropped (MUST-FIX 8c).
 
 use crate::security::SecurityConfig;
+use axum::Json;
+use axum::body::Body;
+use axum::http::{Response, StatusCode};
+use axum::response::IntoResponse;
 use governor::middleware::NoOpMiddleware;
-use std::sync::Arc;
+use serde_json::json;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tower_governor::GovernorLayer;
+use tower_governor::errors::GovernorError;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
+
+/// The coarse cadence at which [`spawn_gc_task`] drives [`RateLimitGc::gc`] when
+/// a rate-limit layer is mounted. Retention is only ever a memory optimisation
+/// (never a correctness requirement), so a slow, cheap cadence is deliberate.
+pub const RATE_LIMIT_GC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The concrete governor layer this core builds: per-peer-IP keying, no extra
 /// middleware, producing `axum::body::Body` error responses (the `axum`-feature
@@ -41,6 +60,51 @@ pub type SpikeGovernorLayer = GovernorLayer<PeerIpKeyExtractor, NoOpMiddleware, 
 /// keyed `RateLimiter` behind both the mounted [`SpikeGovernorLayer`] and the
 /// [`RateLimit::gc`] housekeeping handle.
 type SpikeGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
+
+/// Wrap tower_governor's raw over-limit response into AletheiaDB's shared
+/// structured envelope (MUST-FIX 8b).
+///
+/// Without this, [`GovernorLayer`] serves its own plain-text
+/// `"Too Many Requests! Wait for {n}s"` body (via `From<GovernorError>`), which
+/// breaks the #3234 error contract every other surface honors. Installed via
+/// [`GovernorLayer::error_handler`] — the clean tower_governor 0.8 hook (a
+/// `Fn(GovernorError) -> Response<Body>`), so no extra tower layer is needed.
+///
+/// Only the `TooManyRequests` (429) case is rewritten, into the legacy
+/// `ResourceLimitExceeded` shape — `code: "RESOURCE_EXHAUSTED"`, `retriable:
+/// true` (rate-limit throttling is transient) — preserving governor's
+/// `retry-after` header so a client still learns when to retry. Non-throttle
+/// governor errors (`UnableToExtractKey` → 500, custom `Other`) fall through to
+/// governor's default rendering unchanged.
+fn wrap_governor_error(error: GovernorError) -> Response<Body> {
+    match error {
+        GovernorError::TooManyRequests { wait_time, headers } => {
+            let body = json!({
+                "success": false,
+                "error": format!("rate limit exceeded; retry after {wait_time}s"),
+                "code": "RESOURCE_EXHAUSTED",
+                "retriable": true,
+                "details": {
+                    "reason": "rate_limit",
+                    "retry_after_secs": wait_time,
+                },
+            });
+            let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+            // Preserve governor's advisory headers (retry-after / x-ratelimit-*)
+            // without clobbering the JSON content-type set above.
+            if let Some(extra) = headers {
+                for (name, value) in extra.iter() {
+                    if name != axum::http::header::CONTENT_TYPE {
+                        resp.headers_mut().insert(name, value.clone());
+                    }
+                }
+            }
+            resp
+        }
+        // Not a throttle decision — keep governor's own status/body.
+        other => other.into(),
+    }
+}
 
 /// A mounted rate limiter plus the handle needed to garbage-collect its
 /// unbounded per-IP keyed state (F2).
@@ -93,6 +157,94 @@ impl RateLimit {
     pub fn live_keys(&self) -> usize {
         self.config.limiter().len()
     }
+
+    /// Split the mountable [`layer`](Self::layer) from a lifecycle-tied GC handle
+    /// (MUST-FIX 8c). `apply_security` calls this: it moves the `layer` onto the
+    /// router via `.layer(..)` and hands the [`RateLimitGc`] to [`spawn_gc_task`]
+    /// so the unbounded per-IP keyed state is periodically reclaimed.
+    ///
+    /// The returned [`RateLimitGc`] holds only a **weak** reference to the shared
+    /// config, so it never keeps the limiter alive on its own — the GC task
+    /// self-terminates once the mounted layer (the last strong ref) is dropped.
+    #[must_use]
+    pub fn into_parts(self) -> (SpikeGovernorLayer, RateLimitGc) {
+        let gc = RateLimitGc {
+            config: Arc::downgrade(&self.config),
+        };
+        (self.layer, gc)
+    }
+}
+
+/// A lifecycle-tied garbage-collection handle for a mounted rate limiter
+/// (MUST-FIX 8c).
+///
+/// Holds a [`Weak`] to the shared keyed config: [`gc`](Self::gc) upgrades it and
+/// calls `retain_recent()` when the limiter is still mounted, and reports
+/// `false` once the layer has been dropped so [`spawn_gc_task`]'s loop exits
+/// without leaking. This is the reference that makes the background GC task
+/// tied to the app's lifecycle rather than a detached, never-ending task.
+#[derive(Clone)]
+pub struct RateLimitGc {
+    config: Weak<SpikeGovernorConfig>,
+}
+
+impl RateLimitGc {
+    /// Reclaim stale per-IP keyed state if the limiter is still live.
+    ///
+    /// Returns `true` when the underlying limiter was reachable and swept
+    /// (`retain_recent()`), `false` once every strong reference (i.e. the
+    /// mounted layer) has been dropped — the signal [`spawn_gc_task`] uses to
+    /// stop.
+    #[must_use]
+    pub fn gc(&self) -> bool {
+        match self.config.upgrade() {
+            Some(config) => {
+                config.limiter().retain_recent();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Live per-IP key count if the limiter is still mounted (observability).
+    #[must_use]
+    pub fn live_keys(&self) -> Option<usize> {
+        self.config.upgrade().map(|c| c.limiter().len())
+    }
+}
+
+/// Spawn the periodic GC task that drives [`RateLimitGc::gc`] (MUST-FIX 8c).
+///
+/// Started by `apply_security` only when a rate-limit layer is mounted. The task
+/// ticks every `interval` and calls `gc()`; because the handle is weak, the very
+/// first tick after the mounted layer is dropped observes the upgrade fail and
+/// **breaks the loop** — so the task is tied to the app's lifecycle and never
+/// leaks or duplicates (one task per mounted layer, self-terminating).
+///
+/// Returns `None` when called outside a Tokio runtime (no task is spawned);
+/// otherwise the [`JoinHandle`](tokio::task::JoinHandle) (primarily for tests —
+/// production fire-and-forgets it, relying on the weak-handle self-termination).
+#[must_use = "in production the handle is intentionally dropped; tests should await it"]
+pub fn spawn_gc_task(
+    handle: RateLimitGc,
+    interval: Duration,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // The first tick fires immediately; consume it so the first *sweep*
+        // happens one interval in (nothing to reclaim at t=0 anyway).
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if !handle.gc() {
+                // The mounted layer was dropped: stop (no leak).
+                break;
+            }
+        }
+    }))
 }
 
 /// Build the per-IP rate-limit layer from a [`SecurityConfig`], **default-off**.
@@ -130,6 +282,8 @@ pub fn governor_layer(cfg: &SecurityConfig) -> Option<RateLimit> {
     // state. `GovernorLayer::new` accepts `impl Into<Arc<GovernorConfig>>`; an
     // `Arc` is passed through by identity.
     let config = Arc::new(builder.finish()?);
-    let layer = GovernorLayer::new(config.clone());
+    // Wrap the raw governor 429 into the shared structured envelope (8b) via the
+    // tower_governor 0.8 `error_handler` hook.
+    let layer = GovernorLayer::new(config.clone()).error_handler(wrap_governor_error);
     Some(RateLimit { layer, config })
 }

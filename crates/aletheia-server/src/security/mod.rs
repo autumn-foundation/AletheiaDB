@@ -45,7 +45,8 @@ pub use auth::{
 };
 pub use cursor::{CursorSecret, LiveCursorRegistry};
 pub use mcp_gate::{
-    McpSecurityLayer, mcp_permission_denied_response, mcp_unauthenticated_response,
+    McpSecurityLayer, mcp_payload_too_large_response, mcp_permission_denied_response,
+    mcp_unauthenticated_response, mcp_unroutable_tool_call_response,
 };
 pub use resource_limits::{InFlightLimiter, ResourceLimits};
 
@@ -244,8 +245,16 @@ pub fn apply_security(app: TestApp, cfg: &SecurityConfig) -> TestApp {
     let app = app.secure_mcp(McpSecurityLayer::new(cfg.store.clone(), cfg.mode));
 
     // 2. Default-off per-IP rate limiter, mounted app-wide only when enabled.
+    //    When enabled, retain the `RateLimit`'s GC handle and drive it from a
+    //    lifecycle-tied background task so the per-IP keyed state cannot grow
+    //    without bound (MUST-FIX 8c). The task holds only a weak handle, so it
+    //    self-terminates when the mounted layer is dropped (no leak/duplicate).
     match rate_limit::governor_layer(cfg) {
-        Some(rl) => app.layer(rl.layer),
+        Some(rl) => {
+            let (layer, gc) = rl.into_parts();
+            let _gc_task = rate_limit::spawn_gc_task(gc, rate_limit::RATE_LIMIT_GC_INTERVAL);
+            app.layer(layer)
+        }
         None => app,
     }
 }
