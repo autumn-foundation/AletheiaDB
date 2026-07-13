@@ -128,6 +128,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -235,6 +236,44 @@ pub struct AletheiaMcpServer {
     /// observability). Shared so a cloned server (used for the timeout
     /// thread-race) increments the same counters.
     limit_counters: Arc<LimitCounters>,
+    /// Number of `query` calls currently occupying a timeout-race worker
+    /// thread (Issue #3368 DoS guard). Bounded by
+    /// [`QueryLimitsConfig::max_in_flight_queries`]; a worker holds its slot
+    /// for its whole (non-cancellable) lifetime — even after the caller has
+    /// timed out and discarded it — so a still-running discarded query keeps
+    /// occupying capacity. Shared across clones so the cloned server used for
+    /// the race sees the same live count.
+    in_flight_queries: Arc<AtomicUsize>,
+}
+
+/// RAII slot in the bounded in-flight-query pool (Issue #3368). Decrements the
+/// shared counter on drop — which happens inside the spawned worker closure
+/// when the WORKER finishes (never when the caller merely times out), so a
+/// discarded-but-still-running query keeps holding its slot until it actually
+/// completes.
+struct InFlightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Outcome of racing a query computation against its wall-clock deadline
+/// (Issue #3368). Distinguishes a real timeout (retriable `RESOURCE_EXHAUSTED`)
+/// from a worker that died — e.g. panicked — mid-computation (non-retriable
+/// `INTERNAL`), so a deterministic panic is never mislabeled as an invisible,
+/// infinitely-retriable timeout.
+enum RaceOutcome {
+    /// The worker finished within the deadline; carries its result.
+    Completed(CallToolResult),
+    /// The deadline elapsed before the worker finished.
+    TimedOut,
+    /// The worker's sender was dropped without a result (it panicked or was
+    /// otherwise torn down) before the deadline.
+    WorkerDied,
 }
 
 impl AletheiaMcpServer {
@@ -274,6 +313,7 @@ impl AletheiaMcpServer {
             cursors: Arc::new(CursorManager::new()),
             query_limits: Arc::new(QueryLimitsConfig::default()),
             limit_counters: Arc::new(LimitCounters::default()),
+            in_flight_queries: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -362,6 +402,7 @@ impl AletheiaMcpServer {
             cursors: Arc::new(CursorManager::new()),
             query_limits: Arc::new(QueryLimitsConfig::default()),
             limit_counters: Arc::new(LimitCounters::default()),
+            in_flight_queries: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -5480,41 +5521,142 @@ impl AletheiaMcpServer {
         row_limit: usize,
     ) -> CallToolResult {
         if effective.timeout_ms == 0 {
+            // Inline (unlimited-timeout) path: no worker thread is spawned, so
+            // the in-flight guard does not apply (Issue #3368).
             return self.execute_query_core(effective, &language, &req, row_limit);
         }
+
+        // Bounded in-flight-query DoS guard (Issue #3368): the timeout race
+        // spawns a detached, non-cancellable worker; without a cap a caller
+        // could pile up thousands of still-running expensive queries. Acquire a
+        // slot before spawning; at the cap, reject with a retriable UNAVAILABLE
+        // rather than spawning yet another worker.
+        let cap = self.query_limits.max_in_flight_queries;
+        let guard = match self.try_acquire_in_flight(cap) {
+            Some(guard) => guard,
+            None => return self.in_flight_capacity_error(&language, cap),
+        };
+
         let server = self.clone();
         let lang = language.clone();
-        let outcome = self.race_deadline(effective.timeout_ms, move || {
+        let outcome = self.race_deadline(effective.timeout_ms, guard, move || {
             server.execute_query_core(effective, &lang, &req, row_limit)
         });
         match outcome {
-            Some(result) => result,
-            None => self.wall_clock_timeout_error(&language, effective.timeout_ms),
+            RaceOutcome::Completed(result) => result,
+            RaceOutcome::TimedOut => self.wall_clock_timeout_error(&language, effective.timeout_ms),
+            RaceOutcome::WorkerDied => self.worker_died_error(&language),
+        }
+    }
+
+    /// Try to reserve a slot in the bounded in-flight-query pool (Issue #3368).
+    ///
+    /// Returns `Some(guard)` on success (the guard releases the slot on drop),
+    /// or `None` when the pool is already at `cap` (the caller then rejects the
+    /// query). A `cap` of `0` means unbounded — a slot is always granted (still
+    /// accounted, so [`AletheiaMcpServer`] can observe the live count). Uses a
+    /// CAS loop so a spurious over-count can never leak a slot.
+    fn try_acquire_in_flight(&self, cap: usize) -> Option<InFlightGuard> {
+        let mut current = self.in_flight_queries.load(Ordering::Acquire);
+        loop {
+            if cap != 0 && current >= cap {
+                return None;
+            }
+            match self.in_flight_queries.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(InFlightGuard {
+                        counter: Arc::clone(&self.in_flight_queries),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
         }
     }
 
     /// Race a computation `f` against a wall-clock deadline (Issue #3368).
     ///
-    /// Returns `Some(result)` if `f` finished within `timeout_ms`, or `None` if
-    /// the deadline elapsed first. `f` runs on a dedicated thread and is **not**
-    /// cancelled on timeout — it runs to completion and its result is discarded
-    /// — so the caller's wait is bounded without engine-level cancellation
-    /// (mirroring the HTTP `/query` surface). `f` must therefore be free of
-    /// externally-visible side effects that would be unsafe to discard; the
-    /// `query` tool's read-only guard runs before this, so a discarded query can
-    /// never leave a partial write.
-    fn race_deadline<F>(&self, timeout_ms: u64, f: F) -> Option<CallToolResult>
+    /// Returns [`RaceOutcome::Completed`] if `f` finished within `timeout_ms`,
+    /// [`RaceOutcome::TimedOut`] if the deadline elapsed first, or
+    /// [`RaceOutcome::WorkerDied`] if the worker's sender was dropped without a
+    /// result (a panic in `f` or anything it calls) — the latter is reported as
+    /// a non-retriable INTERNAL error rather than a retriable timeout, so a
+    /// deterministic panic can never masquerade as an infinitely-retriable
+    /// timeout.
+    ///
+    /// `f` runs on a dedicated thread and is **not** cancelled on timeout — it
+    /// runs to completion and its result is discarded — so the caller's wait is
+    /// bounded without engine-level cancellation (mirroring the HTTP `/query`
+    /// surface). `f` must therefore be free of externally-visible side effects
+    /// that would be unsafe to discard; the `query` tool's read-only guard runs
+    /// before this, so a discarded query can never leave a partial write.
+    /// `guard` is moved into the worker so its in-flight slot is released when
+    /// the WORKER finishes (not when the caller times out).
+    fn race_deadline<F>(&self, timeout_ms: u64, guard: InFlightGuard, f: F) -> RaceOutcome
     where
         F: FnOnce() -> CallToolResult + Send + 'static,
     {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            // Hold the in-flight slot for the worker's whole lifetime; it is
+            // released when `_guard` drops at the end of this closure — even if
+            // the caller already timed out and discarded the result.
+            let _guard = guard;
             // A send error only means the receiver already timed out and went
             // away; the computed result is simply discarded.
             let _ = tx.send(f());
         });
-        rx.recv_timeout(std::time::Duration::from_millis(timeout_ms))
-            .ok()
+        match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+            Ok(result) => RaceOutcome::Completed(result),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => RaceOutcome::TimedOut,
+            // The sender dropped without sending — the worker panicked (or was
+            // otherwise torn down). Do NOT treat this as a timeout.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => RaceOutcome::WorkerDied,
+        }
+    }
+
+    /// Build the structured worker-died error (Issue #3368): the timeout-race
+    /// worker's sender dropped without a result, i.e. the computation panicked.
+    /// Reported as a non-retriable `INTERNAL` (kind `runtime_error`) — a
+    /// deterministic panic must not be retried forever as a "timeout". Carries
+    /// no engine-internal detail (no secret/panic payload) beyond the fact of
+    /// the failure. Not counted as a timeout termination.
+    fn worker_died_error(&self, language: &str) -> CallToolResult {
+        self.query_error_classified(
+            "runtime_error",
+            McpErrorCode::Internal,
+            false,
+            "The query worker terminated unexpectedly before producing a result (internal \
+             error). This is not a timeout; retrying the identical query is unlikely to help.",
+            None,
+            Some(language),
+        )
+    }
+
+    /// Build the structured in-flight-capacity error (Issue #3368): the bounded
+    /// worker pool is full, so the query was rejected instead of spawning yet
+    /// another non-cancellable worker. Retriable `UNAVAILABLE` — the caller
+    /// should back off and retry once load subsides.
+    fn in_flight_capacity_error(&self, language: &str, cap: usize) -> CallToolResult {
+        self.query_error_with_details(
+            "runtime_error",
+            McpErrorCode::Unavailable,
+            true,
+            &format!(
+                "The server is at its cap of {cap} concurrently executing timed queries and \
+                 cannot admit another right now. Retry with backoff, or run without a wall-clock \
+                 timeout only in a trusted/embedded deployment.",
+            ),
+            Some(language),
+            json!({
+                "reason": "in_flight_query_cap",
+                "max_in_flight_queries": cap,
+            }),
+        )
     }
 
     /// Build the structured wall-clock-timeout error and record the termination
@@ -5624,27 +5766,46 @@ impl AletheiaMcpServer {
         // by any scalar projection columns -- mirroring how aggregate rows
         // derive their dynamic schema -- so a caller can map row keys to
         // columns instead of seeing the static entity/score/path schema.
+        // Build rows one at a time, measuring serialized size incrementally so
+        // peak working memory stays ≈ the byte cap (Issue #3368). Each row's
+        // compact serialized length is a strict lower bound on that row's
+        // contribution to the final pretty-printed response (pretty-printing
+        // only adds whitespace/indentation, and the response envelope adds
+        // more), so once the running row bytes alone exceed the cap the full
+        // response is guaranteed over cap: we stop building further rows and
+        // fail closed immediately instead of materializing the whole (up to
+        // 100k-row) result and then rejecting it.
+        let cap = effective.max_response_bytes;
         let mut computed_columns: Option<Vec<String>> = None;
-        let rows: Vec<serde_json::Value> = collected
-            .into_iter()
-            .take(row_limit)
-            .map(|row| {
-                if computed_columns.is_none() {
-                    if let Some(bindings) = &row.bindings {
-                        let mut names: Vec<String> =
-                            bindings.iter().map(|(name, _)| name.clone()).collect();
-                        if let Some(cols) = &row.columns {
-                            names.extend(cols.iter().map(|(name, _)| name.clone()));
-                        }
-                        computed_columns = Some(names);
-                    } else if let Some(cols) = &row.columns {
-                        computed_columns =
-                            Some(cols.iter().map(|(name, _)| name.clone()).collect());
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        let mut running_bytes: usize = 0;
+        for row in collected.into_iter().take(row_limit) {
+            if computed_columns.is_none() {
+                if let Some(bindings) = &row.bindings {
+                    let mut names: Vec<String> =
+                        bindings.iter().map(|(name, _)| name.clone()).collect();
+                    if let Some(cols) = &row.columns {
+                        names.extend(cols.iter().map(|(name, _)| name.clone()));
                     }
+                    computed_columns = Some(names);
+                } else if let Some(cols) = &row.columns {
+                    computed_columns = Some(cols.iter().map(|(name, _)| name.clone()).collect());
                 }
-                self.query_row_to_json(row)
-            })
-            .collect();
+            }
+            let row_json = self.query_row_to_json(row);
+            if cap > 0 {
+                // Compact length is the cheapest strict lower bound on the row's
+                // pretty-printed footprint.
+                running_bytes = running_bytes
+                    .saturating_add(serde_json::to_string(&row_json).map_or(0, |s| s.len()));
+                if running_bytes > cap {
+                    // Provably over cap already — reject without building the
+                    // rest of the result (peak allocation ≈ cap).
+                    return self.result_bytes_error(language, running_bytes, cap);
+                }
+            }
+            rows.push(row_json);
+        }
         let row_count = rows.len();
 
         let columns = match &computed_columns {
@@ -5660,36 +5821,43 @@ impl AletheiaMcpServer {
             "truncated": truncated,
         });
 
-        // Protective result-byte cap (Issue #3368): measure the exact bytes the
+        // Protective result-byte cap (Issue #3368): the incremental guard above
+        // bounds peak allocation; here we take the exact serialized bytes the
         // response will carry (the pretty-printed form `success_json` emits) and
-        // fail closed if it exceeds the effective cap. Non-retriable — the same
-        // query would produce the same oversized result; the caller must narrow
-        // it or raise `limits.max_response_bytes`.
+        // fail closed if the envelope + whitespace pushes a within-row-budget
+        // response over the cap. Non-retriable — the same query would produce
+        // the same oversized result; the caller must narrow it or raise
+        // `limits.max_response_bytes`.
         let serialized = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-        if effective.max_response_bytes > 0 && serialized.len() > effective.max_response_bytes {
-            self.limit_counters
-                .record_termination(LimitDimension::ResultBytes);
-            return self.query_error_with_details(
-                "runtime_error",
-                McpErrorCode::ResourceExhausted,
-                false,
-                &format!(
-                    "Query response ({} bytes) exceeds the result-byte cap of {} bytes. Narrow \
-                     the query (smaller LIMIT / fewer returned properties) or raise \
-                     `limits.max_response_bytes` (up to the operator ceiling).",
-                    serialized.len(),
-                    effective.max_response_bytes,
-                ),
-                Some(language),
-                json!({
-                    "dimension": LimitDimension::ResultBytes.as_str(),
-                    "limit": effective.max_response_bytes,
-                    "consumed": serialized.len(),
-                }),
-            );
+        if cap > 0 && serialized.len() > cap {
+            return self.result_bytes_error(language, serialized.len(), cap);
         }
 
         CallToolResult::success(vec![Content::text(serialized)])
+    }
+
+    /// Build the structured result-byte-cap error and record the termination
+    /// (Issue #3368). `consumed` is the measured (or provably-lower-bounded)
+    /// serialized size, always `> cap`. Non-retriable `RESOURCE_EXHAUSTED`.
+    fn result_bytes_error(&self, language: &str, consumed: usize, cap: usize) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::ResultBytes);
+        self.query_error_with_details(
+            "runtime_error",
+            McpErrorCode::ResourceExhausted,
+            false,
+            &format!(
+                "Query response ({consumed} bytes) exceeds the result-byte cap of {cap} bytes. \
+                 Narrow the query (smaller LIMIT / fewer returned properties) or raise \
+                 `limits.max_response_bytes` (up to the operator ceiling).",
+            ),
+            Some(language),
+            json!({
+                "dimension": LimitDimension::ResultBytes.as_str(),
+                "limit": cap,
+                "consumed": consumed,
+            }),
+        )
     }
 
     /// Test-only accessor returning the names of all advertised tools.
@@ -6661,31 +6829,182 @@ mod server_unit_tests {
     // `mcp::tests` integration tests cover the end-to-end behavior).
     // ===================================================================
 
+    /// Acquire an unbounded (cap 0) in-flight slot for the low-level
+    /// `race_deadline` unit tests that exercise the race in isolation.
+    fn test_guard(server: &AletheiaMcpServer) -> super::InFlightGuard {
+        server
+            .try_acquire_in_flight(0)
+            .expect("unbounded acquire always succeeds")
+    }
+
     /// A computation that finishes within the deadline is returned intact.
     #[test]
     fn race_deadline_returns_fast_result() {
         let server = make_server();
-        let out = server.race_deadline(1_000, || {
+        let out = server.race_deadline(1_000, test_guard(&server), || {
             CallToolResult::success(vec![Content::text("done".to_string())])
         });
-        let out = out.expect("fast computation must complete within the deadline");
-        assert_eq!(AletheiaMcpServer::extract_text(out), "done");
+        match out {
+            super::RaceOutcome::Completed(result) => {
+                assert_eq!(AletheiaMcpServer::extract_text(result), "done");
+            }
+            _ => panic!("fast computation must complete within the deadline"),
+        }
     }
 
-    /// A computation that overruns the deadline yields `None` (the caller then
-    /// synthesizes the timeout error). Deterministic: 300 ms work vs 10 ms
+    /// A computation that overruns the deadline yields `TimedOut` (the caller
+    /// then synthesizes the timeout error). Deterministic: 300 ms work vs 10 ms
     /// deadline.
     #[test]
     fn race_deadline_times_out_slow_result() {
         let server = make_server();
-        let out = server.race_deadline(10, || {
+        let out = server.race_deadline(10, test_guard(&server), || {
             std::thread::sleep(std::time::Duration::from_millis(300));
             CallToolResult::success(vec![Content::text("late".to_string())])
         });
         assert!(
-            out.is_none(),
-            "a computation exceeding the deadline must race to None"
+            matches!(out, super::RaceOutcome::TimedOut),
+            "a computation exceeding the deadline must race to TimedOut"
         );
+    }
+
+    /// FIX 1 (Issue #3368): a worker that panics mid-computation drops its
+    /// sender, which `race_deadline` must surface as `WorkerDied` — NOT a
+    /// timeout. The 1 s deadline is far longer than the immediate panic, so a
+    /// `TimedOut` here would prove the Disconnected/Timeout collapse bug.
+    #[test]
+    fn race_deadline_panicking_worker_is_worker_died_not_timeout() {
+        let server = make_server();
+        let out = server.race_deadline(1_000, test_guard(&server), || {
+            panic!("deterministic worker panic");
+        });
+        assert!(
+            matches!(out, super::RaceOutcome::WorkerDied),
+            "a panicking worker must race to WorkerDied, never TimedOut"
+        );
+    }
+
+    /// FIX 1 (Issue #3368): end-to-end, a panicking query worker yields a
+    /// non-retriable INTERNAL error (not a retriable RESOURCE_EXHAUSTED
+    /// timeout) and does NOT bump the wall-clock-timeout counter.
+    #[test]
+    fn query_panicking_worker_yields_internal_not_timeout() {
+        let server = make_server();
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 0);
+        // A generous 60 s deadline; the worker panics immediately, so any
+        // timeout classification would be a bug, not a race artifact.
+        let effective = super::EffectiveQueryLimits {
+            timeout_ms: 60_000,
+            max_result_rows: 0,
+            max_response_bytes: 0,
+        };
+        let out = server.race_deadline(effective.timeout_ms, test_guard(&server), || {
+            panic!("boom");
+        });
+        let result = match out {
+            super::RaceOutcome::WorkerDied => server.worker_died_error("aql"),
+            super::RaceOutcome::TimedOut => panic!("panic must not be classified as a timeout"),
+            super::RaceOutcome::Completed(_) => panic!("panicking worker cannot complete"),
+        };
+        assert_eq!(result.is_error, Some(true));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        let err = &val["error"];
+        assert_eq!(err["kind"].as_str(), Some("runtime_error"));
+        assert_eq!(err["code"].as_str(), Some("INTERNAL"));
+        assert_eq!(err["retriable"].as_bool(), Some(false));
+        // The panic must NOT have been counted as a wall-clock timeout.
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 0);
+    }
+
+    /// FIX 2 (Issue #3368): at the in-flight cap, an extra timed query is
+    /// rejected `UNAVAILABLE` (retriable) instead of spawning another worker;
+    /// once the occupying workers finish the slots are released and a
+    /// subsequent timed query succeeds again.
+    #[test]
+    fn in_flight_cap_rejects_then_releases() {
+        use crate::core::property::PropertyMap;
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        db.create_node("Widget", PropertyMap::new()).unwrap();
+        // Cap of 1 live worker, with a generous timeout so the guard (not the
+        // deadline) is what rejects.
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            max_in_flight_queries: 1,
+            default_timeout_ms: 60_000,
+            max_timeout_ms: 0,
+            ..super::QueryLimitsConfig::default()
+        });
+
+        // Manually occupy the only slot to simulate a still-running worker.
+        let held = server
+            .try_acquire_in_flight(server.query_limits.max_in_flight_queries)
+            .expect("first slot acquires");
+
+        // A timed query now finds the pool full and is rejected UNAVAILABLE.
+        let rejected = server.handle_query(serde_json::json!({
+            "language": "aql",
+            "query": "MATCH (n:Widget) RETURN n",
+        }));
+        assert_eq!(rejected.is_error, Some(true));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(rejected)).unwrap();
+        assert_eq!(val["error"]["code"].as_str(), Some("UNAVAILABLE"), "{val}");
+        assert_eq!(val["error"]["retriable"].as_bool(), Some(true), "{val}");
+        assert_eq!(
+            val["error"]["details"]["max_in_flight_queries"].as_u64(),
+            Some(1),
+            "{val}"
+        );
+
+        // Release the held slot; the next timed query now admits and succeeds.
+        drop(held);
+        let ok = server.handle_query(serde_json::json!({
+            "language": "aql",
+            "query": "MATCH (n:Widget) RETURN n",
+        }));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(ok)).unwrap();
+        assert!(val.get("error").is_none(), "slot released, query ok: {val}");
+        assert_eq!(val["row_count"].as_u64(), Some(1));
+        // No worker is left occupying a slot after completion.
+        assert_eq!(
+            server.in_flight_queries.load(super::Ordering::Acquire),
+            0,
+            "workers must release their slot on completion"
+        );
+    }
+
+    /// FIX 2 (Issue #3368): the inline `timeout_ms == 0` path never spawns a
+    /// worker and is therefore unaffected by the in-flight guard — even with
+    /// the pool artificially saturated, an unlimited-timeout query runs inline
+    /// and succeeds.
+    #[test]
+    fn in_flight_cap_does_not_affect_inline_zero_timeout_path() {
+        use crate::core::property::PropertyMap;
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        db.create_node("Widget", PropertyMap::new()).unwrap();
+        // Unlimited timeout (default_timeout_ms 0) + cap 1, and saturate it.
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            max_in_flight_queries: 1,
+            default_timeout_ms: 0,
+            max_timeout_ms: 0,
+            ..super::QueryLimitsConfig::default()
+        });
+        let _held = server
+            .try_acquire_in_flight(server.query_limits.max_in_flight_queries)
+            .expect("first slot acquires");
+        // Inline path: no guard consulted, no spawn, succeeds despite full pool.
+        let ok = server.handle_query(serde_json::json!({
+            "language": "aql",
+            "query": "MATCH (n:Widget) RETURN n",
+        }));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(ok)).unwrap();
+        assert!(
+            val.get("error").is_none(),
+            "inline zero-timeout path is unguarded: {val}"
+        );
+        assert_eq!(val["row_count"].as_u64(), Some(1));
     }
 
     /// The wall-clock-timeout error is a retriable RESOURCE_EXHAUSTED with

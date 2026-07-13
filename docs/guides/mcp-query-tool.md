@@ -673,7 +673,7 @@ object of this shape (Issue #3234):
 | `CONSTRAINT_VIOLATION` | A declared uniqueness constraint rejected the write (`details` carries `label`, `property`, `value`, `existing_node_id`) | `false` | Use the existing entity or change the value |
 | `FAILED_PRECONDITION` | Valid request, wrong system state: vector index not enabled, node still has connected edges without `detach: true`, referenced edge endpoint missing, enabling a unique constraint over already-existing duplicate values, feature not compiled in | `false` | Change the state (enable the index, pass `detach`, create the endpoint, dedupe the data), then re-issue |
 | `CONFLICT` | Concurrency conflict: serialization failure, write-write conflict, aborted transaction | usually `true` | Retry the operation (a duplicate-ID conflict is the exception: `retriable: false`) |
-| `UNAVAILABLE` | Transient condition: query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow) | `true` | Retry, ideally with backoff |
+| `UNAVAILABLE` | Transient condition: engine-internal query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow), or the `query` tool at its in-flight-worker cap (Issue #3368, `details.max_in_flight_queries`) | `true` | Retry, ideally with backoff |
 | `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
 | `UNAUTHENTICATED` | No valid session credential in `required` auth mode (Issue #3350) — missing, unknown, or revoked; deliberately indistinguishable, and returned for *every* tool including unknown tool names (no inventory leak). Never carries `details`, never echoes the credential | `false` | Supply a valid `ALETHEIADB_MCP_API_KEY` (or bootstrap key) and restart the session; retrying with the same credential cannot succeed |
 | `PERMISSION_DENIED` | Authenticated, but the principal's role does not allow the tool's access class (Issue #3350). `details` carries `required_class` and `principal_role` | `false` | Use a credential whose role allows the class (see [docs/guides/access-control-matrix.md](access-control-matrix.md)); do not retry with the same key |
@@ -752,6 +752,16 @@ default (generous) limits the response is byte-identical to pre-#3368 behavior.
 | Result rows | **Success**, truncated to the cap and flagged | *(none — success)* | n/a | response carries `truncated: true` (the #3226 completeness signal) |
 | Result bytes | Response rejected, structured error | `RESOURCE_EXHAUSTED` (kind `runtime_error`) | `false` — the same query yields the same oversized result | `{dimension:"result_bytes", limit, consumed}` |
 | Over-ceiling override | Rejected before any execution | `INVALID_ARGUMENT` (kind `invalid_params`) | `false` | `{dimension, requested, ceiling}` |
+| In-flight cap reached | Rejected before spawning a worker | `UNAVAILABLE` (kind `runtime_error`) | `true` — transient load; back off and retry | `{reason:"in_flight_query_cap", max_in_flight_queries}` |
+| Worker died (panic) | Structured error (never a timeout) | `INTERNAL` (kind `runtime_error`) | `false` — a deterministic panic won't fix itself on retry | *(none)* |
+
+**Two distinct timeout `code`s.** The *wall-clock-limit* timeout above — the
+`query` tool's own deadline elapsing on the raced worker — is
+`RESOURCE_EXHAUSTED`. An *engine-internal* `QueryError::Timeout` bubbled up from
+the executor maps to `UNAVAILABLE` instead. Both are `retriable: true`, but they
+carry different `code`s (and the former alone carries
+`details.dimension = "wall_clock_timeout"`), so branch on `details` when you need
+to tell them apart.
 
 Row-cap overflow degrades to a **disclosed truncation** (never a silent drop);
 the timeout and byte cap **fail closed** with an error. The read-only guard runs
@@ -760,6 +770,27 @@ partial write. Timeout enforcement bounds the caller's wait via a thread-race;
 the underlying computation is not force-cancelled (it runs to completion and is
 discarded), mirroring the HTTP `/query` surface — engine-level cooperative
 cancellation is a separate query-executor concern.
+
+### Bounded in-flight workers (DoS guard)
+
+Because a timed query runs on a **detached, non-cancellable** worker thread, a
+caller sending tiny `timeout_ms` overrides — or simply hammering the documented
+retriable-timeout retry loop — could otherwise pile up thousands of still-running
+expensive queries and exhaust threads/CPU/memory. The server caps the number of
+`query` calls concurrently occupying a worker
+(`QueryLimitsConfig::max_in_flight_queries`, **default 64**, `0` = unbounded;
+configured on the same `AletheiaMcpServer::with_query_limits(...)` path as the
+other limits). At the cap a new timed query is **rejected up front** with a
+retriable `UNAVAILABLE` error (`details.max_in_flight_queries`) instead of
+spawning another worker. A worker holds its slot for its whole lifetime — even
+after the caller has timed out and discarded it — so a discarded-but-still-running
+query keeps occupying capacity until it actually finishes. The inline
+unlimited-timeout path (`timeout_ms == 0`) never spawns a worker and is therefore
+unguarded. (The already-merged HTTP `/query` path (#3446) shares the same
+unbounded-worker weakness; adding an equivalent cap there is a parity follow-up.)
+A worker that **panics** mid-computation is reported as a non-retriable
+`INTERNAL` error (never a retriable timeout), so a deterministic panic can't
+become an invisible, infinitely-retriable "timeout".
 
 ### LLM self-correction path
 
@@ -803,9 +834,13 @@ tool remains an `unsupported_construct` (#3360).
 Over-limit terminations are counted per dimension in-process
 (`AletheiaMcpServer::limit_termination_counts()`); surfacing them through
 `database_stats` needs a storage-layer counter and is a cross-lane follow-up.
-True engine-level **memory** accounting is likewise a query-executor follow-up;
-the response-byte cap is the working-memory proxy for a read-only query on this
-surface.
+The response-byte cap is enforced **incrementally**: rows are serialized and
+measured as they are appended, and the response fails closed as soon as the
+running size provably exceeds the cap — so peak working memory stays ≈ the cap
+rather than materializing the full (up to the row-count ceiling) result before
+rejecting it. The row-count ceiling remains the independent bound on how many
+rows are ever built. True engine-level **memory** accounting (spill, per-operator
+budgets) is a separate query-executor follow-up.
 
 ## Discovering the queryable temporal extent (`temporal_extent`)
 

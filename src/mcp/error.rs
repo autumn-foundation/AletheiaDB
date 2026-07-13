@@ -413,7 +413,10 @@ mod tests {
         assert_eq!(McpErrorCode::Internal.as_str(), "INTERNAL");
         assert_eq!(McpErrorCode::Unauthenticated.as_str(), "UNAUTHENTICATED");
         assert_eq!(McpErrorCode::PermissionDenied.as_str(), "PERMISSION_DENIED");
-        assert_eq!(McpErrorCode::ResourceExhausted.as_str(), "RESOURCE_EXHAUSTED");
+        assert_eq!(
+            McpErrorCode::ResourceExhausted.as_str(),
+            "RESOURCE_EXHAUSTED"
+        );
     }
 
     #[test]

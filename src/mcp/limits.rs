@@ -34,6 +34,17 @@ pub const DEFAULT_MAX_RESULT_ROWS_CEILING: usize = 100_000;
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Operator hard ceiling for a per-call `max_response_bytes` override (64 MiB).
 pub const DEFAULT_MAX_RESPONSE_BYTES_CEILING: usize = 64 * 1024 * 1024;
+/// Default cap on the number of `query` calls concurrently occupying a
+/// timeout-race worker thread (Issue #3368 DoS guard).
+///
+/// A configured wall-clock timeout runs each query on a dedicated, detached
+/// worker thread (it cannot be cooperatively cancelled). Without a bound, a
+/// caller sending tiny `timeout_ms` overrides — or simply hammering the
+/// documented retriable-timeout retry loop — could pile up unbounded still-
+/// running expensive queries and exhaust threads/CPU/memory. This caps the
+/// number of live workers; at the cap a new timed query is rejected
+/// `UNAVAILABLE` (retriable) instead of spawning. `0` = unbounded.
+pub const DEFAULT_MAX_IN_FLIGHT_QUERIES: usize = 64;
 
 /// Which per-query resource-limit dimension a value applies to (Issue #3368).
 ///
@@ -208,6 +219,14 @@ pub struct QueryLimitsConfig {
     pub default_max_response_bytes: usize,
     /// Operator ceiling for a per-call byte override (`0` = no ceiling).
     pub max_response_bytes: usize,
+    /// Cap on the number of `query` calls concurrently occupying a
+    /// timeout-race worker thread (Issue #3368 DoS guard; `0` = unbounded).
+    ///
+    /// This is a server-level (not per-call) bound: it is not part of
+    /// [`EffectiveQueryLimits`] and cannot be overridden per request. It only
+    /// affects the spawned-worker path taken when a wall-clock timeout is in
+    /// force; the inline `timeout_ms == 0` path never spawns and is unguarded.
+    pub max_in_flight_queries: usize,
 }
 
 impl QueryLimitsConfig {
@@ -223,6 +242,7 @@ impl QueryLimitsConfig {
             max_result_rows: 0,
             default_max_response_bytes: 0,
             max_response_bytes: 0,
+            max_in_flight_queries: 0,
         }
     }
 
@@ -282,6 +302,7 @@ impl Default for QueryLimitsConfig {
             max_result_rows: DEFAULT_MAX_RESULT_ROWS_CEILING,
             default_max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES_CEILING,
+            max_in_flight_queries: DEFAULT_MAX_IN_FLIGHT_QUERIES,
         }
     }
 }
