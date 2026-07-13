@@ -10,7 +10,7 @@ use crate::query::planner::Statistics;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::{HistoricalStats, HistoricalStorage};
 use crate::storage::index_persistence::operations::{
-    persist_temporal_index, persist_vector_indexes,
+    persist_graph_index_from_snapshot, persist_temporal_index_from_snapshot, persist_vector_indexes,
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -67,19 +67,78 @@ impl AletheiaDB {
                 }
             })?;
 
-            // Capture current LSN for all operations
-            let current_lsn = self.wal.current_lsn().0;
-
             let tracker = self.persistence_tracker.as_ref();
 
+            // ── Coherence barrier (lost-write persist race fix) ─────────────────
+            //
+            // Capture the manifest LSN AND coherent in-memory snapshots of the
+            // current and historical stores as ONE atomic observation, so the
+            // graph and temporal indexes cannot observe different instants (the
+            // pre-fix torn snapshot could restore e.g. 85 graph nodes against 86
+            // temporal versions). We mirror the PROVEN backup.rs lock order
+            // EXACTLY — `historical.read()` THEN `current.snapshot_lock.write()`
+            // — which is consistent with the commit path's `historical.write()`
+            // → `snapshot_lock.read()` ordering, so no AB-BA inversion.
+            //
+            // The manifest LSN is the APPLIED WATERMARK: the minimum LSN of any
+            // commit that is durable (fsynced) but not yet applied. Stamping the
+            // manifest with this — rather than the WAL allocation frontier —
+            // guarantees replay re-covers any durable-but-unapplied write instead
+            // of dropping it. When nothing is in flight it equals today's frontier
+            // (idle persist keeps the identical manifest LSN). Re-applying a write
+            // that DID make it into the snapshot is safe: replay is idempotent
+            // (keyed by version_id).
+            //
+            // Locks are released BEFORE any disk I/O; serialization below runs
+            // OFF-LOCK from the immutable snapshots, exactly like checkpoint /
+            // backup.
+            //
+            // We ALSO hold `current_timestamp` (lock-order class 1, acquired
+            // FIRST) across the frontier + in-flight-min read. This closes a
+            // narrow window: a commit's WAL LSN band is allocated (bumping the
+            // frontier) INSIDE `append_batch`, but its in-flight registration
+            // happens just AFTER the append returns — both under the commit's
+            // own `current_timestamp` hold. Without taking `current_timestamp`
+            // here, `persist_indexes` could read a frontier already advanced past
+            // such a commit while `in_flight.min()` does not yet see it, so the
+            // manifest would sit ABOVE that soon-to-be-durable write and replay
+            // would drop it. Holding `current_timestamp` guarantees no commit is
+            // between allocation and registration, so the frontier and the
+            // in-flight set are mutually consistent. Order class 1 → 3 → snapshot
+            // is respected (no inversion; apply-phase commits hold `historical`
+            // but NOT `current_timestamp`, so no deadlock).
+            let (manifest_lsn, current_snapshot, historical_snapshot) = {
+                let _ts =
+                    self.current_timestamp
+                        .lock()
+                        .map_err(|_| StorageError::InconsistentState {
+                            reason: "current_timestamp lock poisoned during persist_indexes"
+                                .to_string(),
+                        })?;
+                let hist = self.historical.read();
+                let (manifest_lsn, current_snapshot) = {
+                    let _snap_lock = self.current.snapshot_lock.write();
+                    let frontier = self.wal.current_lsn().0;
+                    let manifest_lsn = self.in_flight.min().unwrap_or(frontier);
+                    let current_snapshot = self
+                        .current
+                        .create_snapshot(crate::storage::wal::LSN(manifest_lsn));
+                    (manifest_lsn, current_snapshot)
+                };
+                let historical_snapshot =
+                    hist.create_snapshot(crate::storage::wal::LSN(manifest_lsn));
+                (manifest_lsn, current_snapshot, historical_snapshot)
+            };
+
             // String interner must be saved first (dependency for all others).
-            // Update the string LSN tracker to current_lsn BEFORE calculating safe LSN
-            // so even if no new strings were added, the tracker reflects current state.
+            // Update the string LSN tracker to manifest_lsn BEFORE calculating
+            // safe LSN so even if no new strings were added, the tracker reflects
+            // the watermark.
             if let Some(tracker) = tracker {
                 crate::storage::index_persistence::operations::persist_string_interner(
                     manager,
                     tracker,
-                    current_lsn,
+                    manifest_lsn,
                 )?;
             } else {
                 manager.save_string_interner().map_err(|e| {
@@ -90,29 +149,31 @@ impl AletheiaDB {
                 })?;
             }
 
-            crate::storage::index_persistence::operations::persist_graph_index(
-                &self.current,
-                manager,
-                tracker,
-                current_lsn,
-            )?;
+            // Graph index from the COHERENT current snapshot (off-lock).
+            persist_graph_index_from_snapshot(&current_snapshot, manager, tracker, manifest_lsn)?;
 
             if let Some(tracker) = tracker {
-                persist_vector_indexes(&self.current, manager, Some(tracker), current_lsn)?;
-                persist_temporal_index(
-                    &self.historical,
-                    &self.temporal_indexes,
+                // NOTE (v1 scope): vector indexes are still persisted from live
+                // current storage rather than the coherent snapshot. The reported
+                // torn-snapshot symptom is graph-vs-temporal (both fixed above);
+                // a snapshot-coherent vector persist requires locking the vector
+                // index and is a tracked follow-up. See the design doc.
+                persist_vector_indexes(&self.current, manager, Some(tracker), manifest_lsn)?;
+                // Temporal index from the COHERENT historical snapshot (off-lock).
+                persist_temporal_index_from_snapshot(
+                    &historical_snapshot,
                     manager,
                     tracker,
-                    current_lsn,
+                    manifest_lsn,
                 )?;
             }
 
-            // Record WAL position for future replay coordination.
-            // Safe LSN = min of all components; since we just persisted everything, current_lsn is safe.
+            // Record WAL position for future replay coordination. Safe LSN = min
+            // of all components; since every component was just persisted at
+            // `manifest_lsn`, this resolves to the applied watermark.
             let safe_lsn = tracker
                 .map(|t| t.get_safe_manifest_lsn())
-                .unwrap_or(current_lsn);
+                .unwrap_or(manifest_lsn);
 
             let manifest = IndexManifest::new(safe_lsn);
             manager.save_manifest(&manifest).map_err(|e| {

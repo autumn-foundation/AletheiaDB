@@ -158,6 +158,14 @@ pub struct AletheiaDB {
     pub(crate) temporal_indexes: Arc<TemporalIndexes>,
     /// Concurrent Write-Ahead Log for durability - lock-free striped architecture
     pub(crate) wal: Arc<ConcurrentWalSystem>,
+    /// In-flight (durable-but-not-yet-applied) LSN tracker (lost-write persist
+    /// race fix). Records the base LSN of every commit that is fsynced but not
+    /// yet applied to current/historical storage. Index persistence stamps the
+    /// manifest with `min(in_flight)` — the applied watermark — instead of the
+    /// WAL allocation frontier, so replay always re-covers a durable-but-
+    /// unapplied write instead of dropping it. Its internal mutex is a leaf
+    /// (never held while acquiring another write-path primitive).
+    pub(crate) in_flight: Arc<crate::api::transaction::write::InFlightLsns>,
     /// Current logical timestamp for transaction time - Mutex-protected for thread-safe increment
     pub(crate) current_timestamp: Arc<Mutex<Timestamp>>,
     /// Monotonic observation time for adaptive forward clock-skew limits.

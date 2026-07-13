@@ -37,8 +37,11 @@ use std::time::Instant;
 mod apply;
 mod conflict;
 pub(crate) mod constraint;
+mod in_flight;
 mod validation;
 mod wal;
+
+pub(crate) use in_flight::InFlightLsns;
 
 #[cfg(test)]
 pub(crate) const MAX_BACKWARD_DRIFT_US: i64 = crate::core::hlc::MAX_BACKWARD_DRIFT_US;
@@ -104,6 +107,12 @@ pub struct WriteTransaction {
     /// Uniqueness constraint registry shared with the parent database.
     /// `None` for transactions created without a registry (legacy / tests).
     pub(crate) constraint_registry: Option<Arc<crate::core::constraint::ConstraintRegistry>>,
+
+    /// In-flight (durable-but-not-yet-applied) LSN tracker shared with the
+    /// parent database (lost-write persist race fix). `None` for transactions
+    /// created without a tracker (legacy / tests): such commits skip watermark
+    /// registration and behave exactly as before.
+    pub(crate) in_flight: Option<Arc<InFlightLsns>>,
 }
 
 impl WriteTransaction {
@@ -241,6 +250,7 @@ impl WriteTransaction {
             version_id_gen,
             durability_mode,
             constraint_registry: None,
+            in_flight: None,
         }
     }
 
@@ -250,6 +260,14 @@ impl WriteTransaction {
         registry: Arc<crate::core::constraint::ConstraintRegistry>,
     ) -> Self {
         self.constraint_registry = Some(registry);
+        self
+    }
+
+    /// Attach the parent database's in-flight LSN tracker (called by the DB
+    /// layer). Enables the durable-but-unapplied watermark used by index
+    /// persistence to avoid lost writes across a crash.
+    pub(crate) fn with_in_flight_tracker(mut self, tracker: Arc<InFlightLsns>) -> Self {
+        self.in_flight = Some(tracker);
         self
     }
 
@@ -412,6 +430,16 @@ impl WriteTransaction {
         // `current_timestamp` lock is taken, preserving the lock-order contract.
         let closing_version_ids = self.pregenerate_closing_version_ids()?;
 
+        // In-flight watermark guard (lost-write persist race fix). Declared in
+        // the OUTER function scope so it lives past the `current_timestamp`
+        // critical section and across `apply_changes` + finalization: the LSN is
+        // registered AFTER the WAL append allocates it but BEFORE the durability
+        // fsync (so a durable write is always registered), and this guard is only
+        // dropped at end-of-function (after apply + finalize on the success path,
+        // or on any early-return / panic path), so a *deregistered* LSN is
+        // guaranteed present in any current+historical snapshot.
+        let mut in_flight_guard: Option<in_flight::InFlightGuard> = None;
+
         // Acquire commit timestamp and perform mode-aware WAL flush.
         //
         // CRITICAL: We must hold the timestamp lock until WAL logging is complete
@@ -542,7 +570,15 @@ impl WriteTransaction {
 
             // Log operations to WAL (lock-free striped append!)
             // This must happen BEFORE applying changes for durability.
-            wal::log_operations_to_wal(self, commit, &closing_version_ids)?;
+            // Returns the base (lowest) LSN allocated for this commit, if any.
+            let base_lsn = wal::log_operations_to_wal(self, commit, &closing_version_ids)?;
+
+            // Register the commit's base LSN as in-flight BEFORE the durability
+            // fsync below, so a write that becomes durable is always registered.
+            // The guard survives to end-of-function (see its declaration above).
+            if let (Some(tracker), Some(base_lsn)) = (self.in_flight.as_ref(), base_lsn) {
+                in_flight_guard = Some(tracker.register(base_lsn.0));
+            }
 
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
@@ -620,6 +656,15 @@ impl WriteTransaction {
         #[cfg(test)]
         commit_test_hooks::run_pre_apply_hook();
 
+        // Always-compiled one-shot interleaving seam for the lost-write persist
+        // race regression tests (which live in `tests/` and therefore cannot see
+        // the `#[cfg(test)]` hooks above). This fires at the SAME point — durable
+        // + acknowledged (WAL fsynced), in-flight LSN registered, but NOT yet
+        // applied — so an integration test can park exactly one commit here while
+        // it drives a racing `persist_indexes()`. In production the seam is a
+        // single relaxed atomic load (unarmed), so it is effectively zero-cost.
+        race_seam::run_pre_apply_once();
+
         let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
 
         // Test-only interleaving hook (Issue #3425): fires at the exact point
@@ -632,6 +677,13 @@ impl WriteTransaction {
         // Only reached on the success path — sets commit_timestamp: Some(T) on all
         // written nodes/edges, making them visible to future snapshot readers.
         apply::finalize_current_commit_timestamps(self, commit_timestamp);
+
+        // Apply + finalization are complete: this write is now present in both
+        // current and historical storage. Deregister the in-flight LSN so index
+        // persistence no longer needs to hold the manifest watermark below it.
+        // Deregistering strictly AFTER finalize is the invariant that lets the
+        // watermark guarantee "every deregistered LSN is in the snapshot".
+        drop(in_flight_guard.take());
 
         // Finalization complete: release the historical write guard. Snapshots
         // blocked on `historical.read()` now proceed and observe resolved timestamps.
@@ -1985,6 +2037,75 @@ impl Drop for WriteTransaction {
             // Register abort with visibility manager
             self.visibility_manager.register_abort(self.tx_id);
             self.state = TxState::Aborted;
+        }
+    }
+}
+
+/// Always-compiled one-shot commit-path interleaving seam for the lost-write
+/// persist-race regression tests.
+///
+/// Unlike [`commit_test_hooks`] (which is `#[cfg(test)]` and thus invisible to
+/// the crate's `tests/` integration tests), this seam is always compiled and
+/// `#[doc(hidden)] pub`, so an integration test can arm it. It lets a test park
+/// exactly one commit at the **durable-but-not-yet-applied** point of the commit
+/// path (WAL fsynced + acknowledged, in-flight LSN registered, `apply_changes`
+/// not yet called) while it drives a racing `persist_indexes()`.
+///
+/// # Cost
+///
+/// The fire path ([`run_pre_apply_once`]) is a single relaxed atomic load when
+/// unarmed (the production state), so it adds no measurable cost to the commit
+/// hot path — the "an `Option` that's `None`" contract, implemented as an
+/// `AtomicBool` that is `false` in production.
+///
+/// # One-shot
+///
+/// [`arm_pre_apply_once`] installs a hook fired by the **next** commit only; the
+/// fire path atomically disarms before running the hook, so under concurrency
+/// exactly one commit fires it. [`clear`] disarms without firing (test teardown).
+#[doc(hidden)]
+pub mod race_seam {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    /// Fast-path guard: `true` only while a hook is armed. Kept separate from
+    /// the `Mutex` so the unarmed fire path never touches the lock.
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Arm a one-shot hook fired by the next commit at the durable-but-unapplied
+    /// point. Intended for regression tests only.
+    pub fn arm_pre_apply_once(hook: Box<dyn FnOnce() + Send>) {
+        if let Ok(mut slot) = HOOK.lock() {
+            *slot = Some(hook);
+            ARMED.store(true, Ordering::Release);
+        }
+    }
+
+    /// Disarm any pending hook without firing it (test teardown).
+    pub fn clear() {
+        ARMED.store(false, Ordering::Release);
+        if let Ok(mut slot) = HOOK.lock() {
+            *slot = None;
+        }
+    }
+
+    /// Fire and consume the armed hook exactly once. Called on the commit hot
+    /// path just before `apply_changes`.
+    #[inline]
+    pub(crate) fn run_pre_apply_once() {
+        // Fast path: one relaxed atomic load; `false` in production.
+        if !ARMED.load(Ordering::Acquire) {
+            return;
+        }
+        // Disarm atomically so concurrent commits never double-fire.
+        if ARMED.swap(false, Ordering::AcqRel) {
+            let hook = HOOK.lock().ok().and_then(|mut slot| slot.take());
+            if let Some(hook) = hook {
+                hook();
+            }
         }
     }
 }
