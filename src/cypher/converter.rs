@@ -1268,8 +1268,8 @@ impl CypherConverter {
     ///   which fall through to the ordinary comparison path),
     /// - `Err(..)` for a provenance-named accessor with a malformed argument
     ///   (e.g. `source(n.foo)`, `confidence('x')`, `confidence(r, s)`,
-    ///   `source()`, `source(DISTINCT n)`), so the mistake surfaces as a
-    ///   structured error rather than silently degrading.
+    ///   `source()`), so the mistake surfaces as a structured error rather than
+    ///   silently degrading.
     fn as_provenance_accessor(
         &self,
         expr: &CypherExpr,

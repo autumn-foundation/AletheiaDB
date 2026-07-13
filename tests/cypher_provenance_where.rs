@@ -285,14 +285,39 @@ fn confidence_via_parameter_folds() {
         .expect("query executes");
     let mut got = Vec::new();
     for row in results.collect_all().expect("collect rows") {
-        if let EntityResult::Node(n) = row.entity
-            && let Some(v) = n.get_property("name")
-        {
+        if let Some(v) = match &row.entity {
+            EntityResult::Node(n) => n.get_property("name"),
+            _ => None,
+        } {
             got.push(format!("{v:?}"));
         }
     }
     got.sort();
     assert_eq!(got, vec!["String(\"alice\")", "String(\"carol\")"]);
+}
+
+#[test]
+fn count_star_reflects_provenance_filter_before_aggregation() {
+    use aletheiadb::core::property::PropertyValue;
+    let db = make_db();
+    // The provenance `WHERE` runs BEFORE aggregation: only alice (0.95) clears
+    // `>= 0.9`, so `count(*)` is 1 -- not the 4-row unfiltered total. This locks
+    // the filter-then-aggregate ordering.
+    let results = db
+        .execute_cypher("MATCH (n:Person) WHERE confidence(n) >= 0.9 RETURN count(*)")
+        .expect("query executes");
+    let rows = results.collect_all().expect("collect rows");
+    assert_eq!(rows.len(), 1, "keyless count(*) yields a single global row");
+    let cols = rows[0]
+        .columns
+        .as_ref()
+        .expect("aggregate row carries columns");
+    assert_eq!(cols.len(), 1, "one projected aggregate column");
+    assert_eq!(
+        cols[0].1,
+        PropertyValue::Int(1),
+        "only the provenance-filtered rows are counted"
+    );
 }
 
 #[test]
@@ -450,9 +475,10 @@ fn cypher_aql_parity_over_representative_queries() {
             let results = db.execute_aql(aql).expect("aql executes");
             let mut out = Vec::new();
             for row in results.collect_all().expect("collect rows") {
-                if let EntityResult::Node(n) = row.entity
-                    && let Some(v) = n.get_property("name")
-                {
+                if let Some(v) = match &row.entity {
+                    EntityResult::Node(n) => n.get_property("name"),
+                    _ => None,
+                } {
                     out.push(format!("{v:?}"));
                 }
             }
