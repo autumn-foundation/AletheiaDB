@@ -6013,3 +6013,286 @@ fn test_rebuild_edge_version_chains_preserves_restored_links_across_cold_gap() {
     assert_eq!(v3.next_version, None);
     assert_eq!(storage.get_current_edge_version(edge_id), Some(v3_id));
 }
+
+// ============================================================================
+// Issue #383: Per-entity temporal vector snapshot policy
+//
+// These tests exercise the per-entity snapshot-policy gate that decides, per
+// node/edge, whether that entity's anchor triggers the pre-anchor snapshot
+// hooks (the #3525 multi-hook API). They use a *recording* hook that captures
+// the `entity_id` it is invoked with, so we can assert that the temporal vector
+// index is triggered for **exactly** the entities whose policy opted in.
+// ============================================================================
+
+/// A pre-anchor hook that records every `entity_id` it is invoked for and
+/// returns a fixed snapshot id, so tests can observe which entities' anchors
+/// actually triggered the snapshot hooks.
+fn recording_hook(sink: &Arc<std::sync::Mutex<Vec<u64>>>, snapshot_id: usize) -> PreAnchorHook {
+    let sink = Arc::clone(sink);
+    Arc::new(move |_entity_type, entity_id, _timestamp, _properties| {
+        sink.lock().unwrap().push(entity_id);
+        Ok(Some(snapshot_id))
+    })
+}
+
+/// Create a first (anchor) edge version for `id` and return its stored vector
+/// snapshot id (mirrors `add_first_node_anchor`).
+fn add_first_edge_anchor(storage: &mut HistoricalStorage, id: u64) -> Option<usize> {
+    let edge_id = EdgeId::new(id).unwrap();
+    let label = GLOBAL_INTERNER.intern("LINKS").unwrap();
+    let vid = VersionId::new(10_000 + id).unwrap();
+    storage
+        .add_edge_version(
+            edge_id,
+            vid,
+            1000.into(),
+            1000.into(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            false,
+        )
+        .unwrap();
+    let version = storage.get_edge_version(vid).unwrap();
+    assert!(version.is_anchor());
+    version.data.get_vector_snapshot_id()
+}
+
+/// Backward compatibility: with no policy configured the default is `Snapshot`,
+/// so every anchor triggers the hook exactly as before Issue #383.
+#[test]
+fn test_snapshot_policy_default_is_backward_compat() {
+    let mut storage = HistoricalStorage::new();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    storage.add_pre_node_anchor_hook(recording_hook(&seen, 7));
+
+    // Default resolves to Snapshot for any entity.
+    assert_eq!(
+        storage.node_snapshot_policy(NodeId::new(1).unwrap()),
+        SnapshotPolicy::Snapshot
+    );
+    assert_eq!(
+        storage.default_node_snapshot_policy(),
+        SnapshotPolicy::Snapshot
+    );
+
+    let s1 = add_first_node_anchor(&mut storage, 1);
+    let s2 = add_first_node_anchor(&mut storage, 2);
+
+    assert_eq!(s1, Some(7));
+    assert_eq!(s2, Some(7));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![1, 2],
+        "both anchors triggered the hook"
+    );
+    assert_eq!(storage.hook_metrics().invocations, 2);
+}
+
+/// A node marked `Skip` still forms its graph anchor, but the snapshot hooks are
+/// not run for it: no snapshot id is stored and no invocation is counted.
+#[test]
+fn test_snapshot_policy_skip_node_suppresses_hook() {
+    let mut storage = HistoricalStorage::new();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    storage.add_pre_node_anchor_hook(recording_hook(&seen, 42));
+
+    storage.set_node_snapshot_policy(NodeId::new(1).unwrap(), SnapshotPolicy::Skip);
+    assert_eq!(
+        storage.node_snapshot_policy(NodeId::new(1).unwrap()),
+        SnapshotPolicy::Skip
+    );
+
+    let snapshot = add_first_node_anchor(&mut storage, 1);
+
+    // Graph anchor was still created (asserted inside the helper), but with no
+    // vector snapshot and no hook invocation.
+    assert_eq!(
+        snapshot, None,
+        "Skip entity must not capture a vector snapshot"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "Skip entity must not invoke the hook"
+    );
+    assert_eq!(storage.hook_metrics().invocations, 0);
+}
+
+/// Two entities with different policies are snapshotted independently: the
+/// temporal index is triggered for exactly the opted-in entity.
+#[test]
+fn test_snapshot_policy_two_nodes_independent() {
+    let mut storage = HistoricalStorage::new();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    storage.add_pre_node_anchor_hook(recording_hook(&seen, 5));
+
+    storage.set_node_snapshot_policy(NodeId::new(1).unwrap(), SnapshotPolicy::Skip);
+    // Node 2 keeps the default (Snapshot).
+
+    let s1 = add_first_node_anchor(&mut storage, 1);
+    let s2 = add_first_node_anchor(&mut storage, 2);
+
+    assert_eq!(s1, None);
+    assert_eq!(s2, Some(5));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![2],
+        "exactly the opted-in node triggered a snapshot"
+    );
+    assert_eq!(storage.hook_metrics().invocations, 1);
+}
+
+/// Flipping the default to `Skip` gives an opt-in model: only nodes explicitly
+/// set to `Snapshot` trigger the hook.
+#[test]
+fn test_snapshot_policy_default_skip_opt_in() {
+    let mut storage = HistoricalStorage::new();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    storage.add_pre_node_anchor_hook(recording_hook(&seen, 3));
+
+    storage.set_default_node_snapshot_policy(SnapshotPolicy::Skip);
+    assert_eq!(storage.default_node_snapshot_policy(), SnapshotPolicy::Skip);
+    storage.set_node_snapshot_policy(NodeId::new(5).unwrap(), SnapshotPolicy::Snapshot);
+
+    let s5 = add_first_node_anchor(&mut storage, 5);
+    let s6 = add_first_node_anchor(&mut storage, 6);
+
+    assert_eq!(s5, Some(3), "opted-in node snapshotted");
+    assert_eq!(s6, None, "default-Skip node not snapshotted");
+    assert_eq!(*seen.lock().unwrap(), vec![5]);
+    assert_eq!(storage.hook_metrics().invocations, 1);
+}
+
+/// The gate wraps the whole ordered multi-hook run: a `Snapshot` entity runs all
+/// hooks in registration order (last `Ok(Some)` wins), while a `Skip` entity
+/// runs none of them.
+#[test]
+fn test_snapshot_policy_multi_hook_ordering_preserved_and_gated() {
+    use std::sync::Mutex;
+
+    let mut storage = HistoricalStorage::new();
+    let order = Arc::new(Mutex::new(Vec::<(u64, usize)>::new()));
+
+    for i in 0..2usize {
+        let order_clone = Arc::clone(&order);
+        let hook: PreAnchorHook =
+            Arc::new(move |_entity_type, entity_id, _timestamp, _properties| {
+                order_clone.lock().unwrap().push((entity_id, i));
+                Ok(Some(100 + i))
+            });
+        storage.add_pre_node_anchor_hook(hook);
+    }
+
+    storage.set_node_snapshot_policy(NodeId::new(2).unwrap(), SnapshotPolicy::Skip);
+
+    let s1 = add_first_node_anchor(&mut storage, 1); // Snapshot (default)
+    let s2 = add_first_node_anchor(&mut storage, 2); // Skip
+
+    assert_eq!(s1, Some(101), "last hook wins for the Snapshot node");
+    assert_eq!(s2, None, "Skip node runs no hooks");
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec![(1, 0), (1, 1)],
+        "both hooks ran in order for node 1 only; node 2 ran none",
+    );
+    // Two invocations total (node 1's two hooks); node 2 contributed none.
+    assert_eq!(storage.hook_metrics().invocations, 2);
+}
+
+/// Node and edge policies are independent registries: making nodes default-Skip
+/// does not affect edge snapshotting, and vice versa.
+#[test]
+fn test_snapshot_policy_node_and_edge_independent() {
+    let mut storage = HistoricalStorage::new();
+    let node_seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    let edge_seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    storage.add_pre_node_anchor_hook(recording_hook(&node_seen, 1));
+    storage.add_pre_edge_anchor_hook(recording_hook(&edge_seen, 2));
+
+    // Nodes default to Skip; edges keep the Snapshot default.
+    storage.set_default_node_snapshot_policy(SnapshotPolicy::Skip);
+
+    let ns = add_first_node_anchor(&mut storage, 1);
+    let es = add_first_edge_anchor(&mut storage, 1);
+
+    assert_eq!(ns, None, "node default Skip suppresses node snapshot");
+    assert_eq!(
+        es,
+        Some(2),
+        "edge default (Snapshot) is unaffected by node policy"
+    );
+    assert!(node_seen.lock().unwrap().is_empty());
+    assert_eq!(*edge_seen.lock().unwrap(), vec![1]);
+}
+
+/// An edge marked `Skip` suppresses the edge snapshot hook, symmetric with nodes.
+#[test]
+fn test_snapshot_policy_edge_skip_suppresses() {
+    let mut storage = HistoricalStorage::new();
+    let edge_seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    storage.add_pre_edge_anchor_hook(recording_hook(&edge_seen, 9));
+
+    storage.set_edge_snapshot_policy(EdgeId::new(1).unwrap(), SnapshotPolicy::Skip);
+    assert_eq!(
+        storage.edge_snapshot_policy(EdgeId::new(1).unwrap()),
+        SnapshotPolicy::Skip
+    );
+
+    let es = add_first_edge_anchor(&mut storage, 1);
+
+    assert_eq!(es, None);
+    assert!(edge_seen.lock().unwrap().is_empty());
+    assert_eq!(storage.hook_metrics().invocations, 0);
+}
+
+/// `clear_node_snapshot_policy` reverts a node to the current default; the
+/// resolved getter reflects overrides and their removal.
+#[test]
+fn test_snapshot_policy_clear_reverts_to_default() {
+    let mut storage = HistoricalStorage::new();
+    let node = NodeId::new(1).unwrap();
+
+    storage.set_node_snapshot_policy(node, SnapshotPolicy::Skip);
+    assert_eq!(storage.node_snapshot_policy(node), SnapshotPolicy::Skip);
+
+    assert_eq!(
+        storage.clear_node_snapshot_policy(node),
+        Some(SnapshotPolicy::Skip)
+    );
+    assert_eq!(
+        storage.node_snapshot_policy(node),
+        SnapshotPolicy::Snapshot,
+        "cleared node reverts to the default policy",
+    );
+    // Clearing again is a no-op.
+    assert_eq!(storage.clear_node_snapshot_policy(node), None);
+}
+
+/// Lock-order / no-deadlock smoke test: a sequence of many anchors with mixed
+/// per-entity policies (and a configured hook timeout) completes normally,
+/// exercising the gate on the write path under the historical lock.
+#[test]
+fn test_snapshot_policy_mixed_sequence_completes() {
+    let mut storage = HistoricalStorage::new();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    storage.add_pre_node_anchor_hook(recording_hook(&seen, 1));
+    // A generous timeout exercises the detached-thread hook path under the gate.
+    storage.set_pre_anchor_hook_timeout(Some(std::time::Duration::from_secs(5)));
+
+    // Even ids Skip, odd ids Snapshot.
+    for id in 1..=20u64 {
+        if id % 2 == 0 {
+            storage.set_node_snapshot_policy(NodeId::new(id).unwrap(), SnapshotPolicy::Skip);
+        }
+    }
+    for id in 1..=20u64 {
+        add_first_node_anchor(&mut storage, id);
+    }
+
+    let seen = seen.lock().unwrap();
+    // Exactly the 10 odd ids triggered the snapshot hook.
+    let expected: Vec<u64> = (1..=20u64).filter(|id| id % 2 == 1).collect();
+    assert_eq!(*seen, expected);
+    assert_eq!(storage.hook_metrics().invocations, 10);
+}
