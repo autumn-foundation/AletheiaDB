@@ -33,6 +33,7 @@ cargo bench --bench aletheiadb -- node_lookup
 | `id_generation` | ID allocation | ID generation throughput |
 | `string_interning` | String deduplication | Intern performance |
 | `temporal_vector` | Temporal vector queries | Time-travel with vectors |
+| `provenance_write_throughput` | "Cost of trust" write matrix (baseline vs provenance vs constraint vs composed) | Throughput ratio, p50/p99 latency, self-gate ([guide](benchmarks/cost-of-trust.md)) |
 
 ## Viewing Results
 

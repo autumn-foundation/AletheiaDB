@@ -35,6 +35,36 @@
       "metric": "Storage overhead",
       "target": "<2X vs non-temporal",
       "rationale": "Acceptable overhead for bi-temporal tracking"
+    },
+    {
+      "metric": "provenance_write_composed_ratio",
+      "target": ">=0.80",
+      "rationale": "Issue #3383: write throughput with #3224 provenance AND a #3218 uniqueness constraint enabled must stay >=80% of the same-run no-trust baseline (measured back-to-back, hardware-variance-immune)"
+    },
+    {
+      "metric": "provenance_only_write_ratio",
+      "target": ">=0.85",
+      "rationale": "Issue #3383: attaching a #3224 provenance bundle to every write must keep throughput >=85% of the same-run baseline (WAL serializes extra source/confidence/note bytes)"
+    },
+    {
+      "metric": "constraint_active_write_ratio",
+      "target": ">=0.85",
+      "rationale": "Issue #3383: an active #3218 uniqueness constraint must keep write throughput >=85% of the same-run baseline (per-write reservation-index check on the commit path)"
+    },
+    {
+      "metric": "provenance_write_current_read_p99",
+      "target": "<1µs",
+      "rationale": "Issue #3383 (AC4): carrying provenance must not slow the current-state single-hop read hot path"
+    },
+    {
+      "metric": "provenance_temporal_reconstruct",
+      "target": "<10ms",
+      "rationale": "Issue #3383 (AC4): reconstructing a provenance-carrying historical version stays within the temporal-query budget"
+    },
+    {
+      "metric": "provenance_constraint_recovery_10k_50k",
+      "target": "<5s",
+      "rationale": "Issue #3383 (AC5): crash recovery of a provenance + uniqueness-constraint dataset at the 10K-node/50K-edge reference scale completes within the medium-dataset recovery budget"
     }
   ]
 }
