@@ -1,11 +1,20 @@
 # openCypher Compatibility Matrix (Issue #561)
 
-AletheiaDB implements a **read-only subset** of openCypher with bi-temporal and
-vector extensions. This document is the authoritative, machine-verified contract
-for **what that subset is** and **how out-of-subset queries fail**. Every row in
-the tables below is pinned by an executable case in the compatibility suite
-(`src/cypher/compat.rs`); the doc and the suite are kept in lockstep — if they
-disagree, that is a bug.
+AletheiaDB implements a growing subset of openCypher with bi-temporal and
+vector extensions. The read subset is complemented by a **core write subset**
+(Issue #560: `CREATE` / `SET` / `DELETE` / `DETACH DELETE`), executed through the
+native bi-temporal write APIs. This document is the authoritative,
+machine-verified contract for **what that subset is** and **how out-of-subset
+queries fail**. Every row in the tables below is pinned by an executable case in
+the compatibility suite (`src/cypher/compat.rs`); the doc and the suite are kept
+in lockstep — if they disagree, that is a bug.
+
+> **Writes are `execute_cypher`-only.** The MCP `query` tool and HTTP `/query`
+> endpoint remain strictly read-only: every mutating clause is rejected by the
+> text-level guard `crate::query::read_only::detect_mutating_clause` *before the
+> parser runs*, so a write can never execute through those surfaces. Mutations
+> are reachable only via `AletheiaDB::execute_cypher` /
+> `execute_cypher_with_params`.
 
 The design goal is **honesty over coverage**: a construct is either *supported*
 (parses/executes correctly) or *rejected with a structured error*. AletheiaDB
@@ -108,8 +117,63 @@ correctly.
 | `FOR SYSTEM_TIME AS OF` (#551) | `... FOR SYSTEM_TIME AS OF '2024-01-15' RETURN n` | *convert-only*; runtime-proven (`test_e2e_for_system_time_as_of_honored_by_label_scan`) |
 | Bi-temporal (#551) | `... AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...' RETURN n` | *convert-only*; runtime-proven (`test_e2e_as_of_bitemporal_valid_and_system`, `test_e2e_as_of_asymmetric_bitemporal`) |
 | `BETWEEN ... AND` (valid-time range, #552) | `... BETWEEN '2024-01-01' AND '2024-12-31' RETURN n` | *convert-only*; half-open `[start, end)` (start-inclusive, end-exclusive). Runtime-proven in `tests.rs` (`test_e2e_between_*`, incl. boundary inclusivity) |
-| Vector similarity in `ORDER BY` | `RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10` | *convert-only* (needs an `Embedding` param) |
+| Vector similarity in `ORDER BY` (#553) | `RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10` | *convert-only* in the suite (needs a seeded vector index); runtime-proven in `tests.rs` (`test_e2e_vector_rank_*`) |
+| Vector distance functions (#553) | `vector.cosine` / `vector.euclidean` / `vector.dot_product` | the function name selects the metric (cosine / euclidean / dot-product) for the rank, overriding the index default; runtime-proven per-metric (`test_e2e_{cosine,dot_product,euclidean}_picks_*_winner`) |
+| Vector `ORDER BY` direction (#553) | `... vector.cosine(...) DESC` / `... vector.euclidean(...) ASC` | the rank yields **nearest-first**; the direction must match the metric's natural sense — `DESC` for similarity metrics (cosine/similarity/dot_product), `ASC` for the distance-flavored `vector.euclidean`. A farthest-first direction (cosine `ASC`, euclidean `DESC`) is **rejected** with `UnsupportedFeature` (never silently answered nearest-first) |
+| Vector literal embedding (#554) | `ORDER BY vector.similarity(d.embedding, [0.1, 0.2, 0.3]) DESC` | inline numeric list literal (Int/Float coerced to `f32`); usable anywhere an `Embedding` param is; non-numeric/nested/boolean/empty rejected with a clear `SemanticError`; a `List` **param** (non-`Embedding`) is a clear `ParameterError`; dimension mismatch surfaces a clear runtime error |
+| Vector similarity threshold (#553) | `MATCH (d:Document) WHERE vector.similarity(d.embedding, $q) > 0.8 RETURN d` | `>`,`>=`,`<`,`<=` against a numeric literal (`=`/`<>` rejected); alone or as one `AND` conjunct (residual predicate survives as a `Filter`); runtime-proven (`test_e2e_threshold_operator_coverage`). **Compares against the metric's *similarity* score, not the raw distance**: for `vector.euclidean` the similarity is `1/(1+distance)`, so `vector.euclidean(...) > 0.8` means *distance < 0.25* — prefer cosine/dot_product/`similarity` for intuitive thresholds. A bare threshold with no `ORDER BY` returns survivors **nearest-first** (and `LIMIT n` becomes top-n nearest), since the threshold is computed by the rank; openCypher leaves order unspecified without `ORDER BY`, so this is superset-correct (`test_e2e_bare_threshold_orders_by_similarity`) |
+| Vector score projection (#555) | `RETURN d, vector.cosine(d.embedding, $q) AS score ORDER BY score DESC` | the aliased similarity is materialized as a returned column and is sortable via the alias; runtime-proven (`test_e2e_score_alias_materialized_column`) |
 | Parameters | `MATCH (n:Person {name:$name}) RETURN n` | `$param` bindings |
+
+### Write clauses (Issue #560, `execute_cypher`-only)
+
+Executed through the native write APIs in one transaction (all-or-nothing, one
+commit timestamp), so each mutation records the correct bi-temporal version.
+Deeper side-effect and bi-temporal assertions live in `src/cypher/tests.rs`
+(`cypher::tests::mutations`); the compat suite pins the row-count contract
+against a **fresh seed graph per case**.
+
+| Construct | Example | Notes / caveats |
+|-----------|---------|-----------------|
+| `CREATE` node | `CREATE (n:Person {name:'Zed'}) RETURN n` | exactly one label per new node (single-label model); inline properties supported; `RETURN` yields the created node |
+| `CREATE` relationship | `CREATE (a:Team {name:'X'})-[:HAS]->(b:Member {name:'Y'})` | directed (`->`/`<-`), exactly one type; endpoints may be new or reference matched/earlier-created variables |
+| `MATCH ... CREATE` | `MATCH (a:Person {name:'A'}),(b:Person {name:'B'}) CREATE (a)-[:KNOWS]->(b)` | creates once per matched row |
+| `SET` property | `MATCH (n:Person {name:'Alice'}) SET n.age = 31` | PATCH-merge (adds/overwrites the named key, preserves others); multiple `n.p = v` items coalesce into one new version; also applies to relationship variables |
+| `DELETE` | `MATCH (a)-[r:KNOWS]->(b) DELETE r` | deletes node and/or relationship variables; a plain `DELETE` of a node that still has relationships is **refused** (openCypher safety rule) |
+| `DETACH DELETE` | `MATCH (n:Person {name:'A'}) DETACH DELETE n` | cascade-removes the node and its relationships (maps to `delete_node_cascade`) |
+| `RETURN` after write | `CREATE (n:X {..}) RETURN n`, `... SET n.p=1 RETURN n` | bound variables (bare or `AS`-aliased) / `*`; re-read post-write (a `SET`-updated node reflects the new value) |
+
+Deferred to follow-ups (rejected cleanly — see §2): `MERGE` (#3548), `REMOVE`
+(#3549), label mutation (`SET n:Label`), whole-entity replacement
+(`SET n = {...}` / `+=`), variable-length relationships in a write, and
+aggregate/property `RETURN` projections after a write.
+
+#### Write-clause v1 deviations & limitations
+
+- **`SET n.prop = null` stores an explicit `Null`, it does not remove the key.**
+  openCypher treats `SET x.p = null` as *deleting* the property. AletheiaDB's
+  native update is PATCH-merge with no per-key tombstone, so v1 stores an
+  explicit `PropertyValue::Null` under the key instead. True key deletion (and
+  the `REMOVE` clause) are blocked on a replace/tombstone write API tracked in
+  **#3549**. Pinned by `set_null_stores_explicit_null_v1_deviation`.
+- **`RETURN` after a write re-reads current state post-commit.** The returned
+  rows reflect the entity's state *after* the statement commits (a `SET`-updated
+  node shows the new value); a returned entity that the statement *deleted* falls
+  back to the pre-delete snapshot captured during matching.
+- **The reading `MATCH` is evaluated before the write transaction opens
+  (check-then-act window).** Matching reads current state, then all writes run in
+  one transaction. The *writes* are atomic (all-or-nothing, one commit
+  timestamp), but a concurrent committer could change the matched set between the
+  match and the write. v1 accepts this window; a snapshot-consistent match-inside-
+  the-write-tx is a follow-up.
+- **Per-row versioning.** A `SET`/`DELETE` whose reading `MATCH` binds the same
+  entity in multiple rows applies once per row (can record multiple versions).
+  Multiple `SET` items targeting one entity in a single row are coalesced into
+  one version.
+- **Same-statement create-then-delete-endpoint.** `CREATE (a)-[:R]->(b) DELETE a`
+  (plain) is **refused** with the friendly "use `DETACH DELETE`" message via a
+  statement-local created-edge ledger (rather than aborting at commit);
+  `DETACH DELETE` of such an endpoint works (cascade unions the buffered CREATE).
 
 ---
 
@@ -120,12 +184,8 @@ can be produced. The suite pins the exact variant and a message substring.
 
 | Construct | Example | Error variant | Why |
 |-----------|---------|---------------|-----|
-| `CREATE` | `CREATE (n) RETURN n` | `ParseError` | read-only subset; `CREATE` is not a lexer keyword, so it fails `expect(MATCH)` |
-| `SET` | `MATCH (n) SET n.x = 1` | `ParseError` | mutating clause not in the read-only grammar |
-| `MERGE` | `MERGE (n:Person {name:'Z'}) RETURN n` | `ParseError` | mutating clause |
-| `DELETE` | `MATCH (n) DELETE n` | `ParseError` | mutating clause |
-| `REMOVE` | `MATCH (n) REMOVE n.age` | `ParseError` | mutating clause |
-| `DETACH DELETE` | `MATCH (n) DETACH DELETE n` | `ParseError` | mutating clause |
+| `MERGE` | `MERGE (n:Person {name:'Z'}) RETURN n` | `ParseError` | **deferred to #3548**: match-or-create is its own design problem; not yet a lexer keyword, so it fails `expect(MATCH)`. Rejects cleanly, never partially applies |
+| `REMOVE` | `MATCH (n) REMOVE n.age` | `ParseError` | **deferred to #3549**: property/label removal needs a replace/tombstone write API the native surface does not expose (update is PATCH-merge only); label removal also conflicts with the single-label model |
 | `FOREACH` | `FOREACH (x IN [1] | SET ...)` | `ParseError` | mutating/procedural clause |
 | `CALL` | `CALL db.labels()` | `ParseError` | procedure calls not supported |
 | `LOAD CSV` | `LOAD CSV FROM 'f.csv' AS row RETURN row` | `ParseError` | data-loading clause not supported |

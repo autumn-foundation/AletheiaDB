@@ -35,6 +35,13 @@ dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
 usearch = "2.25.2"
+# SIMD-accelerated vector distance kernels (Issue #426). Optional: enabled via
+# the `simsimd` feature (on by default). Provides runtime-dispatched x86
+# AVX2/AVX-512 AND ARM NEON/SVE kernels, replacing the crate's hand-written
+# x86-only unsafe SIMD. When the feature is off the scalar fallback is used.
+# Pinned to patch-only within 6.5 (defense-in-depth for a C-compiling dep;
+# still admits security patches). Resolves to 6.5.16 in Cargo.lock.
+simsimd = { version = "~6.5", optional = true }
 arc-swap = "1.9"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
@@ -241,8 +248,15 @@ otel = [
     "dep:tokio",
 ]
 
+# SIMD-accelerated vector kernels via the `simsimd` crate (Issue #426).
+# On by default so stock builds get x86 AVX2/AVX-512 and ARM NEON/SVE
+# acceleration through simsimd's runtime dispatch. Building with
+# `--no-default-features` (or otherwise omitting this feature) falls back to the
+# portable scalar kernels, which the compiler auto-vectorizes.
+simsimd = ["dep:simsimd"]
+
 # Default features
-default = ["config-toml", "audit-export"]
+default = ["config-toml", "audit-export", "simsimd"]
 
 # Signed audit export of entity history for compliance (Issue #3358).
 # Pulls Ed25519 (asymmetric offline-verifiable signatures) and serde (artifact
@@ -447,6 +461,13 @@ path = "benches/durability_modes.rs"
 name = "provenance_chain"
 harness = false
 path = "benches/provenance_chain.rs"
+
+# Provenance-enabled write-throughput "cost of trust" matrix + self-gate (Issue #3383)
+[[bench]]
+name = "provenance_write_throughput"
+harness = false
+path = "benches/provenance_write_throughput.rs"
+required-features = []
 
 [[bench]]
 name = "checkpoints"

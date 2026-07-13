@@ -454,14 +454,20 @@ impl QueryExecutor {
                 embedding,
                 k,
                 property_key,
+                metric,
+                threshold,
+                score_alias,
             } => {
                 let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::VectorRerankIterator::new(
+                Box::new(iterators::VectorRerankIterator::with_options(
                     input_iter,
                     embedding.clone(),
                     *k,
                     Arc::clone(&self.current),
                     property_key.clone(),
+                    *metric,
+                    *threshold,
+                    score_alias.clone(),
                 ))
             }
 
@@ -947,6 +953,9 @@ mod tests {
                 embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
                 k: 2,
                 property_key: None,
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             },
             estimated_cost: Default::default(),
             temporal_context: None,
@@ -1738,6 +1747,9 @@ mod tests {
                 embedding: vec![0.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0].into(),
                 k: 2,
                 property_key: Some("content_embedding".to_string()),
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             },
             estimated_cost: Default::default(),
             temporal_context: None,

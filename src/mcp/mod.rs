@@ -30,12 +30,17 @@ mod batch;
 mod budget;
 mod cursor;
 mod error;
+mod limits;
 mod server;
 mod tools;
 
 pub use auth::{McpAuthConfig, validate_mcp_auth_startup};
 pub use batch::{ApplyBatchRequest, BatchNodeRef, BatchOperation};
 pub use error::{McpError, McpErrorCode};
+pub use limits::{
+    EffectiveQueryLimits, LimitCountsSnapshot, LimitDimension, LimitOverrideError,
+    QueryLimitsConfig, QueryLimitsOverride,
+};
 pub use server::AletheiaMcpServer;
 
 // Re-export tool request/response types for testing (alphabetically sorted)

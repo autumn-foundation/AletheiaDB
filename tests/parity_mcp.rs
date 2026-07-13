@@ -33,7 +33,7 @@
 //! (via the public `McpErrorCode` enum — the single source of truth for the
 //! wire codes), the success + structured-error envelope shapes, the temporal
 //! block on read responses, and the vector-elision default. It also pins the
-//! full 44-tool inventory + access-class table as a golden constant that a
+//! full 46-tool inventory + access-class table as a golden constant that a
 //! porter must keep in lockstep with the server.
 //!
 //! Run with:
@@ -45,7 +45,8 @@ use std::sync::Arc;
 
 use aletheiadb::AletheiaDB;
 use aletheiadb::mcp::{
-    AletheiaMcpServer, CreateNodeRequest, GetNodeRequest, McpErrorCode, TraverseRequest,
+    AletheiaMcpServer, CreateNodeRequest, GetNodeRequest, McpErrorCode, QueryLimitsConfig,
+    QueryLimitsOverride, QueryRequest, TraverseRequest,
 };
 use serde_json::{Value, json};
 
@@ -57,8 +58,8 @@ fn server() -> AletheiaMcpServer {
     AletheiaMcpServer::new(Arc::new(AletheiaDB::new().expect("create DB")))
 }
 
-/// The 9 stable structured error codes, in the enum's declared order.
-const ALL_CODES: [McpErrorCode; 9] = [
+/// The 10 stable structured error codes, in the enum's declared order.
+const ALL_CODES: [McpErrorCode; 10] = [
     McpErrorCode::NotFound,
     McpErrorCode::InvalidArgument,
     McpErrorCode::ConstraintViolation,
@@ -68,6 +69,7 @@ const ALL_CODES: [McpErrorCode; 9] = [
     McpErrorCode::Internal,
     McpErrorCode::Unauthenticated,
     McpErrorCode::PermissionDenied,
+    McpErrorCode::ResourceExhausted,
 ];
 
 fn code_strings() -> Vec<&'static str> {
@@ -138,6 +140,10 @@ fn error_code_vocabulary_is_stable() {
             ("INTERNAL", false),
             ("UNAUTHENTICATED", false),
             ("PERMISSION_DENIED", false),
+            // Issue #3368: per-query resource-limit breaches. Default
+            // non-retriable; the read-only wall-clock-timeout case overrides
+            // retriable:true explicitly at the call site.
+            ("RESOURCE_EXHAUSTED", false),
         ],
         "MCP structured error vocabulary changed — a port must preserve these \
          codes + retriable defaults (keep tests/parity/inventory.json in sync)"
@@ -348,7 +354,7 @@ fn representative_tool_roundtrip_is_wellformed() {
 }
 
 // ===========================================================================
-// Golden tool inventory — the 44-tool advertised set + access classes.
+// Golden tool inventory — the 46-tool advertised set + access classes.
 //
 // This is the one place the FULL registry is pinned from an external test:
 // because the advertised list (`tool_definitions`) is not reachable through the
@@ -360,7 +366,7 @@ fn representative_tool_roundtrip_is_wellformed() {
 /// (tool_name, access_class) for every advertised MCP tool, per
 /// `src/mcp/auth.rs::TOOL_ACCESS_CLASSES`. Access class ∈ {read, write, metrics}
 /// (MCP advertises no admin-class tools).
-const TOOL_INVENTORY: [(&str, &str); 44] = [
+const TOOL_INVENTORY: [(&str, &str); 46] = [
     ("get_node", "read"),
     ("create_node", "write"),
     ("update_node", "write"),
@@ -404,14 +410,16 @@ const TOOL_INVENTORY: [(&str, &str); 44] = [
     ("lineage_upstream", "read"),
     ("lineage_downstream", "read"),
     ("audit_export", "read"),
+    ("verify_chain", "read"),
+    ("export_chain_head", "read"),
     ("database_stats", "metrics"),
 ];
 
 /// PARITY (external mirror, NOT a live drift detector): this constant is a
-/// cross-crate reference copy of the 44-tool inventory. Because the live
+/// cross-crate reference copy of the 46-tool inventory. Because the live
 /// registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)`
 /// and unreachable from this external test crate, this test only validates the
-/// mirror's internal consistency (44 tools, unique names, MCP-legal classes,
+/// mirror's internal consistency (46 tools, unique names, MCP-legal classes,
 /// exactly one metrics tool) — it does NOT read the server, so it cannot by
 /// itself catch a tool added/removed/renamed/reclassified in the registry.
 ///
@@ -422,7 +430,7 @@ const TOOL_INVENTORY: [(&str, &str); 44] = [
 /// `tests/parity/inventory.json` in lockstep when the inventory changes.
 #[test]
 fn tool_inventory_golden_is_stable() {
-    assert_eq!(TOOL_INVENTORY.len(), 44, "MCP advertises exactly 44 tools");
+    assert_eq!(TOOL_INVENTORY.len(), 46, "MCP advertises exactly 46 tools");
 
     // Names unique.
     let mut names: Vec<&str> = TOOL_INVENTORY.iter().map(|(n, _)| *n).collect();
@@ -446,4 +454,122 @@ fn tool_inventory_golden_is_stable() {
         .map(|(n, _)| *n)
         .collect();
     assert_eq!(metrics, vec!["database_stats"]);
+}
+
+// ===========================================================================
+// Per-query resource limits on the `query` tool (Issue #3368).
+//
+// A port MUST reproduce: an over-ceiling per-call override → INVALID_ARGUMENT;
+// a result-byte-cap breach → RESOURCE_EXHAUSTED (non-retriable); a row-cap
+// override → a SUCCESS truncated with `truncated:true` (the #3226 completeness
+// signal), never an error. AQL is used so the pins hold in cypher-less builds.
+// ===========================================================================
+
+fn seed_widget(server: &AletheiaMcpServer, name: &str) {
+    create_node(
+        server,
+        json!({ "label": "Widget", "properties": { "name": name } }),
+    );
+}
+
+fn run_query(server: &AletheiaMcpServer, req: QueryRequest) -> Value {
+    serde_json::from_str(&server.query(req)).expect("query response is JSON")
+}
+
+/// PARITY: an over-ceiling `limits` override is a structured INVALID_ARGUMENT
+/// with `details.dimension`, rejected before execution and non-retriable.
+#[test]
+fn query_over_ceiling_override_is_invalid_argument() {
+    let s = server();
+    let v = run_query(
+        &s,
+        QueryRequest {
+            language: "aql".into(),
+            query: "MATCH (n) RETURN n".into(),
+            params: None,
+            limit: None,
+            limits: Some(QueryLimitsOverride {
+                timeout_ms: Some(u64::MAX),
+                ..Default::default()
+            }),
+        },
+    );
+    let code = assert_structured_error(&serde_json::to_string(&v).unwrap(), "over-ceiling");
+    assert_eq!(code, "INVALID_ARGUMENT");
+    assert_eq!(v["error"]["retriable"].as_bool(), Some(false), "{v}");
+    assert_eq!(
+        v["error"]["details"]["dimension"].as_str(),
+        Some("wall_clock_timeout"),
+        "{v}"
+    );
+}
+
+/// PARITY: a response over the result-byte cap fails closed with a
+/// non-retriable RESOURCE_EXHAUSTED carrying `details.consumed > limit`.
+#[test]
+fn query_byte_cap_is_resource_exhausted() {
+    let s = server().with_query_limits(QueryLimitsConfig {
+        default_max_response_bytes: 40,
+        ..QueryLimitsConfig::default()
+    });
+    seed_widget(&s, "alpha");
+    let v = run_query(
+        &s,
+        QueryRequest {
+            language: "aql".into(),
+            query: "MATCH (n:Widget) RETURN n".into(),
+            params: None,
+            limit: None,
+            limits: None,
+        },
+    );
+    let code = assert_structured_error(&serde_json::to_string(&v).unwrap(), "byte-cap");
+    assert_eq!(code, "RESOURCE_EXHAUSTED");
+    assert_eq!(v["error"]["retriable"].as_bool(), Some(false), "{v}");
+    assert_eq!(
+        v["error"]["details"]["dimension"].as_str(),
+        Some("result_bytes")
+    );
+    assert!(
+        v["error"]["details"]["consumed"].as_u64().unwrap()
+            > v["error"]["details"]["limit"].as_u64().unwrap()
+    );
+}
+
+/// PARITY: a row-cap override truncates with the `truncated:true` completeness
+/// signal — a SUCCESS, not an error (the list-like alternative to fail-closed).
+#[test]
+fn query_row_cap_override_truncates_successfully() {
+    let s = server();
+    for name in ["a", "b", "c"] {
+        seed_widget(&s, name);
+    }
+    let v = run_query(
+        &s,
+        QueryRequest {
+            language: "aql".into(),
+            query: "MATCH (n:Widget) RETURN n".into(),
+            params: None,
+            limit: None,
+            limits: Some(QueryLimitsOverride {
+                max_result_rows: Some(1),
+                ..Default::default()
+            }),
+        },
+    );
+    assert!(
+        v.get("error").is_none(),
+        "row cap is a truncated success: {v}"
+    );
+    assert_eq!(v["row_count"].as_u64(), Some(1), "{v}");
+    assert_eq!(v["truncated"].as_bool(), Some(true), "{v}");
+}
+
+/// PARITY: RESOURCE_EXHAUSTED is in the stable code vocabulary and is
+/// non-retriable by default (the wall-clock-timeout case overrides to
+/// retriable at its call site; the byte cap keeps the default).
+#[test]
+fn resource_exhausted_code_is_in_vocabulary() {
+    assert!(code_strings().contains(&"RESOURCE_EXHAUSTED"));
+    assert!(!McpErrorCode::ResourceExhausted.default_retriable());
 }

@@ -1108,6 +1108,19 @@ pub struct QueryRequest {
     /// Maximum number of rows to return (default: 100, capped at 10000).
     #[schemars(description = "Maximum number of rows to return (default: 100, capped at 10000)")]
     pub limit: Option<usize>,
+
+    /// Optional per-call resource-limit overrides (Issue #3368): `timeout_ms`,
+    /// `max_result_rows`, and `max_response_bytes`. Each is folded against the
+    /// server default and an operator ceiling; an override above the ceiling is
+    /// rejected with `INVALID_ARGUMENT`. Omitting `limits` uses the server
+    /// defaults unchanged.
+    #[schemars(
+        description = "Optional per-call resource-limit overrides: {timeout_ms, max_result_rows, \
+                       max_response_bytes}. Each is bounded by an operator ceiling (over-ceiling \
+                       values are rejected with INVALID_ARGUMENT). 0 means unlimited (only under \
+                       an unbounded ceiling)."
+    )]
+    pub limits: Option<super::limits::QueryLimitsOverride>,
 }
 
 // ============================================================================

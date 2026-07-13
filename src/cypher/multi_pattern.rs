@@ -72,7 +72,7 @@ use super::error::CypherError;
 // TODO(perf #549-followup): carry entity *ids* instead of cloned entities
 // through the Cartesian product; a wide product currently clones each entity
 // once per surviving branch.
-type Binding = Vec<(String, EntityResult)>;
+pub(crate) type Binding = Vec<(String, EntityResult)>;
 
 /// A projected row paired with its still-full pattern binding (needed to
 /// evaluate `ORDER BY` expressions and `DISTINCT` keys after projection).
@@ -320,6 +320,119 @@ pub fn evaluate(
         .collect();
 
     Ok(QueryResults::new(Box::new(VecResultIterator::new(rows))))
+}
+
+/// Match a reading pattern list into its raw per-row variable bindings
+/// (Issue #560).
+///
+/// This exposes the nested-loop pattern matcher used by [`evaluate`] for reuse
+/// by the write-statement executor (`crate::cypher::mutation`): it returns every
+/// consistent `variable -> entity` binding (all bound node **and** relationship
+/// variables), *before* any projection, so the caller can drive `SET` / `DELETE`
+/// off the matched entities.
+///
+/// Current-state only: patterns are matched against the live graph. The caller
+/// is responsible for rejecting unsupported reading shapes (variable-length
+/// relationships, etc.) before calling.
+///
+/// # Errors
+///
+/// Returns [`CypherError::SemanticError`] for a structurally malformed pattern
+/// and [`CypherError::UnsupportedFeature`] if the intermediate binding count
+/// exceeds the configured cap (mirroring [`evaluate`]).
+pub(crate) fn match_bindings(
+    db: &AletheiaDB,
+    pattern: &[CypherPattern],
+    where_clause: Option<&CypherExpr>,
+    params: &HashMap<String, CypherParameterValue>,
+) -> Result<Vec<Binding>, CypherError> {
+    // Materialize the current-state node set once (sorted by id for a
+    // deterministic candidate enumeration and stable output order), mirroring
+    // `evaluate`.
+    let mut nodes: Vec<Node> = db.current.all_nodes().collect();
+    nodes.sort_by_key(|n| n.id);
+    let mut node_by_id: HashMap<NodeId, usize> = HashMap::with_capacity(nodes.len());
+    for (idx, node) in nodes.iter().enumerate() {
+        node_by_id.insert(node.id, idx);
+    }
+
+    let binding_cap = db.historical.read().max_schema_as_of_entities();
+
+    let eval = MultiEval {
+        db,
+        params,
+        nodes,
+        node_by_id,
+    };
+
+    // Per-pattern first-node candidate memoization (base-independent scan).
+    let mut first_memos: Vec<Vec<Node>> = Vec::with_capacity(pattern.len());
+    for p in pattern {
+        let memo = match p.elements.first() {
+            Some(CypherPatternElement::Node(first)) => eval.scan_node_candidates(first)?,
+            _ => Vec::new(),
+        };
+        first_memos.push(memo);
+    }
+
+    // Nested-loop binding matcher: extend the binding set by each pattern.
+    let mut env: Vec<PartialBinding> = vec![PartialBinding::default()];
+    for (p, first_memo) in pattern.iter().zip(first_memos.iter()) {
+        let mut next: Vec<PartialBinding> = Vec::new();
+        for base in &env {
+            eval.match_pattern_extends(p, base, first_memo, &mut next)?;
+            if next.len() > binding_cap {
+                return Err(CypherError::UnsupportedFeature(format!(
+                    "write reading pattern exceeds {binding_cap} intermediate bindings; add a \
+                     more selective WHERE filter or labels to narrow the match (configurable via \
+                     max_schema_as_of_entities)"
+                )));
+            }
+        }
+        env = next;
+    }
+
+    // WHERE filter (three-valued: keep a row iff its predicate is `Tri::True`).
+    if let Some(predicate) = where_clause {
+        let mut filtered = Vec::with_capacity(env.len());
+        for binding in env {
+            if eval.eval_predicate(predicate, &binding.vars)? == Tri::True {
+                filtered.push(binding);
+            }
+        }
+        env = filtered;
+    }
+
+    Ok(env.into_iter().map(|b| b.vars).collect())
+}
+
+/// Convert a Cypher literal (resolving a `$param`) into a [`PropertyValue`]
+/// (Issue #560).
+///
+/// Shared by the multi-pattern evaluator and the write-statement executor so
+/// both resolve inline/`SET`/`CREATE` values identically.
+///
+/// # Errors
+///
+/// Returns [`CypherError::ParameterError`] if a referenced `$param` is unbound.
+pub(crate) fn cypher_value_to_property(
+    value: &CypherValue,
+    params: &HashMap<String, CypherParameterValue>,
+) -> Result<PropertyValue, CypherError> {
+    Ok(match value {
+        CypherValue::Null => PropertyValue::Null,
+        CypherValue::Bool(b) => PropertyValue::Bool(*b),
+        CypherValue::Int(n) => PropertyValue::Int(*n),
+        CypherValue::Float(f) => PropertyValue::Float(*f),
+        CypherValue::String(s) => PropertyValue::String(std::sync::Arc::from(s.as_str())),
+        CypherValue::Vector(v) => PropertyValue::Vector(std::sync::Arc::clone(v)),
+        CypherValue::Parameter(name) => {
+            let param = params.get(name).ok_or_else(|| {
+                CypherError::ParameterError(format!("unbound parameter: ${name}"))
+            })?;
+            param_to_property(param)
+        }
+    })
 }
 
 /// Shared evaluation context: the database handle, bound parameters, and the
@@ -576,20 +689,7 @@ impl MultiEval<'_> {
 
     /// Convert a Cypher literal (resolving a `$param`) into a [`PropertyValue`].
     fn cypher_value_to_property(&self, value: &CypherValue) -> Result<PropertyValue, CypherError> {
-        Ok(match value {
-            CypherValue::Null => PropertyValue::Null,
-            CypherValue::Bool(b) => PropertyValue::Bool(*b),
-            CypherValue::Int(n) => PropertyValue::Int(*n),
-            CypherValue::Float(f) => PropertyValue::Float(*f),
-            CypherValue::String(s) => PropertyValue::String(std::sync::Arc::from(s.as_str())),
-            CypherValue::Vector(v) => PropertyValue::Vector(std::sync::Arc::clone(v)),
-            CypherValue::Parameter(name) => {
-                let param = self.params.get(name).ok_or_else(|| {
-                    CypherError::ParameterError(format!("unbound parameter: ${name}"))
-                })?;
-                param_to_property(param)
-            }
-        })
+        cypher_value_to_property(value, self.params)
     }
 
     // -- Predicate / scalar evaluation ------------------------------------
