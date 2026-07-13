@@ -210,7 +210,7 @@ pub fn authorize<C: AccessClassMarker>(principal: &Principal) -> Result<(), Alet
 /// Returns `None` for missing or malformed headers — every failure collapses
 /// into the same uniform 401 upstream, deliberately. The bearer scheme match is
 /// ASCII-case-insensitive; a whitespace-only or empty credential is rejected.
-#[must_use]
+#[must_use = "the extracted credential must be verified against the auth store"]
 pub fn extract_credential(parts: &Parts) -> Option<String> {
     if let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) {
         let s = value.to_str().ok()?;
