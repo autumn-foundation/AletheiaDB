@@ -1497,26 +1497,54 @@ impl CypherConverter {
             return Ok(false);
         }
 
-        // A `vector.fn(...) AS <alias>` item in the RETURN list materializes its
-        // score under `<alias>` (Issue #555). Find it once so both ORDER-BY arms
-        // below can attach the alias to the emitted rank.
-        let aliased = Self::aliased_vector_return_item(return_clause);
+        // Every `vector.fn(...) AS <alias>` item in the RETURN list (Issue #555).
+        // v1 supports at most ONE such projection, and it must be the SAME
+        // function (name + args) as the one driving the rank -- otherwise the
+        // materialized score would come from a different metric/embedding than
+        // the ordering, a silent wrong answer (adversarial finding #2).
+        let aliased = Self::aliased_vector_return_items(return_clause);
+        if aliased.len() > 1 {
+            return Err(CypherError::UnsupportedFeature(
+                "multiple vector score projections in a single RETURN are not \
+                 supported in v1 (project a single vector.fn(...) AS <alias>)"
+                    .to_string(),
+            ));
+        }
 
         let order_item = &return_clause.order_by[0];
 
-        // Arm 1: `ORDER BY vector.fn(entity.prop, <emb>) DESC` directly.
+        // Arm 1: `ORDER BY vector.fn(entity.prop, <emb>) <DIR>` directly.
         if let CypherExpr::FunctionCall { name, args, .. } = &order_item.expr
             && is_vector_function(name)
         {
+            let metric = vector_metric_for(name);
+            // Reject an ordering direction that would request farthest-first
+            // (silent wrong answer #1): the rank always yields nearest-first, so
+            // the direction must match the metric's natural nearest-first sense.
+            Self::check_vector_order_direction(name, metric, order_item.descending)?;
+            // Attach the projected alias only when it is the SAME function+args.
+            let score_alias = match aliased.first() {
+                None => None,
+                Some(&(a_name, a_args, alias)) => {
+                    if a_name == name && a_args == args.as_slice() {
+                        Some(alias.clone())
+                    } else {
+                        return Err(CypherError::UnsupportedFeature(
+                            "the RETURN projects a vector function that differs \
+                             from the ORDER BY vector function; independent \
+                             multi-score projection is not supported in v1 \
+                             (project and order by the same vector.fn(...))"
+                                .to_string(),
+                        ));
+                    }
+                }
+            };
             let (property_key, embedding) = self.extract_vector_args(args)?;
-            // If a vector function is also projected `AS <alias>` in this RETURN,
-            // surface the score under that alias too (Issue #555).
-            let score_alias = aliased.map(|(alias, _)| alias.clone());
             ops.push(QueryOp::RankBySimilarity {
                 embedding,
                 top_k: return_clause.limit,
                 property_key: Some(property_key),
-                metric: vector_metric_for(name),
+                metric,
                 threshold: None,
                 score_alias,
             });
@@ -1526,45 +1554,75 @@ impl CypherConverter {
         // Arm 2: `ORDER BY <alias>` where `<alias>` was defined as a vector
         // function in the RETURN items (e.g. `vector.cosine(...) AS score` then
         // `ORDER BY score DESC`). The score is materialized under `<alias>`.
-        if let CypherExpr::Variable(ref alias_name) = order_item.expr {
-            for item in &return_clause.items {
-                if let CypherReturnItem::Expression {
-                    expr: CypherExpr::FunctionCall { name, args, .. },
-                    alias: Some(alias),
-                } = item
-                    && alias == alias_name
-                    && is_vector_function(name)
-                {
-                    let (property_key, embedding) = self.extract_vector_args(args)?;
-                    ops.push(QueryOp::RankBySimilarity {
-                        embedding,
-                        top_k: return_clause.limit,
-                        property_key: Some(property_key),
-                        metric: vector_metric_for(name),
-                        threshold: None,
-                        score_alias: Some(alias.clone()),
-                    });
-                    return Ok(true);
-                }
-            }
+        if let CypherExpr::Variable(ref alias_name) = order_item.expr
+            && let Some(&(name, args, alias)) = aliased
+                .iter()
+                .find(|entry| entry.2.as_str() == alias_name.as_str())
+        {
+            let metric = vector_metric_for(name);
+            Self::check_vector_order_direction(name, metric, order_item.descending)?;
+            let (property_key, embedding) = self.extract_vector_args(args)?;
+            ops.push(QueryOp::RankBySimilarity {
+                embedding,
+                top_k: return_clause.limit,
+                property_key: Some(property_key),
+                metric,
+                threshold: None,
+                score_alias: Some(alias.clone()),
+            });
+            return Ok(true);
         }
 
         Ok(false)
     }
 
-    /// Find the first `RETURN` item of the form `vector.fn(...) AS <alias>`,
-    /// returning `(alias, args)`. Used to materialize the similarity score under
-    /// its alias (Issue #555).
-    fn aliased_vector_return_item(
+    /// Every `RETURN` item of the form `vector.fn(...) AS <alias>`, as
+    /// `(name, args, alias)`. Used to materialize the similarity score under its
+    /// alias (Issue #555) and to reject unsupported multi-/mismatched-projection
+    /// forms (adversarial finding #2).
+    fn aliased_vector_return_items(
         return_clause: &CypherReturn,
-    ) -> Option<(&String, &[CypherExpr])> {
-        return_clause.items.iter().find_map(|item| match item {
-            CypherReturnItem::Expression {
-                expr: CypherExpr::FunctionCall { name, args, .. },
-                alias: Some(alias),
-            } if is_vector_function(name) => Some((alias, args.as_slice())),
-            _ => None,
-        })
+    ) -> Vec<(&String, &[CypherExpr], &String)> {
+        return_clause
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                CypherReturnItem::Expression {
+                    expr: CypherExpr::FunctionCall { name, args, .. },
+                    alias: Some(alias),
+                } if is_vector_function(name) => Some((name, args.as_slice(), alias)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Reject a vector `ORDER BY` direction that would request farthest-first
+    /// results (adversarial finding #1). The rank always yields **nearest-first**,
+    /// so the ordering direction must match the metric's natural nearest-first
+    /// sense: `DESC` for similarity metrics (cosine / similarity / dot_product,
+    /// higher = nearer) and `ASC` for the distance-flavored `vector.euclidean`
+    /// (lower = nearer, matching the Issue #553 example). Any other direction
+    /// asks for farthest-first, which v1 does not support (rejected clearly
+    /// rather than silently returning nearest-first).
+    fn check_vector_order_direction(
+        func_name: &str,
+        metric: VectorMetric,
+        descending: bool,
+    ) -> Result<(), CypherError> {
+        let natural_descending = !matches!(metric, VectorMetric::Euclidean);
+        if descending != natural_descending {
+            let (wanted, other) = if natural_descending {
+                ("DESC", "ASC")
+            } else {
+                ("ASC", "DESC")
+            };
+            return Err(CypherError::UnsupportedFeature(format!(
+                "vector ranking over {func_name} supports only {wanted} ordering \
+                 (nearest-first); {other} (farthest-first) vector ordering is not \
+                 supported in v1"
+            )));
+        }
+        Ok(())
     }
 
     /// Extract the property key and embedding from vector function arguments.
@@ -1708,6 +1766,19 @@ impl CypherConverter {
             ops.push(QueryOp::Filter(predicate));
         }
         // ...then the vector similarity threshold rank(s).
+        //
+        // v1 BEHAVIOR (adversarial finding #6): the threshold is implemented as a
+        // RankBySimilarity with `top_k: None`, which computes the score for every
+        // surviving row and returns them **sorted by similarity descending** (the
+        // rank's inherent output order). So a bare
+        // `WHERE vector.similarity(...) > t RETURN d` (no ORDER BY) returns the
+        // passing rows nearest-first rather than in scan order, and a trailing
+        // `LIMIT n` therefore yields the top-n *nearest* passing rows rather than
+        // the first-n in scan order. openCypher leaves row order unspecified
+        // without ORDER BY, so this is a superset-correct (not wrong) result; it
+        // is pinned by a test and documented in the compatibility guide. A
+        // score-unaware Filter-only lowering is a possible follow-up but would
+        // still need the score computed to evaluate the predicate.
         ops.append(&mut ranks);
         Ok(())
     }

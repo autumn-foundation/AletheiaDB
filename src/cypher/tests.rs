@@ -5663,24 +5663,33 @@ fn test_convert_vector_dot_product_recognized() {
 #[test]
 fn test_convert_vector_metric_from_function_name() {
     // Each vector function name selects the corresponding metric on the op.
+    // The ORDER BY direction must be the metric's natural nearest-first sense
+    // (DESC for similarity metrics, ASC for the distance-flavored euclidean).
     let cases = [
         (
             "vector.similarity",
+            "DESC",
             crate::core::vector::DistanceMetric::Cosine,
         ),
-        ("vector.cosine", crate::core::vector::DistanceMetric::Cosine),
+        (
+            "vector.cosine",
+            "DESC",
+            crate::core::vector::DistanceMetric::Cosine,
+        ),
         (
             "vector.euclidean",
+            "ASC",
             crate::core::vector::DistanceMetric::Euclidean,
         ),
         (
             "vector.dot_product",
+            "DESC",
             crate::core::vector::DistanceMetric::DotProduct,
         ),
     ];
-    for (func, expected) in cases {
+    for (func, dir, expected) in cases {
         let q = format!(
-            "MATCH (d:Document) RETURN d ORDER BY {func}(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5"
+            "MATCH (d:Document) RETURN d ORDER BY {func}(d.embedding, [1.0, 0.0, 0.0]) {dir} LIMIT 5"
         );
         let query = parse_cypher(&q).unwrap();
         let metric = query
@@ -5977,6 +5986,467 @@ fn test_e2e_dimension_mismatch_clear_error() {
     assert!(
         msg.contains("dimension") || msg.contains("length") || msg.contains("mismatch"),
         "error should mention the dimension mismatch, got: {msg}"
+    );
+}
+
+// ---- Adversarial-review follow-ups (#553/#554/#555 hardening) --------------
+
+/// A discriminating fixture whose UN-normalized embeddings make cosine,
+/// dot-product, and euclidean disagree on the top-1 nearest to `[1,0,0]`:
+/// - `xcos`  = [3,0,0]   -> cosine winner (perfectly aligned direction)
+/// - `ydot`  = [5,1,0]   -> dot-product winner (largest projection)
+/// - `zeuc`  = [1,0.1,0] -> euclidean winner (closest absolute point)
+fn discriminating_metric_db() -> (
+    crate::AletheiaDB,
+    crate::core::NodeId,
+    crate::core::NodeId,
+    crate::core::NodeId,
+) {
+    use crate::index::vector::{DistanceMetric as IndexMetric, HnswConfig};
+    let db = crate::AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(3, IndexMetric::Cosine))
+        .unwrap();
+    let mk = |db: &crate::AletheiaDB, name: &str, v: [f32; 3]| {
+        db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", name)
+                .insert_vector("embedding", &v)
+                .build(),
+        )
+        .unwrap()
+    };
+    let xcos = mk(&db, "xcos", [3.0, 0.0, 0.0]);
+    let ydot = mk(&db, "ydot", [5.0, 1.0, 0.0]);
+    let zeuc = mk(&db, "zeuc", [1.0, 0.1, 0.0]);
+    (db, xcos, ydot, zeuc)
+}
+
+// Finding #1: ORDER BY direction is honored (non-natural direction rejected).
+
+#[test]
+fn test_convert_vector_order_cosine_desc_ok_asc_rejected() {
+    // Cosine is a similarity (higher = nearer): DESC is the natural nearest-first
+    // direction and is accepted; ASC (farthest-first) is rejected, not silently
+    // answered as nearest-first.
+    assert!(
+        parse_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+        )
+        .is_ok()
+    );
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("nearest-first")),
+        "cosine ASC should be rejected as farthest-first, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_vector_order_euclidean_asc_ok_desc_rejected() {
+    // Euclidean is distance-flavored (lower = nearer): ASC is natural and
+    // accepted; DESC (farthest-first) is rejected.
+    assert!(
+        parse_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 5",
+        )
+        .is_ok()
+    );
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(_)),
+        "euclidean DESC should be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_vector_order_alias_asc_rejected() {
+    // The direction check also applies through an aliased score in ORDER BY.
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY score ASC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("nearest-first")),
+        "ORDER BY <cosine-alias> ASC should be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_e2e_cosine_asc_rejected_at_execution() {
+    let (db, _a, _b, _g) = vector_test_db();
+    let result = db.execute_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 1",
+    );
+    assert!(
+        result.is_err(),
+        "cosine ASC must be rejected at execution, not silently nearest-first"
+    );
+}
+
+// Finding #2: aliased score column cannot come from a different function.
+
+#[test]
+fn test_convert_mixed_function_alias_rejected() {
+    // RETURN projects euclidean AS score, ORDER BY ranks by cosine -> the score
+    // column would be populated from the WRONG function; reject clearly.
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("differs")),
+        "mismatched projection/order vector functions should be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_multiple_vector_projections_rejected() {
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS s1, vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) AS s2 ORDER BY s1 DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("multiple")),
+        "multiple vector score projections should be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_matching_function_alias_projects() {
+    // Same function+args in RETURN and ORDER BY -> the alias is attached.
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap();
+    let alias = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { score_alias, .. } => score_alias.clone(),
+            _ => None,
+        })
+        .expect("matching projection should attach a score alias");
+    assert_eq!(alias, "score");
+}
+
+#[test]
+fn test_e2e_matching_function_alias_value_is_cosine() {
+    let (db, alpha, _beta, _gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    let cols = rows[0].columns.as_ref().expect("score column");
+    let (_n, v) = cols.iter().find(|(n, _)| n == "score").unwrap();
+    match v {
+        crate::core::property::PropertyValue::Float(f) => {
+            assert!(
+                (*f - 1.0).abs() < 1e-4,
+                "cosine score for alpha ~1.0, got {f}"
+            )
+        }
+        other => panic!("expected Float score, got {other:?}"),
+    }
+}
+
+// Finding #3: each metric picks its OWN distinct winner at runtime.
+
+#[test]
+fn test_e2e_cosine_picks_cosine_winner() {
+    let (db, xcos, _ydot, _zeuc) = discriminating_metric_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows[0].entity.node_id(), Some(xcos), "cosine top-1 is xcos");
+}
+
+#[test]
+fn test_e2e_dot_product_picks_dot_winner() {
+    // This would return `xcos` (the cosine winner) if the metric were ignored;
+    // it proves the dot_product metric is actually executed.
+    let (db, xcos, ydot, _zeuc) = discriminating_metric_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.dot_product(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows[0].entity.node_id(),
+        Some(ydot),
+        "dot_product top-1 is ydot"
+    );
+    assert_ne!(
+        rows[0].entity.node_id(),
+        Some(xcos),
+        "dot_product must NOT collapse to the cosine winner"
+    );
+}
+
+#[test]
+fn test_e2e_euclidean_picks_euclidean_winner() {
+    let (db, _xcos, _ydot, zeuc) = discriminating_metric_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows[0].entity.node_id(),
+        Some(zeuc),
+        "euclidean top-1 is zeuc"
+    );
+}
+
+// Finding #4: full threshold operator coverage.
+
+fn threshold_rows(db: &crate::AletheiaDB, cmp: &str, value: &str) -> usize {
+    let q = format!(
+        "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) {cmp} {value} RETURN d"
+    );
+    collect_rows(db.execute_cypher(&q).unwrap()).len()
+}
+
+#[test]
+fn test_e2e_threshold_operator_coverage() {
+    let (db, _a, _b, _g) = vector_test_db();
+    // cosines: alpha=1.0, gamma~0.994, beta=0.0.
+    assert_eq!(
+        threshold_rows(&db, ">=", "1.0"),
+        1,
+        ">= 1.0 boundary keeps alpha"
+    );
+    assert_eq!(
+        threshold_rows(&db, ">", "0.5"),
+        2,
+        "> 0.5 keeps alpha+gamma"
+    );
+    assert_eq!(threshold_rows(&db, "<", "0.5"), 1, "< 0.5 keeps beta");
+    assert_eq!(threshold_rows(&db, "<=", "0.0"), 1, "<= 0.0 keeps beta");
+    assert_eq!(
+        threshold_rows(&db, ">", "2.0"),
+        0,
+        "> 2.0 keeps nothing (0 rows, not error)"
+    );
+    // A threshold at/below the minimum score keeps every row (cosine >= 0 here).
+    assert_eq!(
+        threshold_rows(&db, ">=", "0.0"),
+        3,
+        ">= 0.0 keeps all three"
+    );
+}
+
+#[test]
+fn test_convert_threshold_negative_literal_rejected() {
+    // The Cypher grammar has no unary minus, so a negative threshold literal is
+    // a parse error (not silently mis-handled). Pin this v1 limitation.
+    let err = parse_cypher(
+        "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > -1.0 RETURN d",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::ParseError { .. }),
+        "a negative threshold literal should be a parse error, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_threshold_eq_and_ne_rejected() {
+    for cmp in ["=", "<>"] {
+        let q = format!(
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) {cmp} 0.8 RETURN d"
+        );
+        let err = parse_cypher(&q).unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(_)),
+            "vector threshold with `{cmp}` should be rejected, got: {err:?}"
+        );
+    }
+}
+
+// Finding #5: euclidean/dot threshold compares against SIMILARITY, not raw distance.
+
+#[test]
+fn test_e2e_euclidean_threshold_operates_on_similarity() {
+    // euclidean similarity = 1/(1+distance); `> 0.8` means distance < 0.25.
+    // alpha (dist 0 -> sim 1.0) and gamma (dist ~0.141 -> sim ~0.876) pass;
+    // beta (dist ~1.414 -> sim ~0.414) does not.
+    let (db, alpha, _beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) WHERE vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) > 0.8 RETURN d",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows.len(),
+        2,
+        "euclidean sim > 0.8 == distance < 0.25 keeps 2"
+    );
+    let ids: std::collections::HashSet<_> =
+        rows.iter().filter_map(|r| r.entity.node_id()).collect();
+    assert!(ids.contains(&alpha) && ids.contains(&gamma));
+}
+
+// Finding #6: bare threshold reorders survivors by similarity (pinned v1 behavior).
+
+#[test]
+fn test_e2e_bare_threshold_orders_by_similarity() {
+    let (db, alpha, _beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.5 RETURN d",
+        )
+        .unwrap(),
+    );
+    // v1: survivors come back nearest-first (alpha 1.0 before gamma ~0.994).
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    assert_eq!(rows[1].entity.node_id(), Some(gamma));
+}
+
+// Finding #7: literal edge cases (nested list, boolean, dimension mismatch).
+
+#[test]
+fn test_convert_vector_literal_nested_rejected() {
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [[1, 2], 3]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::SemanticError(ref m) if m.contains("not numeric")),
+        "a nested-list element should be rejected as non-numeric, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_vector_literal_boolean_rejected() {
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [true, 0, 0]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::SemanticError(ref m) if m.contains("not numeric")),
+        "a boolean element should be rejected as non-numeric, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_e2e_literal_dimension_mismatch_error() {
+    // A 1-dim literal against a 3-dim index is a clear runtime dimension error.
+    let (db, _a, _b, _g) = vector_test_db();
+    let results = db
+        .execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [1.0]) DESC LIMIT 5",
+        )
+        .unwrap();
+    let err = results
+        .collect_all()
+        .expect_err("1-dim literal vs 3-dim index must error");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("dimension") || msg.contains("length") || msg.contains("mismatch"),
+        "expected a dimension error, got: {msg}"
+    );
+}
+
+// Finding #8: a numeric-array List PARAM (not an Embedding) is rejected clearly.
+
+#[test]
+fn test_convert_list_param_rejected() {
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "q".to_string(),
+        CypherParameterValue::List(vec![
+            CypherParameterValue::Float(1.0),
+            CypherParameterValue::Float(0.0),
+            CypherParameterValue::Float(0.0),
+        ]),
+    );
+    let err = parse_cypher_with_params(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 5",
+        params,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::ParameterError(_)),
+        "a List param must be rejected (callers must pass an Embedding), got: {err:?}"
+    );
+}
+
+// Finding #9: a zero-vector row is gracefully excluded, not errored.
+
+#[test]
+fn test_e2e_zero_vector_row_gracefully_handled() {
+    use crate::index::vector::{DistanceMetric as IndexMetric, HnswConfig};
+    let db = crate::AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(3, IndexMetric::Cosine))
+        .unwrap();
+    let good = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "good")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+    let _zero = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "zero")
+                .insert_vector("embedding", &[0.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+    // A zero vector scores 0.0 under cosine (finite, not NaN): it is NOT a
+    // dimension error, so the query succeeds, and a `> 0.5` threshold excludes
+    // the zero row (0.0 < 0.5) while keeping `good`.
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.5 RETURN d",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "zero-vector row excluded by threshold, no error"
+    );
+    assert_eq!(rows[0].entity.node_id(), Some(good));
+
+    // Without a threshold the zero row is still returned (ranked last, score 0),
+    // never dropped as an error.
+    let all = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 10",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        all.len(),
+        2,
+        "both rows returned; zero vector is not an error"
+    );
+    assert_eq!(
+        all[0].entity.node_id(),
+        Some(good),
+        "good ranks above the zero vector"
     );
 }
 

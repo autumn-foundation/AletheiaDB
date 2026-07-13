@@ -2308,6 +2308,10 @@ impl ResultIterator for VectorRerankIterator {
             // Materialize the score as a named output column when the query
             // aliased the vector function (Cypher `vector.cosine(...) AS score`),
             // preserving the row's entity (unlike aggregation's Null-entity rows).
+            // NOTE (cross-lane follow-up): the MCP serializer (`query_row_to_json`
+            // in src/mcp/server.rs) currently ignores `QueryRow.columns`, so this
+            // aliased score is NOT yet surfaced through the MCP `query` tool --
+            // same gap as aggregation columns (#558). Lane-4 follow-up.
             if let Some(alias) = score_alias {
                 let col = (alias, PropertyValue::Float(f64::from(item.score)));
                 match row.columns {
