@@ -4,6 +4,16 @@
 //! distance calculations at various vector dimensions commonly used in
 //! embedding models.
 //!
+//! # simsimd vs scalar (Issue #426)
+//!
+//! The `optimized` arm of each group calls the crate's public op, which is
+//! backed by the [`simsimd`](https://docs.rs/simsimd) crate when the `simsimd`
+//! feature is enabled (the default) — x86 AVX2/AVX-512 and ARM NEON/SVE via
+//! runtime dispatch — and by the portable scalar fallback under
+//! `--no-default-features`. Each group retains its scalar comparison arm
+//! (`scalar_1pass` / `naive_3pass` / `scalar`) so the simsimd-vs-scalar delta
+//! is visible in a single `cargo bench` run.
+//!
 //! Common embedding dimensions:
 //! - 384: Sentence Transformers (all-MiniLM)
 //! - 768: BERT base, BGE models

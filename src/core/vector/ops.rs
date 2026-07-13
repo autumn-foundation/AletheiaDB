@@ -1,8 +1,36 @@
 //! General arithmetic operations and transformations for vectors.
+//!
+//! # SIMD backend (Issue #426)
+//!
+//! The reduction kernels behind these functions are provided by the
+//! [`simsimd`](https://docs.rs/simsimd) crate when the `simsimd` feature is
+//! enabled (the default), giving runtime-dispatched x86 (SSE/AVX2/AVX-512) and
+//! ARM (NEON/SVE) acceleration with no `unsafe` code in this crate. Building
+//! with `--no-default-features` selects the portable scalar fallback. The
+//! public signatures and every documented edge case (empty / zero-vector
+//! handling, clamping, NaN/Inf propagation) are identical across both paths.
+//!
+//! ## Additional metrics available from simsimd (not yet wired in)
+//!
+//! `DistanceMetric` currently exposes cosine, Euclidean, and dot product.
+//! simsimd offers further SIMD-accelerated kernels that could be surfaced as
+//! new `DistanceMetric` variants in a follow-up:
+//!
+//! - **Jensen–Shannon (`js`) and Kullback–Leibler (`kl`) divergence** via
+//!   `simsimd::ProbabilitySimilarity` — for probability-distribution vectors.
+//! - **Hamming and Jaccard/Tanimoto** via `simsimd::BinarySimilarity` — for
+//!   packed *bit* vectors (a distinct storage type from the dense `f32`
+//!   vectors handled here).
+//!
+//! Wiring these into [`super::metric::DistanceMetric`] is a deliberately
+//! deferred follow-up: each needs input-domain validation (probability
+//! simplex / bit-packed layout) and a public storage/enum surface. Note that
+//! **Haversine (great-circle) distance is *not* provided by simsimd**, so it is
+//! not part of this list.
 
 use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
 use super::simd::{
-    dot_and_magnitudes, dot_product_sum, scale_and_copy, scale_in_place, squared_diff_sum,
+    dot_and_magnitudes, dot_product_sum, scale_in_place, squared_diff_sum,
     squared_magnitude as squared_magnitude_simd,
 };
 use super::validation::check_dimensions_match;
@@ -70,13 +98,15 @@ use crate::core::error::Result;
 ///
 /// # Performance
 ///
-/// This implementation uses SIMD acceleration when available:
-/// - **AVX2 + FMA**: Processes 8 floats at a time with fused multiply-add
-/// - **SSE2**: Processes 4 floats at a time (baseline for x86_64)
-/// - **Scalar**: Fallback for other platforms
+/// This implementation uses SIMD acceleration via the `simsimd` crate when the
+/// `simsimd` feature is enabled (Issue #426):
+/// - **x86**: SSE / AVX2 / AVX-512, selected at runtime
+/// - **ARM**: NEON / SVE, selected at runtime
+/// - **Scalar**: portable fallback when the feature is disabled
 ///
-/// All variants use a single-pass algorithm that computes the dot product
-/// and both magnitudes simultaneously for better cache efficiency.
+/// The dot product and both squared magnitudes are computed with accelerated
+/// reductions and combined here; the zero-vector guard, overflow-safe magnitude
+/// product, and clamping below are unchanged.
 ///
 /// # Numerical Precision
 ///
@@ -308,10 +338,11 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
 ///
 /// # Performance
 ///
-/// This implementation uses SIMD acceleration when available:
-/// - **AVX2 + FMA**: Processes 8 floats at a time with fused multiply-add
-/// - **SSE2**: Processes 4 floats at a time (baseline for x86_64)
-/// - **Scalar**: Fallback for other platforms
+/// This implementation uses SIMD acceleration via the `simsimd` crate when the
+/// `simsimd` feature is enabled (Issue #426):
+/// - **x86**: SSE / AVX2 / AVX-512, selected at runtime
+/// - **ARM**: NEON / SVE, selected at runtime
+/// - **Scalar**: portable fallback when the feature is disabled
 #[inline]
 pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
     check_dimensions_match(a, b)?;
@@ -372,10 +403,11 @@ pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
 ///
 /// # Performance
 ///
-/// This implementation uses SIMD acceleration when available:
-/// - **AVX2 + FMA**: Processes 8 floats at a time with fused multiply-add
-/// - **SSE2**: Processes 4 floats at a time (baseline for x86_64)
-/// - **Scalar**: Fallback for other platforms
+/// This implementation uses SIMD acceleration via the `simsimd` crate when the
+/// `simsimd` feature is enabled (Issue #426):
+/// - **x86**: SSE / AVX2 / AVX-512, selected at runtime
+/// - **ARM**: NEON / SVE, selected at runtime
+/// - **Scalar**: portable fallback when the feature is disabled
 ///
 /// The square root is computed after the SIMD-accelerated sum.
 #[inline]
@@ -446,10 +478,11 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
 ///
 /// # Performance
 ///
-/// This implementation uses SIMD acceleration when available:
-/// - **AVX2 + FMA**: Processes 8 floats at a time with fused multiply-add
-/// - **SSE2**: Processes 4 floats at a time (baseline for x86_64)
-/// - **Scalar**: Fallback for other platforms
+/// This implementation uses SIMD acceleration via the `simsimd` crate when the
+/// `simsimd` feature is enabled (Issue #426):
+/// - **x86**: SSE / AVX2 / AVX-512, selected at runtime
+/// - **ARM**: NEON / SVE, selected at runtime
+/// - **Scalar**: portable fallback when the feature is disabled
 ///
 /// This dedicated dot product function is more efficient than
 /// [`cosine_similarity`] when you only need the dot product and not the
@@ -579,7 +612,8 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 ///
 /// This function allocates a new vector. For in-place normalization without
 /// allocation, use [`normalize_in_place`].
-/// Uses SIMD-accelerated scalar multiplication (AVX2/SSE2) for optimal performance.
+/// The element-wise scale is a plain iterator map that the compiler
+/// auto-vectorizes; there is no `unsafe` code on this path (Issue #426).
 ///
 /// # Note on Dimension Validation
 ///
@@ -589,7 +623,6 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 /// - Dimension limits are enforced at storage time (see [`crate::core::PropertyValue::vector`])
 /// - Additional checks would add overhead without safety benefit
 #[inline]
-#[allow(clippy::uninit_vec)] // Performance optimization: we explicitly fill the vector
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let sq_mag = squared_magnitude(v);
     // Use squared magnitude threshold to avoid denormal number issues.
@@ -598,28 +631,10 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
         // Return zero vector of same length
         return vec![0.0; v.len()];
     }
-    // Scale and copy in one pass using SIMD
-    // Compute 1/sqrt(sq_mag) directly to avoid intermediate variable
+    // Compute 1/sqrt(sq_mag) directly to avoid intermediate variable.
     let inv_mag = 1.0 / sq_mag.sqrt();
-
-    // Allocate uninitialized vector to avoid zero-filling overhead.
-    // This provides ~15% speedup for large vectors by avoiding an extra write pass.
-    let mut result = Vec::with_capacity(v.len());
-
-    // Use spare_capacity_mut to get uninitialized memory safely without creating a
-    // reference to uninitialized data (which would be UB).
-    let dst = result.spare_capacity_mut();
-    // We must limit the slice to the number of elements we're going to write
-    // In case capacity > v.len() (unlikely with with_capacity but possible)
-    let dst = &mut dst[..v.len()];
-
-    scale_and_copy(v, dst, inv_mag);
-
-    // SAFETY: scale_and_copy guarantees it has written to all elements of dst.
-    // We passed a slice of length v.len(), so v.len() elements are now initialized.
-    unsafe { result.set_len(v.len()) };
-
-    result
+    // Safe element-wise scale; the compiler auto-vectorizes this map.
+    v.iter().map(|x| x * inv_mag).collect()
 }
 
 /// Normalizes a vector to unit length in place.
