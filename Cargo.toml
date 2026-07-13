@@ -462,6 +462,13 @@ name = "provenance_chain"
 harness = false
 path = "benches/provenance_chain.rs"
 
+# Provenance-enabled write-throughput "cost of trust" matrix + self-gate (Issue #3383)
+[[bench]]
+name = "provenance_write_throughput"
+harness = false
+path = "benches/provenance_write_throughput.rs"
+required-features = []
+
 [[bench]]
 name = "checkpoints"
 harness = false
