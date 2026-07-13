@@ -489,6 +489,58 @@ async fn mcp_tools_list_advertises_three_node_tools_with_read_class() {
     );
 }
 
+/// Bypass-proofing (Lane B adversarial-review requirement): the set of tools
+/// the dispatcher will actually route (the live `/mcp` `tools/list`) must equal
+/// the RBAC registry `MCP_TOOL_CLASSES`. A routable tool missing from the
+/// registry would bypass the class gate on the autumn surface; a stale registry
+/// entry would classify a non-existent tool. This test fails on either drift,
+/// so a new `#[api_doc(mcp)]` handler cannot ship routable-but-unclassified.
+#[tokio::test]
+async fn mcp_routable_tools_are_all_classified() {
+    use std::collections::BTreeSet;
+
+    let (db, store, _) = fixture();
+    let client = build_server_client(db, store, AuthMode::Required);
+
+    let rpc = json!({ "jsonrpc": "2.0", "id": 42, "method": "tools/list" });
+    let resp = client
+        .post("/mcp")
+        .header("authorization", &format!("Bearer {READER_TOKEN}"))
+        .json(&rpc)
+        .send()
+        .await;
+    assert_eq!(resp.status.as_u16(), 200);
+    let body: Value = serde_json::from_str(&resp.text()).expect("json");
+
+    let routable: BTreeSet<String> = body["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_string())
+        .collect();
+    let registered: BTreeSet<String> = rbac::MCP_TOOL_CLASSES
+        .iter()
+        .map(|(n, _)| (*n).to_string())
+        .collect();
+
+    // routable ⊆ registry: no routable tool may lack a class (the escalation
+    // hole). registry ⊆ routable: no stale/phantom class entries.
+    assert_eq!(
+        routable, registered,
+        "the live /mcp routable tool set must equal the RBAC registry \
+         (routable-but-unclassified = class-gate bypass): routable={routable:?} \
+         registry={registered:?}"
+    );
+    // And every routable name resolves to a concrete class (defensive: None at
+    // the dispatch gate must be treated as reject, never allow).
+    for name in &routable {
+        assert!(
+            rbac::tool_access_class(name).is_some(),
+            "routable tool {name} has no class"
+        );
+    }
+}
+
 #[tokio::test]
 async fn mcp_tools_call_get_node_matches_http() {
     let (db, store, node_id) = fixture();
