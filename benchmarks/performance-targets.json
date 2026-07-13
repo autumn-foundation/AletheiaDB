@@ -39,13 +39,19 @@
     {
       "metric": "MCP round-trip p99 (representative read/write/temporal/vector/query)",
       "target": "<5ms",
-      "rationale": "End-to-end tool latency through the shipped aletheia-mcp stdio server keeps LLM tool calls interactive (Issue #3361). Measured by the mcp_round_trip bench under an Async durability profile; gated per-scenario, hard-failed in the nightly lane.",
+      "rationale": "Absolute ceiling on the MCP protocol + parse + dispatch + handler latency of a tool call through the shipped aletheia-mcp stdio server, measured under an Async durability profile (Issue #3361). This is an MCP-layer metric, NOT durable-write latency: the default durable GroupCommit{max_delay_ms:10} adds ~10ms of batch-wait to a solo write, which is a WAL/durability cost paid equally by any caller (it cancels out of the overhead sub-metric) and is out of scope for this gate. Gated per-scenario; the absolute ceiling catches gross blowups. Hard-failed (exit 3) in the nightly lane.",
+      "benchmark": "mcp_round_trip"
+    },
+    {
+      "metric": "MCP round-trip p50 vs committed reference baseline (same gated set)",
+      "target": "<=2x baseline",
+      "rationale": "Relative regression gate: a gated scenario whose current median (p50) exceeds 2x its committed baseline p50 fails (Issue #3361). Gates on the median (stable +-3-9% run-to-run) rather than p99 (tail drifts >10% and would false-fail). Needed because the honest gated p99 sits ~26x under the 5ms absolute ceiling, so a clean 2x regression would otherwise stay green. Baseline at benchmarks/baselines/mcp_round_trip_baseline.json; hard-failed (exit 4) in the nightly lane.",
       "benchmark": "mcp_round_trip"
     },
     {
       "metric": "MCP transport overhead (round-trip minus in-process direct call)",
       "target": "<1ms",
-      "rationale": "JSON-RPC serialization + stdio + process-boundary cost above the direct API floor for single-entity reads (Issue #3361). Independently checkable per scenario via the overhead sub-metric.",
+      "rationale": "JSON-RPC serialization + stdio + process-boundary cost above the direct API floor for single-entity reads (Issue #3361). Independently checkable per scenario via the overhead sub-metric. Note: overhead percentiles subtract independently-sorted round-trip and direct series (unpaired), so p95/p99 overhead is an informational decomposition, noisy on the tail; the p50 is the reliable central estimate. Informational, never gated.",
       "benchmark": "mcp_round_trip"
     }
   ]

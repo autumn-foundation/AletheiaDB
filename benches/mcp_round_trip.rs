@@ -12,7 +12,10 @@
 //! It reports per-scenario `p50/p95/p99/max` (nearest-rank), an **MCP-overhead
 //! sub-metric** (round-trip minus the in-process direct-call floor), enforces
 //! **registry completeness** (every advertised tool must have a scenario), and
-//! gates representative scenarios at **p99 < 5ms**. See
+//! gates representative scenarios two ways: an **absolute** `p99 < 5ms` ceiling
+//! (catches gross blowups) plus a **relative** committed-baseline regression
+//! gate (`current p50 > 2x baseline p50` fails — median is stable run-to-run,
+//! whereas p99 drifts ±10%+ and would false-fail). See
 //! `docs/guides/mcp-latency-benchmarks.md` for the published targets, fixture
 //! shape, hardware baseline, and the JSON artifact schema.
 //!
@@ -26,10 +29,17 @@
 //! - `MCP_BENCH_WARMUP` / `BENCH_WARMUP_TIME`: warm-up calls per scenario (default 20)
 //! - `MCP_BENCH_SCALE`: `smoke` (default) or `nightly` (fixture scale)
 //! - `MCP_BENCH_ENFORCE_LATENCY=1`: hard-fail (exit 3) if a gated scenario's p99 >= 5ms
+//! - `MCP_BENCH_BASELINE=<path>`: committed reference baseline JSON of gated
+//!   median (p50) latencies; enables the **relative** regression gate.
+//! - `MCP_BENCH_ENFORCE_RELATIVE=1`: hard-fail (exit 4) if a gated scenario's
+//!   current p50 exceeds `MCP_BENCH_REGRESSION_MULTIPLIER` x its baseline p50.
+//! - `MCP_BENCH_REGRESSION_MULTIPLIER=<f>`: relative-gate threshold (default 2.0).
+//! - `MCP_BENCH_WRITE_BASELINE=<path>`: after the run, write the gated
+//!   scenarios' p50 to this path in the reference-baseline schema (regenerator).
 //! - `MCP_BENCH_JSON=<path>`: write the machine-readable artifact here
 //! - `MCP_BENCH_INJECT_LATENCY_MS=<f>`: SENSITIVITY PROOF — add this synthetic
 //!   per-call latency (ms) to the injected gated scenario, so a regression can
-//!   be demonstrated to trip the gate.
+//!   be demonstrated to trip both the absolute and the relative gate.
 //! - `MCP_BENCH_INJECT_SCENARIO=<name>`: which scenario to inject into
 //!   (default `gate_read__get_node`).
 
@@ -55,14 +65,31 @@ use serde_json::{Value, json};
 /// adds a fixed per-commit fsync/batch-wait latency (~2-10ms) that is a
 /// durability tradeoff, **not** MCP overhead (it is paid equally by the
 /// in-process direct-call floor, so it cancels out of the overhead sub-metric).
+///
+/// `MCP_BENCH_DURABILITY=group_commit` overrides this to the default durable
+/// `GroupCommit { max_delay_ms: 10 }` profile, used ONLY to capture the
+/// **observational** (ungated) durable-write round-trip number documented
+/// alongside the Async-profile gated numbers — it is durability-bound, not an
+/// MCP-layer cost.
 fn bench_config(dir: &std::path::Path) -> AletheiaDBConfig {
+    let durability = match std::env::var("MCP_BENCH_DURABILITY")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "group_commit" | "groupcommit" => DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 200,
+        },
+        _ => DurabilityMode::Async {
+            flush_interval_ms: 50,
+        },
+    };
     AletheiaDBConfig::builder()
         .wal(
             WalConfigBuilder::new()
                 .wal_dir(dir.join("wal"))
-                .durability_mode(DurabilityMode::Async {
-                    flush_interval_ms: 50,
-                })
+                .durability_mode(durability)
                 .build(),
         )
         .persistence(PersistenceConfig {
@@ -84,6 +111,10 @@ struct Config {
     warmup: usize,
     scale_nightly: bool,
     enforce_latency: bool,
+    enforce_relative: bool,
+    regression_multiplier: f64,
+    baseline_path: Option<String>,
+    write_baseline_path: Option<String>,
     json_path: Option<String>,
     inject_latency_ms: f64,
     inject_scenario: String,
@@ -106,6 +137,21 @@ impl Config {
             enforce_latency: std::env::var("MCP_BENCH_ENFORCE_LATENCY")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            enforce_relative: std::env::var("MCP_BENCH_ENFORCE_RELATIVE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            regression_multiplier: parse(
+                "MCP_BENCH_REGRESSION_MULTIPLIER",
+                "MCP_BENCH_REGRESSION_MULTIPLIER",
+                2.0f64,
+            )
+            .max(1.0),
+            baseline_path: std::env::var("MCP_BENCH_BASELINE")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            write_baseline_path: std::env::var("MCP_BENCH_WRITE_BASELINE")
+                .ok()
+                .filter(|s| !s.is_empty()),
             json_path: std::env::var("MCP_BENCH_JSON").ok(),
             inject_latency_ms: std::env::var("MCP_BENCH_INJECT_LATENCY_MS")
                 .ok()
@@ -379,20 +425,18 @@ fn micros_to_rfc3339(micros: i64) -> String {
 /// on both the binary's data dir and the direct-floor's data dir, so entity ids
 /// and version ids line up between the two.
 fn seed_fixture(dir: &std::path::Path, cfg: &Config) -> Fixture {
-    let (n_person, n_edge, del_pool, hist_long) = if cfg.scale_nightly {
-        (
-            10_000usize,
-            50_000usize,
-            cfg.warmup + cfg.sample_size + 200,
-            20usize,
-        )
+    // Disposable-delete pool sizing (Issue #3361 review FIX 5): the round-trip
+    // consumes ids `warmup + i` for `i in 0..sample_size`, while the direct-call
+    // floor (a SEPARATE db copy) consumes `warmup + sample_size + i` for
+    // `i in 0..sample_size`. So the highest index touched is
+    // `warmup + 2*sample_size - 1`; size the pool to cover that (plus margin) so
+    // no delete scenario wraps past the pool end and re-deletes an already-gone
+    // id (which would skew the direct floor toward NOT_FOUND fast paths).
+    let del_pool = cfg.warmup + 2 * cfg.sample_size + 200;
+    let (n_person, n_edge, hist_long) = if cfg.scale_nightly {
+        (10_000usize, 50_000usize, 20usize)
     } else {
-        (
-            500usize,
-            2_000usize,
-            cfg.warmup + cfg.sample_size + 50,
-            12usize,
-        )
+        (500usize, 2_000usize, 12usize)
     };
     let embedding_dim = 16usize;
     let seed_start = now_rfc3339();
@@ -1454,13 +1498,108 @@ fn git_sha() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// A single gated scenario's relative-gate evaluation against the committed
+/// baseline median.
+struct RegressionRow {
+    name: String,
+    current_p50_us: f64,
+    baseline_p50_us: f64,
+    ratio: f64,
+    regressed: bool,
+}
+
+/// Load the committed reference baseline (`gated_scenarios[name].p50_us`).
+/// Returns `None` if the file is absent or unparseable (relative gate then
+/// silently no-ops — it only ever fires when a baseline is present).
+fn load_baseline(path: &str) -> Option<std::collections::BTreeMap<String, f64>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let obj = v.get("gated_scenarios")?.as_object()?;
+    let mut out = std::collections::BTreeMap::new();
+    for (name, entry) in obj {
+        if let Some(p50) = entry.get("p50_us").and_then(|x| x.as_f64()) {
+            out.insert(name.clone(), p50);
+        }
+    }
+    Some(out)
+}
+
+/// Compare the current gated p50s against the baseline; a ratio above
+/// `multiplier` is a regression. Gates on **p50/median** (stable run-to-run),
+/// never p99 (which drifts on the tail and would false-fail).
+fn evaluate_relative(
+    results: &[ScenarioResult],
+    baseline: &std::collections::BTreeMap<String, f64>,
+    multiplier: f64,
+) -> Vec<RegressionRow> {
+    let mut rows = Vec::new();
+    for r in results.iter().filter(|r| r.gated) {
+        if let Some(&base) = baseline.get(&r.name) {
+            let cur = r.round_trip.p50_ns as f64 / 1000.0;
+            let ratio = if base > 0.0 {
+                cur / base
+            } else {
+                f64::INFINITY
+            };
+            rows.push(RegressionRow {
+                name: r.name.clone(),
+                current_p50_us: cur,
+                baseline_p50_us: base,
+                ratio,
+                regressed: ratio > multiplier,
+            });
+        }
+    }
+    rows
+}
+
+/// Serialize the gated scenarios' current p50 as a fresh reference baseline.
+fn build_baseline_doc(cfg: &Config, fx: &Fixture, results: &[ScenarioResult]) -> Value {
+    let mut gated = serde_json::Map::new();
+    for r in results.iter().filter(|r| r.gated) {
+        gated.insert(
+            r.name.clone(),
+            json!({
+                "tool": r.tool,
+                "p50_us": r.round_trip.p50_ns as f64 / 1000.0,
+                "p99_us": r.round_trip.p99_ns as f64 / 1000.0,
+            }),
+        );
+    }
+    json!({
+        "schema_version": 1,
+        "benchmark": "mcp_round_trip",
+        "issue": 3361,
+        "kind": "reference_baseline",
+        "note": "Reference baseline MEDIAN (p50) latencies for the GATED scenarios only. \
+                 The relative regression gate fails a gated scenario whose current p50 \
+                 exceeds regression_multiplier x its baseline p50. This is a REFERENCE \
+                 baseline tied to the hardware/scale below; refresh it per release or when \
+                 the reference runner changes (regenerate with MCP_BENCH_WRITE_BASELINE).",
+        "generated_at": now_rfc3339(),
+        "git_sha": git_sha(),
+        "scale": if cfg.scale_nightly { "nightly" } else { "smoke" },
+        "sample_size": cfg.sample_size,
+        "warmup": cfg.warmup,
+        "regression_multiplier": cfg.regression_multiplier,
+        "gate_on": "p50",
+        "hardware": {
+            "arch": std::env::consts::ARCH,
+            "os": std::env::consts::OS,
+            "logical_cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        },
+        "fixture": { "nodes": fx.nodes, "edges": fx.edges, "embedding_dim": fx.embedding_dim },
+        "gated_scenarios": gated,
+    })
+}
+
 fn main() {
     let cfg = Config::from_env();
     let bin = env!("CARGO_BIN_EXE_aletheia-mcp");
 
     println!("=== MCP round-trip latency benchmark (Issue #3361) ===");
     println!(
-        "scale={} sample_size={} warmup={} enforce_latency={} inject={}ms@{}",
+        "scale={} sample_size={} warmup={} enforce_latency={} enforce_relative={} mult={:.1}x baseline={} inject={}ms@{}",
         if cfg.scale_nightly {
             "nightly"
         } else {
@@ -1469,6 +1608,9 @@ fn main() {
         cfg.sample_size,
         cfg.warmup,
         cfg.enforce_latency,
+        cfg.enforce_relative,
+        cfg.regression_multiplier,
+        cfg.baseline_path.as_deref().unwrap_or("<none>"),
         cfg.inject_latency_ms,
         cfg.inject_scenario,
     );
@@ -1578,6 +1720,21 @@ fn main() {
         }
     }
 
+    // ---- Relative committed-baseline regression gate (AC5) ----
+    // Median (p50) based: stable ±3-9% run-to-run, so a real 2x regression trips
+    // it while honest noise never does (p99 is deliberately NOT used here — its
+    // tail drifts ±10%+ and would false-fail). Additive to the absolute p99 gate.
+    let baseline = cfg.baseline_path.as_deref().and_then(load_baseline);
+    let regression_rows = baseline
+        .as_ref()
+        .map(|b| evaluate_relative(&results, b, cfg.regression_multiplier))
+        .unwrap_or_default();
+    let regression_failures: Vec<String> = regression_rows
+        .iter()
+        .filter(|r| r.regressed)
+        .map(|r| r.name.clone())
+        .collect();
+
     println!("\n=== Gate summary ===");
     println!(
         "p99 < {}ms gate over {} gated scenarios: {}",
@@ -1591,6 +1748,41 @@ fn main() {
     );
     if !gated_failures.is_empty() {
         println!("  FAILING GATED SCENARIOS: {gated_failures:?}");
+    }
+    match &baseline {
+        None => println!(
+            "relative regression gate (p50 <= {:.1}x baseline): SKIPPED (no baseline; set MCP_BENCH_BASELINE)",
+            cfg.regression_multiplier
+        ),
+        Some(_) => {
+            println!(
+                "relative regression gate (p50 <= {:.1}x baseline) over {} baselined scenario(s): {}",
+                cfg.regression_multiplier,
+                regression_rows.len(),
+                if regression_failures.is_empty() {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+            );
+            for row in &regression_rows {
+                println!(
+                    "  {:<32} current p50={:.1}us baseline p50={:.1}us ratio={:.2}x{}",
+                    row.name,
+                    row.current_p50_us,
+                    row.baseline_p50_us,
+                    row.ratio,
+                    if row.regressed {
+                        "  <-- REGRESSION"
+                    } else {
+                        ""
+                    },
+                );
+            }
+            if !regression_failures.is_empty() {
+                println!("  REGRESSED GATED SCENARIOS: {regression_failures:?}");
+            }
+        }
     }
     println!(
         "overhead < {}ms budget (informational): {}",
@@ -1619,12 +1811,23 @@ fn main() {
         &results,
         &gated_failures,
         &overhead_failures,
+        &regression_rows,
+        &regression_failures,
+        baseline.is_some(),
         registry_complete,
     );
     if let Some(path) = &cfg.json_path {
         std::fs::write(path, serde_json::to_string_pretty(&artifact).unwrap())
             .expect("write JSON artifact");
         println!("\nJSON artifact written to {path}");
+    }
+
+    // ---- Reference-baseline regenerator ----
+    if let Some(path) = &cfg.write_baseline_path {
+        let doc = build_baseline_doc(&cfg, &fx, &results);
+        std::fs::write(path, serde_json::to_string_pretty(&doc).unwrap())
+            .expect("write reference baseline");
+        println!("reference baseline written to {path}");
     }
 
     // ---- Exit codes ----
@@ -1638,9 +1841,16 @@ fn main() {
     }
     if cfg.enforce_latency && !gated_failures.is_empty() {
         eprintln!(
-            "\nERROR: p99 < {P99_GATE_MS}ms gate FAILED for gated scenario(s): {gated_failures:?}"
+            "\nERROR: absolute p99 < {P99_GATE_MS}ms gate FAILED for gated scenario(s): {gated_failures:?}"
         );
         std::process::exit(3);
+    }
+    if cfg.enforce_relative && !regression_failures.is_empty() {
+        eprintln!(
+            "\nERROR: relative regression gate FAILED — gated scenario(s) exceeded {:.1}x baseline p50: {regression_failures:?}",
+            cfg.regression_multiplier
+        );
+        std::process::exit(4);
     }
     println!("\nOK");
 }
@@ -1688,6 +1898,9 @@ fn build_artifact(
     results: &[ScenarioResult],
     gated_failures: &[String],
     overhead_failures: &[String],
+    regression_rows: &[RegressionRow],
+    regression_failures: &[String],
+    baseline_present: bool,
     registry_complete: bool,
 ) -> Value {
     let scenarios: Vec<Value> = results
@@ -1743,6 +1956,21 @@ fn build_artifact(
             "injected_latency_ms": cfg.inject_latency_ms,
             "injected_scenario": cfg.inject_scenario,
         },
+        "relative_gate": {
+            "baseline_present": baseline_present,
+            "baseline_path": cfg.baseline_path,
+            "regression_multiplier": cfg.regression_multiplier,
+            "gate_on": "p50",
+            "enforced": cfg.enforce_relative,
+            "scenarios": regression_rows.iter().map(|r| json!({
+                "name": r.name,
+                "current_p50_us": r.current_p50_us,
+                "baseline_p50_us": r.baseline_p50_us,
+                "ratio": r.ratio,
+                "regressed": r.regressed,
+            })).collect::<Vec<_>>(),
+            "failures": regression_failures,
+        },
         "registry": {
             "advertised": advertised,
             "covered": covered.iter().cloned().collect::<Vec<_>>(),
@@ -1752,6 +1980,9 @@ fn build_artifact(
         "scenarios": scenarios,
         "gated_failures": gated_failures,
         "overhead_failures": overhead_failures,
-        "pass": registry_complete && (!cfg.enforce_latency || gated_failures.is_empty()),
+        "regression_failures": regression_failures,
+        "pass": registry_complete
+            && (!cfg.enforce_latency || gated_failures.is_empty())
+            && (!cfg.enforce_relative || regression_failures.is_empty()),
     })
 }

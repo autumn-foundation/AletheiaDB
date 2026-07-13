@@ -297,16 +297,22 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-mcpbench-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run MCP round-trip benchmark (nightly scale, enforced gate)
+      - name: Run MCP round-trip benchmark (nightly scale, enforced gates)
         env:
           MCP_BENCH_SCALE: nightly
           MCP_BENCH_SAMPLE_SIZE: 1000
           MCP_BENCH_WARMUP: 50
+          # Absolute p99<5ms ceiling (exit 3) AND relative committed-baseline
+          # p50<=2x regression gate (exit 4) are BOTH enforced here.
           MCP_BENCH_ENFORCE_LATENCY: '1'
+          MCP_BENCH_ENFORCE_RELATIVE: '1'
+          MCP_BENCH_BASELINE: benchmarks/baselines/mcp_round_trip_baseline.json
           MCP_BENCH_JSON: mcp_round_trip_results.json
         run: |
-          # Hard-fail on: registry-completeness (exit 2) or an over-budget gated
-          # scenario p99>=5ms (exit 3). This is the reference enforcement lane.
+          # Hard-fail on: registry-completeness (exit 2), an over-budget gated
+          # scenario p99>=5ms (exit 3), or a gated scenario p50 > 2x its committed
+          # baseline (exit 4). This is the reference enforcement lane; the relative
+          # gate is what makes a clean 2x regression fail CI.
           cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
 
       - name: Upload MCP latency artifact

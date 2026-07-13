@@ -37,10 +37,15 @@ black-box so it exercises precisely what a real client hits.
 
 | Metric | Target | How it is checked |
 |---|---|---|
-| MCP round-trip **p99** (representative read / write / temporal / vector / query) | **< 5 ms** | Gated per-scenario; hard-failed in the nightly CI lane |
+| MCP round-trip **p99** (representative read / write / temporal / vector / query) | **< 5 ms** (absolute ceiling) | Gated per-scenario; hard-failed in the nightly CI lane (exit 3) |
+| MCP round-trip **p50** vs committed baseline (same gated set) | **≤ 2× baseline** (relative) | Median-based regression gate; hard-failed in the nightly CI lane (exit 4) |
 | MCP transport **overhead** (round-trip − in-process direct call), single-entity reads | **< 1 ms** | Reported per scenario; independently checkable from the artifact |
 
-Both rows are recorded in [`benchmarks/performance-targets.json`](../../benchmarks/performance-targets.json).
+The two latency rows are recorded in
+[`benchmarks/performance-targets.json`](../../benchmarks/performance-targets.json).
+The p99 ceiling is scoped to **MCP protocol + parse + dispatch + handler latency
+under the Async durability profile** — durable-write cost under `GroupCommit` is a
+separate WAL concern (see the durability note below).
 
 ### A note on durability and the write gate
 
@@ -56,10 +61,31 @@ fsync cost, the harness serves the fixture under an **`Async` durability profile
 (`flush_interval_ms: 50`, background flush, ~10–100 µs commit latency). It does
 this by generating a TOML config at runtime and pointing the spawned binary at it
 via `ALETHEIADB_CONFIG` (the same config backs the in-process direct DB). Under
-this profile every write tool round-trips in well under 1 ms, so the write gate is
-meaningful. A production deployment that chooses `GroupCommit`/`Synchronous` adds
-its fsync/batch-wait latency on top; that is expected and is a separate WAL
-concern (see [docs/WAL.md](../WAL.md)).
+this profile every write tool round-trips in well under 1 ms.
+
+So be precise about what the 5 ms write gate measures: **MCP protocol + parse +
+dispatch + handler latency under the Async profile** — *not* durable-write
+latency. A production deployment that chooses the default durable
+`GroupCommit { max_delay_ms: 10 }` adds its ~10 ms batch-wait on top; a *solo*
+`create_node` there round-trips at ≈ 10–11 ms, which is **durability-bound, not an
+MCP-layer cost**, and is a separate WAL concern (see [docs/WAL.md](../WAL.md)).
+Crucially this does **not** inflate the MCP-overhead sub-metric: the batch-wait is
+paid equally by the in-process direct floor, so it cancels out of
+`round_trip − direct` (the overhead stays sub-millisecond regardless of
+durability mode).
+
+**Observational durable-write number (ungated).** Re-running the harness under the
+default durable profile (`MCP_BENCH_DURABILITY=group_commit`) shows the honest
+durable cost alongside the Async-profile gated number:
+
+| Scenario | Durability profile | round-trip p50 | round-trip p99 | MCP overhead p99 | Gated? |
+|---|---|--:|--:|--:|:-:|
+| `gate_write__create_node` | **Async** (gate profile) | ~0.16 ms | ~0.24 ms | ~0.21 ms | ✓ (< 5 ms) |
+| `create_node` (observational) | **GroupCommit `{max_delay_ms:10}`** (default durable) | ~10.9 ms | ~11.5 ms | ~0.0 ms | ✗ (durability-bound) |
+
+The ~10.9 ms is the batch-delay wait, not MCP work — note the overhead sub-metric
+stays ≈ 0 ms because the direct floor pays the same wait. This row is **not
+gated**; it exists only to make the durable number honest and visible.
 
 ## Coverage (AC1–AC3)
 
@@ -127,6 +153,10 @@ generate the Async-profile config).
 | `MCP_BENCH_WARMUP` / `BENCH_WARMUP_TIME` | 20 | Warm-up calls per scenario (discarded) |
 | `MCP_BENCH_SCALE` | `smoke` | `smoke` or `nightly` fixture scale |
 | `MCP_BENCH_ENFORCE_LATENCY` | `0` | `1` → hard-fail (exit 3) if a gated scenario p99 ≥ 5 ms |
+| `MCP_BENCH_BASELINE` | — | Path to the committed reference baseline JSON; enables the relative gate |
+| `MCP_BENCH_ENFORCE_RELATIVE` | `0` | `1` → hard-fail (exit 4) if a gated scenario p50 > `multiplier` × baseline p50 |
+| `MCP_BENCH_REGRESSION_MULTIPLIER` | `2.0` | Relative-gate threshold (ratio of current p50 to baseline p50) |
+| `MCP_BENCH_WRITE_BASELINE` | — | Regenerate the reference baseline: write gated p50s to this path |
 | `MCP_BENCH_JSON` | — | Path for the machine-readable artifact |
 | `MCP_BENCH_INJECT_LATENCY_MS` | `0` | Sensitivity proof: synthetic per-call latency added to the injected gated scenario |
 | `MCP_BENCH_INJECT_SCENARIO` | `gate_read__get_node` | Which gated scenario receives the injection |
@@ -137,13 +167,16 @@ generate the Async-profile config).
 - `0` — success (registry complete; no enforced gate failure).
 - `2` — **registry-completeness failed** (an advertised tool has no scenario). Always enforced.
 - `3` — an **enforced** gated scenario p99 ≥ 5 ms (only when `MCP_BENCH_ENFORCE_LATENCY=1`).
+- `4` — an **enforced** gated scenario p50 exceeded the relative baseline multiplier (only when `MCP_BENCH_ENFORCE_RELATIVE=1`).
 
 ## Measured results (smoke scale, reference run)
 
-Hardware baseline: `x86_64` Linux, 4 logical CPUs, **debug build** (`cargo bench`
-compiles benches without release optimizations, so these are conservative upper
-bounds — a release build is faster). `sample_size=100`, `warmup=15`. Every one of
-the 46 tools has at least one scenario; all p99 land well under the 5 ms gate.
+Hardware baseline: `x86_64` Linux, 4 logical CPUs, **optimized (release-profile)
+bench build**. `cargo bench` (and `just mcp-bench`, and both CI lanes) compile
+this bench under `[profile.bench]`, which `inherits = "release"` in `Cargo.toml`
+(opt-level 3, thin LTO) — so these are optimized-build numbers, not a debug
+build. `sample_size=100`, `warmup=15`. Every one of the 46 tools has at least one
+scenario; all p99 land well under the 5 ms gate.
 
 <!-- BEGIN MCP-LATENCY-TABLE (regenerate from the MCP_BENCH_JSON artifact) -->
 | Scenario | Tool | Cat | Size | Gated | p50 (µs) | p95 (µs) | p99 (µs) | max (µs) | Overhead p99 (µs) |
@@ -206,15 +239,32 @@ the 46 tools has at least one scenario; all p99 land well under the 5 ms gate.
 | provenance__audit_export | audit_export | provenance | typical |  | 144.5 | 199.1 | 220.6 | 221.3 | n/a |
 <!-- END MCP-LATENCY-TABLE -->
 
-**Overhead (AC6).** For the 26 tools whose request type is publicly re-exported
-from `aletheiadb::mcp`, the harness computes the in-process direct-call floor and
-reports `overhead = round_trip − direct`. Across those tools the p99 overhead is
+**Overhead (AC6).** For the **26 of 46** tools whose request type is publicly
+re-exported from `aletheiadb::mcp`, the harness computes the in-process
+direct-call floor and reports `overhead = round_trip − direct`. All **5 gated
+scenarios are covered**. Across the covered tools the p99 overhead is
 sub-millisecond (e.g. `get_node` ≈ 0.18 ms, `find_similar` ≈ 0.28 ms), inside the
-< 1 ms budget. Tools whose request type is not yet re-exported (e.g. the
-`*_at_valid_time`/`*_at_transaction_time`, `diff_*`, `get_*_history`,
-`get_schema`, `database_stats`, `retract_*`, lineage, and provenance tools) show
-`n/a` for overhead; extending coverage only requires re-exporting those request
-types (a Lane 4 / MCP-owner change — the harness logic already handles them).
+< 1 ms budget.
+
+The remaining **20** tools show `n/a` for overhead: they lack a public
+direct-call entry point (`aletheiadb::mcp` does not re-export their request type).
+Extending coverage is a deliberate **Lane-4 / MCP-owner follow-up** — of the 20,
+**11 are a one-line `pub use` re-export** in `src/mcp/mod.rs` (their typed method
+already exists: e.g. `*_at_valid_time`/`*_at_transaction_time`, `diff_*`,
+`get_*_history`, `get_schema`, `database_stats`, `retract_*`) and **9 need a new
+public typed method** (lineage, provenance, constraint tools). The harness logic
+already handles them the moment a floor exists. These are intentionally **not**
+routed through the higher-level `AletheiaDB` API, because that would measure a
+different (inconsistent) floor than the MCP handler path and make the overhead
+sub-metric incomparable across tools.
+
+> **Caveat — the overhead sub-metric is an informational decomposition, noisy on
+> the tail.** `overhead.pN = round_trip.pN − direct.pN` subtracts two
+> **independently sorted** percentile series; the p99 of the round-trip and the
+> p99 of the direct floor come from *different* calls, so the difference is **not**
+> a per-call paired latency. Treat the overhead p50 as a solid central estimate
+> and the overhead p95/p99 as indicative only (they can even round to 0 when the
+> two tails happen to align). It is a diagnostic, never a gate.
 
 ## Machine-readable artifact (AC4)
 
@@ -277,36 +327,86 @@ $ echo $?
 2
 ```
 
-## Sensitivity proof (the p99 gate has teeth)
+## Two gates: absolute ceiling + relative baseline (AC5)
+
+The gated scenarios are checked **two** ways, and both hard-fail in the nightly
+lane:
+
+1. **Absolute p99 < 5 ms** — a fixed ceiling that catches gross blowups (an O(n)
+   scan or serialization blow-up creeping into a hot path). Exit 3 when enforced
+   (`MCP_BENCH_ENFORCE_LATENCY=1`).
+2. **Relative committed-baseline regression** — for each gated scenario,
+   `ratio = current_p50 / baseline_p50`; if any ratio exceeds
+   `MCP_BENCH_REGRESSION_MULTIPLIER` (default **2.0×**) the gate fails, naming the
+   scenario. Exit 4 when enforced (`MCP_BENCH_ENFORCE_RELATIVE=1`). The baseline
+   lives at [`benchmarks/baselines/mcp_round_trip_baseline.json`](../../benchmarks/baselines/mcp_round_trip_baseline.json).
+
+### Why the relative gate exists (the absolute gate alone can't satisfy AC5)
+
+AC5 requires that *"a 2× regression must fail CI."* The absolute p99 gate cannot
+deliver that on its own: the honest gated p99 sits **~26× under** the 5 ms
+ceiling, so a clean 2× regression only lifts p99 to ~1.6 ms — still green. The
+relative gate closes that hole by comparing against a committed reference median.
+
+### Why it gates on p50 (median), not p99
+
+The gate compares **medians**. Across honest runs the p50 of these gated
+scenarios is stable (±3–9%), so a real 2× regression is unmistakable against a
+2.0× threshold, while ordinary noise never trips it. The **p99 tail is the wrong
+signal for a relative gate**: non-injected p99 drift of ±11% was observed, plus a
+one-off AQL p99 spike to ~30 ms with zero injection — a p99-based relative gate
+would false-fail. The absolute p99 ceiling is kept **additively** precisely
+because a single-run tail spike is what it is designed to tolerate (it only fires
+at 5 ms).
+
+### The reference baseline
+
+`benchmarks/baselines/mcp_round_trip_baseline.json` holds the gated scenarios'
+baseline **p50** (µs), generated from an honest run at the nightly fixture scale
+on the reference runner. It is a **reference** baseline tied to that hardware and
+scale — refresh it per release, or whenever the reference runner changes, by
+re-running with `MCP_BENCH_WRITE_BASELINE=<path>` (the harness writes the file in
+the same schema). Because it gates on a 2.0× ratio of a stable median, moderate
+hardware differences do not false-fail; a runner more than 2× slower than the
+reference should regenerate the baseline.
+
+### Sensitivity proof (both gates have teeth)
 
 `MCP_BENCH_INJECT_LATENCY_MS` adds a synthetic per-call latency to a gated
-scenario, inside the timed region, to model a latency regression. With enforcement
-on, an **honest run passes (exit 0)** while an **injected regression fails
-(exit 3)**, naming the scenario:
+scenario, inside the timed region, modelling a latency regression. It raises
+every measured call, so it lifts the **median** (which the relative gate reads),
+not just the tail. With both gates enforced, an **honest run passes (exit 0)**
+while an **injected 2× regression fails the relative gate (exit 4)**, naming the
+scenario — even though that same 2× regression stays under the absolute 5 ms
+ceiling:
 
-| Run | `gate_read__get_node` p50 | p99 | Gate | Exit |
-|---|--:|--:|---|:-:|
-| **Honest** | 0.12 ms | **0.19 ms** | PASS | 0 |
-| Modest injection (`+0.19 ms`, ≈ a doubling of the baseline) | ~0.49 ms | ~0.67 ms | PASS (still ~7× under budget) | 0 |
-| **Regression injection (`+5 ms`)** | **5.43 ms** | **53.4 ms** | **FAIL** `["gate_read__get_node"]` | **3** |
+| Run | `gate_read__get_node` p50 | ratio vs baseline | Relative gate | Absolute p99 gate | Exit |
+|---|--:|--:|---|---|:-:|
+| **Honest** | ~0.12 ms | ~1.0× | PASS | PASS | 0 |
+| **2× injection** (`+baseline p50`) | ~0.25 ms | **~2.1×** | **FAIL** `["gate_read__get_node"]` | PASS (~1.6 ms, still green) | **4** |
+| Gross injection (`+5 ms`) | ~5.1 ms | ~40× | FAIL | **FAIL** (p99 ≫ 5 ms) | 3 or 4 |
 
-Because the debug-build honest round-trip (~0.19 ms) sits ~26× under the 5 ms
-budget, a literal 2× regression stays green (that headroom is intentional — the
-gate targets **gross** regressions such as an O(n) scan or serialization blow-up
-creeping into a hot path). A regression large enough to breach the budget trips
-the gate deterministically and fails CI. The exit-code split (0 vs 3) is what the
-nightly lane keys on.
+The exact numbers from the verification run on this machine are recorded in the
+PR description. The relative gate (exit 4) is what makes a clean 2× regression
+fail CI; the absolute gate (exit 3) remains for gross blowups. Both are wired to
+hard-fail the nightly lane.
 
 ## CI wiring (two lanes)
 
 The bench is wired into `.github/workflows/benchmark.yml` as two additive jobs:
 
 - **`mcp-roundtrip-nightly`** — runs on `schedule` / `workflow_dispatch`,
-  **nightly** fixture scale, `MCP_BENCH_ENFORCE_LATENCY=1`. A gated p99 ≥ 5 ms
-  **hard-fails** the job (the reference-runner enforcement lane).
+  **nightly** fixture scale, with **both** gates enforced:
+  `MCP_BENCH_ENFORCE_LATENCY=1` (absolute p99 ≥ 5 ms → exit 3) **and**
+  `MCP_BENCH_ENFORCE_RELATIVE=1` with `MCP_BENCH_BASELINE` pointed at the
+  committed reference baseline (a gated p50 > 2× baseline → exit 4). Either
+  failure **hard-fails** the job. This is the reference-runner enforcement lane;
+  the relative gate is what makes a clean 2× regression fail CI.
 - **`mcp-roundtrip-smoke`** — runs on `push` / `pull_request`, reduced (smoke)
   scale, **`continue-on-error: true`** — informational only, never a blocking
-  per-PR check. Registry-completeness (exit 2) still surfaces in the log.
+  per-PR check. Neither latency gate is enforced (`MCP_BENCH_ENFORCE_LATENCY=0`,
+  no `MCP_BENCH_ENFORCE_RELATIVE`); registry-completeness (exit 2) still surfaces
+  in the log.
 
 Flipping the per-PR smoke lane to blocking is a deliberate one-line change
 (`continue-on-error: false`) left to the repository owner.
