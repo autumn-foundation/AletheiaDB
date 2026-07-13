@@ -443,9 +443,13 @@ impl QueryExecutor {
 
             PhysicalOp::Filter { input, predicate } => {
                 let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::FilterIterator::new(
+                // Pass historical storage so a `Predicate::Provenance` leaf
+                // (Issue #3354a) can resolve each row entity's write-time
+                // provenance; property-only filters never touch it.
+                Box::new(iterators::FilterIterator::with_historical(
                     input_iter,
                     predicate.clone(),
+                    Arc::clone(&self.historical),
                 ))
             }
 

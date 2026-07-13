@@ -523,11 +523,206 @@ pub enum Predicate {
     /// Logical NOT of a predicate
     Not(Box<Predicate>),
 
+    /// Filter on a version's write-time provenance (Issue #3354a).
+    ///
+    /// Unlike every other [`Predicate`] variant (which reads a stored *property*
+    /// of the row entity), this reads the [`Provenance`](crate::core::provenance::Provenance)
+    /// bundle recorded on the version the row represents — resolved from the
+    /// entity's version id at the query's bi-temporal coordinate, so an `AS OF`
+    /// query filters on the provenance recorded on the version visible at that
+    /// coordinate (matching Issue #3348 semantics, AC3).
+    Provenance(ProvenancePredicate),
+
     /// Always true (identity for AND)
     True,
 
     /// Always false (identity for OR)
     False,
+}
+
+/// A write-time provenance predicate over a single version, lowered from an AQL
+/// `WHERE` provenance accessor (Issue #3354a).
+///
+/// Evaluated per-row against the `Option<Provenance>` recorded on the version
+/// the row represents. Absent provenance (no bundle, or a bundle missing the
+/// queried field) makes every accessor evaluate to null, so any comparison is
+/// false and the row is excluded — deliberately mirroring
+/// [`ProvenanceFilter::matches`](crate::core::provenance::ProvenanceFilter::matches)'s
+/// exclude-unattributed default. The [`ProvenancePredicate::Filter`] arm reuses
+/// that exact `matches` implementation for the foldable positive shapes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProvenancePredicate {
+    /// The foldable positive shapes that the reusable core
+    /// [`ProvenanceFilter`](crate::core::provenance::ProvenanceFilter) already
+    /// expresses, evaluated per-version via its `matches`:
+    /// - `source(x) = 'S'`    → `sources = [S]` (any-of exact match)
+    /// - `confidence(x) >= t` → `min_confidence = t` (inclusive lower bound)
+    ///
+    /// Correctness rides on the shared `matches` implementation, so the AQL
+    /// accessor and the #3348 structured filter return identical result sets.
+    Filter(crate::core::provenance::ProvenanceFilter),
+
+    /// A general per-row accessor comparison for the operators the reusable
+    /// `ProvenanceFilter` cannot express (`<`, `<=`, `>`, `<>`, and `=` on
+    /// confidence/reason). Semantics for absent provenance still match
+    /// `ProvenanceFilter::matches` (excluded).
+    Accessor {
+        /// Which provenance field the accessor reads.
+        field: ProvenanceField,
+        /// The comparison operator.
+        op: ProvenanceCmp,
+        /// The right-hand literal to compare against.
+        operand: ProvenanceOperand,
+    },
+
+    /// `provenance(x) IS [NOT] NULL` — deliberately selects (or excludes) the
+    /// versions with **no** provenance bundle at all. `negated == false` keeps
+    /// rows whose bundle is absent (`IS NULL`); `negated == true` keeps rows
+    /// whose bundle is present (`IS NOT NULL`).
+    IsNull {
+        /// `true` for `IS NOT NULL`, `false` for `IS NULL`.
+        negated: bool,
+    },
+}
+
+/// A provenance field addressable by an AQL accessor (Issue #3354a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvenanceField {
+    /// `source(x)` → [`Provenance::source`](crate::core::provenance::Provenance::source).
+    Source,
+    /// `confidence(x)` → [`Provenance::confidence`](crate::core::provenance::Provenance::confidence).
+    Confidence,
+    /// `reason(x)` → [`Provenance::note`](crate::core::provenance::Provenance::note)
+    /// (the user-facing name for the internal `note` field).
+    Reason,
+}
+
+impl ProvenanceField {
+    /// The user-facing accessor name (`"source"`/`"confidence"`/`"reason"`).
+    #[must_use]
+    pub fn accessor_name(self) -> &'static str {
+        match self {
+            ProvenanceField::Source => "source",
+            ProvenanceField::Confidence => "confidence",
+            ProvenanceField::Reason => "reason",
+        }
+    }
+}
+
+/// Comparison operator for a [`ProvenancePredicate::Accessor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvenanceCmp {
+    /// `=`
+    Eq,
+    /// `<>` / `!=`
+    Ne,
+    /// `<`
+    Lt,
+    /// `<=`
+    Le,
+    /// `>`
+    Gt,
+    /// `>=`
+    Ge,
+}
+
+/// The right-hand literal of a [`ProvenancePredicate::Accessor`] comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProvenanceOperand {
+    /// A string operand (for `source`/`reason`).
+    Str(String),
+    /// A numeric operand (for `confidence`, already validated to `[0,1]`).
+    Num(f64),
+}
+
+impl ProvenancePredicate {
+    /// Evaluate this predicate against the provenance bundle recorded on the
+    /// version a row represents.
+    ///
+    /// `prov` is the `Option<Provenance>` for the exact version being
+    /// considered (the historical version at the query's bi-temporal
+    /// coordinate for an `AS OF` query), so the decision reflects provenance as
+    /// recorded at that coordinate (Issue #3348 AC3).
+    ///
+    /// Absent provenance handling deliberately mirrors
+    /// [`ProvenanceFilter::matches`](crate::core::provenance::ProvenanceFilter::matches):
+    /// a missing bundle (or a bundle missing the queried field) fails every
+    /// accessor comparison; only [`ProvenancePredicate::IsNull`] can select the
+    /// no-bundle rows.
+    #[must_use]
+    pub fn evaluate(&self, prov: Option<&crate::core::provenance::Provenance>) -> bool {
+        match self {
+            // Reuse the shared core semantics for the foldable positive shapes.
+            ProvenancePredicate::Filter(filter) => filter.matches(prov),
+            ProvenancePredicate::IsNull { negated } => {
+                if *negated {
+                    prov.is_some()
+                } else {
+                    prov.is_none()
+                }
+            }
+            ProvenancePredicate::Accessor { field, op, operand } => {
+                match (field, operand) {
+                    (ProvenanceField::Confidence, ProvenanceOperand::Num(rhs)) => {
+                        match prov.and_then(crate::core::provenance::Provenance::confidence) {
+                            Some(lhs) => op.compare_num(lhs, *rhs),
+                            None => false, // absent field => excluded (matches semantics)
+                        }
+                    }
+                    (ProvenanceField::Source, ProvenanceOperand::Str(rhs)) => {
+                        match prov.and_then(crate::core::provenance::Provenance::source) {
+                            Some(lhs) => op.compare_str(lhs, rhs),
+                            None => false,
+                        }
+                    }
+                    (ProvenanceField::Reason, ProvenanceOperand::Str(rhs)) => {
+                        match prov.and_then(crate::core::provenance::Provenance::note) {
+                            Some(lhs) => op.compare_str(lhs, rhs),
+                            None => false,
+                        }
+                    }
+                    // Field/operand type mismatches are rejected at convert time,
+                    // so this arm is unreachable in practice; fail closed.
+                    _ => false,
+                }
+            }
+        }
+    }
+}
+
+impl ProvenanceCmp {
+    /// Apply this comparator to two numbers (for `confidence`).
+    #[must_use]
+    pub fn compare_num(self, lhs: f64, rhs: f64) -> bool {
+        match self {
+            ProvenanceCmp::Eq => lhs == rhs,
+            ProvenanceCmp::Ne => lhs != rhs,
+            ProvenanceCmp::Lt => lhs < rhs,
+            ProvenanceCmp::Le => lhs <= rhs,
+            ProvenanceCmp::Gt => lhs > rhs,
+            ProvenanceCmp::Ge => lhs >= rhs,
+        }
+    }
+
+    /// Apply this comparator to two strings (for `source`/`reason`).
+    ///
+    /// Only equality/inequality are meaningful for strings. The ordering
+    /// comparators (`Lt`/`Le`/`Gt`/`Ge`) are **rejected at convert time** for
+    /// the string accessors (see `build_provenance_comparison` in
+    /// `src/query/converter.rs`), so they are unreachable through the AQL
+    /// surface; the lexicographic arms below exist only for total-match
+    /// completeness and are never exercised by a converted query.
+    #[must_use]
+    pub fn compare_str(self, lhs: &str, rhs: &str) -> bool {
+        match self {
+            ProvenanceCmp::Eq => lhs == rhs,
+            ProvenanceCmp::Ne => lhs != rhs,
+            ProvenanceCmp::Lt => lhs < rhs,
+            ProvenanceCmp::Le => lhs <= rhs,
+            ProvenanceCmp::Gt => lhs > rhs,
+            ProvenanceCmp::Ge => lhs >= rhs,
+        }
+    }
 }
 
 impl Predicate {
@@ -802,6 +997,148 @@ mod tests {
 
         let v: PredicateValue = "hello".into();
         assert_eq!(v, PredicateValue::String("hello".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod provenance_predicate_tests {
+    use super::*;
+    use crate::core::provenance::{Provenance, ProvenanceFilter};
+
+    fn prov(source: Option<&str>, confidence: Option<f64>, reason: Option<&str>) -> Provenance {
+        Provenance::from_parts(
+            source.map(String::from),
+            confidence,
+            reason.map(String::from),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn is_null_selects_no_bundle_only() {
+        let is_null = ProvenancePredicate::IsNull { negated: false };
+        let is_not_null = ProvenancePredicate::IsNull { negated: true };
+        assert!(is_null.evaluate(None));
+        assert!(!is_null.evaluate(Some(&prov(Some("crm"), None, None))));
+        assert!(!is_not_null.evaluate(None));
+        assert!(is_not_null.evaluate(Some(&prov(Some("crm"), None, None))));
+    }
+
+    #[test]
+    fn absent_provenance_fails_every_accessor() {
+        let cases = [
+            ProvenancePredicate::Accessor {
+                field: ProvenanceField::Confidence,
+                op: ProvenanceCmp::Ge,
+                operand: ProvenanceOperand::Num(0.5),
+            },
+            ProvenancePredicate::Accessor {
+                field: ProvenanceField::Confidence,
+                op: ProvenanceCmp::Lt,
+                operand: ProvenanceOperand::Num(0.5),
+            },
+            ProvenancePredicate::Accessor {
+                field: ProvenanceField::Source,
+                op: ProvenanceCmp::Ne,
+                operand: ProvenanceOperand::Str("x".into()),
+            },
+        ];
+        for c in cases {
+            assert!(!c.evaluate(None), "absent bundle must fail {c:?}");
+        }
+    }
+
+    #[test]
+    fn confidence_operators() {
+        let p = prov(None, Some(0.8), None);
+        let mk = |op| ProvenancePredicate::Accessor {
+            field: ProvenanceField::Confidence,
+            op,
+            operand: ProvenanceOperand::Num(0.8),
+        };
+        assert!(mk(ProvenanceCmp::Ge).evaluate(Some(&p)));
+        assert!(mk(ProvenanceCmp::Le).evaluate(Some(&p)));
+        assert!(mk(ProvenanceCmp::Eq).evaluate(Some(&p)));
+        assert!(!mk(ProvenanceCmp::Gt).evaluate(Some(&p)));
+        assert!(!mk(ProvenanceCmp::Lt).evaluate(Some(&p)));
+        assert!(!mk(ProvenanceCmp::Ne).evaluate(Some(&p)));
+    }
+
+    /// The foldable `Filter` arm and the shared `ProvenanceFilter::matches` must
+    /// agree exactly on every bundle shape (AC3 parity).
+    #[test]
+    fn filter_arm_matches_core_provenance_filter() {
+        let filter = ProvenanceFilter::validated(Some("hr".into()), None, Some(0.9), false)
+            .unwrap()
+            .unwrap();
+        let pred = ProvenancePredicate::Filter(filter.clone());
+        let bundles = [
+            None,
+            Some(prov(Some("hr"), Some(0.95), None)),
+            Some(prov(Some("hr"), Some(0.5), None)),
+            Some(prov(Some("crm"), Some(0.95), None)),
+            Some(prov(None, Some(0.95), None)),
+            Some(prov(Some("hr"), None, None)),
+        ];
+        for b in &bundles {
+            assert_eq!(
+                pred.evaluate(b.as_ref()),
+                filter.matches(b.as_ref()),
+                "Filter arm must equal ProvenanceFilter::matches for {b:?}"
+            );
+        }
+    }
+
+    /// The general `Accessor` arm for the foldable positive shapes must equal
+    /// the equivalent `ProvenanceFilter::matches` result (source exact match,
+    /// inclusive min-confidence).
+    #[test]
+    fn accessor_arm_parity_with_filter_on_foldable_shapes() {
+        // confidence(x) >= 0.9  ==  min_confidence 0.9
+        let acc = ProvenancePredicate::Accessor {
+            field: ProvenanceField::Confidence,
+            op: ProvenanceCmp::Ge,
+            operand: ProvenanceOperand::Num(0.9),
+        };
+        let filter = ProvenanceFilter::validated(None, None, Some(0.9), false)
+            .unwrap()
+            .unwrap();
+        for b in [
+            None,
+            Some(prov(None, Some(0.95), None)),
+            Some(prov(None, Some(0.9), None)),
+            Some(prov(None, Some(0.5), None)),
+            Some(prov(Some("crm"), None, None)),
+        ] {
+            assert_eq!(
+                acc.evaluate(b.as_ref()),
+                filter.matches(b.as_ref()),
+                "{b:?}"
+            );
+        }
+
+        // source(x) = 'crm'  ==  sources [crm]
+        let acc = ProvenancePredicate::Accessor {
+            field: ProvenanceField::Source,
+            op: ProvenanceCmp::Eq,
+            operand: ProvenanceOperand::Str("crm".into()),
+        };
+        let filter = ProvenanceFilter::validated(Some("crm".into()), None, None, false)
+            .unwrap()
+            .unwrap();
+        for b in [
+            None,
+            Some(prov(Some("crm"), None, None)),
+            Some(prov(Some("hr"), None, None)),
+        ] {
+            assert_eq!(
+                acc.evaluate(b.as_ref()),
+                filter.matches(b.as_ref()),
+                "{b:?}"
+            );
+        }
     }
 }
 

@@ -95,6 +95,62 @@ extend them. Advertised, supported constructs:
 Mutating clauses (`CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`, `DETACH`,
 `DROP`, `CALL`, `FOREACH`, `LOAD`) are rejected **before execution**.
 
+## Querying provenance (Issue #3354a)
+
+Write-time provenance (source / confidence / reason, Issue #3224 — the same
+metadata the structured read tools filter on in Issue #3348) is queryable
+directly from an **AQL** `WHERE` clause through the `query` tool, so an LLM can
+express a trust-thresholded, temporally-scoped question as one declarative
+statement instead of a fetch-all-then-filter chain.
+
+Read-only accessors (usable in `WHERE` only in v1):
+
+- `source(x)` — the version's `source` (string; `=`, `<>`)
+- `confidence(x)` — the version's `confidence` (number in `[0,1]`; `=`, `<>`,
+  `<`, `<=`, `>`, `>=`)
+- `reason(x)` — the version's `reason` (string; `=`, `<>`)
+- `provenance(x) IS [NOT] NULL` — select (or exclude) versions with no bundle
+
+`x` is a bound variable. A property literally named `source` is still
+`n.source` (property access) and is unaffected — the accessors resolve only in
+function-call position.
+
+**Semantics match the #3348 structured filter exactly.** Provenance is
+evaluated per-version at the query's bi-temporal coordinate (an `AS OF` query
+reads the bundle on the version visible at that coordinate, not the latest);
+unattributed versions (or a bundle missing the queried field) are **excluded**
+by any comparison and selectable only via `provenance(x) IS NULL`.
+
+```jsonc
+// tools/call -> "query": trusted HR facts as of a coordinate, one call
+{
+  "language": "aql",
+  "query": "AS OF '1704067200000000' MATCH (n:Person) WHERE source(n) = 'hr-system' AND confidence(n) >= 0.9 RETURN n",
+  "limit": 20
+}
+```
+
+Misuse fails closed with the tool's structured error payload, never a silent
+empty result: a `confidence` literal outside `[0,1]` (or NaN) → `invalid_params`
+naming `min_confidence`; an accessor compared to the wrong type
+(`confidence(n) = 'high'`, `source(n) = 5`) → `invalid_params`
+(`Type mismatch: …`); an **ordering operator on a string accessor**
+(`source(n) < 'x'`, `reason(n) >= 'y'`) → `parse_error` (the string accessors
+support only `=`/`<>`, and ordering ops are rejected at convert time rather than
+silently accepted as lexicographic comparisons); a malformed accessor argument
+(`source(n.foo)`, `confidence(n, m)`, `source()`) → `parse_error`. The accessors
+introduce no mutating clause, so the tool's read-only guarantee is unchanged, and
+the query tool stays `reader`-class.
+
+In the single-entity pipeline, a non-provenance property leaf on an **edge** row
+is a pass-through (evaluates `true`); only provenance leaves actually filter edge
+rows, so a mixed edge predicate filters **only on its provenance clause**.
+
+> **Deferred (v1):** provenance in `RETURN`/`ORDER BY` projections (needs the
+> scalar-projection-into-row lowering) and the Cypher surface (#3354b). Like
+> ordinary property predicates, an accessor reads the row's bound entity rather
+> than resolving per-variable.
+
 ## End-to-end example (LLM-style)
 
 **Question:** *"As of June 2026, which Products does Alice's KNOWS-network view

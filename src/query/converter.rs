@@ -181,8 +181,50 @@ use super::ast::{
     RelationshipPattern, ReturnClause, SourceClause, TemporalClause, TimestampLiteral,
 };
 use super::builder::Query;
-use super::ir::{Predicate, PredicateValue, QueryOp, SortKey, TraversalDepth};
+use super::ir::{
+    Predicate, PredicateValue, ProvenanceCmp, ProvenanceField, ProvenanceOperand,
+    ProvenancePredicate, QueryOp, SortKey, TraversalDepth,
+};
 use super::plan::{QueryHints, TemporalContext};
+
+/// Map an AQL provenance accessor function name to its [`ProvenanceField`]
+/// (case-insensitive), or `None` if the name is not a provenance accessor
+/// (Issue #3354a).
+fn provenance_field_name(name: &str) -> Option<ProvenanceField> {
+    match name.to_ascii_lowercase().as_str() {
+        "source" => Some(ProvenanceField::Source),
+        "confidence" => Some(ProvenanceField::Confidence),
+        "reason" => Some(ProvenanceField::Reason),
+        _ => None,
+    }
+}
+
+/// Map an AST [`ComparisonOp`] to the IR [`ProvenanceCmp`] (Issue #3354a).
+fn provenance_cmp_from_ast(op: ComparisonOp) -> ProvenanceCmp {
+    match op {
+        ComparisonOp::Eq => ProvenanceCmp::Eq,
+        ComparisonOp::Ne => ProvenanceCmp::Ne,
+        ComparisonOp::Lt => ProvenanceCmp::Lt,
+        ComparisonOp::Le => ProvenanceCmp::Le,
+        ComparisonOp::Gt => ProvenanceCmp::Gt,
+        ComparisonOp::Ge => ProvenanceCmp::Ge,
+    }
+}
+
+/// Flip a comparison operator when its operands are swapped, so an accessor on
+/// the right-hand side (`0.9 <= confidence(x)`) lowers identically to the
+/// accessor-on-left form (`confidence(x) >= 0.9`). Equality/inequality are
+/// symmetric (Issue #3354a).
+fn flip_comparison_op(op: ComparisonOp) -> ComparisonOp {
+    match op {
+        ComparisonOp::Eq => ComparisonOp::Eq,
+        ComparisonOp::Ne => ComparisonOp::Ne,
+        ComparisonOp::Lt => ComparisonOp::Gt,
+        ComparisonOp::Le => ComparisonOp::Ge,
+        ComparisonOp::Gt => ComparisonOp::Lt,
+        ComparisonOp::Ge => ComparisonOp::Le,
+    }
+}
 
 /// Converts a parsed [`QueryAst`] into a [`Query`] that can be executed.
 ///
@@ -711,6 +753,11 @@ impl AstConverter {
             PredicateExpr::Exists(prop) => Ok(Predicate::Exists(prop.property.clone())),
             PredicateExpr::IsNull(prop) => Ok(Predicate::NotExists(prop.property.clone())),
             PredicateExpr::IsNotNull(prop) => Ok(Predicate::Exists(prop.property.clone())),
+            PredicateExpr::ProvenanceIsNull { negated, .. } => {
+                Ok(Predicate::Provenance(ProvenancePredicate::IsNull {
+                    negated: *negated,
+                }))
+            }
             PredicateExpr::Contains { .. }
             | PredicateExpr::StartsWith { .. }
             | PredicateExpr::EndsWith { .. } => self.convert_string_predicate(expr),
@@ -788,6 +835,30 @@ impl AstConverter {
         op: ComparisonOp,
         right: &Expression,
     ) -> Result<Predicate> {
+        // Provenance accessors (Issue #3354a): `source(x)`/`confidence(x)`/
+        // `reason(x)` appear as function calls, never property accesses, so a
+        // property named `source` (`n.source`) is unaffected. Recognize an
+        // accessor on either side and lower to a provenance predicate before
+        // the property-access handling below.
+        let left_accessor = self.as_provenance_accessor(left)?;
+        let right_accessor = self.as_provenance_accessor(right)?;
+        match (left_accessor, right_accessor) {
+            (Some(_), Some(_)) => {
+                return Err(Error::Query(QueryError::SyntaxError {
+                    message: "comparing two provenance accessors is not supported".to_string(),
+                }));
+            }
+            (Some(field), None) => {
+                return self.build_provenance_comparison(field, op, right);
+            }
+            (None, Some(field)) => {
+                // Accessor on the right: flip the comparison so the accessor is
+                // the logical left-hand side.
+                return self.build_provenance_comparison(field, flip_comparison_op(op), left);
+            }
+            (None, None) => {}
+        }
+
         // Try left side as property
         if let Expression::Property(prop) = left {
             let key = prop.property.clone();
@@ -822,6 +893,192 @@ impl AstConverter {
         Err(Error::Query(QueryError::SyntaxError {
             message: "Comparison must involve a property access (e.g., n.age)".to_string(),
         }))
+    }
+
+    /// Recognize a provenance accessor expression `source(x)`/`confidence(x)`/
+    /// `reason(x)` (Issue #3354a).
+    ///
+    /// Returns:
+    /// - `Ok(Some(field))` for a well-formed accessor over a single bound
+    ///   variable,
+    /// - `Ok(None)` for any other expression (including unknown function calls,
+    ///   which fall through to the ordinary comparison path),
+    /// - `Err(..)` for a provenance-named accessor with a malformed argument
+    ///   (e.g. `source(n.foo)`, `confidence('x')`, `confidence(r, s)`,
+    ///   `source()`), so the mistake surfaces as a structured error rather than
+    ///   silently degrading.
+    fn as_provenance_accessor(&self, expr: &Expression) -> Result<Option<ProvenanceField>> {
+        let Expression::FunctionCall { name, args } = expr else {
+            return Ok(None);
+        };
+        let Some(field) = provenance_field_name(name) else {
+            return Ok(None);
+        };
+        match args.as_slice() {
+            [Expression::Identifier(_)] => Ok(Some(field)),
+            _ => Err(Error::Query(QueryError::SyntaxError {
+                message: format!(
+                    "{}(x) provenance accessor requires exactly one bound variable argument",
+                    field.accessor_name()
+                ),
+            })),
+        }
+    }
+
+    /// Lower a provenance accessor comparison `field(x) <op> operand` (with the
+    /// accessor already normalized to the left) into a [`Predicate::Provenance`]
+    /// (Issue #3354a).
+    ///
+    /// Type-checks the operand (`confidence` compares only to a number;
+    /// `source`/`reason` only to a string) and validates a `confidence`
+    /// operand's range/NaN via the reusable
+    /// [`ProvenanceFilter::validated`](crate::core::provenance::ProvenanceFilter::validated)
+    /// rules. The two foldable positive shapes (`source(x) = 'S'`,
+    /// `confidence(x) >= t`) are lowered to a `ProvenanceFilter` evaluated via
+    /// its shared `matches`; other operators use the general accessor form.
+    ///
+    /// Ordering operators (`<`, `<=`, `>`, `>=`) are **rejected at convert
+    /// time** for the string accessors (`source`/`reason`), which support only
+    /// `=`/`<>` (fail-closed: they are never silently accepted as lexicographic
+    /// comparisons). `confidence` accepts the full numeric ordering set.
+    fn build_provenance_comparison(
+        &self,
+        field: ProvenanceField,
+        op: ComparisonOp,
+        operand_expr: &Expression,
+    ) -> Result<Predicate> {
+        let operand = self.expression_to_provenance_operand(operand_expr)?;
+        let cmp = provenance_cmp_from_ast(op);
+
+        match (field, operand) {
+            (ProvenanceField::Confidence, ProvenanceOperand::Num(n)) => {
+                // Validate the confidence literal (range + NaN) once for every
+                // operator, reusing the core rules and the offending-field name;
+                // the resulting filter is only folded for the `>=` shape below.
+                let filter = crate::core::provenance::ProvenanceFilter::validated(
+                    None,
+                    None,
+                    Some(n),
+                    false,
+                )
+                .map_err(|e| {
+                    Error::Query(QueryError::InvalidParameter {
+                        parameter: e.field().to_string(),
+                        reason: format!("confidence(x) must be between 0.0 and 1.0, got {n}"),
+                    })
+                })?;
+                // Foldable positive shape: `confidence(x) >= t` reuses the core
+                // filter's inclusive min-confidence semantics via matches(). If
+                // the validated filter is inactive (defensive: a set
+                // min_confidence always yields an active filter), fall back to
+                // the general accessor form rather than panicking (coding
+                // standard: no expect/unwrap on the production path).
+                match (matches!(cmp, ProvenanceCmp::Ge), filter) {
+                    (true, Some(filter)) => {
+                        Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
+                    }
+                    _ => Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
+                        field,
+                        op: cmp,
+                        operand: ProvenanceOperand::Num(n),
+                    })),
+                }
+            }
+            (ProvenanceField::Confidence, ProvenanceOperand::Str(_)) => {
+                Err(Error::Query(QueryError::TypeMismatch {
+                    expected: "number".to_string(),
+                    actual: "string (confidence(x) compares only to a numeric value)".to_string(),
+                }))
+            }
+            (ProvenanceField::Source | ProvenanceField::Reason, ProvenanceOperand::Str(s)) => {
+                // `source`/`reason` are string accessors: only equality and
+                // inequality are supported (documented `=`/`<>`). Ordering
+                // operators are rejected at convert time (fail-closed) rather
+                // than being silently accepted as lexicographic comparisons.
+                if matches!(
+                    cmp,
+                    ProvenanceCmp::Lt | ProvenanceCmp::Le | ProvenanceCmp::Gt | ProvenanceCmp::Ge
+                ) {
+                    return Err(Error::Query(QueryError::SyntaxError {
+                        message: format!(
+                            "ordering operators (<, <=, >, >=) are not supported for \
+                             {}(x); only = and <> are supported for source/reason",
+                            field.accessor_name()
+                        ),
+                    }));
+                }
+                // Foldable positive shape: `source(x) = 'S'` reuses the core
+                // filter's any-of exact-match semantics via matches(). `reason`
+                // and the `<>` operator use the general accessor form. If the
+                // validated filter is inactive (defensive), fall back to the
+                // accessor form rather than panicking (coding standard: no
+                // expect/unwrap on the production path).
+                if field == ProvenanceField::Source && matches!(cmp, ProvenanceCmp::Eq) {
+                    let filter = crate::core::provenance::ProvenanceFilter::validated(
+                        Some(s.clone()),
+                        None,
+                        None,
+                        false,
+                    )
+                    .map_err(|e| {
+                        Error::Query(QueryError::InvalidParameter {
+                            parameter: e.field().to_string(),
+                            reason: e.to_string(),
+                        })
+                    })?;
+                    if let Some(filter) = filter {
+                        Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
+                    } else {
+                        Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
+                            field,
+                            op: cmp,
+                            operand: ProvenanceOperand::Str(s),
+                        }))
+                    }
+                } else {
+                    Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
+                        field,
+                        op: cmp,
+                        operand: ProvenanceOperand::Str(s),
+                    }))
+                }
+            }
+            (ProvenanceField::Source | ProvenanceField::Reason, ProvenanceOperand::Num(_)) => {
+                Err(Error::Query(QueryError::TypeMismatch {
+                    expected: "string".to_string(),
+                    actual: format!(
+                        "number ({}(x) compares only to a string value)",
+                        field.accessor_name()
+                    ),
+                }))
+            }
+        }
+    }
+
+    /// Resolve the right-hand literal/parameter of a provenance comparison to a
+    /// typed operand (Issue #3354a).
+    fn expression_to_provenance_operand(&self, expr: &Expression) -> Result<ProvenanceOperand> {
+        let value = match expr {
+            Expression::Literal(pv) => self.convert_property_value(pv)?,
+            Expression::Parameter(name) => self.resolve_value_param(name)?,
+            _ => {
+                return Err(Error::Query(QueryError::SyntaxError {
+                    message: "a provenance accessor must be compared to a literal or parameter"
+                        .to_string(),
+                }));
+            }
+        };
+        match value {
+            PredicateValue::String(s) => Ok(ProvenanceOperand::Str(s)),
+            PredicateValue::Int(i) => Ok(ProvenanceOperand::Num(i as f64)),
+            PredicateValue::Float(f) => Ok(ProvenanceOperand::Num(f)),
+            PredicateValue::Bool(_) | PredicateValue::Null => {
+                Err(Error::Query(QueryError::TypeMismatch {
+                    expected: "string or number".to_string(),
+                    actual: "boolean or null (unsupported provenance operand)".to_string(),
+                }))
+            }
+        }
     }
 
     /// Convert an expression to a predicate value.
@@ -1122,6 +1379,106 @@ mod tests {
                 label: Some(l)
             } if l == "Person"
         ));
+    }
+
+    fn filter_predicate(aql: &str) -> Predicate {
+        let ast = Parser::parse(aql).unwrap();
+        let query = AstConverter::new().convert(&ast).unwrap();
+        query
+            .ops
+            .into_iter()
+            .find_map(|op| match op {
+                QueryOp::Filter(p) => Some(p),
+                _ => None,
+            })
+            .expect("a Filter op")
+    }
+
+    #[test]
+    fn test_convert_provenance_source_eq_folds_to_filter() {
+        // `source(x) = 'S'` reuses the core ProvenanceFilter (foldable shape).
+        let pred = filter_predicate("MATCH (n:Person) WHERE source(n) = 'hr' RETURN n");
+        assert!(
+            matches!(pred, Predicate::Provenance(ProvenancePredicate::Filter(_))),
+            "expected folded Filter, got {pred:?}"
+        );
+    }
+
+    #[test]
+    fn test_convert_provenance_confidence_ge_folds_to_filter() {
+        let pred = filter_predicate("MATCH (n:Person) WHERE confidence(n) >= 0.9 RETURN n");
+        assert!(
+            matches!(pred, Predicate::Provenance(ProvenancePredicate::Filter(_))),
+            "expected folded Filter, got {pred:?}"
+        );
+    }
+
+    #[test]
+    fn test_convert_provenance_confidence_lt_uses_accessor() {
+        // `<` is not expressible as a ProvenanceFilter -> general accessor path.
+        let pred = filter_predicate("MATCH (n:Person) WHERE confidence(n) < 0.5 RETURN n");
+        match pred {
+            Predicate::Provenance(ProvenancePredicate::Accessor { field, op, operand }) => {
+                assert_eq!(field, ProvenanceField::Confidence);
+                assert_eq!(op, ProvenanceCmp::Lt);
+                assert_eq!(operand, ProvenanceOperand::Num(0.5));
+            }
+            other => panic!("expected Accessor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_provenance_accessor_on_right_flips() {
+        // `0.9 <= confidence(n)` lowers identically to `confidence(n) >= 0.9`
+        // (folded Filter).
+        let pred = filter_predicate("MATCH (n:Person) WHERE 0.9 <= confidence(n) RETURN n");
+        assert!(
+            matches!(pred, Predicate::Provenance(ProvenancePredicate::Filter(_))),
+            "expected folded Filter after flip, got {pred:?}"
+        );
+    }
+
+    #[test]
+    fn test_convert_provenance_is_null() {
+        let pred = filter_predicate("MATCH (n:Person) WHERE provenance(n) IS NULL RETURN n");
+        assert!(matches!(
+            pred,
+            Predicate::Provenance(ProvenancePredicate::IsNull { negated: false })
+        ));
+    }
+
+    #[test]
+    fn test_convert_provenance_confidence_out_of_range_rejected() {
+        let ast = Parser::parse("MATCH (n:Person) WHERE confidence(n) >= 1.5 RETURN n").unwrap();
+        let err = AstConverter::new().convert(&ast).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Error::Query(QueryError::InvalidParameter { parameter, .. })
+                    if parameter == "min_confidence"
+            ),
+            "expected InvalidParameter(min_confidence), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_convert_provenance_type_mismatch_rejected() {
+        let ast = Parser::parse("MATCH (n:Person) WHERE confidence(n) = 'high' RETURN n").unwrap();
+        let err = AstConverter::new().convert(&ast).unwrap_err();
+        assert!(
+            matches!(&err, Error::Query(QueryError::TypeMismatch { .. })),
+            "expected TypeMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_convert_property_named_source_is_not_accessor() {
+        // `n.source` must remain an ordinary property predicate.
+        let pred = filter_predicate("MATCH (n:Person) WHERE n.source = 'manual' RETURN n");
+        assert!(
+            matches!(pred, Predicate::Eq { ref key, .. } if key == "source"),
+            "expected property Eq, got {pred:?}"
+        );
     }
 
     #[test]
