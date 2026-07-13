@@ -61,7 +61,9 @@ Nodes:
 - `Company` **Acme** `{name:'Acme', cid:1}`
 - `Company` **Globex** `{name:'Globex', cid:2}`
 
-No node has an `email` property (used to pin `IS NULL` / `IS NOT NULL`).
+No node has an `email` property (used to pin openCypher-correct `IS NULL` /
+`IS NOT NULL` on an absent property: `IS NULL` matches all 4 Persons,
+`IS NOT NULL` matches 0 — fixed in #3511).
 
 Edges:
 
@@ -88,7 +90,7 @@ correctly.
 | `WHERE` boolean logic | `WHERE n.age > 30 AND n.dept = 'Sales'` | `AND` / `OR` / `NOT` |
 | `WHERE ... IN` | `WHERE n.dept IN ['Eng','Sales']` | list membership |
 | `STARTS WITH` / `ENDS WITH` / `CONTAINS` | `WHERE n.name STARTS WITH 'A'` | case-sensitive |
-| `IS NULL` / `IS NOT NULL` | `WHERE n.name IS NULL` | parses/executes; **openCypher-correct only for *present* properties** — absent-property semantics deviate (see [§3](#3-known-limitations-executes-with-documented-caveats)) |
+| `IS NULL` / `IS NOT NULL` | `WHERE n.email IS NULL` | openCypher-correct for both **present** and **absent** properties: a missing property *is* null, so `n.email IS NULL` matches all rows and `IS NOT NULL` matches none (absent-property inversion fixed in #3511) |
 | Outgoing / incoming / undirected | `-[:KNOWS]->`, `<-[:KNOWS]-`, `-[:KNOWS]-` | |
 | Relationship-type traversal | `MATCH (a)-[:KNOWS]->(b) RETURN b` | |
 | Variable-length paths | `-[:KNOWS*1..3]->`, `*2`, `*`, `*2..`, `*..2` | **node-distinct / shortest-path reachability** (v1 simplification of trail semantics); open-ended bounds capped at depth 10 |
@@ -155,25 +157,16 @@ can be produced. The suite pins the exact variant and a message substring.
   (`DEFAULT_MAX_TRAVERSAL_DEPTH`).
 - **`RETURN DISTINCT <scalar projection>`** deduplicates by entity id, not the
   projected value (property projection is not yet lowered into the row model).
-- **`IS NULL` / `IS NOT NULL` on an *absent* property deviate from openCypher.**
-  The Cypher converter lowers `x IS NULL` → `Eq{value: Null}` and
-  `x IS NOT NULL` → `Ne{value: Null}`; the executor treats a **missing**
-  property as non-matching for `Eq` and matching for `Ne`. So for a property
-  that no node carries:
 
-  | Query | AletheiaDB (actual) | openCypher (expected) |
-  |-------|---------------------|-----------------------|
-  | `n.email IS NULL`     | 0 rows | all rows (a missing property *is* null) |
-  | `n.email IS NOT NULL` | all rows | 0 rows |
+> **Fixed (#3511):** `IS NULL` / `IS NOT NULL` on an *absent* property was
+> previously inverted vs openCypher (a missing property matched `IS NOT NULL`
+> instead of `IS NULL`). #3511 re-lowered property-access `x IS NULL` →
+> `Or(NotExists, Eq(Null))` and `x IS NOT NULL` → `And(Exists, Ne(Null))`, so a
+> missing property now correctly *is* null. This is now asserted as
+> openCypher-correct in the supported corpus (`is_null_absent_prop` /
+> `is_not_null_absent_prop` in `src/cypher/compat.rs`), no longer a deviation.
 
-  For **present** properties the behavior is openCypher-correct. This inversion
-  is a genuine deviation (not merely a missing feature); it is pinned — as a
-  deviation, **not** asserted as correct — by `compat_known_deviations` in
-  `src/cypher/compat.rs`, so a future fix will trip that test and prompt an
-  update here.
-
-Apart from that documented deviation, no case in the suite asserts a wrong
-answer as correct.
+No case in the suite asserts a wrong answer as correct.
 
 ---
 
