@@ -850,3 +850,166 @@ fn run_server_enforces_request_body_413() {
         "a small legitimate request must still serve 200"
     );
 }
+
+// ===========================================================================
+// Provenance filtering (Issue #3348)
+// ===========================================================================
+
+/// Seed a `Doc` node with the given provenance source/confidence.
+fn seed_doc(db: &AletheiaDB, name: &str, source: Option<&str>, confidence: Option<f64>) -> u64 {
+    let mut builder = aletheiadb::core::provenance::Provenance::builder();
+    if let Some(s) = source {
+        builder = builder.source(s);
+    }
+    if let Some(c) = confidence {
+        builder = builder.confidence(c);
+    }
+    let mut options = aletheiadb::api::transaction::WriteRequestOptions::new();
+    if source.is_some() || confidence.is_some() {
+        options = options.with_provenance(builder.build().expect("valid provenance"));
+    }
+    db.create_node_with_options(
+        "Doc",
+        PropertyMapBuilder::new().insert("name", name).build(),
+        options,
+    )
+    .expect("seed doc")
+    .as_u64()
+}
+
+fn doc_names(data: &Value) -> Vec<String> {
+    data.as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["properties"]["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// AC1/AC2: find_node filters by exact source; unattributed excluded by default.
+#[tokio::test]
+async fn find_node_filters_by_provenance_source() {
+    let (client, db) = anon_client();
+    seed_doc(&db, "crm-a", Some("crm"), Some(0.9));
+    seed_doc(&db, "hr-a", Some("hr"), Some(0.9));
+    seed_doc(&db, "none", None, None);
+
+    let (status, body) = post_query(
+        &client,
+        &json!({"operation": "find_node", "label": "Doc", "provenance_source": "crm"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(doc_names(&body["data"]), vec!["crm-a"]);
+}
+
+/// AC2: include_unattributed re-includes no-provenance nodes.
+#[tokio::test]
+async fn find_node_include_unattributed() {
+    let (client, db) = anon_client();
+    seed_doc(&db, "crm-a", Some("crm"), Some(0.9));
+    seed_doc(&db, "none", None, None);
+
+    let (_s, excluded) = post_query(
+        &client,
+        &json!({"operation": "find_node", "label": "Doc", "min_confidence": 0.0}),
+    )
+    .await;
+    assert_eq!(doc_names(&excluded["data"]), vec!["crm-a"]);
+
+    let (_s, included) = post_query(
+        &client,
+        &json!({"operation": "find_node", "label": "Doc", "min_confidence": 0.0, "include_unattributed": true}),
+    )
+    .await;
+    let mut names = doc_names(&included["data"]);
+    names.sort();
+    assert_eq!(names, vec!["crm-a", "none"]);
+}
+
+/// AC1: min_confidence is an inclusive lower bound.
+#[tokio::test]
+async fn find_node_min_confidence_inclusive() {
+    let (client, db) = anon_client();
+    seed_doc(&db, "hi", Some("crm"), Some(0.8));
+    seed_doc(&db, "lo", Some("crm"), Some(0.79));
+
+    let (_s, body) = post_query(
+        &client,
+        &json!({"operation": "find_node", "label": "Doc", "min_confidence": 0.8}),
+    )
+    .await;
+    assert_eq!(doc_names(&body["data"]), vec!["hi"]);
+}
+
+/// AC5: invalid confidence is a 400 INVALID_ARGUMENT naming the field.
+#[tokio::test]
+async fn find_node_invalid_confidence_is_400() {
+    let (client, db) = anon_client();
+    seed_doc(&db, "a", Some("crm"), Some(0.9));
+
+    let (status, body) = post_query(
+        &client,
+        &json!({"operation": "find_node", "label": "Doc", "min_confidence": 1.5}),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["success"].as_bool(), Some(false));
+    assert!(
+        body["error"].as_str().unwrap().contains("min_confidence"),
+        "error must name the field: {body}"
+    );
+}
+
+/// AC5: empty source list is a 400.
+#[tokio::test]
+async fn find_node_empty_source_list_is_400() {
+    let (client, db) = anon_client();
+    seed_doc(&db, "a", Some("crm"), Some(0.9));
+
+    let (status, body) = post_query(
+        &client,
+        &json!({"operation": "find_node", "label": "Doc", "provenance_sources": []}),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("provenance_sources")
+    );
+}
+
+/// AC1: get_node returns the node when the filter passes, 404 when excluded.
+#[tokio::test]
+async fn get_node_provenance_filter_excludes_as_404() {
+    let (client, db) = anon_client();
+    let id = seed_doc(&db, "a", Some("crm"), Some(0.9));
+
+    let (status_ok, _b) = post_query(
+        &client,
+        &json!({"operation": "get_node", "node_id": id, "provenance_source": "crm"}),
+    )
+    .await;
+    assert_eq!(status_ok, 200);
+
+    let (status_excluded, _b) = post_query(
+        &client,
+        &json!({"operation": "get_node", "node_id": id, "provenance_source": "hr"}),
+    )
+    .await;
+    assert_eq!(status_excluded, 404);
+}
+
+/// AC2: omitting the filter is byte-identical to today.
+#[tokio::test]
+async fn find_node_without_filter_is_unchanged() {
+    let (client, db) = anon_client();
+    seed_doc(&db, "a", Some("crm"), Some(0.9));
+    seed_doc(&db, "b", None, None);
+
+    let (_s, body) = post_query(&client, &json!({"operation": "find_node", "label": "Doc"})).await;
+    let mut names = doc_names(&body["data"]);
+    names.sort();
+    assert_eq!(names, vec!["a", "b"], "no filter returns all nodes");
+}
