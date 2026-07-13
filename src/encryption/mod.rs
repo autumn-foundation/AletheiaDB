@@ -33,7 +33,7 @@ pub use cli::{
     EncryptionStatus, KeyGenResult, format_encryption_status, generate_key, get_encryption_status,
     validate_key_file,
 };
-pub use config::{EncryptionConfig, KeyProviderConfig};
+pub use config::{AuditConfig, AuditDestination, EncryptionConfig, KeyProviderConfig};
 pub use error::{EncryptionError, KeyDerivationError, KeyProviderError};
 pub use factory::{Algorithm, algorithm_from_id, create_cipher};
 pub use key_derivation::{
