@@ -22,7 +22,12 @@ categories = ["database-implementations", "data-structures"]
 # the existing CI gates are entirely unaffected; the spike gets its own gates
 # (`cargo … -p aletheia-autumn-spike`, `just spike-check`).
 [workspace]
-members = ["crates/autumn-spike"]
+# `aletheia-server` is the production autumn-web 0.5 server crate (Issue #3524,
+# PR1 skeleton) — an isolated member for the same reason as the spike: autumn
+# 0.5's proc-macros hard-code `::autumn_web`, so the 0.5 surface must live in a
+# crate whose extern prelude binds `autumn_web` to 0.5. It requires an explicit
+# `-p aletheia-server`; bare cargo stays root-scoped via `default-members`.
+members = ["crates/autumn-spike", "crates/aletheia-server"]
 default-members = ["."]
 # `python/` and `fuzz/` are independent crates with their own manifests (the
 # Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
