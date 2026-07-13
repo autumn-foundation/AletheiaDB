@@ -84,7 +84,7 @@ jobs:
           # CI runs (push/PR): performance_targets only for fast feedback on key metrics
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Running ALL benchmarks (weekly/manual run)..."
-            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench aletheiadb --bench hnsw_index --bench performance_targets --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity"
+            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench aletheiadb --bench hnsw_index --bench performance_targets --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity --bench provenance_write_throughput"
           else
             echo "Running PERFORMANCE TARGETS benchmark only (CI run)..."
             # Performance targets: lightweight benchmark verifying key performance metrics
@@ -112,6 +112,63 @@ jobs:
             echo "Benchmarks may have failed to run properly. Check output.txt for details."
             exit 1
           fi
+
+      # ----------------------------------------------------------------------
+      # Provenance write-throughput "cost of trust" gate (Issue #3383)
+      #
+      # Two lanes, per the CI-policy fence:
+      #   * SCHEDULED / manual: run the self-gate (PROV_BENCH_GATE=1). Hard-fail
+      #     is intentional here -- it ALERTS on a same-run ratio regression and
+      #     does NOT block any pull request (this job never gates a PR merge).
+      #   * PULL REQUEST: reduced-scale smoke, INFORMATIONAL only. continue-on-
+      #     error guarantees it can never fail the PR. Flipping this to blocking
+      #     is a one-line change (drop continue-on-error) once a week or two of
+      #     scheduled-lane signal proves the gate stable on the runner -- and
+      #     that flip is an operator decision, not part of Issue #3383.
+      # ----------------------------------------------------------------------
+      - name: Provenance write self-gate (scheduled, hard-fail alert)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          # Gate the CPU-bound (Async 1ms-flush, interleaved) arm ratio bounds
+          # AND the AC5 recovery <5s budget at the reduced default scale (2000
+          # nodes / 4000 edges). Hard-fail here is an ALERT; it never blocks a PR.
+          #
+          # NOTE: the recovery dataset is populated by a single-writer GroupCommit
+          # loop (~10 ms/commit), so the 10K-node/50K-edge REFERENCE scale would
+          # take ~10 min to build -- too slow for this shared CI job. The
+          # reference scale is reproduced manually / on the performance rig via
+          # PROV_BENCH_RECOVERY_NODES=10000 PROV_BENCH_RECOVERY_EDGES=50000 (the
+          # reopen, not the build, is what the <5s budget governs). See
+          # docs/benchmarks/cost-of-trust.md.
+          PROV_BENCH_GATE: '1'
+          PROV_BENCH_JSON_OUT: provenance_write_throughput.json
+        run: |
+          set -o pipefail
+          cargo bench --features "config-toml,observability,semantic-search,embeddings" \
+            --bench provenance_write_throughput | tee prov-write-gate.txt
+
+      - name: Provenance write smoke (PR, informational / non-blocking)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          # One interleaved pass (5000 timed writes/config) — a fast smoke.
+          PROV_BENCH_WRITES: '5000'
+          BENCH_SAMPLE_SIZE: 10
+          BENCH_MEASUREMENT_TIME: 1
+          BENCH_WARMUP_TIME: 1
+          PROV_BENCH_JSON_OUT: provenance_write_throughput.json
+        run: |
+          # No PROV_BENCH_GATE: report the matrix + JSON artifact, never fail the PR.
+          cargo bench --features "config-toml,observability,semantic-search,embeddings" \
+            --bench provenance_write_throughput | tee prov-write-smoke.txt
+
+      - name: Upload provenance write-throughput JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: provenance-write-throughput-results
+          path: provenance_write_throughput.json
 
       - name: Generate benchmark JSON
         run: |

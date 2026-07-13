@@ -5117,6 +5117,7 @@ mod unwind {
             CypherExecution::Explain(_) | CypherExecution::Profile(_) => {
                 panic!("UNWIND must plan to Rows, not an Explain/Profile")
             }
+            CypherExecution::Mutation { .. } => panic!("UNWIND must plan to Rows, not a Mutation"),
         }
         match plan_cypher("MATCH (n:Person) RETURN n").unwrap() {
             CypherExecution::Query(_) => {}
@@ -5127,6 +5128,7 @@ mod unwind {
             CypherExecution::Explain(_) | CypherExecution::Profile(_) => {
                 panic!("plain MATCH must plan to a Query, not an Explain/Profile")
             }
+            CypherExecution::Mutation { .. } => panic!("plain MATCH must plan to a Query"),
         }
     }
 
@@ -5499,6 +5501,955 @@ mod explain_profile {
             "EXPLAIN of a single-variable MATCH should still produce a plan: {text}"
         );
     }
+}
+
+// ============================================================================
+// Vector extensions: literals, metric selection, WHERE-threshold, score
+// projection (Issues #553 / #554 / #555)
+// ============================================================================
+
+/// Build a seeded 3-dimensional cosine vector index with three Documents whose
+/// embeddings give an unambiguous ordering relative to the query `[1,0,0]`:
+/// `alpha` (identical) > `gamma` (near) > `beta` (orthogonal).
+fn vector_test_db() -> (
+    crate::AletheiaDB,
+    crate::core::NodeId,
+    crate::core::NodeId,
+    crate::core::NodeId,
+) {
+    use crate::index::vector::{DistanceMetric as IndexMetric, HnswConfig};
+    let db = crate::AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(3, IndexMetric::Cosine))
+        .unwrap();
+    let alpha = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "alpha")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+    let beta = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "beta")
+                .insert_vector("embedding", &[0.0f32, 1.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+    let gamma = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "gamma")
+                .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                .build(),
+        )
+        .unwrap();
+    (db, alpha, beta, gamma)
+}
+
+fn query_embedding_param(v: &[f32]) -> std::collections::HashMap<String, CypherParameterValue> {
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "q".to_string(),
+        CypherParameterValue::Embedding(Arc::from(v)),
+    );
+    params
+}
+
+// ---- #554: vector literals -------------------------------------------------
+
+#[test]
+fn test_convert_vector_literal_embedding_accepted() {
+    // A numeric list literal is usable wherever an embedding is expected, with
+    // no bound parameter (Issue #554).
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [0.1, 0.2, 0.3]) DESC LIMIT 5",
+    )
+    .unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::RankBySimilarity { .. })),
+        "a numeric vector literal should lower into a RankBySimilarity op"
+    );
+}
+
+#[test]
+fn test_convert_vector_literal_int_elements_accepted() {
+    // Integer elements are coerced to f32 (mixed int/float embedding literal).
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1, 0, 0]) DESC LIMIT 5",
+    )
+    .unwrap();
+    let rank = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { embedding, .. } => Some(embedding.clone()),
+            _ => None,
+        })
+        .expect("expected a RankBySimilarity op");
+    assert_eq!(&*rank, &[1.0f32, 0.0, 0.0]);
+}
+
+#[test]
+fn test_convert_vector_literal_non_numeric_rejected() {
+    // A non-numeric element yields a clear semantic error, never a silently
+    // wrong embedding.
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [0.1, 'x', 0.3]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::SemanticError(ref m) if m.contains("not numeric")),
+        "expected a clear non-numeric error, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_vector_literal_empty_rejected() {
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, []) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::SemanticError(ref m) if m.contains("at least one element")),
+        "expected an empty-vector-literal error, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_non_embedding_param_rejected() {
+    // A String parameter passed where an embedding is expected is a clear error
+    // (Issue #554 acceptance: non-embedding parameters fail clearly).
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "q".to_string(),
+        CypherParameterValue::String("not-a-vector".into()),
+    );
+    let err = parse_cypher_with_params(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 5",
+        params,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::ParameterError(_)),
+        "expected a ParameterError for a non-embedding parameter, got: {err:?}"
+    );
+}
+
+// ---- #553: dot_product recognition + metric selection ----------------------
+
+#[test]
+fn test_convert_vector_dot_product_recognized() {
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.dot_product(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap();
+    let metric = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { metric, .. } => Some(*metric),
+            _ => None,
+        })
+        .expect("vector.dot_product should lower into a RankBySimilarity op");
+    assert_eq!(metric, crate::core::vector::DistanceMetric::DotProduct);
+}
+
+#[test]
+fn test_convert_vector_metric_from_function_name() {
+    // Each vector function name selects the corresponding metric on the op.
+    // The ORDER BY direction must be the metric's natural nearest-first sense
+    // (DESC for similarity metrics, ASC for the distance-flavored euclidean).
+    let cases = [
+        (
+            "vector.similarity",
+            "DESC",
+            crate::core::vector::DistanceMetric::Cosine,
+        ),
+        (
+            "vector.cosine",
+            "DESC",
+            crate::core::vector::DistanceMetric::Cosine,
+        ),
+        (
+            "vector.euclidean",
+            "ASC",
+            crate::core::vector::DistanceMetric::Euclidean,
+        ),
+        (
+            "vector.dot_product",
+            "DESC",
+            crate::core::vector::DistanceMetric::DotProduct,
+        ),
+    ];
+    for (func, dir, expected) in cases {
+        let q = format!(
+            "MATCH (d:Document) RETURN d ORDER BY {func}(d.embedding, [1.0, 0.0, 0.0]) {dir} LIMIT 5"
+        );
+        let query = parse_cypher(&q).unwrap();
+        let metric = query
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                QueryOp::RankBySimilarity { metric, .. } => Some(*metric),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no RankBySimilarity for {func}"));
+        assert_eq!(metric, expected, "metric mismatch for {func}");
+    }
+}
+
+// ---- #553: WHERE threshold filtering ---------------------------------------
+
+#[test]
+fn test_convert_where_vector_threshold() {
+    // `WHERE vector.similarity(...) > 0.8` lowers into a RankBySimilarity with a
+    // threshold and no top_k (keep every passing row).
+    let query = parse_cypher(
+        "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.8 RETURN d",
+    )
+    .unwrap();
+    let (top_k, threshold) = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity {
+                top_k, threshold, ..
+            } => Some((*top_k, *threshold)),
+            _ => None,
+        })
+        .expect("WHERE vector threshold should emit a RankBySimilarity");
+    assert_eq!(top_k, None, "a threshold filter keeps all passing rows");
+    let threshold = threshold.expect("threshold must be present");
+    assert_eq!(threshold.op, crate::query::ir::ScoreComparison::Gt);
+    assert!((threshold.value - 0.8).abs() < 1e-6);
+}
+
+#[test]
+fn test_convert_where_vector_threshold_flipped() {
+    // `0.8 < vector.similarity(...)` is the mirror of `> 0.8`.
+    let query = parse_cypher(
+        "MATCH (d:Document) WHERE 0.8 < vector.similarity(d.embedding, [1.0, 0.0, 0.0]) RETURN d",
+    )
+    .unwrap();
+    let threshold = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { threshold, .. } => *threshold,
+            _ => None,
+        })
+        .expect("flipped threshold should still emit a RankBySimilarity");
+    assert_eq!(threshold.op, crate::query::ir::ScoreComparison::Gt);
+    assert!((threshold.value - 0.8).abs() < 1e-6);
+}
+
+#[test]
+fn test_convert_where_vector_threshold_with_residual_filter() {
+    // A threshold conjoined with a property predicate: the property predicate
+    // survives as a Filter, the vector part becomes a RankBySimilarity.
+    let query = parse_cypher(
+        "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.5 AND d.name = 'alpha' RETURN d",
+    )
+    .unwrap();
+    assert!(
+        query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::RankBySimilarity {
+                threshold: Some(_),
+                ..
+            }
+        )),
+        "vector conjunct should become a threshold rank"
+    );
+    assert!(
+        query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))),
+        "residual property predicate should survive as a Filter"
+    );
+}
+
+// ---- #555: score alias projection ------------------------------------------
+
+#[test]
+fn test_convert_vector_score_alias_projected() {
+    // `vector.cosine(...) AS score` sets the score_alias on the rank op so the
+    // similarity is materialized under that column name.
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY score DESC LIMIT 5",
+    )
+    .unwrap();
+    let alias = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { score_alias, .. } => score_alias.clone(),
+            _ => None,
+        })
+        .expect("expected a RankBySimilarity with a score alias");
+    assert_eq!(alias, "score");
+}
+
+#[test]
+fn test_convert_hybrid_op_ordering() {
+    // Planner/explain-style check: a hybrid graph + vector query lowers to the
+    // expected op ordering -- the source scan and traversal precede the
+    // RankBySimilarity, which precedes the final Limit (Issue #555).
+    let query = parse_cypher(
+        "MATCH (p:Person {name: 'Alice'})-[:KNOWS]->(d) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap();
+    let scan = query
+        .ops
+        .iter()
+        .position(|op| matches!(op, QueryOp::ScanNodes { .. }))
+        .expect("scan");
+    let traverse = query
+        .ops
+        .iter()
+        .position(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        .expect("traverse");
+    let rank = query
+        .ops
+        .iter()
+        .position(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+        .expect("rank");
+    let limit = query
+        .ops
+        .iter()
+        .position(|op| matches!(op, QueryOp::Limit(_)))
+        .expect("limit");
+    assert!(
+        scan < traverse && traverse < rank && rank < limit,
+        "expected scan < traverse < rank < limit, got ops: {:?}",
+        query.ops
+    );
+}
+
+// ---- End-to-end execution --------------------------------------------------
+
+#[test]
+fn test_e2e_vector_rank_cosine_param_order() {
+    let (db, alpha, beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10",
+            query_embedding_param(&[1.0f32, 0.0, 0.0]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    assert_eq!(rows[1].entity.node_id(), Some(gamma));
+    assert_eq!(rows[2].entity.node_id(), Some(beta));
+    // Scores are materialized and descending.
+    let s0 = rows[0].score().unwrap();
+    let s1 = rows[1].score().unwrap();
+    let s2 = rows[2].score().unwrap();
+    assert!(
+        s0 >= s1 && s1 >= s2,
+        "scores must be descending: {s0} {s1} {s2}"
+    );
+}
+
+#[test]
+fn test_e2e_vector_rank_literal_order() {
+    // Same query using an inline numeric vector literal instead of a parameter.
+    let (db, alpha, _beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 2",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 2, "LIMIT 2 keeps the two nearest");
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    assert_eq!(rows[1].entity.node_id(), Some(gamma));
+}
+
+#[test]
+fn test_e2e_where_threshold_filters_rows() {
+    let (db, alpha, _beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, $q) > 0.5 RETURN d",
+            query_embedding_param(&[1.0f32, 0.0, 0.0]),
+        )
+        .unwrap(),
+    );
+    // alpha (1.0) and gamma (~0.994) pass; beta (0.0) is filtered out.
+    assert_eq!(rows.len(), 2, "only rows above the 0.5 threshold survive");
+    let ids: std::collections::HashSet<_> =
+        rows.iter().filter_map(|r| r.entity.node_id()).collect();
+    assert!(ids.contains(&alpha) && ids.contains(&gamma));
+}
+
+#[test]
+fn test_e2e_score_alias_materialized_column() {
+    let (db, alpha, _beta, _gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, $q) AS score ORDER BY score DESC LIMIT 10",
+            query_embedding_param(&[1.0f32, 0.0, 0.0]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 3);
+    // The entity survives alongside the projected score column.
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    let cols = rows[0]
+        .columns
+        .as_ref()
+        .expect("score alias should materialize a column");
+    let (name, value) = cols
+        .iter()
+        .find(|(n, _)| n == "score")
+        .expect("a 'score' column must be present");
+    assert_eq!(name, "score");
+    match value {
+        crate::core::property::PropertyValue::Float(f) => {
+            assert!(
+                (*f - 1.0).abs() < 1e-4,
+                "alpha's cosine score should be ~1.0, got {f}"
+            );
+        }
+        other => panic!("score column should be a Float, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_e2e_hybrid_traverse_then_rank() {
+    // Graph traversal + vector ranking in one query (Issue #555 hybrid path).
+    let (db, alpha, beta, gamma) = vector_test_db();
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    for target in [alpha, beta, gamma] {
+        db.create_edge(alice, target, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (p:Person {name: 'Alice'})-[:KNOWS]->(d) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10",
+            query_embedding_param(&[1.0f32, 0.0, 0.0]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 3, "Alice knows all three documents");
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    assert_eq!(rows[1].entity.node_id(), Some(gamma));
+    assert_eq!(rows[2].entity.node_id(), Some(beta));
+}
+
+#[test]
+fn test_e2e_metric_euclidean_ranks() {
+    // The euclidean metric name selects the euclidean scoring path and still
+    // returns the nearest document first.
+    let (db, alpha, _beta, _gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].entity.node_id(),
+        Some(alpha),
+        "alpha is the nearest by euclidean distance"
+    );
+}
+
+#[test]
+fn test_e2e_dimension_mismatch_clear_error() {
+    // A query embedding whose dimension differs from the stored vectors surfaces
+    // a clear error instead of silently dropping rows (Issue #554).
+    let (db, _alpha, _beta, _gamma) = vector_test_db();
+    let results = db
+        .execute_cypher_with_params(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 10",
+            // 4-dim query vs 3-dim stored embeddings.
+            query_embedding_param(&[1.0f32, 0.0, 0.0, 0.0]),
+        )
+        .unwrap();
+    let err = results
+        .collect_all()
+        .expect_err("a dimension mismatch must surface as an error");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("dimension") || msg.contains("length") || msg.contains("mismatch"),
+        "error should mention the dimension mismatch, got: {msg}"
+    );
+}
+
+// ---- Adversarial-review follow-ups (#553/#554/#555 hardening) --------------
+
+/// A discriminating fixture whose UN-normalized embeddings make cosine,
+/// dot-product, and euclidean disagree on the top-1 nearest to `[1,0,0]`:
+/// - `xcos`  = [3,0,0]   -> cosine winner (perfectly aligned direction)
+/// - `ydot`  = [5,1,0]   -> dot-product winner (largest projection)
+/// - `zeuc`  = [1,0.1,0] -> euclidean winner (closest absolute point)
+fn discriminating_metric_db() -> (
+    crate::AletheiaDB,
+    crate::core::NodeId,
+    crate::core::NodeId,
+    crate::core::NodeId,
+) {
+    use crate::index::vector::{DistanceMetric as IndexMetric, HnswConfig};
+    let db = crate::AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(3, IndexMetric::Cosine))
+        .unwrap();
+    let mk = |db: &crate::AletheiaDB, name: &str, v: [f32; 3]| {
+        db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", name)
+                .insert_vector("embedding", &v)
+                .build(),
+        )
+        .unwrap()
+    };
+    let xcos = mk(&db, "xcos", [3.0, 0.0, 0.0]);
+    let ydot = mk(&db, "ydot", [5.0, 1.0, 0.0]);
+    let zeuc = mk(&db, "zeuc", [1.0, 0.1, 0.0]);
+    (db, xcos, ydot, zeuc)
+}
+
+// Finding #1: ORDER BY direction is honored (non-natural direction rejected).
+
+#[test]
+fn test_convert_vector_order_cosine_desc_ok_asc_rejected() {
+    // Cosine is a similarity (higher = nearer): DESC is the natural nearest-first
+    // direction and is accepted; ASC (farthest-first) is rejected, not silently
+    // answered as nearest-first.
+    assert!(
+        parse_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+        )
+        .is_ok()
+    );
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("nearest-first")),
+        "cosine ASC should be rejected as farthest-first, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_vector_order_euclidean_asc_ok_desc_rejected() {
+    // Euclidean is distance-flavored (lower = nearer): ASC is natural and
+    // accepted; DESC (farthest-first) is rejected.
+    assert!(
+        parse_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 5",
+        )
+        .is_ok()
+    );
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(_)),
+        "euclidean DESC should be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_vector_order_alias_asc_rejected() {
+    // The direction check also applies through an aliased score in ORDER BY.
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY score ASC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("nearest-first")),
+        "ORDER BY <cosine-alias> ASC should be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_e2e_cosine_asc_rejected_at_execution() {
+    let (db, _a, _b, _g) = vector_test_db();
+    let result = db.execute_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 1",
+    );
+    assert!(
+        result.is_err(),
+        "cosine ASC must be rejected at execution, not silently nearest-first"
+    );
+}
+
+// Finding #2: aliased score column cannot come from a different function.
+
+#[test]
+fn test_convert_mixed_function_alias_rejected() {
+    // RETURN projects euclidean AS score, ORDER BY ranks by cosine -> the score
+    // column would be populated from the WRONG function; reject clearly.
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("differs")),
+        "mismatched projection/order vector functions should be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_multiple_vector_projections_rejected() {
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS s1, vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) AS s2 ORDER BY s1 DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(ref m) if m.contains("multiple")),
+        "multiple vector score projections should be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_matching_function_alias_projects() {
+    // Same function+args in RETURN and ORDER BY -> the alias is attached.
+    let query = parse_cypher(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 5",
+    )
+    .unwrap();
+    let alias = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::RankBySimilarity { score_alias, .. } => score_alias.clone(),
+            _ => None,
+        })
+        .expect("matching projection should attach a score alias");
+    assert_eq!(alias, "score");
+}
+
+#[test]
+fn test_e2e_matching_function_alias_value_is_cosine() {
+    let (db, alpha, _beta, _gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, [1.0, 0.0, 0.0]) AS score ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    let cols = rows[0].columns.as_ref().expect("score column");
+    let (_n, v) = cols.iter().find(|(n, _)| n == "score").unwrap();
+    match v {
+        crate::core::property::PropertyValue::Float(f) => {
+            assert!(
+                (*f - 1.0).abs() < 1e-4,
+                "cosine score for alpha ~1.0, got {f}"
+            )
+        }
+        other => panic!("expected Float score, got {other:?}"),
+    }
+}
+
+// Finding #3: each metric picks its OWN distinct winner at runtime.
+
+#[test]
+fn test_e2e_cosine_picks_cosine_winner() {
+    let (db, xcos, _ydot, _zeuc) = discriminating_metric_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.cosine(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows[0].entity.node_id(), Some(xcos), "cosine top-1 is xcos");
+}
+
+#[test]
+fn test_e2e_dot_product_picks_dot_winner() {
+    // This would return `xcos` (the cosine winner) if the metric were ignored;
+    // it proves the dot_product metric is actually executed.
+    let (db, xcos, ydot, _zeuc) = discriminating_metric_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.dot_product(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows[0].entity.node_id(),
+        Some(ydot),
+        "dot_product top-1 is ydot"
+    );
+    assert_ne!(
+        rows[0].entity.node_id(),
+        Some(xcos),
+        "dot_product must NOT collapse to the cosine winner"
+    );
+}
+
+#[test]
+fn test_e2e_euclidean_picks_euclidean_winner() {
+    let (db, _xcos, _ydot, zeuc) = discriminating_metric_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) ASC LIMIT 1",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows[0].entity.node_id(),
+        Some(zeuc),
+        "euclidean top-1 is zeuc"
+    );
+}
+
+// Finding #4: full threshold operator coverage.
+
+fn threshold_rows(db: &crate::AletheiaDB, cmp: &str, value: &str) -> usize {
+    let q = format!(
+        "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) {cmp} {value} RETURN d"
+    );
+    collect_rows(db.execute_cypher(&q).unwrap()).len()
+}
+
+#[test]
+fn test_e2e_threshold_operator_coverage() {
+    let (db, _a, _b, _g) = vector_test_db();
+    // cosines: alpha=1.0, gamma~0.994, beta=0.0.
+    assert_eq!(
+        threshold_rows(&db, ">=", "1.0"),
+        1,
+        ">= 1.0 boundary keeps alpha"
+    );
+    assert_eq!(
+        threshold_rows(&db, ">", "0.5"),
+        2,
+        "> 0.5 keeps alpha+gamma"
+    );
+    assert_eq!(threshold_rows(&db, "<", "0.5"), 1, "< 0.5 keeps beta");
+    assert_eq!(threshold_rows(&db, "<=", "0.0"), 1, "<= 0.0 keeps beta");
+    assert_eq!(
+        threshold_rows(&db, ">", "2.0"),
+        0,
+        "> 2.0 keeps nothing (0 rows, not error)"
+    );
+    // A threshold at/below the minimum score keeps every row (cosine >= 0 here).
+    assert_eq!(
+        threshold_rows(&db, ">=", "0.0"),
+        3,
+        ">= 0.0 keeps all three"
+    );
+}
+
+#[test]
+fn test_convert_threshold_negative_literal_rejected() {
+    // The Cypher grammar has no unary minus, so a negative threshold literal is
+    // a parse error (not silently mis-handled). Pin this v1 limitation.
+    let err = parse_cypher(
+        "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > -1.0 RETURN d",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::ParseError { .. }),
+        "a negative threshold literal should be a parse error, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_threshold_eq_and_ne_rejected() {
+    for cmp in ["=", "<>"] {
+        let q = format!(
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) {cmp} 0.8 RETURN d"
+        );
+        let err = parse_cypher(&q).unwrap_err();
+        assert!(
+            matches!(err, CypherError::UnsupportedFeature(_)),
+            "vector threshold with `{cmp}` should be rejected, got: {err:?}"
+        );
+    }
+}
+
+// Finding #5: euclidean/dot threshold compares against SIMILARITY, not raw distance.
+
+#[test]
+fn test_e2e_euclidean_threshold_operates_on_similarity() {
+    // euclidean similarity = 1/(1+distance); `> 0.8` means distance < 0.25.
+    // alpha (dist 0 -> sim 1.0) and gamma (dist ~0.141 -> sim ~0.876) pass;
+    // beta (dist ~1.414 -> sim ~0.414) does not.
+    let (db, alpha, _beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) WHERE vector.euclidean(d.embedding, [1.0, 0.0, 0.0]) > 0.8 RETURN d",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows.len(),
+        2,
+        "euclidean sim > 0.8 == distance < 0.25 keeps 2"
+    );
+    let ids: std::collections::HashSet<_> =
+        rows.iter().filter_map(|r| r.entity.node_id()).collect();
+    assert!(ids.contains(&alpha) && ids.contains(&gamma));
+}
+
+// Finding #6: bare threshold reorders survivors by similarity (pinned v1 behavior).
+
+#[test]
+fn test_e2e_bare_threshold_orders_by_similarity() {
+    let (db, alpha, _beta, gamma) = vector_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.5 RETURN d",
+        )
+        .unwrap(),
+    );
+    // v1: survivors come back nearest-first (alpha 1.0 before gamma ~0.994).
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity.node_id(), Some(alpha));
+    assert_eq!(rows[1].entity.node_id(), Some(gamma));
+}
+
+// Finding #7: literal edge cases (nested list, boolean, dimension mismatch).
+
+#[test]
+fn test_convert_vector_literal_nested_rejected() {
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [[1, 2], 3]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::SemanticError(ref m) if m.contains("not numeric")),
+        "a nested-list element should be rejected as non-numeric, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_vector_literal_boolean_rejected() {
+    let err = parse_cypher(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [true, 0, 0]) DESC LIMIT 5",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::SemanticError(ref m) if m.contains("not numeric")),
+        "a boolean element should be rejected as non-numeric, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_e2e_literal_dimension_mismatch_error() {
+    // A 1-dim literal against a 3-dim index is a clear runtime dimension error.
+    let (db, _a, _b, _g) = vector_test_db();
+    let results = db
+        .execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [1.0]) DESC LIMIT 5",
+        )
+        .unwrap();
+    let err = results
+        .collect_all()
+        .expect_err("1-dim literal vs 3-dim index must error");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("dimension") || msg.contains("length") || msg.contains("mismatch"),
+        "expected a dimension error, got: {msg}"
+    );
+}
+
+// Finding #8: a numeric-array List PARAM (not an Embedding) is rejected clearly.
+
+#[test]
+fn test_convert_list_param_rejected() {
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "q".to_string(),
+        CypherParameterValue::List(vec![
+            CypherParameterValue::Float(1.0),
+            CypherParameterValue::Float(0.0),
+            CypherParameterValue::Float(0.0),
+        ]),
+    );
+    let err = parse_cypher_with_params(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $q) DESC LIMIT 5",
+        params,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::ParameterError(_)),
+        "a List param must be rejected (callers must pass an Embedding), got: {err:?}"
+    );
+}
+
+// Finding #9: a zero-vector row is gracefully excluded, not errored.
+
+#[test]
+fn test_e2e_zero_vector_row_gracefully_handled() {
+    use crate::index::vector::{DistanceMetric as IndexMetric, HnswConfig};
+    let db = crate::AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(3, IndexMetric::Cosine))
+        .unwrap();
+    let good = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "good")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+    let _zero = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("name", "zero")
+                .insert_vector("embedding", &[0.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+    // A zero vector scores 0.0 under cosine (finite, not NaN): it is NOT a
+    // dimension error, so the query succeeds, and a `> 0.5` threshold excludes
+    // the zero row (0.0 < 0.5) while keeping `good`.
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) WHERE vector.similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.5 RETURN d",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "zero-vector row excluded by threshold, no error"
+    );
+    assert_eq!(rows[0].entity.node_id(), Some(good));
+
+    // Without a threshold the zero row is still returned (ranked last, score 0),
+    // never dropped as an error.
+    let all = collect_rows(
+        db.execute_cypher(
+            "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 10",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        all.len(),
+        2,
+        "both rows returned; zero vector is not an error"
+    );
+    assert_eq!(
+        all[0].entity.node_id(),
+        Some(good),
+        "good ranks above the zero vector"
+    );
 }
 
 // ============================================================================
@@ -6474,5 +7425,717 @@ mod multi_pattern {
             Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
             Err(other) => panic!("expected UnsupportedFeature cap error, got {other:?}"),
         }
+    }
+}
+
+// ===========================================================================
+// Write clauses (Issue #560): CREATE / SET / DELETE / DETACH DELETE
+//
+// End-to-end mutation tests exercising the execute_cypher-only write path. Each
+// asserts the real side effect against the graph, plus bi-temporal correctness
+// (a CREATE is invisible AS OF before it; a SET records a new version while the
+// old version is still visible AS OF earlier).
+// ===========================================================================
+mod mutations {
+    use crate::AletheiaDB;
+    use crate::api::WriteOps;
+    use crate::core::error::Error;
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
+    use crate::core::temporal::time;
+    use crate::query::executor::{EntityResult, QueryRow};
+
+    fn run(db: &AletheiaDB, query: &str) -> Vec<QueryRow> {
+        db.execute_cypher(query).unwrap().collect_all().unwrap()
+    }
+
+    fn str_prop(entity: &EntityResult, key: &str) -> Option<String> {
+        match entity {
+            EntityResult::Node(n) => n.get_property(key).and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.to_string()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn int_prop_node(db: &AletheiaDB, label: &str, name: &str, key: &str) -> Option<i64> {
+        for id in db.scan_nodes_by_label(label) {
+            let node = db.get_node(id).unwrap();
+            if node.get_property("name") == Some(&PropertyValue::from(name)) {
+                return node.get_property(key).and_then(|v| match v {
+                    PropertyValue::Int(n) => Some(*n),
+                    _ => None,
+                });
+            }
+        }
+        None
+    }
+
+    fn node_id_by_name(db: &AletheiaDB, label: &str, name: &str) -> crate::core::id::NodeId {
+        for id in db.scan_nodes_by_label(label) {
+            let node = db.get_node(id).unwrap();
+            if node.get_property("name") == Some(&PropertyValue::from(name)) {
+                return id;
+            }
+        }
+        panic!("no {label} named {name}");
+    }
+
+    // ---- CREATE ----------------------------------------------------------
+
+    #[test]
+    fn create_node_persists_and_returns() {
+        let db = AletheiaDB::new().unwrap();
+        let rows = run(&db, "CREATE (n:Person {name: 'Zed', age: 41}) RETURN n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "Zed");
+        // Side effect: the node exists in current state.
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "age"), Some(41));
+    }
+
+    #[test]
+    fn create_node_without_return_yields_no_rows_but_persists() {
+        let db = AletheiaDB::new().unwrap();
+        let rows = run(&db, "CREATE (n:Widget {sku: 'A1'})");
+        assert!(rows.is_empty());
+        assert_eq!(db.scan_nodes_by_label("Widget").count(), 1);
+    }
+
+    #[test]
+    fn create_relationship_between_new_nodes() {
+        let db = AletheiaDB::new().unwrap();
+        let rows = run(
+            &db,
+            "CREATE (a:Person {name: 'Alice'})-[r:KNOWS {since: 2020}]->(b:Person {name: 'Bob'}) \
+             RETURN a, r, b",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 2);
+        assert_eq!(db.edge_count(), 1);
+        let alice = node_id_by_name(&db, "Person", "Alice");
+        let bob = node_id_by_name(&db, "Person", "Bob");
+        let out = db.get_outgoing_edges(alice);
+        assert_eq!(out.len(), 1);
+        let edge = db.get_edge(out[0]).unwrap();
+        assert_eq!(edge.target, bob);
+        assert!(edge.has_label_str("KNOWS"));
+    }
+
+    #[test]
+    fn match_then_create_relationship_binds_existing() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'}), (b:Person {name: 'B'}) CREATE (a)-[:KNOWS]->(b)",
+        );
+        assert_eq!(db.edge_count(), 1);
+        let out = db.get_outgoing_edges(a);
+        assert_eq!(out.len(), 1);
+        assert_eq!(db.get_edge(out[0]).unwrap().target, b);
+    }
+
+    // ---- SET -------------------------------------------------------------
+
+    #[test]
+    fn set_overwrites_existing_property() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+        let rows = run(
+            &db,
+            "MATCH (n:Person {name: 'Alice'}) SET n.age = 31 RETURN n",
+        );
+        assert_eq!(rows.len(), 1);
+        // RETURN reflects the post-update value.
+        assert_eq!(
+            rows[0].entity.as_node().unwrap().get_property("age"),
+            Some(&PropertyValue::Int(31))
+        );
+        assert_eq!(int_prop_node(&db, "Person", "Alice", "age"), Some(31));
+    }
+
+    #[test]
+    fn set_creates_missing_property_and_keeps_others() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+        run(
+            &db,
+            "MATCH (n:Person {name: 'Alice'}) SET n.city = 'London'",
+        );
+        let id = node_id_by_name(&db, "Person", "Alice");
+        let node = db.get_node(id).unwrap();
+        assert_eq!(
+            node.get_property("city"),
+            Some(&PropertyValue::from("London"))
+        );
+        // PATCH semantics: pre-existing props survive.
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Int(30)));
+        assert_eq!(
+            node.get_property("name"),
+            Some(&PropertyValue::from("Alice"))
+        );
+    }
+
+    #[test]
+    fn set_multiple_properties_one_statement() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        run(
+            &db,
+            "MATCH (n:Person {name: 'Alice'}) SET n.age = 40, n.city = 'Paris'",
+        );
+        let node = db
+            .get_node(node_id_by_name(&db, "Person", "Alice"))
+            .unwrap();
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Int(40)));
+        assert_eq!(
+            node.get_property("city"),
+            Some(&PropertyValue::from("Paris"))
+        );
+    }
+
+    #[test]
+    fn set_all_matched_nodes() {
+        let db = AletheiaDB::new().unwrap();
+        for name in ["A", "B", "C"] {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", name).build(),
+            )
+            .unwrap();
+        }
+        let rows = run(&db, "MATCH (n:Person) SET n.active = 1 RETURN n");
+        assert_eq!(rows.len(), 3);
+        for id in db.scan_nodes_by_label("Person") {
+            assert_eq!(
+                db.get_node(id).unwrap().get_property("active"),
+                Some(&PropertyValue::Int(1))
+            );
+        }
+    }
+
+    #[test]
+    fn set_on_no_match_is_noop() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        let rows = run(
+            &db,
+            "MATCH (n:Person {name: 'Nobody'}) SET n.age = 99 RETURN n",
+        );
+        assert!(rows.is_empty());
+        assert_eq!(int_prop_node(&db, "Person", "Alice", "age"), None);
+    }
+
+    // ---- DELETE / DETACH DELETE -----------------------------------------
+
+    #[test]
+    fn delete_unconnected_node() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        run(&db, "MATCH (n:Person {name: 'Alice'}) DELETE n");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 0);
+    }
+
+    #[test]
+    fn plain_delete_of_connected_node_is_refused() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        // openCypher safety rule: refuse to orphan the edge.
+        let err = db.execute_cypher("MATCH (n:Person {name: 'A'}) DELETE n");
+        assert!(err.is_err(), "expected refusal, got Ok");
+        // Nothing deleted (atomic).
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 2);
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    #[test]
+    fn detach_delete_removes_node_and_edges() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        run(&db, "MATCH (n:Person {name: 'A'}) DETACH DELETE n");
+        assert!(db.get_node(a).is_err());
+        // The connected edge is gone (no orphan).
+        assert_eq!(db.edge_count(), 0);
+        // B survives.
+        assert!(db.get_node(b).is_ok());
+    }
+
+    #[test]
+    fn delete_relationship_variable() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        run(&db, "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b) DELETE r");
+        // Both nodes survive; the relationship is gone.
+        assert_eq!(db.edge_count(), 0);
+        assert!(db.get_node(a).is_ok());
+        assert!(db.get_node(b).is_ok());
+    }
+
+    #[test]
+    fn delete_node_and_its_relationship_together() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        // Deleting both the node and its (only) edge in one clause is allowed
+        // regardless of listing order (edges are deleted before nodes).
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b) DELETE a, r",
+        );
+        assert!(db.get_node(a).is_err());
+        assert_eq!(db.edge_count(), 0);
+    }
+
+    // ---- Bi-temporal correctness ----------------------------------------
+
+    #[test]
+    fn created_node_is_invisible_as_of_before_creation() {
+        let db = AletheiaDB::new().unwrap();
+        let before = time::now();
+        // Small delay is unnecessary: `before` was captured prior to the write.
+        run(&db, "CREATE (n:Person {name: 'Zed'})");
+        let id = node_id_by_name(&db, "Person", "Zed");
+        // Visible now.
+        assert!(db.get_node(id).is_ok());
+        // Invisible as of a transaction time strictly before the create.
+        assert!(
+            db.get_node_at_time(id, before, before).is_err(),
+            "node should not exist as of before its creation"
+        );
+    }
+
+    #[test]
+    fn set_records_new_version_old_still_visible_as_of_earlier() {
+        let db = AletheiaDB::new().unwrap();
+        let (id, t0) = db
+            .write_with_timestamp(|tx| {
+                tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("age", 30i64)
+                        .build(),
+                )
+            })
+            .unwrap();
+        run(&db, "MATCH (n:Person {name: 'Alice'}) SET n.age = 31");
+        // Current state: new version.
+        assert_eq!(
+            db.get_node(id).unwrap().get_property("age"),
+            Some(&PropertyValue::Int(30 + 1))
+        );
+        // AS OF the create commit: the old version (age 30) is still visible.
+        let old = db.get_node_at_time(id, t0, t0).unwrap();
+        assert_eq!(old.get_property("age"), Some(&PropertyValue::Int(30)));
+    }
+
+    // ---- Rejections (structured, never silently-wrong) -------------------
+
+    fn assert_query_error(db: &AletheiaDB, query: &str) {
+        match db.execute_cypher(query) {
+            Ok(_) => panic!("expected an error for `{query}`, got Ok"),
+            Err(Error::Query(_)) => {}
+            Err(other) => panic!("expected a Query error for `{query}`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        // MERGE is deferred to a follow-up; it must reject cleanly (parse error),
+        // never partially apply.
+        assert!(
+            db.execute_cypher("MERGE (n:Person {name: 'Zed'}) RETURN n")
+                .is_err()
+        );
+        assert_eq!(db.node_count(), 0);
+    }
+
+    #[test]
+    fn remove_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+        // REMOVE is deferred (the native update API is PATCH-merge only).
+        assert!(db.execute_cypher("MATCH (n:Person) REMOVE n.age").is_err());
+        // No mutation happened.
+        assert_eq!(int_prop_node(&db, "Person", "Alice", "age"), Some(30));
+    }
+
+    #[test]
+    fn set_label_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        assert_query_error(&db, "MATCH (n:Person) SET n:Admin");
+    }
+
+    #[test]
+    fn create_undirected_relationship_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        assert_query_error(&db, "CREATE (a:Person)-[:KNOWS]-(b:Person)");
+        assert_eq!(
+            db.node_count(),
+            0,
+            "no partial writes on a rejected statement"
+        );
+    }
+
+    #[test]
+    fn create_node_without_label_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        assert_query_error(&db, "CREATE (n {name: 'x'})");
+    }
+
+    #[test]
+    fn set_replace_all_properties_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        assert_query_error(&db, "MATCH (n:Person) SET n = {age: 1}");
+    }
+
+    #[test]
+    fn explain_write_is_rejected_and_has_no_side_effect() {
+        let db = AletheiaDB::new().unwrap();
+        assert_query_error(&db, "EXPLAIN CREATE (n:Person {name: 'Zed'})");
+        assert_eq!(db.node_count(), 0);
+    }
+
+    // ---- Test hardening (coordinator review follow-ups) ------------------
+
+    /// Multiple SET items in one statement must record exactly ONE new version
+    /// (create = v1, the coalesced multi-property SET = v2), not one per item.
+    #[test]
+    fn set_multiple_items_produce_exactly_one_version() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        let id = node_id_by_name(&db, "Person", "Alice");
+        assert_eq!(db.get_node_history(id).unwrap().version_count(), 1);
+        run(
+            &db,
+            "MATCH (n:Person {name: 'Alice'}) SET n.a = 1, n.b = 2, n.c = 3",
+        );
+        // Exactly one additional version, not three.
+        assert_eq!(db.get_node_history(id).unwrap().version_count(), 2);
+        let node = db.get_node(id).unwrap();
+        assert_eq!(node.get_property("a"), Some(&PropertyValue::Int(1)));
+        assert_eq!(node.get_property("b"), Some(&PropertyValue::Int(2)));
+        assert_eq!(node.get_property("c"), Some(&PropertyValue::Int(3)));
+    }
+
+    /// A self-loop is one connected edge (counted/removed once) under DETACH.
+    #[test]
+    fn detach_delete_self_loop_removed_once() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("P", PropertyMapBuilder::new().insert("name", "A").build())
+            .unwrap();
+        db.create_edge(a, a, "LOOP", crate::core::property::PropertyMap::new())
+            .unwrap();
+        // Self-loop is one distinct connected edge.
+        assert_eq!(db.count_connected_edges(a).unwrap(), 1);
+        run(&db, "MATCH (n:P) DETACH DELETE n");
+        assert!(db.get_node(a).is_err());
+        assert_eq!(db.edge_count(), 0);
+    }
+
+    /// Same-statement CREATE with a comma-separated pattern that reuses an
+    /// earlier-created variable (`(a:X), (a)-[:R]->(b:Y)`).
+    #[test]
+    fn create_with_reused_variable_ref() {
+        let db = AletheiaDB::new().unwrap();
+        run(&db, "CREATE (a:X {name: 'A'}), (a)-[:R]->(b:Y {name: 'B'})");
+        assert_eq!(db.scan_nodes_by_label("X").count(), 1);
+        assert_eq!(db.scan_nodes_by_label("Y").count(), 1);
+        assert_eq!(db.edge_count(), 1);
+        let a = node_id_by_name(&db, "X", "A");
+        let out = db.get_outgoing_edges(a);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            db.get_edge(out[0]).unwrap().target,
+            node_id_by_name(&db, "Y", "B")
+        );
+    }
+
+    /// RETURN after DELETE yields the pre-delete snapshot (materialize_row
+    /// fallback path), and the node is actually gone.
+    #[test]
+    fn return_after_delete_yields_snapshot() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        let rows = run(&db, "MATCH (n:Person {name: 'Alice'}) DELETE n RETURN n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "Alice");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 0);
+    }
+
+    /// An empty MATCH performs zero mutations for both CREATE and DELETE.
+    #[test]
+    fn empty_match_zero_mutations() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        // CREATE driven by an empty match creates nothing.
+        run(&db, "MATCH (g:Ghost) CREATE (m:New {x: 1})");
+        assert_eq!(db.scan_nodes_by_label("New").count(), 0);
+        // DELETE driven by an empty match deletes nothing.
+        run(&db, "MATCH (g:Ghost) DELETE g");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// A multi-row `DELETE` where one matched row is connected must roll back
+    /// ALL rows' deletes (atomic across rows), not just refuse the connected one.
+    #[test]
+    fn multi_row_delete_is_atomic_across_rows() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        let _c = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "C").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        // A (and B) are connected; a plain DELETE of all Persons must refuse and
+        // leave EVERY node + the edge intact.
+        assert!(db.execute_cypher("MATCH (n:Person) DELETE n").is_err());
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 3);
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    /// `SET` on a relationship variable.
+    #[test]
+    fn set_on_edge_property() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b) SET r.since = 2020",
+        );
+        let edge = db.get_edge(db.get_outgoing_edges(a)[0]).unwrap();
+        assert_eq!(edge.get_property("since"), Some(&PropertyValue::Int(2020)));
+    }
+
+    /// Minor 1: create-edge-then-plain-delete-endpoint refuses cleanly (friendly
+    /// DETACH-DELETE message) instead of aborting at commit, and stays atomic.
+    #[test]
+    fn create_edge_then_plain_delete_endpoint_is_refused() {
+        let db = AletheiaDB::new().unwrap();
+        let err = db.execute_cypher("CREATE (a:P {name: 'A'})-[:R]->(b:P {name: 'B'}) DELETE a");
+        assert!(
+            err.is_err(),
+            "plain DELETE of a just-created edge endpoint must be refused"
+        );
+        // Atomic: neither node nor the edge was committed.
+        assert_eq!(db.node_count(), 0);
+        assert_eq!(db.edge_count(), 0);
+    }
+
+    /// Minor 1 companion: DETACH DELETE of a same-statement-created edge endpoint
+    /// works (delete_node_cascade unions the buffered CREATE), no orphan.
+    #[test]
+    fn create_edge_then_detach_delete_endpoint_works() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "CREATE (a:P {name: 'A'})-[:R]->(b:P {name: 'B'}) DETACH DELETE a",
+        );
+        // `a` and the relationship are gone; `b` survives; no orphaned edge.
+        assert_eq!(db.scan_nodes_by_label("P").count(), 1);
+        assert_eq!(db.edge_count(), 0);
+        assert_eq!(str_prop_of_only_p(&db), "B");
+    }
+
+    fn str_prop_of_only_p(db: &AletheiaDB) -> String {
+        let id = db.scan_nodes_by_label("P").next().unwrap();
+        match db.get_node(id).unwrap().get_property("name") {
+            Some(PropertyValue::String(s)) => s.to_string(),
+            _ => panic!("missing name"),
+        }
+    }
+
+    /// Minor 3: `SET r.x = 1` after `DELETE r` in one statement is a no-op on the
+    /// deleted edge (symmetric with the node path), not a not-found abort.
+    #[test]
+    fn set_on_edge_deleted_earlier_in_statement_is_noop() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
+            .unwrap();
+        // DELETE r then SET r.x must succeed (the SET is skipped), edge gone.
+        db.execute_cypher("MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b) DELETE r SET r.x = 1")
+            .expect("SET on an already-deleted edge must be a no-op, not an error");
+        assert_eq!(db.edge_count(), 0);
+    }
+
+    /// Document + pin the openCypher `SET x = null` deviation: we store an
+    /// explicit Null value rather than removing the property key (true key
+    /// deletion is future work tied to REMOVE / a replace-tombstone write API).
+    #[test]
+    fn set_null_stores_explicit_null_v1_deviation() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+        run(&db, "MATCH (n:Person {name: 'Alice'}) SET n.age = null");
+        let node = db
+            .get_node(node_id_by_name(&db, "Person", "Alice"))
+            .unwrap();
+        // v1: the key is present with an explicit Null (NOT removed).
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Null));
     }
 }

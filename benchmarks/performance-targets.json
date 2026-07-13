@@ -53,6 +53,46 @@
       "target": "<1ms",
       "rationale": "JSON-RPC serialization + stdio + process-boundary cost above the direct API floor for single-entity reads (Issue #3361). Independently checkable per scenario via the overhead sub-metric. Note: overhead percentiles subtract independently-sorted round-trip and direct series (unpaired), so p95/p99 overhead is an informational decomposition, noisy on the tail; the p50 is the reliable central estimate. Informational, never gated.",
       "benchmark": "mcp_round_trip"
+    },
+    {
+      "metric": "provenance_write_composed_ratio",
+      "target": ">=0.80",
+      "rationale": "Issue #3383: on the CPU-bound arm (Async 1ms-flush, interleaved multi-pass, solo DB per config, so per-write trust CPU cost bottlenecks throughput) write throughput with #3224 provenance + #3218 uniqueness constraint enabled must stay >=80% of the same-run no-trust baseline (measured back-to-back, hardware-variance-immune). Composed folds the two per-write-CPU trust features; the #3351 chain is measured separately (see chain_active note)"
+    },
+    {
+      "metric": "provenance_only_write_ratio",
+      "target": ">=0.85",
+      "rationale": "Issue #3383: on the CPU-bound arm, attaching a #3224 provenance bundle to every write must keep throughput >=85% of the same-run baseline (WAL serializes extra source/confidence/note bytes)"
+    },
+    {
+      "metric": "constraint_active_write_ratio",
+      "target": ">=0.85",
+      "rationale": "Issue #3383: on the CPU-bound arm, an active #3218 uniqueness constraint must keep write throughput >=85% of the same-run baseline (per-write reservation-index check on the commit path)"
+    },
+    {
+      "metric": "chain_active_write_ratio",
+      "target": "observation (ungated in #3383 CPU-bound arm)",
+      "rationale": "Issue #3383: the #3351 tamper-evident hash chain is an async SHA-256 sealer sidecar. At the CPU-bound arm's ~100K+ writes/sec the sealer, not the writer's per-write enqueue CPU, is the throughput ceiling on a slow shared core, so the CPU-arm ratio measures sealer throughput (observed ~0.63-0.84) not per-write cost -- it is reported but NOT hard-gated here. The chain's >=0.90 overhead metric is owned and gated by the dedicated provenance_chain bench (Issue #3351) in its native GroupCommit regime"
+    },
+    {
+      "metric": "lineage_active_write_ratio",
+      "target": ">=0.80",
+      "rationale": "Issue #3383: on the CPU-bound arm, attaching a #3371 fact-to-fact derivation-lineage list (fixed small derived_from set) to every write must keep throughput >=80% of the same-run baseline (per-write in-memory lineage-index insert + source validation costs ~12%; bound set well below observed ~0.86-0.91 for shared-runner headroom)"
+    },
+    {
+      "metric": "provenance_write_current_read_p99",
+      "target": "<1µs",
+      "rationale": "Issue #3383 (AC4): carrying provenance must not slow the current-state single-hop read hot path"
+    },
+    {
+      "metric": "provenance_temporal_reconstruct",
+      "target": "<10ms",
+      "rationale": "Issue #3383 (AC4): reconstructing a provenance-carrying historical version stays within the temporal-query budget"
+    },
+    {
+      "metric": "provenance_constraint_recovery_10k_50k",
+      "target": "<5s",
+      "rationale": "Issue #3383 (AC5): crash recovery of a provenance + uniqueness-constraint dataset at the 10K-node/50K-edge reference scale completes within the medium-dataset recovery budget"
     }
   ]
 }

@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
+use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::index::vector::DistanceMetric;
 
-use super::ir::{Direction, Predicate, TraversalDepth};
+use super::ir::{Direction, Predicate, ScoreThreshold, TraversalDepth};
 
 /// A logical query plan represented as a tree of operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -265,6 +266,12 @@ pub enum UnaryOp {
         top_k: Option<usize>,
         /// Property key containing the embedding (None = "embedding")
         property_key: Option<String>,
+        /// Distance/similarity metric selected by the calling surface.
+        metric: VectorMetric,
+        /// Optional similarity-score threshold (keeps only passing rows).
+        threshold: Option<ScoreThreshold>,
+        /// Optional output-column alias for the materialized similarity score.
+        score_alias: Option<String>,
     },
 
     /// Sort by property or score
@@ -627,6 +634,9 @@ mod tests {
                 embedding: Arc::from([1.0f32; 384].as_slice()),
                 top_k: Some(10),
                 property_key: None,
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             },
             LogicalOp::Scan(ScanOp::NodeLookup(vec![])),
         );

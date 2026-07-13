@@ -439,11 +439,17 @@ impl QueryPlanner {
                 embedding,
                 top_k,
                 property_key,
+                metric,
+                threshold,
+                score_alias,
             } => Ok(LogicalOp::unary(
                 UnaryOp::VectorRank {
                     embedding: embedding.clone(),
                     top_k: *top_k,
                     property_key: property_key.clone(),
+                    metric: *metric,
+                    threshold: *threshold,
+                    score_alias: score_alias.clone(),
                 },
                 input,
             )),
@@ -898,14 +904,29 @@ impl QueryPlanner {
                 embedding,
                 top_k,
                 property_key,
+                metric,
+                threshold,
+                score_alias,
             } => {
                 self.validate_vector_index(property_key.as_deref())?;
+
+                // A pure threshold filter (no explicit top_k) keeps *every*
+                // passing row, so leave `k` unbounded rather than clamping to
+                // the default top-k; a genuine top_k still bounds the result.
+                let k = top_k.unwrap_or(if threshold.is_some() {
+                    usize::MAX
+                } else {
+                    DEFAULT_VECTOR_TOP_K
+                });
 
                 Ok(PhysicalOp::VectorRerank {
                     input: Box::new(input),
                     embedding: embedding.clone(),
-                    k: top_k.unwrap_or(DEFAULT_VECTOR_TOP_K),
+                    k,
                     property_key: property_key.clone(),
+                    metric: *metric,
+                    threshold: *threshold,
+                    score_alias: score_alias.clone(),
                 })
             }
 
@@ -1463,6 +1484,9 @@ mod tests {
                 embedding: Arc::from(embedding.as_slice()),
                 top_k: Some(10),
                 property_key: None,
+                metric: crate::core::vector::DistanceMetric::Cosine,
+                threshold: None,
+                score_alias: None,
             }],
             temporal_context: None,
             hints: QueryHints::default(),

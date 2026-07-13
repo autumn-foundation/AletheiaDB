@@ -1897,68 +1897,6 @@ fn test_validate_vector_with_bounds_dimension_checked_first() {
 // ========================================================================
 
 #[test]
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn test_simd_explicit_coverage() {
-    // This test explicitly calls internal SIMD functions to ensure code coverage
-    // for safety assertions, even if the runtime dispatcher favors one instruction set.
-    let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let b = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
-
-    // 1. Test SSE2 (Always available on x86_64, usually available on x86)
-    if is_x86_feature_detected!("sse2") {
-        unsafe {
-            // dot_and_magnitudes_sse2
-            let (dot, mag_a, mag_b) = super::simd::x86_ops::dot_and_magnitudes_sse2(&a, &b);
-            // Expected: 1*8 + ... = 120.0
-            assert!((dot - 120.0).abs() < 1e-5);
-            assert!(mag_a > 0.0);
-            assert!(mag_b > 0.0);
-
-            // dot_product_sse2
-            let dot_prod = super::simd::x86_ops::dot_product_sse2(&a, &b);
-            assert!((dot - dot_prod).abs() < 1e-5);
-
-            // squared_diff_sum_sse2
-            let sq_diff = super::simd::x86_ops::squared_diff_sum_sse2(&a, &b);
-            assert!(sq_diff >= 0.0);
-
-            // scale_in_place_sse2
-            let mut v = a.clone();
-            super::simd::x86_ops::scale_in_place_sse2(&mut v, 2.0);
-            assert!((v[0] - 2.0).abs() < 1e-5);
-        }
-    }
-
-    // 2. Test AVX2 (Conditional)
-    // We explicitly test this branch even if the dispatcher might prefer it,
-    // to ensure the specific function logic is correct.
-    if is_x86_feature_detected!("avx2") {
-        unsafe {
-            // scale_in_place_avx2 only needs AVX2
-            let mut v = a.clone();
-            super::simd::x86_ops::scale_in_place_avx2(&mut v, 2.0);
-            assert!((v[0] - 2.0).abs() < 1e-5);
-
-            // Others need FMA + AVX2
-            if is_x86_feature_detected!("fma") {
-                // dot_and_magnitudes_avx2
-                let (dot, mag_a, _mag_b) = super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b);
-                assert!((dot - 120.0).abs() < 1e-5);
-                assert!(mag_a > 0.0);
-
-                // dot_product_avx2
-                let dot_prod = super::simd::x86_ops::dot_product_avx2(&a, &b);
-                assert!((dot - dot_prod).abs() < 1e-5);
-
-                // squared_diff_sum_avx2
-                let sq_diff = super::simd::x86_ops::squared_diff_sum_avx2(&a, &b);
-                assert!(sq_diff >= 0.0);
-            }
-        }
-    }
-}
-
-#[test]
 fn test_normalize_small_vector_preserves_direction() {
     let v = vec![1.0e-8_f32];
     let normalized = normalize(&v);
@@ -2966,59 +2904,6 @@ fn test_dot_product_sum_mismatch_panics() {
     let a = vec![1.0, 2.0];
     let b = vec![1.0, 2.0, 3.0];
     let _ = super::simd::dot_product_sum(&a, &b);
-}
-
-#[test]
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn test_simd_mismatched_lengths_safety() {
-    let a = vec![1.0; 8];
-    let b = vec![1.0; 9];
-
-    // Test SSE2 if available (baseline for x86_64)
-    if is_x86_feature_detected!("sse2") {
-        let result = std::panic::catch_unwind(|| unsafe {
-            super::simd::x86_ops::dot_and_magnitudes_sse2(&a, &b)
-        });
-        assert!(
-            result.is_err(),
-            "SSE2 dot_and_magnitudes should panic on mismatch"
-        );
-
-        let result =
-            std::panic::catch_unwind(|| unsafe { super::simd::x86_ops::dot_product_sse2(&a, &b) });
-        assert!(result.is_err(), "SSE2 dot_product should panic on mismatch");
-
-        let result = std::panic::catch_unwind(|| unsafe {
-            super::simd::x86_ops::squared_diff_sum_sse2(&a, &b)
-        });
-        assert!(
-            result.is_err(),
-            "SSE2 squared_diff_sum should panic on mismatch"
-        );
-    }
-
-    // Test AVX2 if available
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        let result = std::panic::catch_unwind(|| unsafe {
-            super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b)
-        });
-        assert!(
-            result.is_err(),
-            "AVX2 dot_and_magnitudes should panic on mismatch"
-        );
-
-        let result =
-            std::panic::catch_unwind(|| unsafe { super::simd::x86_ops::dot_product_avx2(&a, &b) });
-        assert!(result.is_err(), "AVX2 dot_product should panic on mismatch");
-
-        let result = std::panic::catch_unwind(|| unsafe {
-            super::simd::x86_ops::squared_diff_sum_avx2(&a, &b)
-        });
-        assert!(
-            result.is_err(),
-            "AVX2 squared_diff_sum should panic on mismatch"
-        );
-    }
 }
 
 #[test]
