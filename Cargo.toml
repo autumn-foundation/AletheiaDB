@@ -423,6 +423,15 @@ harness = false
 path = "benches/otel_overhead.rs"
 required-features = ["otel"]
 
+# MCP round-trip p99 latency harness (Issue #3361): black-box over the shipped
+# aletheia-mcp binary's stdio JSON-RPC transport, with per-tool coverage, an
+# MCP-overhead sub-metric, registry-completeness enforcement, and a p99<5ms gate.
+[[bench]]
+name = "mcp_round_trip"
+harness = false
+path = "benches/mcp_round_trip.rs"
+required-features = ["mcp-server", "config-toml"]
+
 # Storage layer - raw storage primitives and fast path
 [[bench]]
 name = "current_state"

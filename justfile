@@ -22,6 +22,27 @@ test-one TEST:
 bench:
     cargo bench
 
+# Run the MCP round-trip p99 latency harness (Issue #3361).
+# Black-box over the shipped aletheia-mcp binary's stdio JSON-RPC transport.
+# Args: scale (smoke|nightly), sample size, warmup, enforce (0|1 hard-fail p99<5ms
+# absolute gate AND the relative committed-baseline p50<=2x gate).
+# Requires the mcp-server + config-toml features; serves the seeded fixture under
+# an Async durability profile so latencies isolate MCP overhead from fsync cost.
+# When enforce=1 the relative gate reads benchmarks/baselines/mcp_round_trip_baseline.json.
+mcp-bench scale='smoke' sample='200' warmup='20' enforce='0':
+    MCP_BENCH_SCALE={{scale}} MCP_BENCH_SAMPLE_SIZE={{sample}} MCP_BENCH_WARMUP={{warmup}} \
+    MCP_BENCH_ENFORCE_LATENCY={{enforce}} MCP_BENCH_ENFORCE_RELATIVE={{enforce}} \
+    MCP_BENCH_BASELINE=benchmarks/baselines/mcp_round_trip_baseline.json \
+    MCP_BENCH_JSON=mcp_round_trip_results.json \
+    cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
+# Regenerate the MCP round-trip reference baseline (gated p50s) — run on the
+# reference runner at nightly scale; commit the result. Refresh per release/hardware.
+mcp-bench-baseline sample='300' warmup='30':
+    MCP_BENCH_SCALE=nightly MCP_BENCH_SAMPLE_SIZE={{sample}} MCP_BENCH_WARMUP={{warmup}} \
+    MCP_BENCH_WRITE_BASELINE=benchmarks/baselines/mcp_round_trip_baseline.json \
+    cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
 # Run benchmarks and generate HTML tables
 bench-tables:
     cargo bench --all-features
