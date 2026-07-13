@@ -57,6 +57,10 @@ fn run() -> Result<(), String> {
         Some("backup") => handle_backup(args.collect()),
         Some("restore") => handle_restore(args.collect()),
         Some("verify") => handle_verify(args.collect()),
+        // Encryption key operator commands (Issue #490): the independent,
+        // non-rotation slice. `keys rotate` depends on the rotation engine
+        // (Issue #488) and is intentionally not implemented here.
+        Some("keys") => handle_keys(args.collect()),
         // A single `import` verb serves both formats; `handle_import` reads `--format`
         // and dispatches to the neo4j-csv (Issue #3356) or parquet (Issue #3364) path.
         // `handle_import` is always defined (a stub when the `import` feature is off).
@@ -96,7 +100,10 @@ Usage:\n\
   aletheia backup <output_path>\n\
   aletheia restore <input_path>\n\
   aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n> | --latest] [--dry-run]\n\
-  aletheia verify [--entity <node|edge>:<id>] [--export-head PATH] [--against PATH] [--json]"
+  aletheia verify [--entity <node|edge>:<id>] [--export-head PATH] [--against PATH] [--json]\n\
+  aletheia keys generate --output <PATH> [--force]\n\
+  aletheia keys status [--key-file PATH | --env-var NAME]   (alias: keys info)\n\
+  aletheia keys verify --key-file <PATH>"
     );
     // The neo4j-csv import verb is gated behind the `import` feature; only advertise it
     // when it is compiled in.
@@ -165,7 +172,14 @@ Usage:\n\
   audit-keygen — Generate an Ed25519 signing key (0600) and print its public key.\n\
   audit-export — Sign an entity's full bi-temporal history into a portable artifact.\n\
   audit-verify — Verify an artifact OFFLINE (no database) with the signer's public key.\n\
-  audit-render — Render an artifact as a human-readable chronology.\n"
+  audit-render — Render an artifact as a human-readable chronology.\n\
+\nEncryption keys (Issue #490):\n\
+  keys generate — Provision a new 32-byte master key file (0600 on Unix).\n\
+                  Refuses to overwrite unless --force. Key bytes are never printed.\n\
+  keys status   — Show the key configuration (provider, algorithm, version)\n\
+                  without reading or printing key material. Alias: keys info.\n\
+                  Not configured is reported informationally (exit 0).\n\
+  keys verify   — Verify the named key file loads and is valid (health check).\n"
     );
 }
 
@@ -407,6 +421,150 @@ fn handle_verify(args: Vec<String>) -> Result<(), String> {
     // Default: full-chain verify.
     let result = db.verify_chain().map_err(chain_error_hint)?;
     finish_verification(&result, "full", json)
+}
+
+/// `aletheia keys <generate|status|verify>` — encryption key operator commands
+/// (Issue #490).
+///
+/// This is the independent, non-rotation slice of the encryption CLI:
+/// - `generate` provisions a new 32-byte master key file.
+/// - `status` (alias `info`) reports the key configuration without ever
+///   reading or printing key material.
+/// - `verify` confirms the configured/named key loads and is valid.
+///
+/// `keys rotate` is intentionally NOT implemented: it depends on the key
+/// rotation engine (Issue #488), which is not yet on trunk.
+fn handle_keys(args: Vec<String>) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("generate") => keys_generate(&args[1..]),
+        // `info` is accepted as an alias for `status`.
+        Some("status") | Some("info") => keys_status(&args[1..]),
+        Some("verify") => keys_verify(&args[1..]),
+        Some(sub) => Err(format!("unknown keys subcommand '{sub}'")),
+        None => Err("usage: aletheia keys <generate|status|verify> ...".to_string()),
+    }
+}
+
+/// `aletheia keys generate --output <PATH> [--force]` — generate a new 32-byte
+/// master key file.
+///
+/// Refuses to overwrite an existing file unless `--force` is passed, so a live
+/// key is never clobbered by accident. The generated key bytes are NEVER
+/// printed. On Unix the file is tightened to `0600` (owner read/write only).
+fn keys_generate(args: &[String]) -> Result<(), String> {
+    let output = arg_value(args, "--output")
+        .ok_or_else(|| "usage: aletheia keys generate --output <PATH> [--force]".to_string())?;
+    let force = args.iter().any(|a| a == "--force");
+    let path = Path::new(&output);
+
+    if path.exists() && !force {
+        return Err(format!(
+            "refusing to overwrite existing key file '{output}' (pass --force to replace it)"
+        ));
+    }
+
+    let result = aletheiadb::encryption::cli::generate_key(path)
+        .map_err(|e| format!("failed to generate key: {e}"))?;
+
+    // A master key must never be world-readable; tighten to owner-only on Unix.
+    // (`generate_key_file` writes with the process umask, so we set the mode
+    // explicitly here rather than relying on it.)
+    restrict_key_permissions(path)?;
+
+    println!(
+        "Generated a new {}-byte master key at {}\n  algorithm: {}\n  (key bytes are not printed)",
+        result.key_length, result.path, result.algorithm
+    );
+    Ok(())
+}
+
+/// `aletheia keys status` (alias `info`) — report the encryption key
+/// configuration WITHOUT reading or printing key material.
+///
+/// Configuration is resolved from `--key-file`/`--env-var` flags, else from an
+/// `ALETHEIADB_CONFIG` TOML (when the `config-toml` feature is compiled in),
+/// else reported as not configured (exit 0, informational). Only non-secret
+/// facts are shown: provider type, provider detail (path/var name — not
+/// secret), algorithm, and the key version (always 1 until rotation lands).
+fn keys_status(args: &[String]) -> Result<(), String> {
+    let config = resolve_encryption_config(args)?;
+    let status = aletheiadb::encryption::cli::get_encryption_status(&config);
+    let mut out = aletheiadb::encryption::cli::format_encryption_status(&status);
+    if status.enabled {
+        // There is no rotation yet (Issue #488), so the key version is always
+        // 1 today. Surface it explicitly rather than implying multi-version.
+        out.push_str("Key version:    1 (rotation not yet enabled)\n");
+    }
+    print!("{out}");
+    Ok(())
+}
+
+/// `aletheia keys verify --key-file <PATH>` — verify the named key is usable.
+///
+/// Constructs the file key provider and runs its health check (which loads and
+/// parses the MEK). This is the scoped v1 of the issue's `encryption verify`:
+/// it verifies the KEY is loadable/valid, NOT that all encrypted data across
+/// all storage layers decrypts (that broader check depends on index encryption,
+/// Issue #481, which is not yet on trunk). On failure a safe error category is
+/// reported (never key bytes) and the process exits non-zero.
+fn keys_verify(args: &[String]) -> Result<(), String> {
+    let key_file = arg_value(args, "--key-file")
+        .ok_or_else(|| "usage: aletheia keys verify --key-file <PATH>".to_string())?;
+    let path = Path::new(&key_file);
+    match aletheiadb::encryption::cli::validate_key_file(path) {
+        Ok(()) => {
+            println!("Key at {key_file} loads and is valid.");
+            Ok(())
+        }
+        // `KeyProviderError`'s Display never contains key bytes (only a
+        // category and, for a length mismatch, a byte count), so it is safe to
+        // surface directly.
+        Err(e) => Err(format!("key verification failed: {e}")),
+    }
+}
+
+/// Resolve the [`EncryptionConfig`](aletheiadb::encryption::config::EncryptionConfig)
+/// for `keys status` from CLI flags or ambient config.
+///
+/// Precedence: `--key-file` > `--env-var` > `ALETHEIADB_CONFIG` (TOML, when
+/// `config-toml` is compiled in) > disabled/not-configured.
+fn resolve_encryption_config(
+    args: &[String],
+) -> Result<aletheiadb::encryption::config::EncryptionConfig, String> {
+    use aletheiadb::encryption::config::EncryptionConfig;
+
+    if let Some(path) = arg_value(args, "--key-file") {
+        return Ok(EncryptionConfig::file_based(path));
+    }
+    if let Some(var) = arg_value(args, "--env-var") {
+        return Ok(EncryptionConfig::env_based(var));
+    }
+    #[cfg(feature = "config-toml")]
+    if let Ok(cfg_path) = env::var(aletheiadb::config::CONFIG_ENV) {
+        let cfg = aletheiadb::config::AletheiaDBConfig::from_toml_file(&cfg_path)
+            .map_err(|e| format!("failed to load config '{cfg_path}': {e}"))?;
+        return Ok(cfg.encryption);
+    }
+    Ok(EncryptionConfig::disabled())
+}
+
+/// Tighten a freshly written key file to owner-only permissions (`0600`) on
+/// Unix. A no-op on non-Unix platforms (which lack POSIX mode bits).
+#[cfg(unix)]
+fn restrict_key_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+        format!(
+            "failed to set owner-only permissions on key file '{}': {e}",
+            path.display()
+        )
+    })
+}
+
+/// Non-Unix no-op for [`restrict_key_permissions`].
+#[cfg(not(unix))]
+fn restrict_key_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 /// Turn a chain API error (notably "chain not enabled") into a CLI-friendly
