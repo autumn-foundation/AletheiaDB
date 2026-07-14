@@ -223,6 +223,10 @@ pub struct AletheiaMcpServer {
     db: Arc<AletheiaDB>,
     /// Maximum operations accepted by one `apply_batch` call (Issue #3231).
     pub(crate) max_batch_operations: usize,
+    /// Maximum number of entries accepted in a `priority_properties` budget
+    /// array (Issue #3583). Bounds the one-time cost of building the protected-
+    /// key set; an over-cap array is rejected with `INVALID_ARGUMENT`.
+    pub(crate) max_priority_properties: usize,
     auth: SessionAuth,
     /// Snapshot-anchored keyset continuation cursors (Issue #3360). Shared
     /// (one manager == one MCP connection) so its live-cursor cap is a
@@ -309,6 +313,7 @@ impl AletheiaMcpServer {
         Self {
             db,
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
+            max_priority_properties: budget::DEFAULT_MAX_PRIORITY_PROPERTIES,
             auth: SessionAuth::Anonymous,
             cursors: Arc::new(CursorManager::new()),
             query_limits: Arc::new(QueryLimitsConfig::default()),
@@ -364,6 +369,23 @@ impl AletheiaMcpServer {
         self
     }
 
+    /// Override the maximum number of entries accepted in a `priority_properties`
+    /// token-budget array (default: 1024, Issue #3583).
+    ///
+    /// `priority_properties` (Issue #3353) names the property keys a budgeted
+    /// read protects from elision. It is consulted for every property of every
+    /// returned entity, so an unbounded array is a denial-of-service vector:
+    /// this cap rejects an over-long array up front with a structured
+    /// `INVALID_ARGUMENT` error (naming the cap and the given length) before any
+    /// shaping runs, keeping response-shaping cost bounded regardless of caller
+    /// input. The per-key lookup itself is O(1); this cap additionally bounds the
+    /// one-time cost of validating the array and building the lookup set.
+    #[must_use]
+    pub fn with_max_priority_properties(mut self, max_priority_properties: usize) -> Self {
+        self.max_priority_properties = max_priority_properties;
+        self
+    }
+
     /// Create an MCP server with authentication and role-based
     /// authorization (Issue #3350, Phase 2).
     ///
@@ -398,6 +420,7 @@ impl AletheiaMcpServer {
         Self {
             db,
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
+            max_priority_properties: budget::DEFAULT_MAX_PRIORITY_PROPERTIES,
             auth: SessionAuth::from(auth),
             cursors: Arc::new(CursorManager::new()),
             query_limits: Arc::new(QueryLimitsConfig::default()),
@@ -6264,7 +6287,7 @@ impl AletheiaMcpServer {
         // budget with a disclosed truncation contract. Omitting the budget
         // parameters leaves behavior completely unchanged.
         if is_budgetable_read_tool(name) {
-            match budget::parse_budget(&args) {
+            match budget::parse_budget(&args, self.max_priority_properties) {
                 Ok(Some(budget_req)) => {
                     // Retain the original arguments so the rung-4 truncation
                     // handle can emit a concrete offset-based resume call

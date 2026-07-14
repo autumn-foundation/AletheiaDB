@@ -45,12 +45,29 @@
 //! — their ranked results are never dropped or reordered to meet a budget; only
 //! per-result payloads degrade (Issue #3353 AC7).
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value, json};
 
 use super::error::{McpError, McpErrorCode};
 
 /// Bytes-per-token divisor. See the module docs for the estimation basis.
 pub(crate) const BYTES_PER_TOKEN: u64 = 4;
+
+/// Default upper bound on the number of entries accepted in a
+/// `priority_properties` array (Issue #3583, surfaced via #3353).
+///
+/// `priority_properties` is matched against every property of every returned
+/// entity at the elide and summarize rungs. Left unbounded, an attacker could
+/// pass a `priority_properties` array with up to hundreds of thousands of
+/// entries (bounded only by the transport body cap), turning response shaping
+/// into multi-second blocking CPU. The scan itself is now an O(1) `HashSet`
+/// lookup, but the array is *still* rejected above this cap so the one-time cost
+/// of building that set (and of validating/allocating the array) stays bounded.
+///
+/// Configurable per server via
+/// [`AletheiaMcpServer::with_max_priority_properties`](crate::mcp::AletheiaMcpServer::with_max_priority_properties).
+pub(crate) const DEFAULT_MAX_PRIORITY_PROPERTIES: usize = 1024;
 
 /// Property values whose pretty-serialized form exceeds this many bytes are
 /// "bulky" and are the first content sacrificed (rung 2). Set above the fixed
@@ -109,7 +126,18 @@ impl Rung {
 /// `max_response_tokens`) is simply ignored — consistent with the surface's
 /// unknown-field tolerance — so the request is served in full rather than
 /// silently budgeted under a key the caller did not intend.
-pub(crate) fn parse_budget(args: &Value) -> Result<Option<BudgetRequest>, McpError> {
+///
+/// `max_priority_properties` bounds the length of the `priority_properties`
+/// array (defense-in-depth against the Issue #3583 DoS): an array longer than
+/// the cap is rejected with a structured `INVALID_ARGUMENT` error naming both
+/// the cap and the given length, so re-issuing under the cap succeeds. The cap
+/// is configurable per server via
+/// [`AletheiaMcpServer::with_max_priority_properties`](crate::mcp::AletheiaMcpServer::with_max_priority_properties)
+/// (default [`DEFAULT_MAX_PRIORITY_PROPERTIES`]).
+pub(crate) fn parse_budget(
+    args: &Value,
+    max_priority_properties: usize,
+) -> Result<Option<BudgetRequest>, McpError> {
     let obj = match args.as_object() {
         Some(o) => o,
         None => return Ok(None),
@@ -125,6 +153,23 @@ pub(crate) fn parse_budget(args: &Value) -> Result<Option<BudgetRequest>, McpErr
     let priority_properties = match obj.get("priority_properties") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => {
+            // Defense-in-depth (Issue #3583): reject an over-long array up front,
+            // before allocating/validating each element, so an oversized array
+            // cannot turn response shaping into unbounded work.
+            if items.len() > max_priority_properties {
+                return Err(McpError::new(
+                    McpErrorCode::InvalidArgument,
+                    format!(
+                        "priority_properties may contain at most {max_priority_properties} \
+                         entries, but {} were given",
+                        items.len()
+                    ),
+                )
+                .details(json!({
+                    "max_priority_properties": max_priority_properties,
+                    "given": items.len(),
+                })));
+            }
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 match item.as_str() {
@@ -342,11 +387,20 @@ fn build_candidate(
     cap: u64,
 ) -> Value {
     let ctx = derive_ctx(&value, tool);
+    // Build the protected-key lookup once per candidate (Issue #3583): the elide
+    // and summarize rungs consult it per-property-per-entity, so an O(1)
+    // `HashSet` lookup replaces the previous O(len(priority_properties)) linear
+    // scan and keeps shaping cost independent of the array length.
+    let priority: HashSet<&str> = budget
+        .priority_properties
+        .iter()
+        .map(String::as_str)
+        .collect();
     let mut sections: Vec<Value> = Vec::new();
     match rung {
         Rung::Full => {}
         Rung::ElideProperties => {
-            let n = elide_bulky_properties(&mut value, &budget.priority_properties, &ctx);
+            let n = elide_bulky_properties(&mut value, &priority, &ctx);
             if n > 0 {
                 sections.push(json!({
                     "section": "properties",
@@ -356,7 +410,7 @@ fn build_candidate(
             }
         }
         Rung::Summaries => {
-            let n = summarize_entities(&mut value, &budget.priority_properties, &ctx);
+            let n = summarize_entities(&mut value, &priority, &ctx);
             if n > 0 {
                 sections.push(json!({
                     "section": "properties",
@@ -366,7 +420,7 @@ fn build_candidate(
         }
         Rung::CountsAndHandles => {
             // First reduce every entity to its summary, then truncate arrays.
-            summarize_entities(&mut value, &budget.priority_properties, &ctx);
+            summarize_entities(&mut value, &priority, &ctx);
             let mut sections_so_far = vec![json!({
                 "section": "properties",
                 "rung": "entity_summaries",
@@ -499,7 +553,7 @@ fn entity_fetch_handle(map: &Map<String, Value>, ctx: &ShapeCtx) -> Value {
 /// number of values elided. A value is elided only when its `{elided,...}`
 /// descriptor serializes *smaller* than the value it replaces, so this rung can
 /// never enlarge the response (Issue #3353 F3).
-fn elide_bulky_properties(value: &mut Value, priority: &[String], ctx: &ShapeCtx) -> usize {
+fn elide_bulky_properties(value: &mut Value, priority: &HashSet<&str>, ctx: &ShapeCtx) -> usize {
     let mut count = 0;
     match value {
         Value::Object(map) => {
@@ -507,7 +561,7 @@ fn elide_bulky_properties(value: &mut Value, priority: &[String], ctx: &ShapeCtx
                 let handle = entity_fetch_handle(map, ctx);
                 if let Some(Value::Object(props)) = map.get_mut("properties") {
                     for (key, val) in props.iter_mut() {
-                        if priority.iter().any(|p| p == key) {
+                        if priority.contains(key.as_str()) {
                             continue;
                         }
                         if already_elided(val) {
@@ -553,7 +607,7 @@ fn elide_bulky_properties(value: &mut Value, priority: &[String], ctx: &ShapeCtx
 
 /// Rung 3: reduce each entity's `properties` to protected keys only. Returns the
 /// number of entities summarized (i.e. that dropped at least one property).
-fn summarize_entities(value: &mut Value, priority: &[String], ctx: &ShapeCtx) -> usize {
+fn summarize_entities(value: &mut Value, priority: &HashSet<&str>, ctx: &ShapeCtx) -> usize {
     let mut count = 0;
     match value {
         Value::Object(map) => {
@@ -563,7 +617,7 @@ fn summarize_entities(value: &mut Value, priority: &[String], ctx: &ShapeCtx) ->
                     let original_len = props.len();
                     let mut kept = Map::new();
                     for (key, val) in props.iter() {
-                        if priority.iter().any(|p| p == key) {
+                        if priority.contains(key.as_str()) {
                             kept.insert(key.clone(), val.clone());
                         }
                     }
@@ -1074,5 +1128,133 @@ mod unit_tests {
         assert!(out.len() <= 90, "byte cap holds: {} bytes", out.len());
         // Valid UTF-8 by construction (String), and re-checkable:
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    // ---- Issue #3583: priority_properties DoS bound ------------------------
+
+    /// The protected-key `HashSet` lookup path protects *exactly* the same keys
+    /// as the previous linear scan: a representative node with a mix of
+    /// protected and unprotected bulky properties keeps the protected ones in
+    /// full and elides the unprotected ones. Behavior-preserving evidence for
+    /// the O(1) rewrite.
+    #[test]
+    fn priority_hashset_protects_same_keys_as_linear_scan() {
+        let node = json!({
+            "id": 1,
+            "label": "Doc",
+            "properties": {
+                "bio": "x".repeat(4000),      // protected → survives
+                "notes": "y".repeat(4000),    // unprotected → elided
+                "summary": "z".repeat(4000),  // protected → survives
+                "extra": "w".repeat(4000),    // unprotected → elided
+            }
+        });
+        let budget = budget_req(100_000, &["bio", "summary"]);
+        let args = json!({});
+        let elided = build_candidate(
+            node,
+            Rung::ElideProperties,
+            &budget,
+            "get_node",
+            &args,
+            100_000,
+        );
+        let props = &elided["properties"];
+        // Protected keys retain their full value.
+        assert_eq!(props["bio"].as_str().map(str::len), Some(4000));
+        assert_eq!(props["summary"].as_str().map(str::len), Some(4000));
+        // Unprotected bulky keys are elided descriptors, not the raw string.
+        assert_eq!(props["notes"]["elided"], json!(true));
+        assert_eq!(props["extra"]["elided"], json!(true));
+    }
+
+    /// The summarize rung keeps exactly the protected keys via the `HashSet`
+    /// path (plus the disclosure marker), dropping everything else — matching
+    /// the pre-rewrite linear-scan semantics.
+    #[test]
+    fn priority_hashset_summarize_keeps_only_protected() {
+        let node = json!({
+            "id": 7,
+            "label": "Doc",
+            "properties": {
+                "bio": "x".repeat(4000),
+                "notes": "y".repeat(4000),
+                "keepme": "k".repeat(10),
+            }
+        });
+        let budget = budget_req(500, &["keepme"]);
+        let args = json!({});
+        let shaped = build_candidate(node, Rung::Summaries, &budget, "get_node", &args, 500);
+        let props = shaped["properties"].as_object().expect("properties object");
+        assert!(props.contains_key("keepme"), "protected key survives");
+        assert!(!props.contains_key("bio"), "unprotected key dropped");
+        assert!(!props.contains_key("notes"), "unprotected key dropped");
+        assert!(
+            props.contains_key("_budget_omitted"),
+            "summary discloses the omission"
+        );
+    }
+
+    /// A `priority_properties` array at or below the cap parses successfully.
+    #[test]
+    fn parse_budget_accepts_priority_at_cap() {
+        let items: Vec<Value> = (0..DEFAULT_MAX_PRIORITY_PROPERTIES)
+            .map(|i| json!(format!("p{i}")))
+            .collect();
+        let args = json!({
+            "max_response_tokens": 1000,
+            "priority_properties": items,
+        });
+        let parsed = parse_budget(&args, DEFAULT_MAX_PRIORITY_PROPERTIES)
+            .expect("at-cap array is accepted")
+            .expect("budget present");
+        assert_eq!(
+            parsed.priority_properties.len(),
+            DEFAULT_MAX_PRIORITY_PROPERTIES
+        );
+    }
+
+    /// A `priority_properties` array over the cap is rejected with a structured
+    /// `INVALID_ARGUMENT` error naming the cap and the given length, before any
+    /// shaping work — the #3583 defense-in-depth bound.
+    #[test]
+    fn parse_budget_rejects_priority_over_cap() {
+        let cap = 8usize;
+        let items: Vec<Value> = (0..cap + 1).map(|i| json!(format!("p{i}"))).collect();
+        let given = items.len();
+        let args = json!({
+            "max_response_tokens": 1000,
+            "priority_properties": items,
+        });
+        let err = parse_budget(&args, cap).expect_err("over-cap array must be rejected");
+        assert_eq!(err.code(), McpErrorCode::InvalidArgument);
+        assert!(!err.is_retriable(), "caller-fault error is non-retriable");
+        let json = err.to_json();
+        assert_eq!(json["details"]["max_priority_properties"], json!(cap));
+        assert_eq!(json["details"]["given"], json!(given));
+        // The message names both the cap and the given length.
+        assert!(err.message().contains(&cap.to_string()));
+        assert!(err.message().contains(&given.to_string()));
+        // Self-consistent: re-issuing under the cap succeeds.
+        let ok_items: Vec<Value> = (0..cap).map(|i| json!(format!("p{i}"))).collect();
+        let ok_args = json!({
+            "max_response_tokens": 1000,
+            "priority_properties": ok_items,
+        });
+        assert!(
+            parse_budget(&ok_args, cap).is_ok(),
+            "re-issuing under the cap must succeed"
+        );
+    }
+
+    /// The cap is inert when `priority_properties` is absent or empty (the
+    /// common case): behavior is completely unchanged.
+    #[test]
+    fn parse_budget_cap_inert_without_priority() {
+        let args = json!({ "max_response_tokens": 1000 });
+        let parsed = parse_budget(&args, 1)
+            .expect("no priority array")
+            .expect("budget present");
+        assert!(parsed.priority_properties.is_empty());
     }
 }

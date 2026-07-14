@@ -14172,6 +14172,77 @@ mod budget_tests {
         assert_eq!(value["error"]["code"], json!("INVALID_ARGUMENT"));
     }
 
+    // ---- Issue #3583: priority_properties DoS bound (e2e) ------------------
+
+    /// An over-cap `priority_properties` array is rejected at the MCP surface
+    /// with a structured `INVALID_ARGUMENT` error — bounded, not a hang — and
+    /// the error names the configured cap.
+    #[test]
+    fn issue3583_over_cap_priority_properties_rejected() {
+        let cap = 16usize;
+        let server = create_test_server().with_max_priority_properties(cap);
+        let id = seed_big_node(&server, "Person", "Alice");
+        let over: Vec<String> = (0..cap + 1).map(|i| format!("p{i}")).collect();
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({
+                "node_id": id,
+                "max_response_tokens": 1000,
+                "priority_properties": over,
+            }),
+        );
+        assert!(is_error, "over-cap array must be rejected: {value}");
+        assert_eq!(value["error"]["code"], json!("INVALID_ARGUMENT"));
+        assert_eq!(value["error"]["retriable"], json!(false));
+        assert_eq!(
+            value["error"]["details"]["max_priority_properties"],
+            json!(cap)
+        );
+        assert_eq!(value["error"]["details"]["given"], json!(cap + 1));
+    }
+
+    /// A large-but-valid `priority_properties` array completes successfully in
+    /// bounded time — the O(1) lookup path is not a hang — and the protected key
+    /// (`bio`) survives in full. (Forced-degradation protection semantics are
+    /// covered exhaustively by the `budget::unit_tests` HashSet tests; here the
+    /// budget is generous so the large echoed array does not itself dominate the
+    /// minimal-viable size, keeping the assertion robust.)
+    #[test]
+    fn issue3583_large_valid_priority_properties_completes() {
+        let cap = 512usize;
+        let server = create_test_server().with_max_priority_properties(cap);
+        let id = seed_big_node(&server, "Person", "Alice");
+        // A large (at-cap) array including the real protected key "bio".
+        let mut priority: Vec<String> = (0..cap - 1).map(|i| format!("p{i}")).collect();
+        priority.push("bio".to_string());
+        let byte_budget = 200_000u64;
+        let (shaped, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({
+                "node_id": id,
+                "max_response_bytes": byte_budget,
+                "priority_properties": priority,
+            }),
+        );
+        assert!(!is_error, "at-cap valid array must complete: {shaped}");
+        // The response is bounded by the stated budget and the budget block is
+        // present (shaping ran end-to-end without hanging).
+        let serialized = serde_json::to_string_pretty(&shaped).unwrap();
+        assert!(
+            serialized.len() as u64 <= byte_budget,
+            "response stays within the byte budget: {} bytes",
+            serialized.len()
+        );
+        assert!(shaped.get("budget").is_some(), "budget block attached");
+        assert_eq!(
+            shaped["properties"]["bio"].as_str().map(|s| s.len()),
+            Some(4000),
+            "protected key survives via the HashSet lookup path"
+        );
+    }
+
     // ---- AC7: ranked tools never drop/reorder results ----------------------
 
     #[test]
