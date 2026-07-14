@@ -610,3 +610,61 @@ async fn node_reads_default_output_unchanged() {
         "default find_nodes_at_time output must be unchanged"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// OpenAPI schema fidelity (Gemini review follow-up): the `find_nodes_at_time`
+// POST body must expose a named, per-operation request schema in /openapi.json —
+// mirroring the typed sibling write handlers — instead of the shared generic
+// `Value` component a raw `Json<Value>` body produced.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn openapi_find_nodes_at_time_has_typed_request_schema() {
+    let db = fresh_db();
+    let client = build_server_client(db, make_store(), AuthMode::Required);
+    let resp = client.get("/openapi.json").send().await;
+    assert_eq!(resp.status.as_u16(), 200);
+    let spec: Value = serde_json::from_str(&resp.text()).expect("openapi json");
+
+    // find_nodes_at_time (POST /nodes/find_at_time): the request body schema is a
+    // named, per-operation component ref — NOT the shared, generic `Value`
+    // component the old `Json<Value>` body emitted.
+    let find_schema = &spec["paths"]["/nodes/find_at_time"]["post"]["requestBody"]["content"]["application/json"]
+        ["schema"];
+    let find_ref = find_schema["$ref"].as_str().unwrap_or_else(|| {
+        panic!(
+            "find_at_time requestBody schema must be a $ref: {}",
+            spec["paths"]["/nodes/find_at_time"]
+        )
+    });
+    assert!(
+        find_ref.ends_with("/FindNodesAtTimeQuery"),
+        "find_at_time request body must ref a typed per-operation schema, got {find_ref}"
+    );
+    assert_ne!(
+        find_ref, "#/components/schemas/Value",
+        "must not degrade to the shared generic Value component"
+    );
+
+    // The referenced component exists as a typed object.
+    let comp = &spec["components"]["schemas"]["FindNodesAtTimeQuery"];
+    assert_eq!(
+        comp["type"], "object",
+        "FindNodesAtTimeQuery must be a typed object component: {comp}"
+    );
+
+    // Mirror a typed sibling: create_node (POST /nodes) refs its own named
+    // component the same way — so find_at_time is no longer uniquely untyped.
+    let sibling_ref = spec["paths"]["/nodes"]["post"]["requestBody"]["content"]["application/json"]
+        ["schema"]["$ref"]
+        .as_str()
+        .expect("create_node requestBody must be a $ref (typed sibling)");
+    assert!(
+        sibling_ref.starts_with("#/components/schemas/"),
+        "typed sibling uses a named component ref: {sibling_ref}"
+    );
+    assert!(
+        !sibling_ref.ends_with("/Value"),
+        "typed sibling is not the generic Value component: {sibling_ref}"
+    );
+}

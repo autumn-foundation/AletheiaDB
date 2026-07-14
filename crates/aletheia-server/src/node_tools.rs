@@ -34,11 +34,13 @@
 //! gate). Cursor tokens are validated against a per-instance secret, so these
 //! handlers use the process-lifetime shared
 //! [`ServerState::mcp_server`](crate::state::ServerState::mcp_server) rather than
-//! constructing a server per request. `find_nodes_at_time` takes its arguments as
-//! a raw JSON **body** ([`Json<Value>`]) rather than a typed request so a #3360
-//! cursor-continuation POST (`{"cursor": "…"}`, with no `label`/`valid_time`)
-//! deserializes — those fields are required on the typed request but absent on a
-//! continuation.
+//! constructing a server per request. `find_nodes_at_time` takes an
+//! **all-optional** typed body ([`FindNodesAtTimeQuery`]) — every field
+//! `Option<_>` — so a #3360 cursor-continuation POST (`{"cursor": "…"}`, with no
+//! `label`/`valid_time`) still deserializes (those two are logically required but
+//! their requiredness stays a runtime concern the dispatch layer enforces),
+//! while `/openapi.json` still gets a named, per-operation request schema instead
+//! of the shared generic `Value` component a raw `Json<Value>` body would emit.
 //!
 //! The three dispatch-routed reads are pinned with **hardcoded literal** tool
 //! names (`"get_node"`/`"list_nodes"`/`"find_nodes_at_time"`, never
@@ -351,20 +353,73 @@ pub async fn retract_node(
     tool_json(server.retract_node(req))
 }
 
+/// Request body for [`find_nodes_at_time`] — an **all-optional** mirror of the
+/// legacy `FindNodesAtTimeRequest` plus the #3353 token budget and the #3360
+/// cursor parameters.
+///
+/// Every field is `Option<_>` on purpose. `label` and `valid_time` are logically
+/// required for a fresh query, but requiredness stays a **runtime** concern:
+/// `dispatch_tool` already returns a structured `INVALID_ARGUMENT` when they are
+/// missing. Keeping them optional here is what lets a #3360 cursor-continuation
+/// body (`{"cursor": "…"}`, which omits `label` / `valid_time`) still
+/// deserialize. The handler rebuilds the raw MCP arguments object from the
+/// `Some` fields and forwards it through `dispatch_tool_json`, so budget/cursor
+/// still apply and a no-budget/no-cursor call is byte-identical to before.
+///
+/// This typed body (vs. a bare `Json<Value>`) is what restores a named,
+/// per-operation request schema in `/openapi.json` — mirroring the typed sibling
+/// handlers (`Json<CreateNodeRequest>` etc.) — instead of the shared, generic
+/// `Value` component the raw body produced.
+#[derive(Debug, Default, Deserialize)]
+pub struct FindNodesAtTimeQuery {
+    /// The node label to match (logically required; enforced at dispatch).
+    pub label: Option<String>,
+    /// Filter by property key (with `property_value`).
+    pub property_key: Option<String>,
+    /// Filter by exact property value (with `property_key`).
+    pub property_value: Option<Value>,
+    /// Valid time (logically required; enforced at dispatch): ISO 8601 / RFC 3339
+    /// or microseconds since epoch.
+    pub valid_time: Option<String>,
+    /// Transaction time (defaults to now when omitted).
+    pub transaction_time: Option<String>,
+    /// Maximum number of nodes to return.
+    pub limit: Option<usize>,
+    /// Number of matching nodes to skip.
+    pub offset: Option<usize>,
+    /// Return full vector/embedding arrays instead of the elided descriptor.
+    pub include_vectors: Option<bool>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+    /// #3360: request a snapshot-anchored cursor on the first page.
+    pub use_cursor: Option<bool>,
+    /// #3360: opaque continuation token from a prior page (passed back alone).
+    pub cursor: Option<String>,
+}
+
 /// `find_nodes_at_time` — resolve nodes by label (+ optional exact property
 /// match) as they existed at a bi-temporal point (#3236), reconstructing each
 /// node's state at `(valid_time, transaction_time)`. Read-only ([`ReadClass`]);
 /// vectors elided by default (#3220). Budgetable (#3353) and cursorable (#3360).
 /// HTTP + MCP tool.
 ///
-/// The request rides as a raw JSON **body** ([`Value`]) forwarded verbatim
-/// through `dispatch_tool_json`, so (a) the #3353 budget
+/// Takes the typed all-optional [`FindNodesAtTimeQuery`] body and rebuilds the
+/// raw MCP arguments (only the `Some` fields) before forwarding through
+/// `dispatch_tool_json`, so (a) the #3353 budget
 /// (`max_response_tokens`/`max_response_bytes`/`priority_properties`) and #3360
 /// cursor (`use_cursor`/`cursor`) params flow through, and (b) a cursor
 /// continuation (`{"cursor": "…"}`, which omits the otherwise-required `label` /
-/// `valid_time`) deserializes — a typed request would reject it. With no
-/// budget/cursor present the body is exactly a `FindNodesAtTimeRequest`, so the
-/// result is byte-identical to the typed method.
+/// `valid_time`) deserializes — required-ness stays a runtime concern the
+/// dispatch layer enforces with a structured `INVALID_ARGUMENT`. With no
+/// budget/cursor present the rebuilt args equal a `FindNodesAtTimeRequest`, so
+/// the result is byte-identical to the legacy method. A non-object body is not
+/// representable through the typed extractor; were one to reach dispatch it would
+/// degrade to the same structured `INVALID_ARGUMENT` as the legacy `Value::Null`
+/// contract (no guard needed).
 #[post("/nodes/find_at_time")]
 #[api_doc(
     description = "Find nodes by label/property as of a bi-temporal point, reconstructed at that time",
@@ -373,8 +428,38 @@ pub async fn retract_node(
 pub async fn find_nodes_at_time(
     _auth: Authorized<ReadClass>,
     state: ServerState,
-    Json(args): Json<Value>,
+    Json(opts): Json<FindNodesAtTimeQuery>,
 ) -> Json<Value> {
     let server = state.mcp_server();
-    tool_json(server.dispatch_tool_json("find_nodes_at_time", args))
+    let mut args = Map::new();
+    insert_opt(&mut args, "label", opts.label.map(Value::from));
+    insert_opt(
+        &mut args,
+        "property_key",
+        opts.property_key.map(Value::from),
+    );
+    // property_value is already a JSON value (string/number/bool/null).
+    insert_opt(&mut args, "property_value", opts.property_value);
+    insert_opt(&mut args, "valid_time", opts.valid_time.map(Value::from));
+    insert_opt(
+        &mut args,
+        "transaction_time",
+        opts.transaction_time.map(Value::from),
+    );
+    insert_opt(&mut args, "limit", opts.limit.map(Value::from));
+    insert_opt(&mut args, "offset", opts.offset.map(Value::from));
+    insert_opt(
+        &mut args,
+        "include_vectors",
+        opts.include_vectors.map(Value::from),
+    );
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    insert_opt(&mut args, "use_cursor", opts.use_cursor.map(Value::from));
+    insert_opt(&mut args, "cursor", opts.cursor.map(Value::from));
+    tool_json(server.dispatch_tool_json("find_nodes_at_time", Value::Object(args)))
 }
