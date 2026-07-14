@@ -25,12 +25,13 @@ jobs:
     # redden the required stable cells: the matrix runs fail-fast: false so a
     # broken cell cannot cancel its siblings, and nightly cells are
     # continue-on-error so their failures stay visible without failing the run.
-    continue-on-error: ${{ matrix.rust == 'nightly' }}
+    continue-on-error: ${{ startsWith(matrix.rust, 'nightly') }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable, nightly]
+        # nightly pinned to a known-good date: nightly-2026-07-13+ ICEs on a standard #[test] (rustc_test_entrypoint_marker) — upstream https://github.com/rust-lang/rust/issues/100263 . Bump/remove once the ICE is fixed upstream.
+        rust: [stable, nightly-2026-07-12]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
