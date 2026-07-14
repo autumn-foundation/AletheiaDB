@@ -47,6 +47,12 @@ pub fn build_server_testapp(db: Arc<AletheiaDB>, store: Arc<AuthStore>, mode: Au
             node_tools::get_node,
             node_tools::list_nodes,
             node_tools::count_nodes,
+            node_tools::create_node,
+            node_tools::update_node,
+            node_tools::delete_node,
+            node_tools::delete_node_cascade,
+            node_tools::retract_node,
+            node_tools::find_nodes_at_time,
         ])
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");
