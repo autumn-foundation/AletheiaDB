@@ -77,6 +77,36 @@ pub fn save_temporal_adjacency_index_with_cipher(
     Ok(())
 }
 
+/// Save the temporal adjacency index, encrypting with the current generation of
+/// an [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+pub(crate) fn save_temporal_adjacency_index_with_keyring(
+    index: &TemporalAdjacencyIndex,
+    data_dir: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    let adjacency_dir = data_dir.join("temporal_adjacency");
+    std::fs::create_dir_all(&adjacency_dir)?;
+
+    let outgoing = extract_outgoing_data(index);
+    let data = TemporalAdjacencyData {
+        magic: TEMPORAL_ADJACENCY_MAGIC,
+        version: MANIFEST_VERSION,
+        outgoing,
+    };
+    let bytes = bitcode::encode(&data);
+
+    let adjacency_file = adjacency_dir.join("adjacency.idx");
+    match keyring.and_then(super::common::IndexKeyring::current) {
+        Some((cipher, key_version)) => {
+            let encrypted =
+                super::common::encrypt_index_bytes_versioned(&bytes, &cipher, key_version)?;
+            super::atomic_write(&adjacency_file, &encrypted)?;
+        }
+        None => super::atomic_write(&adjacency_file, &bytes)?,
+    }
+    Ok(())
+}
+
 /// Maximum file size for temporal adjacency index (10 MB)
 ///
 /// With 64 bytes per entry, this allows ~163K entries total.
@@ -156,7 +186,19 @@ pub fn load_temporal_adjacency_index_with_cipher_and_remap(
     cipher: Option<&Arc<dyn Cipher>>,
     remap: &InternerRemap,
 ) -> Result<Arc<TemporalAdjacencyIndex>> {
-    let mut data = load_temporal_adjacency_data(data_dir, cipher)?;
+    let ring = cipher.map(|c| super::common::IndexKeyring::single(c.clone()));
+    load_temporal_adjacency_index_with_keyring_and_remap(data_dir, ring.as_ref(), remap)
+}
+
+/// Load the temporal adjacency index, decrypting via an
+/// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
+/// `key_version` (Issue #488 key rotation) and applying the interner `remap`.
+pub(crate) fn load_temporal_adjacency_index_with_keyring_and_remap(
+    data_dir: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+    remap: &InternerRemap,
+) -> Result<Arc<TemporalAdjacencyIndex>> {
+    let mut data = load_temporal_adjacency_data_with_keyring(data_dir, keyring)?;
     remap.remap_temporal_adjacency_data(&mut data);
     Ok(Arc::new(reconstruct_index(data)?))
 }
@@ -166,9 +208,9 @@ pub fn load_temporal_adjacency_index_with_cipher_and_remap(
 /// interner-id translation). Passing `cipher == None` reads a plaintext file;
 /// a legacy plaintext file is read even when a cipher is supplied (header
 /// sniffing).
-fn load_temporal_adjacency_data(
+fn load_temporal_adjacency_data_with_keyring(
     data_dir: &Path,
-    cipher: Option<&Arc<dyn Cipher>>,
+    keyring: Option<&super::common::IndexKeyring>,
 ) -> Result<TemporalAdjacencyData> {
     let adjacency_file = data_dir.join("temporal_adjacency").join("adjacency.idx");
 
@@ -185,7 +227,7 @@ fn load_temporal_adjacency_data(
     // Read file, decrypting transparently if it carries the encrypted header.
     let raw = std::fs::read(&adjacency_file)?;
     let bytes = if super::common::is_encrypted_index(&raw) {
-        super::common::decrypt_index_bytes(&raw, &adjacency_file, cipher)?
+        super::common::decrypt_index_bytes_with_keyring(&raw, &adjacency_file, keyring)?
     } else {
         raw
     };

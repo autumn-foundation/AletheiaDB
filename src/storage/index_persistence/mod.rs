@@ -87,6 +87,8 @@ pub mod loader;
 pub mod manifest;
 /// Persistence operations implementation.
 pub mod operations;
+/// Index-layer key-rotation re-encryption engine (Issue #488).
+pub mod reencrypt;
 pub mod strings;
 pub mod temporal;
 pub mod temporal_adjacency;
@@ -108,6 +110,7 @@ pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
 use rayon::prelude::*;
+pub use reencrypt::{IndexKeyRotation, RotationError, RotationProgress, RotationStatus};
 
 /// Current manifest format version.
 ///

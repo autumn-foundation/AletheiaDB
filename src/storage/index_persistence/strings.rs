@@ -284,6 +284,24 @@ pub fn save_string_interner_with_cipher(
     super::common::save_encoded_maybe_encrypted(&data, path, cipher)
 }
 
+/// Save the global string interner, encrypting with the current generation of
+/// an [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+pub(crate) fn save_string_interner_with_keyring(
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    let strings = GLOBAL_INTERNER.get_all_strings();
+
+    let data = StringInternerData {
+        magic: INTERNER_MAGIC,
+        version: MANIFEST_VERSION,
+        string_count: strings.len() as u64,
+        strings,
+    };
+
+    super::common::save_encoded_maybe_encrypted_with_keyring(&data, path, keyring)
+}
+
 /// Load the string interner from disk and validate CRC32 checksum.
 ///
 /// # Examples
@@ -331,7 +349,27 @@ pub fn load_string_interner_with_cipher(
         "String interner",
         cipher,
     )?;
+    validate_string_interner(data, path)
+}
 
+/// Load the string interner, decrypting via an
+/// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
+/// `key_version` (Issue #488 key rotation).
+pub(crate) fn load_string_interner_with_keyring(
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<StringInternerData> {
+    let data: StringInternerData = super::common::load_encoded_maybe_encrypted_with_keyring(
+        path,
+        super::MAX_STRING_INTERNER_FILE_SIZE,
+        "String interner",
+        keyring,
+    )?;
+    validate_string_interner(data, path)
+}
+
+/// Validate a decoded string-interner payload (magic, version, DoS limits).
+fn validate_string_interner(data: StringInternerData, path: &Path) -> Result<StringInternerData> {
     // Validate magic bytes
     if data.magic != INTERNER_MAGIC {
         return Err(IndexPersistenceError::InvalidMagic {

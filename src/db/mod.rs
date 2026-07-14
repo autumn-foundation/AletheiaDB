@@ -42,6 +42,8 @@ pub mod ops;
 pub mod pitr;
 /// Query builder and executor hooks.
 pub mod query;
+/// Index-layer key rotation orchestration (Issue #488).
+pub mod rotation;
 /// Graph schema discovery (labels, edge types, property keys).
 pub mod schema;
 /// Unified vector similarity query builder.
@@ -197,6 +199,10 @@ pub struct AletheiaDB {
     pub(crate) persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Encryption manager (if encryption at rest is enabled)
     pub(crate) encryption_manager: Option<Arc<crate::encryption::EncryptionManager>>,
+    /// Encryption configuration used at startup (retained for key rotation,
+    /// Issue #488: re-sourcing the current MEK to guard against rotating to the
+    /// same key). `None` when encryption is disabled.
+    pub(crate) encryption_config: Option<crate::encryption::config::EncryptionConfig>,
     /// Uniqueness constraint registry (declarations + reservation index).
     pub(crate) constraint_registry: Arc<crate::core::constraint::ConstraintRegistry>,
     /// Fact-to-fact derivation lineage index (Issue #3371).

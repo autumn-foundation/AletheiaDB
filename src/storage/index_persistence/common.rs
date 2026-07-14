@@ -7,11 +7,174 @@ use bitcode::{Decode, Encode};
 use crc32fast::Hasher;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use super::atomic_write;
 use super::error::{IndexPersistenceError, Result};
 use crate::encryption::cipher::Cipher;
+
+// ── Key-version-addressable index cipher keyring (Issue #488) ─────────
+//
+// Before key rotation there is exactly one index generation. During a
+// rotation the data dir holds a MIX of files encrypted under the old and the
+// new key, distinguished only by the plaintext header `key_version` (Issue
+// #481). The keyring maps `key_version -> cipher` so the read path can decrypt
+// each file with the generation that actually wrote it, while writes always
+// use the CURRENT (newest) generation and stamp its `key_version` into the
+// header. A single-generation keyring reproduces the pre-rotation behavior
+// exactly (it decrypts any header with its one cipher and writes `key_version`
+// == 1), so the non-rotation path is unchanged.
+
+/// One key generation: a `key_version` and the cipher derived from that
+/// generation's index DEK.
+#[derive(Clone)]
+struct KeyGeneration {
+    key_version: u32,
+    cipher: Arc<dyn Cipher>,
+}
+
+#[derive(Clone)]
+struct KeyringInner {
+    /// All live generations (1 before rotation, 2 during, 1 after). Small.
+    generations: Vec<KeyGeneration>,
+    /// Version stamped into freshly written files (the newest generation).
+    current_version: u32,
+    /// Back-compat mode: a lone generation created from a single cipher with
+    /// no explicit version decrypts ANY header `key_version` with that cipher,
+    /// matching #481's version-agnostic single-cipher read exactly.
+    match_any: bool,
+}
+
+/// A cheaply-cloneable, shared-mutable set of index ciphers addressed by
+/// `key_version` (Issue #488).
+///
+/// Clones share the same underlying state, so a rotation engine can add the
+/// new generation (making live reads dispatch on the header and live writes
+/// stamp the new version) and later retire the old generation while the
+/// persistence manager holding a clone observes the change immediately.
+#[derive(Clone)]
+pub(crate) struct IndexKeyring {
+    inner: Arc<RwLock<KeyringInner>>,
+}
+
+impl IndexKeyring {
+    /// A single-generation keyring from one cipher (the non-rotation path).
+    ///
+    /// Reads decrypt any header `key_version` with this cipher and writes stamp
+    /// `ENC_INDEX_KEY_VERSION_V1` — byte-for-byte identical to #481.
+    pub(crate) fn single(cipher: Arc<dyn Cipher>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(KeyringInner {
+                generations: vec![KeyGeneration {
+                    key_version: ENC_INDEX_KEY_VERSION_V1,
+                    cipher,
+                }],
+                current_version: ENC_INDEX_KEY_VERSION_V1,
+                match_any: true,
+            })),
+        }
+    }
+
+    /// A single-generation keyring pinned to an explicit `key_version` (strict
+    /// dispatch). Used by rotation tests to construct pinned/mixed keyrings.
+    #[cfg(test)]
+    pub(crate) fn single_versioned(cipher: Arc<dyn Cipher>, key_version: u32) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(KeyringInner {
+                generations: vec![KeyGeneration {
+                    key_version,
+                    cipher,
+                }],
+                current_version: key_version,
+                match_any: false,
+            })),
+        }
+    }
+
+    /// Read (decrypt) cipher for a header `key_version`, or `None` if no
+    /// generation matches. A `match_any` single keyring returns its only
+    /// cipher for every version (back-compat).
+    fn cipher_for_version(&self, key_version: u32) -> Option<Arc<dyn Cipher>> {
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        if inner.match_any {
+            return inner.generations.first().map(|g| g.cipher.clone());
+        }
+        inner
+            .generations
+            .iter()
+            .find(|g| g.key_version == key_version)
+            .map(|g| g.cipher.clone())
+    }
+
+    /// Current (write) cipher and the `key_version` it stamps.
+    pub(crate) fn current(&self) -> Option<(Arc<dyn Cipher>, u32)> {
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let v = inner.current_version;
+        inner
+            .generations
+            .iter()
+            .find(|g| g.key_version == v)
+            .map(|g| (g.cipher.clone(), v))
+    }
+
+    /// The version freshly written files are stamped with.
+    pub(crate) fn current_version(&self) -> u32 {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_version
+    }
+
+    /// Whether a generation with `key_version` is currently held (i.e. reads of
+    /// files stamped with it can be decrypted). A `match_any` single keyring
+    /// holds every version.
+    #[cfg(test)]
+    pub(crate) fn has_version(&self, key_version: u32) -> bool {
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        inner.match_any
+            || inner
+                .generations
+                .iter()
+                .any(|g| g.key_version == key_version)
+    }
+
+    /// The current (write) cipher, if any (for callers that only need the
+    /// cipher, e.g. checkpoint's single-generation writes).
+    pub(crate) fn current_cipher(&self) -> Option<Arc<dyn Cipher>> {
+        self.current().map(|(c, _)| c)
+    }
+
+    /// Add a new generation, making it current. Switches the keyring to strict
+    /// per-version dispatch. Used by the rotation engine at `begin`.
+    pub(crate) fn add_generation(&self, key_version: u32, cipher: Arc<dyn Cipher>) {
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        inner.match_any = false;
+        inner.generations.retain(|g| g.key_version != key_version);
+        inner.generations.push(KeyGeneration {
+            key_version,
+            cipher,
+        });
+        inner.current_version = key_version;
+    }
+
+    /// Retire every generation except `key_version`, which becomes the sole,
+    /// current generation. Used by the rotation engine at `complete`/`cancel`.
+    pub(crate) fn retain_only(&self, key_version: u32) {
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        inner.generations.retain(|g| g.key_version == key_version);
+        inner.current_version = key_version;
+        inner.match_any = false;
+    }
+}
+
+/// Read the header `key_version` of an encrypted index buffer without
+/// decrypting. Returns `None` if `bytes` is not an encrypted index file.
+pub(crate) fn index_file_key_version(bytes: &[u8]) -> Option<u32> {
+    if !is_encrypted_index(bytes) {
+        return None;
+    }
+    Some(u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]))
+}
 
 // ── Encrypted index file header (Issue #481) ─────────────────────────
 //
@@ -70,7 +233,18 @@ fn build_enc_header(algorithm_id: u8, key_version: u32) -> [u8; ENC_HEADER_LEN] 
 ///
 /// The header is passed as AAD so it is authenticated (but not encrypted).
 pub(crate) fn encrypt_index_bytes(plaintext: &[u8], cipher: &Arc<dyn Cipher>) -> Result<Vec<u8>> {
-    let header = build_enc_header(cipher.algorithm_id(), ENC_INDEX_KEY_VERSION_V1);
+    encrypt_index_bytes_versioned(plaintext, cipher, ENC_INDEX_KEY_VERSION_V1)
+}
+
+/// Like [`encrypt_index_bytes`] but stamps an explicit `key_version` into the
+/// header (Issue #488 key rotation). `encrypt_index_bytes` is exactly this with
+/// `key_version == ENC_INDEX_KEY_VERSION_V1`.
+pub(crate) fn encrypt_index_bytes_versioned(
+    plaintext: &[u8],
+    cipher: &Arc<dyn Cipher>,
+    key_version: u32,
+) -> Result<Vec<u8>> {
+    let header = build_enc_header(cipher.algorithm_id(), key_version);
     let ciphertext = cipher
         .encrypt(plaintext, &header)
         .map_err(|e| IndexPersistenceError::Serialization(format!("Encryption failed: {e}")))?;
@@ -392,6 +566,113 @@ pub(crate) fn save_encoded_encrypted<T: Encode>(
     // Encrypt the whole thing (data + CRC) with the header as AAD.
     let encrypted = encrypt_index_bytes(&plaintext, cipher)?;
 
+    atomic_write(path, &encrypted)
+}
+
+// ── Keyring-aware read/write path (Issue #488) ───────────────────────
+//
+// These mirror the single-cipher helpers above but dispatch the decrypt
+// cipher on the file's header `key_version` via an [`IndexKeyring`], and stamp
+// the keyring's current version on writes. A single-generation keyring makes
+// them behave exactly like the single-cipher path.
+
+/// Decrypt an encrypted index buffer, selecting the cipher by the header's
+/// `key_version` from `keyring` (Issue #488). `bytes` MUST satisfy
+/// [`is_encrypted_index`].
+pub(crate) fn decrypt_index_bytes_with_keyring(
+    bytes: &[u8],
+    path: &Path,
+    keyring: Option<&IndexKeyring>,
+) -> Result<Vec<u8>> {
+    debug_assert!(is_encrypted_index(bytes));
+    let key_version = u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
+    let cipher = keyring.and_then(|k| k.cipher_for_version(key_version));
+    decrypt_index_bytes(bytes, path, cipher.as_ref())
+}
+
+/// Like [`read_index_file`] but decrypts via a keyring (Issue #488).
+pub(crate) fn read_index_file_with_keyring(
+    path: &Path,
+    max_size: u64,
+    context: &str,
+    keyring: Option<&IndexKeyring>,
+) -> Result<Vec<u8>> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > max_size {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "{} file size {} exceeds limit {}",
+                context,
+                metadata.len(),
+                max_size
+            ),
+        });
+    }
+
+    let bytes = fs::read(path)?;
+    if is_encrypted_index(&bytes) {
+        decrypt_index_bytes_with_keyring(&bytes, path, keyring)
+    } else {
+        Ok(bytes)
+    }
+}
+
+/// Like [`read_and_verify_crc_maybe_encrypted`] but decrypts via a keyring.
+pub(crate) fn read_and_verify_crc_maybe_encrypted_with_keyring(
+    path: &Path,
+    max_size: u64,
+    context: &str,
+    keyring: Option<&IndexKeyring>,
+) -> Result<Vec<u8>> {
+    let content = read_index_file_with_keyring(path, max_size, context, keyring)?;
+    verify_and_strip_crc(content, path)
+}
+
+/// Like [`load_encoded_maybe_encrypted`] but decrypts via a keyring.
+pub(crate) fn load_encoded_maybe_encrypted_with_keyring<T: for<'a> Decode<'a>>(
+    path: &Path,
+    max_size: u64,
+    context: &str,
+    keyring: Option<&IndexKeyring>,
+) -> Result<T> {
+    let data = read_and_verify_crc_maybe_encrypted_with_keyring(path, max_size, context, keyring)?;
+    let decoded: T = bitcode::decode(&data)?;
+    Ok(decoded)
+}
+
+/// Like [`save_encoded_maybe_encrypted`] but encrypts with the keyring's
+/// current generation, stamping its `key_version` into the header (Issue #488).
+/// A `None` keyring writes plaintext.
+pub(crate) fn save_encoded_maybe_encrypted_with_keyring<T: Encode>(
+    data: &T,
+    path: &Path,
+    keyring: Option<&IndexKeyring>,
+) -> Result<()> {
+    match keyring.and_then(IndexKeyring::current) {
+        Some((cipher, key_version)) => {
+            save_encoded_encrypted_versioned(data, path, &cipher, key_version)
+        }
+        None => save_encoded_with_crc(data, path),
+    }
+}
+
+/// Like [`save_encoded_encrypted`] but stamps an explicit `key_version`.
+pub(crate) fn save_encoded_encrypted_versioned<T: Encode>(
+    data: &T,
+    path: &Path,
+    cipher: &Arc<dyn Cipher>,
+    key_version: u32,
+) -> Result<()> {
+    let encoded = bitcode::encode(data);
+
+    let mut hasher = Hasher::new();
+    hasher.update(&encoded);
+    let checksum = hasher.finalize();
+
+    let mut plaintext = encoded;
+    plaintext.extend_from_slice(&checksum.to_le_bytes());
+
+    let encrypted = encrypt_index_bytes_versioned(&plaintext, cipher, key_version)?;
     atomic_write(path, &encrypted)
 }
 

@@ -38,6 +38,24 @@ fn write_graph_buffer_maybe_encrypted(
     }
 }
 
+/// Write a graph-file buffer, encrypting with the current generation of an
+/// [`IndexKeyring`](super::common::IndexKeyring) and stamping its `key_version`
+/// (Issue #488 key rotation). A `None` keyring writes plaintext.
+fn write_graph_buffer_with_keyring(
+    path: &Path,
+    plaintext: &[u8],
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    match keyring.and_then(super::common::IndexKeyring::current) {
+        Some((cipher, key_version)) => {
+            let encrypted =
+                super::common::encrypt_index_bytes_versioned(plaintext, &cipher, key_version)?;
+            super::atomic_write(path, &encrypted)
+        }
+        None => super::atomic_write(path, plaintext),
+    }
+}
+
 /// Map decompression errors to `IndexPersistenceError`, preserving the
 /// specific `SizeLimitExceeded` variant for capacity violations.
 fn map_decompress_error(e: crate::core::error::Error) -> IndexPersistenceError {
@@ -263,6 +281,17 @@ pub fn save_graph_index_with_cipher(
     write_graph_buffer_maybe_encrypted(path, &plaintext, cipher)
 }
 
+/// Save graph index data (uncompressed), encrypting with an
+/// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+pub(crate) fn save_graph_index_with_keyring(
+    data: &GraphIndexData,
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    let plaintext = build_graph_plaintext(data);
+    write_graph_buffer_with_keyring(path, &plaintext, keyring)
+}
+
 /// Load graph index data from disk and validate CRC32 checksum.
 ///
 /// Automatically detects zstd compression by checking for magic bytes.
@@ -364,6 +393,22 @@ pub fn load_graph_index_with_cipher(
     decode_graph_bytes(&buffer, path)
 }
 
+/// Load graph index data, decrypting via an
+/// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
+/// `key_version` (Issue #488 key rotation).
+pub(crate) fn load_graph_index_with_keyring(
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<GraphIndexData> {
+    let buffer = super::common::read_index_file_with_keyring(
+        path,
+        super::MAX_GRAPH_INDEX_FILE_SIZE,
+        "Graph index",
+        keyring,
+    )?;
+    decode_graph_bytes(&buffer, path)
+}
+
 /// Create a new empty GraphIndexData.
 pub fn new_graph_index_data() -> GraphIndexData {
     GraphIndexData {
@@ -443,6 +488,18 @@ pub fn save_graph_index_compressed_with_cipher(
 ) -> Result<()> {
     let plaintext = build_graph_plaintext_compressed(data, compression_level)?;
     write_graph_buffer_maybe_encrypted(path, &plaintext, cipher)
+}
+
+/// Save graph index data (zstd-compressed), encrypting with an
+/// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+pub(crate) fn save_graph_index_compressed_with_keyring(
+    data: &GraphIndexData,
+    path: &Path,
+    compression_level: i32,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    let plaintext = build_graph_plaintext_compressed(data, compression_level)?;
+    write_graph_buffer_with_keyring(path, &plaintext, keyring)
 }
 
 /// Load graph index data using memory-mapped file for efficient large file handling.
