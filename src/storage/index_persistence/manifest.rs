@@ -117,6 +117,16 @@ pub fn save_manifest_with_cipher(
     super::common::save_encoded_maybe_encrypted(manifest, path, cipher)
 }
 
+/// Save the manifest, encrypting with the current generation of an
+/// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+pub(crate) fn save_manifest_with_keyring(
+    manifest: &IndexManifest,
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    super::common::save_encoded_maybe_encrypted_with_keyring(manifest, path, keyring)
+}
+
 /// Load manifest from disk and validate CRC32 checksum.
 ///
 /// # Examples
@@ -172,7 +182,26 @@ pub fn load_manifest_with_cipher(
         "Manifest",
         cipher,
     )?;
+    decode_and_validate_manifest(data, path)
+}
 
+/// Load the manifest, decrypting via an [`IndexKeyring`](super::common::IndexKeyring)
+/// that dispatches on the header `key_version` (Issue #488 key rotation).
+pub(crate) fn load_manifest_with_keyring(
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<IndexManifest> {
+    let data = super::common::read_and_verify_crc_maybe_encrypted_with_keyring(
+        path,
+        super::MAX_MANIFEST_FILE_SIZE,
+        "Manifest",
+        keyring,
+    )?;
+    decode_and_validate_manifest(data, path)
+}
+
+/// Decode + validate the bitcode manifest payload (magic + version check).
+fn decode_and_validate_manifest(data: Vec<u8>, path: &Path) -> Result<IndexManifest> {
     // Decode and validate
     let manifest: IndexManifest = bitcode::decode(&data)?;
 

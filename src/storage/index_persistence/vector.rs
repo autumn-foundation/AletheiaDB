@@ -40,6 +40,16 @@ pub fn save_vector_meta_with_cipher(
     super::common::save_encoded_maybe_encrypted(meta, path, cipher)
 }
 
+/// Save vector index metadata, encrypting with the current generation of an
+/// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+pub(crate) fn save_vector_meta_with_keyring(
+    meta: &VectorIndexMeta,
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    super::common::save_encoded_maybe_encrypted_with_keyring(meta, path, keyring)
+}
+
 /// Load vector index metadata and validate CRC32 checksum.
 ///
 /// Reads the encoded vector metadata and verifies its CRC32 checksum before decoding
@@ -64,12 +74,23 @@ pub fn load_vector_meta_with_cipher(
     path: &Path,
     cipher: Option<&Arc<dyn Cipher>>,
 ) -> Result<VectorIndexMeta> {
+    let ring = cipher.map(|c| super::common::IndexKeyring::single(c.clone()));
+    load_vector_meta_with_keyring(path, ring.as_ref())
+}
+
+/// Load vector index metadata, decrypting via an
+/// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
+/// `key_version` (Issue #488 key rotation).
+pub(crate) fn load_vector_meta_with_keyring(
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<VectorIndexMeta> {
     // Metadata should be small, but use standard limit for consistency
-    let meta: VectorIndexMeta = super::common::load_encoded_maybe_encrypted(
+    let meta: VectorIndexMeta = super::common::load_encoded_maybe_encrypted_with_keyring(
         path,
         super::MAX_VECTOR_INDEX_FILE_SIZE,
         "Vector index",
-        cipher,
+        keyring,
     )?;
 
     if meta.magic != VECTOR_META_MAGIC {
@@ -115,6 +136,16 @@ pub fn save_vector_mappings_with_cipher(
     super::common::save_encoded_maybe_encrypted(mappings, path, cipher)
 }
 
+/// Save vector ID mappings, encrypting with the current generation of an
+/// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+pub(crate) fn save_vector_mappings_with_keyring(
+    mappings: &VectorMappingsData,
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    super::common::save_encoded_maybe_encrypted_with_keyring(mappings, path, keyring)
+}
+
 /// Load vector ID mappings and validate CRC32 checksum.
 ///
 /// Restores the `NodeId` <-> `u64` translation table into memory, verifying
@@ -138,11 +169,22 @@ pub fn load_vector_mappings_with_cipher(
     path: &Path,
     cipher: Option<&Arc<dyn Cipher>>,
 ) -> Result<VectorMappingsData> {
-    super::common::load_encoded_maybe_encrypted(
+    let ring = cipher.map(|c| super::common::IndexKeyring::single(c.clone()));
+    load_vector_mappings_with_keyring(path, ring.as_ref())
+}
+
+/// Load vector ID mappings, decrypting via an
+/// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
+/// `key_version` (Issue #488 key rotation).
+pub(crate) fn load_vector_mappings_with_keyring(
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<VectorMappingsData> {
+    super::common::load_encoded_maybe_encrypted_with_keyring(
         path,
         super::MAX_VECTOR_INDEX_FILE_SIZE,
         "Vector index",
-        cipher,
+        keyring,
     )
 }
 
@@ -306,56 +348,62 @@ fn native_temp_base(real_path: &Path) -> PathBuf {
     dir.join(format!(".aeix-usearch-tmp-{suffix}.usearch"))
 }
 
-/// Whole-file-encrypt the plaintext bytes at `src` and atomically write the
-/// `[AEIX header][ciphertext]` blob to `dst`.
-fn encrypt_file_whole(src: &Path, dst: &Path, cipher: &Arc<dyn Cipher>) -> Result<()> {
+/// Whole-file-encrypt the plaintext bytes at `src`, stamping `key_version` into
+/// the `[AEIX header]`, and atomically write the ciphertext blob to `dst`
+/// (Issue #488 key rotation; the native usearch write path).
+fn encrypt_file_whole_versioned(
+    src: &Path,
+    dst: &Path,
+    cipher: &Arc<dyn Cipher>,
+    key_version: u32,
+) -> Result<()> {
     let plaintext = std::fs::read(src)?;
-    let encrypted = super::common::encrypt_index_bytes(&plaintext, cipher)?;
+    let encrypted = super::common::encrypt_index_bytes_versioned(&plaintext, cipher, key_version)?;
     super::atomic_write(dst, &encrypted)
 }
 
 /// Read `src`, transparently decrypting if it carries the `AEIX` header (a
 /// legacy plaintext file is copied through unchanged, covering the upgrade /
-/// torn-write case), and atomically write the plaintext to `dst`.
-fn decrypt_file_to(
+/// torn-write case) via an [`IndexKeyring`](super::common::IndexKeyring) that
+/// dispatches on the header `key_version`, and atomically write the plaintext to
+/// `dst` (Issue #488 key rotation; the native usearch read path).
+fn decrypt_file_to_with_keyring(
     src: &Path,
     dst: &Path,
     max_size: u64,
     context: &str,
-    cipher: Option<&Arc<dyn Cipher>>,
+    keyring: Option<&super::common::IndexKeyring>,
 ) -> Result<()> {
-    let plaintext = super::common::read_index_file(src, max_size, context, cipher)?;
+    let plaintext = super::common::read_index_file_with_keyring(src, max_size, context, keyring)?;
     super::atomic_write(dst, &plaintext)
 }
 
-/// Save the native HNSW index (`current.usearch` + `.usearch.mappings`
-/// sidecar), encrypting both at rest when `cipher` is `Some` (Issue #481).
-///
-/// With `cipher == None` this is exactly `index.save(real_path)`.
-pub(crate) fn save_hnsw_index_maybe_encrypted(
+/// Save the native HNSW index, encrypting both files with the current
+/// generation of an [`IndexKeyring`](super::common::IndexKeyring) and stamping
+/// its `key_version` (Issue #488 key rotation). A `None`/empty keyring writes
+/// plaintext (identical to `index.save`).
+pub(crate) fn save_hnsw_index_with_keyring(
     index: &crate::index::vector::HnswIndex,
     real_path: &Path,
-    cipher: Option<&Arc<dyn Cipher>>,
+    keyring: Option<&super::common::IndexKeyring>,
 ) -> crate::core::error::Result<()> {
     use crate::index::vector::VectorIndex;
 
-    let Some(cipher) = cipher else {
-        // Plaintext path: byte-identical to the pre-encryption behavior.
+    let Some((cipher, key_version)) = keyring.and_then(super::common::IndexKeyring::current) else {
         return index.save(real_path);
     };
 
     let temp_base = native_temp_base(real_path);
     let temp_mappings = temp_base.with_extension("usearch.mappings");
-    // Clean up the plaintext temp files on every exit path.
     let _guard = TempFileGuard::new(vec![temp_base.clone(), temp_mappings.clone()]);
 
-    // Let usearch write its two plaintext files to the temp base.
     index.save(&temp_base)?;
 
-    // Encrypt each and atomically publish to the real paths.
     let real_mappings = real_path.with_extension("usearch.mappings");
-    encrypt_file_whole(&temp_base, real_path, cipher).map_err(native_enc_err)?;
-    encrypt_file_whole(&temp_mappings, &real_mappings, cipher).map_err(native_enc_err)?;
+    encrypt_file_whole_versioned(&temp_base, real_path, &cipher, key_version)
+        .map_err(native_enc_err)?;
+    encrypt_file_whole_versioned(&temp_mappings, &real_mappings, &cipher, key_version)
+        .map_err(native_enc_err)?;
     Ok(())
 }
 
@@ -364,46 +412,48 @@ pub(crate) fn save_hnsw_index_maybe_encrypted(
 ///
 /// A legacy plaintext file (no header) is handed straight to usearch with no
 /// temp shuffle, so the plaintext path is unchanged.
-pub(crate) fn load_hnsw_index_maybe_encrypted(
+/// Load the native HNSW index, decrypting via an
+/// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
+/// `key_version` (Issue #488 key rotation). A legacy plaintext file loads
+/// directly.
+pub(crate) fn load_hnsw_index_with_keyring(
     real_path: &Path,
     config: crate::index::vector::HnswConfig,
-    cipher: Option<&Arc<dyn Cipher>>,
+    keyring: Option<&super::common::IndexKeyring>,
 ) -> crate::core::error::Result<crate::index::vector::HnswIndex> {
     use crate::index::vector::HnswIndex;
 
     if !native_file_is_encrypted(real_path) {
-        // Legacy / plaintext index: load directly (unchanged path).
         return HnswIndex::load(real_path, config);
     }
 
-    // Encrypted on disk: decrypt both files to a temp base, load from there.
-    let cipher = cipher.ok_or_else(|| {
-        crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-            "usearch index is encrypted but no encryption key is configured".to_string(),
-        ))
-    })?;
+    if keyring.is_none() {
+        return Err(crate::core::error::Error::Vector(
+            crate::core::error::VectorError::IndexError(
+                "usearch index is encrypted but no encryption key is configured".to_string(),
+            ),
+        ));
+    }
 
     let temp_base = native_temp_base(real_path);
     let temp_mappings = temp_base.with_extension("usearch.mappings");
     let real_mappings = real_path.with_extension("usearch.mappings");
-    // Clean up the decrypted-plaintext temp files on every exit path (success,
-    // decrypt error, or usearch load error).
     let _guard = TempFileGuard::new(vec![temp_base.clone(), temp_mappings.clone()]);
 
-    decrypt_file_to(
+    decrypt_file_to_with_keyring(
         real_path,
         &temp_base,
         super::MAX_MMAP_FILE_SIZE,
         "usearch index",
-        Some(cipher),
+        keyring,
     )
     .map_err(native_enc_err)?;
-    decrypt_file_to(
+    decrypt_file_to_with_keyring(
         &real_mappings,
         &temp_mappings,
         super::MAX_VECTOR_INDEX_FILE_SIZE,
         "usearch mappings",
-        Some(cipher),
+        keyring,
     )
     .map_err(native_enc_err)?;
 
@@ -605,7 +655,8 @@ mod tests {
             .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
             .unwrap();
 
-        save_hnsw_index_maybe_encrypted(&index, &path, Some(&cipher)).unwrap();
+        let ring = super::super::common::IndexKeyring::single(cipher.clone());
+        save_hnsw_index_with_keyring(&index, &path, Some(&ring)).unwrap();
 
         // Both the native index file and its mappings sidecar are encrypted at
         // rest (carry the AEIX header).
@@ -625,7 +676,7 @@ mod tests {
         );
 
         // Correct key => decrypts to a temp file, loads, and the vectors survive.
-        let loaded = load_hnsw_index_maybe_encrypted(&path, config.clone(), Some(&cipher)).unwrap();
+        let loaded = load_hnsw_index_with_keyring(&path, config.clone(), Some(&ring)).unwrap();
         assert_eq!(loaded.len(), 2);
         assert!(
             !any_aeix_temp_present(dir.path()),
@@ -634,7 +685,7 @@ mod tests {
 
         // Fails closed: encrypted on disk but no cipher supplied. The error
         // message names the missing key and leaks no plaintext / no temp file.
-        let err = load_hnsw_index_maybe_encrypted(&path, config.clone(), None).unwrap_err();
+        let err = load_hnsw_index_with_keyring(&path, config.clone(), None).unwrap_err();
         assert!(
             format!("{err}").contains("no encryption key"),
             "expected fail-closed missing-key error, got: {err}"
@@ -653,7 +704,8 @@ mod tests {
             k[7] = 0x5A;
             Arc::new(Aes256GcmCipher::new(&k)) as Arc<dyn Cipher>
         };
-        assert!(load_hnsw_index_maybe_encrypted(&path, config, Some(&wrong)).is_err());
+        let wrong_ring = super::super::common::IndexKeyring::single(wrong);
+        assert!(load_hnsw_index_with_keyring(&path, config, Some(&wrong_ring)).is_err());
         assert!(
             !any_aeix_temp_present(dir.path()),
             "temp leaked on wrong-key load"

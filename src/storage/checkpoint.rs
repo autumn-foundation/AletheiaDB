@@ -506,20 +506,20 @@ impl CheckpointManager {
         // Encrypt checkpoint index files at rest when a cipher is configured
         // (Issue #481): a checkpoint in an encryption-enabled DB must not write
         // cleartext, and `recover` must read these files back encrypted.
-        let cipher = self.persistence_manager.index_cipher();
+        let keyring = self.persistence_manager.keyring();
         if self.config.enable_compression {
-            crate::storage::index_persistence::graph::save_graph_index_compressed_with_cipher(
+            crate::storage::index_persistence::graph::save_graph_index_compressed_with_keyring(
                 &graph_data,
                 &graph_path,
                 self.config.compression_level,
-                cipher,
+                keyring,
             )
             .map_err(persistence_err)?;
         } else {
-            crate::storage::index_persistence::graph::save_graph_index_with_cipher(
+            crate::storage::index_persistence::graph::save_graph_index_with_keyring(
                 &graph_data,
                 &graph_path,
-                cipher,
+                keyring,
             )
             .map_err(persistence_err)?;
         }
@@ -530,10 +530,10 @@ impl CheckpointManager {
             .persistence_manager
             .temporal_path()
             .join("versions.idx");
-        crate::storage::index_persistence::temporal::save_temporal_index_with_cipher(
+        crate::storage::index_persistence::temporal::save_temporal_index_with_keyring(
             &temporal_data,
             &temporal_path,
-            self.persistence_manager.index_cipher(),
+            self.persistence_manager.keyring(),
         )
         .map_err(persistence_err)?;
         bytes_written += std::fs::metadata(&temporal_path)
@@ -1039,9 +1039,9 @@ impl CheckpointManager {
             // ids to live ids (Issue #3490) before the raw resolution sites
             // below touch them; an identity remap is a no-op.
             let mut graph_data =
-                crate::storage::index_persistence::graph::load_graph_index_with_cipher(
+                crate::storage::index_persistence::graph::load_graph_index_with_keyring(
                     &graph_path,
-                    self.persistence_manager.index_cipher(),
+                    self.persistence_manager.keyring(),
                 )
                 .map_err(persistence_err)?;
             remap.remap_graph_index_data(&mut graph_data);
@@ -1116,9 +1116,9 @@ impl CheckpointManager {
             // `restore_into_historical_storage` resolves them; an identity remap
             // is a no-op.
             let mut temporal_data =
-                crate::storage::index_persistence::temporal::load_temporal_index_with_cipher(
+                crate::storage::index_persistence::temporal::load_temporal_index_with_keyring(
                     &temporal_path,
-                    self.persistence_manager.index_cipher(),
+                    self.persistence_manager.keyring(),
                 )
                 .map_err(persistence_err)?;
             remap.remap_temporal_index_data(&mut temporal_data);

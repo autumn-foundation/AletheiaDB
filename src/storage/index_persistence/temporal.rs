@@ -723,6 +723,16 @@ pub fn save_temporal_index_with_cipher(
     super::common::save_encoded_maybe_encrypted(data, path, cipher)
 }
 
+/// Save temporal index data, encrypting with an
+/// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+pub(crate) fn save_temporal_index_with_keyring(
+    data: &TemporalIndexData,
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<()> {
+    super::common::save_encoded_maybe_encrypted_with_keyring(data, path, keyring)
+}
+
 /// Load temporal index data from disk and validate CRC32 checksum.
 ///
 /// # Validation
@@ -758,7 +768,18 @@ pub fn load_temporal_index_with_cipher(
     path: &Path,
     cipher: Option<&Arc<dyn Cipher>>,
 ) -> Result<TemporalIndexData> {
-    decode_temporal_blob(path, cipher)
+    let ring = cipher.map(|c| super::common::IndexKeyring::single(c.clone()));
+    decode_temporal_blob(path, ring.as_ref())
+}
+
+/// Load temporal index data, decrypting via an
+/// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
+/// `key_version` (Issue #488 key rotation).
+pub(crate) fn load_temporal_index_with_keyring(
+    path: &Path,
+    keyring: Option<&super::common::IndexKeyring>,
+) -> Result<TemporalIndexData> {
+    decode_temporal_blob(path, keyring)
 }
 
 /// Decode temporal index bytes, transparently upgrading pre-fidelity
@@ -782,16 +803,16 @@ pub fn load_temporal_index_with_cipher(
 /// reads and checksum passes on the (common, cheap) legacy-fallback paths.
 fn decode_temporal_blob(
     path: &Path,
-    cipher: Option<&Arc<dyn Cipher>>,
+    keyring: Option<&super::common::IndexKeyring>,
 ) -> Result<TemporalIndexData> {
     use crate::storage::index_persistence::formats::legacy_v2::TemporalIndexDataV2;
     use crate::storage::index_persistence::formats::legacy_v3::TemporalIndexDataV3;
 
-    let bytes = super::common::read_and_verify_crc_maybe_encrypted(
+    let bytes = super::common::read_and_verify_crc_maybe_encrypted_with_keyring(
         path,
         super::MAX_TEMPORAL_INDEX_FILE_SIZE,
         "Temporal index",
-        cipher,
+        keyring,
     )?;
 
     if let Ok(data) = bitcode::decode::<TemporalIndexData>(&bytes)

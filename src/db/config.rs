@@ -377,6 +377,15 @@ impl AletheiaDB {
                 None
             };
 
+            // Retain the encryption config for key rotation (Issue #488): the
+            // current MEK must be re-sourceable to guard against rotating to the
+            // same key. Only stored when encryption is enabled; never the key.
+            let encryption_config_stored = if config.encryption.enabled {
+                Some(config.encryption.clone())
+            } else {
+                None
+            };
+
             // Extract WAL cipher from encryption manager (if enabled)
             let wal_cipher = encryption_manager
                 .as_ref()
@@ -490,11 +499,22 @@ impl AletheiaDB {
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
                 encryption_manager: encryption_manager.clone(),
+                encryption_config: encryption_config_stored,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 chain: None,
                 _tempdir: None,
             };
+
+            // Issue #488: resume an interrupted index key rotation BEFORE
+            // loading indexes, so the index directory is a single, uniform key
+            // generation by the time it is read back (a crash mid-rotation left
+            // a mix of old/new key files plus a `rotation.state` breadcrumb).
+            if let Some(ref manager) = persistence_manager
+                && config.encryption.enabled
+            {
+                crate::db::rotation::resume_pending_rotation(manager, &config.encryption)?;
+            }
 
             // Load indexes on startup if enabled
             if let Some(ref manager) = persistence_manager
@@ -852,6 +872,7 @@ impl AletheiaDB {
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
                 encryption_manager: None,
+                encryption_config: None,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 chain: None,
