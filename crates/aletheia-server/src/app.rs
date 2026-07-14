@@ -16,6 +16,7 @@ use crate::http_routes;
 use crate::node_tools;
 use crate::security::{self, SecurityConfig};
 use crate::state::ServerState;
+use crate::traverse_temporal_tools;
 use aletheiadb::AletheiaDB;
 use aletheiadb::auth::{AuthMode, AuthStore};
 use autumn_web::openapi::OpenApiConfig;
@@ -85,6 +86,18 @@ pub fn try_build_server_testapp(
             edge_tools::update_edge,
             edge_tools::delete_edge,
             edge_tools::retract_edge,
+            traverse_temporal_tools::traverse,
+            traverse_temporal_tools::get_node_history,
+            traverse_temporal_tools::get_edge_history,
+            traverse_temporal_tools::get_node_at_time,
+            traverse_temporal_tools::get_edge_at_time,
+            traverse_temporal_tools::list_changes,
+            traverse_temporal_tools::get_node_at_valid_time,
+            traverse_temporal_tools::get_node_at_transaction_time,
+            traverse_temporal_tools::diff_node_versions,
+            traverse_temporal_tools::get_edge_at_valid_time,
+            traverse_temporal_tools::get_edge_at_transaction_time,
+            traverse_temporal_tools::diff_edge_versions,
         ])
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");

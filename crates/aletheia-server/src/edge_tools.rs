@@ -81,6 +81,14 @@ use serde_json::{Map, Value};
 /// dispatch-routed too (see [`crate::node_tools`]) and are pinned here in the
 /// same table so the one `dispatch_pinned_names_match_routed_class` conformance
 /// test covers every dispatch-routed read across both clusters.
+///
+/// The two dispatch-routed **traversal/temporal** reads (`traverse`,
+/// `get_node_history`) are pinned here too (see
+/// [`crate::traverse_temporal_tools`]): both are budgetable (#3353) so they
+/// forward raw arguments through `dispatch_tool_json`, `traverse` additionally
+/// cursorable (#3360). The other ten tools in that cluster are not budgetable /
+/// cursorable and forward through typed methods, so they are not dispatch-routed
+/// and do not appear here.
 pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("get_edge", AccessClass::Read),
     ("list_edges", AccessClass::Read),
@@ -89,6 +97,8 @@ pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("get_node", AccessClass::Read),
     ("list_nodes", AccessClass::Read),
     ("find_nodes_at_time", AccessClass::Read),
+    ("traverse", AccessClass::Read),
+    ("get_node_history", AccessClass::Read),
 ];
 
 /// Parse an MCP tool method's JSON string result into a [`Value`] for the HTTP

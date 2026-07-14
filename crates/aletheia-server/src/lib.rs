@@ -33,6 +33,7 @@ pub mod http_routes;
 pub mod node_tools;
 pub mod security;
 pub mod state;
+pub mod traverse_temporal_tools;
 
 pub use app::{
     build_server_client, build_server_client_with_config, build_server_testapp,
