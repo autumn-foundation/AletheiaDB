@@ -20,7 +20,14 @@ jobs:
   test:
     name: Test Suite
     runs-on: ${{ matrix.os }}
+    # Nightly rustc is an advisory canary for upcoming compiler releases, not a
+    # merge gate. An ICE or breakage in a nightly cell must never cancel or
+    # redden the required stable cells: the matrix runs fail-fast: false so a
+    # broken cell cannot cancel its siblings, and nightly cells are
+    # continue-on-error so their failures stay visible without failing the run.
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, nightly]
