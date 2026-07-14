@@ -14,7 +14,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aletheia_server::security::rate_limit::governor_layer;
+use aletheia_server::security::rate_limit::{governor_layer, spawn_gc_task};
 use aletheia_server::security::{RateLimitSettings, SecurityConfig};
 use aletheiadb::auth::{AuthMode, AuthStore};
 
@@ -23,6 +23,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
+use serde_json::{Value, json};
 use tower::ServiceExt; // oneshot
 
 // ---------------------------------------------------------------------------
@@ -279,4 +280,92 @@ async fn documents_raw_429_headers_and_body() {
         .expect("read body");
     // A non-empty human-readable body (the text we replace with the envelope).
     assert!(!body.is_empty(), "governor 429 has an explanatory body");
+}
+
+// ---------------------------------------------------------------------------
+// (4) MUST-FIX 8b: the over-limit 429 is wrapped in the shared STRUCTURED
+//     envelope (code + retriable + message), NOT governor's raw plain text.
+// ---------------------------------------------------------------------------
+
+/// 8b: an over-limit request must return the `{success, error, code, retriable}`
+/// envelope — `RESOURCE_EXHAUSTED` / `retriable: true` — as `application/json`,
+/// not tower_governor's plain-text `"Too Many Requests! ..."` body. The
+/// `retry-after` header governor emits is preserved.
+#[tokio::test]
+async fn over_limit_429_is_structured_envelope_not_raw_text() {
+    let mut cfg = config();
+    cfg.rate_limit = Some(RateLimitSettings::new(1, 1));
+    let app = router_with_layer(&cfg);
+    let ip = [10, 0, 0, 9];
+
+    let _first = app.clone().oneshot(req_from(ip)).await.unwrap();
+    let throttled = app.clone().oneshot(req_from(ip)).await.expect("throttled");
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Content-type is JSON (the envelope), and the governor retry-after survives.
+    let ct = throttled
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        ct.contains("application/json"),
+        "wrapped 429 is JSON, got content-type = {ct:?}"
+    );
+    assert!(
+        throttled.headers().contains_key("retry-after"),
+        "wrapped 429 preserves governor's retry-after header"
+    );
+
+    let bytes = axum::body::to_bytes(throttled.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let v: Value = serde_json::from_slice(&bytes)
+        .expect("wrapped 429 body must be structured JSON, not raw governor text");
+    assert_eq!(v["success"], json!(false));
+    assert_eq!(v["code"], "RESOURCE_EXHAUSTED", "8b code: {v}");
+    assert_eq!(
+        v["retriable"],
+        json!(true),
+        "rate-limit 429 is retriable: {v}"
+    );
+    assert!(
+        v["error"].is_string(),
+        "carries a human-readable message: {v}"
+    );
+    let raw = String::from_utf8_lossy(&bytes);
+    assert!(
+        !raw.trim_start().starts_with("Too Many Requests"),
+        "must not be governor's raw plain-text body: {raw}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (5) MUST-FIX 8c: the RateLimit gc() handle is driven by a background task
+//     tied to the layer's lifecycle (self-terminates when the layer drops).
+// ---------------------------------------------------------------------------
+
+/// 8c: `spawn_gc_task` starts a periodic task that calls `gc()`; because it
+/// holds only a *weak* handle to the shared limiter, it self-terminates once the
+/// mounted layer (the last strong ref) is dropped — no leaked/duplicated task,
+/// lifecycle-tied.
+#[tokio::test]
+async fn gc_task_runs_and_self_terminates_when_layer_dropped() {
+    let mut cfg = config();
+    cfg.rate_limit = Some(RateLimitSettings::new(1000, 100));
+    let rl = governor_layer(&cfg).expect("rate limiting enabled");
+
+    // Split the mountable layer from the GC handle (what apply_security does).
+    let (layer, gc) = rl.into_parts();
+    let handle = spawn_gc_task(gc, Duration::from_millis(5)).expect("spawned under a runtime");
+
+    // Drop the only remaining strong ref to the keyed limiter. The GC task's
+    // next tick observes the weak upgrade fail and exits its loop.
+    drop(layer);
+
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("gc task terminates promptly after the layer is dropped")
+        .expect("gc task did not panic");
 }

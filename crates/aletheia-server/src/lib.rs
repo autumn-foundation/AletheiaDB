@@ -33,6 +33,9 @@ pub mod node_tools;
 pub mod security;
 pub mod state;
 
-pub use app::{build_server_client, build_server_testapp};
-pub use security::SecurityConfig;
+pub use app::{
+    build_server_client, build_server_client_with_config, build_server_testapp,
+    try_build_server_client, try_build_server_testapp,
+};
+pub use security::{SecurityConfig, ServerSecurityState};
 pub use state::ServerState;

@@ -35,6 +35,10 @@ tower_governor = { version = "0.8", default-features = false, features = ["axum"
 # Names `governor::middleware::NoOpMiddleware` in `governor_layer`'s return
 # type (tower_governor does not re-export it). Version pinned to tower_governor's.
 governor = "0.10"
+# The custom `/mcp` security gate (B4) is a hand-written `tower::Layer` /
+# `tower::Service`; `secure_mcp` accepts any such layer. autumn-web 0.5 / axum
+# 0.8 are on tower 0.5.
+tower = { version = "0.5" }
 # Cursor-signing primitive (Lane B4): base64url token encoding, SHA-256 for the
 # hand-rolled HMAC (no extra hmac crate — mirrors legacy `src/mcp/cursor.rs`),
 # constant-time MAC compare via subtle, a random per-process secret via rand,

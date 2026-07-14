@@ -27,12 +27,12 @@
 
 pub mod auth;
 pub mod cursor;
+pub mod mcp_gate;
 pub mod rate_limit;
 pub mod rbac;
 pub mod resource_limits;
 
 use aletheiadb::auth::{AuthMode, AuthStore};
-use autumn_web::auth::RequireApiToken;
 use autumn_web::prelude::AppState as AutumnAppState;
 use autumn_web::test::TestApp;
 use std::sync::Arc;
@@ -41,8 +41,14 @@ use std::time::Duration;
 pub use auth::{
     AccessClassMarker, AdminClass, ApiKeyStore, AuthStoreTokenAdapter, Authorized, MetricsClass,
     RateLimitSettings, ReadClass, ServerAuthState, WriteClass, authorize, authorize_class,
-    extract_credential,
+    extract_credential, extract_credential_headers,
 };
+pub use cursor::{CursorSecret, LiveCursorRegistry};
+pub use mcp_gate::{
+    McpSecurityLayer, mcp_payload_too_large_response, mcp_permission_denied_response,
+    mcp_unauthenticated_response, mcp_unroutable_tool_call_response,
+};
+pub use resource_limits::{InFlightLimiter, ResourceLimits};
 
 /// Security configuration for the server surface.
 ///
@@ -100,27 +106,156 @@ impl SecurityConfig {
             max_live_cursors_per_conn: 128,
         }
     }
+
+    /// Enable the default-off per-IP rate-limit layer (builder-style, for
+    /// wiring/tests). `None` restores the default (off).
+    #[must_use]
+    pub fn with_rate_limit(mut self, settings: Option<RateLimitSettings>) -> Self {
+        self.rate_limit = settings;
+        self
+    }
+
+    /// Override the per-query wall-clock timeout (`Duration::ZERO` = unlimited).
+    #[must_use]
+    pub fn with_query_timeout(mut self, timeout: Duration) -> Self {
+        self.query_timeout = timeout;
+        self
+    }
+
+    /// Override the per-query row cap (`0` = unlimited).
+    #[must_use]
+    pub fn with_max_result_rows(mut self, rows: usize) -> Self {
+        self.max_result_rows = rows;
+        self
+    }
+
+    /// Override the per-query serialized-byte cap (`0` = unlimited).
+    #[must_use]
+    pub fn with_max_response_bytes(mut self, bytes: usize) -> Self {
+        self.max_response_bytes = bytes;
+        self
+    }
+
+    /// Override the concurrent in-flight-query cap (`0` = unbounded).
+    #[must_use]
+    pub fn with_max_in_flight_queries(mut self, cap: usize) -> Self {
+        self.max_in_flight_queries = cap;
+        self
+    }
 }
 
-/// Apply the security layer stack to the app builder.
+/// Shared server-side security **primitives** installed into app state by
+/// [`init_state`] and pulled back by the resource-limited read handlers and
+/// (future) cursor-paged handlers.
 ///
-/// **Seam (Lane A calls, Lane B extends).** PR1 mirrors the spike: in
-/// [`AuthMode::Required`] the whole `/mcp` endpoint is gated behind autumn's
-/// native [`RequireApiToken`] backed by the shared [`AuthStore`] (via
-/// [`AuthStoreTokenAdapter`]), so the MCP catalog is not anonymously reachable.
-/// [`AuthMode::Anonymous`] skips the gate deliberately.
+/// Distinct from [`ServerAuthState`] (which carries the credential store +
+/// mode): this carries the per-query resource caps ([`ResourceLimits`]), the
+/// process-wide bounded in-flight guard ([`InFlightLimiter`], #3550), the
+/// per-process cursor-signing secret ([`CursorSecret`], #3360) and the
+/// per-connection cursor cap registry ([`LiveCursorRegistry`]). Cloneable
+/// (every field is `Arc`-backed or `Copy`) so it lives in the extension bag.
+#[derive(Clone)]
+pub struct ServerSecurityState {
+    limits: ResourceLimits,
+    in_flight: InFlightLimiter,
+    cursor_secret: Arc<CursorSecret>,
+    cursor_registry: LiveCursorRegistry,
+}
+
+impl ServerSecurityState {
+    /// Build the primitives from a [`SecurityConfig`]: a fresh in-flight guard
+    /// and cursor registry at the configured caps, and a fresh random
+    /// per-process cursor secret.
+    #[must_use]
+    pub fn from_config(cfg: &SecurityConfig) -> Self {
+        Self {
+            limits: ResourceLimits::from_config(cfg),
+            in_flight: InFlightLimiter::from_config(cfg),
+            cursor_secret: Arc::new(CursorSecret::random()),
+            cursor_registry: LiveCursorRegistry::new(cfg.max_live_cursors_per_conn),
+        }
+    }
+
+    /// The effective per-query resource caps.
+    #[must_use]
+    pub fn limits(&self) -> ResourceLimits {
+        self.limits
+    }
+
+    /// The bounded in-flight-query admission guard.
+    #[must_use]
+    pub fn in_flight(&self) -> &InFlightLimiter {
+        &self.in_flight
+    }
+
+    /// The per-process cursor-signing secret.
+    #[must_use]
+    pub fn cursor_secret(&self) -> &Arc<CursorSecret> {
+        &self.cursor_secret
+    }
+
+    /// The per-connection live-cursor cap registry.
+    #[must_use]
+    pub fn cursor_registry(&self) -> &LiveCursorRegistry {
+        &self.cursor_registry
+    }
+}
+
+impl axum::extract::FromRequestParts<AutumnAppState> for ServerSecurityState {
+    type Rejection = aletheiadb::http::AletheiaHttpError;
+
+    async fn from_request_parts(
+        _parts: &mut axum::http::request::Parts,
+        state: &AutumnAppState,
+    ) -> Result<Self, Self::Rejection> {
+        state
+            .extension::<ServerSecurityState>()
+            .map(|arc| (*arc).clone())
+            .ok_or(aletheiadb::http::AletheiaHttpError::StateMissing)
+    }
+}
+
+/// Apply the security layer stack to the app builder (B4 wiring).
 ///
-/// TODO(Lane B): add the `tower-governor` rate-limit layer and the in-flight
-/// `ConcurrencyLimit` backpressure layer here (both no-ops in PR1).
+/// **Seam (Lane A calls, Lane B fills).** Two mounts:
+///
+/// 1. **`/mcp` gate (F2/F4).** The whole `/mcp` endpoint — `initialize`,
+///    `tools/list`, `tools/call` — is gated behind the custom
+///    [`McpSecurityLayer`] via
+///    [`secure_mcp`](autumn_web::app::AppBuilder::secure_mcp) (whose bound
+///    accepts any `tower::Layer<Route>`, not just `RequireApiToken`). Unlike the
+///    native bearer-only `RequireApiToken`, this layer accepts Bearer **or**
+///    `x-api-key`, emits the shared `{code, message, retriable, details?}`
+///    envelope on failure (uniform 401), and RBAC-pre-checks each `tools/call`
+///    at the envelope (403 with `details`). It is mounted in **both** modes: in
+///    [`AuthMode::Anonymous`] it inserts the anonymous principal and passes
+///    through (catalog reachable), matching the legacy anonymous surface.
+/// 2. **Rate-limit layer (F, default-off).** [`rate_limit::governor_layer`]
+///    returns `None` unless [`SecurityConfig::rate_limit`] is `Some`, so by
+///    default no layer is mounted and behavior is byte-for-byte today's. When
+///    the operator opts in, the per-IP `tower-governor` layer is mounted
+///    app-wide via `.layer()`.
+///
+/// The per-query resource caps, in-flight guard, and cursor primitives are
+/// **state**, not layers — [`init_state`] installs them for the handlers to
+/// enforce per-request.
 #[must_use]
 pub fn apply_security(app: TestApp, cfg: &SecurityConfig) -> TestApp {
-    match cfg.mode {
-        AuthMode::Required => {
-            let token_layer =
-                RequireApiToken::new(Arc::new(AuthStoreTokenAdapter::new(cfg.store.clone())));
-            app.secure_mcp(token_layer)
+    // 1. Custom /mcp gate (both modes; branches on mode internally).
+    let app = app.secure_mcp(McpSecurityLayer::new(cfg.store.clone(), cfg.mode));
+
+    // 2. Default-off per-IP rate limiter, mounted app-wide only when enabled.
+    //    When enabled, retain the `RateLimit`'s GC handle and drive it from a
+    //    lifecycle-tied background task so the per-IP keyed state cannot grow
+    //    without bound (MUST-FIX 8c). The task holds only a weak handle, so it
+    //    self-terminates when the mounted layer is dropped (no leak/duplicate).
+    match rate_limit::governor_layer(cfg) {
+        Some(rl) => {
+            let (layer, gc) = rl.into_parts();
+            let _gc_task = rate_limit::spawn_gc_task(gc, rate_limit::RATE_LIMIT_GC_INTERVAL);
+            app.layer(layer)
         }
-        AuthMode::Anonymous => app,
+        None => app,
     }
 }
 
@@ -131,6 +266,10 @@ pub fn apply_security(app: TestApp, cfg: &SecurityConfig) -> TestApp {
 /// which hands out a shared `&AppState` whose `insert_extension` takes `&self`.
 pub fn init_state(app_state: &AutumnAppState, cfg: &SecurityConfig) {
     app_state.insert_extension(ServerAuthState::new(cfg.store.clone(), cfg.mode));
+    // B4: install the resource-limit + cursor primitives so the read handlers
+    // (row/byte/timeout/in-flight enforcement) and cursor-paged handlers can
+    // pull them per-request.
+    app_state.insert_extension(ServerSecurityState::from_config(cfg));
 }
 
 /// Validate security configuration at startup.

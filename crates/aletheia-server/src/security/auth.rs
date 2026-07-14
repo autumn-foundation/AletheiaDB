@@ -124,19 +124,32 @@ impl<C: AccessClassMarker> FromRequestParts<AppState> for Authorized<C> {
             .map(|arc| (*arc).clone())
             .ok_or(AletheiaHttpError::StateMissing)?;
 
-        let principal = match auth.mode() {
-            // Anonymous mode: no credential required. Lane B may model this more
-            // richly; PR1 authorizes with the synthetic full-access principal
-            // (mirrors the spike's "anonymous == fully privileged").
-            AuthMode::Anonymous => Principal::anonymous(),
-            AuthMode::Required => {
-                // Uniform failure: missing / malformed / unknown / revoked are
-                // indistinguishable (byte-identical 401 to the legacy surface).
-                let credential =
-                    extract_credential(parts).ok_or(AletheiaHttpError::Unauthorized)?;
-                auth.store()
-                    .verify(&credential)
-                    .ok_or(AletheiaHttpError::Unauthorized)?
+        // F3 (Issue #3524 B4): principal caching. If a preceding tower layer in
+        // this same request pipeline (e.g. the `/mcp` security gate) already
+        // authenticated the credential and inserted the verified [`Principal`]
+        // into request extensions, reuse it verbatim instead of performing a
+        // second `AuthStore::verify` — the class check below still runs, so
+        // behavior is identical, only the redundant constant-time scan is
+        // avoided. When no layer precedes the extractor (the direct HTTP route
+        // path, which is deliberately NOT fronted by a redundant auth layer so
+        // `/openapi.json` stays public), extensions carry no `Principal` and we
+        // authenticate exactly as before — one verify, revocation-immediate.
+        let principal = if let Some(cached) = parts.extensions.get::<Principal>() {
+            cached.clone()
+        } else {
+            match auth.mode() {
+                // Anonymous mode: no credential required. Authorizes with the
+                // synthetic full-access principal (anonymous == fully privileged).
+                AuthMode::Anonymous => Principal::anonymous(),
+                AuthMode::Required => {
+                    // Uniform failure: missing / malformed / unknown / revoked
+                    // are indistinguishable (byte-identical 401 to legacy).
+                    let credential =
+                        extract_credential(parts).ok_or(AletheiaHttpError::Unauthorized)?;
+                    auth.store()
+                        .verify(&credential)
+                        .ok_or(AletheiaHttpError::Unauthorized)?
+                }
             }
         };
 
@@ -199,6 +212,13 @@ impl RateLimitSettings {
 /// `"role '{role}' does not permit {class} access"`, so 403 bodies stay
 /// identical to the existing `/query` surface.
 ///
+/// **Two-shape 403 contract (coordinator #8a / ruling F4):** this HTTP-surface
+/// 403 is deliberately **message-only** — it carries no `details` block, exactly
+/// mirroring the legacy `src/http/auth.rs`. Only the MCP-surface 403
+/// ([`crate::security::mcp_permission_denied_response`]) carries
+/// `details: {required_class, principal_role}`. The asymmetry is intentional;
+/// do not add `details` here.
+///
 /// # Errors
 ///
 /// Returns [`AletheiaHttpError::PermissionDenied`] when `principal.role` does
@@ -234,7 +254,20 @@ pub fn authorize<C: AccessClassMarker>(principal: &Principal) -> Result<(), Alet
 /// ASCII-case-insensitive; a whitespace-only or empty credential is rejected.
 #[must_use = "the extracted credential must be verified against the auth store"]
 pub fn extract_credential(parts: &Parts) -> Option<String> {
-    if let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) {
+    extract_credential_headers(&parts.headers)
+}
+
+/// Header-map form of [`extract_credential`] — the credential extractor a tower
+/// `Service` uses, which holds an `http::Request` (and thus a `&HeaderMap`)
+/// rather than an extractor's `&Parts`. Same contract: `Authorization: Bearer`
+/// (ASCII-case-insensitive scheme) first, then `x-api-key`; both trimmed, empty
+/// rejected; any malformed header collapses to `None` (the uniform-401 upstream).
+///
+/// [`extract_credential`] delegates here so the two entry points can never
+/// diverge on what counts as a valid credential.
+#[must_use = "the extracted credential must be verified against the auth store"]
+pub fn extract_credential_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
         let s = value.to_str().ok()?;
         let (scheme, rest) = s.split_once(' ')?;
         if !scheme.eq_ignore_ascii_case("bearer") {
@@ -246,7 +279,7 @@ pub fn extract_credential(parts: &Parts) -> Option<String> {
         }
         return Some(token.to_owned());
     }
-    if let Some(value) = parts.headers.get("x-api-key") {
+    if let Some(value) = headers.get("x-api-key") {
         let token = value.to_str().ok()?.trim();
         if token.is_empty() {
             return None;

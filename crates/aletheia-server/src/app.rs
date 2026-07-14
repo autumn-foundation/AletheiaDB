@@ -32,8 +32,30 @@ use std::sync::Arc;
 /// need a keyless required-mode client should insert a bootstrap key first.
 #[must_use]
 pub fn build_server_testapp(db: Arc<AletheiaDB>, store: Arc<AuthStore>, mode: AuthMode) -> TestApp {
-    let cfg = SecurityConfig::new(store, mode);
-    security::validate_startup(&cfg).expect("security startup validation");
+    try_build_server_testapp(db, SecurityConfig::new(store, mode))
+        .expect("security startup validation")
+}
+
+/// Fallible assembly — the proving-ground stand-in for the production
+/// `on_startup` refusal (ruling: startup wiring).
+///
+/// `validate_startup(&cfg)` runs **before** any routing is assembled; a refused
+/// config (required mode with zero credentials) returns `Err(message)` rather
+/// than assembling a server every request would 401. In the production
+/// `AppBuilder`, this same `validate_startup` is wired into `.on_startup(..)`,
+/// whose `Err` aborts startup with the propagated message; `TestApp` has no
+/// `on_startup` hook, so the proving ground surfaces the identical refusal here
+/// (and `build_server_testapp` turns it into a fail-fast panic).
+///
+/// # Errors
+///
+/// Returns the human-readable refusal message from
+/// [`security::validate_startup`] when the config is refused.
+pub fn try_build_server_testapp(
+    db: Arc<AletheiaDB>,
+    cfg: SecurityConfig,
+) -> Result<TestApp, String> {
+    security::validate_startup(&cfg)?;
 
     let server_state = ServerState::new(db);
     let init_cfg = cfg.clone();
@@ -57,13 +79,13 @@ pub fn build_server_testapp(db: Arc<AletheiaDB>, store: Arc<AuthStore>, mode: Au
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");
 
-    // Lane-B security seam: `/mcp` gate (Required mode), etc.
+    // Lane-B security seam: custom `/mcp` gate + default-off rate limiter.
     let app = security::apply_security(app, &cfg);
 
-    app.state_initializer(move |app_state| {
+    Ok(app.state_initializer(move |app_state| {
         app_state.insert_extension(server_state);
         security::init_state(app_state, &init_cfg);
-    })
+    }))
 }
 
 /// Convenience: [`build_server_testapp`] then `.build()` into a [`TestClient`].
@@ -74,4 +96,27 @@ pub fn build_server_client(
     mode: AuthMode,
 ) -> TestClient {
     build_server_testapp(db, store, mode).build()
+}
+
+/// Assemble a [`TestClient`] from a fully-specified [`SecurityConfig`] (custom
+/// resource caps, rate-limit opt-in, cursor budgets). **Panics** on a refused
+/// startup config (see [`try_build_server_testapp`]).
+#[must_use]
+pub fn build_server_client_with_config(db: Arc<AletheiaDB>, cfg: SecurityConfig) -> TestClient {
+    try_build_server_testapp(db, cfg)
+        .expect("security startup validation")
+        .build()
+}
+
+/// Fallible [`build_server_client_with_config`] — returns the startup-refusal
+/// message instead of panicking.
+///
+/// # Errors
+///
+/// Returns the refusal message from [`security::validate_startup`].
+pub fn try_build_server_client(
+    db: Arc<AletheiaDB>,
+    cfg: SecurityConfig,
+) -> Result<TestClient, String> {
+    Ok(try_build_server_testapp(db, cfg)?.build())
 }

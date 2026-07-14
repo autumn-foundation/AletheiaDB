@@ -32,8 +32,10 @@
 //! (autumn maps `Json<T>` to the reserved `body` MCP argument key), so the
 //! `tools/call` `arguments` wrap the request under `"body"`.
 
-use crate::security::{Authorized, ReadClass, WriteClass};
+use crate::security::resource_limits::{check_byte_cap_of, run_with_timeout};
+use crate::security::{Authorized, ReadClass, ServerSecurityState, WriteClass};
 use crate::state::ServerState;
+use aletheiadb::http::AletheiaHttpError;
 use aletheiadb::mcp::{
     AletheiaMcpServer, CountNodesRequest, CreateNodeRequest, DeleteNodeCascadeRequest,
     DeleteNodeRequest, FindNodesAtTimeRequest, GetNodeRequest, ListNodesRequest,
@@ -102,19 +104,38 @@ pub struct ListNodesQuery {
 )]
 pub async fn list_nodes(
     _auth: Authorized<ReadClass>,
+    security: ServerSecurityState,
     state: ServerState,
     Query(opts): Query<ListNodesQuery>,
-) -> Json<Value> {
-    let server = AletheiaMcpServer::new(state.db_arc());
-    let out = server.list_nodes(ListNodesRequest {
+) -> Result<Json<Value>, AletheiaHttpError> {
+    // B4 resource-limits wiring (#3542 / #3550): a bounded in-flight admission
+    // guard (503 UNAVAILABLE at capacity, released by RAII on any exit), a
+    // per-query wall-clock timeout (429 RESOURCE_EXHAUSTED on deadline), and a
+    // serialized-byte cap on the exact wire response (413 RESOURCE_EXHAUSTED),
+    // all reusing the shared `AletheiaHttpError` envelope. Generous defaults
+    // (cfg) make this a no-op on the parity path; a tiny configured cap makes
+    // the 413/503 boundaries observable.
+    let limits = security.limits();
+    let _guard = security.in_flight().try_acquire()?;
+
+    let db = state.db_arc();
+    let request = ListNodesRequest {
         label: opts.label,
         property_key: opts.property_key,
         property_value: opts.property_value.map(Value::String),
         limit: opts.limit,
         offset: opts.offset,
         include_vectors: opts.include_vectors,
-    });
-    tool_json(out)
+    };
+    let out = run_with_timeout(limits.timeout, false, async move {
+        AletheiaMcpServer::new(db).list_nodes(request)
+    })
+    .await?;
+
+    let value = serde_json::from_str::<Value>(&out).unwrap_or(Value::String(out));
+    // Cap against the exact serialized response bytes (undercount-proof).
+    check_byte_cap_of(&value, limits.max_response_bytes)?;
+    Ok(Json(value))
 }
 
 /// Query options for [`count_nodes`].
