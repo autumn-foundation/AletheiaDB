@@ -179,6 +179,12 @@ loom = { version = "0.7.2", features = ["checkpoint"] }
 rand = "0.8"
 
 [features]
+# Test-only: exposes the write-path `race_seam` arming surface
+# (arm_pre_apply_once/clear) used by the lost-write-persist-race regression
+# integration test. Off by default so the commit path cannot be parked in
+# production builds. See src/api/transaction/write/mod.rs::race_seam.
+testing = []
+
 # Stable: Semantic search cohort (graduated 0.1).
 # Retrieval, matching, clustering, traversal, entity resolution.
 # Modules: fishing, gestalt, cartographer, highlander, janus, chameleon,
@@ -382,6 +388,16 @@ exclude = [
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(fuzzing)'] }
+
+# Lost-write persist-race regression test needs the `race_seam` arming surface,
+# which is gated behind the `testing` feature. `required-features` makes plain
+# `cargo test` / `cargo clippy --all-targets` SKIP this target when `testing`
+# is off (avoiding compile errors) and BUILD it under `--features testing` /
+# `--all-features`.
+[[test]]
+name = "lost_write_persist_race"
+path = "tests/lost_write_persist_race.rs"
+required-features = ["testing"]
 
 # Examples with required features
 # Embedding examples require their respective feature flags

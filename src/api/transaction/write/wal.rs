@@ -26,7 +26,7 @@ use super::WriteTransaction;
 use crate::core::error::Result;
 use crate::core::id::VersionId;
 use crate::core::temporal::Timestamp;
-use crate::storage::wal::WalOperation;
+use crate::storage::wal::{LSN, WalOperation};
 
 /// Log all buffered operations to the Write-Ahead Log (WAL).
 ///
@@ -67,6 +67,13 @@ use crate::storage::wal::WalOperation;
 /// * `commit_timestamp` - The authoritative bi-temporal commit timestamp, carried
 ///   in the terminal `CommitTx` marker and re-stamped onto every replayed version.
 ///
+/// # Returns
+///
+/// `Some(base_lsn)` — the lowest LSN allocated for this transaction (the
+/// `BeginTx` marker's LSN) — for a non-empty transaction, or `None` for an
+/// empty transaction (no ops appended). The base LSN is registered as the
+/// commit's in-flight watermark by the caller (lost-write persist race fix).
+///
 /// # Errors
 ///
 /// Returns an error if the WAL append fails (e.g., disk full, IO error).
@@ -74,7 +81,7 @@ pub(crate) fn log_operations_to_wal(
     tx: &WriteTransaction,
     commit_timestamp: Timestamp,
     closing_version_ids: &[VersionId],
-) -> Result<()> {
+) -> Result<Option<LSN>> {
     // Collect all buffered writes into a single batch and append them under one atomic
     // LSN allocation via the WAL `append_batch` path (Issue #219). This is strictly more
     // efficient than the previous per-operation `append_async` loop for multi-operation
@@ -85,8 +92,9 @@ pub(crate) fn log_operations_to_wal(
 
     if buffered.is_empty() {
         // Empty transaction: no data ops, therefore no frame and no marker.
-        // Reproduces the prior early-return exactly.
-        return Ok(());
+        // Reproduces the prior early-return exactly. No LSN allocated, so no
+        // in-flight watermark to register.
+        return Ok(None);
     }
 
     let tx_id = tx.tx_id.as_u64();
@@ -123,7 +131,10 @@ pub(crate) fn log_operations_to_wal(
         commit_timestamp,
     });
 
-    tx.wal.append_batch_async(operations)?;
+    // `append_batch` allocates a single contiguous LSN band and returns the
+    // allocated LSNs in operation order, so element 0 (the `BeginTx` marker) is
+    // the base — the lowest LSN for this whole transaction.
+    let lsns = tx.wal.append_batch_async(operations)?;
 
-    Ok(())
+    Ok(lsns.first().copied())
 }

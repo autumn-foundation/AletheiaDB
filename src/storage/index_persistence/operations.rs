@@ -600,6 +600,63 @@ pub(crate) fn persist_graph_index(
     Ok((graph_data.node_count, graph_data.edge_count))
 }
 
+/// Persist the graph index from a pre-captured [`CurrentStorageSnapshot`]
+/// (lost-write persist race fix — coherent snapshot).
+///
+/// This is the snapshot-based counterpart of [`persist_graph_index`], used by
+/// [`crate::db::AletheiaDB::persist_indexes`] so the graph, temporal, and
+/// manifest-LSN captures are ONE atomic observation (taken under the coherence
+/// barrier) instead of three independent live scans that can observe different
+/// instants (which previously restored e.g. 85 graph nodes against 86 temporal
+/// versions). Serialization runs OFF-LOCK from the immutable snapshot, exactly
+/// like the checkpoint / backup paths.
+///
+/// Unlike the live scan, no CSR adjacency arrays are exported here (a snapshot
+/// carries nodes + edges, not the live adjacency index); the loader rebuilds
+/// adjacency from the persisted edges via `compact_adjacency()` when the CSR
+/// arrays are absent, matching the checkpoint path's on-disk shape exactly.
+pub(crate) fn persist_graph_index_from_snapshot(
+    snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
+    manager: &Arc<IndexPersistenceManager>,
+    tracker: Option<&Arc<PersistenceTracker>>,
+    current_lsn: u64,
+) -> Result<(u64, u64)> {
+    use crate::storage::index_persistence::graph::{
+        extract_graph_data_from_snapshot, save_graph_index_with_cipher,
+    };
+
+    // Extract nodes/edges from the coherent snapshot. Property serialization can
+    // intern previously unseen string values, so this must precede the interner
+    // save below (mirrors `persist_graph_index`'s "interner AFTER graph
+    // conversion" ordering).
+    let graph_data = extract_graph_data_from_snapshot(snapshot).map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to extract graph snapshot: {}", e))
+    })?;
+
+    manager.save_string_interner().map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
+
+    let graph_path = manager.graph_path().join("adjacency.idx");
+    std::fs::create_dir_all(manager.graph_path()).map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to create graph directory: {}", e))
+    })?;
+    // Route through the same at-rest encryption path as the live `persist_graph_index`
+    // (Issue #3564): when a cipher is configured the snapshot-persisted file MUST be
+    // encrypted, not plaintext, or the coherent-snapshot path would be a security
+    // regression vs the live path.
+    save_graph_index_with_cipher(&graph_data, &graph_path, manager.index_cipher()).map_err(
+        |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+    )?;
+
+    if let Some(tracker) = tracker {
+        tracker.reset_graph_mutations();
+        tracker.update_graph_lsn(current_lsn);
+        tracker.update_last_persisted_counts(graph_data.node_count, graph_data.edge_count);
+    }
+    Ok((graph_data.node_count, graph_data.edge_count))
+}
+
 /// Persist temporal index to disk.
 ///
 /// Converts the historical versions of nodes and edges into a disk-friendly format
@@ -736,6 +793,242 @@ pub(crate) fn persist_temporal_index(
 
     // Save to disk
     let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
+    save_temporal_index_with_cipher(&temporal_data, &temporal_path, manager.index_cipher())
+        .map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
+        })?;
+
+    tracker.reset_temporal_mutations();
+    tracker.update_temporal_lsn(current_lsn);
+    Ok(())
+}
+
+/// Reconstruct the full property state of the version PRECEDING `version`,
+/// using only versions captured in `by_id` (lost-write persist race fix —
+/// coherent snapshot). Mirrors the checkpoint path's helper of the same intent.
+///
+/// Walks `prev_version` links back to the nearest anchor within the snapshot,
+/// then re-applies the intervening deltas oldest-first. Fails (rather than
+/// persisting a silently-lossy entry) if the chain leaves the snapshot or
+/// carries no anchor. Only invoked for the rare sparse-vector-delta case.
+fn reconstruct_node_base_from_snapshot(
+    by_id: &std::collections::HashMap<VersionId, Arc<crate::core::version::NodeVersion>>,
+    version: &crate::core::version::NodeVersion,
+) -> Result<crate::core::property::PropertyMap> {
+    use crate::core::version::VersionData;
+    let err = |reason: String| StorageError::PersistenceError(reason);
+
+    let mut chain: Vec<&Arc<crate::core::version::NodeVersion>> = Vec::new();
+    let mut cur = version.prev_version;
+    while let Some(vid) = cur {
+        if chain.len() >= crate::storage::historical::MAX_RECONSTRUCTION_DEPTH {
+            return Err(err(format!(
+                "Version chain for node {} exceeds max reconstruction depth while \
+                 materializing sparse vector deltas",
+                version.node_id
+            ))
+            .into());
+        }
+        let v = by_id.get(&vid).ok_or_else(|| {
+            err(format!(
+                "Cannot materialize sparse vector delta for node version {}: base version \
+                 {} is not in the persistence snapshot (cold-migrated?)",
+                version.id, vid
+            ))
+        })?;
+        chain.push(v);
+        if v.is_anchor() {
+            break;
+        }
+        cur = v.prev_version;
+    }
+
+    let anchor_props = match chain.last().map(|v| &v.data) {
+        Some(VersionData::Anchor { properties, .. }) => properties.clone(),
+        _ => {
+            return Err(err(format!(
+                "Cannot materialize sparse vector delta for node version {}: no anchor in chain",
+                version.id
+            ))
+            .into());
+        }
+    };
+
+    let mut props = anchor_props;
+    for v in chain.iter().rev().skip(1) {
+        if let VersionData::Delta { delta } = &v.data {
+            props = delta.apply(&props);
+        }
+    }
+    Ok(props)
+}
+
+/// Edge mirror of [`reconstruct_node_base_from_snapshot`].
+fn reconstruct_edge_base_from_snapshot(
+    by_id: &std::collections::HashMap<VersionId, Arc<crate::core::version::EdgeVersion>>,
+    version: &crate::core::version::EdgeVersion,
+) -> Result<crate::core::property::PropertyMap> {
+    use crate::core::version::VersionData;
+    let err = |reason: String| StorageError::PersistenceError(reason);
+
+    let mut chain: Vec<&Arc<crate::core::version::EdgeVersion>> = Vec::new();
+    let mut cur = version.prev_version;
+    while let Some(vid) = cur {
+        if chain.len() >= crate::storage::historical::MAX_RECONSTRUCTION_DEPTH {
+            return Err(err(format!(
+                "Version chain for edge {} exceeds max reconstruction depth while \
+                 materializing sparse vector deltas",
+                version.edge_id
+            ))
+            .into());
+        }
+        let v = by_id.get(&vid).ok_or_else(|| {
+            err(format!(
+                "Cannot materialize sparse vector delta for edge version {}: base version \
+                 {} is not in the persistence snapshot (cold-migrated?)",
+                version.id, vid
+            ))
+        })?;
+        chain.push(v);
+        if v.is_anchor() {
+            break;
+        }
+        cur = v.prev_version;
+    }
+
+    let anchor_props = match chain.last().map(|v| &v.data) {
+        Some(VersionData::Anchor { properties, .. }) => properties.clone(),
+        _ => {
+            return Err(err(format!(
+                "Cannot materialize sparse vector delta for edge version {}: no anchor in chain",
+                version.id
+            ))
+            .into());
+        }
+    };
+
+    let mut props = anchor_props;
+    for v in chain.iter().rev().skip(1) {
+        if let VersionData::Delta { delta } = &v.data {
+            props = delta.apply(&props);
+        }
+    }
+    Ok(props)
+}
+
+/// Persist the temporal index from a pre-captured [`HistoricalStorageSnapshot`]
+/// (lost-write persist race fix — coherent snapshot).
+///
+/// The snapshot-based counterpart of [`persist_temporal_index`], producing the
+/// byte-identical on-disk shape (only `node_versions`/`edge_versions` are read
+/// back by the loader; anchors are identified by `version_type` in the entries)
+/// but serializing OFF-LOCK from an immutable snapshot taken under the same
+/// coherence barrier as the graph snapshot, so both reflect the same applied
+/// set at the same manifest LSN.
+pub(crate) fn persist_temporal_index_from_snapshot(
+    snapshot: &crate::storage::snapshot::HistoricalStorageSnapshot,
+    manager: &Arc<IndexPersistenceManager>,
+    tracker: &Arc<PersistenceTracker>,
+    current_lsn: u64,
+) -> Result<()> {
+    use crate::storage::index_persistence::temporal::{
+        convert_edge_version, convert_node_version, materialize_version_data_for_persistence,
+        needs_sparse_vector_materialization, new_temporal_index_data,
+        save_temporal_index_with_cipher,
+    };
+
+    // Build id->version maps only when a sparse-vector delta is actually present
+    // (the common case pays only the detection scan), so their base state can be
+    // reconstructed within the snapshot.
+    let node_by_id: std::collections::HashMap<VersionId, Arc<crate::core::version::NodeVersion>> =
+        if snapshot
+            .iter_node_versions()
+            .any(|v| needs_sparse_vector_materialization(&v.data))
+        {
+            snapshot.iter_node_versions().map(|v| (v.id, v)).collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+    let edge_by_id: std::collections::HashMap<VersionId, Arc<crate::core::version::EdgeVersion>> =
+        if snapshot
+            .iter_edge_versions()
+            .any(|v| needs_sparse_vector_materialization(&v.data))
+        {
+            snapshot.iter_edge_versions().map(|v| (v.id, v)).collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+
+    let mut node_versions = Vec::with_capacity(snapshot.node_version_count());
+    for version_arc in snapshot.iter_node_versions() {
+        let version = &*version_arc;
+        let entry = if needs_sparse_vector_materialization(&version.data) {
+            let base = reconstruct_node_base_from_snapshot(&node_by_id, version)?;
+            let mut persisted = version.clone();
+            persisted.data = materialize_version_data_for_persistence(&version.data, &base)
+                .map_err(|e| {
+                    StorageError::PersistenceError(format!(
+                        "Failed to materialize node version {}: {}",
+                        version.id.as_u64(),
+                        e
+                    ))
+                })?;
+            convert_node_version(&persisted)
+        } else {
+            convert_node_version(version)
+        }
+        .map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to convert node version {}: {}",
+                version.id.as_u64(),
+                e
+            ))
+        })?;
+        node_versions.push(entry);
+    }
+
+    let mut edge_versions = Vec::with_capacity(snapshot.edge_version_count());
+    for version_arc in snapshot.iter_edge_versions() {
+        let version = &*version_arc;
+        let entry = if needs_sparse_vector_materialization(&version.data) {
+            let base = reconstruct_edge_base_from_snapshot(&edge_by_id, version)?;
+            let mut persisted = version.clone();
+            persisted.data = materialize_version_data_for_persistence(&version.data, &base)
+                .map_err(|e| {
+                    StorageError::PersistenceError(format!(
+                        "Failed to materialize edge version {}: {}",
+                        version.id.as_u64(),
+                        e
+                    ))
+                })?;
+            convert_edge_version(&persisted)
+        } else {
+            convert_edge_version(version)
+        }
+        .map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to convert edge version {}: {}",
+                version.id.as_u64(),
+                e
+            ))
+        })?;
+        edge_versions.push(entry);
+    }
+
+    let mut temporal_data = new_temporal_index_data();
+    temporal_data.node_versions = node_versions;
+    temporal_data.edge_versions = edge_versions;
+
+    // Persist string interner AFTER converting temporal data (conversion can
+    // intern previously unseen string values from version payloads).
+    manager.save_string_interner().map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
+
+    let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
+    // Route through the same at-rest encryption path as the live `persist_temporal_index`
+    // (Issue #3564): when a cipher is configured the snapshot-persisted file MUST be
+    // encrypted, not plaintext.
     save_temporal_index_with_cipher(&temporal_data, &temporal_path, manager.index_cipher())
         .map_err(|e| {
             StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
