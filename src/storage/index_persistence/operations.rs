@@ -626,7 +626,7 @@ pub(crate) fn persist_graph_index_from_snapshot(
     current_lsn: u64,
 ) -> Result<(u64, u64)> {
     use crate::storage::index_persistence::graph::{
-        extract_graph_data_from_snapshot, save_graph_index_with_cipher,
+        extract_graph_data_from_snapshot, save_graph_index_with_keyring,
     };
 
     // Extract nodes/edges from the coherent snapshot. Property serialization can
@@ -649,9 +649,9 @@ pub(crate) fn persist_graph_index_from_snapshot(
     // (Issue #3564): when a cipher is configured the snapshot-persisted file MUST be
     // encrypted, not plaintext, or the coherent-snapshot path would be a security
     // regression vs the live path.
-    save_graph_index_with_cipher(&graph_data, &graph_path, manager.index_cipher()).map_err(
-        |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
-    )?;
+    save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring()).map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save graph index: {}", e))
+    })?;
 
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
@@ -937,7 +937,7 @@ pub(crate) fn persist_temporal_index_from_snapshot(
     use crate::storage::index_persistence::temporal::{
         convert_edge_version, convert_node_version, materialize_version_data_for_persistence,
         needs_sparse_vector_materialization, new_temporal_index_data,
-        save_temporal_index_with_cipher,
+        save_temporal_index_with_keyring,
     };
 
     // Build id->version maps only when a sparse-vector delta is actually present
@@ -1032,10 +1032,9 @@ pub(crate) fn persist_temporal_index_from_snapshot(
     // Route through the same at-rest encryption path as the live `persist_temporal_index`
     // (Issue #3564): when a cipher is configured the snapshot-persisted file MUST be
     // encrypted, not plaintext.
-    save_temporal_index_with_cipher(&temporal_data, &temporal_path, manager.index_cipher())
-        .map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
-        })?;
+    save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring()).map_err(
+        |e| StorageError::PersistenceError(format!("Failed to save temporal index: {}", e)),
+    )?;
 
     tracker.reset_temporal_mutations();
     tracker.update_temporal_lsn(current_lsn);
