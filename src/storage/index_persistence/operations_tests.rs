@@ -1414,3 +1414,141 @@ fn regression_3490_interner_remap_subprocess_helper() {
          edge-type label was not remapped (resolves to the wrong live id)"
     );
 }
+
+/// Regression guard for the #488 auto-merge break (PR #3578).
+///
+/// The #488 key-rotation merge removed `IndexPersistenceManager::index_cipher()`
+/// and migrated the live persist paths to the `*_with_keyring` helpers, but the
+/// two snapshot-persist functions added by #481
+/// (`persist_graph_index_from_snapshot` / `persist_temporal_index_from_snapshot`)
+/// were missed by the text-merge, leaving them calling the removed method
+/// (E0599, red trunk). This test drives BOTH functions DIRECTLY with an
+/// encryption-enabled manager and asserts the persisted graph + temporal
+/// snapshot files carry the `AEIX` encrypted-index header on disk — the exact
+/// invariant a wrong (plaintext / non-keyring) call would violate. It also
+/// reloads through the keyring to prove the encrypted bytes round-trip.
+///
+/// Coverage: these are the two changed call sites in `operations.rs`
+/// (`save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring())`
+/// at ~L652 and
+/// `save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring())`
+/// at ~L1035). The existing end-to-end coverage lives in the ignored-by-codecov
+/// `tests/` integration suite, so this lib-level test is what greens the patch.
+#[test]
+fn snapshot_persist_from_snapshot_uses_keyring_and_writes_encrypted() {
+    use crate::encryption::cipher::{Aes256GcmCipher, Cipher};
+    use crate::storage::index_persistence::common::is_encrypted_index;
+    use crate::storage::index_persistence::graph::load_graph_index_with_keyring;
+    use crate::storage::index_persistence::temporal::load_temporal_index_with_keyring;
+    use crate::storage::wal::LSN;
+    use zeroize::Zeroizing;
+
+    fn test_cipher(seed: u8) -> Arc<dyn Cipher> {
+        let mut key = Zeroizing::new([0u8; 32]);
+        key[0] = seed;
+        key[5] = seed.wrapping_add(1);
+        Arc::new(Aes256GcmCipher::new(&key))
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cipher = test_cipher(0x71);
+    // Encryption-enabled manager: `keyring()` is Some, so the persist paths MUST
+    // route through the keyring and write AEIX-encrypted files.
+    let manager = Arc::new(IndexPersistenceManager::with_cipher(
+        temp_dir.path(),
+        Some(cipher.clone()),
+    ));
+    let tracker = Arc::new(PersistenceTracker::new());
+
+    // ── Graph snapshot path (persist_graph_index_from_snapshot) ─────────────
+    let current = Arc::new(CurrentStorage::new());
+    let graph_value = format!(
+        "graph-snap-enc-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos()
+    );
+    current
+        .create_node(
+            "SnapshotPersistGraph",
+            PropertyMapBuilder::new()
+                .insert("payload", graph_value.as_str())
+                .build(),
+        )
+        .expect("failed to create graph test node");
+    let current_snapshot = current.create_snapshot(LSN(0));
+
+    persist_graph_index_from_snapshot(&current_snapshot, &manager, Some(&tracker), 0)
+        .expect("persist_graph_index_from_snapshot must succeed with an encrypted manager");
+
+    // ── Temporal snapshot path (persist_temporal_index_from_snapshot) ───────
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    let temporal_value = format!(
+        "temporal-snap-enc-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos()
+    );
+    let label = GLOBAL_INTERNER
+        .intern("SnapshotPersistTemporal")
+        .expect("failed to intern label");
+    let now = time::now();
+    historical
+        .write()
+        .add_node_version(
+            NodeId::new(1).expect("invalid node id"),
+            VersionId::new(1).expect("invalid version id"),
+            now,
+            now,
+            label,
+            PropertyMapBuilder::new()
+                .insert("payload", temporal_value.as_str())
+                .build(),
+            false,
+        )
+        .expect("failed to add node version");
+    let historical_snapshot = historical.read().create_snapshot(LSN(0));
+
+    persist_temporal_index_from_snapshot(&historical_snapshot, &manager, &tracker, 0)
+        .expect("persist_temporal_index_from_snapshot must succeed with an encrypted manager");
+
+    // ── On-disk assertion: both snapshot-persisted files are AEIX-encrypted ──
+    // This is the invariant the #488 merge break violated: a wrong (non-keyring)
+    // call would write plaintext (or fail to compile). Reading raw bytes proves
+    // the keyring path actually ran.
+    let graph_path = manager.graph_path().join("adjacency.idx");
+    let graph_bytes = std::fs::read(&graph_path).expect("graph snapshot file must exist");
+    assert!(
+        is_encrypted_index(&graph_bytes),
+        "persist_graph_index_from_snapshot must write an AEIX-encrypted file when a \
+         keyring is configured (found plaintext at {:?})",
+        graph_path
+    );
+
+    let temporal_path = manager.temporal_path().join("versions.idx");
+    let temporal_bytes = std::fs::read(&temporal_path).expect("temporal snapshot file must exist");
+    assert!(
+        is_encrypted_index(&temporal_bytes),
+        "persist_temporal_index_from_snapshot must write an AEIX-encrypted file when a \
+         keyring is configured (found plaintext at {:?})",
+        temporal_path
+    );
+
+    // ── Round-trip: the encrypted bytes decrypt through the keyring ─────────
+    let graph_data = load_graph_index_with_keyring(&graph_path, manager.keyring())
+        .expect("encrypted graph snapshot must decrypt through the keyring");
+    assert_eq!(
+        graph_data.nodes.len(),
+        1,
+        "round-tripped graph snapshot must recover the single persisted node"
+    );
+    let temporal_data = load_temporal_index_with_keyring(&temporal_path, manager.keyring())
+        .expect("encrypted temporal snapshot must decrypt through the keyring");
+    assert_eq!(
+        temporal_data.node_versions.len(),
+        1,
+        "round-tripped temporal snapshot must recover the single persisted version"
+    );
+}
