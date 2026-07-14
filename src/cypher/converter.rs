@@ -42,9 +42,13 @@ use super::parser::CypherParser;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::query::builder::Query;
+use crate::query::converter::{
+    ProvenanceLoweringError, lower_provenance_comparison, provenance_field_name,
+};
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Predicate, PredicateValue,
-    QueryOp, ScoreComparison, ScoreThreshold, SortKey, TraversalDepth,
+    ProvenanceCmp, ProvenanceField, ProvenanceOperand, ProvenancePredicate, QueryOp,
+    ScoreComparison, ScoreThreshold, SortKey, TraversalDepth,
 };
 use crate::query::plan::{QueryHints, TemporalContext};
 
@@ -57,6 +61,68 @@ use crate::query::plan::{QueryHints, TemporalContext};
 /// Kept clearly above the parser's cap so it only ever rejects such hand-built
 /// pathological input, never a legitimately parsed query.
 const MAX_CONVERT_DEPTH: usize = 256;
+
+/// Map a Cypher [`CypherCompOp`] to the IR [`ProvenanceCmp`] (Issue #3354b).
+fn cypher_comp_to_provenance_cmp(op: CypherCompOp) -> ProvenanceCmp {
+    match op {
+        CypherCompOp::Eq => ProvenanceCmp::Eq,
+        CypherCompOp::Ne => ProvenanceCmp::Ne,
+        CypherCompOp::Lt => ProvenanceCmp::Lt,
+        CypherCompOp::Le => ProvenanceCmp::Le,
+        CypherCompOp::Gt => ProvenanceCmp::Gt,
+        CypherCompOp::Ge => ProvenanceCmp::Ge,
+    }
+}
+
+/// Flip a Cypher comparison operator when its operands are swapped, so an
+/// accessor on the right-hand side (`0.9 <= confidence(x)`) lowers identically
+/// to the accessor-on-left form (`confidence(x) >= 0.9`). Equality/inequality
+/// are symmetric (Issue #3354b).
+fn flip_cypher_comp_op(op: CypherCompOp) -> CypherCompOp {
+    match op {
+        CypherCompOp::Eq => CypherCompOp::Eq,
+        CypherCompOp::Ne => CypherCompOp::Ne,
+        CypherCompOp::Lt => CypherCompOp::Gt,
+        CypherCompOp::Le => CypherCompOp::Ge,
+        CypherCompOp::Gt => CypherCompOp::Lt,
+        CypherCompOp::Ge => CypherCompOp::Le,
+    }
+}
+
+/// Map the surface-agnostic [`ProvenanceLoweringError`] into the Cypher error
+/// vocabulary (Issue #3354b).
+///
+/// Chosen so the MCP `query` tool surfaces the same structured kinds as the AQL
+/// side (via [`CypherError`] → `crate::core::error::Error` → `map_query_error`):
+/// type mismatches and out-of-range confidence become
+/// [`CypherError::ParameterError`] (→ `invalid_params`); the ordering-op-on-
+/// string rejection becomes [`CypherError::SemanticError`] (→ `parse_error`).
+fn map_provenance_lowering_error(e: ProvenanceLoweringError) -> CypherError {
+    match e {
+        ProvenanceLoweringError::ConfidenceOutOfRange { value, .. } => CypherError::ParameterError(
+            format!("confidence(x) must be between 0.0 and 1.0, got {value}"),
+        ),
+        ProvenanceLoweringError::ConfidenceNotNumeric => CypherError::ParameterError(
+            "type mismatch: confidence(x) compares only to a numeric value".to_string(),
+        ),
+        ProvenanceLoweringError::OrderingOpOnStringField { field } => {
+            CypherError::SemanticError(format!(
+                "ordering operators (<, <=, >, >=) are not supported for {}(x); \
+                 only = and <> are supported for source/reason",
+                field.accessor_name()
+            ))
+        }
+        ProvenanceLoweringError::StringFieldNotString { field } => {
+            CypherError::ParameterError(format!(
+                "type mismatch: {}(x) compares only to a string value",
+                field.accessor_name()
+            ))
+        }
+        ProvenanceLoweringError::FilterValidation { message, .. } => {
+            CypherError::ParameterError(message)
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Parameter values
@@ -1040,6 +1106,13 @@ impl CypherConverter {
                 Ok(Predicate::Not(Box::new(inner_pred)))
             }
             CypherExpr::IsNull(inner) => {
+                // `provenance(x) IS NULL` (Issue #3354b): selects the versions
+                // with no provenance bundle at all (unattributed rows).
+                if self.is_provenance_bundle_accessor(inner)? {
+                    return Ok(Predicate::Provenance(ProvenancePredicate::IsNull {
+                        negated: false,
+                    }));
+                }
                 match inner.as_ref() {
                     // Property access (`n.email IS NULL`): openCypher treats a
                     // property as null when it is ABSENT *or* present with an
@@ -1069,6 +1142,13 @@ impl CypherConverter {
                 }
             }
             CypherExpr::IsNotNull(inner) => {
+                // `provenance(x) IS NOT NULL` (Issue #3354b): selects the
+                // versions that carry a provenance bundle (attributed rows).
+                if self.is_provenance_bundle_accessor(inner)? {
+                    return Ok(Predicate::Provenance(ProvenancePredicate::IsNull {
+                        negated: true,
+                    }));
+                }
                 match inner.as_ref() {
                     // Property access (`n.email IS NOT NULL`): openCypher requires
                     // the property to be PRESENT with a non-null value. Lower to
@@ -1141,6 +1221,30 @@ impl CypherConverter {
         op: CypherCompOp,
         right: &CypherExpr,
     ) -> Result<Predicate, CypherError> {
+        // Provenance accessors (Issue #3354b): `source(x)`/`confidence(x)`/
+        // `reason(x)` appear as function calls, never property accesses, so a
+        // property literally named `source` (`n.source`) is unaffected.
+        // Recognize an accessor on either side and lower to a provenance
+        // predicate before the ordinary property-access handling below.
+        let left_accessor = self.as_provenance_accessor(left)?;
+        let right_accessor = self.as_provenance_accessor(right)?;
+        match (left_accessor, right_accessor) {
+            (Some(_), Some(_)) => {
+                return Err(CypherError::SemanticError(
+                    "comparing two provenance accessors is not supported".to_string(),
+                ));
+            }
+            (Some(field), None) => {
+                return self.build_provenance_comparison(field, op, right);
+            }
+            (None, Some(field)) => {
+                // Accessor on the right (`0.9 <= confidence(n)`): flip the
+                // comparison so the accessor is the logical left-hand side.
+                return self.build_provenance_comparison(field, flip_cypher_comp_op(op), left);
+            }
+            (None, None) => {}
+        }
+
         let key = self.extract_property_key(left)?;
         let value = self.convert_expr_to_predicate_value(right)?;
 
@@ -1152,6 +1256,127 @@ impl CypherConverter {
             CypherCompOp::Lt => Predicate::Lt { key, value },
             CypherCompOp::Le => Predicate::Lte { key, value },
         })
+    }
+
+    /// Recognize a provenance accessor expression `source(x)`/`confidence(x)`/
+    /// `reason(x)` (Issue #3354b).
+    ///
+    /// Returns:
+    /// - `Ok(Some(field))` for a well-formed accessor over a single bound
+    ///   variable,
+    /// - `Ok(None)` for any other expression (including unknown function calls,
+    ///   which fall through to the ordinary comparison path),
+    /// - `Err(..)` for a provenance-named accessor with a malformed argument
+    ///   (e.g. `source(n.foo)`, `confidence('x')`, `confidence(r, s)`,
+    ///   `source()`), so the mistake surfaces as a structured error rather than
+    ///   silently degrading.
+    fn as_provenance_accessor(
+        &self,
+        expr: &CypherExpr,
+    ) -> Result<Option<ProvenanceField>, CypherError> {
+        let CypherExpr::FunctionCall {
+            name,
+            args,
+            distinct,
+        } = expr
+        else {
+            return Ok(None);
+        };
+        let Some(field) = provenance_field_name(name) else {
+            return Ok(None);
+        };
+        // `DISTINCT` is only meaningful for aggregates; reject it here rather
+        // than silently ignoring it.
+        if *distinct {
+            return Err(CypherError::SemanticError(format!(
+                "{}(x) provenance accessor does not accept DISTINCT",
+                field.accessor_name()
+            )));
+        }
+        match args.as_slice() {
+            [CypherExpr::Variable(_)] => Ok(Some(field)),
+            _ => Err(CypherError::SemanticError(format!(
+                "{}(x) provenance accessor requires exactly one bound variable argument",
+                field.accessor_name()
+            ))),
+        }
+    }
+
+    /// Recognize a `provenance(x)` bundle accessor for the `IS [NOT] NULL` form
+    /// (Issue #3354b).
+    ///
+    /// Returns `Ok(true)` for a well-formed `provenance(<bound variable>)` call,
+    /// `Ok(false)` for any other expression, and `Err(..)` for a
+    /// `provenance(...)` call with a malformed argument. Unlike the field
+    /// accessors, `provenance` addresses the whole bundle and is only valid in
+    /// the `IS [NOT] NULL` position.
+    fn is_provenance_bundle_accessor(&self, expr: &CypherExpr) -> Result<bool, CypherError> {
+        let CypherExpr::FunctionCall {
+            name,
+            args,
+            distinct,
+        } = expr
+        else {
+            return Ok(false);
+        };
+        if !name.eq_ignore_ascii_case("provenance") {
+            return Ok(false);
+        }
+        if *distinct {
+            return Err(CypherError::SemanticError(
+                "provenance(x) does not accept DISTINCT".to_string(),
+            ));
+        }
+        match args.as_slice() {
+            [CypherExpr::Variable(_)] => Ok(true),
+            _ => Err(CypherError::SemanticError(
+                "provenance(x) IS NULL requires a single bound variable argument".to_string(),
+            )),
+        }
+    }
+
+    /// Lower a provenance accessor comparison `field(x) <op> operand` (accessor
+    /// already normalized to the left) into a [`Predicate::Provenance`], reusing
+    /// the shared surface-agnostic lowering (Issue #3354b).
+    ///
+    /// The type-check / folding / ordering-op rejection / `[0,1]`-NaN validation
+    /// semantics live once in [`lower_provenance_comparison`]; this method only
+    /// adapts the Cypher operand/operator into the IR triple and maps the
+    /// neutral error into the Cypher error vocabulary.
+    fn build_provenance_comparison(
+        &self,
+        field: ProvenanceField,
+        op: CypherCompOp,
+        operand_expr: &CypherExpr,
+    ) -> Result<Predicate, CypherError> {
+        let operand = self.expr_to_provenance_operand(operand_expr)?;
+        let cmp = cypher_comp_to_provenance_cmp(op);
+        lower_provenance_comparison(field, cmp, operand).map_err(map_provenance_lowering_error)
+    }
+
+    /// Resolve the right-hand literal/parameter of a provenance comparison to a
+    /// typed operand (Issue #3354b).
+    fn expr_to_provenance_operand(
+        &self,
+        expr: &CypherExpr,
+    ) -> Result<ProvenanceOperand, CypherError> {
+        let value = match expr {
+            CypherExpr::Value(v) => self.convert_value_to_predicate_value(v)?,
+            _ => {
+                return Err(CypherError::SemanticError(
+                    "a provenance accessor must be compared to a literal or parameter".to_string(),
+                ));
+            }
+        };
+        match value {
+            PredicateValue::String(s) => Ok(ProvenanceOperand::Str(s)),
+            PredicateValue::Int(i) => Ok(ProvenanceOperand::Num(i as f64)),
+            PredicateValue::Float(f) => Ok(ProvenanceOperand::Num(f)),
+            PredicateValue::Bool(_) | PredicateValue::Null => Err(CypherError::ParameterError(
+                "type mismatch: a provenance accessor operand must be a string or number"
+                    .to_string(),
+            )),
+        }
     }
 
     /// Extract a property key from an expression.
