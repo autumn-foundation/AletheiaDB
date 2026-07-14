@@ -380,7 +380,7 @@ impl AletheiaMcpServer {
     /// shaping runs, keeping response-shaping cost bounded regardless of caller
     /// input. The per-key lookup itself is O(1); this cap additionally bounds the
     /// one-time cost of validating the array and building the lookup set.
-    #[must_use]
+    #[must_use = "with_max_priority_properties returns a new server; discarding it drops the configured limit"]
     pub fn with_max_priority_properties(mut self, max_priority_properties: usize) -> Self {
         self.max_priority_properties = max_priority_properties;
         self
