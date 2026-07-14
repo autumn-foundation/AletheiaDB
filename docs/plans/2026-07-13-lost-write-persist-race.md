@@ -132,17 +132,37 @@ registration, so the frontier and the in-flight set are mutually consistent.
 Replay semantics (`src/db/config.rs`) are unchanged (still inclusive-from-manifest
 per #3419); only the manifest LSN it reads is now the applied watermark.
 
-## Scope note / follow-up
+## Follow-ups / out of scope
 
-Vector indexes are still persisted from live current storage rather than the
-coherent snapshot. The reported torn-snapshot symptom is graph-vs-temporal (both
-fixed); a snapshot-coherent vector persist requires locking the vector index and
-is a tracked follow-up. Also, `persist_indexes` holds `current_timestamp` across
-the in-memory snapshot clones; a possible optimization is to release it right
-after the frontier+min read (the applied-set is already frozen by
-`historical.read()`), which the current implementation conservatively does not
-do. The hold is in-memory only and strictly shorter than the pre-existing
-`historical.read()`-across-temporal-disk-I/O hold it replaces.
+Two known follow-ups remain out of scope for this change:
+
+- **(F7) Snapshot-coherent vector index.** Vector indexes are persisted from
+  LIVE current storage — AFTER the coherence barrier is released — rather than
+  from the coherent snapshot, so a graph-vs-vector torn snapshot is possible on
+  recovery. This is NOT a lost write (replay re-indexes every entry with
+  `lsn >= manifest_lsn`), but an entry that is in the vector file AND also
+  replayed can get a double HNSW insert. Fix options: snapshot the vectors under
+  the same barrier, or gate loaded vector entries by `lsn <= manifest` on
+  restore. The reported torn-snapshot symptom is graph-vs-temporal (both fixed by
+  the coherence barrier above).
+
+- **(F2) Abort-after-fsync WAL-framing replay.** A commit that crashes between
+  WAL fsync and in-memory apply, or the narrow crash-during-commit-flush window,
+  is bounded by the pre-existing lack of WAL transaction framing (Issues #3413 /
+  #3416). Durable WAL transaction framing so partial/aborted commits are cleanly
+  skipped on replay is tracked there, not here.
+
+### Note on the `current_timestamp` hold (addressed)
+
+`persist_indexes` now holds `current_timestamp` (lock-order class 1, the top of
+every commit) ONLY for the O(log n) frontier + `in_flight.min()` watermark read,
+then RELEASES it before the two O(N) snapshot clones — so a background persist no
+longer stalls all writers across the deep clones. Releasing early is safe: the
+manifest LSN equals `min(in-flight bases at T0)`, every write with
+`lsn < manifest_lsn` was already applied at T0 and is present in the coherent
+snapshot taken at T1 > T0 under `historical.read()`, and every durable write not
+in the snapshot has `lsn >= manifest_lsn` and is re-applied idempotently by
+inclusive replay. The frontier / `in_flight.min()` are not re-read after release.
 
 ## Test / risk matrix
 
@@ -160,4 +180,6 @@ do. The hold is in-memory only and strictly shorter than the pre-existing
 always-compiled one-shot commit seam
 (`api::transaction::write::race_seam`) that parks exactly one commit at the
 durable-but-not-applied point while the test drives `persist_indexes()`. The
-seam is a single relaxed atomic load when unarmed (zero production cost).
+seam is a single acquire atomic load when unarmed (zero production cost), and its
+arming surface is compiled only under the `testing` feature (gated out of
+default builds, so the commit path cannot be parked in production).

@@ -2053,30 +2053,47 @@ impl Drop for WriteTransaction {
 ///
 /// # Cost
 ///
-/// The fire path ([`run_pre_apply_once`]) is a single relaxed atomic load when
+/// The fire path ([`run_pre_apply_once`]) is a single acquire atomic load when
 /// unarmed (the production state), so it adds no measurable cost to the commit
 /// hot path — the "an `Option` that's `None`" contract, implemented as an
 /// `AtomicBool` that is `false` in production.
 ///
+/// # Arming surface is feature-gated
+///
+/// The arming API (`arm_pre_apply_once`/`clear`, the `HOOK` static, and the
+/// armed branch that locks `HOOK`) is compiled ONLY under
+/// `#[cfg(any(test, feature = "testing"))]`. In a default build there is no way
+/// to set `ARMED = true`, so [`run_pre_apply_once`] reduces to its inert fast
+/// path (`if !ARMED { return; }`) and can never park the commit path — it is
+/// inert by construction, not merely by convention. A downstream crate that
+/// links the library without the `testing` feature cannot reach the parking
+/// surface.
+///
 /// # One-shot
 ///
-/// [`arm_pre_apply_once`] installs a hook fired by the **next** commit only; the
+/// `arm_pre_apply_once` installs a hook fired by the **next** commit only; the
 /// fire path atomically disarms before running the hook, so under concurrency
-/// exactly one commit fires it. [`clear`] disarms without firing (test teardown).
+/// exactly one commit fires it. `clear` disarms without firing (test teardown).
 #[doc(hidden)]
 pub mod race_seam {
+    #[cfg(any(test, feature = "testing"))]
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[cfg(any(test, feature = "testing"))]
     type Hook = Box<dyn FnOnce() + Send>;
 
     /// Fast-path guard: `true` only while a hook is armed. Kept separate from
-    /// the `Mutex` so the unarmed fire path never touches the lock.
+    /// the `Mutex` so the unarmed fire path never touches the lock. In a default
+    /// (non-`testing`) build nothing can ever set this to `true`.
     static ARMED: AtomicBool = AtomicBool::new(false);
+    #[cfg(any(test, feature = "testing"))]
     static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
 
     /// Arm a one-shot hook fired by the next commit at the durable-but-unapplied
-    /// point. Intended for regression tests only.
+    /// point. Intended for regression tests only; only compiled under
+    /// `#[cfg(any(test, feature = "testing"))]`.
+    #[cfg(any(test, feature = "testing"))]
     pub fn arm_pre_apply_once(hook: Box<dyn FnOnce() + Send>) {
         if let Ok(mut slot) = HOOK.lock() {
             *slot = Some(hook);
@@ -2084,7 +2101,9 @@ pub mod race_seam {
         }
     }
 
-    /// Disarm any pending hook without firing it (test teardown).
+    /// Disarm any pending hook without firing it (test teardown). Only compiled
+    /// under `#[cfg(any(test, feature = "testing"))]`.
+    #[cfg(any(test, feature = "testing"))]
     pub fn clear() {
         ARMED.store(false, Ordering::Release);
         if let Ok(mut slot) = HOOK.lock() {
@@ -2093,18 +2112,23 @@ pub mod race_seam {
     }
 
     /// Fire and consume the armed hook exactly once. Called on the commit hot
-    /// path just before `apply_changes`.
+    /// path just before `apply_changes`. Always compiled, but in a default build
+    /// `ARMED` can never be `true` (the arming surface is gated out), so this is
+    /// just the inert fast-path load.
     #[inline]
     pub(crate) fn run_pre_apply_once() {
-        // Fast path: one relaxed atomic load; `false` in production.
-        if !ARMED.load(Ordering::Acquire) {
-            return;
-        }
-        // Disarm atomically so concurrent commits never double-fire.
-        if ARMED.swap(false, Ordering::AcqRel) {
-            let hook = HOOK.lock().ok().and_then(|mut slot| slot.take());
-            if let Some(hook) = hook {
-                hook();
+        // Fast path: one acquire atomic load; `false` in production (the arming
+        // surface is gated out of default builds, so `ARMED` is always `false`
+        // and this whole body is inert by construction).
+        if ARMED.load(Ordering::Acquire) {
+            // Disarm atomically so concurrent commits never double-fire. This
+            // branch is unreachable without the arming surface (test/testing only).
+            #[cfg(any(test, feature = "testing"))]
+            if ARMED.swap(false, Ordering::AcqRel) {
+                let hook = HOOK.lock().ok().and_then(|mut slot| slot.take());
+                if let Some(hook) = hook {
+                    hook();
+                }
             }
         }
     }

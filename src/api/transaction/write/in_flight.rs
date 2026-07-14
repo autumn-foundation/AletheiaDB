@@ -48,7 +48,12 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct InFlightLsns {
     /// Multiset is unnecessary: each in-flight commit owns a distinct base LSN
     /// (LSN allocation is monotonic and a commit registers exactly once), so a
-    /// plain ordered set suffices and gives O(log n) min via `first()`.
+    /// plain ordered set suffices and gives O(log n) min via `iter().next()`.
+    ///
+    /// NOTE: raw `u64` rather than the `LSN` newtype (CLAUDE.md prefers the
+    /// newtype) because every call site — the commit path and `persist_indexes`
+    /// — works in raw `u64` LSN values; wrapping here would ripple `LSN`
+    /// wrap/unwrap into several call sites for no safety gain in this leaf type.
     lsns: Mutex<BTreeSet<u64>>,
 }
 

@@ -37,15 +37,19 @@ pub struct IndexManifest {
     ///
     /// # Semantics (Issue #3419)
     ///
-    /// This is the **next-to-allocate** LSN (`wal.current_lsn()`) captured
-    /// *before* the snapshot was taken — NOT the last-allocated LSN. The
-    /// resulting contract is:
+    /// This is the **applied-frontier watermark** =
+    /// `min(in-flight commit base LSN, wal.current_lsn())` captured *before*
+    /// the snapshot was taken — i.e. the minimum LSN of any commit that is
+    /// durable (fsynced) but not yet applied, or the WAL allocation frontier
+    /// when no commit is in flight. It is NOT the last-allocated LSN, and it
+    /// equals the allocation frontier (`wal.current_lsn()`) ONLY when no commit
+    /// is in flight. The resulting contract is:
     ///
-    /// - Every WAL entry with LSN **< lsn** is guaranteed to be reflected in
-    ///   the persisted snapshot.
+    /// - Every WAL entry with LSN **< lsn** is guaranteed to be applied AND
+    ///   reflected in the persisted snapshot.
     /// - Entries with LSN **>= lsn** may or may not be reflected (a write can
-    ///   race a background persist between the LSN capture and the snapshot
-    ///   read).
+    ///   race a background persist, or be durable-but-unapplied at capture
+    ///   time), and are re-applied idempotently by inclusive replay.
     ///
     /// Startup replay must therefore begin **AT `lsn` (inclusive)** — never
     /// at `lsn + 1`, which silently drops the first post-persist write — and
