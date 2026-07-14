@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 use super::atomic_write;
 use super::common::{
-    ENC_HEADER_LEN, IndexKeyring, decrypt_index_bytes_with_keyring, encrypt_index_bytes_versioned,
-    index_file_key_version, is_encrypted_index,
+    ENC_HEADER_LEN, IndexKeyring, decrypt_index_bytes, decrypt_index_bytes_with_keyring,
+    encrypt_index_bytes_versioned, index_file_key_version, is_encrypted_index,
 };
 use crate::encryption::cipher::Cipher;
 
@@ -47,12 +47,42 @@ pub enum RotationError {
     /// The new key derives the same index DEK as the old key.
     #[error("new key equals the current key; rotation would be a no-op and risk nonce reuse")]
     SameKey,
+    /// Index-only key rotation was requested while one or more OTHER layers
+    /// (WAL / checkpoint / cold storage) are still encrypted under the current
+    /// MEK. Rotating only the index tree to a new MEK and then switching the key
+    /// provider would leave those layers undecryptable — catastrophic loss — so
+    /// v1 refuses (Issue #488 P0.1). Full-MEK rotation across every layer is a
+    /// documented follow-up.
+    #[error(
+        "index-only key rotation is unsupported while other encrypted-at-rest \
+         layers are present ({layers}); rotating the index alone to a new key \
+         would leave those layers undecryptable"
+    )]
+    UnsupportedWhileEncryptedLayersPresent {
+        /// Comma-separated names of the still-encrypted layers (e.g. "wal").
+        layers: String,
+    },
     /// A rotation is already in progress.
     #[error("a key rotation is already in progress")]
     AlreadyInProgress,
     /// No rotation is in progress.
     #[error("no key rotation is in progress")]
     NotInProgress,
+    /// A file is stamped with the current (new) `key_version` but does NOT
+    /// authenticate under the current key — evidence of a foreign key
+    /// generation (e.g. an earlier interrupted rotation stamped the same version
+    /// number with a *different* key). Treating it as already-migrated would let
+    /// `complete` retire the old key over a file only the old key can read, so
+    /// the rotation wedges here instead (Issue #488 P0.3).
+    #[error(
+        "index file {path} is stamped with the current key_version but does not \
+         decrypt under the current key (foreign key generation); manual \
+         intervention required"
+    )]
+    ForeignKeyVersionFile {
+        /// The offending file.
+        path: PathBuf,
+    },
     /// `complete` was called while old-key files remain.
     #[error("cannot complete rotation: {remaining} index file(s) still hold the old key")]
     OldKeyFilesRemain {
@@ -208,10 +238,35 @@ impl IndexKeyRotation {
         Ok(p)
     }
 
-    /// Verify a full pass completed (zero old/unknown encrypted files remain).
+    /// Verify a full pass completed (zero old/unknown encrypted files remain)
+    /// AND that every file claiming the new `key_version` actually authenticates
+    /// under the new key.
+    ///
+    /// Binding verification to key IDENTITY, not just the version NUMBER, closes
+    /// the double-rotation hole (Issue #488 P0.3): a file stamped with
+    /// `new_version` by a *different* key (from an earlier interrupted rotation)
+    /// is not silently counted as migrated — it wedges the rotation with
+    /// [`RotationError::ForeignKeyVersionFile`] so [`complete`](Self::complete)
+    /// can never retire the old key over a file only the old key can read.
     pub fn verify_complete(&self) -> Result<(), RotationError> {
-        let status = self.status()?;
-        let remaining = status.at_old + status.unknown;
+        let mut remaining = 0;
+        for path in self.enumerate_index_files()? {
+            let bytes = std::fs::read(&path)?;
+            match index_file_key_version(&bytes) {
+                // Not an encrypted-index file (enumeration already excludes
+                // these, but stay defensive).
+                None => {}
+                Some(v) if v == self.new_version => {
+                    // Version says "new" — prove it with an AEAD auth check under
+                    // the current key, not the bare number.
+                    if decrypt_index_bytes(&bytes, &path, Some(&self.new_cipher)).is_err() {
+                        return Err(RotationError::ForeignKeyVersionFile { path });
+                    }
+                }
+                // Old or unknown key generation still present.
+                Some(_) => remaining += 1,
+            }
+        }
         if remaining > 0 {
             return Err(RotationError::OldKeyFilesRemain { remaining });
         }
@@ -256,7 +311,19 @@ impl IndexKeyRotation {
         }
         let current = index_file_key_version(&bytes).unwrap_or(0);
         if current == target_version {
-            return Ok(FileOutcome::SkippedAlreadyNew);
+            // Key-identity binding (Issue #488 P0.3): a matching version NUMBER
+            // is not proof this file was written by `target_cipher`. A prior
+            // interrupted rotation could have stamped `target_version` with a
+            // DIFFERENT key. Confirm the file authenticates under the target key
+            // before trusting it as already-migrated; otherwise wedge rather
+            // than skip, so a later `complete` never retires the old key over a
+            // foreign-key file.
+            return match decrypt_index_bytes(&bytes, path, Some(target_cipher)) {
+                Ok(_) => Ok(FileOutcome::SkippedAlreadyNew),
+                Err(_) => Err(RotationError::ForeignKeyVersionFile {
+                    path: path.to_path_buf(),
+                }),
+            };
         }
         // Decrypt with whichever generation wrote this file (keyring dispatch).
         let plaintext = decrypt_index_bytes_with_keyring(&bytes, path, Some(&self.keyring))?;
@@ -570,6 +637,52 @@ mod tests {
             assert_eq!(&read_enc(p, &old_ring), pt);
         }
         assert_eq!(keyring.current_version(), OLD_V);
+    }
+
+    #[test]
+    fn foreign_key_file_at_new_version_wedges_verify_and_complete() {
+        // Issue #488 P0.3: a file stamped with the NEW key_version but encrypted
+        // under a THIRD (foreign) key — as an interrupted second rotation would
+        // leave — must NOT be treated as already-migrated. verify_complete and
+        // complete must refuse (ForeignKeyVersionFile), never retire the old key.
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let (old, new) = (cipher_from_seed(0xD0), cipher_from_seed(0xD1));
+        let foreign = cipher_from_seed(0xEE); // neither old nor new
+
+        // A normal old-key file plus a file stamped NEW_V but written by the
+        // foreign key.
+        write_enc(&indexes.join("normal.idx"), &old, OLD_V, b"payload-normal");
+        write_enc(
+            &indexes.join("foreign.idx"),
+            &foreign,
+            NEW_V,
+            b"payload-foreign",
+        );
+
+        let eng = engine(&indexes, &old, &new);
+        // Full forward pass: the old-key file re-encrypts fine, but the
+        // foreign-key file (already at NEW_V number) is detected on the skip
+        // path and wedges.
+        let err = eng.re_encrypt(&mut |_| true).unwrap_err();
+        assert!(
+            matches!(err, RotationError::ForeignKeyVersionFile { .. }),
+            "expected ForeignKeyVersionFile, got {err:?}"
+        );
+
+        // verify_complete independently refuses (key-identity, not number).
+        let verr = eng.verify_complete().unwrap_err();
+        assert!(
+            matches!(verr, RotationError::ForeignKeyVersionFile { .. }),
+            "verify_complete must wedge on a foreign-key new-version file, got {verr:?}"
+        );
+
+        // complete() must therefore refuse and NOT retire the old generation.
+        assert!(eng.complete().is_err());
+        assert!(
+            eng.status().is_ok(),
+            "engine still holds both generations after refusal"
+        );
     }
 
     #[test]

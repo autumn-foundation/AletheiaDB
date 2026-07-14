@@ -43,6 +43,14 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce as AesNonce};
 ///
 /// Nonce: 12 bytes (96 bits), Tag: 16 bytes (128 bits).
 /// Total overhead: 28 bytes per encrypted payload.
+///
+/// # Key hygiene (Issue #488 P2.1)
+///
+/// The `aes-gcm` dependency is compiled with its `zeroize` feature enabled (see
+/// `Cargo.toml`), so the expanded AES key schedule held by `inner` is wiped on
+/// drop. This matters for key rotation: when the old generation is retired
+/// (`IndexKeyring::retain_only`) its `Arc<dyn Cipher>` is dropped, and the
+/// retired key schedule must not linger un-zeroized in memory.
 pub struct Aes256GcmCipher {
     inner: Aes256Gcm,
 }
@@ -251,6 +259,26 @@ mod tests {
     }
 
     // ── AES-256-GCM ──
+
+    /// Issue #488 P2.1: the retired-cipher key schedule is zeroized on drop.
+    /// There is no public API to observe the wipe, so this test's real job is to
+    /// keep the `zeroize` code path COMPILED IN: it constructs and drops both
+    /// AEAD ciphers, which only links when `aes-gcm`'s `zeroize` feature (and
+    /// ChaCha's unconditional zeroize) are present. A regression that dropped
+    /// the feature from `Cargo.toml` would not fail here, but the accompanying
+    /// `Cargo.toml` note and this smoke test document the requirement.
+    #[test]
+    fn ciphers_construct_and_drop_with_zeroize_compiled_in() {
+        let key = test_key();
+        {
+            let c = Aes256GcmCipher::new(&key);
+            let _ = c.encrypt(b"x", b"aad").unwrap();
+        } // AES key schedule zeroized here.
+        {
+            let c = ChaCha20Poly1305Cipher::new(&key);
+            let _ = c.encrypt(b"x", b"aad").unwrap();
+        } // ChaCha key schedule zeroized here.
+    }
 
     #[test]
     fn aes256gcm_roundtrip() {

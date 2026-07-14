@@ -144,7 +144,13 @@ rand = { version = "0.8", features = ["small_rng"] }
 tempfile = "3.27"
 
 # Encryption at rest (ADR-0028)
-aes-gcm = "0.10"
+# `zeroize` (Issue #488 P2.1): wipe a retired cipher's expanded key schedule on
+# drop. Without it, a rotated-out cipher's key schedule would linger
+# un-zeroized in memory after `retain_only` drops it. aes-gcm gates this behind
+# an opt-in `zeroize` feature; chacha20poly1305 0.10 has no such feature because
+# it zeroizes its key schedule unconditionally (via the inner `chacha20` crate),
+# so no feature is needed there.
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.13"
 sha2 = "0.11"

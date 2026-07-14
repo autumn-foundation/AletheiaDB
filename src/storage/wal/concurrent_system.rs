@@ -764,6 +764,18 @@ impl ConcurrentWalSystem {
         self.coordinator.wal_dir()
     }
 
+    /// Whether this WAL is encrypted at rest (a WAL cipher is configured).
+    ///
+    /// Used by the index key-rotation cross-layer guard (Issue #488): an
+    /// index-only key rotation to a new MEK must refuse while any *other* layer
+    /// (WAL/checkpoint/cold) is still encrypted under the current MEK, because
+    /// switching the key provider afterward would render those un-rotated files
+    /// undecryptable. Never exposes the cipher or any key material.
+    #[must_use]
+    pub(crate) fn is_encrypted(&self) -> bool {
+        self.wal_cipher.is_some()
+    }
+
     /// Read WAL entries from disk, starting from the specified LSN.
     ///
     /// This reads all segment files in the WAL directory and returns entries
