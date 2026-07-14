@@ -463,8 +463,44 @@ HistoricalConfigBuilder::new()
     .reconstruction_cache_size(1000).unwrap()
 ```
 
+## MCP Server Resource Limits
+
+The MCP server (`AletheiaMcpServer`) exposes builder-style knobs that bound
+per-call resource usage, guarding the surface against denial-of-service from
+untrusted callers. All have safe defaults and are optional.
+
+| Knob | Default | Purpose |
+|------|---------|---------|
+| `with_max_batch_operations(n)` | 1000 | Max operations accepted by one `apply_batch` call (Issue #3231). |
+| `with_cursor_config(ttl, max_live_cursors)` | 5 min, 128 | Continuation-cursor TTL and per-connection live-cursor cap (Issue #3360). |
+| `with_max_priority_properties(n)` | 1024 | Max entries in a token-budget `priority_properties` array (Issue #3583). |
+
+### `with_max_priority_properties` (Issue #3583)
+
+The token-budget parameter `priority_properties` (Issue #3353) names the
+property keys a budgeted read protects from elision. It is consulted for every
+property of every returned entity while the response is shaped. Left unbounded,
+a caller could pass an array with hundreds of thousands of entries, turning
+response shaping into multi-second blocking CPU. The per-key lookup is O(1)
+(backed by a `HashSet`), and an array longer than this cap is rejected up front
+with a structured `INVALID_ARGUMENT` error naming the cap and the given length
+(so re-issuing under the cap succeeds), keeping the one-time validation cost
+bounded as well.
+
+```rust
+use std::sync::Arc;
+use aletheiadb::AletheiaDB;
+use aletheiadb::mcp::AletheiaMcpServer;
+
+let db = Arc::new(AletheiaDB::new()?);
+// Tighten the priority_properties cap from the default 1024 to 64.
+let server = AletheiaMcpServer::new(db).with_max_priority_properties(64);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ## References
 
 - [WAL Documentation](WAL.md) - Write-ahead log internals
 - [Index Persistence Guide](guides/index-persistence-guide.md) - Index persistence details
 - [Architecture Documentation](ARCHITECTURE.md) - System architecture
+- [MCP Query Tool Guide](guides/mcp-query-tool.md) - Token budgets, cursors, and MCP resource limits
