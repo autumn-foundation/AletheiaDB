@@ -612,6 +612,27 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Dispatch a tool by name from a raw JSON arguments object, returning the
+    /// tool's JSON string result.
+    ///
+    /// Unlike the per-tool typed methods (e.g. [`get_edge`](Self::get_edge)),
+    /// which call their `handle_*` directly, this routes through
+    /// [`dispatch_tool`](Self::dispatch_tool) so the raw-argument-driven
+    /// cross-cutting read features apply: the Issue #3353 token-budget shaping
+    /// (`max_response_tokens` / `max_response_bytes` / `priority_properties`)
+    /// and the Issue #3360 snapshot-anchored cursor paging (`use_cursor` /
+    /// `cursor`), both of which are read off the raw arguments and are therefore
+    /// invisible to the typed request structs. On the embedded/anonymous
+    /// [`AletheiaMcpServer::new`] path the built-in tool authorization is a
+    /// no-op; a caller that has authorized the tool out-of-band (e.g. the
+    /// autumn-web HTTP surface's own RBAC gate) gets the same result a direct
+    /// `handle_*` would produce when neither budget nor cursor is present.
+    ///
+    // exposed for autumn-web migration (Issue #3524)
+    pub fn dispatch_tool_json(&self, name: &str, args: serde_json::Value) -> String {
+        Self::extract_text(self.dispatch_tool(name, args))
+    }
+
     /// Get an edge by its ID.
     ///
     /// Returns the edge's source, target, label, and properties.

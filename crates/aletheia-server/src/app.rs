@@ -11,6 +11,7 @@
 //! (`routes`/`openapi`/`mount_mcp`/`secure_mcp`/`state_initializer`), so Lane B
 //! can lift this into a `run_server` with minimal change.
 
+use crate::edge_tools;
 use crate::http_routes;
 use crate::node_tools;
 use crate::security::{self, SecurityConfig};
@@ -75,6 +76,15 @@ pub fn try_build_server_testapp(
             node_tools::delete_node_cascade,
             node_tools::retract_node,
             node_tools::find_nodes_at_time,
+            edge_tools::get_edge,
+            edge_tools::list_edges,
+            edge_tools::count_edges,
+            edge_tools::get_outgoing_edges,
+            edge_tools::get_incoming_edges,
+            edge_tools::create_edge,
+            edge_tools::update_edge,
+            edge_tools::delete_edge,
+            edge_tools::retract_edge,
         ])
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");

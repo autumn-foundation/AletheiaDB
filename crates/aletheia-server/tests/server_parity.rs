@@ -550,6 +550,65 @@ async fn mcp_routable_tools_are_all_classified() {
     }
 }
 
+/// SECURITY. The budgetable edge reads forward RAW ARGUMENTS to
+/// `AletheiaMcpServer::dispatch_tool_json` with a **hardcoded literal** tool
+/// name pinned to the route (e.g. the `get_edge` handler pins `"get_edge"`). A
+/// read-gated (`Authorized<ReadClass>`) handler that pinned a WRITE tool's name
+/// would route a caller past a read gate into a write tool — privilege
+/// escalation. This test makes that impossible: for every pinned entry in
+/// `edge_tools::DISPATCH_ROUTED_READ_TOOLS`, the pinned name must (1) be a
+/// **routed** tool on `/mcp` (pinned ↔ routed) and (2) resolve in the RBAC
+/// registry to **exactly** the [`AccessClass`] of the handler's `Authorized<C>`
+/// gate (routed ↔ class). Since every dispatch-routed read is `ReadClass`, any
+/// drift to a non-Read (e.g. write) pinned name fails here.
+#[tokio::test]
+async fn dispatch_pinned_names_match_routed_class() {
+    use aletheia_server::edge_tools::DISPATCH_ROUTED_READ_TOOLS;
+    use std::collections::BTreeSet;
+
+    let (db, store, _) = fixture();
+    let client = build_server_client(db, store, AuthMode::Required);
+
+    // The set of tool names actually routed on `/mcp`.
+    let rpc = json!({ "jsonrpc": "2.0", "id": 77, "method": "tools/list" });
+    let resp = client
+        .post("/mcp")
+        .header("authorization", &format!("Bearer {READER_TOKEN}"))
+        .json(&rpc)
+        .send()
+        .await;
+    assert_eq!(resp.status.as_u16(), 200);
+    let body: Value = serde_json::from_str(&resp.text()).expect("json");
+    let routable: BTreeSet<String> = body["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_string())
+        .collect();
+
+    assert!(
+        !DISPATCH_ROUTED_READ_TOOLS.is_empty(),
+        "the pinned-name table must not be empty"
+    );
+    for (pinned, class) in DISPATCH_ROUTED_READ_TOOLS {
+        // (1) pinned ↔ routed: the literal a handler forwards must be a real,
+        // routed tool name (never a typo or an off-surface name).
+        assert!(
+            routable.contains(*pinned),
+            "pinned dispatch name {pinned:?} is not routed on /mcp: {routable:?}"
+        );
+        // (2) routed ↔ class: the RBAC-registry class of the pinned name must
+        // equal the handler's declared Authorized<C> class. A read-gated
+        // handler pinning a write tool's name would trip this (Write != Read).
+        assert_eq!(
+            rbac::tool_access_class(pinned),
+            Some(*class),
+            "pinned dispatch name {pinned:?} registry class must equal the handler's \
+             Authorized<C> class ({class:?}) — a read handler pinning a write name is escalation"
+        );
+    }
+}
+
 #[tokio::test]
 async fn mcp_tools_call_get_node_matches_http() {
     let (db, store, node_id) = fixture();

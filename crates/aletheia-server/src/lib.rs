@@ -28,6 +28,7 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod edge_tools;
 pub mod http_routes;
 pub mod node_tools;
 pub mod security;
