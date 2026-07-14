@@ -398,17 +398,19 @@ impl AletheiaDB {
 
         let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
 
-        // Begin: switch the live keyring to two generations and record the
-        // durable breadcrumb BEFORE any re-encrypted (v2) file is published, so a
-        // power loss can never strand a v2 file with a lost breadcrumb (Issue
-        // #488 P0.2). `write_rotation_state` fsyncs the file and its parent dir.
-        keyring.add_generation(new_version, Arc::clone(&new_cipher));
+        // Begin: record the durable breadcrumb BEFORE switching the live keyring
+        // to stamp v2, so no v2-encrypted file can ever be fsynced (via a
+        // contract-violating concurrent index persist) before the breadcrumb is
+        // on stable storage — a power loss can then never strand a v2 file with a
+        // lost breadcrumb (Issue #488 P0.2). `write_rotation_state` fsyncs the
+        // file and its parent dir; only once it returns do we flip the keyring.
         write_rotation_state(
             manager,
             new_version,
             new_key_source,
             RotationDirection::Forward,
         )?;
+        keyring.add_generation(new_version, Arc::clone(&new_cipher));
         self.emit_rotation_audit(&AuditEvent::RotationStarted {
             old_version,
             new_version,
