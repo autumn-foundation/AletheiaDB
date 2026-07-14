@@ -296,7 +296,25 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
     // Atomically replace target with temp
     fs::rename(&temp_path, path)?;
 
+    // Durably persist the rename itself: without an fsync of the containing
+    // directory, a crash after the rename can lose the new directory entry even
+    // though the file's data was fsync'd, resurrecting the old target or leaving
+    // no target at all (Issue #488 P0.2). Best-effort: a directory that cannot
+    // be fsync'd (e.g. some network filesystems) must not fail the write.
+    if let Some(parent) = path.parent() {
+        fsync_dir(parent);
+    }
+
     Ok(())
+}
+
+/// Best-effort fsync of a directory so a preceding `rename`/`create` in it is
+/// durable across a crash. Errors are swallowed: not every filesystem supports
+/// directory fsync, and a failed dir-sync must never fail the enclosing write.
+pub(crate) fn fsync_dir(dir: &std::path::Path) {
+    if let Ok(handle) = std::fs::File::open(dir) {
+        let _ = handle.sync_all();
+    }
 }
 
 /// Load graph, temporal, and vector indexes in parallel for faster startup.
