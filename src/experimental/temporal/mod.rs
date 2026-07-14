@@ -13,6 +13,7 @@ pub mod echo;
 pub mod kairos;
 pub mod mnemosyne;
 pub mod sherlock;
+pub mod tapestry;
 pub mod temporal_diff;
 /// Temporal narrative generator: natural-language history logs from version diffs.
 pub mod temporal_narrative;
