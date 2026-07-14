@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::encryption::audit::{AuditEvent, EncryptionAuditLogger};
 use crate::encryption::cipher::Cipher;
 use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
 use crate::encryption::error::KeyProviderError;
@@ -14,6 +15,31 @@ use crate::encryption::key_derivation::{
     CHECKPOINT_DEK_CONTEXT, COLD_DEK_CONTEXT, INDEX_DEK_CONTEXT, KeyDerivation, WAL_DEK_CONTEXT,
 };
 use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvider};
+
+/// The key version tracked by the manager for the currently-loaded MEK.
+///
+/// A `KeyRotationManager` exists (see `rotation.rs`) but is only a version
+/// counter today; rotation-event audit wiring is deferred to #488, so the
+/// manager always reports version 1 for the freshly-loaded key.
+const CURRENT_KEY_VERSION: u32 = 1;
+
+/// Reduce a [`KeyProviderError`] to a stable, key-safe category token.
+///
+/// # Why?
+/// The audit log must **never** leak secrets. A raw error `Display` could embed
+/// a key file path (or, in principle, other sensitive context), so the audit
+/// path records only this opaque category -- never the full error string.
+fn error_category(err: &KeyProviderError) -> &'static str {
+    match err {
+        KeyProviderError::KeyNotFound => "key_not_found",
+        KeyProviderError::AccessDenied(_) => "access_denied",
+        KeyProviderError::Unavailable(_) => "provider_unavailable",
+        KeyProviderError::InvalidKeyFormat(_) => "invalid_key_format",
+        KeyProviderError::RotationNotSupported => "rotation_not_supported",
+        KeyProviderError::Io(_) => "io_error",
+        KeyProviderError::Provider(_) => "provider_error",
+    }
+}
 
 /// Central manager that owns per-component ciphers for encryption at rest.
 ///
@@ -26,6 +52,10 @@ pub struct EncryptionManager {
     cold_cipher: Arc<dyn Cipher>,
     checkpoint_cipher: Arc<dyn Cipher>,
     provider_name: String,
+    /// Structured encryption audit logger (Issue #489). Emits `key.loaded` at
+    /// construction; available to the rotation engine (#488) for
+    /// `key.rotation.*` events via [`audit_logger`](Self::audit_logger).
+    audit: EncryptionAuditLogger,
 }
 
 impl std::fmt::Debug for EncryptionManager {
@@ -57,6 +87,26 @@ impl EncryptionManager {
     /// Returns [`KeyProviderError`] if the MEK cannot be loaded (missing file,
     /// missing env var, invalid format, etc.).
     pub fn from_config(config: &EncryptionConfig) -> Result<Self, KeyProviderError> {
+        let audit = EncryptionAuditLogger::from_audit_config(&config.audit);
+        Self::from_config_with_logger(config, audit)
+    }
+
+    /// Build an [`EncryptionManager`] from config with an explicitly-provided
+    /// audit logger.
+    ///
+    /// [`from_config`](Self::from_config) delegates here after constructing a
+    /// logger from `config.audit`. This variant lets callers (and tests) inject
+    /// a preconfigured logger.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyProviderError`] if the MEK cannot be loaded. On failure a
+    /// `key.access.denied` audit event (carrying only a key-safe error
+    /// category) is emitted before returning.
+    pub fn from_config_with_logger(
+        config: &EncryptionConfig,
+        audit: EncryptionAuditLogger,
+    ) -> Result<Self, KeyProviderError> {
         // 1. Create the key provider.
         let provider: Box<dyn KeyProvider> = match &config.key_provider {
             KeyProviderConfig::File { path } => Box::new(FileKeyProvider::new(path)),
@@ -65,8 +115,32 @@ impl EncryptionManager {
 
         let name = provider.provider_name().to_string();
 
-        // 2. Load the MEK.
-        let mek = provider.get_mek()?;
+        // 2. Load the MEK, auditing success (`key.loaded`) and failure
+        //    (`key.access.denied` with a key-safe category, never a path or key
+        //    material).
+        let mek = match provider.get_mek() {
+            Ok(mek) => {
+                audit.log(&AuditEvent::KeyLoaded {
+                    provider: name.clone(),
+                    key_version: CURRENT_KEY_VERSION,
+                });
+                mek
+            }
+            Err(e) => {
+                audit.log(&AuditEvent::KeyAccessDenied {
+                    provider: name.clone(),
+                    error: error_category(&e).to_string(),
+                });
+                return Err(e);
+            }
+        };
+
+        // NOTE: rotation audit events (`key.rotation.started` /
+        // `key.rotation.completed` / `key.rotation.failed`) are not emitted
+        // here. A `KeyRotationManager` exists in `rotation.rs` but is only a
+        // version counter today; rotation-event audit wiring is deferred to
+        // #488 (via `EncryptionManager::audit_logger()`), so we deliberately do
+        // not wire the counter-only rotation now.
 
         // 3. Derive per-component DEKs.
         let kd = KeyDerivation::new(mek);
@@ -91,7 +165,19 @@ impl EncryptionManager {
             cold_cipher: Arc::from(create_cipher(algorithm, &cold_dek)),
             checkpoint_cipher: Arc::from(create_cipher(algorithm, &checkpoint_dek)),
             provider_name: name,
+            audit,
         })
+    }
+
+    /// The encryption audit logger owned by this manager.
+    ///
+    /// # Why?
+    /// The key-rotation engine (#488) will use this to emit `key.rotation.*`
+    /// audit events, keeping all encryption audit emission on one logger with a
+    /// single configured destination and instance id.
+    #[must_use]
+    pub fn audit_logger(&self) -> &EncryptionAuditLogger {
+        &self.audit
     }
 
     /// Cipher for WAL encryption/decryption.
@@ -295,6 +381,90 @@ mod tests {
         assert!(
             matches!(err, KeyProviderError::KeyNotFound),
             "expected KeyNotFound, got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_config_emits_key_loaded_audit_event() {
+        use crate::encryption::audit::AuditLevel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("test.key");
+        FileKeyProvider::generate_key_file(&key_path).unwrap();
+
+        let config = EncryptionConfig::file_based(&key_path);
+        let (logger, buf) = EncryptionAuditLogger::with_capture(AuditLevel::KeyEvents, "node-1");
+
+        let mgr = EncryptionManager::from_config_with_logger(&config, logger).unwrap();
+        assert_eq!(mgr.provider_name(), "file");
+
+        let lines = buf.lock().unwrap();
+        assert_eq!(lines.len(), 1, "exactly one key.loaded event");
+        let v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(v["event"], "key.loaded");
+        assert_eq!(v["data"]["provider_type"], "file");
+        assert_eq!(v["data"]["key_version"], 1);
+    }
+
+    #[test]
+    fn from_config_emits_key_access_denied_on_failure() {
+        use crate::encryption::audit::AuditLevel;
+
+        // A file provider pointed at a missing key => load failure.
+        let config = EncryptionConfig::file_based("/nonexistent/path/missing.key");
+        let (logger, buf) = EncryptionAuditLogger::with_capture(AuditLevel::KeyEvents, "node-1");
+
+        let err = EncryptionManager::from_config_with_logger(&config, logger).unwrap_err();
+        assert!(matches!(err, KeyProviderError::KeyNotFound));
+
+        let lines = buf.lock().unwrap();
+        assert_eq!(lines.len(), 1, "exactly one key.access.denied event");
+        let line = &lines[0];
+        // No path leakage: the raw key file path must not appear in the audit line.
+        assert!(
+            !line.contains("missing.key") && !line.contains("/nonexistent"),
+            "audit line leaked the key file path: {line}"
+        );
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["event"], "key.access.denied");
+        assert_eq!(v["level"], "error");
+        assert_eq!(v["data"]["provider"], "file");
+        assert_eq!(v["data"]["error"], "key_not_found");
+    }
+
+    #[test]
+    fn error_category_never_includes_details() {
+        // Categories are fixed tokens -- they can never carry a path or key bytes.
+        assert_eq!(
+            error_category(&KeyProviderError::KeyNotFound),
+            "key_not_found"
+        );
+        assert_eq!(
+            error_category(&KeyProviderError::InvalidKeyFormat(
+                "/secret/path leaked".into()
+            )),
+            "invalid_key_format"
+        );
+        assert_eq!(
+            error_category(&KeyProviderError::AccessDenied("secret".into())),
+            "access_denied"
+        );
+    }
+
+    #[test]
+    fn from_config_default_audit_disabled_is_silent() {
+        // Default config (no audit block) => disabled logger, zero output.
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("test.key");
+        FileKeyProvider::generate_key_file(&key_path).unwrap();
+
+        let config = EncryptionConfig::file_based(&key_path);
+        assert!(!config.audit.enabled);
+        // Must construct successfully with auditing disabled (no panic, no output).
+        let mgr = EncryptionManager::from_config(&config).unwrap();
+        assert_eq!(
+            mgr.audit_logger().level(),
+            crate::encryption::audit::AuditLevel::None
         );
     }
 }

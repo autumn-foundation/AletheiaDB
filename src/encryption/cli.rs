@@ -289,6 +289,7 @@ mod tests {
             key_provider: KeyProviderConfig::Env {
                 variable: "X".into(),
             },
+            audit: crate::encryption::config::AuditConfig::default(),
         };
         let status = get_encryption_status(&config);
         assert!(status.algorithm.as_ref().unwrap().contains("Auto"));
@@ -300,6 +301,7 @@ mod tests {
             key_provider: KeyProviderConfig::Env {
                 variable: "X".into(),
             },
+            audit: crate::encryption::config::AuditConfig::default(),
         };
         let status = get_encryption_status(&config);
         assert_eq!(status.algorithm.as_deref(), Some("AES-256-GCM"));
@@ -311,6 +313,7 @@ mod tests {
             key_provider: KeyProviderConfig::Env {
                 variable: "X".into(),
             },
+            audit: crate::encryption::config::AuditConfig::default(),
         };
         let status = get_encryption_status(&config);
         assert_eq!(status.algorithm.as_deref(), Some("ChaCha20-Poly1305"));
