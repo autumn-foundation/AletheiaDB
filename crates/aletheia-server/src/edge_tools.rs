@@ -76,11 +76,19 @@ use serde_json::{Map, Value};
 /// `pub` (not `pub(crate)`) because the conformance test is an integration test
 /// — an external crate — exactly like the already-`pub`
 /// `security::rbac::MCP_TOOL_CLASSES` it cross-checks against.
+///
+/// The three **node** reads (`get_node`, `list_nodes`, `find_nodes_at_time`) are
+/// dispatch-routed too (see [`crate::node_tools`]) and are pinned here in the
+/// same table so the one `dispatch_pinned_names_match_routed_class` conformance
+/// test covers every dispatch-routed read across both clusters.
 pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("get_edge", AccessClass::Read),
     ("list_edges", AccessClass::Read),
     ("get_outgoing_edges", AccessClass::Read),
     ("get_incoming_edges", AccessClass::Read),
+    ("get_node", AccessClass::Read),
+    ("list_nodes", AccessClass::Read),
+    ("find_nodes_at_time", AccessClass::Read),
 ];
 
 /// Parse an MCP tool method's JSON string result into a [`Value`] for the HTTP
@@ -90,7 +98,7 @@ fn tool_json(s: String) -> Json<Value> {
 }
 
 /// Fold a present optional value into the raw MCP arguments object under `key`.
-fn insert_opt(args: &mut Map<String, Value>, key: &str, val: Option<Value>) {
+pub(crate) fn insert_opt(args: &mut Map<String, Value>, key: &str, val: Option<Value>) {
     if let Some(v) = val {
         args.insert(key.to_string(), v);
     }
@@ -103,7 +111,7 @@ fn insert_opt(args: &mut Map<String, Value>, key: &str, val: Option<Value>) {
 /// `AletheiaMcpServer::dispatch_tool`), so budgetable edge read handlers forward
 /// them via `AletheiaMcpServer::dispatch_tool_json` rather than the typed
 /// per-tool methods (which would silently drop them).
-fn insert_budget(
+pub(crate) fn insert_budget(
     args: &mut Map<String, Value>,
     max_response_tokens: Option<u64>,
     max_response_bytes: Option<u64>,

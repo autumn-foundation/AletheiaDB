@@ -6,19 +6,52 @@
 //! Each is a single `#[get(...)]`/`#[post(...)]` + `#[api_doc(description=...,
 //! mcp)]` handler, so one definition surfaces on **HTTP**, **MCP-over-HTTP**
 //! (`/mcp`), and **OpenAPI** at once. The response body is produced by the
-//! *exact* main-crate MCP typed method
-//! ([`AletheiaMcpServer::get_node`]/`create_node`/`update_node`/…), so it is
-//! byte-identical to the legacy MCP surface (bare entity JSON + the `temporal`
-//! block #3232, #3220 vector elision, the #3209 DETACH refuse/detach contract on
-//! `delete_node`, the #3230 retraction contract, #3221 `valid_time`, and #3236
-//! point-in-time reconstruction) — asserted in the parity suite against a fresh
+//! *exact* main-crate MCP surface, so it is byte-identical to the legacy MCP
+//! surface (bare entity JSON + the `temporal` block #3232, #3220 vector elision,
+//! the #3209 DETACH refuse/detach contract on `delete_node`, the #3230
+//! retraction contract, #3221 `valid_time`, and #3236 point-in-time
+//! reconstruction) — asserted in the parity suite against a fresh
 //! [`AletheiaMcpServer`] over the same `Arc<AletheiaDB>`.
 //!
-//! These reuse **already-public** symbols
-//! (`aletheiadb::mcp::{AletheiaMcpServer, GetNodeRequest, ListNodesRequest,
-//! CountNodesRequest, CreateNodeRequest, UpdateNodeRequest, DeleteNodeRequest,
-//! DeleteNodeCascadeRequest, RetractNodeRequest, FindNodesAtTimeRequest}`), so no
-//! main-crate visibility widening is required.
+//! # Forwarding: typed methods vs. raw-argument dispatch
+//!
+//! The **writes** (`create_node`/`update_node`/`delete_node`/
+//! `delete_node_cascade`/`retract_node`) and `count_nodes` forward through the
+//! main crate's typed per-tool methods (`AletheiaMcpServer::create_node`, …).
+//! The three **budgetable reads** (`get_node`, `list_nodes`,
+//! `find_nodes_at_time`) instead forward the raw JSON arguments through
+//! `AletheiaMcpServer::dispatch_tool_json`, because the Issue #3353 token budget
+//! (`max_response_tokens`/`max_response_bytes`/`priority_properties`, all three)
+//! and the Issue #3360 cursor paging (`use_cursor`/`cursor`, `list_nodes` /
+//! `find_nodes_at_time` only — `get_node` is a single-entity read and is not
+//! cursorable) are read off the raw arguments and applied in `dispatch_tool` —
+//! the typed per-tool methods bypass that pipeline and their request structs do
+//! not carry those params, so typed forwarding would silently drop them (the gap
+//! this retrofit closes). With neither budget nor cursor present,
+//! `dispatch_tool_json` reproduces the typed method's output byte-for-byte (same
+//! `handle_*`; the shared server is anonymous, so its built-in tool
+//! authorization is a no-op — the autumn `Authorized<C>` extractor is the real
+//! gate). Cursor tokens are validated against a per-instance secret, so these
+//! handlers use the process-lifetime shared
+//! [`ServerState::mcp_server`](crate::state::ServerState::mcp_server) rather than
+//! constructing a server per request. `find_nodes_at_time` takes its arguments as
+//! a raw JSON **body** ([`Json<Value>`]) rather than a typed request so a #3360
+//! cursor-continuation POST (`{"cursor": "…"}`, with no `label`/`valid_time`)
+//! deserializes — those fields are required on the typed request but absent on a
+//! continuation.
+//!
+//! The three dispatch-routed reads are pinned with **hardcoded literal** tool
+//! names (`"get_node"`/`"list_nodes"`/`"find_nodes_at_time"`, never
+//! request-derived) and registered in
+//! [`crate::edge_tools::DISPATCH_ROUTED_READ_TOOLS`] so the shared
+//! `dispatch_pinned_names_match_routed_class` conformance test proves a
+//! read-gated handler can never pin a write tool's name.
+//!
+//! The writes and `count_nodes` reuse **already-public** symbols
+//! (`aletheiadb::mcp::{AletheiaMcpServer, CountNodesRequest, CreateNodeRequest,
+//! UpdateNodeRequest, DeleteNodeRequest, DeleteNodeCascadeRequest,
+//! RetractNodeRequest}`); `dispatch_tool_json` (the reads' entry) is the
+//! main-crate widening PR3 already landed. No further widening is required.
 //!
 //! The MCP tool result carries in-band errors (e.g. a missing node →
 //! `{"error":{"code":"NOT_FOUND",...}}`); we return that JSON verbatim with a
@@ -32,18 +65,18 @@
 //! (autumn maps `Json<T>` to the reserved `body` MCP argument key), so the
 //! `tools/call` `arguments` wrap the request under `"body"`.
 
+use crate::edge_tools::{insert_budget, insert_opt};
 use crate::security::resource_limits::{check_byte_cap_of, run_with_timeout};
 use crate::security::{Authorized, ReadClass, ServerSecurityState, WriteClass};
 use crate::state::ServerState;
 use aletheiadb::http::AletheiaHttpError;
 use aletheiadb::mcp::{
     AletheiaMcpServer, CountNodesRequest, CreateNodeRequest, DeleteNodeCascadeRequest,
-    DeleteNodeRequest, FindNodesAtTimeRequest, GetNodeRequest, ListNodesRequest,
-    RetractNodeRequest, UpdateNodeRequest,
+    DeleteNodeRequest, RetractNodeRequest, UpdateNodeRequest,
 };
 use autumn_web::prelude::{Json, Path, Query, get, post};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Parse an MCP tool method's JSON string result into a [`Value`] for the HTTP
 /// response. A non-JSON result (should not happen) degrades to a JSON string.
@@ -51,14 +84,24 @@ fn tool_json(s: String) -> Json<Value> {
     Json(serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s)))
 }
 
-/// Query options for [`get_node`].
+/// Query options for [`get_node`] — the entity flag plus the #3353 token-budget
+/// parameters. `get_node` is a single-entity read: budgetable (#3353) but not
+/// cursorable (#3360).
 #[derive(Debug, Default, Deserialize)]
 pub struct GetNodeQuery {
     /// Return full vector/embedding arrays instead of the elided descriptor.
     pub include_vectors: Option<bool>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
 }
 
 /// `get_node` — fetch a node by id, with bi-temporal bounds. HTTP + MCP tool.
+/// Budgetable (#3353); forwards raw arguments through `dispatch_tool_json` so the
+/// token budget applies (the typed method bypasses that pipeline).
 #[get("/nodes/{id}")]
 #[api_doc(
     description = "Fetch a node by id, returning its properties and bi-temporal bounds",
@@ -70,15 +113,26 @@ pub async fn get_node(
     Path(id): Path<u64>,
     Query(opts): Query<GetNodeQuery>,
 ) -> Json<Value> {
-    let server = AletheiaMcpServer::new(state.db_arc());
-    let out = server.get_node(GetNodeRequest {
-        node_id: id,
-        include_vectors: opts.include_vectors,
-    });
-    tool_json(out)
+    let server = state.mcp_server();
+    let mut args = Map::new();
+    args.insert("node_id".to_string(), Value::from(id));
+    insert_opt(
+        &mut args,
+        "include_vectors",
+        opts.include_vectors.map(Value::from),
+    );
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    tool_json(server.dispatch_tool_json("get_node", Value::Object(args)))
 }
 
-/// Query options for [`list_nodes`].
+/// Query options for [`list_nodes`] — label/property/paging plus the #3353 token
+/// budget and the #3360 cursor parameters. `list_nodes` is budgetable **and**
+/// cursorable.
 #[derive(Debug, Default, Deserialize)]
 pub struct ListNodesQuery {
     /// Filter by node label.
@@ -93,10 +147,22 @@ pub struct ListNodesQuery {
     pub offset: Option<usize>,
     /// Return full vector/embedding arrays instead of the elided descriptor.
     pub include_vectors: Option<bool>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+    /// #3360: request a snapshot-anchored cursor on the first page.
+    pub use_cursor: Option<bool>,
+    /// #3360: opaque continuation token from a prior page (passed back alone).
+    pub cursor: Option<String>,
 }
 
 /// `list_nodes` — list nodes with optional label/property filtering + paging.
-/// HTTP + MCP tool.
+/// HTTP + MCP tool. Budgetable (#3353) and cursorable (#3360): forwards raw
+/// arguments through `dispatch_tool_json` so both pipelines apply (the typed
+/// method bypasses them).
 #[get("/nodes")]
 #[api_doc(
     description = "List nodes with optional label/property filtering and pagination",
@@ -118,17 +184,44 @@ pub async fn list_nodes(
     let limits = security.limits();
     let _guard = security.in_flight().try_acquire()?;
 
-    let db = state.db_arc();
-    let request = ListNodesRequest {
-        label: opts.label,
-        property_key: opts.property_key,
-        property_value: opts.property_value.map(Value::String),
-        limit: opts.limit,
-        offset: opts.offset,
-        include_vectors: opts.include_vectors,
-    };
+    // Route through the shared server's `dispatch_tool_json` so the #3353 token
+    // budget and #3360 cursor paging (read off the raw arguments) apply — the
+    // typed `list_nodes` method bypasses that pipeline. The cursor secret lives
+    // on the process-lifetime shared server, so continuations resume correctly.
+    let server = state.mcp_server();
+    let mut args = Map::new();
+    insert_opt(&mut args, "label", opts.label.map(Value::from));
+    insert_opt(
+        &mut args,
+        "property_key",
+        opts.property_key.map(Value::from),
+    );
+    // property_value arrives as a string on the HTTP query surface (matching the
+    // prior typed forwarding, which wrapped it in `Value::String`).
+    insert_opt(
+        &mut args,
+        "property_value",
+        opts.property_value.map(Value::from),
+    );
+    insert_opt(&mut args, "limit", opts.limit.map(Value::from));
+    insert_opt(&mut args, "offset", opts.offset.map(Value::from));
+    insert_opt(
+        &mut args,
+        "include_vectors",
+        opts.include_vectors.map(Value::from),
+    );
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    insert_opt(&mut args, "use_cursor", opts.use_cursor.map(Value::from));
+    insert_opt(&mut args, "cursor", opts.cursor.map(Value::from));
+    let args = Value::Object(args);
+
     let out = run_with_timeout(limits.timeout, false, async move {
-        AletheiaMcpServer::new(db).list_nodes(request)
+        server.dispatch_tool_json("list_nodes", args)
     })
     .await?;
 
@@ -163,14 +256,15 @@ pub async fn count_nodes(
 
 // ════════════════════════════════════════════════════════════════════════════
 // Node-write cluster (Issue #3524, PR2): create / update / delete /
-// delete_cascade / retract — all [`WriteClass`], plus the [`ReadClass`]
-// point-in-time finder `find_nodes_at_time`.
+// delete_cascade / retract — all [`WriteClass`].
 //
 // Each handler forwards its request body to the exact legacy MCP typed method
 // and returns that method's `String` verbatim, so every contract those methods
 // implement — #3221 `valid_time`, #3209 DETACH refuse/detach, #3230 retraction
-// idempotency, #3232 temporal block, #3220 vector elision, #3236 point-in-time
-// reconstruction — is preserved byte-for-byte with **zero** reserialization.
+// idempotency, #3232 temporal block, #3220 vector elision — is preserved
+// byte-for-byte with **zero** reserialization. The [`ReadClass`] point-in-time
+// finder `find_nodes_at_time` follows the reads (below), routing through
+// `dispatch_tool_json` so the #3353 budget and #3360 cursor pipelines apply.
 // ════════════════════════════════════════════════════════════════════════════
 
 /// `create_node` — create a node with properties and optional bi-temporal
@@ -260,7 +354,17 @@ pub async fn retract_node(
 /// `find_nodes_at_time` — resolve nodes by label (+ optional exact property
 /// match) as they existed at a bi-temporal point (#3236), reconstructing each
 /// node's state at `(valid_time, transaction_time)`. Read-only ([`ReadClass`]);
-/// vectors elided by default (#3220). HTTP + MCP tool.
+/// vectors elided by default (#3220). Budgetable (#3353) and cursorable (#3360).
+/// HTTP + MCP tool.
+///
+/// The request rides as a raw JSON **body** ([`Value`]) forwarded verbatim
+/// through `dispatch_tool_json`, so (a) the #3353 budget
+/// (`max_response_tokens`/`max_response_bytes`/`priority_properties`) and #3360
+/// cursor (`use_cursor`/`cursor`) params flow through, and (b) a cursor
+/// continuation (`{"cursor": "…"}`, which omits the otherwise-required `label` /
+/// `valid_time`) deserializes — a typed request would reject it. With no
+/// budget/cursor present the body is exactly a `FindNodesAtTimeRequest`, so the
+/// result is byte-identical to the typed method.
 #[post("/nodes/find_at_time")]
 #[api_doc(
     description = "Find nodes by label/property as of a bi-temporal point, reconstructed at that time",
@@ -269,8 +373,8 @@ pub async fn retract_node(
 pub async fn find_nodes_at_time(
     _auth: Authorized<ReadClass>,
     state: ServerState,
-    Json(req): Json<FindNodesAtTimeRequest>,
+    Json(args): Json<Value>,
 ) -> Json<Value> {
-    let server = AletheiaMcpServer::new(state.db_arc());
-    tool_json(server.find_nodes_at_time(req))
+    let server = state.mcp_server();
+    tool_json(server.dispatch_tool_json("find_nodes_at_time", args))
 }
