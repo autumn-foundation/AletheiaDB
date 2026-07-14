@@ -2,26 +2,54 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::error::Result;
 use super::formats::IndexManifest;
-use super::manifest::{load_manifest, save_manifest};
+use super::manifest::{load_manifest_with_cipher, save_manifest_with_cipher};
 use super::strings::{
-    InternerRemap, load_string_interner, restore_string_interner, save_string_interner,
+    InternerRemap, load_string_interner_with_cipher, restore_string_interner,
+    save_string_interner_with_cipher,
 };
+use crate::encryption::cipher::Cipher;
 
 /// Manages index persistence directory structure.
 pub struct IndexPersistenceManager {
     /// Base directory for all index files
     base_path: PathBuf,
+    /// Optional cipher for encryption-at-rest of index files (Issue #481).
+    /// `None` means indexes are persisted/read as plaintext (default,
+    /// back-compatible). When `Some`, files are written with the encrypted
+    /// index header and read back transparently (a legacy plaintext file is
+    /// still read correctly via header sniffing).
+    index_cipher: Option<Arc<dyn Cipher>>,
 }
 
 impl IndexPersistenceManager {
-    /// Create a new persistence manager.
+    /// Create a new persistence manager (no encryption).
     pub fn new(base_path: impl Into<PathBuf>) -> Self {
         Self {
             base_path: base_path.into(),
+            index_cipher: None,
         }
+    }
+
+    /// Create a new persistence manager with an optional index cipher.
+    ///
+    /// Passing `None` is equivalent to [`IndexPersistenceManager::new`].
+    pub fn with_cipher(
+        base_path: impl Into<PathBuf>,
+        index_cipher: Option<Arc<dyn Cipher>>,
+    ) -> Self {
+        Self {
+            base_path: base_path.into(),
+            index_cipher,
+        }
+    }
+
+    /// The index cipher, if encryption-at-rest is enabled.
+    pub(crate) fn index_cipher(&self) -> Option<&Arc<dyn Cipher>> {
+        self.index_cipher.as_ref()
     }
 
     /// Get the base path.
@@ -120,7 +148,12 @@ impl IndexPersistenceManager {
         // but other index files exist (partial save failure scenario)
         let interner_path = self.interner_path();
         let (interner_was_loaded, remap) = if interner_path.exists() {
-            let interner_data = load_string_interner(&interner_path)?;
+            // Decrypt the persisted interner with the configured index cipher
+            // (Issue #481); `restore_string_interner` returns the file-id ->
+            // live-id remap (Issue #3490) the caller threads through the graph /
+            // temporal index data.
+            let interner_data =
+                load_string_interner_with_cipher(&interner_path, self.index_cipher())?;
             let remap = restore_string_interner(&interner_data)?;
             (true, remap)
         } else {
@@ -147,7 +180,7 @@ impl IndexPersistenceManager {
         }
 
         // 3. Load manifest
-        let manifest = load_manifest(&manifest_path)?;
+        let manifest = load_manifest_with_cipher(&manifest_path, self.index_cipher())?;
 
         Ok((manifest, remap))
     }
@@ -155,13 +188,13 @@ impl IndexPersistenceManager {
     /// Save the manifest.
     pub fn save_manifest(&self, manifest: &IndexManifest) -> Result<()> {
         self.ensure_directories()?;
-        save_manifest(manifest, &self.manifest_path())
+        save_manifest_with_cipher(manifest, &self.manifest_path(), self.index_cipher())
     }
 
     /// Save the string interner.
     pub fn save_string_interner(&self) -> Result<()> {
         self.ensure_directories()?;
-        save_string_interner(&self.interner_path())
+        save_string_interner_with_cipher(&self.interner_path(), self.index_cipher())
     }
 }
 

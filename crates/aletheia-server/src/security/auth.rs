@@ -169,6 +169,28 @@ impl FromRequestParts<AppState> for ApiKeyStore {
     }
 }
 
+/// Per-IP rate-limit settings for the default-**off** `tower-governor` layer
+/// (Lane B3). Present (`Some`) on [`SecurityConfig`](crate::security::SecurityConfig)
+/// only when the operator opts in; the effective switch for
+/// [`governor_layer`](crate::security::rate_limit::governor_layer) is
+/// `SecurityConfig::rate_limit.is_some()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RateLimitSettings {
+    /// Sustained requests per second replenished per key (per peer IP).
+    pub rps: u64,
+    /// Burst bucket size — the number of requests allowed to arrive at once
+    /// before the per-second replenishment throttles them.
+    pub burst: u32,
+}
+
+impl RateLimitSettings {
+    /// Build settings from a sustained rate and a burst allowance.
+    #[must_use]
+    pub fn new(rps: u64, burst: u32) -> Self {
+        Self { rps, burst }
+    }
+}
+
 /// Authorize an authenticated `principal` for an [`AccessClass`].
 ///
 /// The per-request RBAC decision. On refusal returns

@@ -187,10 +187,14 @@ use super::ir::{
 };
 use super::plan::{QueryHints, TemporalContext};
 
-/// Map an AQL provenance accessor function name to its [`ProvenanceField`]
+/// Map a provenance accessor function name to its [`ProvenanceField`]
 /// (case-insensitive), or `None` if the name is not a provenance accessor
 /// (Issue #3354a).
-fn provenance_field_name(name: &str) -> Option<ProvenanceField> {
+///
+/// Shared by the AQL converter and the Cypher converter
+/// (`src/cypher/converter.rs`, Issue #3354b) so both surfaces recognize exactly
+/// the same accessor names.
+pub(crate) fn provenance_field_name(name: &str) -> Option<ProvenanceField> {
     match name.to_ascii_lowercase().as_str() {
         "source" => Some(ProvenanceField::Source),
         "confidence" => Some(ProvenanceField::Confidence),
@@ -223,6 +227,155 @@ fn flip_comparison_op(op: ComparisonOp) -> ComparisonOp {
         ComparisonOp::Le => ComparisonOp::Ge,
         ComparisonOp::Gt => ComparisonOp::Lt,
         ComparisonOp::Ge => ComparisonOp::Le,
+    }
+}
+
+/// AST-agnostic reason a provenance accessor comparison could not be lowered
+/// (Issue #3354a / #3354b).
+///
+/// Both the AQL converter ([`AstConverter::build_provenance_comparison`]) and
+/// the Cypher converter (`src/cypher/converter.rs`) convert their own
+/// operand/operator into the surface-neutral IR triple
+/// `(ProvenanceField, ProvenanceCmp, ProvenanceOperand)`, call
+/// [`lower_provenance_comparison`], and then map this neutral error into their
+/// own error vocabulary. Sharing the lowering keeps the folding, type-check,
+/// ordering-op rejection, and `[0,1]`/NaN validation semantics identical across
+/// both surfaces (no copy-pasted semantics to drift).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ProvenanceLoweringError {
+    /// An ordering operator (`<`, `<=`, `>`, `>=`) was applied to a string
+    /// accessor (`source`/`reason`), which supports only `=`/`<>`. Rejected
+    /// fail-closed rather than silently accepted as a lexicographic comparison.
+    OrderingOpOnStringField {
+        /// The offending string accessor.
+        field: ProvenanceField,
+    },
+    /// `confidence(x)` was compared to a non-numeric operand.
+    ConfidenceNotNumeric,
+    /// `source(x)`/`reason(x)` was compared to a non-string operand.
+    StringFieldNotString {
+        /// The offending string accessor.
+        field: ProvenanceField,
+    },
+    /// A `confidence(x)` numeric operand was NaN or outside `[0.0, 1.0]`.
+    ConfidenceOutOfRange {
+        /// The reusable-filter field name that rejected the value (for the
+        /// structured-error `parameter`/`details` payload).
+        field: &'static str,
+        /// The rejected value (may be NaN).
+        value: f64,
+    },
+    /// Defensive: the reusable [`ProvenanceFilter::validated`] rejected the
+    /// folded positive shape. Unreachable through either surface today (the
+    /// source `=` fold passes a single non-empty scalar), retained so the
+    /// production path never `unwrap`s.
+    FilterValidation {
+        /// The reusable-filter field name that rejected the input.
+        field: &'static str,
+        /// The rejection message.
+        message: String,
+    },
+}
+
+/// Lower a provenance accessor comparison `field(x) <cmp> operand` (with the
+/// accessor already normalized to the left) into a [`Predicate::Provenance`]
+/// (Issue #3354a / #3354b).
+///
+/// This is the single, surface-agnostic home of the provenance-comparison
+/// semantics:
+///
+/// - `confidence(x)` accepts only a numeric operand, validated to `[0,1]`/non-NaN
+///   via [`ProvenanceFilter::validated`](crate::core::provenance::ProvenanceFilter::validated);
+///   the foldable positive shape `confidence(x) >= t` reuses the core filter's
+///   inclusive min-confidence semantics via `matches`, other operators use the
+///   general accessor form.
+/// - `source(x)`/`reason(x)` accept only a string operand and only `=`/`<>`
+///   (ordering operators are rejected fail-closed). The foldable positive shape
+///   `source(x) = 'S'` reuses the core filter's any-of exact-match semantics.
+///
+/// Absent-provenance handling is delegated to
+/// [`ProvenancePredicate::evaluate`], which mirrors `ProvenanceFilter::matches`
+/// (unattributed rows excluded).
+pub(crate) fn lower_provenance_comparison(
+    field: ProvenanceField,
+    cmp: ProvenanceCmp,
+    operand: ProvenanceOperand,
+) -> std::result::Result<Predicate, ProvenanceLoweringError> {
+    match (field, operand) {
+        (ProvenanceField::Confidence, ProvenanceOperand::Num(n)) => {
+            // Validate the confidence literal (range + NaN) once for every
+            // operator, reusing the core rules; the filter is only folded for
+            // the `>=` shape below.
+            let filter =
+                crate::core::provenance::ProvenanceFilter::validated(None, None, Some(n), false)
+                    .map_err(|e| ProvenanceLoweringError::ConfidenceOutOfRange {
+                        field: e.field(),
+                        value: n,
+                    })?;
+            // Foldable positive shape: `confidence(x) >= t`. If the validated
+            // filter is inactive (defensive: a set min_confidence always yields
+            // an active filter), fall back to the general accessor form rather
+            // than panicking (coding standard: no expect/unwrap on the
+            // production path).
+            match (matches!(cmp, ProvenanceCmp::Ge), filter) {
+                (true, Some(filter)) => {
+                    Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
+                }
+                _ => Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
+                    field,
+                    op: cmp,
+                    operand: ProvenanceOperand::Num(n),
+                })),
+            }
+        }
+        (ProvenanceField::Confidence, ProvenanceOperand::Str(_)) => {
+            Err(ProvenanceLoweringError::ConfidenceNotNumeric)
+        }
+        (ProvenanceField::Source | ProvenanceField::Reason, ProvenanceOperand::Str(s)) => {
+            // `source`/`reason` are string accessors: only equality and
+            // inequality are supported. Ordering operators are rejected here
+            // (fail-closed) rather than silently accepted as lexicographic
+            // comparisons.
+            if matches!(
+                cmp,
+                ProvenanceCmp::Lt | ProvenanceCmp::Le | ProvenanceCmp::Gt | ProvenanceCmp::Ge
+            ) {
+                return Err(ProvenanceLoweringError::OrderingOpOnStringField { field });
+            }
+            // Foldable positive shape: `source(x) = 'S'` reuses the core
+            // filter's any-of exact-match semantics via `matches`. `reason` and
+            // the `<>` operator use the general accessor form.
+            if field == ProvenanceField::Source && matches!(cmp, ProvenanceCmp::Eq) {
+                let filter = crate::core::provenance::ProvenanceFilter::validated(
+                    Some(s.clone()),
+                    None,
+                    None,
+                    false,
+                )
+                .map_err(|e| ProvenanceLoweringError::FilterValidation {
+                    field: e.field(),
+                    message: e.to_string(),
+                })?;
+                if let Some(filter) = filter {
+                    Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
+                } else {
+                    Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
+                        field,
+                        op: cmp,
+                        operand: ProvenanceOperand::Str(s),
+                    }))
+                }
+            } else {
+                Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
+                    field,
+                    op: cmp,
+                    operand: ProvenanceOperand::Str(s),
+                }))
+            }
+        }
+        (ProvenanceField::Source | ProvenanceField::Reason, ProvenanceOperand::Num(_)) => {
+            Err(ProvenanceLoweringError::StringFieldNotString { field })
+        }
     }
 }
 
@@ -950,109 +1103,50 @@ impl AstConverter {
         let operand = self.expression_to_provenance_operand(operand_expr)?;
         let cmp = provenance_cmp_from_ast(op);
 
-        match (field, operand) {
-            (ProvenanceField::Confidence, ProvenanceOperand::Num(n)) => {
-                // Validate the confidence literal (range + NaN) once for every
-                // operator, reusing the core rules and the offending-field name;
-                // the resulting filter is only folded for the `>=` shape below.
-                let filter = crate::core::provenance::ProvenanceFilter::validated(
-                    None,
-                    None,
-                    Some(n),
-                    false,
-                )
-                .map_err(|e| {
-                    Error::Query(QueryError::InvalidParameter {
-                        parameter: e.field().to_string(),
-                        reason: format!("confidence(x) must be between 0.0 and 1.0, got {n}"),
-                    })
-                })?;
-                // Foldable positive shape: `confidence(x) >= t` reuses the core
-                // filter's inclusive min-confidence semantics via matches(). If
-                // the validated filter is inactive (defensive: a set
-                // min_confidence always yields an active filter), fall back to
-                // the general accessor form rather than panicking (coding
-                // standard: no expect/unwrap on the production path).
-                match (matches!(cmp, ProvenanceCmp::Ge), filter) {
-                    (true, Some(filter)) => {
-                        Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
-                    }
-                    _ => Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
-                        field,
-                        op: cmp,
-                        operand: ProvenanceOperand::Num(n),
-                    })),
-                }
-            }
-            (ProvenanceField::Confidence, ProvenanceOperand::Str(_)) => {
-                Err(Error::Query(QueryError::TypeMismatch {
+        // Delegate the surface-agnostic semantics (folding, type checks,
+        // ordering-op rejection, [0,1]/NaN validation) to the shared lowering,
+        // then map its neutral error into the AQL error vocabulary (unchanged
+        // wording, so behavior is byte-identical to the pre-refactor path).
+        lower_provenance_comparison(field, cmp, operand).map_err(|e| match e {
+            ProvenanceLoweringError::ConfidenceOutOfRange {
+                field: param,
+                value,
+            } => Error::Query(QueryError::InvalidParameter {
+                parameter: param.to_string(),
+                reason: format!("confidence(x) must be between 0.0 and 1.0, got {value}"),
+            }),
+            ProvenanceLoweringError::ConfidenceNotNumeric => {
+                Error::Query(QueryError::TypeMismatch {
                     expected: "number".to_string(),
                     actual: "string (confidence(x) compares only to a numeric value)".to_string(),
-                }))
+                })
             }
-            (ProvenanceField::Source | ProvenanceField::Reason, ProvenanceOperand::Str(s)) => {
-                // `source`/`reason` are string accessors: only equality and
-                // inequality are supported (documented `=`/`<>`). Ordering
-                // operators are rejected at convert time (fail-closed) rather
-                // than being silently accepted as lexicographic comparisons.
-                if matches!(
-                    cmp,
-                    ProvenanceCmp::Lt | ProvenanceCmp::Le | ProvenanceCmp::Gt | ProvenanceCmp::Ge
-                ) {
-                    return Err(Error::Query(QueryError::SyntaxError {
-                        message: format!(
-                            "ordering operators (<, <=, >, >=) are not supported for \
-                             {}(x); only = and <> are supported for source/reason",
-                            field.accessor_name()
-                        ),
-                    }));
-                }
-                // Foldable positive shape: `source(x) = 'S'` reuses the core
-                // filter's any-of exact-match semantics via matches(). `reason`
-                // and the `<>` operator use the general accessor form. If the
-                // validated filter is inactive (defensive), fall back to the
-                // accessor form rather than panicking (coding standard: no
-                // expect/unwrap on the production path).
-                if field == ProvenanceField::Source && matches!(cmp, ProvenanceCmp::Eq) {
-                    let filter = crate::core::provenance::ProvenanceFilter::validated(
-                        Some(s.clone()),
-                        None,
-                        None,
-                        false,
-                    )
-                    .map_err(|e| {
-                        Error::Query(QueryError::InvalidParameter {
-                            parameter: e.field().to_string(),
-                            reason: e.to_string(),
-                        })
-                    })?;
-                    if let Some(filter) = filter {
-                        Ok(Predicate::Provenance(ProvenancePredicate::Filter(filter)))
-                    } else {
-                        Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
-                            field,
-                            op: cmp,
-                            operand: ProvenanceOperand::Str(s),
-                        }))
-                    }
-                } else {
-                    Ok(Predicate::Provenance(ProvenancePredicate::Accessor {
-                        field,
-                        op: cmp,
-                        operand: ProvenanceOperand::Str(s),
-                    }))
-                }
+            ProvenanceLoweringError::OrderingOpOnStringField { field } => {
+                Error::Query(QueryError::SyntaxError {
+                    message: format!(
+                        "ordering operators (<, <=, >, >=) are not supported for \
+                         {}(x); only = and <> are supported for source/reason",
+                        field.accessor_name()
+                    ),
+                })
             }
-            (ProvenanceField::Source | ProvenanceField::Reason, ProvenanceOperand::Num(_)) => {
-                Err(Error::Query(QueryError::TypeMismatch {
+            ProvenanceLoweringError::StringFieldNotString { field } => {
+                Error::Query(QueryError::TypeMismatch {
                     expected: "string".to_string(),
                     actual: format!(
                         "number ({}(x) compares only to a string value)",
                         field.accessor_name()
                     ),
-                }))
+                })
             }
-        }
+            ProvenanceLoweringError::FilterValidation {
+                field: param,
+                message,
+            } => Error::Query(QueryError::InvalidParameter {
+                parameter: param.to_string(),
+                reason: message,
+            }),
+        })
     }
 
     /// Resolve the right-hand literal/parameter of a provenance comparison to a

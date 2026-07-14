@@ -26,9 +26,26 @@ axum = { version = "0.8" }
 tower-http = { version = "0.6", features = ["set-header"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# `time` feature: resource_limits' `run_with_timeout` uses `tokio::time::timeout`.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }
+# Rate-limit primitive (Lane B3). `default-features = false` drops the `tonic`
+# default so only the axum body conversion is compiled in; autumn-web 0.5 /
+# axum 0.8 / tower 0.5 compatible.
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+# Names `governor::middleware::NoOpMiddleware` in `governor_layer`'s return
+# type (tower_governor does not re-export it). Version pinned to tower_governor's.
+governor = "0.10"
+# Cursor-signing primitive (Lane B4): base64url token encoding, SHA-256 for the
+# hand-rolled HMAC (no extra hmac crate — mirrors legacy `src/mcp/cursor.rs`),
+# constant-time MAC compare via subtle, a random per-process secret via rand,
+# and zeroize to wipe the secret on drop. Versions match the main crate.
+base64 = "0.22"
+sha2 = "0.11"
+subtle = "2.6"
+rand = "0.8"
+zeroize = "1"
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }
 # `tower::ServiceExt::oneshot` drives the legacy 0.4 router in parity tests.
 tower = { version = "0.5", features = ["util"] }

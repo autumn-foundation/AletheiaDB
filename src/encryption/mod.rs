@@ -30,10 +30,10 @@ pub use cipher::{
     AES_256_GCM_ID, Aes256GcmCipher, CHACHA20_POLY1305_ID, ChaCha20Poly1305Cipher, Cipher,
 };
 pub use cli::{
-    EncryptionStatus, KeyGenResult, format_encryption_status, generate_key, get_encryption_status,
-    validate_key_file,
+    EncryptionStatus, KeyGenResult, format_encryption_status, generate_key,
+    generate_key_with_overwrite, get_encryption_status, validate_key_file,
 };
-pub use config::{EncryptionConfig, KeyProviderConfig};
+pub use config::{AuditConfig, AuditDestination, EncryptionConfig, KeyProviderConfig};
 pub use error::{EncryptionError, KeyDerivationError, KeyProviderError};
 pub use factory::{Algorithm, algorithm_from_id, create_cipher};
 pub use key_derivation::{

@@ -10,7 +10,8 @@ use crate::query::planner::Statistics;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::{HistoricalStats, HistoricalStorage};
 use crate::storage::index_persistence::operations::{
-    persist_graph_index_from_snapshot, persist_temporal_index_from_snapshot, persist_vector_indexes,
+    persist_graph_index_from_snapshot, persist_temporal_adjacency_index,
+    persist_temporal_index_from_snapshot, persist_vector_indexes,
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -181,6 +182,20 @@ impl AletheiaDB {
                     manifest_lsn,
                 )?;
             }
+
+            // Persist the temporal-adjacency index too, so a manual force-persist
+            // (e.g. re-encrypting a dataset after enabling encryption) rewrites
+            // EVERY on-disk index file — matching the shutdown path
+            // `persist_all_indexes`. Without this, `temporal_adjacency/adjacency.idx`
+            // could remain plaintext after a manual re-encrypt (Issue #481).
+            //
+            // Persisted from LIVE historical storage AFTER the coherence barrier was
+            // released (same treatment as `persist_vector_indexes` above): the
+            // temporal-adjacency index shares the vector index's documented
+            // torn-snapshot follow-up (F7). This is NOT a lost write — replay
+            // reconstructs adjacency for every entry with lsn >= manifest_lsn, so the
+            // on-disk file is re-covered on restore.
+            persist_temporal_adjacency_index(&self.historical, manager)?;
 
             // Record WAL position for future replay coordination. Safe LSN = min
             // of all components; since every component was just persisted at

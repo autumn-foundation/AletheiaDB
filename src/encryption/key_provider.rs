@@ -72,11 +72,45 @@ impl FileKeyProvider {
         Self { path: path.into() }
     }
 
-    /// Generate a new random key file at the given path.
+    /// Generate a new random key file at the given path, overwriting any
+    /// existing file.
     ///
     /// Creates parent directories if they don't exist. The key is written as
     /// 64 hex characters followed by a newline.
+    ///
+    /// # Security
+    /// On Unix the file is created with mode `0600` (owner read/write only)
+    /// *before* any key bytes are written, so the master key is **never**
+    /// world- or group-readable at any instant -- there is no window between
+    /// creation and a subsequent `chmod` during which the real key sits in a
+    /// `0644` file. See [`generate_key_file_with_overwrite`] for the
+    /// non-overwriting (atomic `O_EXCL`) variant.
+    ///
+    /// [`generate_key_file_with_overwrite`]: Self::generate_key_file_with_overwrite
     pub fn generate_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
+        Self::generate_key_file_with_overwrite(path, true)
+    }
+
+    /// Generate a new random key file, refusing to overwrite an existing file
+    /// when `overwrite` is `false`.
+    ///
+    /// When `overwrite` is `false`, the file is created atomically with
+    /// `O_EXCL` (`create_new`): if a file already exists at `path` the call
+    /// fails (fail-closed) rather than clobbering it, closing the
+    /// check-then-write TOCTOU. When `overwrite` is `true`, any existing file
+    /// is first removed so the key file is always (re-)created fresh with the
+    /// correct mode (a momentary absence exposes no key material).
+    ///
+    /// # Security
+    /// On Unix the file is created with mode `0600` (owner read/write only)
+    /// *before* any key bytes are written, so the master key is **never**
+    /// world- or group-readable at any instant.
+    pub fn generate_key_file_with_overwrite(
+        path: &Path,
+        overwrite: bool,
+    ) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
+        use std::io::Write;
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -84,8 +118,36 @@ impl FileKeyProvider {
         let mut key = Zeroizing::new([0u8; 32]);
         rand::thread_rng().fill_bytes(key.as_mut());
 
-        let hex = bytes_to_hex(key.as_ref());
-        std::fs::write(path, format!("{hex}\n"))?;
+        // Keep the hex representation in a zeroizing buffer so the key never
+        // lingers in a plain heap `String`.
+        let key_hex = Zeroizing::new(format!("{}\n", bytes_to_hex(key.as_ref())));
+
+        if overwrite {
+            // Opening an existing file with `truncate` does NOT reset its mode,
+            // which could leave a stale (possibly world-readable) file's
+            // permissions in place. Remove it first, then re-create fresh with
+            // `0600`. A brief absence exposes no key material.
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // Create with `O_EXCL` in both paths (the overwrite path just removed
+        // any prior file). This makes creation atomic and guarantees the mode
+        // is applied at creation time on Unix -- the key bytes are only ever
+        // written into a `0600` file.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(path)?;
+        f.write_all(key_hex.as_bytes())?;
+        f.flush()?;
 
         Ok(key)
     }
@@ -303,6 +365,47 @@ mod tests {
         let provider = FileKeyProvider::new(&path);
         let loaded = provider.get_mek().unwrap();
         assert_eq!(generated.as_ref(), loaded.as_ref());
+    }
+
+    /// The key file must be `0600` the instant `generate_key_file` returns --
+    /// proving the mode is applied at creation time and does NOT depend on any
+    /// post-hoc `chmod` by the caller. If it did, this test would observe the
+    /// looser default-umask mode.
+    #[cfg(unix)]
+    #[test]
+    fn generate_key_file_is_0600_immediately() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("created_0600.hex");
+
+        let _key = FileKeyProvider::generate_key_file(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "key file must be 0600 at creation time (no post-hoc chmod), got {mode:o}"
+        );
+    }
+
+    /// The non-overwriting variant must fail (fail-closed) if a file already
+    /// exists at the path, and must leave that file's contents untouched.
+    #[test]
+    fn generate_key_file_no_overwrite_refuses_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.hex");
+        std::fs::write(&path, b"pre-existing contents").unwrap();
+
+        let err = FileKeyProvider::generate_key_file_with_overwrite(&path, false).unwrap_err();
+        assert!(
+            matches!(err, KeyProviderError::Io(_)),
+            "expected an Io (AlreadyExists) error, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"pre-existing contents",
+            "existing file must be left untouched when overwrite is refused"
+        );
     }
 
     #[test]

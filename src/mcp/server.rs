@@ -7570,6 +7570,135 @@ mod server_unit_tests {
         );
     }
 
+    /// End-to-end (Issue #3354b): a Cypher provenance `WHERE` accessor filters
+    /// rows through the MCP `query` tool exactly like the AQL side, using the
+    /// shared executor evaluation. Alice (source `hr-system`) is kept; Bob
+    /// (source `crm-sync`) is excluded.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_cypher_provenance_where_filters() {
+        use crate::api::transaction::WriteRequestOptions;
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::provenance::Provenance;
+
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let alice_prov = Provenance::builder()
+            .source("hr-system")
+            .build()
+            .expect("prov");
+        db.create_node_with_options(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "alice").build(),
+            WriteRequestOptions::new().with_provenance(alice_prov),
+        )
+        .expect("create alice");
+        let bob_prov = Provenance::builder()
+            .source("crm-sync")
+            .build()
+            .expect("prov");
+        db.create_node_with_options(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "bob").build(),
+            WriteRequestOptions::new().with_provenance(bob_prov),
+        )
+        .expect("create bob");
+        let server = AletheiaMcpServer::new(db);
+
+        let result = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (n:Person) WHERE source(n) = 'hr-system' RETURN n",
+        }));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        assert!(
+            val.get("error").is_none(),
+            "provenance WHERE must not error: {val}"
+        );
+        assert_eq!(val["row_count"], 1, "only alice matches: {val}");
+        let rows = val["rows"].as_array().expect("rows array");
+        assert_eq!(
+            rows[0]["entity"]["properties"]["name"], "alice",
+            "the kept row is alice: {val}"
+        );
+    }
+
+    /// A Cypher provenance accessor compared to the wrong type surfaces as the
+    /// structured `invalid_params` kind (never a silent empty result), mirroring
+    /// the AQL side (Issue #3354b).
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_cypher_provenance_type_mismatch_is_invalid_params() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+        let result = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (n:Person) WHERE confidence(n) = 'high' RETURN n",
+        }));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        assert_eq!(
+            val["error"]["kind"].as_str(),
+            Some("invalid_params"),
+            "type mismatch is a caller-repairable argument fault: {val}"
+        );
+    }
+
+    /// The ordering-op-on-string rejection (fail-closed) surfaces as a
+    /// structured `parse_error` through the MCP `query` tool (Issue #3354b).
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_cypher_provenance_ordering_op_rejected() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+        let result = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (n:Person) WHERE source(n) < 'x' RETURN n",
+        }));
+        let val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(result)).unwrap();
+        assert_eq!(
+            val["error"]["kind"].as_str(),
+            Some("parse_error"),
+            "ordering op on a string accessor is rejected: {val}"
+        );
+    }
+
+    /// Read-only invariant (Issue #3354b): a provenance predicate cannot smuggle
+    /// a write. A pure provenance-`WHERE` read is accepted, but the same query
+    /// with an appended mutating clause is rejected `read_only_violation`
+    /// *before* execution by the existing statement guard.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_cypher_provenance_stays_read_only() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+
+        // Pure provenance read: not a mutating clause, accepted.
+        let ok = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (n:Person) WHERE provenance(n) IS NOT NULL RETURN n",
+        }));
+        let ok_val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(ok)).unwrap();
+        assert!(
+            ok_val.get("error").is_none(),
+            "a read-only provenance query must not be rejected: {ok_val}"
+        );
+
+        // Provenance WHERE with an appended write is rejected before execution.
+        let bad = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (n:Person) WHERE source(n) = 'hr-system' DELETE n",
+        }));
+        let bad_val: serde_json::Value =
+            serde_json::from_str(&AletheiaMcpServer::extract_text(bad)).unwrap();
+        assert_eq!(
+            bad_val["error"]["kind"].as_str(),
+            Some("read_only_violation"),
+            "a smuggled write is rejected read-only: {bad_val}"
+        );
+    }
+
     #[test]
     fn map_query_error_unsupported_feature_yields_unsupported_construct() {
         let server = make_server();

@@ -1,26 +1,45 @@
-//! Node-read proof slice: `get_node` / `list_nodes` / `count_nodes` (Issue #3524).
+//! Node tools: the read proof slice (`get_node` / `list_nodes` / `count_nodes`)
+//! plus the node-write cluster (`create_node` / `update_node` / `delete_node` /
+//! `delete_node_cascade` / `retract_node`) and the point-in-time node finder
+//! `find_nodes_at_time` (Issue #3524, PR2).
 //!
-//! Each is a single `#[get(...)]` + `#[api_doc(description=..., mcp)]` handler,
-//! so one definition surfaces on **HTTP**, **MCP-over-HTTP** (`/mcp`), and
-//! **OpenAPI** at once. The response body is produced by the *exact* main-crate
-//! MCP typed method ([`AletheiaMcpServer::get_node`]/`list_nodes`/`count_nodes`),
-//! so it is byte-identical to the legacy MCP surface (bare entity JSON + the
-//! `temporal` block, #3220 vector elision) — asserted in the parity suite
-//! against a fresh [`AletheiaMcpServer`] over the same `Arc<AletheiaDB>`.
+//! Each is a single `#[get(...)]`/`#[post(...)]` + `#[api_doc(description=...,
+//! mcp)]` handler, so one definition surfaces on **HTTP**, **MCP-over-HTTP**
+//! (`/mcp`), and **OpenAPI** at once. The response body is produced by the
+//! *exact* main-crate MCP typed method
+//! ([`AletheiaMcpServer::get_node`]/`create_node`/`update_node`/…), so it is
+//! byte-identical to the legacy MCP surface (bare entity JSON + the `temporal`
+//! block #3232, #3220 vector elision, the #3209 DETACH refuse/detach contract on
+//! `delete_node`, the #3230 retraction contract, #3221 `valid_time`, and #3236
+//! point-in-time reconstruction) — asserted in the parity suite against a fresh
+//! [`AletheiaMcpServer`] over the same `Arc<AletheiaDB>`.
 //!
 //! These reuse **already-public** symbols
 //! (`aletheiadb::mcp::{AletheiaMcpServer, GetNodeRequest, ListNodesRequest,
-//! CountNodesRequest}`), so PR1 requires **no** main-crate visibility widening.
+//! CountNodesRequest, CreateNodeRequest, UpdateNodeRequest, DeleteNodeRequest,
+//! DeleteNodeCascadeRequest, RetractNodeRequest, FindNodesAtTimeRequest}`), so no
+//! main-crate visibility widening is required.
 //!
 //! The MCP tool result carries in-band errors (e.g. a missing node →
-//! `{"error":{"code":"NOT_FOUND",...}}`); PR1 returns that JSON verbatim with a
+//! `{"error":{"code":"NOT_FOUND",...}}`); we return that JSON verbatim with a
 //! 200, matching the MCP method's `String` return exactly (unifying HTTP status
-//! semantics with the legacy HTTP envelope is Lane B / a follow-up).
+//! semantics with the legacy HTTP envelope is a follow-up).
+//!
+//! The five write tools are classified [`WriteClass`] and the read finder
+//! [`ReadClass`]; the marker rides in each handler's `Authorized<C>` signature
+//! (the one place the class is declared), which autumn replays for `/mcp
+//! tools/call`. The write handlers take their arguments as a JSON **body**
+//! (autumn maps `Json<T>` to the reserved `body` MCP argument key), so the
+//! `tools/call` `arguments` wrap the request under `"body"`.
 
-use crate::security::{Authorized, ReadClass};
+use crate::security::{Authorized, ReadClass, WriteClass};
 use crate::state::ServerState;
-use aletheiadb::mcp::{AletheiaMcpServer, CountNodesRequest, GetNodeRequest, ListNodesRequest};
-use autumn_web::prelude::{Json, Path, Query, get};
+use aletheiadb::mcp::{
+    AletheiaMcpServer, CountNodesRequest, CreateNodeRequest, DeleteNodeCascadeRequest,
+    DeleteNodeRequest, FindNodesAtTimeRequest, GetNodeRequest, ListNodesRequest,
+    RetractNodeRequest, UpdateNodeRequest,
+};
+use autumn_web::prelude::{Json, Path, Query, get, post};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -119,4 +138,118 @@ pub async fn count_nodes(
     let server = AletheiaMcpServer::new(state.db_arc());
     let out = server.count_nodes(CountNodesRequest { label: opts.label });
     tool_json(out)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Node-write cluster (Issue #3524, PR2): create / update / delete /
+// delete_cascade / retract — all [`WriteClass`], plus the [`ReadClass`]
+// point-in-time finder `find_nodes_at_time`.
+//
+// Each handler forwards its request body to the exact legacy MCP typed method
+// and returns that method's `String` verbatim, so every contract those methods
+// implement — #3221 `valid_time`, #3209 DETACH refuse/detach, #3230 retraction
+// idempotency, #3232 temporal block, #3220 vector elision, #3236 point-in-time
+// reconstruction — is preserved byte-for-byte with **zero** reserialization.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// `create_node` — create a node with properties and optional bi-temporal
+/// `valid_time` (#3221), provenance, and derivation lineage (#3371). HTTP + MCP
+/// tool. The response carries the new node with its `temporal` block (#3232).
+#[post("/nodes")]
+#[api_doc(
+    description = "Create a node with properties and optional valid_time, provenance, and lineage",
+    mcp
+)]
+pub async fn create_node(
+    _auth: Authorized<WriteClass>,
+    state: ServerState,
+    Json(req): Json<CreateNodeRequest>,
+) -> Json<Value> {
+    let server = AletheiaMcpServer::new(state.db_arc());
+    tool_json(server.create_node(req))
+}
+
+/// `update_node` — replace a node's properties, recording a new bi-temporal
+/// version (optional `valid_time` #3221, provenance, lineage). HTTP + MCP tool.
+#[post("/nodes/update")]
+#[api_doc(
+    description = "Update a node's properties, recording a new version with optional valid_time",
+    mcp
+)]
+pub async fn update_node(
+    _auth: Authorized<WriteClass>,
+    state: ServerState,
+    Json(req): Json<UpdateNodeRequest>,
+) -> Json<Value> {
+    let server = AletheiaMcpServer::new(state.db_arc());
+    tool_json(server.update_node(req))
+}
+
+/// `delete_node` — safe-by-default delete (#3209): refuses with
+/// `connected_edges` unless `detach: true`, which cascade-deletes and reports
+/// `edges_removed`. Optional `valid_time` (#3221; not with `detach`). HTTP + MCP.
+#[post("/nodes/delete")]
+#[api_doc(
+    description = "Delete a node; refuses if it has edges unless detach:true (DETACH DELETE contract)",
+    mcp
+)]
+pub async fn delete_node(
+    _auth: Authorized<WriteClass>,
+    state: ServerState,
+    Json(req): Json<DeleteNodeRequest>,
+) -> Json<Value> {
+    let server = AletheiaMcpServer::new(state.db_arc());
+    tool_json(server.delete_node(req))
+}
+
+/// `delete_node_cascade` — atomically delete a node and every connected edge,
+/// preventing orphans. HTTP + MCP tool.
+#[post("/nodes/delete_cascade")]
+#[api_doc(
+    description = "Delete a node and all its connected edges atomically (cascade delete)",
+    mcp
+)]
+pub async fn delete_node_cascade(
+    _auth: Authorized<WriteClass>,
+    state: ServerState,
+    Json(req): Json<DeleteNodeCascadeRequest>,
+) -> Json<Value> {
+    let server = AletheiaMcpServer::new(state.db_arc());
+    tool_json(server.delete_node_cascade(req))
+}
+
+/// `retract_node` — close a node's valid-time interval without deleting history
+/// (#3230): refuses with `connected_edges` unless `detach: true` (co-retracts
+/// edges, reports `edges_retracted`); re-retraction is an idempotent no-op.
+/// HTTP + MCP tool.
+#[post("/nodes/retract")]
+#[api_doc(
+    description = "Retract a node (close its valid-time interval) without deleting history",
+    mcp
+)]
+pub async fn retract_node(
+    _auth: Authorized<WriteClass>,
+    state: ServerState,
+    Json(req): Json<RetractNodeRequest>,
+) -> Json<Value> {
+    let server = AletheiaMcpServer::new(state.db_arc());
+    tool_json(server.retract_node(req))
+}
+
+/// `find_nodes_at_time` — resolve nodes by label (+ optional exact property
+/// match) as they existed at a bi-temporal point (#3236), reconstructing each
+/// node's state at `(valid_time, transaction_time)`. Read-only ([`ReadClass`]);
+/// vectors elided by default (#3220). HTTP + MCP tool.
+#[post("/nodes/find_at_time")]
+#[api_doc(
+    description = "Find nodes by label/property as of a bi-temporal point, reconstructed at that time",
+    mcp
+)]
+pub async fn find_nodes_at_time(
+    _auth: Authorized<ReadClass>,
+    state: ServerState,
+    Json(req): Json<FindNodesAtTimeRequest>,
+) -> Json<Value> {
+    let server = AletheiaMcpServer::new(state.db_arc());
+    tool_json(server.find_nodes_at_time(req))
 }

@@ -17,6 +17,26 @@ use super::formats::{
     PersistedPropertyValue,
 };
 use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
+use crate::encryption::cipher::Cipher;
+
+/// Write a fully-built plaintext graph-file buffer to disk, encrypting the
+/// whole buffer with the encrypted-index header when a cipher is supplied
+/// (Issue #481). The plaintext buffer (`[bitcode|zstd][crc32]`) is identical
+/// whether or not it is subsequently encrypted, so the existing zstd-detect +
+/// CRC + decode read logic runs unchanged after decryption.
+fn write_graph_buffer_maybe_encrypted(
+    path: &Path,
+    plaintext: &[u8],
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<()> {
+    match cipher {
+        Some(cipher) => {
+            let encrypted = super::common::encrypt_index_bytes(plaintext, cipher)?;
+            super::atomic_write(path, &encrypted)
+        }
+        None => super::atomic_write(path, plaintext),
+    }
+}
 
 /// Map decompression errors to `IndexPersistenceError`, preserving the
 /// specific `SizeLimitExceeded` variant for capacity violations.
@@ -211,41 +231,54 @@ pub(crate) fn extract_graph_data_from_snapshot(
 ///
 /// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_graph_index(data: &GraphIndexData, path: &Path) -> Result<()> {
+    save_graph_index_with_cipher(data, path, None)
+}
+
+/// Build the uncompressed plaintext graph-file buffer: `[bitcode][crc32]`.
+fn build_graph_plaintext(data: &GraphIndexData) -> Vec<u8> {
     let encoded = bitcode::encode(data);
 
-    // Calculate CRC32 of the encoded data
     let mut hasher = Hasher::new();
     hasher.update(&encoded);
     let checksum = hasher.finalize();
 
-    // Write data + checksum
-    let mut data_with_checksum = encoded;
-    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
+    let mut buffer = encoded;
+    buffer.extend_from_slice(&checksum.to_le_bytes());
+    buffer
+}
 
-    super::atomic_write(path, &data_with_checksum)?;
-    Ok(())
+/// Save graph index data (uncompressed), optionally encrypting it at rest
+/// (Issue #481). With `cipher == None` this is identical to
+/// [`save_graph_index`].
+///
+/// # Errors
+///
+/// Returns an error if serialization, encryption, or file I/O fails.
+pub fn save_graph_index_with_cipher(
+    data: &GraphIndexData,
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<()> {
+    let plaintext = build_graph_plaintext(data);
+    write_graph_buffer_maybe_encrypted(path, &plaintext, cipher)
 }
 
 /// Load graph index data from disk and validate CRC32 checksum.
 ///
 /// Automatically detects zstd compression by checking for magic bytes.
 pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
-    // Check file size before reading to prevent OOM/DoS
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > super::MAX_GRAPH_INDEX_FILE_SIZE {
-        return Err(IndexPersistenceError::SizeLimitExceeded {
-            message: format!(
-                "Graph index file size {} exceeds limit {}",
-                metadata.len(),
-                super::MAX_GRAPH_INDEX_FILE_SIZE
-            ),
-        });
-    }
+    load_graph_index_with_cipher(path, None)
+}
 
-    let bytes = fs::read(path)?;
-
+/// Decode a plaintext graph-file buffer (`[bitcode|zstd][crc32]`): auto-detect
+/// zstd compression, verify the CRC32, decode, and validate magic/version.
+///
+/// Shared by the buffered and memory-mapped read paths so the exact
+/// zstd-detect + CRC + decode logic is applied identically to a plaintext file
+/// and to the decrypted contents of an encrypted one.
+fn decode_graph_bytes(buffer: &[u8], path: &Path) -> Result<GraphIndexData> {
     // Check minimum size (must have at least 4 bytes for CRC)
-    if bytes.len() < 4 {
+    if buffer.len() < 4 {
         return Err(IndexPersistenceError::Corrupted {
             path: path.to_path_buf(),
             source: "File too small to contain CRC32 checksum".into(),
@@ -253,7 +286,7 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     }
 
     // Split data and checksum
-    let (data_slice, checksum_bytes) = bytes.split_at(bytes.len() - 4);
+    let (data_slice, checksum_bytes) = buffer.split_at(buffer.len() - 4);
     let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
         IndexPersistenceError::Corrupted {
             path: path.to_path_buf(),
@@ -309,6 +342,28 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     Ok(data)
 }
 
+/// Load graph index data, transparently decrypting it if written encrypted
+/// (Issue #481). A legacy plaintext graph index is loaded even when a cipher
+/// is supplied (header sniffing); zstd auto-detection then runs on the
+/// decrypted plaintext.
+///
+/// # Errors
+///
+/// Same as [`load_graph_index`], plus a structured error if the file is
+/// encrypted but no cipher is supplied or decryption fails.
+pub fn load_graph_index_with_cipher(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<GraphIndexData> {
+    let buffer = super::common::read_index_file(
+        path,
+        super::MAX_GRAPH_INDEX_FILE_SIZE,
+        "Graph index",
+        cipher,
+    )?;
+    decode_graph_bytes(&buffer, path)
+}
+
 /// Create a new empty GraphIndexData.
 pub fn new_graph_index_data() -> GraphIndexData {
     GraphIndexData {
@@ -343,6 +398,15 @@ pub fn save_graph_index_compressed(
     path: &Path,
     compression_level: i32,
 ) -> Result<()> {
+    save_graph_index_compressed_with_cipher(data, path, compression_level, None)
+}
+
+/// Build the compressed plaintext graph-file buffer: `[zstd][crc32]` where the
+/// CRC32 is computed over the *uncompressed* bitcode (matching the read path).
+fn build_graph_plaintext_compressed(
+    data: &GraphIndexData,
+    compression_level: i32,
+) -> Result<Vec<u8>> {
     let encoded = bitcode::encode(data);
 
     // Calculate CRC32 of uncompressed data
@@ -355,12 +419,30 @@ pub fn save_graph_index_compressed(
         IndexPersistenceError::Serialization(format!("zstd compression failed: {}", e))
     })?;
 
-    // Write: compressed_data + checksum (of uncompressed)
-    let mut data_with_checksum = compressed;
-    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
+    // buffer: compressed_data + checksum (of uncompressed)
+    let mut buffer = compressed;
+    buffer.extend_from_slice(&checksum.to_le_bytes());
+    Ok(buffer)
+}
 
-    super::atomic_write(path, &data_with_checksum)?;
-    Ok(())
+/// Save graph index data with zstd compression, optionally encrypting the
+/// whole compressed buffer at rest (Issue #481). Encryption is applied
+/// **after** compression, so the read path decrypts first and then runs its
+/// existing zstd auto-detection. With `cipher == None` this is identical to
+/// [`save_graph_index_compressed`].
+///
+/// # Errors
+///
+/// Returns an error if serialization, compression, encryption, or file write
+/// fails.
+pub fn save_graph_index_compressed_with_cipher(
+    data: &GraphIndexData,
+    path: &Path,
+    compression_level: i32,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<()> {
+    let plaintext = build_graph_plaintext_compressed(data, compression_level)?;
+    write_graph_buffer_maybe_encrypted(path, &plaintext, cipher)
 }
 
 /// Load graph index data using memory-mapped file for efficient large file handling.
@@ -390,6 +472,55 @@ pub fn save_graph_index_compressed(
 /// let data = load_graph_index_mmap(&path)?;
 /// ```
 pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
+    load_graph_index_mmap_with_cipher(path, None)
+}
+
+/// Memory-mapped graph index load, transparently handling encryption
+/// (Issue #481).
+///
+/// An encrypted file (identified by its plaintext header) **cannot** be
+/// memory-mapped as a live struct — the on-disk bytes are ciphertext — so this
+/// falls back to a buffered read + decrypt + decode via
+/// [`load_graph_index_with_cipher`]. A legacy plaintext file takes the true
+/// mmap path unchanged.
+pub fn load_graph_index_mmap_with_cipher(
+    path: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<GraphIndexData> {
+    use std::io::Read;
+
+    // Peek the first bytes to detect the encrypted-index header.
+    let mut header = [0u8; super::common::ENC_HEADER_LEN];
+    let read_len = {
+        let mut file = std::fs::File::open(path)?;
+        // A short read (small file) simply won't match the magic; that's fine.
+        let mut filled = 0usize;
+        loop {
+            match file.read(&mut header[filled..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    filled += n;
+                    if filled == header.len() {
+                        break;
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        filled
+    };
+
+    if super::common::is_encrypted_index(&header[..read_len]) {
+        // Encrypted: buffered decrypt (mmap of ciphertext would be meaningless).
+        return load_graph_index_with_cipher(path, cipher);
+    }
+
+    load_graph_index_mmap_plaintext(path)
+}
+
+/// The original plaintext memory-mapped load path.
+fn load_graph_index_mmap_plaintext(path: &Path) -> Result<GraphIndexData> {
     use memmap2::Mmap;
     use std::fs::File;
 
@@ -845,6 +976,167 @@ mod tests {
 
         assert_eq!(loaded.node_count, 2);
         assert_eq!(loaded.nodes.len(), 2);
+    }
+
+    // ── Encryption-at-rest tests (Issue #481) ────────────────────────
+
+    fn enc_test_cipher() -> Arc<dyn Cipher> {
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+        let mut key = Zeroizing::new([0u8; 32]);
+        key[0] = 0x5A;
+        key[7] = 0xE1;
+        Arc::new(Aes256GcmCipher::new(&key))
+    }
+
+    fn sample_graph() -> GraphIndexData {
+        let mut data = new_graph_index_data();
+        data.node_count = 1;
+        data.nodes.push(PersistedNode {
+            id: 7,
+            label_idx: GLOBAL_INTERNER.intern("Person").unwrap().as_u32(),
+            version_id: 3,
+            properties: PersistedPropertyMap { entries: vec![] },
+        });
+        data
+    }
+
+    #[test]
+    fn test_graph_index_encrypted_round_trip_plain() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index_with_cipher(&data, &path, Some(&cipher)).unwrap();
+
+        // On-disk file carries the encrypted-index header.
+        let raw = fs::read(&path).unwrap();
+        assert!(super::super::common::is_encrypted_index(&raw));
+
+        let loaded = load_graph_index_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.nodes[0].id, 7);
+
+        // Without a cipher, loading fails closed (never reads ciphertext as data).
+        assert!(load_graph_index_with_cipher(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_graph_index_encrypted_round_trip_zstd() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index_compressed_with_cipher(&data, &path, 3, Some(&cipher)).unwrap();
+        assert!(super::super::common::is_encrypted_index(
+            &fs::read(&path).unwrap()
+        ));
+
+        let loaded = load_graph_index_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.nodes[0].id, 7);
+    }
+
+    #[test]
+    fn test_graph_index_mmap_falls_back_to_buffered_decrypt() {
+        // use_mmap + encryption: the mmap loader must NOT map ciphertext; it
+        // falls back to buffered decrypt and returns correct data.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index_with_cipher(&data, &path, Some(&cipher)).unwrap();
+
+        let loaded = load_graph_index_mmap_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.nodes[0].id, 7);
+    }
+
+    #[test]
+    fn test_graph_index_mmap_plaintext_still_works_with_cipher_present() {
+        // A legacy plaintext file loads through the mmap+cipher path (upgrade).
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index(&data, &path).unwrap(); // plaintext
+        let loaded = load_graph_index_mmap_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.nodes[0].id, 7);
+    }
+
+    #[test]
+    fn test_graph_index_legacy_plaintext_loads_with_cipher() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index(&data, &path).unwrap(); // plaintext, no header
+        let loaded = load_graph_index_with_cipher(&path, Some(&cipher)).unwrap();
+        assert_eq!(loaded.nodes[0].id, 7);
+    }
+
+    #[test]
+    fn test_graph_index_encrypted_wrong_key_fails() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index_with_cipher(&data, &path, Some(&cipher)).unwrap();
+
+        let wrong = {
+            use crate::encryption::Aes256GcmCipher;
+            use zeroize::Zeroizing;
+            let mut key = Zeroizing::new([0u8; 32]);
+            key[0] = 0x11;
+            Arc::new(Aes256GcmCipher::new(&key)) as Arc<dyn Cipher>
+        };
+        assert!(load_graph_index_with_cipher(&path, Some(&wrong)).is_err());
+    }
+
+    #[test]
+    fn test_graph_index_mmap_encrypted_fails_closed_without_cipher() {
+        // The mmap load path must also fail closed for an encrypted file when
+        // no cipher is supplied: it detects the header, routes to the buffered
+        // decrypt, and errors rather than mapping ciphertext as a live struct.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index_with_cipher(&data, &path, Some(&cipher)).unwrap();
+
+        assert!(load_graph_index_mmap_with_cipher(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_graph_index_zstd_encrypted_tampered_fails() {
+        // A tampered byte inside an encrypted+compressed graph file must fail
+        // authentication on decrypt (Corrupted), never surface a half-decoded
+        // or wrong graph.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.idx");
+        let cipher = enc_test_cipher();
+        let data = sample_graph();
+
+        save_graph_index_compressed_with_cipher(&data, &path, 3, Some(&cipher)).unwrap();
+
+        let mut raw = fs::read(&path).unwrap();
+        let mid = raw.len() / 2;
+        raw[mid] ^= 0xFF;
+        fs::write(&path, &raw).unwrap();
+
+        match load_graph_index_with_cipher(&path, Some(&cipher)) {
+            Err(IndexPersistenceError::Corrupted { .. }) => {}
+            other => {
+                panic!("expected Corrupted error for tampered encrypted zstd graph, got {other:?}")
+            }
+        }
     }
 
     #[test]

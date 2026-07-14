@@ -352,6 +352,26 @@ pub fn load_indexes_parallel(
     Option<formats::TemporalIndexData>,
     Vec<formats::VectorIndexData>,
 )> {
+    load_indexes_parallel_with_cipher(graph_path, temporal_path, vector_paths, None)
+}
+
+/// Like [`load_indexes_parallel`], but transparently decrypts any index file
+/// written encrypted at rest (Issue #481). Passing `cipher == None` is
+/// byte-for-byte equivalent to [`load_indexes_parallel`] (header sniffing means
+/// a plaintext file still loads with a cipher present, and a plaintext-only
+/// directory is unaffected). Kept in lockstep with the cipher-aware loaders so
+/// this alternate parallel entry point never fails closed on an encrypted
+/// directory.
+pub fn load_indexes_parallel_with_cipher(
+    graph_path: &std::path::Path,
+    temporal_path: Option<&std::path::Path>,
+    vector_paths: Vec<&std::path::Path>,
+    cipher: Option<&std::sync::Arc<dyn crate::encryption::cipher::Cipher>>,
+) -> Result<(
+    formats::GraphIndexData,
+    Option<formats::TemporalIndexData>,
+    Vec<formats::VectorIndexData>,
+)> {
     use std::thread;
 
     // Convert paths to owned PathBufs for thread safety
@@ -359,18 +379,29 @@ pub fn load_indexes_parallel(
     let temporal_path_opt = temporal_path.map(|p| p.to_path_buf());
     let vector_paths: Vec<_> = vector_paths.into_iter().map(|p| p.to_path_buf()).collect();
 
+    // Clone the cipher Arc into owned Options so each thread/closure can decrypt
+    // independently (a `&Arc` cannot cross the thread boundary).
+    let graph_cipher = cipher.cloned();
+    let temporal_cipher = cipher.cloned();
+    let vector_cipher = cipher.cloned();
+
     // Spawn thread for graph loading
-    let graph_handle = thread::spawn(move || graph::load_graph_index(&graph_path));
+    let graph_handle = thread::spawn(move || {
+        graph::load_graph_index_with_cipher(&graph_path, graph_cipher.as_ref())
+    });
 
     // Spawn thread for temporal loading if path provided
-    let temporal_handle =
-        temporal_path_opt.map(|path| thread::spawn(move || temporal::load_temporal_index(&path)));
+    let temporal_handle = temporal_path_opt.map(|path| {
+        thread::spawn(move || {
+            temporal::load_temporal_index_with_cipher(&path, temporal_cipher.as_ref())
+        })
+    });
 
     // Load vector indexes in parallel using Rayon (blocks current thread)
     // We do this while graph and temporal indexes are loading in background threads
     let vector_data: Result<Vec<_>> = vector_paths
         .par_iter()
-        .map(|path| vector::load_vector_index(path))
+        .map(|path| vector::load_vector_index_with_cipher(path, vector_cipher.as_ref()))
         .collect();
     let vector_data = vector_data?;
 
