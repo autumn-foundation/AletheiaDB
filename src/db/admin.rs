@@ -10,7 +10,7 @@ use crate::query::planner::Statistics;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::{HistoricalStats, HistoricalStorage};
 use crate::storage::index_persistence::operations::{
-    persist_temporal_index, persist_vector_indexes,
+    persist_temporal_adjacency_index, persist_temporal_index, persist_vector_indexes,
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -107,6 +107,13 @@ impl AletheiaDB {
                     current_lsn,
                 )?;
             }
+
+            // Persist the temporal-adjacency index too, so a manual force-persist
+            // (e.g. re-encrypting a dataset after enabling encryption) rewrites
+            // EVERY on-disk index file — matching the shutdown path
+            // `persist_all_indexes`. Without this, `temporal_adjacency/adjacency.idx`
+            // could remain plaintext after a manual re-encrypt (Issue #481).
+            persist_temporal_adjacency_index(&self.historical, manager)?;
 
             // Record WAL position for future replay coordination.
             // Safe LSN = min of all components; since we just persisted everything, current_lsn is safe.

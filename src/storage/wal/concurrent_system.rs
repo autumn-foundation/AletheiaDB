@@ -351,6 +351,9 @@ impl ConcurrentWalSystem {
             wal_cipher: config.wal_cipher.clone(),
         };
 
+        // Retain the cipher on the system for the recovery read path.
+        let wal_cipher = config.wal_cipher.clone();
+
         let wal = Arc::new(ConcurrentWal::new(wal_config)?);
         let coordinator = Arc::new(FlushCoordinator::new(coordinator_config)?);
         let shutdown_signal = Arc::new(AtomicBool::new(false));
@@ -424,7 +427,7 @@ impl ConcurrentWalSystem {
             group_commit,
             consecutive_flush_errors,
             tolerate_torn_tail: config.tolerate_torn_tail,
-            wal_cipher: config.wal_cipher,
+            wal_cipher,
         })
     }
 

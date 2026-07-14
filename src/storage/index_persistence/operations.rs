@@ -64,8 +64,11 @@ pub(crate) fn persist_vector_indexes(
 ) -> Result<()> {
     use crate::storage::index_persistence::formats::PersistedHnswConfig;
     use crate::storage::index_persistence::vector::{
-        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
+        new_vector_mappings, new_vector_meta, save_vector_mappings_with_cipher,
+        save_vector_meta_with_cipher,
     };
+
+    let cipher = manager.index_cipher();
 
     // Save string interner first (required by all indexes)
     manager.save_string_interner().map_err(|e| {
@@ -98,12 +101,17 @@ pub(crate) fn persist_vector_indexes(
                 ))
             })?;
 
-        // Save HNSW index using usearch native format
+        // Save HNSW index using usearch native format, encrypting the native
+        // `current.usearch` file + its `.usearch.mappings` sidecar at rest when
+        // a cipher is configured (Issue #481, closes AC #1).
         let usearch_path = vec_path.join("current.usearch");
 
-        // Use the VectorIndex trait's save method
-        use crate::index::vector::VectorIndex;
-        index.save(&usearch_path).map_err(|e| {
+        crate::storage::index_persistence::vector::save_hnsw_index_maybe_encrypted(
+            index.as_ref(),
+            &usearch_path,
+            cipher,
+        )
+        .map_err(|e| {
             StorageError::PersistenceError(format!("Failed to save usearch index: {}", e))
         })?;
 
@@ -124,12 +132,14 @@ pub(crate) fn persist_vector_indexes(
         // Set the actual vector count
         vector_meta.vector_count = vector_count as u64;
 
-        save_vector_meta(&vector_meta, &vec_path.join("meta.idx")).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to save vector metadata for {}: {}",
-                property_name, e
-            ))
-        })?;
+        save_vector_meta_with_cipher(&vector_meta, &vec_path.join("meta.idx"), cipher).map_err(
+            |e| {
+                StorageError::PersistenceError(format!(
+                    "Failed to save vector metadata for {}: {}",
+                    property_name, e
+                ))
+            },
+        )?;
 
         // Create and save mappings
         use crate::storage::index_persistence::formats::VectorMapping;
@@ -143,12 +153,13 @@ pub(crate) fn persist_vector_indexes(
             })
             .collect();
 
-        save_vector_mappings(&vector_mappings, &vec_path.join("mappings.idx")).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to save vector mappings for {}: {}",
-                property_name, e
-            ))
-        })?;
+        save_vector_mappings_with_cipher(&vector_mappings, &vec_path.join("mappings.idx"), cipher)
+            .map_err(|e| {
+                StorageError::PersistenceError(format!(
+                    "Failed to save vector mappings for {}: {}",
+                    property_name, e
+                ))
+            })?;
     }
 
     if let Some(tracker) = tracker {
@@ -206,9 +217,13 @@ struct SkippedVectorIndex {
 /// so output stays deterministic even though loads run in parallel.
 fn load_single_vector_index(
     vec_path: &std::path::Path,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
 ) -> std::result::Result<LoadedVectorIndex, SkippedVectorIndex> {
     use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
-    use crate::storage::index_persistence::vector::{load_vector_mappings, load_vector_meta};
+    use crate::storage::index_persistence::vector::{
+        load_hnsw_index_maybe_encrypted, load_vector_mappings_with_cipher,
+        load_vector_meta_with_cipher,
+    };
 
     let skipped = |property_name: &str, reason: String| SkippedVectorIndex {
         property_name: property_name.to_string(),
@@ -248,7 +263,7 @@ fn load_single_vector_index(
         return Err(skipped(&property_name, "metadata not found".to_string()));
     }
 
-    let meta = match load_vector_meta(&meta_path) {
+    let meta = match load_vector_meta_with_cipher(&meta_path, cipher) {
         Ok(meta) => meta,
         Err(e) => {
             return Err(skipped(
@@ -275,11 +290,13 @@ fn load_single_vector_index(
         .with_ef_construction(meta.hnsw_config.ef_construction as usize)
         .with_ef_search(meta.hnsw_config.ef_search as usize);
 
-    // Load or create index
+    // Load or create index. When the native `current.usearch` file was written
+    // encrypted (Issue #481), it is transparently decrypted to a temp file and
+    // handed to usearch; a legacy plaintext file loads directly (sniffed).
     let usearch_path = vec_path.join("current.usearch");
     let index_result = if usearch_path.exists() {
-        // Load existing index
-        HnswIndex::load(&usearch_path, config.clone())
+        // Load existing index (decrypting first if encrypted at rest)
+        load_hnsw_index_maybe_encrypted(&usearch_path, config.clone(), cipher)
     } else {
         // Create new empty index
         HnswIndex::new(config.clone())
@@ -298,7 +315,7 @@ fn load_single_vector_index(
     let mut warnings = Vec::new();
     let mappings_path = vec_path.join("mappings.idx");
     if mappings_path.exists() {
-        let mappings_data = match load_vector_mappings(&mappings_path) {
+        let mappings_data = match load_vector_mappings_with_cipher(&mappings_path, cipher) {
             Ok(data) => data,
             Err(e) => {
                 return Err(skipped(
@@ -401,11 +418,14 @@ pub(crate) fn load_vector_indexes(
     // parking_lot locks used by `HnswIndex` do not poison, so unwinding is
     // safe and must not abort startup or kill the sibling loads (rayon would
     // otherwise propagate the panic through `collect`).
+    // Clone the index cipher (cheap Arc clone) so each parallel task can decrypt
+    // encrypted vector meta/mappings files (Issue #481).
+    let cipher = manager.index_cipher().cloned();
     let staged: Vec<std::result::Result<LoadedVectorIndex, SkippedVectorIndex>> = index_dirs
         .par_iter()
         .map(|path| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                load_single_vector_index(path)
+                load_single_vector_index(path, cipher.as_ref())
             }))
             .unwrap_or_else(|payload| {
                 let panic_msg = if let Some(s) = payload.downcast_ref::<&str>() {
@@ -504,7 +524,7 @@ pub(crate) fn persist_graph_index(
     current_lsn: u64,
 ) -> Result<(u64, u64)> {
     use crate::storage::index_persistence::graph::{
-        new_graph_index_data, persist_property_map, save_graph_index,
+        new_graph_index_data, persist_property_map, save_graph_index_with_cipher,
     };
     use crate::storage::index_persistence::{PersistedEdge, PersistedNode};
 
@@ -568,9 +588,9 @@ pub(crate) fn persist_graph_index(
         StorageError::PersistenceError(format!("Failed to create graph directory: {}", e))
     })?;
 
-    save_graph_index(&graph_data, &graph_path).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save graph index: {}", e))
-    })?;
+    save_graph_index_with_cipher(&graph_data, &graph_path, manager.index_cipher()).map_err(
+        |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+    )?;
 
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
@@ -598,7 +618,8 @@ pub(crate) fn persist_temporal_index(
 ) -> Result<()> {
     use crate::storage::index_persistence::temporal::{
         convert_edge_version, convert_node_version, materialize_version_data_for_persistence,
-        needs_sparse_vector_materialization, new_temporal_index_data, save_temporal_index,
+        needs_sparse_vector_materialization, new_temporal_index_data,
+        save_temporal_index_with_cipher,
     };
 
     // Get read lock on historical storage
@@ -715,9 +736,10 @@ pub(crate) fn persist_temporal_index(
 
     // Save to disk
     let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
-    save_temporal_index(&temporal_data, &temporal_path).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
-    })?;
+    save_temporal_index_with_cipher(&temporal_data, &temporal_path, manager.index_cipher())
+        .map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
+        })?;
 
     tracker.reset_temporal_mutations();
     tracker.update_temporal_lsn(current_lsn);
@@ -758,12 +780,17 @@ pub(crate) fn persist_temporal_adjacency_index(
     historical: &Arc<RwLock<HistoricalStorage>>,
     manager: &Arc<IndexPersistenceManager>,
 ) -> Result<()> {
-    use crate::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index;
+    use crate::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index_with_cipher;
 
     // Get the temporal adjacency index from historical storage
     let historical_read = historical.read();
     if let Some(adj_index) = historical_read.get_temporal_adjacency_index() {
-        save_temporal_adjacency_index(adj_index, manager.base_path()).map_err(|e| {
+        save_temporal_adjacency_index_with_cipher(
+            adj_index,
+            manager.base_path(),
+            manager.index_cipher(),
+        )
+        .map_err(|e| {
             StorageError::PersistenceError(format!(
                 "Failed to save temporal adjacency index: {}",
                 e
@@ -936,9 +963,11 @@ pub(crate) fn load_indexes_startup(
     // Try to restore graph data even if manifest loading failed
     let graph_path = manager.graph_path().join("adjacency.idx");
     if graph_path.exists() {
-        use crate::storage::index_persistence::graph::{load_graph_index, restore_property_map};
+        use crate::storage::index_persistence::graph::{
+            load_graph_index_with_cipher, restore_property_map,
+        };
 
-        match load_graph_index(&graph_path) {
+        match load_graph_index_with_cipher(&graph_path, manager.index_cipher()) {
             Ok(mut graph_data) => {
                 // Issue #3490: translate persisted (file-space) interner ids
                 // (node/edge labels, property keys, and string property values)
@@ -1150,9 +1179,18 @@ pub(crate) fn load_indexes_startup(
                     current.compact_adjacency();
                 }
             }
-            Err(_e) => {
-                // Graph index loading failed - start with empty graph
-                // This is normal if no index files exist yet
+            Err(e) => {
+                // The graph index file EXISTS (checked above) but could not be
+                // loaded: corruption, or — under encryption-at-rest (Issue #481)
+                // — a missing/wrong/misconfigured key. Warn before falling back
+                // to an empty graph + WAL replay so an operator gets a
+                // diagnostic instead of silent data loss. The error Display
+                // carries only the path and a cipher-opaque failure string
+                // (never key material).
+                eprintln!(
+                    "Warning: index 'graph' load failed, recovering from WAL: {}",
+                    e
+                );
             }
         }
     }
@@ -1161,10 +1199,10 @@ pub(crate) fn load_indexes_startup(
     let temporal_path = manager.temporal_path().join("versions.idx");
     if temporal_path.exists() {
         use crate::storage::index_persistence::temporal::{
-            load_temporal_index, restore_into_historical_storage,
+            load_temporal_index_with_cipher, restore_into_historical_storage,
         };
 
-        match load_temporal_index(&temporal_path) {
+        match load_temporal_index_with_cipher(&temporal_path, manager.index_cipher()) {
             Ok(mut temporal_data) => {
                 // Issue #3490: translate persisted (file-space) interner ids in
                 // the historical versions/anchors (labels, property keys, string
@@ -1239,7 +1277,14 @@ pub(crate) fn load_indexes_startup(
                 }
             }
             Err(e) => {
-                eprintln!("Warning: Failed to load temporal index: {}", e);
+                // File exists but failed to load (corruption, or a missing/
+                // wrong encryption key under Issue #481). Warn, then fall back
+                // to WAL replay for this component. Error text carries no key
+                // material.
+                eprintln!(
+                    "Warning: index 'temporal' load failed, recovering from WAL: {}",
+                    e
+                );
             }
         }
     }
@@ -1267,26 +1312,40 @@ pub(crate) fn load_indexes_startup(
     }
 
     // Load temporal adjacency index.
+    // Issue #481: the persisted file may be encrypted at rest and must be
+    // decrypted with the configured index cipher.
     // Issue #3490: the persisted edge-type labels are file-space interner ids
     // and MUST be translated through the same remap as the graph/temporal
     // indexes before they are resolved, or AS-OF (#3225) edge-type traversal
     // filtering silently matches the wrong edge type after a reload whose
-    // interner order diverged from the saved file.
-    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index_with_remap;
+    // interner order diverged from the saved file. The combined loader decrypts
+    // first, then applies the remap to the decoded data.
+    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index_with_cipher_and_remap;
 
     let adjacency_file = manager
         .base_path()
         .join("temporal_adjacency")
         .join("adjacency.idx");
     if adjacency_file.exists() {
-        match load_temporal_adjacency_index_with_remap(manager.base_path(), &interner_remap) {
+        match load_temporal_adjacency_index_with_cipher_and_remap(
+            manager.base_path(),
+            manager.index_cipher(),
+            &interner_remap,
+        ) {
             Ok(adj_index) => {
                 let mut hist_write = historical.write();
                 hist_write.set_temporal_adjacency_index(adj_index);
                 eprintln!("Loaded temporal adjacency index from disk");
             }
             Err(e) => {
-                eprintln!("Warning: Failed to load temporal adjacency index: {}", e);
+                // File exists but failed to load (corruption, or a missing/
+                // wrong encryption key under Issue #481). Warn, then continue
+                // without the adjacency index (rebuilt lazily). No key material
+                // in the error text.
+                eprintln!(
+                    "Warning: index 'temporal_adjacency' load failed, recovering from WAL: {}",
+                    e
+                );
             }
         }
     }

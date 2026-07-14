@@ -333,6 +333,32 @@ impl CheckpointManager {
     /// # }
     /// ```
     pub fn new(config: CheckpointConfig) -> Result<Self> {
+        Self::with_cipher(config, None)
+    }
+
+    /// Create a new checkpoint manager whose persisted index files are
+    /// encrypted at rest with the given index cipher (Issue #481).
+    ///
+    /// The cipher is threaded into the underlying
+    /// [`IndexPersistenceManager`], so checkpoints **compose** with
+    /// encryption: `create_checkpoint` writes the graph/temporal/interner/
+    /// manifest snapshot encrypted, and `recover` reads them back encrypted.
+    /// Passing `cipher == None` is identical to [`CheckpointManager::new`]
+    /// (plaintext, back-compatible).
+    ///
+    /// This is the fix for the silent-plaintext / broken-restore hazard where a
+    /// checkpoint manager without a cipher would (a) write checkpoint index
+    /// files in cleartext even in an encryption-enabled database and (b) fail
+    /// closed when reading `AEIX`-headed files written by the encrypted persist
+    /// path.
+    ///
+    /// # Errors
+    /// Returns a [`StorageError::CheckpointError`] if the compression level is
+    /// invalid, or a persistence error if the data directory cannot be created.
+    pub fn with_cipher(
+        config: CheckpointConfig,
+        cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+    ) -> Result<Self> {
         // Validate compression level (zstd supports 1-22)
         if config.enable_compression
             && !(MIN_ZSTD_LEVEL..=MAX_ZSTD_LEVEL).contains(&config.compression_level)
@@ -346,7 +372,7 @@ impl CheckpointManager {
             .into());
         }
 
-        let persistence_manager = IndexPersistenceManager::new(&config.data_dir);
+        let persistence_manager = IndexPersistenceManager::with_cipher(&config.data_dir, cipher);
         persistence_manager
             .ensure_directories()
             .map_err(persistence_err)?;
@@ -477,16 +503,25 @@ impl CheckpointManager {
 
         // 3. Save graph index (current state) from snapshot
         let graph_path = self.persistence_manager.graph_path().join("adjacency.idx");
+        // Encrypt checkpoint index files at rest when a cipher is configured
+        // (Issue #481): a checkpoint in an encryption-enabled DB must not write
+        // cleartext, and `recover` must read these files back encrypted.
+        let cipher = self.persistence_manager.index_cipher();
         if self.config.enable_compression {
-            crate::storage::index_persistence::graph::save_graph_index_compressed(
+            crate::storage::index_persistence::graph::save_graph_index_compressed_with_cipher(
                 &graph_data,
                 &graph_path,
                 self.config.compression_level,
+                cipher,
             )
             .map_err(persistence_err)?;
         } else {
-            crate::storage::index_persistence::graph::save_graph_index(&graph_data, &graph_path)
-                .map_err(persistence_err)?;
+            crate::storage::index_persistence::graph::save_graph_index_with_cipher(
+                &graph_data,
+                &graph_path,
+                cipher,
+            )
+            .map_err(persistence_err)?;
         }
         bytes_written += std::fs::metadata(&graph_path).map(|m| m.len()).unwrap_or(0);
 
@@ -495,9 +530,10 @@ impl CheckpointManager {
             .persistence_manager
             .temporal_path()
             .join("versions.idx");
-        crate::storage::index_persistence::temporal::save_temporal_index(
+        crate::storage::index_persistence::temporal::save_temporal_index_with_cipher(
             &temporal_data,
             &temporal_path,
+            self.persistence_manager.index_cipher(),
         )
         .map_err(persistence_err)?;
         bytes_written += std::fs::metadata(&temporal_path)
@@ -998,9 +1034,16 @@ impl CheckpointManager {
                 .persistence_manager
                 .indexes_path()
                 .join(&graph_entry.adjacency_file);
+            // Decrypt the persisted graph index with the configured index
+            // cipher (Issue #481), then translate persisted file-space interner
+            // ids to live ids (Issue #3490) before the raw resolution sites
+            // below touch them; an identity remap is a no-op.
             let mut graph_data =
-                crate::storage::index_persistence::graph::load_graph_index(&graph_path)
-                    .map_err(persistence_err)?;
+                crate::storage::index_persistence::graph::load_graph_index_with_cipher(
+                    &graph_path,
+                    self.persistence_manager.index_cipher(),
+                )
+                .map_err(persistence_err)?;
             remap.remap_graph_index_data(&mut graph_data);
 
             // Track maximum version ID to initialize generator
@@ -1066,13 +1109,18 @@ impl CheckpointManager {
                 .persistence_manager
                 .indexes_path()
                 .join(&temporal_entry.node_versions_file);
-            // Issue #3490: translate persisted file-space interner ids (version
-            // labels, property keys, string values, delta removed_keys, anchor
-            // full_state) to live ids before `restore_into_historical_storage`
-            // resolves them; an identity remap is a no-op.
+            // Decrypt the persisted temporal index with the configured index
+            // cipher (Issue #481), then (Issue #3490) translate persisted
+            // file-space interner ids (version labels, property keys, string
+            // values, delta removed_keys, anchor full_state) to live ids before
+            // `restore_into_historical_storage` resolves them; an identity remap
+            // is a no-op.
             let mut temporal_data =
-                crate::storage::index_persistence::temporal::load_temporal_index(&temporal_path)
-                    .map_err(persistence_err)?;
+                crate::storage::index_persistence::temporal::load_temporal_index_with_cipher(
+                    &temporal_path,
+                    self.persistence_manager.index_cipher(),
+                )
+                .map_err(persistence_err)?;
             remap.remap_temporal_index_data(&mut temporal_data);
 
             max_version_id = temporal_data
@@ -1298,6 +1346,107 @@ mod tests {
                 let name = node.get_property("name").unwrap().as_str().unwrap();
                 assert_eq!(name, format!("Node{}", i));
             }
+        }
+
+        Ok(())
+    }
+
+    /// Issue #481 (P0.2): a checkpoint created with an index cipher must write
+    /// its index files ENCRYPTED on disk and restore from them correctly, and a
+    /// cipher-less manager must fail closed (never silently read the ciphertext
+    /// as plaintext) against those encrypted files.
+    #[test]
+    fn test_checkpoint_encrypted_roundtrip() -> Result<()> {
+        use crate::encryption::cipher::{Aes256GcmCipher, Cipher};
+        use zeroize::Zeroizing;
+
+        fn cipher(seed: u8) -> Arc<dyn Cipher> {
+            let mut key = Zeroizing::new([0u8; 32]);
+            key[0] = seed;
+            key[7] = seed.wrapping_add(3);
+            Arc::new(Aes256GcmCipher::new(&key))
+        }
+        fn has_enc_header(path: &std::path::Path) -> bool {
+            std::fs::read(path)
+                .map(|b| b.len() >= 4 && &b[..4] == b"AEIX")
+                .unwrap_or(false)
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+
+        let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        let key = cipher(0x51);
+
+        // Phase 1: create an encrypted checkpoint with a few nodes.
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::with_cipher(config, Some(Arc::clone(&key)))?;
+
+            let current = CurrentStorage::new();
+            for i in 1..=5 {
+                let props = PropertyMapBuilder::new()
+                    .insert("name", format!("Secret{}", i))
+                    .build();
+                let label =
+                    GLOBAL_INTERNER
+                        .intern("Classified")
+                        .map_err(|e| StorageError::WalError {
+                            reason: e.to_string(),
+                        })?;
+                let node = Node::new(NodeId::new(i)?, label, props, VersionId::new(i)?);
+                current.insert_node_direct(node, time::now())?;
+            }
+            let historical = HistoricalStorage::new();
+            manager.create_checkpoint(LSN(0), &current, &historical)?;
+
+            // Checkpoint index files must be encrypted on disk.
+            let adjacency = manager
+                .persistence_manager
+                .graph_path()
+                .join("adjacency.idx");
+            assert!(
+                has_enc_header(&adjacency),
+                "checkpoint graph adjacency.idx must carry the AEIX header (encrypted)"
+            );
+            assert!(
+                has_enc_header(&manager.persistence_manager.manifest_path()),
+                "checkpoint manifest.idx must be encrypted"
+            );
+            assert!(
+                has_enc_header(&manager.persistence_manager.interner_path()),
+                "checkpoint interner.idx must be encrypted"
+            );
+        }
+
+        // Phase 2: recover WITH the cipher -> data survives.
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::with_cipher(config, Some(Arc::clone(&key)))?;
+            let (recovered, _hist, _lsn) = manager.recover(&wal)?;
+            assert_eq!(recovered.node_count(), 5);
+            for i in 1..=5 {
+                let node = recovered.get_node(NodeId::new(i)?)?;
+                assert_eq!(
+                    node.get_property("name").unwrap().as_str().unwrap(),
+                    format!("Secret{}", i)
+                );
+            }
+        }
+
+        // Phase 3: recover WITHOUT a cipher against encrypted files -> fail
+        // closed (structured error), never surface the ciphertext as plaintext.
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::new(config)?;
+            let result = manager.recover(&wal);
+            assert!(
+                result.is_err(),
+                "cipher-less recover of an encrypted checkpoint must fail closed"
+            );
         }
 
         Ok(())

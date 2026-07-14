@@ -14,6 +14,7 @@ use super::error::{IndexPersistenceError, Result};
 use super::formats::{NodeAdjacencyEntry, PersistedTemporalAdjacencyEntry, TemporalAdjacencyData};
 use super::strings::InternerRemap;
 use super::{MANIFEST_VERSION, TEMPORAL_ADJACENCY_MAGIC};
+use crate::encryption::cipher::Cipher;
 
 /// Save temporal adjacency index to disk.
 ///
@@ -27,6 +28,22 @@ use super::{MANIFEST_VERSION, TEMPORAL_ADJACENCY_MAGIC};
 pub fn save_temporal_adjacency_index(
     index: &TemporalAdjacencyIndex,
     data_dir: &Path,
+) -> Result<()> {
+    save_temporal_adjacency_index_with_cipher(index, data_dir, None)
+}
+
+/// Save the temporal adjacency index, optionally encrypting it at rest
+/// (Issue #481). With `cipher == None` this is identical to
+/// [`save_temporal_adjacency_index`].
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be created, serialization or
+/// encryption fails, or writing the file fails.
+pub fn save_temporal_adjacency_index_with_cipher(
+    index: &TemporalAdjacencyIndex,
+    data_dir: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
 ) -> Result<()> {
     // Create temporal_adjacency directory
     let adjacency_dir = data_dir.join("temporal_adjacency");
@@ -42,12 +59,20 @@ pub fn save_temporal_adjacency_index(
         outgoing,
     };
 
-    // Serialize with bitcode
+    // Serialize with bitcode (this format carries no trailing CRC; the AEAD
+    // tag provides integrity when encrypted, and the magic/version guard the
+    // plaintext path as before).
     let bytes = bitcode::encode(&data);
 
-    // Write atomically
+    // Write atomically, encrypting the whole buffer when a cipher is present.
     let adjacency_file = adjacency_dir.join("adjacency.idx");
-    super::atomic_write(&adjacency_file, &bytes)?;
+    match cipher {
+        Some(cipher) => {
+            let encrypted = super::common::encrypt_index_bytes(&bytes, cipher)?;
+            super::atomic_write(&adjacency_file, &encrypted)?;
+        }
+        None => super::atomic_write(&adjacency_file, &bytes)?,
+    }
 
     Ok(())
 }
@@ -73,13 +98,31 @@ const MAX_ADJACENCY_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// - The data cannot be deserialized.
 /// - The manifest version or magic bytes do not match.
 pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdjacencyIndex>> {
-    let data = load_temporal_adjacency_data(data_dir)?;
-    Ok(Arc::new(reconstruct_index(data)?))
+    load_temporal_adjacency_index_with_cipher_and_remap(data_dir, None, &InternerRemap::identity())
+}
+
+/// Load the temporal adjacency index, transparently decrypting it if written
+/// encrypted (Issue #481). A legacy plaintext file is loaded even when a
+/// cipher is supplied (header sniffing). Uses an identity interner remap.
+///
+/// # Errors
+///
+/// Same as [`load_temporal_adjacency_index`], plus a structured error if the
+/// file is encrypted but no cipher is supplied or decryption fails.
+pub fn load_temporal_adjacency_index_with_cipher(
+    data_dir: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<Arc<TemporalAdjacencyIndex>> {
+    load_temporal_adjacency_index_with_cipher_and_remap(
+        data_dir,
+        cipher,
+        &InternerRemap::identity(),
+    )
 }
 
 /// Load the temporal adjacency index, translating each persisted edge-type
 /// label from **file-space** interner ids to **live** ids via `remap`
-/// (Issue #3490) before reconstruction.
+/// (Issue #3490) before reconstruction. Uses no cipher (plaintext).
 ///
 /// This is the startup-path entry point: `load_indexes_startup` restores the
 /// interner (obtaining the remap) before the persisted adjacency labels are
@@ -92,14 +135,41 @@ pub fn load_temporal_adjacency_index_with_remap(
     data_dir: &Path,
     remap: &InternerRemap,
 ) -> Result<Arc<TemporalAdjacencyIndex>> {
-    let mut data = load_temporal_adjacency_data(data_dir)?;
+    load_temporal_adjacency_index_with_cipher_and_remap(data_dir, None, remap)
+}
+
+/// Load the temporal adjacency index, transparently decrypting it with `cipher`
+/// if written encrypted (Issue #481) AND translating each persisted edge-type
+/// label from file-space interner ids to live ids via `remap` (Issue #3490)
+/// before reconstruction.
+///
+/// This is the combined startup entry point that reconciles encryption-at-rest
+/// with the interner remap; the other `load_temporal_adjacency_index*` variants
+/// delegate here with `None` / [`InternerRemap::identity`] defaults.
+///
+/// # Errors
+///
+/// Same as [`load_temporal_adjacency_index`], plus a structured error if the
+/// file is encrypted but no cipher is supplied or decryption fails.
+pub fn load_temporal_adjacency_index_with_cipher_and_remap(
+    data_dir: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+    remap: &InternerRemap,
+) -> Result<Arc<TemporalAdjacencyIndex>> {
+    let mut data = load_temporal_adjacency_data(data_dir, cipher)?;
     remap.remap_temporal_adjacency_data(&mut data);
     Ok(Arc::new(reconstruct_index(data)?))
 }
 
-/// Read, size-check, deserialize, and validate the on-disk temporal adjacency
-/// blob into [`TemporalAdjacencyData`] (no interner-id translation).
-fn load_temporal_adjacency_data(data_dir: &Path) -> Result<TemporalAdjacencyData> {
+/// Read, size-check, decrypt (Issue #481), deserialize, and validate the
+/// on-disk temporal adjacency blob into [`TemporalAdjacencyData`] (no
+/// interner-id translation). Passing `cipher == None` reads a plaintext file;
+/// a legacy plaintext file is read even when a cipher is supplied (header
+/// sniffing).
+fn load_temporal_adjacency_data(
+    data_dir: &Path,
+    cipher: Option<&Arc<dyn Cipher>>,
+) -> Result<TemporalAdjacencyData> {
     let adjacency_file = data_dir.join("temporal_adjacency").join("adjacency.idx");
 
     // Check file size to prevent DoS
@@ -112,8 +182,13 @@ fn load_temporal_adjacency_data(data_dir: &Path) -> Result<TemporalAdjacencyData
         )));
     }
 
-    // Read file
-    let bytes = std::fs::read(&adjacency_file)?;
+    // Read file, decrypting transparently if it carries the encrypted header.
+    let raw = std::fs::read(&adjacency_file)?;
+    let bytes = if super::common::is_encrypted_index(&raw) {
+        super::common::decrypt_index_bytes(&raw, &adjacency_file, cipher)?
+    } else {
+        raw
+    };
 
     // Deserialize
     let data: TemporalAdjacencyData = bitcode::decode(&bytes).map_err(|e| {
@@ -348,6 +423,107 @@ mod tests {
             Err(IndexPersistenceError::Serialization(_)) => {}
             Err(other) => panic!("expected Serialization error, got {other:?}"),
             Ok(_) => panic!("expected an error, but load succeeded"),
+        }
+    }
+
+    // ── Encryption-at-rest tests (Issue #481) ────────────────────────
+
+    fn enc_test_cipher(seed: u8) -> Arc<dyn Cipher> {
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+        let mut key = Zeroizing::new([0u8; 32]);
+        key[0] = seed;
+        key[9] = seed.wrapping_add(3);
+        Arc::new(Aes256GcmCipher::new(&key))
+    }
+
+    /// Build a single-edge index whose edge-type label is interned so it
+    /// survives the load-time label-resolution guard.
+    fn index_with_one_edge(src: NodeId) -> TemporalAdjacencyIndex {
+        use crate::core::temporal::time;
+        let index = TemporalAdjacencyIndex::new(TemporalAdjacencyConfig::default());
+        let label = crate::core::GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        index
+            .insert_edge(
+                EdgeId::new(100).unwrap(),
+                src,
+                NodeId::new(2).unwrap(),
+                label,
+                time::from_secs(10),
+                time::from_secs(20),
+                time::from_secs(10),
+                crate::core::TIMESTAMP_MAX,
+            )
+            .unwrap();
+        index
+    }
+
+    #[test]
+    fn encrypted_round_trip_preserves_edges() {
+        use crate::core::temporal::time;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let cipher = enc_test_cipher(0x11);
+        let src = NodeId::new(1).unwrap();
+
+        let index = index_with_one_edge(src);
+        save_temporal_adjacency_index_with_cipher(&index, &data_dir, Some(&cipher)).unwrap();
+
+        // The persisted file carries the AEIX encrypted-index header on disk.
+        let raw = std::fs::read(data_dir.join("temporal_adjacency").join("adjacency.idx")).unwrap();
+        assert!(
+            super::super::common::is_encrypted_index(&raw),
+            "expected AEIX header on disk"
+        );
+
+        // Decrypts with the right key and the edge is recovered intact.
+        let loaded = load_temporal_adjacency_index_with_cipher(&data_dir, Some(&cipher)).unwrap();
+        let out = loaded.get_outgoing_at_time(src, time::from_secs(15), time::now());
+        assert_eq!(out, vec![EdgeId::new(100).unwrap()]);
+
+        // Empty valid-time window before the edge existed => nothing.
+        assert!(
+            loaded
+                .get_outgoing_at_time(src, time::from_secs(5), time::now())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn encrypted_file_fails_closed_without_cipher() {
+        // Header says encrypted but no key is configured => structured error,
+        // never a fallback that reads ciphertext as a bitcode blob.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let cipher = enc_test_cipher(0x22);
+        let src = NodeId::new(1).unwrap();
+
+        let index = index_with_one_edge(src);
+        save_temporal_adjacency_index_with_cipher(&index, &data_dir, Some(&cipher)).unwrap();
+
+        match load_temporal_adjacency_index_with_cipher(&data_dir, None) {
+            Err(IndexPersistenceError::Corrupted { .. }) => {}
+            Err(other) => panic!("expected Corrupted fail-closed error, got {other:?}"),
+            Ok(_) => panic!("expected fail-closed error, but load succeeded"),
+        }
+    }
+
+    #[test]
+    fn encrypted_wrong_key_fails_closed() {
+        // A different key must never decrypt to the original data.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let cipher = enc_test_cipher(0x33);
+        let wrong = enc_test_cipher(0x44);
+        let src = NodeId::new(1).unwrap();
+
+        let index = index_with_one_edge(src);
+        save_temporal_adjacency_index_with_cipher(&index, &data_dir, Some(&cipher)).unwrap();
+
+        match load_temporal_adjacency_index_with_cipher(&data_dir, Some(&wrong)) {
+            Err(IndexPersistenceError::Corrupted { .. }) => {}
+            Err(other) => panic!("expected Corrupted wrong-key error, got {other:?}"),
+            Ok(_) => panic!("expected wrong-key error, but load succeeded"),
         }
     }
 }

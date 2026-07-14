@@ -439,11 +439,18 @@ impl AletheiaDB {
             };
             seed_lsn_allocator_from_max(&wal, seed_max_lsn);
 
-            // Create persistence manager if enabled
+            // Create persistence manager if enabled. When encryption is
+            // enabled, thread the index cipher through so index files are
+            // encrypted at rest (Issue #481); mirrors the WAL cipher wiring
+            // above. Encryption disabled => None => plaintext, unchanged.
             let persistence_manager = if config.persistence.enabled {
+                let index_cipher = encryption_manager
+                    .as_ref()
+                    .map(|mgr| Arc::clone(mgr.index_cipher()));
                 Some(Arc::new(
-                    crate::storage::index_persistence::IndexPersistenceManager::new(
+                    crate::storage::index_persistence::IndexPersistenceManager::with_cipher(
                         &config.persistence.data_dir,
+                        index_cipher,
                     ),
                 ))
             } else {
