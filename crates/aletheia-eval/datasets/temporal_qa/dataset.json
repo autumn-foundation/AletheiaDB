@@ -1,0 +1,432 @@
+{
+  "version": "1.0.0",
+  "name": "temporal_qa",
+  "license": "CC0-1.0",
+  "description": "Synthetic bi-temporal CEO-succession dataset. Five fictional companies each have three CEO tenures over three valid-time eras (2015-2018, 2019-2022, 2023+). Each tenure is a fact node whose valid interval is closed by retraction at the era boundary. A question anchored to a valid time is answered by a point-in-time find of the tenure valid at the anchor; a retriever that ignores the anchor and reads current state returns the present CEO and is wrong for every past era.",
+  "entities": [
+    {
+      "key": "acme",
+      "label": "Company",
+      "text": "Acme Corporation semiconductor foundry",
+      "properties": {
+        "name": "Acme"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01"
+    },
+    {
+      "key": "acme_t1",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Acme",
+        "ceo": "Alice"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01",
+      "retract_at": "2019-01-01"
+    },
+    {
+      "key": "acme_t2",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Acme",
+        "ceo": "Bob"
+      },
+      "source": "curated",
+      "valid_from": "2019-01-01",
+      "retract_at": "2023-01-01"
+    },
+    {
+      "key": "acme_t3",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Acme",
+        "ceo": "Carol"
+      },
+      "source": "curated",
+      "valid_from": "2023-01-01"
+    },
+    {
+      "key": "globex",
+      "label": "Company",
+      "text": "Globex plastics injection manufacturer",
+      "properties": {
+        "name": "Globex"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01"
+    },
+    {
+      "key": "globex_t1",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Globex",
+        "ceo": "Dinesh"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01",
+      "retract_at": "2019-01-01"
+    },
+    {
+      "key": "globex_t2",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Globex",
+        "ceo": "Erika"
+      },
+      "source": "curated",
+      "valid_from": "2019-01-01",
+      "retract_at": "2023-01-01"
+    },
+    {
+      "key": "globex_t3",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Globex",
+        "ceo": "Farah"
+      },
+      "source": "curated",
+      "valid_from": "2023-01-01"
+    },
+    {
+      "key": "initech",
+      "label": "Company",
+      "text": "Initech accounting payroll software",
+      "properties": {
+        "name": "Initech"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01"
+    },
+    {
+      "key": "initech_t1",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Initech",
+        "ceo": "Gita"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01",
+      "retract_at": "2019-01-01"
+    },
+    {
+      "key": "initech_t2",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Initech",
+        "ceo": "Hiro"
+      },
+      "source": "curated",
+      "valid_from": "2019-01-01",
+      "retract_at": "2023-01-01"
+    },
+    {
+      "key": "initech_t3",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Initech",
+        "ceo": "Ivan"
+      },
+      "source": "curated",
+      "valid_from": "2023-01-01"
+    },
+    {
+      "key": "umbrella",
+      "label": "Company",
+      "text": "Umbrella pharmaceuticals biotech research",
+      "properties": {
+        "name": "Umbrella"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01"
+    },
+    {
+      "key": "umbrella_t1",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Umbrella",
+        "ceo": "Jia"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01",
+      "retract_at": "2019-01-01"
+    },
+    {
+      "key": "umbrella_t2",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Umbrella",
+        "ceo": "Karl"
+      },
+      "source": "curated",
+      "valid_from": "2019-01-01",
+      "retract_at": "2023-01-01"
+    },
+    {
+      "key": "umbrella_t3",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Umbrella",
+        "ceo": "Lena"
+      },
+      "source": "curated",
+      "valid_from": "2023-01-01"
+    },
+    {
+      "key": "hooli",
+      "label": "Company",
+      "text": "Hooli search advertising platform",
+      "properties": {
+        "name": "Hooli"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01"
+    },
+    {
+      "key": "hooli_t1",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Hooli",
+        "ceo": "Mira"
+      },
+      "source": "curated",
+      "valid_from": "2015-01-01",
+      "retract_at": "2019-01-01"
+    },
+    {
+      "key": "hooli_t2",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Hooli",
+        "ceo": "Noah"
+      },
+      "source": "curated",
+      "valid_from": "2019-01-01",
+      "retract_at": "2023-01-01"
+    },
+    {
+      "key": "hooli_t3",
+      "label": "Tenure",
+      "text": "executive leadership tenure record",
+      "properties": {
+        "company": "Hooli",
+        "ceo": "Omar"
+      },
+      "source": "curated",
+      "valid_from": "2023-01-01"
+    }
+  ],
+  "updates": [],
+  "edges": [],
+  "questions": [
+    {
+      "id": "acme_2016",
+      "text": "Who was the boss of Acme in 2016",
+      "gold_evidence": [
+        "acme"
+      ],
+      "valid_time": "2016-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Acme",
+      "answer_property": "ceo",
+      "gold_answer": "Alice"
+    },
+    {
+      "id": "acme_2020",
+      "text": "Who was the boss of Acme in 2020",
+      "gold_evidence": [
+        "acme"
+      ],
+      "valid_time": "2020-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Acme",
+      "answer_property": "ceo",
+      "gold_answer": "Bob"
+    },
+    {
+      "id": "acme_2024",
+      "text": "Who was the boss of Acme in 2024",
+      "gold_evidence": [
+        "acme"
+      ],
+      "valid_time": "2024-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Acme",
+      "answer_property": "ceo",
+      "gold_answer": "Carol"
+    },
+    {
+      "id": "globex_2016",
+      "text": "Who was the boss of Globex in 2016",
+      "gold_evidence": [
+        "globex"
+      ],
+      "valid_time": "2016-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Globex",
+      "answer_property": "ceo",
+      "gold_answer": "Dinesh"
+    },
+    {
+      "id": "globex_2020",
+      "text": "Who was the boss of Globex in 2020",
+      "gold_evidence": [
+        "globex"
+      ],
+      "valid_time": "2020-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Globex",
+      "answer_property": "ceo",
+      "gold_answer": "Erika"
+    },
+    {
+      "id": "globex_2024",
+      "text": "Who was the boss of Globex in 2024",
+      "gold_evidence": [
+        "globex"
+      ],
+      "valid_time": "2024-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Globex",
+      "answer_property": "ceo",
+      "gold_answer": "Farah"
+    },
+    {
+      "id": "initech_2016",
+      "text": "Who was the boss of Initech in 2016",
+      "gold_evidence": [
+        "initech"
+      ],
+      "valid_time": "2016-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Initech",
+      "answer_property": "ceo",
+      "gold_answer": "Gita"
+    },
+    {
+      "id": "initech_2020",
+      "text": "Who was the boss of Initech in 2020",
+      "gold_evidence": [
+        "initech"
+      ],
+      "valid_time": "2020-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Initech",
+      "answer_property": "ceo",
+      "gold_answer": "Hiro"
+    },
+    {
+      "id": "initech_2024",
+      "text": "Who was the boss of Initech in 2024",
+      "gold_evidence": [
+        "initech"
+      ],
+      "valid_time": "2024-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Initech",
+      "answer_property": "ceo",
+      "gold_answer": "Ivan"
+    },
+    {
+      "id": "umbrella_2016",
+      "text": "Who was the boss of Umbrella in 2016",
+      "gold_evidence": [
+        "umbrella"
+      ],
+      "valid_time": "2016-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Umbrella",
+      "answer_property": "ceo",
+      "gold_answer": "Jia"
+    },
+    {
+      "id": "umbrella_2020",
+      "text": "Who was the boss of Umbrella in 2020",
+      "gold_evidence": [
+        "umbrella"
+      ],
+      "valid_time": "2020-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Umbrella",
+      "answer_property": "ceo",
+      "gold_answer": "Karl"
+    },
+    {
+      "id": "umbrella_2024",
+      "text": "Who was the boss of Umbrella in 2024",
+      "gold_evidence": [
+        "umbrella"
+      ],
+      "valid_time": "2024-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Umbrella",
+      "answer_property": "ceo",
+      "gold_answer": "Lena"
+    },
+    {
+      "id": "hooli_2016",
+      "text": "Who was the boss of Hooli in 2016",
+      "gold_evidence": [
+        "hooli"
+      ],
+      "valid_time": "2016-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Hooli",
+      "answer_property": "ceo",
+      "gold_answer": "Mira"
+    },
+    {
+      "id": "hooli_2020",
+      "text": "Who was the boss of Hooli in 2020",
+      "gold_evidence": [
+        "hooli"
+      ],
+      "valid_time": "2020-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Hooli",
+      "answer_property": "ceo",
+      "gold_answer": "Noah"
+    },
+    {
+      "id": "hooli_2024",
+      "text": "Who was the boss of Hooli in 2024",
+      "gold_evidence": [
+        "hooli"
+      ],
+      "valid_time": "2024-06-01",
+      "answer_label": "Tenure",
+      "answer_filter_key": "company",
+      "answer_filter_value": "Hooli",
+      "answer_property": "ceo",
+      "gold_answer": "Omar"
+    }
+  ]
+}

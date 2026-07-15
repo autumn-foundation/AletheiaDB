@@ -27,7 +27,7 @@ categories = ["database-implementations", "data-structures"]
 # 0.5's proc-macros hard-code `::autumn_web`, so the 0.5 surface must live in a
 # crate whose extern prelude binds `autumn_web` to 0.5. It requires an explicit
 # `-p aletheia-server`; bare cargo stays root-scoped via `default-members`.
-members = ["crates/autumn-spike", "crates/aletheia-server"]
+members = ["crates/autumn-spike", "crates/aletheia-server", "crates/aletheia-eval"]
 default-members = ["."]
 # `python/` and `fuzz/` are independent crates with their own manifests (the
 # Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
