@@ -3,34 +3,52 @@
 //! A *named snapshot* pins a human-readable name to a bi-temporal coordinate
 //! `(valid_time, transaction_time)`. Reads issued through the resulting
 //! [`Snapshot`] handle are evaluated at that coordinate via the deterministic
-//! historical (`*_at_time`) read path, so the same handle returns
-//! byte-for-byte identical results no matter how the database mutates
-//! afterward.
+//! historical (`*_at_time`) read path, so the same handle returns identical
+//! results regardless of writes that land afterward.
 //!
 //! # A snapshot is a coordinate, not a held resource
 //!
 //! Creating a snapshot records two timestamps in a small sidecar registry. It
-//! **pins no storage**, blocks no writers, and imposes **zero overhead on the
-//! write path** (`create_node`/`create_edge` never touch the registry). This
-//! mirrors the #3360 cursor, which likewise captures a `(vt, tt)` pair once
-//! and re-reads deterministically. The tradeoff is that a snapshot enjoys no
-//! retention guarantee: if the versions it observes are later evicted (cold
-//! tier not configured, or history truncated) a read through the handle can
-//! return "not found" for a fact that was visible at creation. This is the
-//! same visibility caveat that governs `temporal_extent` (#3238) and every
-//! other point-in-time read.
+//! **pins no storage** and adds no lasting overhead to the write path
+//! (`create_node`/`create_edge` never touch the registry). Creation itself
+//! takes the commit-clock lock (`current_timestamp`) just long enough to copy a
+//! single `Timestamp` — nanosecond-scale contention on the hot commit path, not
+//! literally zero — so it is effectively free but not a true no-op against
+//! concurrent committers. This mirrors the #3360 cursor, which likewise
+//! captures a `(vt, tt)` pair once and re-reads deterministically. The tradeoff
+//! is that a snapshot enjoys no retention guarantee: if the versions it observes
+//! are later evicted (cold tier not configured, or history truncated) a read
+//! through the handle can return "not found" for a fact that was visible at
+//! creation. This is the same visibility caveat that governs `temporal_extent`
+//! (#3238) and every other point-in-time read.
+//!
+//! A snapshot **created at an instant that races an in-flight commit** inherits
+//! the engine's standard committed-but-not-yet-applied visibility window: the
+//! same caveat that #3225 / #3236 point-in-time reads carry. Once created, the
+//! coordinate is fixed and every read through it is deterministic.
 //!
 //! # Defaulting the coordinate ("now")
 //!
-//! [`AletheiaDB::create_snapshot`] captures the database's authoritative
-//! commit frontier — the value under `current_timestamp` — for **both**
-//! dimensions. Because the commit path advances that frontier strictly
-//! monotonically under the same lock, every already-committed transaction has
-//! a transaction-time start `<=` the frontier (so it is visible) and every
-//! future commit has a start strictly `>` the frontier (so it is invisible).
-//! The result is a deterministic "as of the moment of creation" pin. Note the
-//! same future-valid caveat point-in-time reads carry: a fact whose
-//! `valid_from` lies in the future of the pin is not visible through it.
+//! [`AletheiaDB::create_snapshot`] defaults the two dimensions **differently**,
+//! each to the correct notion of "now":
+//!
+//! - **transaction time** = the database's authoritative commit frontier (the
+//!   value under `current_timestamp`). Because the commit path advances that
+//!   frontier strictly monotonically under the same lock, every already-committed
+//!   transaction has a transaction-time start `<=` the frontier (visible) and
+//!   every future commit a start strictly `>` it (invisible) — a race-free
+//!   monotonic pin. The frontier equals "now" for all committed data but is
+//!   chosen over wallclock precisely for that race-safety.
+//! - **valid time** = wallclock `time::now()`, matching the engine's "now"
+//!   convention (`get_node_at_valid_time`, `find_nodes_at_time`). This ensures a
+//!   default "now" snapshot sees every fact actually valid at creation, rather
+//!   than silently excluding facts the (idle-lagging) frontier has not yet
+//!   reached.
+//!
+//! So "as of the moment of creation" is precise: valid-time-now =
+//! wallclock-now, transaction-time-now = the commit frontier. Note the same
+//! future-valid caveat point-in-time reads carry: a fact whose `valid_from`
+//! lies in the future of the pinned valid time is not visible through it.
 //!
 //! # Scope (this wave is Rust-API-only)
 //!
@@ -54,22 +72,85 @@ use std::path::PathBuf;
 
 /// Persisted-format version for the snapshot registry sidecar file. Bumped
 /// only on an incompatible on-disk change (mirrors the auth key store).
-const PERSIST_FORMAT_VERSION: u32 = 1;
+///
+/// v1 stored each timestamp as a bare `i64` (wallclock micros only, HLC logical
+/// counter dropped). v2 stores the **full** [`HybridTimestamp`] as
+/// `{wallclock, logical}` so a pin round-trips losslessly across restart — a
+/// coordinate with a nonzero logical counter (two commits in the same
+/// microsecond) must not collapse onto its same-microsecond neighbor on reload.
+/// The [`ts_hlc`] deserializer still accepts the legacy bare-integer form
+/// (reconstructing it as logical 0), so v1 files load without a hard failure.
+const PERSIST_FORMAT_VERSION: u32 = 2;
 
-/// serde adapter: (de)serialize a [`Timestamp`] as `i64` microseconds since
-/// the Unix epoch, exactly as the #3360 cursor persists its coordinates. The
-/// logical HLC counter is intentionally dropped — snapshot coordinates are
-/// microsecond-granular on disk, which is sufficient for point-in-time reads.
-mod ts_micros {
+/// serde adapter: (de)serialize a [`Timestamp`] (an HLC `HybridTimestamp`)
+/// **losslessly** as a `{wallclock, logical}` object.
+///
+/// Dropping the logical counter (as the pre-#3370-review format did) is not
+/// safe for snapshot coordinates: two commits within one wallclock microsecond
+/// receive the same wallclock but distinct logical counters (`0`, `1`, …), so a
+/// pin at `(W, 1)` that collapses to `(W, 0)` on reload lands on the *wrong*
+/// side of the supersession and returns the superseded version. Persisting both
+/// components mirrors the version store's on-disk 12-byte
+/// `[wallclock:8][logical:4]` timestamp (`src/core/temporal.rs`).
+///
+/// The deserializer is tolerant of the **legacy** v1 shape — a bare integer is
+/// accepted and reconstructed with logical `0` — so an old sidecar still loads.
+mod ts_hlc {
     use super::Timestamp;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use crate::core::hlc::HybridTimestamp;
+    use serde::de::{self, MapAccess, Visitor};
+    use serde::ser::SerializeStruct;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
 
     pub fn serialize<S: Serializer>(ts: &Timestamp, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_i64(ts.wallclock())
+        let mut st = s.serialize_struct("HybridTimestamp", 2)?;
+        st.serialize_field("wallclock", &ts.wallclock())?;
+        st.serialize_field("logical", &ts.logical())?;
+        st.end()
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Timestamp, D::Error> {
-        Ok(Timestamp::from(i64::deserialize(d)?))
+        struct TsVisitor;
+
+        impl<'de> Visitor<'de> for TsVisitor {
+            type Value = Timestamp;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a {wallclock, logical} object or a legacy integer (micros)")
+            }
+
+            // Legacy v1 form: bare integer micros -> logical 0.
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Timestamp, E> {
+                Ok(HybridTimestamp::new_unchecked(v, 0))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Timestamp, E> {
+                Ok(HybridTimestamp::new_unchecked(v as i64, 0))
+            }
+
+            // Current v2 form: {wallclock, logical}.
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Timestamp, A::Error> {
+                let mut wallclock: Option<i64> = None;
+                let mut logical: Option<u32> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "wallclock" => wallclock = Some(map.next_value()?),
+                        "logical" => logical = Some(map.next_value()?),
+                        _ => {
+                            let _: de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+                let wallclock = wallclock.ok_or_else(|| de::Error::missing_field("wallclock"))?;
+                Ok(HybridTimestamp::new_unchecked(
+                    wallclock,
+                    logical.unwrap_or(0),
+                ))
+            }
+        }
+
+        d.deserialize_any(TsVisitor)
     }
 }
 
@@ -81,11 +162,11 @@ mod ts_micros {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedSnapshot {
     name: String,
-    #[serde(with = "ts_micros")]
+    #[serde(with = "ts_hlc")]
     valid_time: Timestamp,
-    #[serde(with = "ts_micros")]
+    #[serde(with = "ts_hlc")]
     transaction_time: Timestamp,
-    #[serde(with = "ts_micros")]
+    #[serde(with = "ts_hlc")]
     created_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -165,10 +246,21 @@ impl SnapshotRegistry {
     /// Open a registry, loading any existing sidecar at `path`.
     ///
     /// `path` is `None` for an in-memory-only registry. A missing file yields
-    /// an empty registry (first run). A present-but-unreadable or corrupt file
-    /// is surfaced as an error, matching how the auth key store treats its
-    /// persisted file — a durable store that cannot be parsed is a
-    /// configuration problem the operator should see, not silently discarded.
+    /// an empty registry (first run).
+    ///
+    /// # Tolerant load (deliberate divergence from the auth key store)
+    ///
+    /// Snapshots are non-critical *bookmarks*: they pin no data and losing them
+    /// costs at most a re-created pin. So — unlike the **security-critical** auth
+    /// key store (`src/auth/store.rs`), which correctly hard-fails on a corrupt
+    /// file rather than silently start with no credentials — a corrupt,
+    /// unparseable, or unknown-future-version `snapshots.json` must **not brick
+    /// database startup**. On such a file we log a warning, quarantine it aside
+    /// (rename to `*.corrupt`, preserving the bytes for inspection), and start
+    /// with an empty registry. Legacy v1 files (bare-integer timestamps) still
+    /// load normally via the [`ts_hlc`] tolerant deserializer. Only a genuine
+    /// read I/O error (e.g. permissions) is surfaced, since that is an operator
+    /// problem the empty-registry fallback cannot paper over.
     pub(crate) fn open(path: Option<PathBuf>) -> Result<Self> {
         let registry = Self {
             entries: RwLock::new(HashMap::new()),
@@ -179,21 +271,32 @@ impl SnapshotRegistry {
             && path.exists()
         {
             let contents = std::fs::read_to_string(&path)?;
-            let parsed: PersistedRegistry = serde_json::from_str(&contents).map_err(|e| {
-                Error::Other(format!(
-                    "failed to parse snapshot registry at {}: {e}",
-                    path.display()
-                ))
-            })?;
-            if parsed.version != PERSIST_FORMAT_VERSION {
-                return Err(Error::Other(format!(
-                    "unsupported snapshot registry version {} (expected {})",
-                    parsed.version, PERSIST_FORMAT_VERSION
-                )));
-            }
-            let mut entries = registry.entries.write();
-            for snapshot in parsed.snapshots {
-                entries.insert(snapshot.name.clone(), snapshot);
+            match serde_json::from_str::<PersistedRegistry>(&contents) {
+                Ok(parsed) if parsed.version <= PERSIST_FORMAT_VERSION => {
+                    let mut entries = registry.entries.write();
+                    for snapshot in parsed.snapshots {
+                        entries.insert(snapshot.name.clone(), snapshot);
+                    }
+                }
+                Ok(parsed) => {
+                    log_registry_warning(&format!(
+                        "snapshot registry at {} has unsupported future version {} (this build \
+                         understands up to {}); quarantining it and starting with an empty \
+                         registry",
+                        path.display(),
+                        parsed.version,
+                        PERSIST_FORMAT_VERSION
+                    ));
+                    quarantine_corrupt_registry(&path);
+                }
+                Err(e) => {
+                    log_registry_warning(&format!(
+                        "failed to parse snapshot registry at {} ({e}); quarantining it and \
+                         starting with an empty registry",
+                        path.display()
+                    ));
+                    quarantine_corrupt_registry(&path);
+                }
             }
         }
         Ok(registry)
@@ -205,14 +308,22 @@ impl SnapshotRegistry {
     /// [`StorageError::DuplicateId`](crate::core::error::StorageError::DuplicateId),
     /// which maps to the #3234 `CONFLICT` code) if the name is already taken.
     pub(crate) fn insert(&self, snapshot: NamedSnapshot) -> Result<()> {
-        {
+        let name = {
             let mut entries = self.entries.write();
             if entries.contains_key(&snapshot.name) {
                 return Err(conflict(&snapshot.name));
             }
-            entries.insert(snapshot.name.clone(), snapshot);
+            let name = snapshot.name.clone();
+            entries.insert(name.clone(), snapshot);
+            name
+        };
+        // Roll back the in-memory insert if the disk save fails, so RAM and disk
+        // never diverge (the caller sees Err *and* the entry is not registered).
+        if let Err(e) = self.save() {
+            self.entries.write().remove(&name);
+            return Err(e);
         }
-        self.save()
+        Ok(())
     }
 
     /// Fetch a snapshot by name.
@@ -235,13 +346,20 @@ impl SnapshotRegistry {
     ///
     /// Returns a `NOT_FOUND`-classed error if the name is absent.
     pub(crate) fn remove(&self, name: &str) -> Result<()> {
-        {
+        let removed = {
             let mut entries = self.entries.write();
-            if entries.remove(name).is_none() {
-                return Err(not_found(name));
+            match entries.remove(name) {
+                Some(removed) => removed,
+                None => return Err(not_found(name)),
             }
+        };
+        // Re-insert the removed entry if the disk save fails, so RAM and disk
+        // never diverge (the caller sees Err *and* the entry is still present).
+        if let Err(e) = self.save() {
+            self.entries.write().insert(removed.name.clone(), removed);
+            return Err(e);
         }
-        self.save()
+        Ok(())
     }
 
     /// Atomically persist the registry to its sidecar file (temp file +
@@ -294,26 +412,53 @@ impl SnapshotRegistry {
     }
 }
 
+/// Emit a warning about the snapshot registry under either logging
+/// configuration, matching the crate's `observability`-gated logging style
+/// (mirrors `log_scan_warning` in `src/storage/wal/segment_reader.rs`).
+fn log_registry_warning(message: &str) {
+    #[cfg(feature = "observability")]
+    tracing::warn!("{}", message);
+    #[cfg(not(feature = "observability"))]
+    eprintln!("WARNING: {}", message);
+}
+
+/// Move a corrupt/unreadable sidecar aside so startup can proceed with an empty
+/// registry while preserving the bad bytes for inspection. Renames `path` to
+/// `path.corrupt` (overwriting a prior quarantine, which is fine — the current
+/// bad file is the interesting one). Failure to quarantine is itself logged but
+/// never fatal: the in-memory registry is already empty, and a later `save()`
+/// overwrites the file atomically.
+fn quarantine_corrupt_registry(path: &std::path::Path) {
+    let mut corrupt = path.as_os_str().to_owned();
+    corrupt.push(".corrupt");
+    let corrupt = PathBuf::from(corrupt);
+    if let Err(e) = std::fs::rename(path, &corrupt) {
+        log_registry_warning(&format!(
+            "could not quarantine corrupt snapshot registry {} -> {}: {e}",
+            path.display(),
+            corrupt.display()
+        ));
+    }
+}
+
 /// Build the sidecar path for a database's snapshot registry, or `None` when
 /// the database is ephemeral (persistence disabled).
 ///
-/// The file lives at `{data_dir}/snapshots.json`, alongside the auth store's
-/// `{data_dir}/auth/`. The canonical durable config
-/// ([`crate::config::durable_config_for_data_dir`]) sets
-/// `persistence.data_dir = {data_dir}/indexes`, so the top-level data dir is
-/// that path's parent.
+/// The file lives **inside** the configured persistence directory, at
+/// `{persistence.data_dir}/snapshots.json`. Under the canonical durable config
+/// ([`crate::config::durable_config_for_data_dir`], which sets
+/// `persistence.data_dir = {data_dir}/indexes`) that is
+/// `{data_dir}/indexes/snapshots.json`. Keeping it inside `data_dir` — rather
+/// than stripping a parent path component — means a power user who points
+/// `data_dir` straight at their data root gets the sidecar contained within
+/// that root, never a sibling written outside it that could collide.
 pub(crate) fn registry_path_for(
     persistence: &crate::storage::index_persistence::PersistenceConfig,
 ) -> Option<PathBuf> {
     if !persistence.enabled {
         return None;
     }
-    let indexes_dir = &persistence.data_dir;
-    let root = indexes_dir
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| indexes_dir.clone());
-    Some(root.join("snapshots.json"))
+    Some(persistence.data_dir.join("snapshots.json"))
 }
 
 /// A read-only, borrowed handle that pins every read to a
@@ -470,15 +615,28 @@ fn not_found(name: &str) -> Error {
 }
 
 impl AletheiaDB {
-    /// Create a named snapshot pinned to the database's current commit frontier
-    /// (Issue #3370).
+    /// Create a named snapshot pinned to "the moment of creation" (Issue #3370).
     ///
-    /// Both temporal dimensions default to the value under `current_timestamp`
-    /// (the authoritative, monotonically advancing commit clock), so the
-    /// snapshot sees exactly the state committed at creation and nothing
-    /// after: every already-committed transaction is visible and every future
-    /// commit is not. See the [module docs](crate::db::snapshot) for the
-    /// determinism argument and the future-valid caveat.
+    /// The two dimensions are defaulted **differently**, each to the correct
+    /// notion of "now":
+    ///
+    /// - **transaction time** = the commit frontier under `current_timestamp`
+    ///   (the authoritative, monotonically advancing commit clock). Because the
+    ///   commit path advances that frontier strictly monotonically under the
+    ///   same lock, every already-committed transaction has a transaction-time
+    ///   start `<=` the frontier (visible) and every future commit a start
+    ///   strictly `>` it (invisible) — a race-free monotonic pin.
+    /// - **valid time** = wallclock `time::now()`, matching the engine's "now"
+    ///   convention for `get_node_at_valid_time` / `find_nodes_at_time`. Using
+    ///   the (possibly lagging) commit frontier for valid time would silently
+    ///   *exclude* facts that are genuinely valid at creation — the frontier
+    ///   trails wallclock during write-idle periods, and a #3221 future-dated
+    ///   fact already valid by now would be dropped.
+    ///
+    /// Both coordinates are captured **once** here and stored, so reads through
+    /// the resulting handle remain fully deterministic. See the
+    /// [module docs](crate::db::snapshot) for the determinism argument and the
+    /// future-valid caveat.
     ///
     /// # Errors
     ///
@@ -489,11 +647,15 @@ impl AletheiaDB {
         name: impl Into<String>,
         description: Option<String>,
     ) -> Result<NamedSnapshot> {
-        // Capture the commit frontier under its own lock (lock class 1) and
-        // release immediately — we hold no later-class lock, so the ordering
-        // contract is preserved. The commit path advances this value strictly
-        // monotonically under the same lock, which is what makes the pin
-        // deterministic (future commits are strictly greater, hence invisible).
+        // Valid-time "now" is wallclock now (the engine's convention). Captured
+        // outside the lock (class-1 lock discipline holds nothing else).
+        let valid_now = crate::core::temporal::time::now();
+        // Transaction-time "now" is the commit frontier: captured under its own
+        // lock (lock class 1) and released immediately — we hold no later-class
+        // lock, so the ordering contract is preserved. The frontier advances
+        // strictly monotonically under the same lock, which is what makes the
+        // transaction-time pin deterministic (future commits are strictly
+        // greater, hence invisible).
         let frontier = {
             let ts = self.current_timestamp.lock().map_err(|_| {
                 Error::from(crate::core::error::TransactionError::LockPoisoned {
@@ -502,7 +664,7 @@ impl AletheiaDB {
             })?;
             *ts
         };
-        self.create_snapshot_at(name, frontier, frontier, description)
+        self.create_snapshot_at(name, valid_now, frontier, description)
     }
 
     /// Create a named snapshot pinned to an explicit bi-temporal coordinate
@@ -591,10 +753,26 @@ mod tests {
     }
 
     #[test]
-    fn registry_path_is_data_dir_sibling_of_indexes() {
+    fn registry_path_is_inside_data_dir() {
         let cfg = crate::storage::index_persistence::PersistenceConfig {
             enabled: true,
             data_dir: PathBuf::from("/var/lib/aletheia/indexes"),
+            ..Default::default()
+        };
+        // The sidecar lives INSIDE data_dir, never a sibling written outside it.
+        assert_eq!(
+            registry_path_for(&cfg),
+            Some(PathBuf::from("/var/lib/aletheia/indexes/snapshots.json"))
+        );
+    }
+
+    #[test]
+    fn registry_path_is_inside_data_dir_root() {
+        // A power user who points data_dir at their data root gets the sidecar
+        // contained within that root (not a sibling that could collide).
+        let cfg = crate::storage::index_persistence::PersistenceConfig {
+            enabled: true,
+            data_dir: PathBuf::from("/var/lib/aletheia"),
             ..Default::default()
         };
         assert_eq!(
@@ -634,19 +812,111 @@ mod tests {
     }
 
     #[test]
-    fn named_snapshot_serde_round_trips_as_micros() {
+    fn named_snapshot_serde_round_trips_full_hlc() {
+        use crate::core::hlc::HybridTimestamp;
+        // Coordinates with NONZERO logical counters (two commits in the same
+        // wallclock microsecond) must round-trip losslessly — dropping logical
+        // would collapse a pin onto its same-microsecond neighbor.
         let snap = NamedSnapshot {
             name: "s".to_string(),
-            valid_time: Timestamp::from(111),
-            transaction_time: Timestamp::from(222),
-            created_at: Timestamp::from(333),
+            valid_time: HybridTimestamp::new_unchecked(111, 7),
+            transaction_time: HybridTimestamp::new_unchecked(222, 3),
+            created_at: HybridTimestamp::new_unchecked(333, 0),
             description: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
-        // Timestamps serialize as bare integer micros, not nested objects.
-        assert!(json.contains("\"valid_time\":111"), "json was {json}");
-        assert!(json.contains("\"transaction_time\":222"), "json was {json}");
+        // Timestamps serialize as {wallclock, logical} objects (lossless).
+        assert!(json.contains("\"wallclock\":111"), "json was {json}");
+        assert!(json.contains("\"logical\":7"), "json was {json}");
+        assert!(json.contains("\"wallclock\":222"), "json was {json}");
+        assert!(json.contains("\"logical\":3"), "json was {json}");
         let back: NamedSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, snap);
+        // The logical counter specifically survives (the regression guard).
+        assert_eq!(back.valid_time().logical(), 7);
+        assert_eq!(back.transaction_time().logical(), 3);
+    }
+
+    #[test]
+    fn ts_hlc_reconstructs_exact_wallclock_and_logical() {
+        use crate::core::hlc::HybridTimestamp;
+        // Direct serde round-trip of a single timestamp with logical > 0.
+        #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+        struct Wrap(#[serde(with = "ts_hlc")] Timestamp);
+        let ts = HybridTimestamp::new_unchecked(1_700_000_000_000_000, 42);
+        let json = serde_json::to_string(&Wrap(ts)).unwrap();
+        let back: Wrap = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.0, ts);
+        assert_eq!(back.0.wallclock(), 1_700_000_000_000_000);
+        assert_eq!(back.0.logical(), 42);
+    }
+
+    #[test]
+    fn ts_hlc_accepts_legacy_bare_integer_as_logical_zero() {
+        // A legacy v1 sidecar stored bare-integer micros. The tolerant
+        // deserializer must still load it (reconstructed with logical 0), so an
+        // old file loads instead of hard-failing.
+        let legacy = r#"{
+            "version": 1,
+            "snapshots": [
+                { "name": "old", "valid_time": 111, "transaction_time": 222, "created_at": 333 }
+            ]
+        }"#;
+        let parsed: PersistedRegistry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.version, 1);
+        let s = &parsed.snapshots[0];
+        assert_eq!(s.valid_time.wallclock(), 111);
+        assert_eq!(s.valid_time.logical(), 0);
+        assert_eq!(s.transaction_time.wallclock(), 222);
+        assert_eq!(s.transaction_time.logical(), 0);
+    }
+
+    #[test]
+    fn open_quarantines_corrupt_sidecar_and_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshots.json");
+        std::fs::write(&path, b"this is not valid json {{{").unwrap();
+
+        // A corrupt sidecar must NOT brick startup: it quarantines and yields an
+        // empty registry (unlike the security-critical auth store).
+        let reg = SnapshotRegistry::open(Some(path.clone())).unwrap();
+        assert!(
+            reg.list().is_empty(),
+            "registry starts empty after corruption"
+        );
+
+        // The bad bytes are preserved aside for inspection.
+        assert!(!path.exists(), "corrupt file was moved aside");
+        assert!(
+            dir.path().join("snapshots.json.corrupt").exists(),
+            "quarantined file exists"
+        );
+    }
+
+    #[test]
+    fn insert_rolls_back_on_save_failure() {
+        // Point the sidecar at a path whose parent is a *file*, so directory
+        // creation / the atomic write cannot succeed and save() returns Err.
+        let dir = tempfile::tempdir().unwrap();
+        let blocking_file = dir.path().join("not_a_dir");
+        std::fs::write(&blocking_file, b"x").unwrap();
+        let bad_path = blocking_file.join("nested").join("snapshots.json");
+
+        let reg = SnapshotRegistry::open(Some(bad_path)).unwrap();
+        let snap = NamedSnapshot {
+            name: "run1".to_string(),
+            valid_time: Timestamp::from(1000),
+            transaction_time: Timestamp::from(1000),
+            created_at: Timestamp::from(1000),
+            description: None,
+        };
+        let err = reg.insert(snap);
+        assert!(err.is_err(), "save failure surfaces as Err");
+        // RAM did not diverge from disk: the failed insert left no entry.
+        assert!(
+            reg.get("run1").is_none(),
+            "in-memory insert rolled back on save failure"
+        );
+        assert!(reg.list().is_empty());
     }
 }

@@ -9,8 +9,15 @@ use aletheiadb::core::graph::{Edge, Node};
 use aletheiadb::core::id::{EdgeId, NodeId};
 use aletheiadb::core::temporal::time;
 use aletheiadb::db::snapshot::Snapshot;
-use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 use serde_json::json;
+
+/// The canonical durable config places the snapshot sidecar inside the index
+/// persistence dir: `{data_dir}/indexes/snapshots.json` (Issue #3370, review
+/// M6 — never a sibling written outside the data dir).
+fn sidecar_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("indexes").join("snapshots.json")
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -454,8 +461,13 @@ fn snapshot_survives_restart() {
         (snap.coordinate(), node_id)
     };
 
-    // A sidecar file was actually written.
-    assert!(dir.path().join("snapshots.json").exists(), "sidecar exists");
+    // A sidecar file was actually written (inside the data dir, M6).
+    assert!(sidecar_path(dir.path()).exists(), "sidecar exists");
+    // And nothing was written OUTSIDE the data dir as a sibling.
+    assert!(
+        !dir.path().join("snapshots.json").exists(),
+        "no sibling sidecar outside the data dir"
+    );
 
     // Reopen the same directory.
     let db = AletheiaDB::open(dir.path()).unwrap();
@@ -502,25 +514,28 @@ fn persisted_registry_file_is_valid_json_shape() {
         db.create_snapshot("s2", None).unwrap();
     }
 
-    let path = dir.path().join("snapshots.json");
+    let path = sidecar_path(dir.path());
     let contents = std::fs::read_to_string(&path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
 
-    assert_eq!(value["version"], 1);
+    // v2 persists the full HLC (wallclock + logical), not bare micros (M1).
+    assert_eq!(value["version"], 2);
     let arr = value["snapshots"].as_array().unwrap();
     assert_eq!(arr.len(), 2);
-    // Timestamps are bare integer micros (mirrors the #3360 cursor).
-    assert!(arr[0]["valid_time"].is_i64(), "valid_time is i64 micros");
-    assert!(arr[0]["transaction_time"].is_i64());
-    assert!(arr[0]["created_at"].is_i64());
+    // Timestamps are {wallclock, logical} objects (lossless HLC).
+    assert!(
+        arr[0]["valid_time"].is_object(),
+        "valid_time is a {{wallclock, logical}} object"
+    );
+    assert!(arr[0]["valid_time"]["wallclock"].is_i64());
+    assert!(arr[0]["valid_time"]["logical"].is_u64());
+    assert!(arr[0]["transaction_time"]["wallclock"].is_i64());
+    assert!(arr[0]["created_at"]["wallclock"].is_i64());
     let names: Vec<&str> = arr.iter().map(|e| e["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"s1") && names.contains(&"s2"));
 
     // No leftover temp file after the atomic rename.
-    assert!(
-        !dir.path().join("snapshots.tmp").exists(),
-        "no stale temp file"
-    );
+    assert!(!path.with_extension("tmp").exists(), "no stale temp file");
 }
 
 #[test]
@@ -592,4 +607,331 @@ fn pinned_adjacency_reflects_the_coordinate() {
     assert_eq!(out, vec![e], "only the pre-pin outgoing edge at the pin");
     let inc = handle.get_incoming_edges(b);
     assert_eq!(inc, vec![e], "pre-pin incoming edge at the pin");
+}
+
+// ---------------------------------------------------------------------------
+// M3. Retraction AFTER the pin of a PRE-pin tracked entity must not disturb it
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retraction_after_pin_preserves_pre_pin_tracked_entity() {
+    let db = AletheiaDB::new().unwrap();
+    // Seed n1 (+ edge e1 to n2) BEFORE the pin so they are genuinely in the
+    // tracked read set (the review noted the determinism loop only retracted a
+    // throwaway node created AFTER the pin, which proves nothing).
+    let n1 = db.create_node("Person", person("Alice", 30)).unwrap();
+    let n2 = db.create_node("Person", person("Bob", 40)).unwrap();
+    let e1 = db
+        .create_edge(
+            n1,
+            n2,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020).build(),
+        )
+        .unwrap();
+
+    // Pin now — after seeding, before any retraction.
+    db.create_snapshot("pre", None).unwrap();
+    let handle = db.snapshot("pre").unwrap();
+
+    let n1_before = handle.get_node(n1).unwrap();
+    let persons_before = handle.find_nodes("Person").unwrap().nodes.len();
+    assert_eq!(persons_before, 2);
+
+    // Retract n1 (detach co-retracts the connected edge e1) AFTER the pin.
+    let res = db.retract_node_detach(n1, time::now()).unwrap();
+    assert_eq!(res.edges_retracted, 1, "e1 co-retracted with n1");
+
+    // The pin STILL returns n1's pre-retraction version, byte-identical.
+    let n1_after = handle.get_node(n1).unwrap();
+    assert_eq!(
+        n1_after.properties, n1_before.properties,
+        "pinned n1 unchanged by post-pin retraction"
+    );
+    assert_eq!(
+        n1_after.properties.get("name").and_then(|v| v.as_str()),
+        Some("Alice")
+    );
+
+    // find_nodes count unchanged through the pin, and e1 still visible.
+    assert_eq!(
+        handle.find_nodes("Person").unwrap().nodes.len(),
+        persons_before,
+        "find count unchanged through the pin after retraction"
+    );
+    assert!(
+        handle.get_edge(e1).is_ok(),
+        "co-retracted edge still visible at the pin"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// m8. The pre-pinned Snapshot::query() builder traverses AS OF the pin (AC4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pinned_query_builder_traverses_at_the_coordinate() {
+    use aletheiadb::query::QueryBuilder;
+
+    let db = AletheiaDB::new().unwrap();
+    let a = db.create_node("Person", person("A", 1)).unwrap();
+    let b = db.create_node("Person", person("B", 2)).unwrap();
+    db.create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.create_snapshot("q", None).unwrap();
+
+    // A post-pin edge to a fresh node C (must be excluded by the pinned query).
+    let c = db.create_node("Person", person("C", 3)).unwrap();
+    db.create_edge(a, c, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let handle = db.snapshot("q").unwrap();
+    // The builder returned by handle.query() is already `as_of(pin)`.
+    let builder: QueryBuilder<_> = handle.query();
+    let nodes = builder
+        .start(a)
+        .traverse("KNOWS")
+        .execute(&db)
+        .unwrap()
+        .collect_nodes()
+        .unwrap();
+    let ids: Vec<NodeId> = nodes.iter().map(|n| n.id).collect();
+    assert!(
+        ids.contains(&b),
+        "pinned traversal reaches the pre-pin neighbor B, got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&c),
+        "pinned traversal excludes the post-pin neighbor C, got {ids:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// m9. Future-valid exclusion by a default (valid=now) snapshot; included when
+//     pinned to the future valid coord (ties to M2: default valid = now())
+// ---------------------------------------------------------------------------
+
+#[test]
+fn future_valid_fact_excluded_by_default_snapshot_included_when_pinned_to_future() {
+    let db = AletheiaDB::new().unwrap();
+    let now = time::now();
+    // A fact that only becomes valid 10s in the future.
+    let future: aletheiadb::core::temporal::Timestamp = (now.wallclock() + 10_000_000).into();
+    let fnode = db
+        .create_node_with_valid_time("Person", person("Future", 1), Some(future))
+        .unwrap();
+
+    // Default snapshot pins valid-time = wallclock-now (M2), so the future-dated
+    // fact is invisible through it.
+    db.create_snapshot("now", None).unwrap();
+    let now_handle = db.snapshot("now").unwrap();
+    assert!(
+        now_handle.get_node(fnode).is_err(),
+        "future-valid fact excluded by the default (valid=now) snapshot"
+    );
+    assert!(
+        now_handle
+            .find_nodes("Person")
+            .unwrap()
+            .nodes
+            .iter()
+            .all(|n| n.id != fnode),
+        "future-valid fact not in find_nodes at the default pin"
+    );
+
+    // A snapshot pinned to the fact's future valid coordinate DOES see it.
+    let tt = db.get_snapshot("now").unwrap().transaction_time();
+    db.create_snapshot_at("fut", future, tt, None).unwrap();
+    let fut_handle = db.snapshot("fut").unwrap();
+    assert!(
+        fut_handle.get_node(fnode).is_ok(),
+        "future-valid fact visible when the snapshot valid coord is the future"
+    );
+    assert_eq!(
+        fut_handle
+            .get_node(fnode)
+            .unwrap()
+            .properties
+            .get("name")
+            .and_then(|v| v.as_str()),
+        Some("Future")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// m7. Multithreaded determinism: a writer thread mutates the graph while the
+//     main thread repeatedly reads through the handle; every read batch must be
+//     byte-identical to the pre-write fingerprint.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn determinism_under_concurrent_writer() {
+    let db = AletheiaDB::new().unwrap();
+
+    let n1 = db.create_node("Person", person("Alice", 30)).unwrap();
+    let n2 = db.create_node("Person", person("Bob", 40)).unwrap();
+    let e1 = db
+        .create_edge(
+            n1,
+            n2,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020).build(),
+        )
+        .unwrap();
+
+    // Create the snapshot FIRST, before spawning the writer, so creation does
+    // not race a commit (this keeps the test deterministic and sidesteps the
+    // known committed-but-not-yet-applied visibility window).
+    db.create_snapshot("mt", None).unwrap();
+
+    let labels = ["Person", "Other"];
+    let fingerprint = {
+        let handle = db.snapshot("mt").unwrap();
+        read_batch(&handle, &[n1, n2], &[e1], &labels)
+    };
+
+    std::thread::scope(|scope| {
+        // Writer thread: many create/update/delete ops against the live db.
+        scope.spawn(|| {
+            for i in 0..300 {
+                match i % 4 {
+                    0 => {
+                        db.create_node("Person", person(&format!("W{i}"), i as i64))
+                            .unwrap();
+                    }
+                    1 => {
+                        db.update_node_with_valid_time(n1, person("Mutated", 99), None)
+                            .unwrap();
+                    }
+                    2 => {
+                        let tmp = db
+                            .create_node("Other", person(&format!("T{i}"), 1))
+                            .unwrap();
+                        db.delete_node_with_valid_time(tmp, None).unwrap();
+                    }
+                    _ => {
+                        let a = db
+                            .create_node("Other", person(&format!("A{i}"), 1))
+                            .unwrap();
+                        let b = db
+                            .create_node("Other", person(&format!("B{i}"), 2))
+                            .unwrap();
+                        db.create_edge(a, b, "LINK", PropertyMapBuilder::new().build())
+                            .unwrap();
+                    }
+                }
+            }
+        });
+
+        // Reader: hammer the handle; every batch must match the pre-write value.
+        let handle = db.snapshot("mt").unwrap();
+        for _ in 0..500 {
+            let batch = read_batch(&handle, &[n1, n2], &[e1], &labels);
+            assert_eq!(
+                batch, fingerprint,
+                "snapshot read diverged under a concurrent writer"
+            );
+        }
+    });
+
+    // A final read after all writes are joined must still match.
+    let handle = db.snapshot("mt").unwrap();
+    assert_eq!(
+        read_batch(&handle, &[n1, n2], &[e1], &labels),
+        fingerprint,
+        "snapshot read diverged after the writer finished"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M1. Same-microsecond supersession must resolve the correct version AFTER a
+//     restart: the pin's HLC logical counter must round-trip through the
+//     sidecar. With the logical counter dropped, the pin at (W, L2) collapses
+//     to (W, 0) and resolves the WRONG (superseded / absent) version.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "simulation")]
+#[test]
+fn snapshot_resolves_correct_version_across_restart_same_microsecond() {
+    use aletheiadb::simulation::SimulatedClock;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Freeze the clock so both commits land in ONE wallclock microsecond and
+    // differ only in their HLC logical counter.
+    let clock = SimulatedClock::new(1_700_000_000_000_000);
+
+    let (node_id, vt2, tt2) = {
+        let _guard = clock.inject();
+        let db = AletheiaDB::open(dir.path()).unwrap();
+
+        // v1
+        let node_id = {
+            let mut tx = db.write_transaction().unwrap();
+            let id = tx.create_node("Person", person("V1", 1)).unwrap();
+            tx.commit_with_timestamp().unwrap();
+            id
+        };
+        // v2 supersedes v1 in the SAME frozen microsecond.
+        let ts2 = {
+            let mut tx = db.write_transaction().unwrap();
+            tx.update_node(node_id, person("V2", 2)).unwrap();
+            tx.commit_with_timestamp().unwrap()
+        };
+        assert!(
+            ts2.logical() > 0,
+            "v2 tx-time must carry a nonzero logical counter, got {ts2:?}"
+        );
+
+        // Pin exactly at v2's bi-temporal coordinate.
+        let snap = db.create_snapshot_at("pin", ts2, ts2, None).unwrap();
+
+        // BEFORE restart: the handle resolves v2.
+        let handle = db.snapshot("pin").unwrap();
+        assert_eq!(
+            handle
+                .get_node(node_id)
+                .unwrap()
+                .properties
+                .get("name")
+                .and_then(|v| v.as_str()),
+            Some("V2"),
+            "pre-restart handle resolves v2"
+        );
+        (node_id, snap.valid_time(), snap.transaction_time())
+    };
+
+    assert!(tt2.logical() > 0, "pinned tx-time has a nonzero logical");
+
+    // Reopen from the same data dir (clock guard dropped — reads use the pinned
+    // coordinate, not wallclock now).
+    let db = AletheiaDB::open(dir.path()).unwrap();
+
+    // The FULL HLC coordinate survives the sidecar round-trip.
+    let reloaded = db.get_snapshot("pin").unwrap();
+    assert_eq!(
+        reloaded.transaction_time(),
+        tt2,
+        "tx-time logical counter survives restart"
+    );
+    assert_eq!(
+        reloaded.valid_time(),
+        vt2,
+        "valid-time logical counter survives restart"
+    );
+
+    // AND a read through the reopened handle STILL returns v2 — not the
+    // superseded v1, not absent (which is what a collapsed (W,0) pin yields).
+    let handle = db.snapshot("pin").unwrap();
+    assert_eq!(
+        handle
+            .get_node(node_id)
+            .unwrap()
+            .properties
+            .get("name")
+            .and_then(|v| v.as_str()),
+        Some("V2"),
+        "restart resolves v2 via the full-HLC pin, not v1"
+    );
 }
