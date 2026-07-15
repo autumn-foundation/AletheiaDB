@@ -491,8 +491,35 @@ fn keys_generate(args: &[String]) -> Result<(), String> {
     // silently clobbered (closes the check-then-write TOCTOU). The key file is
     // created with mode 0600 *before* any key bytes are written on Unix, so it
     // is never world-readable at any instant.
-    let result = aletheiadb::encryption::cli::generate_key_with_overwrite(path, force)
-        .map_err(|e| format!("failed to generate key: {e}"))?;
+    //
+    // With `--passphrase` (Issue #3587) the MEK is wrapped under a passphrase
+    // read from the ALETHEIADB_KEY_PASSPHRASE environment variable. The
+    // passphrase is NEVER taken from argv (it would leak via the process table),
+    // NEVER echoed, and NEVER printed; a missing/empty variable fails closed.
+    let result = if args.iter().any(|a| a == "--passphrase") {
+        let passphrase = std::env::var("ALETHEIADB_KEY_PASSPHRASE").map_err(|_| {
+            "the --passphrase flag requires the ALETHEIADB_KEY_PASSPHRASE environment variable to be set"
+                .to_string()
+        })?;
+        if passphrase.is_empty() {
+            return Err(
+                "ALETHEIADB_KEY_PASSPHRASE must not be empty when --passphrase is used".to_string(),
+            );
+        }
+        let result = aletheiadb::encryption::cli::generate_passphrase_key_with_overwrite(
+            path,
+            &passphrase,
+            force,
+        )
+        .map_err(|e| format!("failed to generate passphrase key: {e}"));
+        // Drop the passphrase from this frame promptly; the generator already
+        // consumed it into a zeroizing buffer for the KDF.
+        drop(passphrase);
+        result?
+    } else {
+        aletheiadb::encryption::cli::generate_key_with_overwrite(path, force)
+            .map_err(|e| format!("failed to generate key: {e}"))?
+    };
 
     // Defense-in-depth: re-assert owner-only permissions. `generate_key_with_overwrite`
     // already creates the file 0600 at creation time on Unix, so this is a

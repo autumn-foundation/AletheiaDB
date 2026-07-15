@@ -19,6 +19,18 @@ pub trait KeyProvider: Send + Sync {
     /// Retrieve the 32-byte master encryption key.
     fn get_mek(&self) -> Result<Zeroizing<[u8; 32]>, KeyProviderError>;
 
+    /// Retrieve a specific key version (Issue #3587).
+    ///
+    /// The default implementation is for single-version providers (file, env,
+    /// passphrase): they hold exactly one key, so any requested version resolves
+    /// to that sole key via [`get_mek`](Self::get_mek). Multi-version backends
+    /// (e.g. KMS/Vault envelope models) override this to reject unknown versions
+    /// with [`KeyProviderError::KeyNotFound`] rather than silently returning the
+    /// current key. It never panics.
+    fn get_key_version(&self, _version: u32) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
+        self.get_mek()
+    }
+
     /// Human-readable provider name for logging/diagnostics.
     fn provider_name(&self) -> &str;
 
@@ -444,5 +456,37 @@ mod tests {
 
         let env_provider = EnvKeyProvider::new("MY_KEY");
         assert_eq!(env_provider.provider_name(), "env");
+    }
+
+    #[test]
+    fn file_provider_get_key_version_returns_sole_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("versioned.hex");
+
+        let (hex_str, expected) = hex_key_string();
+        std::fs::write(&path, &hex_str).unwrap();
+
+        let provider = FileKeyProvider::new(&path);
+        // A single-version provider resolves ANY requested version to its sole key.
+        let v = provider.get_key_version(42).unwrap();
+        assert_eq!(v.as_ref(), expected.as_ref());
+        assert_eq!(
+            provider.get_key_version(0).unwrap().as_ref(),
+            expected.as_ref()
+        );
+    }
+
+    #[test]
+    fn env_provider_get_key_version_returns_sole_key() {
+        let var = unique_env_var("VERSIONED");
+        let (hex_str, expected) = hex_key_string();
+        // SAFETY: test-only, unique var names prevent races
+        unsafe { std::env::set_var(&var, &hex_str) };
+
+        let provider = EnvKeyProvider::new(&var);
+        let v = provider.get_key_version(7).unwrap();
+        assert_eq!(v.as_ref(), expected.as_ref());
+
+        unsafe { std::env::remove_var(&var) };
     }
 }
