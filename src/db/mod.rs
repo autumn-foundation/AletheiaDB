@@ -32,8 +32,6 @@ pub mod config;
 pub mod constraint_builder;
 /// Queryable bi-temporal extent of the dataset (Issue #3238).
 pub mod extent;
-/// GraphView implementation.
-pub mod graph_view;
 /// Fact-to-fact derivation lineage API (Issue #3371).
 pub mod lineage;
 /// Basic graph operations (CRUD).
