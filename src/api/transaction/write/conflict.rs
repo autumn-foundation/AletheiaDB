@@ -39,6 +39,61 @@ use std::collections::HashSet;
 ///
 /// Returns `TransactionError::SerializationFailure` if a write-write conflict is detected.
 pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
+    // Pre-lock CAS fast-path (Issue #3577): reject a PURE compare-and-set whose
+    // expected version already fails to match the committed head, BEFORE any WAL
+    // frame is appended+fsync'd at commit. This runs in the same guard-free
+    // context as the snapshot-isolation check below (it only READS current
+    // storage; no `historical.write()` guard is held), so it adds no new lock
+    // site and preserves the lock-acquisition order.
+    //
+    // This is a best-effort fast-path, NOT a replacement for the authoritative
+    // under-guard re-check in `cas::detect_cas_precondition_violations`:
+    //
+    //   * Only PURE CAS (`lease: None`) is rejected here. A lease claim's
+    //     OR-branch (`version == expected` OR `lease_until <= commit_ts`) can
+    //     flip from false to true between this pre-lock read and the LATER
+    //     commit timestamp (the lease expires relative to commit), so a pre-lock
+    //     reject of a lease claim would be WRONG — lease claims fall through
+    //     untouched to the authoritative under-guard check.
+    //   * The committed head advances monotonically, so a pure-CAS pre-lock
+    //     mismatch can never become a match at commit: rejecting it now is
+    //     sound. Two concurrent pure-CAS that both read `head == expected` here
+    //     both pass the fast-path; the under-guard check still catches the loser
+    //     (first-committer-wins).
+    //
+    // Without this fast-path every stale-version pure CAS (the common,
+    // single-threaded path) durably writes a `[BeginTx, UpdateNode, CommitTx]`
+    // frame and only THEN aborts under the guard — and absent WAL abort framing
+    // (#3413) a crash would replay that rejected write.
+    for precondition in &tx.cas_preconditions {
+        // Lease claims MUST reach the authoritative under-guard check unchanged.
+        if precondition.lease.is_some() {
+            continue;
+        }
+        match precondition.target {
+            super::cas::CasTarget::Node(node_id) => {
+                let actual = tx.current.get_node(node_id).ok().map(|n| n.current_version);
+                if actual != Some(precondition.expected_version) {
+                    return Err(TransactionError::CasMismatch {
+                        expected: precondition.expected_version,
+                        actual,
+                    }
+                    .into());
+                }
+            }
+            super::cas::CasTarget::Edge(edge_id) => {
+                let actual = tx.current.get_edge(edge_id).ok().map(|e| e.current_version);
+                if actual != Some(precondition.expected_version) {
+                    return Err(TransactionError::CasMismatch {
+                        expected: precondition.expected_version,
+                        actual,
+                    }
+                    .into());
+                }
+            }
+        }
+    }
+
     // Entities CREATED in this same transaction cannot conflict with another
     // transaction (Issue #3417): their ids were freshly allocated by this
     // tx's id generators, so no other committed transaction can hold a version
@@ -62,11 +117,21 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
         }
     }
 
+    // Compare-and-set targets (Issue #3577) are DELIBERATELY excluded from the
+    // pre-lock snapshot-isolation check: their conflict semantics is the
+    // version-based CAS precondition, re-checked under the `historical.write()`
+    // guard (`cas::detect_cas_precondition_violations`). Applying
+    // first-committer-wins here too would preempt that authoritative check and
+    // surface a retriable `SerializationFailure` for a lost claim that must
+    // instead be the non-retriable `CasMismatch`.
+    let cas_nodes = tx.cas_target_nodes();
+    let cas_edges = tx.cas_target_edges();
+
     for write in tx.buffer.operations() {
         match write {
             // UpdateNode: check if node was modified or deleted after our snapshot
             crate::api::transaction::BufferedWrite::UpdateNode { node_id, .. } => {
-                if created_nodes.contains(node_id) {
+                if created_nodes.contains(node_id) || cas_nodes.contains(node_id) {
                     continue;
                 }
                 match tx.current.get_node(*node_id) {
@@ -100,7 +165,7 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
 
             // UpdateEdge: check if edge was modified or deleted after our snapshot
             crate::api::transaction::BufferedWrite::UpdateEdge { edge_id, .. } => {
-                if created_edges.contains(edge_id) {
+                if created_edges.contains(edge_id) || cas_edges.contains(edge_id) {
                     continue;
                 }
                 match tx.current.get_edge(*edge_id) {

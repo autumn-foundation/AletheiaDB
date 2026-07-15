@@ -668,6 +668,27 @@ pub(crate) fn apply_changes<'a>(
     // create-side check re-verifies both endpoints under the guard.
     detect_create_edge_dangling_endpoint(tx)?;
 
+    // Issue #3577 — authoritative compare-and-set re-check. Run under the SAME
+    // exclusive `historical.write()` guard so two claimants opened on the same
+    // snapshot cannot both pass: the second observes the first's committed head
+    // version and aborts with `CasMismatch` (non-retriable). Lease expiry is
+    // judged against `commit_timestamp` (the HLC taken under `current_timestamp`),
+    // not the tx snapshot.
+    //
+    // Durability caveat: this runs BEFORE any op is applied, so a failed CAS
+    // applies nothing to in-memory state. But the WAL frame was already
+    // appended+fsync'd earlier in `commit_with_timestamp_inner`. A pure-CAS
+    // mismatch is normally caught EARLIER by the pre-lock fast-path in
+    // `conflict::detect_conflicts` (before the WAL append), so the common
+    // single-threaded stale-CAS case writes nothing durable. A mismatch that
+    // only manifests HERE — a genuine concurrent pure-CAS race whose loser
+    // passed the fast-path, or ANY lease claim (excluded from the fast-path) —
+    // still leaves a durable `[BeginTx, UpdateNode, CommitTx]` frame that, absent
+    // WAL abort framing (#3413), would replay on crash. This is the same
+    // accepted caveat as the #3416 sibling write-skew checks under this guard.
+    // Zero cost for transactions with no conditional writes.
+    super::cas::detect_cas_precondition_violations(tx, commit_timestamp)?;
+
     // Issue #3406: the closing-version IDs (delete tombstones + retraction
     // versions) are pre-generated once per commit — BEFORE the WAL log phase —
     // so the identical ids are recorded in the WAL and applied here. We simply
