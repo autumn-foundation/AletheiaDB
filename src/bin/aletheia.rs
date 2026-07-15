@@ -1160,10 +1160,11 @@ fn read_chain_head(path: &str) -> Result<ChainHead, String> {
 /// `aletheia import` — load an external graph export.
 ///
 /// Dispatches on `--format`: `neo4j-csv` (the default) loads a Neo4j CSV export
-/// (Issue #3356); `parquet` loads a Parquet file via the mapping contract
-/// (Issue #3364, requires `--features parquet`). A binary Neo4j `.dump` archive and
-/// the APOC Cypher-script dump are unsupported and rejected with an actionable
-/// message (documented follow-ups).
+/// (Issue #3356); `neo4j-cypher` (or any `.cypher` input) loads an
+/// `apoc.export.cypher.all` script dump via [`handle_import_cypher`] (Issue
+/// #3356); `parquet` loads a Parquet file via the mapping contract (Issue
+/// #3364, requires `--features parquet`). A binary Neo4j `.dump` archive is
+/// unsupported and rejected with an actionable message pointing at CSV/Cypher.
 #[cfg(feature = "import")]
 fn handle_import(args: Vec<String>) -> Result<(), String> {
     use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCsvOptions};
@@ -1187,20 +1188,25 @@ fn handle_import(args: Vec<String>) -> Result<(), String> {
     let nodes = arg_values(&args, "--nodes");
     let rels = arg_values(&args, "--relationships");
 
-    // Reject binary dump / Cypher-script inputs with a clear pointer to CSV.
+    // APOC Cypher-script dump import (Issue #3356): a single `.cypher` file (or
+    // `--format neo4j-cypher`) carries both nodes and relationships. Route it to
+    // the dedicated library entry point before the CSV-specific handling.
+    let cypher_selected = matches!(format.as_str(), "neo4j-cypher" | "cypher");
+    let has_cypher_file = nodes
+        .iter()
+        .chain(rels.iter())
+        .any(|p| p.to_ascii_lowercase().ends_with(".cypher"));
+    if cypher_selected || has_cypher_file {
+        return handle_import_cypher(&args, &nodes, &rels);
+    }
+
+    // Reject binary dump inputs with a clear pointer to CSV.
     for path in nodes.iter().chain(rels.iter()) {
         let lower = path.to_ascii_lowercase();
         if lower.ends_with(".dump") {
             return Err(
                 "neo4j binary dump import is not supported; export to CSV with \
                 'neo4j-admin database import' headers or apoc.export.csv"
-                    .to_string(),
-            );
-        }
-        if lower.ends_with(".cypher") {
-            return Err(
-                "neo4j Cypher-script dump import is a documented follow-up; \
-                use CSV export (neo4j-admin database import / apoc.export.csv)"
                     .to_string(),
             );
         }
@@ -1281,6 +1287,81 @@ fn handle_import(args: Vec<String>) -> Result<(), String> {
     let value =
         serde_json::to_value(&report).map_err(|e| format!("failed to render report JSON: {e}"))?;
     if let Some(report_path) = arg_value(&args, "--report") {
+        let rendered = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("failed to render report JSON: {e}"))?;
+        fs::write(&report_path, rendered)
+            .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
+    }
+    print_json_pretty(&value)
+}
+
+/// Import an APOC Cypher-script dump (`apoc.export.cypher.all`), Issue #3356.
+///
+/// A single `.cypher` dump file carries both nodes and relationships, so it is
+/// supplied via `--nodes <file>` (or `--relationships <file>`). Options mirror
+/// the CSV importer's `--label-strategy`, `--vector-property`,
+/// `--valid-from-property`, `--strict-types`, and `--on-error` flags.
+#[cfg(feature = "import")]
+fn handle_import_cypher(args: &[String], nodes: &[String], rels: &[String]) -> Result<(), String> {
+    use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCypherOptions};
+
+    let paths: Vec<String> = nodes.iter().chain(rels.iter()).cloned().collect();
+    let path = match paths.as_slice() {
+        [single] => single.clone(),
+        [] => {
+            return Err(
+                "usage: aletheia import --format neo4j-cypher --nodes <dump.cypher> [options]"
+                    .to_string(),
+            );
+        }
+        _ => {
+            return Err(
+                "the APOC Cypher-script dump import takes a single dump file (one \
+                 apoc.export.cypher.all output holds both nodes and relationships)"
+                    .to_string(),
+            );
+        }
+    };
+
+    let mut opts = Neo4jCypherOptions::new();
+    for name in arg_values(args, "--vector-property") {
+        opts.vector_properties.insert(name);
+    }
+    if let Some(name) = arg_value(args, "--valid-from-property") {
+        opts.valid_from_property = Some(name);
+    }
+    if let Some(strategy) = arg_value(args, "--label-strategy") {
+        opts.label_strategy = match strategy.as_str() {
+            "first" => LabelStrategy::First,
+            "concat" => LabelStrategy::Concat,
+            "property" => LabelStrategy::Property,
+            other => {
+                return Err(format!(
+                    "invalid --label-strategy '{other}', expected first|concat|property"
+                ));
+            }
+        };
+    }
+    if args.iter().any(|a| a == "--strict-types") {
+        opts.strict_types = true;
+    }
+    let failure_mode = match arg_value(args, "--on-error").as_deref() {
+        None | Some("abort") => FailureMode::Abort,
+        Some("skip") => FailureMode::SkipAndReport,
+        Some(other) => {
+            return Err(format!("invalid --on-error '{other}', expected abort|skip"));
+        }
+    };
+
+    let db = open_db()?;
+    let mut importer = db.import().failure_mode(failure_mode);
+    let report = importer
+        .neo4j_import_cypher(&path, &opts)
+        .map_err(|e| format!("import failed: {e}"))?;
+
+    let value =
+        serde_json::to_value(&report).map_err(|e| format!("failed to render report JSON: {e}"))?;
+    if let Some(report_path) = arg_value(args, "--report") {
         let rendered = serde_json::to_string_pretty(&value)
             .map_err(|e| format!("failed to render report JSON: {e}"))?;
         fs::write(&report_path, rendered)
@@ -3310,5 +3391,71 @@ mod parquet_cli_tests {
         ])
         .unwrap_err();
         assert!(err.contains("mode"), "got: {err}");
+    }
+}
+
+/// CLI smoke tests for the APOC Cypher-script dump import verb (Issue #3356,
+/// AC1 — the CLI half). Exercises the `import` dispatch end-to-end: argument
+/// parsing, `.cypher`/`--format` routing to [`handle_import_cypher`], opening
+/// the database, running the import, and rendering the fidelity report.
+#[cfg(all(test, feature = "import"))]
+mod cypher_cli_tests {
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    const DUMP: &str = "\
+:begin
+CREATE (:`Person`:`UNIQUE IMPORT LABEL` {`name`:\"Alice\", `UNIQUE IMPORT ID`:0});
+CREATE (:`Person`:`UNIQUE IMPORT LABEL` {`name`:\"Bob\", `UNIQUE IMPORT ID`:1});
+MATCH (a:`UNIQUE IMPORT LABEL`{`UNIQUE IMPORT ID`:0}), (b:`UNIQUE IMPORT LABEL`{`UNIQUE IMPORT ID`:1}) CREATE (a)-[:`KNOWS`]->(b);
+:commit
+";
+
+    fn write_dump(dir: &TempDir, name: &str) -> String {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(DUMP.as_bytes()).unwrap();
+        path.display().to_string()
+    }
+
+    /// A `.cypher` input routes through the dedicated importer end-to-end and
+    /// the `--report` file captures the fidelity report.
+    #[test]
+    fn import_cypher_file_end_to_end_writes_report() {
+        let dir = TempDir::new().unwrap();
+        let dump = write_dump(&dir, "graph.cypher");
+        let report = dir.path().join("report.json").display().to_string();
+        super::handle_import(vec![s("--nodes"), dump, s("--report"), report.clone()])
+            .expect("cypher import via CLI dispatch should succeed");
+        let json = std::fs::read_to_string(&report).expect("report file written");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid report JSON");
+        assert_eq!(v["nodes_imported"], 2);
+        assert_eq!(v["relationships_imported"], 1);
+        assert_eq!(v["zero_loss"], true);
+    }
+
+    /// `--format neo4j-cypher` routes to the cypher handler even when the file
+    /// does not carry a `.cypher` extension.
+    #[test]
+    fn import_format_neo4j_cypher_routes_to_handler() {
+        let dir = TempDir::new().unwrap();
+        let dump = write_dump(&dir, "graph.txt");
+        super::handle_import(vec![s("--format"), s("neo4j-cypher"), s("--nodes"), dump])
+            .expect("--format neo4j-cypher should import");
+    }
+
+    /// Two dump files is a usage error: one apoc dump holds both nodes and
+    /// relationships. (Fails during argument validation, before opening a db.)
+    #[test]
+    fn import_cypher_rejects_multiple_dump_files() {
+        let dir = TempDir::new().unwrap();
+        let a = write_dump(&dir, "a.cypher");
+        let b = write_dump(&dir, "b.cypher");
+        let err = super::handle_import(vec![s("--nodes"), a, s("--nodes"), b]).unwrap_err();
+        assert!(err.contains("single dump file"), "got: {err}");
     }
 }

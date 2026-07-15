@@ -1,16 +1,25 @@
 # Neo4j Import Guide (Issue #3356)
 
-Migrate a Neo4j graph into AletheiaDB from its **CSV export** — the
-`neo4j-admin database import` / `apoc.export.csv` self-describing typed-header
-convention. The importer reads the header, derives a coercion plan
-automatically (you never hand-write property/type mappings), streams rows
-through the same chunked ACID commit path as the generic bulk importer
-(Issue #3211), and emits a machine-readable **fidelity report** with a
-`zero_loss` boolean.
+Migrate a Neo4j graph into AletheiaDB from **two** text export formats:
 
-> **Scope.** CSV only. A binary Neo4j `.dump` archive and the APOC Cypher-script
-> dump (`apoc.export.cypher.all`) are **not** supported — see
+1. its **CSV export** — the `neo4j-admin database import` / `apoc.export.csv`
+   self-describing typed-header convention, and
+2. its **APOC Cypher-script dump** — the `apoc.export.cypher.all` stream of
+   `CREATE` / `MATCH ... CREATE` statements
+   ([jump to the Cypher-dump section](#apoc-cypher-script-dump-apocexportcypherall)).
+
+Both readers derive their plan automatically (you never hand-write
+property/type mappings), stream through the same chunked ACID commit path as the
+generic bulk importer (Issue #3211), stamp `neo4j-import::<file>` provenance, and
+emit a machine-readable **fidelity report** with a `zero_loss` boolean.
+
+> **Scope.** CSV and the APOC Cypher-script dump. A **binary** Neo4j `.dump`
+> archive is **not** supported — see
 > [Unsupported inputs](#unsupported-inputs-and-follow-ups).
+
+The rest of this section covers the **CSV** path; the
+[APOC Cypher-script dump](#apoc-cypher-script-dump-apocexportcypherall) path is
+documented in full below.
 
 ## Quick start (CLI)
 
@@ -228,13 +237,193 @@ need to know which type transformations were applied.
 - **Binary Neo4j dump (`.dump`).** A proprietary, versioned page-store archive,
   not a documented interchange format. The CLI rejects it with a clear message
   pointing you to CSV export. This is not planned.
-- **APOC Cypher-script dump (`apoc.export.cypher.all`).** A text file of
-  `CREATE (...)` statements. Rejected in v1 with a message pointing you to CSV.
-  A **documented follow-up** would reuse the `cypher` parser to route parsed
-  `CREATE`s through the same prepared-chunk path and report constraint/index/
-  procedure statements as skipped-with-count.
-- **Constraints / indexes / procedures.** Out of scope (report-only in a future
-  Cypher-script path); AletheiaDB does not import Neo4j schema objects.
+- **APOC Cypher-script dump (`apoc.export.cypher.all`).** **Supported** — see
+  [APOC Cypher-script dump](#apoc-cypher-script-dump-apocexportcypherall).
+- **Constraints / indexes / procedures.** AletheiaDB does not import Neo4j schema
+  objects. In the Cypher-dump path they are **report-only**: user-defined
+  constraints/indexes/procedures are enumerated in `unsupported` with counts (and
+  set `zero_loss = false`), never silently dropped.
+
+---
+
+## APOC Cypher-script dump (`apoc.export.cypher.all`)
+
+The `create`-format output of `apoc.export.cypher.all` is a text file of Cypher
+statements framed by `:begin` / `:commit` transaction markers — node `CREATE`s,
+relationship `MATCH ... CREATE`s, and (in the optimized form) `UNWIND` batches.
+A **single** `.cypher` file holds the whole graph (both nodes and
+relationships). AletheiaDB parses it with a self-contained parser (it does
+**not** require the `cypher` query-engine feature) and routes the parsed
+entities through the same bulk-import spine as the CSV path.
+
+### Quick start (CLI)
+
+```bash
+# 1. Export the whole graph from Neo4j (in cypher-shell):
+#    CALL apoc.export.cypher.all('graph.cypher', {format:'plain'});
+export ALETHEIADB_DATA_DIR=./mydata
+
+# 2. Import it (a .cypher file auto-selects this path; --format is optional):
+aletheia import --nodes graph.cypher --report import-report.json
+
+# 3. Query the migrated graph, e.g. count nodes:
+aletheia query "MATCH (n) RETURN count(n)"
+```
+
+The file is passed via `--nodes` (a single dump carries relationships too). The
+CLI accepts `--format neo4j-cypher` explicitly, but any `.cypher` input selects
+this path automatically. Options `--label-strategy`, `--vector-property`,
+`--valid-from-property`, `--strict-types`, and `--on-error` behave exactly as in
+the CSV path.
+
+### Rust API
+
+```rust
+use aletheiadb::AletheiaDB;
+use aletheiadb::api::import::{Neo4jCypherOptions, LabelStrategy};
+
+let db = AletheiaDB::new()?;
+let mut importer = db.import();
+
+let opts = Neo4jCypherOptions::new()
+    .vector_property("embedding")     // numeric list -> Vector (opt-in, never silent)
+    .valid_from_property("since")     // temporal property -> valid_from
+    .label_strategy(LabelStrategy::First);
+
+let report = importer.neo4j_import_cypher("graph.cypher", &opts)?;
+assert!(report.zero_loss);
+println!("{} nodes, {} rels", report.nodes_imported, report.relationships_imported);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`neo4j_import_cypher` imports nodes first (building the business-key map from the
+`UNIQUE IMPORT ID` property), then relationships, so endpoints resolve in one
+pass. It returns the same [`Neo4jFidelityReport`](#fidelity-report) the CSV path
+does.
+
+### Supported constructs
+
+| Construct | Handling |
+|---|---|
+| `:begin` / `:commit` / `:rollback` | No-op transaction delimiters. |
+| `CREATE (:Label {..})` | Node. Multi-label `(:A:B:C {..})` and backtick-quoted `` `Label` `` / `` `prop` `` supported. |
+| `` CREATE (:`UNIQUE IMPORT LABEL` {`UNIQUE IMPORT ID`:N, ..}) `` | apoc's synthetic key scheme: the label is stripped and `UNIQUE IMPORT ID` becomes the business key (not stored). |
+| `MATCH (a {key}), (b {key}) CREATE (a)-[:TYPE {..}]->(b)` | Relationship; endpoints resolved by the matched key property. `<-...-` direction reversed. |
+| `UNWIND [{..},..] AS row CREATE (n:Label) SET n += row.properties` | Node batch (each row's `_id` is the key, `properties` its bag). |
+| `UNWIND [{start,end,properties},..] AS row MATCH .. CREATE ..-[:TYPE]->.. SET r += row.properties` | Relationship batch (`start._id` / `end._id` resolve endpoints). |
+
+### Supported value literals (AC2)
+
+| Literal | Maps to |
+|---|---|
+| `"..."` / `'...'` with `\n \t \r \b \f \\ \' \" \/ \uXXXX` escapes | `String` |
+| integer `42`, `-7` | `Int` (i64; overflow promotes to `Float`) |
+| float `1.5`, `1.5e3` | `Float` (f64) |
+| `true` / `false` | `Bool` |
+| `null` | absent property (not stored) |
+| list `["a","b"]`, `[1,2,3]` | `Array` |
+| numeric list **+ `--vector-property`** | `Vector` (opt-in, **never silent**) |
+| nested map `{..}` | JSON string (`map_to_json` coercion) |
+| `datetime('..')` / `localdatetime('..')` / `date('..')` | `Int` epoch micros (`temporal_to_micros`; trailing `[Zone]` stripped) |
+| `time('..')` / `localtime('..')` | `String` (`time_to_string`) |
+
+### Out of scope — reported, never silently dropped (AC8)
+
+| Construct / value | Report entry |
+|---|---|
+| user `CREATE CONSTRAINT` | `unsupported`: `CREATE CONSTRAINT` |
+| user `CREATE INDEX` | `unsupported`: `CREATE INDEX` |
+| `DROP ...` (non-scaffolding) | `unsupported`: `DROP` |
+| `CALL ...` (non-`awaitIndexes`) | `unsupported`: `CALL` |
+| `MERGE ...` | `unsupported`: `MERGE` |
+| inline `CREATE (a)-[:R]->(b)` (no `MATCH`) | `unsupported`: `CREATE (inline relationship)` |
+| `point(..)`, `duration(..)`, byte/binary or unknown constructors | property dropped, `unsupported`: the constructor name |
+
+Every entry carries a **count**. With `--strict-types`, an unsupported *value*
+(`point(..)`, `duration(..)`, an unknown constructor) is a **hard error** instead
+of a reported-and-counted drop. Unsupported *constructs* (constraints/indexes/
+procedures) stay report-only regardless of `--strict-types`.
+
+> **Byte arrays.** Unlike the CSV path — which reads a `:byte[]` type annotation
+> from the header and reports it as unsupported — a Cypher dump carries **no
+> per-value type tags**. A byte array serialized as a bare integer list is
+> therefore indistinguishable from a `long[]` and imports as an **integer
+> array** (its data is preserved, `zero_loss` stays `true`). Only a byte array
+> that apoc wraps in a **constructor** (an unknown function call) hits the
+> unsupported-value path above and is reported with a count.
+
+> **apoc's own scaffolding is losslessly ignored.** A real
+> `apoc.export.cypher.all` dump always contains the `UNIQUE IMPORT` constraint it
+> creates and drops, the `MATCH (n:`UNIQUE IMPORT LABEL`) ... REMOVE ...` cleanup,
+> and a `CALL db.awaitIndexes(..)`. These manage import-only artifacts this
+> importer already strips, so they are ignored **without** affecting `zero_loss`.
+> Only **user-defined** schema objects flip `zero_loss` to `false`.
+
+### Multi-label rule, vectors, and valid time
+
+- **Multi-label.** Identical to the CSV path: `--label-strategy first` (default)
+  keeps the **first** real label (apoc's synthetic `UNIQUE IMPORT LABEL` is
+  always stripped first) and preserves the full set as a `_labels` array;
+  `concat` joins with `_`; `property` always stores `_labels`. A **label-less**
+  Neo4j node (only the synthetic label) is assigned the fallback label `Node`
+  (`Neo4jCypherOptions::default_label`), recorded as a `default_label` coercion.
+- **Vectors.** A numeric list becomes a dense `PropertyValue::Vector` **only**
+  when its property name is passed via `--vector-property`
+  (`Neo4jCypherOptions::vector_property`); otherwise it stays an `Array`.
+- **Valid time.** By default each fact's `valid_from` is the import time.
+  `--valid-from-property <name>` designates a temporal property (an integer, a
+  string, or a `datetime(..)`/`date(..)` constructor) as `valid_from`; that
+  property is consumed as valid time and **not** stored.
+- **Provenance.** Every imported node/edge carries
+  `provenance.source = "neo4j-import::<file>"`.
+
+### Failure modes and error locations (AC3)
+
+- A **truncated** dump (a statement with no terminating `;`) is a hard error in
+  either mode.
+- `--on-error abort` (default): the first malformed statement, `--strict-types`
+  unsupported value, or unresolved endpoint returns an error naming the source
+  **file** and the 1-based **line** the statement began on.
+  - A **parse-phase** failure (a malformed statement or a `--strict-types`
+    value) is raised while the dump is still being parsed, *before* any commit
+    — so it leaves nothing committed.
+  - An **unresolved-endpoint** failure, however, is detected during the
+    edge-commit phase, which runs *after* nodes are committed (the import is
+    chunked, not one global transaction: nodes commit first to build the
+    business-key map, then edges). So an abort there can leave the successfully
+    imported nodes — and any earlier edge chunks — already committed. The
+    `--report` output still reflects exactly what was written. Use
+    `--on-error skip` if you want the import to finish and collect the
+    unresolved endpoints instead of aborting mid-way.
+- `--on-error skip`: malformed statements land in `skipped` (each with its line
+  and file), unresolved relationship endpoints land in `unresolved_endpoints`,
+  and the import continues.
+
+### Fidelity report shape
+
+The Cypher-dump path returns the same serde-serializable
+[`Neo4jFidelityReport`](#fidelity-report) as the CSV path: `nodes_imported`,
+`relationships_imported`, `properties_imported`, `label_mapping` /`type_mapping`
+tables, `coerced` (e.g. `temporal_to_micros`, `multi_label_flattened`,
+`map_to_json`, `default_label`), `unsupported` (each out-of-scope construct/value
+with a count — here `column` names the construct and `neo4j_type` its kind),
+`skipped`, `unresolved_endpoints`, and `zero_loss`.
+
+### v1 limitations
+
+- **One dump file per CLI invocation.** A single `apoc.export.cypher.all` output
+  already holds the whole graph; the CLI rejects multiple `.cypher` files in one
+  call (the Rust API can be called once per file against the same `Importer` to
+  span files).
+- **UNWIND shape.** The common apoc-optimized shape is supported: node rows with
+  `_id` + `properties`, relationship rows with `start._id` / `end._id` +
+  `properties`. Other custom `UNWIND` shapes are out of scope.
+- **Endpoint key.** Relationships resolve endpoints by the `UNIQUE IMPORT ID`
+  property (configurable via `Neo4jCypherOptions::key_property`), or by the sole
+  property in a match pattern when it has exactly one. The key property is
+  consumed as the identifier and not stored.
+- **Nested maps** are stored as a JSON string (Neo4j properties are primitives or
+  primitive arrays, so this is an edge case in practice).
 
 ## Known limitations
 
