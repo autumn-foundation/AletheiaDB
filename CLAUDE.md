@@ -870,6 +870,28 @@ already-recorded), all non-retriable. Durable persistence of lineage is a
 #3413 follow-up; the #3427 attribution caveat applies. See
 [docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
 
+### Changefeed Subscriptions (Issue #3375)
+
+Push counterpart to the #3216 `list_changes` pull feed: `AletheiaDB::subscribe_changes(filter)`
+returns a `Subscription` whose bounded buffer fills with matching `ChangeRecord`s as
+transactions commit — no polling. `poll()` drains non-blocking; `recv_timeout(dur)` is a
+sync `Mutex`+`Condvar` long-poll (no async dep — the primitive an SSE / MCP `await_changes`
+layer will wrap; **that HTTP/MCP surface is a coordinated Lane 1 follow-up**). A `ChangeFilter`
+selects by node label / edge type / change type (unset dimension = match-all on that axis;
+setting only labels excludes edges and vice-versa; `change_types` is a kind-independent AND).
+The broadcast runs in the commit path **after** the write is durable + applied + visible and
+**outside every write-path lock** (the broadcaster's locks are leaves; records are built via a
+targeted O(txn-size) `historical.read()` of just that transaction's versions, so they are
+byte-identical to `list_changes`). Delivery is **best-effort at-least-once**; the durable
+ground truth is `list_changes`. A lagged (bounded-buffer overflow → disconnected, never
+back-pressures the writer), reconnecting, or crash-surviving consumer resumes with **zero
+loss** by pulling `list_changes` from its last `resume_token` (the encoded `ChangeCursor` of
+the last event drained); duplicates on resume dedup by that stable cursor
+`(tx_time, kind, entity_id, version_id)`. Caps are configurable via `set_changefeed_config`
+(defaults: 128 subscriptions, 1024-event buffer); exceeding the subscription cap fails
+`subscribe_changes` with `CapacityExceeded`. Dropping a `Subscription` deregisters it. v1 is
+in-memory (no WAL change). See [docs/guides/reacting-to-change.md](docs/guides/reacting-to-change.md).
+
 ### Feature Flags: Stable vs Experimental
 
 Semantic features are split between a stable cohort and four experimental

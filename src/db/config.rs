@@ -503,6 +503,9 @@ impl AletheiaDB {
                 encryption_config: encryption_config_stored,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
+                changefeed: Arc::new(
+                    crate::core::changefeed_subscription::ChangefeedBroadcaster::new(),
+                ),
                 chain: None,
                 _tempdir: None,
             };
@@ -877,6 +880,9 @@ impl AletheiaDB {
                 encryption_config: None,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
+                changefeed: Arc::new(
+                    crate::core::changefeed_subscription::ChangefeedBroadcaster::new(),
+                ),
                 chain: None,
                 _tempdir: None,
             };

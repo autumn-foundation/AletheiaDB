@@ -107,6 +107,25 @@ impl ChangeRecord {
     pub fn transaction_time(&self) -> Timestamp {
         self.transaction_time_range.start()
     }
+
+    /// The stable total-order [`ChangeCursor`] identifying this record.
+    ///
+    /// This is the dedup / resume key for the push changefeed (Issue #3375): two
+    /// records are the same committed fact iff their cursors are equal, and a
+    /// consumer resumes a pull with `list_changes(cursor = last_delivered.cursor())`.
+    /// Derived from the record's own fields so it always agrees with what the
+    /// #3216 scan would have produced for the same version.
+    #[inline]
+    pub(crate) fn cursor(&self) -> ChangeCursor {
+        let start = self.transaction_time_range.start();
+        ChangeCursor {
+            tx_wallclock: start.wallclock(),
+            tx_logical: start.logical(),
+            kind_ord: self.kind.ord(),
+            entity_id: self.entity_id,
+            version_id: self.version_id,
+        }
+    }
 }
 
 /// Total-order sort key used for deterministic ordering and cursor pagination.

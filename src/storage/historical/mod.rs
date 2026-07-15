@@ -2051,6 +2051,71 @@ impl HistoricalStorage {
         out
     }
 
+    /// Build changefeed [`RawChange`]s for a specific, known set of just-committed version
+    /// ids — the push-changefeed counterpart to the window scan in
+    /// [`collect_changes`](Self::collect_changes) (Issue #3375).
+    ///
+    /// Where `collect_changes` scans *all* hot versions and filters by a transaction-time
+    /// window, this looks up only the `node_version_ids` / `edge_version_ids` produced by a
+    /// single transaction — an O(txn size) targeted read rather than an O(total) scan, so
+    /// the post-commit broadcast never pays for a full history rescan. Each record is built
+    /// through the **same** [`build_raw_change`] helper `collect_changes` uses (with the
+    /// version's own transaction-time interval as the window, which always contains its own
+    /// start), so the produced records are byte-identical to what `list_changes` would
+    /// return for that version — including tombstone empty valid ranges and Created vs
+    /// Modified classification. Unknown ids (e.g. a version already migrated to the cold
+    /// tier) are silently skipped.
+    ///
+    /// The result is unordered; the caller sorts by [`ChangeCursor`](crate::core::changefeed)
+    /// to obtain the #3216 deterministic total order.
+    pub(crate) fn collect_committed_changes(
+        &self,
+        node_version_ids: &[VersionId],
+        edge_version_ids: &[VersionId],
+    ) -> Vec<RawChange> {
+        let mut out = Vec::with_capacity(node_version_ids.len() + edge_version_ids.len());
+
+        for vid in node_version_ids {
+            if let Some(v) = self.node_versions.get(vid) {
+                let tx_window = v.temporal.transaction_time();
+                if let Some(rec) = build_raw_change(
+                    v.id.as_u64(),
+                    v.node_id.as_u64(),
+                    EntityKind::Node,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    &tx_window,
+                    None,
+                    None,
+                ) {
+                    out.push(rec);
+                }
+            }
+        }
+
+        for vid in edge_version_ids {
+            if let Some(v) = self.edge_versions.get(vid) {
+                let tx_window = v.temporal.transaction_time();
+                if let Some(rec) = build_raw_change(
+                    v.id.as_u64(),
+                    v.edge_id.as_u64(),
+                    EntityKind::Edge,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    &tx_window,
+                    None,
+                    None,
+                ) {
+                    out.push(rec);
+                }
+            }
+        }
+
+        out
+    }
+
     /// Clone the configured tiered-storage handle, if any.
     ///
     /// Lets a caller release the historical lock and then scan the cold tier (disk I/O) without
