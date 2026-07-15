@@ -420,7 +420,10 @@ async fn database_stats_is_metrics_class_gated_not_read() {
     // Read.
     let (s, body) = get(&client, "/schema", Some(METRICS_TOKEN)).await;
     assert_eq!(s, 403, "metrics token denied on a ReadClass tool: {body}");
-    assert_eq!(body["code"], "PERMISSION_DENIED", "denial code: {body}");
+    assert_eq!(
+        body["error"]["code"], "PERMISSION_DENIED",
+        "denial code: {body}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════

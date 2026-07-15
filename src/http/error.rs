@@ -4,6 +4,7 @@
 //! `Result<Json<ApiResponse>, AletheiaHttpError>` and get the right status
 //! code + JSON error body for free.
 
+use crate::auth::{AccessClass, Role};
 use crate::http::config::{LimitDimension, LimitOverrideError};
 use axum::Json;
 use axum::http::StatusCode;
@@ -110,8 +111,19 @@ pub enum AletheiaHttpError {
     Unauthorized,
 
     /// The authenticated principal's role does not allow this operation.
-    #[error("{0}")]
-    PermissionDenied(String),
+    ///
+    /// Carries the operation's required [`AccessClass`] and the principal's
+    /// [`Role`] so the error body can surface a structured
+    /// `details: {required_class, principal_role}` block (matching the MCP
+    /// surface, Issue #3234). The `Display` free text is byte-identical to the
+    /// legacy `"role '{role}' does not permit {class} access"` message.
+    #[error("role '{principal_role}' does not permit {required_class} access")]
+    PermissionDenied {
+        /// The access class the operation required.
+        required_class: AccessClass,
+        /// The authenticated principal's role.
+        principal_role: Role,
+    },
 
     /// A per-query resource limit (timeout / rows / bytes) was exceeded
     /// (Issue #3368). Renders `429` (timeout) or `413` (rows/bytes).
@@ -147,7 +159,7 @@ impl AletheiaHttpError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Internal(_) | Self::StateMissing => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::PermissionDenied(_) => StatusCode::FORBIDDEN,
+            Self::PermissionDenied { .. } => StatusCode::FORBIDDEN,
             Self::InvalidLimitOverride(_) => StatusCode::UNPROCESSABLE_ENTITY,
             // Transient overload → 503 Service Unavailable (retriable).
             Self::InFlightCapacityExceeded { .. } => StatusCode::SERVICE_UNAVAILABLE,
@@ -162,38 +174,38 @@ impl AletheiaHttpError {
         }
     }
 
-    /// Stable machine-readable code (additive: present for auth errors since
-    /// Issue #3350 and for resource-limit errors since Issue #3368).
-    fn code(&self) -> Option<&'static str> {
+    /// Whether a caller may usefully retry. `true` only for transient failure
+    /// classes: a read-class wall-clock timeout (carried on the
+    /// [`ResourceLimitExceeded`] itself) and a full in-flight worker pool
+    /// (transient overload). A write-class timeout is not retriable (a
+    /// committed write must not be duplicated), and every caller-fault class
+    /// (bad-request, not-found, auth, override, row/byte caps) is `false`.
+    ///
+    /// Mirrors the MCP surface's explicit per-error classification (Issue
+    /// #3234): the nested error envelope always carries a concrete `retriable`
+    /// boolean.
+    fn retriable(&self) -> bool {
         match self {
-            Self::Unauthorized => Some("UNAUTHENTICATED"),
-            Self::PermissionDenied(_) => Some("PERMISSION_DENIED"),
-            Self::ResourceLimitExceeded(_) => Some("RESOURCE_EXHAUSTED"),
-            Self::InvalidLimitOverride(_) => Some("INVALID_ARGUMENT"),
-            Self::InFlightCapacityExceeded { .. } => Some("UNAVAILABLE"),
-            _ => None,
-        }
-    }
-
-    /// Whether a caller may usefully retry (additive; Issue #3368). The flag is
-    /// carried on the [`ResourceLimitExceeded`] itself: a read-class wall-clock
-    /// timeout is transient (`true`), a write-class timeout is not (a committed
-    /// write must not be duplicated), and row/byte caps are never retriable.
-    /// `None` where the flag does not apply (existing variants keep their
-    /// pre-#3368 body shape).
-    fn retriable(&self) -> Option<bool> {
-        match self {
-            Self::ResourceLimitExceeded(e) => Some(e.retriable),
-            Self::InvalidLimitOverride(_) => Some(false),
+            Self::ResourceLimitExceeded(e) => e.retriable,
             // Transient overload: backing off and retrying can succeed.
-            Self::InFlightCapacityExceeded { .. } => Some(true),
-            _ => None,
+            Self::InFlightCapacityExceeded { .. } => true,
+            _ => false,
         }
     }
 
-    /// Structured, per-code metadata (additive; Issue #3368).
+    /// Structured, per-code metadata (additive; Issue #3368 and, for
+    /// `PermissionDenied`, Issue #3234). Rendered under `error.details`.
     fn details(&self) -> Option<Value> {
         match self {
+            // A role denial names the required class and the principal's role,
+            // mirroring the MCP-surface 403 details (Issue #3234).
+            Self::PermissionDenied {
+                required_class,
+                principal_role,
+            } => Some(json!({
+                "required_class": required_class.to_string(),
+                "principal_role": principal_role.to_string(),
+            })),
             Self::ResourceLimitExceeded(e) => {
                 let mut d = json!({
                     "dimension": e.dimension.as_str(),
@@ -225,51 +237,46 @@ impl AletheiaHttpError {
     }
 
     /// Stable machine-readable code for *every* variant, using the Issue #3234
-    /// vocabulary. Used to stamp `aletheiadb.error.code` onto the trace span
-    /// (Issue #3376); the response body still only carries [`code`](Self::code)
-    /// for auth errors so the existing wire shape is unchanged.
+    /// vocabulary. Rendered as `error.code` in the response body (unified with
+    /// the MCP surface) and stamped as `aletheiadb.error.code` onto the trace
+    /// span (Issue #3376).
     #[must_use]
-    // Only consumed by the tracing span-stamping path, which is compiled out
-    // when `observability` is disabled; keep it available without warning.
-    #[cfg_attr(not(feature = "observability"), allow(dead_code))]
     pub(crate) fn code_str(&self) -> &'static str {
         match self {
             Self::BadRequest(_) | Self::QueryParse(_) => "INVALID_ARGUMENT",
             Self::NotFound(_) => "NOT_FOUND",
             Self::Internal(_) | Self::StateMissing => "INTERNAL",
             Self::Unauthorized => "UNAUTHENTICATED",
-            Self::PermissionDenied(_) => "PERMISSION_DENIED",
+            Self::PermissionDenied { .. } => "PERMISSION_DENIED",
             Self::ResourceLimitExceeded(_) => "RESOURCE_EXHAUSTED",
             Self::InvalidLimitOverride(_) => "INVALID_ARGUMENT",
             Self::InFlightCapacityExceeded { .. } => "UNAVAILABLE",
         }
     }
 
-    /// Convert to a response, additively including the active trace id
-    /// (Issue #3376) as a `trace_id` body field and `x-trace-id` header when
+    /// Convert to a response with the unified nested error envelope (Issue
+    /// #3234): `{"error": {"code", "message", "retriable", "details"?}}`,
+    /// byte-shape-identical to the MCP surface. The active trace id (Issue
+    /// #3376) is carried additively as a **top-level** `trace_id` sibling of
+    /// `error` (the SDK reads it top-level) and as an `x-trace-id` header when
     /// one is available, so a failing call can be looked up in the trace
     /// backend directly.
     #[must_use]
     pub(crate) fn into_response_with_trace(self, trace_id: Option<String>) -> Response {
         let status = self.status();
-        let mut body = json!({
-            "success": false,
-            "error": self.to_string(),
-        });
-        // Additive fields — only inserted when the variant defines them, so
-        // existing error bodies (bad-request, not-found, internal) are byte
-        // identical to their pre-#3368 shape.
-        if let Some(code) = self.code() {
-            body["code"] = json!(code);
-        }
-        if let Some(retriable) = self.retriable() {
-            body["retriable"] = json!(retriable);
-        }
+        // Build the nested `error` object, mirroring `McpError::to_json`'s
+        // field order: code, message, retriable, then optional details.
+        let mut error_obj = serde_json::Map::new();
+        error_obj.insert("code".to_string(), json!(self.code_str()));
+        error_obj.insert("message".to_string(), json!(self.to_string()));
+        error_obj.insert("retriable".to_string(), json!(self.retriable()));
         if let Some(details) = self.details() {
-            body["details"] = details;
+            error_obj.insert("details".to_string(), details);
         }
-        // Additively carry the active trace id (Issue #3376) as a `trace_id`
-        // body field so a failing call can be correlated in the trace backend.
+        let mut body = json!({ "error": Value::Object(error_obj) });
+        // Additively carry the active trace id (Issue #3376) as a *top-level*
+        // `trace_id` field (sibling of `error`, not nested) so a failing call
+        // can be correlated in the trace backend and the SDK can read it.
         if let (Some(map), Some(tid)) = (body.as_object_mut(), trace_id.as_deref()) {
             map.insert("trace_id".to_string(), json!(tid));
         }
@@ -338,12 +345,20 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(body["success"], false);
-        assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-        assert_eq!(body["retriable"], true);
-        assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
-        assert_eq!(body["details"]["limit_ms"], 100);
-        assert!(body["error"].as_str().unwrap().contains("timeout"));
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["retriable"], true);
+        assert_eq!(body["error"]["details"]["dimension"], "wall_clock_timeout");
+        assert_eq!(body["error"]["details"]["limit_ms"], 100);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("timeout")
+        );
     }
 
     #[tokio::test]
@@ -358,11 +373,11 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-        assert_eq!(body["retriable"], false);
-        assert_eq!(body["details"]["dimension"], "result_bytes");
-        assert_eq!(body["details"]["limit"], 1024);
-        assert_eq!(body["details"]["consumed"], 4096);
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["dimension"], "result_bytes");
+        assert_eq!(body["error"]["details"]["limit"], 1024);
+        assert_eq!(body["error"]["details"]["consumed"], 4096);
     }
 
     #[tokio::test]
@@ -377,8 +392,8 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(body["details"]["dimension"], "result_rows");
-        assert_eq!(body["details"]["consumed"], 25);
+        assert_eq!(body["error"]["details"]["dimension"], "result_rows");
+        assert_eq!(body["error"]["details"]["consumed"], 25);
     }
 
     /// A write-class wall-clock timeout renders `429` but `retriable: false`
@@ -396,12 +411,12 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
         assert_eq!(
-            body["retriable"], false,
+            body["error"]["retriable"], false,
             "a write timeout must not invite a duplicate retry"
         );
-        assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
+        assert_eq!(body["error"]["details"]["dimension"], "wall_clock_timeout");
     }
 
     #[tokio::test]
@@ -415,11 +430,11 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["code"], "INVALID_ARGUMENT");
-        assert_eq!(body["retriable"], false);
-        assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
-        assert_eq!(body["details"]["requested"], 999);
-        assert_eq!(body["details"]["ceiling"], 100);
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["dimension"], "wall_clock_timeout");
+        assert_eq!(body["error"]["details"]["requested"], 999);
+        assert_eq!(body["error"]["details"]["ceiling"], 100);
     }
 
     /// The in-flight-capacity guard renders `503 UNAVAILABLE`, `retriable:
@@ -439,33 +454,49 @@ mod tests {
         );
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["success"], false);
-        assert_eq!(body["code"], "UNAVAILABLE");
-        assert_eq!(body["retriable"], true);
-        assert_eq!(body["details"]["reason"], "in_flight_query_cap");
-        assert_eq!(body["details"]["max_in_flight_queries"], 64);
-        assert!(body["error"].as_str().unwrap().contains("cap of 64"));
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "UNAVAILABLE");
+        assert_eq!(body["error"]["retriable"], true);
+        assert_eq!(body["error"]["details"]["reason"], "in_flight_query_cap");
+        assert_eq!(body["error"]["details"]["max_in_flight_queries"], 64);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cap of 64")
+        );
     }
 
     #[tokio::test]
-    async fn existing_variants_keep_minimal_body_shape() {
-        // No `code`/`retriable`/`details` for a plain bad-request (unchanged).
+    async fn bad_request_renders_nested_invalid_argument() {
+        // The nested envelope now always carries code/message/retriable; a
+        // plain bad-request has no `details` and is never retriable.
         let (status, body) = body_json(AletheiaHttpError::BadRequest("nope".into())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["success"], false);
-        assert_eq!(body["error"], "nope");
-        assert!(body.get("code").is_none());
-        assert!(body.get("retriable").is_none());
-        assert!(body.get("details").is_none());
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["error"]["message"], "nope");
+        assert_eq!(body["error"]["retriable"], false);
+        assert!(body["error"].get("details").is_none());
     }
 
     #[tokio::test]
-    async fn auth_error_body_unchanged_still_has_code_only() {
+    async fn auth_error_renders_nested_unauthenticated() {
         let (status, body) = body_json(AletheiaHttpError::Unauthorized).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(body["code"], "UNAUTHENTICATED");
-        // Auth variants deliberately keep their pre-#3368 shape (no retriable).
-        assert!(body.get("retriable").is_none());
-        assert!(body.get("details").is_none());
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
+        assert_eq!(body["error"]["message"], "authentication required");
+        assert_eq!(body["error"]["retriable"], false);
+        assert!(body["error"].get("details").is_none());
     }
 }

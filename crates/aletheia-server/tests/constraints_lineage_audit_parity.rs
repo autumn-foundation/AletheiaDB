@@ -411,7 +411,10 @@ async fn write_auth_gating_reader_denied_on_enables() {
     )
     .await;
     assert_eq!(s, 403, "reader denied enable_vector_index: {body}");
-    assert_eq!(body["code"], "PERMISSION_DENIED", "denial code: {body}");
+    assert_eq!(
+        body["error"]["code"], "PERMISSION_DENIED",
+        "denial code: {body}"
+    );
 
     let (s, body) = post(
         &client,
@@ -421,7 +424,10 @@ async fn write_auth_gating_reader_denied_on_enables() {
     )
     .await;
     assert_eq!(s, 403, "reader denied enable_unique_constraint: {body}");
-    assert_eq!(body["code"], "PERMISSION_DENIED", "denial code: {body}");
+    assert_eq!(
+        body["error"]["code"], "PERMISSION_DENIED",
+        "denial code: {body}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════

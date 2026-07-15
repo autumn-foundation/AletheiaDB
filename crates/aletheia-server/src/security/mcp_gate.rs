@@ -35,7 +35,8 @@
 //!    and [`rbac::authorize_tool`] consulted. A role that does not permit the
 //!    tool's class is refused **before dispatch** with a `403 PERMISSION_DENIED`
 //!    envelope carrying `details: {required_class, principal_role}` — the same
-//!    shape the legacy MCP `permission_denied_error` emits. (The replayed
+//!    nested `{error:{code, message, retriable, details}}` shape the HTTP surface
+//!    and the MCP tool dispatch emit (Issue #3234). (The replayed
 //!    dispatch handler's own `Authorized<C>` gate remains as defense-in-depth;
 //!    see the crate/README notes on the tools/call replay boundary.)
 //! 4. **Fails closed** on frames it cannot RBAC-precheck (#6): an oversize
@@ -53,17 +54,18 @@
 //!    while guaranteeing the losing/unverified header never survives. Only the
 //!    credential the layer actually verified is normalized.
 //!
-//! # Two-shape 403 contract (ruling F4 / coordinator #8a)
+//! # Unified 403 envelope (ruling F4 / Issue #3234)
 //!
-//! The MCP-surface 403 ([`mcp_permission_denied_response`]) **carries**
-//! `details: {required_class, principal_role}`; the HTTP-surface 403
-//! ([`crate::security::authorize_class`] →
-//! [`AletheiaHttpError::PermissionDenied`]) stays **message-only**, matching the
-//! legacy `src/http/auth.rs`. The two shapes are intentional and asymmetric — do
-//! not add `details` to the HTTP surface. Because the gate now fails closed on
-//! every tool-executing frame it cannot identify (point 4), no MCP tools/call
-//! reaches the dispatch handler's message-only 403 path without first passing
-//! the gate's detail-carrying precheck.
+//! Both the MCP-surface 403 ([`mcp_permission_denied_response`]) and the
+//! HTTP-surface 403 ([`crate::security::authorize_class`] →
+//! [`AletheiaHttpError::PermissionDenied`]) emit the **same** nested
+//! `{error:{code, message, retriable, details}}` envelope, including
+//! `details: {required_class, principal_role}`. The legacy asymmetry (a
+//! message-only HTTP 403) was retired in the breaking HTTP error-envelope
+//! unification, so the two surfaces are now byte-shape-identical. Because the
+//! gate fails closed on every tool-executing frame it cannot identify (point 4),
+//! no MCP tools/call reaches the dispatch handler's 403 path without first
+//! passing the gate's detail-carrying precheck.
 //!
 //! In [`AuthMode::Anonymous`] the layer inserts [`Principal::anonymous`] and
 //! passes through unconditionally (catalog reachable — matching the legacy
@@ -105,28 +107,50 @@ pub fn mcp_unauthenticated_response() -> Response<Body> {
     AletheiaHttpError::Unauthorized.into_response()
 }
 
+/// Build the unified nested error envelope `{error:{code, message, retriable,
+/// details}}` (Issue #3234) shared with the HTTP surface
+/// ([`AletheiaHttpError::into_response`]), so the `/mcp` gate's hand-built
+/// refusals stay byte-shape-identical to the rest of the surface.
+fn mcp_error_envelope(
+    status: StatusCode,
+    code: &str,
+    message: String,
+    retriable: bool,
+    details: serde_json::Value,
+) -> Response<Body> {
+    let body = json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "retriable": retriable,
+            "details": details,
+        }
+    });
+    (status, Json(body)).into_response()
+}
+
 /// The `403 PERMISSION_DENIED` envelope for a `/mcp` per-tool RBAC refusal,
 /// carrying `details: {required_class, principal_role}` (ruling F4). The
-/// `error` message and `details` shape mirror the legacy MCP
-/// `permission_denied_error` exactly, so an LLM/caller branches on `code` +
-/// `details` without substring matching; `retriable` is `false` (a caller-fault
-/// authorization denial is never retriable).
+/// `error` message and `details` shape mirror the MCP tool dispatch and the
+/// HTTP surface exactly (the unified nested envelope, Issue #3234), so an
+/// LLM/caller branches on `code` + `details` without substring matching;
+/// `retriable` is `false` (a caller-fault authorization denial is never
+/// retriable).
 #[must_use]
 pub fn mcp_permission_denied_response(denied: Denied) -> Response<Body> {
-    let body = json!({
-        "success": false,
-        "error": format!(
+    mcp_error_envelope(
+        StatusCode::FORBIDDEN,
+        "PERMISSION_DENIED",
+        format!(
             "role '{}' does not permit {} access",
             denied.principal_role, denied.required_class
         ),
-        "code": "PERMISSION_DENIED",
-        "retriable": false,
-        "details": {
+        false,
+        json!({
             "required_class": denied.required_class.to_string(),
             "principal_role": denied.principal_role.to_string(),
-        },
-    });
-    (StatusCode::FORBIDDEN, Json(body)).into_response()
+        }),
+    )
 }
 
 /// The `413 RESOURCE_EXHAUSTED` envelope for an over-limit buffered `/mcp` body
@@ -136,19 +160,16 @@ pub fn mcp_permission_denied_response(denied: Denied) -> Response<Body> {
 /// fault), mirroring the shared `ResultBytes` 413.
 #[must_use]
 pub fn mcp_payload_too_large_response() -> Response<Body> {
-    let body = json!({
-        "success": false,
-        "error": format!(
-            "request body exceeds the {MAX_MCP_REQUEST_BYTES}-byte /mcp limit"
-        ),
-        "code": "RESOURCE_EXHAUSTED",
-        "retriable": false,
-        "details": {
+    mcp_error_envelope(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "RESOURCE_EXHAUSTED",
+        format!("request body exceeds the {MAX_MCP_REQUEST_BYTES}-byte /mcp limit"),
+        false,
+        json!({
             "reason": "request_body_too_large",
             "limit": MAX_MCP_REQUEST_BYTES,
-        },
-    });
-    (StatusCode::PAYLOAD_TOO_LARGE, Json(body)).into_response()
+        }),
+    )
 }
 
 /// The `400 INVALID_ARGUMENT` envelope for a tool-executing frame the gate
@@ -158,14 +179,13 @@ pub fn mcp_payload_too_large_response() -> Response<Body> {
 /// refuses it fail-closed. Non-retriable.
 #[must_use]
 pub fn mcp_unroutable_tool_call_response(reason: &'static str) -> Response<Body> {
-    let body = json!({
-        "success": false,
-        "error": format!("unroutable tools/call frame refused: {reason}"),
-        "code": "INVALID_ARGUMENT",
-        "retriable": false,
-        "details": { "reason": reason },
-    });
-    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+    mcp_error_envelope(
+        StatusCode::BAD_REQUEST,
+        "INVALID_ARGUMENT",
+        format!("unroutable tools/call frame refused: {reason}"),
+        false,
+        json!({ "reason": reason }),
+    )
 }
 
 /// The classification of a buffered `/mcp` JSON-RPC frame for RBAC prechecking.

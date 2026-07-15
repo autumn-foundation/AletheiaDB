@@ -209,15 +209,15 @@ impl RateLimitSettings {
 /// The per-request RBAC decision. On refusal returns
 /// [`AletheiaHttpError::PermissionDenied`] (HTTP 403 / `PERMISSION_DENIED`,
 /// non-retriable) with the **byte-identical** legacy message
-/// `"role '{role}' does not permit {class} access"`, so 403 bodies stay
+/// `"role '{role}' does not permit {class} access"`, so 403 messages stay
 /// identical to the existing `/query` surface.
 ///
-/// **Two-shape 403 contract (coordinator #8a / ruling F4):** this HTTP-surface
-/// 403 is deliberately **message-only** — it carries no `details` block, exactly
-/// mirroring the legacy `src/http/auth.rs`. Only the MCP-surface 403
-/// ([`crate::security::mcp_permission_denied_response`]) carries
-/// `details: {required_class, principal_role}`. The asymmetry is intentional;
-/// do not add `details` here.
+/// **Unified 403 envelope (Issue #3234):** the HTTP-surface 403 now carries the
+/// same nested `{error: {code, message, retriable, details}}` envelope as the
+/// MCP surface, including `details: {required_class, principal_role}`. The
+/// legacy message-only body has been retired in the breaking HTTP error-envelope
+/// unification; the `required_class` / `principal_role` are threaded through the
+/// [`AletheiaHttpError::PermissionDenied`] variant.
 ///
 /// # Errors
 ///
@@ -227,10 +227,10 @@ pub fn authorize_class(principal: &Principal, class: AccessClass) -> Result<(), 
     if principal.role.allows(class) {
         Ok(())
     } else {
-        Err(AletheiaHttpError::PermissionDenied(format!(
-            "role '{}' does not permit {} access",
-            principal.role, class
-        )))
+        Err(AletheiaHttpError::PermissionDenied {
+            required_class: class,
+            principal_role: principal.role,
+        })
     }
 }
 

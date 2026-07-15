@@ -70,24 +70,28 @@ type SpikeGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
 /// [`GovernorLayer::error_handler`] — the clean tower_governor 0.8 hook (a
 /// `Fn(GovernorError) -> Response<Body>`), so no extra tower layer is needed.
 ///
-/// Only the `TooManyRequests` (429) case is rewritten, into the legacy
-/// `ResourceLimitExceeded` shape — `code: "RESOURCE_EXHAUSTED"`, `retriable:
-/// true` (rate-limit throttling is transient) — preserving governor's
+/// Only the `TooManyRequests` (429) case is rewritten, into the unified nested
+/// `{error:{code, message, retriable, details}}` envelope (Issue #3234) —
+/// `code: "RESOURCE_EXHAUSTED"`, `retriable: true` (rate-limit throttling is
+/// transient) — preserving governor's
 /// `retry-after` header so a client still learns when to retry. Non-throttle
 /// governor errors (`UnableToExtractKey` → 500, custom `Other`) fall through to
 /// governor's default rendering unchanged.
 fn wrap_governor_error(error: GovernorError) -> Response<Body> {
     match error {
         GovernorError::TooManyRequests { wait_time, headers } => {
+            // Unified nested error envelope (Issue #3234), byte-shape-identical to
+            // the HTTP surface's `AletheiaHttpError::into_response`.
             let body = json!({
-                "success": false,
-                "error": format!("rate limit exceeded; retry after {wait_time}s"),
-                "code": "RESOURCE_EXHAUSTED",
-                "retriable": true,
-                "details": {
-                    "reason": "rate_limit",
-                    "retry_after_secs": wait_time,
-                },
+                "error": {
+                    "code": "RESOURCE_EXHAUSTED",
+                    "message": format!("rate limit exceeded; retry after {wait_time}s"),
+                    "retriable": true,
+                    "details": {
+                        "reason": "rate_limit",
+                        "retry_after_secs": wait_time,
+                    },
+                }
             });
             let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
             // Preserve governor's advisory headers (retry-after / x-ratelimit-*)

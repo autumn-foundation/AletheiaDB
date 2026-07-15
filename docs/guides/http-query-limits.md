@@ -160,13 +160,18 @@ Carries a `Retry-After: 1` response header. `retriable` is `true` for a read
 timeout and `false` for a write timeout (a committed write must not be
 duplicated — see [Write operations are exempt](#write-operations-are-exempt-from-the-result-caps)).
 
+Since the #3234 HTTP error-envelope unification the body is the nested
+`{"error":{…}}` shape (byte-shape-identical to MCP); the legacy flat
+`{"success":false,…}` body has been removed.
+
 ```json
 {
-  "success": false,
-  "error": "query exceeded the wall-clock timeout of 30000 ms",
-  "code": "RESOURCE_EXHAUSTED",
-  "retriable": true,
-  "details": { "dimension": "wall_clock_timeout", "limit_ms": 30000 }
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "query exceeded the wall-clock timeout of 30000 ms",
+    "retriable": true,
+    "details": { "dimension": "wall_clock_timeout", "limit_ms": 30000 }
+  }
 }
 ```
 
@@ -174,11 +179,12 @@ duplicated — see [Write operations are exempt](#write-operations-are-exempt-fr
 
 ```json
 {
-  "success": false,
-  "error": "query response exceeded the byte limit of 1048576 (serialized 2400512)",
-  "code": "RESOURCE_EXHAUSTED",
-  "retriable": false,
-  "details": { "dimension": "result_bytes", "limit": 1048576, "consumed": 2400512 }
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "query response exceeded the byte limit of 1048576 (serialized 2400512)",
+    "retriable": false,
+    "details": { "dimension": "result_bytes", "limit": 1048576, "consumed": 2400512 }
+  }
 }
 ```
 
@@ -203,11 +209,12 @@ pre-#3368 responses.
 
 ```json
 {
-  "success": false,
-  "error": "limit override for 'result_rows' (1000) exceeds the maximum allowed (100)",
-  "code": "INVALID_ARGUMENT",
-  "retriable": false,
-  "details": { "dimension": "result_rows", "requested": 1000, "ceiling": 100 }
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "message": "limit override for 'result_rows' (1000) exceeds the maximum allowed (100)",
+    "retriable": false,
+    "details": { "dimension": "result_rows", "requested": 1000, "ceiling": 100 }
+  }
 }
 ```
 

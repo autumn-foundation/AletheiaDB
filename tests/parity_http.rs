@@ -192,8 +192,11 @@ async fn status_requires_credential_in_required_mode() {
     assert_eq!(resp.status.as_u16(), 401);
     assert_eq!(resp.header("www-authenticate"), Some("Bearer"));
     let body: Value = serde_json::from_slice(&resp.body).expect("json");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "UNAUTHENTICATED");
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
 }
 
 // ===========================================================================
@@ -218,9 +221,10 @@ async fn query_success_envelope_shape() {
     );
 }
 
-/// PARITY: a not-found lookup is a 404 whose body keeps the MINIMAL error
-/// envelope — `{success:false, error:<string>}` with NO additive
-/// `code`/`retriable`/`details` fields (those are auth/limit-only).
+/// PARITY: a not-found lookup is a 404 whose body carries the unified nested
+/// error envelope — `{error:{code, message, retriable, details?}}` (Issue
+/// #3234), byte-shape-identical to the MCP surface. `code = NOT_FOUND`,
+/// `retriable = false`, no `details`, and the flat `success` field is gone.
 #[tokio::test]
 async fn query_not_found_minimal_error_envelope() {
     let (client, _db) = anon_client();
@@ -230,25 +234,26 @@ async fn query_not_found_minimal_error_envelope() {
     )
     .await;
     assert_eq!(status, 404);
-    assert_eq!(body["success"], false);
     assert!(
-        body["error"].as_str().is_some_and(|s| !s.is_empty()),
-        "error must be a non-empty string: {body}"
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
     );
-    assert!(body.get("code").is_none(), "404 carries no `code`: {body}");
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
     assert!(
-        body.get("retriable").is_none(),
-        "404 carries no `retriable`: {body}"
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "error.message must be a non-empty string: {body}"
     );
+    assert_eq!(body["error"]["retriable"], false);
     assert!(
-        body.get("details").is_none(),
+        body["error"].get("details").is_none(),
         "404 carries no `details`: {body}"
     );
 
-    // Exact top-level key-set pin: the minimal error envelope is EXACTLY
-    // `{success, error}` — an ADDED field (e.g. a leaked `code`/`trace_id`)
-    // is caught here. Additive fields (code/details/retriable) are
-    // deliberately kept off this path so this exact-key-set pin is valid.
+    // Exact top-level key-set pin: the unified error envelope is EXACTLY
+    // `{error}` (no `trace_id` without the observability feature). An ADDED
+    // top-level field (e.g. a leaked flat `code`/`success`) is caught here.
     let keys: std::collections::BTreeSet<&str> = body
         .as_object()
         .expect("error body is an object")
@@ -257,16 +262,16 @@ async fn query_not_found_minimal_error_envelope() {
         .collect();
     assert_eq!(
         keys,
-        std::collections::BTreeSet::from(["success", "error"]),
-        "minimal 404 error envelope must carry exactly {{success, error}}: {body}"
+        std::collections::BTreeSet::from(["error"]),
+        "unified 404 error envelope must carry exactly {{error}} at top level: {body}"
     );
 }
 
 /// PARITY: a malformed operation payload is a clean 400 client error (never a
 /// 500). A nested-object property is rejected before any DB work (BadRequest →
-/// 400) and keeps the MINIMAL `{success:false, error:<string>}` envelope with
-/// NO additive `code`/`retriable`/`details` (consistent with the not-found
-/// case; those additive fields are auth/limit-only).
+/// 400) and carries the unified nested envelope `{error:{code, message,
+/// retriable}}` with `code = INVALID_ARGUMENT`, `retriable = false`, and no
+/// `details` (consistent with the not-found case).
 #[tokio::test]
 async fn query_malformed_payload_is_400_not_500() {
     let (client, _db) = anon_client();
@@ -283,18 +288,20 @@ async fn query_malformed_payload_is_400_not_500() {
         status, 400,
         "nested property must be a 400 client error, got {status}: {body}"
     );
-    assert_eq!(body["success"], false);
     assert!(
-        body["error"].as_str().is_some_and(|s| !s.is_empty()),
-        "error must be a non-empty string: {body}"
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
     );
-    assert!(body.get("code").is_none(), "400 carries no `code`: {body}");
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
     assert!(
-        body.get("retriable").is_none(),
-        "400 carries no `retriable`: {body}"
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "error.message must be a non-empty string: {body}"
     );
+    assert_eq!(body["error"]["retriable"], false);
     assert!(
-        body.get("details").is_none(),
+        body["error"].get("details").is_none(),
         "400 carries no `details`: {body}"
     );
 }
@@ -330,11 +337,16 @@ async fn query_missing_credential_is_uniform_401() {
     assert_eq!(resp.status.as_u16(), 401);
     assert_eq!(resp.header("www-authenticate"), Some("Bearer"));
     let body: Value = serde_json::from_slice(&resp.body).expect("json");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "UNAUTHENTICATED");
     assert!(
-        body["error"].as_str().is_some_and(|s| !s.is_empty()),
-        "uniform 401 keeps a non-empty error string: {body}"
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "uniform 401 keeps a non-empty error.message string: {body}"
     );
 }
 
@@ -350,8 +362,11 @@ async fn query_reader_write_is_403_permission_denied() {
     )
     .await;
     assert_eq!(status, 403, "reader may not write: {body}");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }
 
 // --- /query resource limits (Issue #3368) ---
@@ -377,12 +392,15 @@ async fn query_row_cap_reject_is_413_resource_exhausted() {
 
     let (status, body) = post_query(&client, &find_people()).await;
     assert_eq!(status, 413, "reject policy over cap → 413: {body}");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-    assert_eq!(body["retriable"], false);
-    assert_eq!(body["details"]["dimension"], "result_rows");
-    assert_eq!(body["details"]["limit"], 2);
-    assert_eq!(body["details"]["consumed"], 5);
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["dimension"], "result_rows");
+    assert_eq!(body["error"]["details"]["limit"], 2);
+    assert_eq!(body["error"]["details"]["consumed"], 5);
 }
 
 /// PARITY: result-byte cap → 413 with `details.dimension = result_bytes` and a
@@ -405,15 +423,18 @@ async fn query_byte_cap_is_413_resource_exhausted() {
 
     let (status, body) = post_query(&client, &find_people()).await;
     assert_eq!(status, 413, "oversized response → 413: {body}");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
     assert_eq!(
-        body["retriable"], false,
+        body["error"]["retriable"], false,
         "a byte cap is never retriable (symmetry with the row cap): {body}"
     );
-    assert_eq!(body["details"]["dimension"], "result_bytes");
-    assert_eq!(body["details"]["limit"], 16);
-    assert!(body["details"]["consumed"].as_u64().unwrap() > 16);
+    assert_eq!(body["error"]["details"]["dimension"], "result_bytes");
+    assert_eq!(body["error"]["details"]["limit"], 16);
+    assert!(body["error"]["details"]["consumed"].as_u64().unwrap() > 16);
 }
 
 /// PARITY: a per-call limit override above the operator ceiling is rejected
@@ -444,12 +465,15 @@ async fn query_over_ceiling_override_is_422_invalid_argument() {
     )
     .await;
     assert_eq!(status, 422, "over-ceiling override → 422: {body}");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "INVALID_ARGUMENT");
-    assert_eq!(body["retriable"], false);
-    assert_eq!(body["details"]["dimension"], "result_rows");
-    assert_eq!(body["details"]["requested"], 1000);
-    assert_eq!(body["details"]["ceiling"], 100);
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["dimension"], "result_rows");
+    assert_eq!(body["error"]["details"]["requested"], 1000);
+    assert_eq!(body["error"]["details"]["ceiling"], 100);
 }
 
 /// PARITY: auth is evaluated BEFORE limit validation — an unauthenticated
@@ -485,7 +509,7 @@ async fn query_auth_precedes_limit_validation() {
     )
     .await;
     assert_eq!(status, 401, "auth rejects before limit logic: {body}");
-    assert_eq!(body["code"], "UNAUTHENTICATED");
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
 }
 
 // ===========================================================================
@@ -530,7 +554,7 @@ async fn admin_create_key_non_admin_is_403() {
         .await;
     assert_eq!(resp.status.as_u16(), 403);
     let body: Value = serde_json::from_slice(&resp.body).expect("json");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }
 
 /// PARITY: invalid create-key input (empty name) is a 400 (repairable client
@@ -547,7 +571,10 @@ async fn admin_create_key_invalid_name_is_400() {
         .await;
     assert_eq!(resp.status.as_u16(), 400);
     let body: Value = serde_json::from_slice(&resp.body).expect("json");
-    assert_eq!(body["success"], false);
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
 }
 
 // ===========================================================================
@@ -614,7 +641,7 @@ async fn admin_list_keys_non_admin_is_403() {
         .await;
     assert_eq!(resp.status.as_u16(), 403);
     let body: Value = serde_json::from_slice(&resp.body).expect("json");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }
 
 // ===========================================================================
@@ -652,12 +679,11 @@ async fn admin_revoke_key_success_and_immediate_effect() {
     // Immediate revocation: the key is now a uniform 401.
     let (status, body) = post_query_key(&client, &victim_key, &find_people()).await;
     assert_eq!(status, 401);
-    assert_eq!(body["code"], "UNAUTHENTICATED");
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
 }
 
-/// PARITY: revoking an unknown id → 404 with the MINIMAL
-/// `{success:false, error:<string>}` envelope (NotFound → no additive
-/// `code`/`retriable`/`details`).
+/// PARITY: revoking an unknown id → 404 with the unified nested envelope
+/// `{error:{code:NOT_FOUND, message, retriable:false}}` (Issue #3234).
 #[tokio::test]
 async fn admin_revoke_unknown_id_is_404() {
     let (client, store, _db) = required_client();
@@ -670,16 +696,18 @@ async fn admin_revoke_unknown_id_is_404() {
         .await;
     assert_eq!(resp.status.as_u16(), 404);
     let body: Value = serde_json::from_slice(&resp.body).expect("json");
-    assert_eq!(body["success"], false);
     assert!(
-        body["error"].as_str().is_some_and(|s| !s.is_empty()),
-        "error must be a non-empty string: {body}"
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
     );
-    assert!(body.get("code").is_none(), "404 carries no `code`: {body}");
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
     assert!(
-        body.get("retriable").is_none(),
-        "404 carries no `retriable`: {body}"
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "error.message must be a non-empty string: {body}"
     );
+    assert_eq!(body["error"]["retriable"], false);
 }
 
 /// PARITY: a non-admin role → 403 on the revoke route.
@@ -695,7 +723,7 @@ async fn admin_revoke_non_admin_is_403() {
         .await;
     assert_eq!(resp.status.as_u16(), 403);
     let body: Value = serde_json::from_slice(&resp.body).expect("json");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }
 
 // ===========================================================================
@@ -957,9 +985,16 @@ async fn find_node_invalid_confidence_is_400() {
     )
     .await;
     assert_eq!(status, 400);
-    assert_eq!(body["success"].as_bool(), Some(false));
     assert!(
-        body["error"].as_str().unwrap().contains("min_confidence"),
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("min_confidence"),
         "error must name the field: {body}"
     );
 }
@@ -977,7 +1012,7 @@ async fn find_node_empty_source_list_is_400() {
     .await;
     assert_eq!(status, 400);
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap()
             .contains("provenance_sources")
@@ -1189,9 +1224,16 @@ async fn find_neighbors_invalid_confidence_is_400() {
     )
     .await;
     assert_eq!(status, 400, "out-of-range confidence must be a 400: {body}");
-    assert_eq!(body["success"].as_bool(), Some(false));
     assert!(
-        body["error"].as_str().unwrap().contains("min_confidence"),
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("min_confidence"),
         "error must name the field: {body}"
     );
 }
