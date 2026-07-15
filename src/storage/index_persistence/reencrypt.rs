@@ -279,16 +279,19 @@ impl IndexKeyRotation {
             // verify may run against a LIVE db: a file listed a moment ago can be
             // removed/renamed by a concurrent writer's atomic_write between the
             // scan and this read. A vanished file is benign — skip it rather than
-            // fail the probe; any OTHER io error still propagates.
-            let bytes = match std::fs::read(&path) {
-                Ok(b) => b,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            };
-            let Some(key_version) = index_file_key_version(&bytes) else {
+            // fail the probe; any OTHER io error still propagates. Peek only the
+            // 10-byte header first (index files can be up to ~100GB, so reading a
+            // whole body just to read its key_version would risk OOM); the full
+            // body is read ONLY for a file we actually decrypt-probe.
+            let key_version = match peek_key_version(&path) {
+                Ok(Some(v)) => v,
                 // Not an AEIX-encrypted file: plaintext, skip (not a failure).
-                report.plaintext += 1;
-                continue;
+                Ok(None) => {
+                    report.plaintext += 1;
+                    continue;
+                }
+                Err(RotationError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
             };
             // Bounded cost: always probe the manifest body; otherwise probe only
             // the first file seen for each distinct key_version.
@@ -297,6 +300,13 @@ impl IndexKeyRotation {
             if !is_manifest && !first_of_version {
                 continue;
             }
+            // Only now read the full body — the file we will actually
+            // decrypt-probe (bounded to the manifest + one file per key_version).
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
             report.probed += 1;
             match decrypt_index_bytes_with_keyring(&bytes, &path, Some(&self.keyring)) {
                 Ok(_) => report.decrypted_ok += 1,
