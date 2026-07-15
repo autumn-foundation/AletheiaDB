@@ -153,7 +153,7 @@ impl HookMetrics {
     }
 }
 
-/// Point-in-time snapshot of [`HookMetrics`], returned by
+/// Point-in-time snapshot of `HookMetrics`, returned by
 /// [`HistoricalStorage::hook_metrics`](super::HistoricalStorage::hook_metrics).
 ///
 /// Lets a caller observe how many pre-anchor hook invocations succeeded,

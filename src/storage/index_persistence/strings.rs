@@ -83,7 +83,7 @@ const UNMAPPABLE_FILE_ID: u32 = u32::MAX;
 /// **file-local** id space, and this remap translates each persisted file id to
 /// the live id the same string actually has in this process. Every persisted
 /// `u32` interner id (keys, string values, labels, `removed_keys`) must be
-/// routed through [`InternerRemap::remap_id`] before being resolved against the
+/// routed through `InternerRemap::remap_id` before being resolved against the
 /// live interner. The on-disk wire format is unchanged — this is purely a
 /// load-time interpretation fix.
 ///
@@ -141,7 +141,7 @@ impl InternerRemap {
     }
 
     /// Translate a persisted file-space id to a live id as a raw `u32`,
-    /// substituting [`UNMAPPABLE_FILE_ID`] for an out-of-range (corrupt) id so
+    /// substituting `UNMAPPABLE_FILE_ID` for an out-of-range (corrupt) id so
     /// that later resolution fails loudly instead of returning wrong data.
     fn remap_id(&self, file_id: u32) -> u32 {
         self.resolve(file_id)
@@ -224,7 +224,7 @@ impl InternerRemap {
     /// matches the correct edge type after reload (Issue #3490).
     ///
     /// An unmappable (corrupt/out-of-range) file id becomes
-    /// [`UNMAPPABLE_FILE_ID`], which fails the live-interner resolve check in
+    /// `UNMAPPABLE_FILE_ID`, which fails the live-interner resolve check in
     /// the reconstruction step (that entry is skipped and counted loudly)
     /// rather than being stored as a garbage edge type.
     ///
