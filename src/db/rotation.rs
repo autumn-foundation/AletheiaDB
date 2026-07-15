@@ -307,6 +307,20 @@ fn drive_forward_layers(
             RotationLayer::Checkpoint => {
                 // Satisfied by the index pass above (same DEK + file format);
                 // no separate work. Recorded complete in the ledger.
+                //
+                // INVARIANT (load-bearing for the checkpoint layer's coverage):
+                // encrypted checkpoint files MUST live under
+                // `manager.indexes_path()`, so the index `re_encrypt`/
+                // `verify_complete` pass above (which enumerates only that tree)
+                // actually rotates and verifies them. If a future checkpoint
+                // writer ever emits encrypted files OUTSIDE `indexes_path()`,
+                // this free-ride breaks two ways: (1) those files would not be
+                // re-encrypted here, and (2) `conflicting_encrypted_layers`
+                // would not see them, so the P0.1 cross-layer guard would not
+                // refuse — silently stranding them under the old MEK. Such a
+                // writer must add a guard entry in
+                // `conflicting_encrypted_layers` (and a real re-encrypt arm
+                // here), not rely on this comment.
             }
             RotationLayer::Wal | RotationLayer::Cold => {
                 // Out of scope in PR1 (PR2/PR3). No re-encryption; recorded
@@ -877,6 +891,12 @@ fn clear_rotation_state(manager: &IndexPersistenceManager) {
 /// rejected and left half-rotated. New fields fail closed: an unknown
 /// `version`, `layer.*` value, missing `target_version`/`new_version`, or a
 /// `new_source_kind` outside File/Env aborts.
+///
+/// **`version=` is MANDATORY.** Both #488 (v1) and #3617 (v2) writers ALWAYS
+/// emit a `version=` line, so a ledger reaching this reader without one is
+/// corrupt, not a pre-versioning legacy artifact — it fails closed
+/// (`missing version`) rather than being silently assumed to be any format.
+/// This is what lets the version dispatch below trust the number it reads.
 fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<RotationLedger>> {
     let path = rotation_state_path(manager);
     let body = match std::fs::read_to_string(&path) {
@@ -1022,6 +1042,17 @@ pub fn resume_pending_rotation(
         .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
     let old_version = keyring.current_version();
 
+    // DERIVATION ASYMMETRY (Issue #3617 PR1): the forward driver
+    // (`run_rotation`) derives the full four-DEK `MekKeyset` (wal/index/cold/
+    // checkpoint) up front, but resume derives ONLY the index DEK here because
+    // PR1's only executable layer is the index domain (index + checkpoint, which
+    // rides the index DEK); wal/cold are recorded `Skipped` and have no resume
+    // work. This is a deliberate, load-bearing gap: PR2 (WAL) and PR3 (cold)
+    // MUST extend resume to derive AND drive their layers' DEKs — not just the
+    // forward path — or an interrupted full-MEK rotation would resume the index
+    // pass while silently leaving the WAL/cold layers half-rotated. Mirror the
+    // `MekKeyset::derive` + `drive_forward_layers` structure here when those
+    // engines land.
     let new_dek = derive_index_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
         .map_err(rotation_err)?;
     let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
@@ -2284,6 +2315,305 @@ mod tests {
         assert!(
             !audit_path.exists(),
             "no audit file should be written when auditing is disabled"
+        );
+    }
+
+    // ── #3617 PR1 review hardening: crash-consistency + fail-closed ──
+
+    #[test]
+    fn crash_after_full_reencrypt_before_clear_resumes_and_clears() {
+        // Crash window: the forward pass re-encrypted (and complete()'d) EVERY
+        // index file to v2, but the process died BEFORE clearing the ledger. The
+        // planted ledger therefore still records index=Pending (the driver never
+        // rewrites the ledger to Complete; it only clears at the very end). On
+        // restart, resume must run the idempotent re-encrypt as a genuine no-op
+        // (files_reencrypted == 0), still verify+complete, and clear the ledger.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let keyring = manager.keyring().cloned().unwrap();
+        let new_index_cipher = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
+                .unwrap()
+                .index_cipher(),
+        );
+        keyring.add_generation(2, new_index_cipher.clone());
+        // Ledger first (v2, index=Pending), exactly as run_rotation orders it.
+        super::write_rotation_state(
+            &manager,
+            2,
+            &KeyProviderConfig::File {
+                path: new_key.clone(),
+            },
+            super::RotationDirection::Forward,
+        )
+        .unwrap();
+        // Re-encrypt ALL files to v2 (the full forward pass that completed
+        // before the crash), then leave the ledger present (crash before clear).
+        let engine = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring,
+            1,
+            std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            ),
+            2,
+            new_index_cipher,
+        );
+        engine.re_encrypt(&mut |_| true).unwrap();
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+        assert!(
+            root.join("data").join("rotation.state").exists(),
+            "precondition: ledger still present (crash before clear)"
+        );
+
+        let resume_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+            .unwrap()
+            .expect("a pending rotation should resume");
+        assert_eq!(report.new_version, 2);
+        assert_eq!(
+            report.files_reencrypted, 0,
+            "already-migrated dataset must re-encrypt nothing (idempotent no-op)"
+        );
+        assert!(
+            !root.join("data").join("rotation.state").exists(),
+            "resume must clear the ledger after completing"
+        );
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+    }
+
+    #[test]
+    fn resume_with_index_complete_ledger_verifies_and_clears() {
+        // Positive skip-branch: a v2 ledger recording index=Complete (and
+        // checkpoint=Complete) while the index files are already at v2. Resume
+        // must take the skip branch (index_domain_pending == false → NO
+        // re_encrypt), still verify via complete(), and clear the ledger.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let keyring = manager.keyring().cloned().unwrap();
+        let new_index_cipher = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
+                .unwrap()
+                .index_cipher(),
+        );
+        keyring.add_generation(2, new_index_cipher.clone());
+        // Truthfully migrate every file to v2 first...
+        let engine = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring,
+            1,
+            std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            ),
+            2,
+            new_index_cipher,
+        );
+        engine.re_encrypt(&mut |_| true).unwrap();
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+
+        // ...then plant a ledger claiming the index domain is already Complete.
+        super::write_ledger(
+            &manager,
+            &super::RotationLedger {
+                direction: super::RotationDirection::Forward,
+                new_version: 2,
+                new_source: KeyProviderConfig::File {
+                    path: new_key.clone(),
+                },
+                index: super::LayerStatus::Complete,
+                checkpoint: super::LayerStatus::Complete,
+                wal: super::LayerStatus::Skipped,
+                cold: super::LayerStatus::Skipped,
+            },
+        )
+        .unwrap();
+
+        let resume_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+            .unwrap()
+            .expect("an index=Complete ledger should still resume to verify+clear");
+        assert_eq!(report.new_version, 2);
+        // Skip branch: progress is RotationProgress::default() — no file was
+        // even scanned for re-encryption (distinguishes it from the Pending
+        // path, which would report files_skipped > 0).
+        assert_eq!(report.files_reencrypted, 0);
+        assert_eq!(
+            report.files_total, 0,
+            "skip branch must not run the re-encrypt scan"
+        );
+        assert_eq!(report.files_skipped, 0);
+        assert!(
+            !root.join("data").join("rotation.state").exists(),
+            "resume must clear the ledger after verifying"
+        );
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+    }
+
+    #[test]
+    fn resume_with_lying_index_complete_ledger_fails_closed() {
+        // Negative skip-branch (the important one): a v2 ledger LIES that the
+        // index domain is Complete, but the index files are still at the OLD key
+        // (never migrated). Resume takes the skip branch (no re_encrypt) and then
+        // complete()/verify_complete() MUST fail closed — old-key files remain,
+        // so the old key must NOT be retired and the ledger must NOT be cleared.
+        // This locks in the fail-closed guarantee PR2 relies on when it drives
+        // the skip branch for the WAL layer.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+        // Files remain at v1 (old key): we DO NOT re-encrypt anything.
+        assert!(assert_all_at_version(&indexes_dir, 1) > 0);
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        // Plant the LYING ledger: index=Complete while old-key files remain.
+        super::write_ledger(
+            &manager,
+            &super::RotationLedger {
+                direction: super::RotationDirection::Forward,
+                new_version: 2,
+                new_source: KeyProviderConfig::File {
+                    path: new_key.clone(),
+                },
+                index: super::LayerStatus::Complete,
+                checkpoint: super::LayerStatus::Complete,
+                wal: super::LayerStatus::Skipped,
+                cold: super::LayerStatus::Skipped,
+            },
+        )
+        .unwrap();
+
+        let resume_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let err = resume_pending_rotation(&resume_mgr, &enc_cfg).expect_err(
+            "a ledger claiming index=Complete over unmigrated old-key files MUST fail closed",
+        );
+        // The verify_complete() fail-closed path (OldKeyFilesRemain /
+        // ForeignKeyVersionFile) surfaces as a rotation failure, never a
+        // silent success.
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "fail-closed error must carry a message, got empty"
+        );
+        // Loudly abort for manual intervention: the ledger is NOT cleared, so a
+        // subsequent startup re-enters the same fail-closed path rather than
+        // retiring the old key over files only the old key can read.
+        assert!(
+            root.join("data").join("rotation.state").exists(),
+            "a fail-closed resume must LEAVE the ledger for manual intervention"
+        );
+        // And the old-key files are untouched — the old generation was never
+        // retired.
+        assert!(assert_all_at_version(&indexes_dir, 1) > 0);
+    }
+
+    #[test]
+    fn unknown_ledger_format_version_is_corrupt() {
+        // A ledger with an UNKNOWN format version (here v3) must fail closed as
+        // corrupt/unsupported, never be silently accepted — v1 and v2 are the
+        // only shapes this reader understands. The rest of the ledger is
+        // otherwise well-formed, proving it is the version dispatch that
+        // rejects, not a missing field.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let manager =
+            std::sync::Arc::new(IndexPersistenceManager::with_cipher(data_dir.clone(), None));
+
+        std::fs::write(
+            data_dir.join("rotation.state"),
+            b"version=3\ndirection=forward\ntarget_version=4\nnew_source_kind=file\nnew_source_value=/etc/aletheia/new.key\nlayer.index=pending\n",
+        )
+        .unwrap();
+
+        let err = super::read_rotation_state(&manager)
+            .expect_err("an unknown ledger format version must fail closed, not parse to Ok");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported ledger version") || msg.contains("corrupt"),
+            "expected an unsupported-version corruption error, got: {msg}"
         );
     }
 }
