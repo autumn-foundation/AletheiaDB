@@ -974,6 +974,30 @@ mod tests {
     }
 
     #[test]
+    fn resume_pending_index_rotation_is_none_when_no_breadcrumb() {
+        // The `&self` resume wrapper (Issue #490 CLI drive-point) must return
+        // Ok(None) — not an error, not a phantom rotation — on a configured,
+        // encrypted, index-persistent DB with no rotation.state breadcrumb.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let key = root.join("k.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key).unwrap();
+
+        let db = build_db(root, &key);
+        seed(&db);
+        // No breadcrumb was ever written.
+        assert!(!root.join("data").join("rotation.state").exists());
+
+        let report = db
+            .resume_pending_index_rotation()
+            .expect("resume with no pending rotation must be Ok, not Err");
+        assert!(
+            report.is_none(),
+            "resume with no breadcrumb must report nothing pending (Ok(None)), got {report:?}"
+        );
+    }
+
+    #[test]
     fn rotate_rejects_without_encryption() {
         let db = AletheiaDB::new().unwrap();
         let err = db

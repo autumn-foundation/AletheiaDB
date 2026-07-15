@@ -542,6 +542,16 @@ aletheia keys verify --key-file /etc/aletheiadb/master.key
 
 ### `keys rotate` — index key rotation (engine: Issue #488)
 
+**Read this first:** the shipped engine performs an *index-only* rotation and
+**safely refuses** on any uniformly-encrypted database — i.e. any database
+created the normal way, because enabling encryption encrypts the WAL (and
+cold/checkpoint) under the same master key too, and rotating the index alone
+would strand those layers. In practice `keys rotate --new-key` against a
+config-encrypted database therefore refuses (see the cross-layer note below);
+`--status`, `--resume`, and `--cancel` remain useful for inspecting and
+finishing an in-flight rotation. Full-MEK (all-layer) rotation is a documented
+follow-up.
+
 Rotates the index-encryption key, re-encrypting every persisted index file from
 the old key to the new one. All modes require an **encrypted, index-persistent**
 database opened via `ALETHEIADB_CONFIG`.
@@ -573,7 +583,7 @@ progress is written to **stderr** so it can be separated from the report.
 > will correctly report:
 >
 > ```
-> error: ... refusing: other encrypted-at-rest layers (wal) are present ...
+> error: index-only key rotation is unsupported while other encrypted-at-rest layers are present (wal); rotating the index alone to a new key would leave those layers undecryptable
 > ```
 >
 > Full-MEK (all-layer) rotation, which re-keys the WAL/cold/checkpoint too, is a
@@ -587,14 +597,32 @@ export ALETHEIADB_CONFIG=/etc/aletheiadb/aletheia.toml
 # Per-layer status table (WAL / index / checkpoints / cold)
 aletheia encryption status
 
-# Prove the configured cipher actually DECRYPTS the data at rest: opens the
-# database, replays the (encrypted) WAL, loads the (encrypted) index files, and
-# classifies them through the live keyring. A wrong/missing key fails the open.
+# Check the configured database's encrypted data at rest under its key.
 aletheia encryption verify
 ```
 
-`encryption verify` exits `0` with `encryption verify: PASS` when the data
-decrypts, and non-zero with a `FAILED` message (no key bytes) otherwise.
+`encryption verify` gives **two signals of different strength**, and is careful
+not to overstate either:
+
+- **WAL — a genuine decrypt proof.** Opening the database replays the
+  (encrypted) WAL through the configured cipher; a wrong or missing key fails
+  the open with an authentication error, so a successful open *proves* the WAL
+  actually AEAD-decrypts.
+- **Index — a header classification, not a body decrypt.** On success it then
+  *classifies* each persisted index file by its 10-byte `AEIX` header
+  key-version against the live keyring (`at_current` / `at_old` / `unknown` /
+  `plaintext`). This reads only the header bytes; it does **not** AEAD-decrypt
+  the index bodies. A full index-body decrypt proof additionally requires
+  `persistence.load_on_startup = true` (the durable `open()` path sets this), so
+  that the index load itself would fail on a bad key.
+
+It operates on the **configured** database only (ambient `ALETHEIADB_CONFIG` /
+`ALETHEIADB_DATA_DIR`); it does not take `--key-file` / `--env-var`, which would
+not change what the real open path reads. It exits `0` with
+`encryption verify: PASS` when the checks pass, and non-zero with a
+`FAILED` message (no key bytes) otherwise — including when the index scan hits a
+real IO error or an unreadable/short `AEIX` header, which fail rather than
+false-pass.
 
 ### `encryption enable` / `disable` — not yet supported
 

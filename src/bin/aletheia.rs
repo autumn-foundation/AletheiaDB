@@ -596,14 +596,14 @@ fn keys_rotate(args: &[String]) -> Result<(), String> {
         return Err(rotate_usage());
     }
     if action_count > 1 {
+        // Covers every over-selection, including `--new-key` + `--new-env-var`
+        // together (both count as an action), so no separate mutual-exclusion
+        // branch is needed.
         return Err(format!(
             "keys rotate: choose exactly one of --new-key/--new-env-var (start), \
              --status, --resume, or --cancel\n{}",
             rotate_usage()
         ));
-    }
-    if new_key.is_some() && new_env_var.is_some() {
-        return Err("keys rotate: --new-key and --new-env-var are mutually exclusive".to_string());
     }
 
     let db = open_db().map_err(rotate_not_configured_hint)?;
@@ -741,7 +741,7 @@ fn handle_encryption(args: Vec<String>) -> Result<(), String> {
 /// Usage detail for the `encryption` subcommand group.
 fn encryption_usage() -> String {
     "  encryption status  [--key-file PATH | --env-var NAME]   Per-layer encryption status\n\
-     \x20 encryption verify  [--key-file PATH | --env-var NAME]   Verify encrypted data decrypts\n\
+     \x20 encryption verify                                       Verify the configured DB's encrypted data decrypts\n\
      \x20 encryption enable                                       (not yet supported — see below)\n\
      \x20 encryption disable                                      (not yet supported — see below)"
         .to_string()
@@ -809,15 +809,35 @@ fn encryption_status(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `encryption verify` — prove that the configured cipher actually decrypts the
-/// database's encrypted data at rest, beyond `keys verify`'s key health-check.
+/// `encryption verify` — check that the **configured** database's encrypted
+/// data at rest is readable under its key, beyond `keys verify`'s key
+/// health-check.
 ///
-/// Opening the database replays the (encrypted) WAL and loads the (encrypted)
-/// persisted index files through the configured cipher; a wrong or missing key
-/// fails the open. On success we additionally classify every index file through
-/// the live keyring. Clear PASS/FAIL with a matching exit code; no key bytes.
-fn encryption_verify(args: &[String]) -> Result<(), String> {
-    let config = resolve_encryption_config(args)?;
+/// Two distinct signals, with different strengths (we are careful not to
+/// overstate either):
+///
+/// * **WAL — a genuine decrypt proof.** Opening the database replays the
+///   (encrypted) WAL through the configured cipher; a wrong or missing key
+///   fails the open with an authentication error. A successful open therefore
+///   *proves* the WAL actually AEAD-decrypts.
+/// * **Index — a header classification, NOT a body decrypt.** On success we
+///   additionally *classify* every persisted index file by reading its 10-byte
+///   `AEIX` header key-version and matching it against the live keyring
+///   (`at_current` / `at_old` / `unknown` / `plaintext`). This reads only the
+///   header bytes; it does **not** AEAD-decrypt the index bodies. A genuine
+///   index-body decrypt happens only when `persistence.load_on_startup = true`
+///   (which the durable `open()` path enables), where the load itself would
+///   fail on a bad key.
+///
+/// Operates on the ambient configuration only (`ALETHEIADB_CONFIG` /
+/// `ALETHEIADB_DATA_DIR`); it does not accept `--key-file` / `--env-var`, which
+/// would not affect the actual open and could mislead. Clear PASS/FAIL with a
+/// matching exit code; no key bytes are ever printed.
+fn encryption_verify(_args: &[String]) -> Result<(), String> {
+    // Resolve from the ambient config only (ignore any CLI key flags): verify
+    // must reflect the database `open_db()` will actually open, not a key the
+    // real open path never consults.
+    let config = resolve_encryption_config(&[])?;
     if !config.enabled {
         println!("Encryption is not enabled for this configuration; nothing to verify.");
         return Ok(());
@@ -831,8 +851,9 @@ fn encryption_verify(args: &[String]) -> Result<(), String> {
         );
     }
 
-    // Opening decrypts the WAL (replay) and index files (load-on-startup). A
-    // wrong/missing key fails here — the primary decryptability signal.
+    // Opening replays the WAL through the cipher (and loads index files when
+    // load_on_startup is set). A wrong/missing key fails here — the primary,
+    // genuine decryptability signal.
     let db = open_db().map_err(|e| format!("encryption verify FAILED: {e}"))?;
 
     if !db.is_encryption_enabled() {
@@ -842,14 +863,15 @@ fn encryption_verify(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // Active probe: classify every persisted index file through the live
-    // keyring. An `unknown`-key file means something did not decrypt cleanly.
+    // Active probe: classify every persisted index file by its AEIX header
+    // key-version against the live keyring. An `unknown`-key file is one whose
+    // header names a key the keyring does not hold — a genuine problem.
     match db.index_rotation_status() {
         Ok(s) => {
             if s.unknown > 0 {
                 return Err(format!(
-                    "encryption verify FAILED: {} index file(s) are not decryptable under the \
-                     configured key(s)",
+                    "encryption verify FAILED: {} index file(s) carry an AEIX header \
+                     key-version not held by the configured keyring",
                     s.unknown
                 ));
             }
@@ -860,14 +882,16 @@ fn encryption_verify(args: &[String]) -> Result<(), String> {
                 stats.current.node_count, stats.current.edge_count
             );
             println!(
-                "  Index: {} encrypted file(s) decrypt under the current key(s) ({} plaintext)",
+                "  Index: {} encrypted file(s) classified at a current/old key version \
+                 by AEIX header ({} plaintext)",
                 s.at_current + s.at_old,
                 s.plaintext
             );
         }
-        Err(_) => {
-            // Index persistence not enabled: the successful open already proved
-            // WAL decryptability, which is a valid PASS.
+        Err(e) if rotation_status_not_enabled(&e) => {
+            // Index persistence (or index encryption) is not enabled: there is
+            // nothing to classify, but the successful open already proved WAL
+            // decryptability, which is a valid PASS.
             let stats = db.stats();
             println!("encryption verify: PASS");
             println!(
@@ -876,8 +900,28 @@ fn encryption_verify(args: &[String]) -> Result<(), String> {
             );
             println!("  Index: index persistence not enabled (nothing to classify)");
         }
+        Err(e) => {
+            // A real error scanning/reading the index files (IO error, an
+            // unreadable/short AEIX header, etc.) must FAIL, never false-PASS.
+            return Err(format!("encryption verify FAILED: {e}"));
+        }
     }
     Ok(())
+}
+
+/// Does this [`index_rotation_status`](aletheiadb::AletheiaDB::index_rotation_status)
+/// error mean "index persistence / index encryption is simply not enabled"
+/// (a benign, PASS-able condition for `encryption verify`) as opposed to a real
+/// IO/read failure that must FAIL? The not-enabled cases surface as
+/// [`StorageError::InconsistentState`](aletheiadb::StorageError::InconsistentState)
+/// whose reason names the missing layer; everything else (IO, corrupt/short
+/// header, foreign key) is a genuine failure.
+fn rotation_status_not_enabled(e: &aletheiadb::Error) -> bool {
+    matches!(
+        e,
+        aletheiadb::Error::Storage(aletheiadb::StorageError::InconsistentState { reason })
+            if reason.contains("not enabled") || reason.contains("not configured")
+    )
 }
 
 /// `encryption enable` / `encryption disable` — HONESTLY unimplemented.
