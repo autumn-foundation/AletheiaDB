@@ -113,7 +113,7 @@ async fn live_mcp_catalog(client: &TestClient) -> BTreeSet<String> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (1) MCP catalog == inventory — EXACT set equality across all 46 tools.
+// (1) MCP catalog == inventory — EXACT set equality across all 51 tools.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -133,8 +133,8 @@ async fn mcp_catalog_equals_inventory_exactly() {
 
     assert_eq!(
         inv.len(),
-        46,
-        "inventory must advertise exactly 46 MCP tools"
+        51,
+        "inventory must advertise exactly 51 MCP tools"
     );
 
     // Symmetric difference, reported precisely so a drift names the culprits.
@@ -148,14 +148,14 @@ async fn mcp_catalog_equals_inventory_exactly() {
     );
     assert_eq!(
         live.len(),
-        46,
-        "the live catalog must be exactly 46 tools (got {})",
+        51,
+        "the live catalog must be exactly 51 tools (got {})",
         live.len()
     );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (2) Access-class conformance for all 46 (belt-and-suspenders full-set check;
+// (2) Access-class conformance for all 51 (belt-and-suspenders full-set check;
 //     `tests/security_rbac.rs::registry_matches_inventory_exactly` pins the
 //     static registry, this pins the *live-catalog-anchored* class per tool).
 // ════════════════════════════════════════════════════════════════════════════
@@ -317,14 +317,14 @@ async fn budgetable_and_cursorable_sets_match_inventory() {
         .collect();
     assert_eq!(
         inv_budgetable.len(),
-        13,
-        "inventory must mark exactly 13 budgetable read tools"
+        14,
+        "inventory must mark exactly 14 budgetable read tools"
     );
     // Cross-check against the totals block too.
     assert_eq!(
         doc["totals"]["mcp_budgetable_read_tools"].as_u64(),
-        Some(13),
-        "totals.mcp_budgetable_read_tools must be 13"
+        Some(14),
+        "totals.mcp_budgetable_read_tools must be 14"
     );
 
     // The crate's DISPATCH_ROUTED_READ_TOOLS is precisely the budgetable set:

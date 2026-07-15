@@ -195,6 +195,26 @@ const DEFAULT_VECTOR_K: usize = 10;
 /// Default transaction time placeholder string.
 const TRANSACTION_TIME_NOW: &str = "now";
 
+/// Maximum UTF-8 byte length of a single text input accepted by the embedding
+/// tools (Issue #2906). Bounds per-request embedding work and memory so an
+/// oversized input is rejected with `INVALID_ARGUMENT` before any model runs.
+///
+/// Only referenced by the feature-on embedding handlers; gated so the
+/// feature-off build (whose handlers return the unavailable-feature error
+/// without validating) does not carry a dead constant.
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_TEXT_BYTES: usize = 64 * 1024;
+
+/// Maximum number of text strings accepted by `embed_text` in one call
+/// (Issue #2906).
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_TEXTS: usize = 256;
+
+/// Maximum number of per-chunk embeddings `embed_text` returns in one call
+/// (Issue #2906). Also the ceiling `max_chunks` is clamped to.
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_CHUNKS: usize = 512;
+
 /// Default maximum number of operations accepted by a single `apply_batch`
 /// call (Issue #3231). Deliberately far below the core transaction buffer's
 /// own DoS cap (`WriteBuffer::DEFAULT_MAX_OPERATIONS` = 50,000), so the MCP
@@ -248,6 +268,16 @@ pub struct AletheiaMcpServer {
     /// occupying capacity. Shared across clones so the cloned server used for
     /// the race sees the same live count.
     in_flight_queries: Arc<AtomicUsize>,
+    /// Optional embedding-model handle (Issue #2906). Present only when the
+    /// `embeddings` feature is compiled AND a model has been configured via
+    /// [`with_embedder`](Self::with_embedder). `None` -> the embedding tools
+    /// (`embed_query`, `embed_text`, `semantic_search`,
+    /// `create_node_with_embedding`, `update_node_embedding`) return
+    /// `FAILED_PRECONDITION` ("no embedding model configured"). The tools are
+    /// advertised unconditionally (Design A); when the feature is *not*
+    /// compiled they return a structured unavailable-feature error instead.
+    #[cfg(feature = "embeddings")]
+    embedder: Option<Arc<crate::embeddings::Embedder>>,
 }
 
 /// RAII slot in the bounded in-flight-query pool (Issue #3368). Decrements the
@@ -319,7 +349,27 @@ impl AletheiaMcpServer {
             query_limits: Arc::new(QueryLimitsConfig::default()),
             limit_counters: Arc::new(LimitCounters::default()),
             in_flight_queries: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "embeddings")]
+            embedder: None,
         }
+    }
+
+    /// Configure the embedding-model handle used by the embedding tools
+    /// (Issue #2906).
+    ///
+    /// The embedding tools are advertised unconditionally, but they only
+    /// produce embeddings once a model is configured here; until then they
+    /// return `FAILED_PRECONDITION`. A model is deliberately NOT built
+    /// implicitly (e.g. from an env var) inside [`new`](Self::new) /
+    /// [`with_auth`](Self::with_auth) because loading a model can download
+    /// weights and block — unacceptable for the many embedded/test callers of
+    /// those constructors. Serving deployments call this explicitly after
+    /// building the [`Embedder`](crate::embeddings::Embedder).
+    #[cfg(feature = "embeddings")]
+    #[must_use = "with_embedder returns a new server; discarding it drops the configured model"]
+    pub fn with_embedder(mut self, embedder: Arc<crate::embeddings::Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Override the per-query resource limits for the `query` tool (Issue
@@ -426,6 +476,8 @@ impl AletheiaMcpServer {
             query_limits: Arc::new(QueryLimitsConfig::default()),
             limit_counters: Arc::new(LimitCounters::default()),
             in_flight_queries: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "embeddings")]
+            embedder: None,
         }
     }
 
@@ -556,6 +608,39 @@ impl AletheiaMcpServer {
     /// Returns the updated node object.
     pub fn update_node(&self, req: UpdateNodeRequest) -> String {
         Self::extract_text(self.handle_update_node(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Generate a single dense embedding from text (Issue #2906).
+    ///
+    /// Returns the tool's JSON response as a string. When the `embeddings`
+    /// feature is not compiled (or no model is configured) this returns the
+    /// structured unavailable/precondition error rather than an embedding.
+    pub fn embed_query(&self, req: EmbedQueryRequest) -> String {
+        Self::extract_text(self.handle_embed_query(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Generate per-chunk dense embeddings for multiple texts (Issue #2906).
+    pub fn embed_text(&self, req: EmbedTextRequest) -> String {
+        Self::extract_text(self.handle_embed_text(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Create a node whose embedding is generated from text (Issue #2906).
+    pub fn create_node_with_embedding(&self, req: CreateNodeWithEmbeddingRequest) -> String {
+        Self::extract_text(self.handle_create_node_with_embedding(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Regenerate a node's embedding property from text, preserving all other
+    /// properties (Issue #2906).
+    pub fn update_node_embedding(&self, req: UpdateNodeEmbeddingRequest) -> String {
+        Self::extract_text(self.handle_update_node_embedding(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -3983,6 +4068,512 @@ impl AletheiaMcpServer {
         }
     }
 
+    // ========================================================================
+    // Embedding generation & text semantic search (Issue #2906)
+    //
+    // Design A: all five tools are advertised and dispatched unconditionally.
+    // The real work lives under `#[cfg(feature = "embeddings")]`; under
+    // `#[cfg(not(feature = "embeddings"))]` each handler returns a structured
+    // unavailable-feature error (mirroring how `handle_query` returns
+    // `language_unavailable` when the `cypher` feature is off), so the tool
+    // inventory is a single flat count regardless of feature selection.
+    // ========================================================================
+
+    /// Structured error returned by the embedding tools when the `embeddings`
+    /// feature was not compiled into this build (Design A, Issue #2906).
+    #[cfg(not(feature = "embeddings"))]
+    fn embeddings_unavailable(&self) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                "Embedding generation is unavailable: this server was built without the \
+                 `embeddings` feature. Rebuild with `--features embeddings` (and configure a \
+                 model) to use embed_query, embed_text, semantic_search, \
+                 create_node_with_embedding, and update_node_embedding.",
+            )
+            .details(json!({ "feature": "embeddings", "available": false })),
+        )
+    }
+
+    /// Run an embedding future to completion on the ambient multi-threaded
+    /// Tokio runtime, bridging the synchronous MCP dispatch path to the async
+    /// `embed_anything` API (Issue #2906).
+    ///
+    /// Returns `Err(CallToolResult)` — a structured `UNAVAILABLE` — instead of
+    /// panicking when there is no current runtime or the runtime is
+    /// single-threaded (`block_in_place` requires the multi-thread flavor). The
+    /// `aletheia-mcp` binary and `aletheia-server` both run on a multi-thread
+    /// runtime, so the happy path always applies there.
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn block_on_embedding<F>(&self, fut: F) -> std::result::Result<F::Output, CallToolResult>
+    where
+        F: std::future::Future,
+    {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                Ok(tokio::task::block_in_place(move || handle.block_on(fut)))
+            }
+            _ => Err(self.error_result(McpError::new(
+                McpErrorCode::Unavailable,
+                "No multi-threaded async runtime is available to run embedding generation. \
+                 Serve the MCP/HTTP surface on a multi-threaded Tokio runtime.",
+            ))),
+        }
+    }
+
+    /// The configured embedder, or a structured `FAILED_PRECONDITION` result
+    /// when none has been set (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn require_embedder(
+        &self,
+    ) -> std::result::Result<Arc<crate::embeddings::Embedder>, CallToolResult> {
+        self.embedder.as_ref().map(Arc::clone).ok_or_else(|| {
+            self.failed_precondition(
+                "No embedding model is configured on this server. Configure one via \
+                 AletheiaMcpServer::with_embedder (or the server's embedding-model option) \
+                 before using the embedding tools.",
+            )
+        })
+    }
+
+    /// Embed a single string into one dense vector (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_embed_query(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EmbedQueryRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let text = req.text;
+        let embedded = match self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[text.as_str()], embedder.as_ref(), None).await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    format!("Embedding generation failed: {e}"),
+                ));
+            }
+        };
+        match crate::embeddings::embed_data_to_dense_iter(data, Some(1)).next() {
+            Some(Ok(dense)) => {
+                let dim = dense.embedding.len();
+                self.success_json(json!({ "embedding": dense.embedding, "dim": dim }))
+            }
+            Some(Err(e)) => self.failed_precondition(&format!(
+                "Configured embedding model produced an unsupported (non-dense) result: {e}"
+            )),
+            None => self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                "Embedding model returned no result",
+            )),
+        }
+    }
+
+    /// Embed multiple texts, returning per-chunk dense embeddings aligned via
+    /// [`EmbedData`](crate::embeddings::EmbedData) (never a positional zip),
+    /// honoring a chunk cap (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_embed_text(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EmbedTextRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.texts.is_empty() {
+            return self.invalid_argument("texts must contain at least one string");
+        }
+        if req.texts.len() > MAX_EMBED_TEXTS {
+            return self.invalid_argument(&format!(
+                "texts exceeds the maximum of {} entries (got {})",
+                MAX_EMBED_TEXTS,
+                req.texts.len()
+            ));
+        }
+        if let Some(oversized) = req.texts.iter().find(|t| t.len() > MAX_EMBED_TEXT_BYTES) {
+            return self.invalid_argument(&format!(
+                "a text entry exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                oversized.len()
+            ));
+        }
+        let chunk_cap = req
+            .max_chunks
+            .map_or(MAX_EMBED_CHUNKS, |m| m.min(MAX_EMBED_CHUNKS));
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let texts = req.texts;
+        let embedded = match self.block_on_embedding(async move {
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            crate::embeddings::embed_query(&refs, embedder.as_ref(), None).await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    format!("Embedding generation failed: {e}"),
+                ));
+            }
+        };
+
+        let mut chunks = Vec::new();
+        for item in crate::embeddings::embed_data_to_dense_iter(data, Some(chunk_cap)) {
+            match item {
+                Ok(dense) => {
+                    let dim = dense.embedding.len();
+                    chunks.push(json!({
+                        "text": dense.text,
+                        "metadata": dense.metadata,
+                        "embedding": dense.embedding,
+                        "dim": dim,
+                    }));
+                }
+                Err(e) => {
+                    return self.failed_precondition(&format!(
+                        "Configured embedding model produced an unsupported (non-dense) result: {e}"
+                    ));
+                }
+            }
+        }
+        let count = chunks.len();
+        self.success_json(json!({ "chunks": chunks, "count": count }))
+    }
+
+    /// Embed `query_text` and reuse the exact `find_similar` path so the
+    /// response envelope is byte-identical (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_semantic_search(&self, args: serde_json::Value) -> CallToolResult {
+        let req: SemanticSearchRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.query_text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "query_text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.query_text.len()
+            ));
+        }
+        // Validate the target index up front (cheap, no model needed) so a
+        // missing index is a clear FAILED_PRECONDITION even before embedding.
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let query_text = req.query_text;
+        let embedded = match self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[query_text.as_str()], embedder.as_ref(), None).await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    format!("Embedding generation failed: {e}"),
+                ));
+            }
+        };
+        let embedding =
+            match crate::embeddings::to_dense_iter(data.into_iter().map(|d| d.embedding), Some(1))
+                .next()
+            {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => {
+                    return self.failed_precondition(&format!(
+                        "Configured embedding model produced an unsupported (non-dense) result: {e}"
+                    ));
+                }
+                None => {
+                    return self.error_result(McpError::new(
+                        McpErrorCode::Internal,
+                        "Embedding model returned no result",
+                    ));
+                }
+            };
+        // Dimension mismatch is a caller-fault INVALID_ARGUMENT.
+        if let Err(e) = self.validate_embedding_dimensions(&embedding, &req.property_name) {
+            return self.invalid_argument(&e);
+        }
+
+        // Delegate to the exact find_similar handler with a rebuilt request so
+        // the success envelope (results/score/temporal/#3220 elision/#3226
+        // pagination) is byte-identical.
+        let mut find_args = serde_json::Map::new();
+        find_args.insert("property_name".to_string(), json!(req.property_name));
+        find_args.insert("embedding".to_string(), json!(embedding));
+        if let Some(k) = req.k {
+            find_args.insert("k".to_string(), json!(k));
+        }
+        if let Some(offset) = req.offset {
+            find_args.insert("offset".to_string(), json!(offset));
+        }
+        if let Some(include_vectors) = req.include_vectors {
+            find_args.insert("include_vectors".to_string(), json!(include_vectors));
+        }
+        self.handle_find_similar(serde_json::Value::Object(find_args))
+    }
+
+    /// Embed `text` and store it as a vector property on a new node, reusing
+    /// the standard `create_node_with_options` write path (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_create_node_with_embedding(&self, args: serde_json::Value) -> CallToolResult {
+        let req: CreateNodeWithEmbeddingRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+        let provenance = match self.parse_opt_provenance(req.provenance) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        let embedding = match self.embed_one(&req.text, embedder) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        // Build the property map (non-embedding props) then attach the
+        // generated vector under `embedding_property`.
+        let base = match &req.properties {
+            Some(p) => match self.json_to_property_map(p) {
+                Ok(map) => map,
+                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+            },
+            None => PropertyMap::default(),
+        };
+        let properties = match base
+            .builder()
+            .try_insert_vector(&req.embedding_property, &embedding)
+        {
+            Ok(b) => b.build(),
+            Err(e) => {
+                return self.invalid_argument(&format!("Invalid embedding property: {}", e));
+            }
+        };
+
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
+
+        match self
+            .db
+            .create_node_with_options(&req.label, properties, options)
+        {
+            Ok(node_id) => match self.db.get_node(node_id) {
+                Ok(node) => {
+                    let now = time::now();
+                    let response = self.node_to_response(&node, false, now);
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
+                }
+                Err(e) => self.db_error(e),
+            },
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Embed `text` and update ONLY the embedding property of an existing node,
+    /// preserving all other properties (Issue #2906).
+    ///
+    /// `update_node` replaces every property, so this first reads the node and
+    /// merges its existing properties before overriding the embedding.
+    #[cfg(feature = "embeddings")]
+    fn handle_update_node_embedding(&self, args: serde_json::Value) -> CallToolResult {
+        let req: UpdateNodeEmbeddingRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        // Read current properties FIRST so the update preserves every other
+        // property (update_node replaces all properties).
+        let node = match self.db.get_node(node_id) {
+            Ok(n) => n,
+            Err(e) => return self.db_error(e),
+        };
+
+        let embedding = match self.embed_one(&req.text, embedder) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        let properties = match node
+            .properties
+            .builder()
+            .try_insert_vector(&req.embedding_property, &embedding)
+        {
+            Ok(b) => b.build(),
+            Err(e) => {
+                return self.invalid_argument(&format!("Invalid embedding property: {}", e));
+            }
+        };
+
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        // Stamp the authenticated principal (if any) onto the version.
+        let provenance = match self.parse_opt_provenance(None) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
+
+        match self
+            .db
+            .update_node_with_options(node_id, properties, options)
+        {
+            Ok(()) => match self.db.get_node(node_id) {
+                Ok(node) => {
+                    let now = time::now();
+                    let response = self.node_to_response(&node, false, now);
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
+                }
+                Err(e) => self.db_error(e),
+            },
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Embed one text into a single dense vector, mapping upstream/non-dense
+    /// failures to structured error results (Issue #2906 shared helper).
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn embed_one(
+        &self,
+        text: &str,
+        embedder: Arc<crate::embeddings::Embedder>,
+    ) -> std::result::Result<Vec<f32>, CallToolResult> {
+        let owned = text.to_string();
+        let embedded = self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[owned.as_str()], embedder.as_ref(), None).await
+        })?;
+        let data = embedded.map_err(|e| {
+            self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                format!("Embedding generation failed: {e}"),
+            ))
+        })?;
+        match crate::embeddings::to_dense_iter(data.into_iter().map(|d| d.embedding), Some(1))
+            .next()
+        {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => Err(self.failed_precondition(&format!(
+                "Configured embedding model produced an unsupported (non-dense) result: {e}"
+            ))),
+            None => Err(self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                "Embedding model returned no result",
+            ))),
+        }
+    }
+
+    // Feature-off variants: return the structured unavailable-feature error.
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_embed_query(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_embed_text(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_semantic_search(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_create_node_with_embedding(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_update_node_embedding(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
     fn handle_enable_vector_index(&self, args: serde_json::Value) -> CallToolResult {
         let req: EnableVectorIndexRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -6420,6 +7011,11 @@ impl AletheiaMcpServer {
             "get_incoming_edges" => self.handle_get_incoming_edges(args),
             "traverse" => self.handle_traverse(args),
             "find_similar" => self.handle_find_similar(args),
+            "embed_query" => self.handle_embed_query(args),
+            "embed_text" => self.handle_embed_text(args),
+            "semantic_search" => self.handle_semantic_search(args),
+            "create_node_with_embedding" => self.handle_create_node_with_embedding(args),
+            "update_node_embedding" => self.handle_update_node_embedding(args),
             "enable_vector_index" => self.handle_enable_vector_index(args),
             "list_vector_indexes" => self.handle_list_vector_indexes(args),
             "enable_unique_constraint" => self.handle_enable_unique_constraint(args),
@@ -6467,6 +7063,7 @@ pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
     "get_incoming_edges",
     "traverse",
     "find_similar",
+    "semantic_search",
     "hybrid_query",
     "query",
     "find_nodes_at_time",
@@ -6845,6 +7442,56 @@ fn tool_definitions() -> Vec<Tool> {
                      `{type, dim, elided:true}` descriptor) to protect LLM context; pass \
                      `include_vectors: true` to receive the full float arrays.",
             make_input_schema::<FindSimilarRequest>(),
+        ),
+        Tool::new(
+            "embed_query",
+            "Generate a single dense embedding vector from a text string using the server's \
+                     configured embedding model (Issue #2906). Returns `{embedding, dim}`. Use it \
+                     to build a query vector for find_similar, or as a general text-to-vector \
+                     utility. Requires the server to be built with the `embeddings` feature and to \
+                     have a model configured; otherwise returns a structured \
+                     FAILED_PRECONDITION error. Input size is bounded.",
+            make_input_schema::<EmbedQueryRequest>(),
+        ),
+        Tool::new(
+            "embed_text",
+            "Generate dense embeddings for multiple texts (Issue #2906). Returns per-chunk \
+                     results `{text, metadata, embedding, dim}` aligned to their source chunks \
+                     (never a positional zip), honoring an optional `max_chunks` cap. Requires the \
+                     `embeddings` feature and a configured model; otherwise returns a structured \
+                     FAILED_PRECONDITION error. Input count and size are bounded.",
+            make_input_schema::<EmbedTextRequest>(),
+        ),
+        Tool::new(
+            "semantic_search",
+            "Text semantic search (Issue #2906): embed `query_text` with the server's \
+                     configured model, then run the exact find_similar k-NN path against the vector \
+                     index on `property_name`, so the response envelope is identical to \
+                     find_similar (results, score, temporal block, #3220 vector elision, #3226 \
+                     pagination). Refuses with FAILED_PRECONDITION if the index/property does not \
+                     exist, INVALID_ARGUMENT on an embedding-dimension mismatch. Requires the \
+                     `embeddings` feature and a configured model.",
+            make_input_schema::<SemanticSearchRequest>(),
+        ),
+        Tool::new(
+            "create_node_with_embedding",
+            "Create a node whose embedding is generated from `text` (Issue #2906): embed the \
+                     text with the server's configured model and store the vector under \
+                     `embedding_property` (alongside any other `properties`), compatible with \
+                     enable_vector_index / find_similar / semantic_search. Supports optional \
+                     `valid_time` and `provenance`. Requires the `embeddings` feature and a \
+                     configured model.",
+            make_input_schema::<CreateNodeWithEmbeddingRequest>(),
+        ),
+        Tool::new(
+            "update_node_embedding",
+            "Regenerate a node's embedding from `text` and update ONLY the embedding property \
+                     (Issue #2906). Because update_node replaces all properties, this first reads \
+                     the node and MERGES its existing properties, then overrides `embedding_property` \
+                     with the freshly generated vector — every other property is preserved. \
+                     Supports optional `valid_time`. Requires the `embeddings` feature and a \
+                     configured model.",
+            make_input_schema::<UpdateNodeEmbeddingRequest>(),
         ),
         Tool::new(
             "enable_vector_index",

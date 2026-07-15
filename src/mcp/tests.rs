@@ -16538,3 +16538,174 @@ mod provenance_filter_tests {
         assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
     }
 }
+
+// ============================================================================
+// Embedding generation & text semantic search (Issue #2906)
+//
+// Design A: all five tools are advertised + dispatched unconditionally. The
+// real bodies live under `#[cfg(feature = "embeddings")]`; the feature-off
+// bodies return a structured unavailable-feature error. The primary test build
+// (no `embeddings` feature) exercises the feature-off path + catalog + RBAC;
+// the `#[cfg(feature = "embeddings")]` sub-module exercises validation, bounds,
+// the no-model precondition, and the non-dense conversion glue WITHOUT loading
+// a model (true model e2e is a separate `#[ignore]`d concern).
+// ============================================================================
+
+mod embedding_tools_tests {
+    use super::*;
+
+    const EMBED_TOOLS: [&str; 5] = [
+        "embed_query",
+        "embed_text",
+        "semantic_search",
+        "create_node_with_embedding",
+        "update_node_embedding",
+    ];
+
+    fn dispatch(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = AletheiaMcpServer::extract_text(result);
+        let value = serde_json::from_str(&text).expect("tool response should be valid JSON");
+        (value, is_error)
+    }
+
+    #[test]
+    fn all_five_tools_are_advertised() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        for name in EMBED_TOOLS {
+            assert!(
+                tools.iter().any(|t| t == name),
+                "{name} must be advertised in the MCP tool catalog"
+            );
+        }
+    }
+
+    // ---- Feature OFF: structured unavailable-feature error (DEFAULT build) ----
+    #[cfg(not(feature = "embeddings"))]
+    mod feature_off {
+        use super::*;
+
+        #[test]
+        fn each_tool_reports_feature_unavailable() {
+            let server = create_test_server();
+            for name in EMBED_TOOLS {
+                let (v, err) = dispatch(&server, name, serde_json::json!({}));
+                assert!(
+                    err,
+                    "{name} should error when the embeddings feature is off"
+                );
+                assert_eq!(
+                    v["error"]["code"].as_str(),
+                    Some("FAILED_PRECONDITION"),
+                    "{name}: {v}"
+                );
+                assert_eq!(
+                    v["error"]["details"]["feature"].as_str(),
+                    Some("embeddings"),
+                    "{name}: {v}"
+                );
+                assert_eq!(
+                    v["error"]["details"]["available"].as_bool(),
+                    Some(false),
+                    "{name}: {v}"
+                );
+                assert_eq!(
+                    v["error"]["retriable"].as_bool(),
+                    Some(false),
+                    "{name}: {v}"
+                );
+            }
+        }
+    }
+
+    // ---- Feature ON: validation/bounds/no-model/non-dense (no model loaded) ----
+    #[cfg(feature = "embeddings")]
+    mod feature_on {
+        use super::*;
+
+        #[test]
+        fn embed_query_without_model_is_failed_precondition() {
+            let server = create_test_server(); // no embedder configured
+            let (v, err) = dispatch(&server, "embed_query", serde_json::json!({"text": "hello"}));
+            assert!(err);
+            assert_eq!(
+                v["error"]["code"].as_str(),
+                Some("FAILED_PRECONDITION"),
+                "{v}"
+            );
+        }
+
+        #[test]
+        fn embed_query_oversized_text_is_invalid_argument() {
+            let server = create_test_server();
+            let big = "a".repeat(64 * 1024 + 1);
+            let (v, err) = dispatch(&server, "embed_query", serde_json::json!({"text": big}));
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        #[test]
+        fn embed_text_empty_is_invalid_argument() {
+            let server = create_test_server();
+            let (v, err) = dispatch(&server, "embed_text", serde_json::json!({"texts": []}));
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        #[test]
+        fn embed_text_too_many_is_invalid_argument() {
+            let server = create_test_server();
+            let texts: Vec<String> = (0..257).map(|i| i.to_string()).collect();
+            let (v, err) = dispatch(&server, "embed_text", serde_json::json!({"texts": texts}));
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        #[test]
+        fn semantic_search_missing_index_is_failed_precondition() {
+            let server = create_test_server();
+            let (v, err) = dispatch(
+                &server,
+                "semantic_search",
+                serde_json::json!({"property_name": "nope", "query_text": "hi"}),
+            );
+            assert!(err);
+            assert_eq!(
+                v["error"]["code"].as_str(),
+                Some("FAILED_PRECONDITION"),
+                "{v}"
+            );
+        }
+
+        // The non-dense conversion glue the embedding handlers rely on: a
+        // MultiVector model result maps to NotDense (never a silent zero
+        // vector). Exercised directly on the shared helper (no model needed).
+        #[test]
+        fn multivector_maps_to_not_dense() {
+            use crate::embeddings::{DenseEmbeddingError, EmbeddingResult, to_dense_iter};
+            let results = vec![EmbeddingResult::MultiVector(vec![vec![0.1_f32, 0.2]])];
+            let first = to_dense_iter(results, Some(1)).next();
+            assert!(
+                matches!(first, Some(Err(DenseEmbeddingError::NotDense))),
+                "expected NotDense, got {first:?}"
+            );
+        }
+
+        // True model-backed end-to-end embedding requires downloading a model
+        // (network + weights); kept #[ignore]d so unit runs stay hermetic.
+        #[test]
+        #[ignore = "requires downloading an embedding model (network); run manually"]
+        fn embed_query_roundtrip_with_real_model() {
+            // Intentionally left as a manual harness: build an Embedder via
+            // aletheiadb::embeddings::EmbedderBuilder, attach it with
+            // AletheiaMcpServer::with_embedder, then embed_query and assert a
+            // non-empty dense vector. Not run in CI.
+        }
+    }
+}

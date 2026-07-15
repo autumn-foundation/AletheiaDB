@@ -316,6 +316,7 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | **Batch** | `apply_batch` (ordered multi-op write batch committing all-or-nothing in one transaction; edge ops may reference batch-created nodes via `$alias`/`$<index>` local refs; see below) |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
+| **Embeddings** | `embed_query`, `embed_text`, `semantic_search`, `create_node_with_embedding`, `update_node_embedding` (generate embeddings from text and run text-based semantic search; require the `embeddings` feature + a configured model, else return a structured unavailable/precondition error — see [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md#mcp-embedding-tools)) |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
