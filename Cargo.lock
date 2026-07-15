@@ -92,6 +92,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aletheia-bench-ldbc"
+version = "0.1.0"
+dependencies = [
+ "aletheiadb",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aletheia-eval"
 version = "0.1.0"
 dependencies = [

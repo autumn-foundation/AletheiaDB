@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "suite": "ldbc-style-snb-subset",
+  "disclaimer": "LDBC-STYLE, NOT AN AUDITED LDBC RESULT. Built-in synthetic generator (not official LDBC Datagen); single-node; incumbents not run in this environment. See docs/METHODOLOGY.md for every deviation.",
+  "generated_at": "2026-07-15T01:27:14Z",
+  "generated_at_unix": 1784078834,
+  "hardware": {
+    "arch": "x86_64",
+    "os": "linux",
+    "logical_cpus": 4,
+    "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+    "total_mem_mib": 16075
+  },
+  "config": {
+    "scale": "smoke",
+    "seed": 42,
+    "warmup": 30,
+    "iterations": 300,
+    "node_count": 222,
+    "edge_count": 702,
+    "vector_count": 48,
+    "vector_dim": 32
+  },
+  "operations": [
+    {
+      "key": "is1_person_profile",
+      "description": "Fetch a single person's profile node",
+      "snb_analogue": "IS1",
+      "category": "short_read",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 0.065,
+        "max_us": 0.713,
+        "mean_us": 0.10286333333333353,
+        "p50_us": 0.068,
+        "p95_us": 0.385,
+        "p99_us": 0.664
+      }
+    },
+    {
+      "key": "is2_person_recent_messages",
+      "description": "List messages (posts/comments) authored by a person",
+      "snb_analogue": "IS2",
+      "category": "short_read",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 0.171,
+        "max_us": 1.686,
+        "mean_us": 0.438973333333333,
+        "p50_us": 0.376,
+        "p95_us": 0.978,
+        "p99_us": 1.555
+      }
+    },
+    {
+      "key": "is3_person_friends",
+      "description": "List a person's direct KNOWS friends",
+      "snb_analogue": "IS3",
+      "category": "short_read",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 0.369,
+        "max_us": 1.745,
+        "mean_us": 0.5031166666666668,
+        "p50_us": 0.406,
+        "p95_us": 0.863,
+        "p99_us": 1.427
+      }
+    },
+    {
+      "key": "is5_message_creator",
+      "description": "Resolve the creator of a post (HAS_CREATOR)",
+      "snb_analogue": "IS5",
+      "category": "short_read",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 0.21,
+        "max_us": 0.58,
+        "mean_us": 0.23616666666666636,
+        "p50_us": 0.223,
+        "p95_us": 0.273,
+        "p99_us": 0.392
+      }
+    },
+    {
+      "key": "is6_forum_of_message",
+      "description": "Resolve the forum containing a post (CONTAINER_OF)",
+      "snb_analogue": "IS6",
+      "category": "short_read",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 0.192,
+        "max_us": 0.5,
+        "mean_us": 0.21381666666666657,
+        "p50_us": 0.2,
+        "p95_us": 0.239,
+        "p99_us": 0.379
+      }
+    },
+    {
+      "key": "ic1_friends_within_2_hops",
+      "description": "Friends of friends within two hops (node-distinct BFS)",
+      "snb_analogue": "IC1",
+      "category": "complex_read",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 3.767,
+        "max_us": 28.189,
+        "mean_us": 4.270206666666667,
+        "p50_us": 4.072,
+        "p95_us": 4.556,
+        "p99_us": 5.077
+      }
+    },
+    {
+      "key": "ic2_recent_messages_by_friends",
+      "description": "Messages authored by a person's direct friends",
+      "snb_analogue": "IC2",
+      "category": "complex_read",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 2.404,
+        "max_us": 54.453,
+        "mean_us": 3.060643333333334,
+        "p50_us": 2.797,
+        "p95_us": 3.123,
+        "p99_us": 3.337
+      }
+    },
+    {
+      "key": "ic9_messages_by_friends_of_friends",
+      "description": "Messages authored by friends-of-friends (2-hop) of a person",
+      "snb_analogue": "IC9",
+      "category": "complex_read",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 13.66,
+        "max_us": 46.359,
+        "mean_us": 16.34001333333333,
+        "p50_us": 15.857,
+        "p95_us": 18.957,
+        "p99_us": 35.748
+      }
+    },
+    {
+      "key": "ins1_insert_person",
+      "description": "Insert a new Person node",
+      "snb_analogue": "INS1",
+      "category": "insert_update",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 2593.842,
+        "max_us": 3577.238,
+        "mean_us": 2879.2063500000013,
+        "p50_us": 2856.661,
+        "p95_us": 3141.54,
+        "p99_us": 3295.493
+      }
+    },
+    {
+      "key": "ins6_insert_post",
+      "description": "Insert a new Post node with a creator edge",
+      "snb_analogue": "INS6",
+      "category": "insert_update",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 5144.433,
+        "max_us": 6880.394,
+        "mean_us": 5843.5260599999965,
+        "p50_us": 5811.15,
+        "p95_us": 6192.169,
+        "p99_us": 6550.915
+      }
+    },
+    {
+      "key": "upd2_update_person_city",
+      "description": "Update a person's city property (bi-temporal revision)",
+      "snb_analogue": "UPD-PERSON",
+      "category": "insert_update",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 2693.058,
+        "max_us": 3627.514,
+        "mean_us": 3004.4418433333312,
+        "p50_us": 2979.393,
+        "p95_us": 3265.388,
+        "p99_us": 3430.705
+      }
+    },
+    {
+      "key": "ext_temporal_reconstruction",
+      "description": "Point-in-time reconstruction of a revised person's historical state (NON-STANDARD)",
+      "snb_analogue": "EXT-TEMPORAL",
+      "category": "temporal_extension",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 0.12,
+        "max_us": 0.173,
+        "mean_us": 0.12662666666666694,
+        "p50_us": 0.125,
+        "p95_us": 0.145,
+        "p99_us": 0.15
+      },
+      "extra": {
+        "reconstruction_target_ms": 10,
+        "revised_person_count": 15
+      }
+    },
+    {
+      "key": "ext_temporal_as_of_traversal",
+      "description": "AS OF traversal of KNOWS edges at a historical valid time (NON-STANDARD)",
+      "snb_analogue": "EXT-TEMPORAL",
+      "category": "temporal_extension",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 1.505,
+        "max_us": 55.161,
+        "mean_us": 2.3584699999999996,
+        "p50_us": 1.58,
+        "p95_us": 6.908,
+        "p99_us": 12.043
+      }
+    },
+    {
+      "key": "ext_vector_knn",
+      "description": "k-NN (k=10) over post embeddings (NON-STANDARD)",
+      "snb_analogue": "EXT-VECTOR",
+      "category": "vector_extension",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 4.47,
+        "max_us": 31.638,
+        "mean_us": 6.883836666666669,
+        "p50_us": 6.877,
+        "p95_us": 7.694,
+        "p99_us": 12.113
+      },
+      "extra": {
+        "knn_k": 10,
+        "target_scale_note": "1M-vector target is ASPIRATIONAL / NOT RUN in this environment; vector_count is the scale actually measured",
+        "vector_count": 48,
+        "vector_dim": 32
+      }
+    },
+    {
+      "key": "ext_vector_hybrid_graph_vector",
+      "description": "Hybrid: traverse Forum CONTAINER_OF Posts then rank by embedding similarity (NON-STANDARD)",
+      "snb_analogue": "EXT-VECTOR",
+      "category": "vector_extension",
+      "iterations": 300,
+      "stats": {
+        "count": 300,
+        "min_us": 2.033,
+        "max_us": 69.341,
+        "mean_us": 2.69411,
+        "p50_us": 2.429,
+        "p95_us": 3.28,
+        "p99_us": 4.355
+      },
+      "extra": {
+        "knn_k": 10
+      }
+    }
+  ]
+}

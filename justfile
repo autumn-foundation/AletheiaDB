@@ -43,6 +43,32 @@ mcp-bench-baseline sample='300' warmup='30':
     MCP_BENCH_WRITE_BASELINE=benchmarks/baselines/mcp_round_trip_baseline.json \
     cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
 
+# LDBC-style benchmark suite (Issue #3373). Informational — NOT part of the
+# gating `just bench` path. Runs the AletheiaDB-side SNB subset + temporal &
+# vector extensions at the given scale and emits a machine-readable JSON report.
+# Defaults to the tiny `smoke` size. Requires an explicit `-p` (isolated crate).
+#   just bench-ldbc                 # smoke, writes ldbc_results.json
+#   just bench-ldbc sf0.1 300 30    # SF0.1-equivalent, 300 iters, 30 warmup
+bench-ldbc scale='smoke' iterations='200' warmup='20' out='ldbc_results.json':
+    cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- \
+        --scale {{scale}} --iterations {{iterations}} --warmup {{warmup}} --out {{out}}
+
+# Regenerate the committed LDBC-style regression baseline for a scale (run on a
+# stable reference machine; commit the result). Refresh per release/hardware.
+bench-ldbc-baseline scale='smoke' iterations='300' warmup='30':
+    cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- \
+        --scale {{scale}} --iterations {{iterations}} --warmup {{warmup}} \
+        --out crates/aletheia-bench-ldbc/baselines/ldbc_{{scale}}_baseline.json \
+        --write-baseline crates/aletheia-bench-ldbc/baselines/ldbc_{{scale}}_baseline.json
+
+# Run the LDBC-style suite and check it against the committed baseline; exits
+# non-zero on a >10% p99 regression (the AletheiaDB-only regression gate).
+bench-ldbc-gate scale='smoke' iterations='200' warmup='20':
+    cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- \
+        --scale {{scale}} --iterations {{iterations}} --warmup {{warmup}} \
+        --out ldbc_results.json --check-gate \
+        --baseline crates/aletheia-bench-ldbc/baselines/ldbc_{{scale}}_baseline.json
+
 # Run benchmarks and generate HTML tables
 bench-tables:
     cargo bench --all-features
