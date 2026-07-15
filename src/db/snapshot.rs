@@ -258,40 +258,57 @@ impl SnapshotRegistry {
     /// database startup**. On such a file we log a warning, quarantine it aside
     /// (rename to `*.corrupt`, preserving the bytes for inspection), and start
     /// with an empty registry. Legacy v1 files (bare-integer timestamps) still
-    /// load normally via the [`ts_hlc`] tolerant deserializer. Only a genuine
-    /// read I/O error (e.g. permissions) is surfaced, since that is an operator
-    /// problem the empty-registry fallback cannot paper over.
+    /// load normally via the [`ts_hlc`] tolerant deserializer.
+    ///
+    /// The load is driven off a single `read_to_string` (no `exists()`
+    /// pre-check, so no TOCTOU gap): a `NotFound` error is the normal first-run
+    /// case and silently yields an empty registry, while **any other** read I/O
+    /// error (permissions, a sharing violation, on-disk corruption surfacing as
+    /// an I/O error) is treated exactly like a parse failure — warn, quarantine,
+    /// start empty — so an operator problem still cannot brick startup for a
+    /// non-critical bookmark file.
     pub(crate) fn open(path: Option<PathBuf>) -> Result<Self> {
         let registry = Self {
             entries: RwLock::new(HashMap::new()),
             persist_path: path.clone(),
             save_lock: parking_lot::Mutex::new(()),
         };
-        if let Some(path) = path
-            && path.exists()
-        {
-            let contents = std::fs::read_to_string(&path)?;
-            match serde_json::from_str::<PersistedRegistry>(&contents) {
-                Ok(parsed) if parsed.version <= PERSIST_FORMAT_VERSION => {
-                    let mut entries = registry.entries.write();
-                    for snapshot in parsed.snapshots {
-                        entries.insert(snapshot.name.clone(), snapshot);
+        if let Some(path) = path {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => match serde_json::from_str::<PersistedRegistry>(&contents) {
+                    Ok(parsed) if parsed.version <= PERSIST_FORMAT_VERSION => {
+                        let mut entries = registry.entries.write();
+                        for snapshot in parsed.snapshots {
+                            entries.insert(snapshot.name.clone(), snapshot);
+                        }
                     }
-                }
-                Ok(parsed) => {
-                    log_registry_warning(&format!(
-                        "snapshot registry at {} has unsupported future version {} (this build \
-                         understands up to {}); quarantining it and starting with an empty \
-                         registry",
-                        path.display(),
-                        parsed.version,
-                        PERSIST_FORMAT_VERSION
-                    ));
-                    quarantine_corrupt_registry(&path);
-                }
+                    Ok(parsed) => {
+                        log_registry_warning(&format!(
+                            "snapshot registry at {} has unsupported future version {} (this \
+                             build understands up to {}); quarantining it and starting with an \
+                             empty registry",
+                            path.display(),
+                            parsed.version,
+                            PERSIST_FORMAT_VERSION
+                        ));
+                        quarantine_corrupt_registry(&path);
+                    }
+                    Err(e) => {
+                        log_registry_warning(&format!(
+                            "failed to parse snapshot registry at {} ({e}); quarantining it and \
+                             starting with an empty registry",
+                            path.display()
+                        ));
+                        quarantine_corrupt_registry(&path);
+                    }
+                },
+                // Missing file is the normal first-run case: start empty, no warning.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // Any other read I/O error (permissions, sharing violation,
+                // corruption) must not brick startup: warn, quarantine, empty.
                 Err(e) => {
                     log_registry_warning(&format!(
-                        "failed to parse snapshot registry at {} ({e}); quarantining it and \
+                        "failed to read snapshot registry at {} ({e}); quarantining it and \
                          starting with an empty registry",
                         path.display()
                     ));
@@ -308,6 +325,15 @@ impl SnapshotRegistry {
     /// [`StorageError::DuplicateId`](crate::core::error::StorageError::DuplicateId),
     /// which maps to the #3234 `CONFLICT` code) if the name is already taken.
     pub(crate) fn insert(&self, snapshot: NamedSnapshot) -> Result<()> {
+        // Serialize the whole mutate+save under `save_lock` (outermost). Two
+        // concurrent inserts must not interleave such that the later save wins
+        // on disk while the earlier one rolls back its in-memory entry, leaving
+        // an on-disk entry absent from RAM. Holding `save_lock` across the
+        // conflict-check, insert, and save closes that observable divergence
+        // window. No deadlock: the `entries` write guard is dropped before
+        // `save_locked()` (which only takes `entries.read()`), and the rollback
+        // re-takes `entries.write()` only after `save_locked()` returns.
+        let _guard = self.save_lock.lock();
         let name = {
             let mut entries = self.entries.write();
             if entries.contains_key(&snapshot.name) {
@@ -319,7 +345,7 @@ impl SnapshotRegistry {
         };
         // Roll back the in-memory insert if the disk save fails, so RAM and disk
         // never diverge (the caller sees Err *and* the entry is not registered).
-        if let Err(e) = self.save() {
+        if let Err(e) = self.save_locked() {
             self.entries.write().remove(&name);
             return Err(e);
         }
@@ -346,6 +372,12 @@ impl SnapshotRegistry {
     ///
     /// Returns a `NOT_FOUND`-classed error if the name is absent.
     pub(crate) fn remove(&self, name: &str) -> Result<()> {
+        // Serialize the whole mutate+save under `save_lock` (outermost),
+        // symmetric to `insert`, so a concurrent remove/insert cannot leave RAM
+        // and disk diverged. Same no-deadlock argument: the `entries` write
+        // guard is dropped before `save_locked()`, and the re-insert on failure
+        // re-takes `entries.write()` only after it returns.
+        let _guard = self.save_lock.lock();
         let removed = {
             let mut entries = self.entries.write();
             match entries.remove(name) {
@@ -355,7 +387,7 @@ impl SnapshotRegistry {
         };
         // Re-insert the removed entry if the disk save fails, so RAM and disk
         // never diverge (the caller sees Err *and* the entry is still present).
-        if let Err(e) = self.save() {
+        if let Err(e) = self.save_locked() {
             self.entries.write().insert(removed.name.clone(), removed);
             return Err(e);
         }
@@ -365,11 +397,29 @@ impl SnapshotRegistry {
     /// Atomically persist the registry to its sidecar file (temp file +
     /// rename + parent fsync), mirroring the auth key store. A no-op for
     /// in-memory-only registries.
+    ///
+    /// Acquires `save_lock` and delegates to [`save_locked`](Self::save_locked).
+    /// Callers already holding `save_lock` (the `insert`/`remove` mutate+save
+    /// critical sections) must call `save_locked` directly instead — this
+    /// `Mutex` is not reentrant. Retained as the standalone lock-acquiring save
+    /// entry point (both current callers hold `save_lock` and use `save_locked`,
+    /// so this is currently unused).
+    #[allow(dead_code)]
     fn save(&self) -> Result<()> {
+        let _guard = self.save_lock.lock();
+        self.save_locked()
+    }
+
+    /// The durable-write body of [`save`](Self::save), **assuming `save_lock`
+    /// is already held** by the caller. A no-op for in-memory-only registries.
+    ///
+    /// Only ever takes `entries.read()` (to snapshot the map for serialization),
+    /// never `save_lock`, so it composes safely inside the `insert`/`remove`
+    /// critical sections that hold `save_lock` across the whole mutate+save.
+    fn save_locked(&self) -> Result<()> {
         let Some(path) = &self.persist_path else {
             return Ok(());
         };
-        let _guard = self.save_lock.lock();
 
         let mut snapshots: Vec<NamedSnapshot> = self.entries.read().values().cloned().collect();
         snapshots.sort_by(|a, b| {
@@ -892,6 +942,40 @@ mod tests {
             "quarantined file exists"
         );
     }
+
+    #[test]
+    fn open_quarantines_future_version_and_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshots.json");
+        // A well-formed sidecar whose version is NEWER than this build
+        // understands must be treated exactly like corruption: quarantine and
+        // start empty, never brick startup or misread newer-format entries.
+        let future = format!(
+            r#"{{ "version": {}, "snapshots": [] }}"#,
+            PERSIST_FORMAT_VERSION + 1
+        );
+        std::fs::write(&path, future.as_bytes()).unwrap();
+
+        let reg = SnapshotRegistry::open(Some(path.clone())).unwrap();
+        assert!(
+            reg.list().is_empty(),
+            "future-version registry starts empty"
+        );
+        // The unsupported file is preserved aside for inspection.
+        assert!(!path.exists(), "future-version file was moved aside");
+        assert!(
+            dir.path().join("snapshots.json.corrupt").exists(),
+            "quarantined file exists"
+        );
+    }
+
+    // NOTE: an unreadable-file (non-NotFound I/O error) `open` case — e.g. a
+    // `chmod 000` sidecar exercising the generic `Err(e)` quarantine arm — is
+    // deliberately NOT tested here: the suite frequently runs as root (in CI
+    // containers), and root bypasses Unix permission bits, so `read_to_string`
+    // would succeed and the test could not reliably provoke the error. The arm
+    // shares the parse-failure quarantine path, which the corrupt-sidecar and
+    // future-version tests already cover.
 
     #[test]
     fn insert_rolls_back_on_save_failure() {
