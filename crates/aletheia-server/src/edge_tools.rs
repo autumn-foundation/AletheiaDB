@@ -89,6 +89,14 @@ use serde_json::{Map, Value};
 /// cursorable (#3360). The other ten tools in that cluster are not budgetable /
 /// cursorable and forward through typed methods, so they are not dispatch-routed
 /// and do not appear here.
+///
+/// The three dispatch-routed **vector/hybrid/query** reads (`find_similar`,
+/// `hybrid_query`, `query`) are pinned here too (see
+/// [`crate::vector_query_tools`]): all three are budgetable (#3353) so they
+/// forward raw arguments through `dispatch_tool_json` under the slow-read guard;
+/// none is cursorable. The fourth tool in that cluster, `list_vector_indexes`,
+/// is not budgetable / cursorable and forwards through a typed method, so it is
+/// not dispatch-routed and does not appear here.
 pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("get_edge", AccessClass::Read),
     ("list_edges", AccessClass::Read),
@@ -99,6 +107,9 @@ pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("find_nodes_at_time", AccessClass::Read),
     ("traverse", AccessClass::Read),
     ("get_node_history", AccessClass::Read),
+    ("find_similar", AccessClass::Read),
+    ("hybrid_query", AccessClass::Read),
+    ("query", AccessClass::Read),
 ];
 
 /// Parse an MCP tool method's JSON string result into a [`Value`] for the HTTP
