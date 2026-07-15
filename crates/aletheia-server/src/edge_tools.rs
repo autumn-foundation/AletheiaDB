@@ -110,6 +110,7 @@ pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("find_similar", AccessClass::Read),
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
+    ("get_schema", AccessClass::Read),
 ];
 
 /// Parse an MCP tool method's JSON string result into a [`Value`] for the HTTP

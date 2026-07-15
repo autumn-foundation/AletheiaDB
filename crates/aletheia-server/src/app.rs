@@ -14,6 +14,7 @@
 use crate::edge_tools;
 use crate::http_routes;
 use crate::node_tools;
+use crate::schema_batch_tools;
 use crate::security::{self, SecurityConfig};
 use crate::state::ServerState;
 use crate::traverse_temporal_tools;
@@ -103,6 +104,10 @@ pub fn try_build_server_testapp(
             vector_query_tools::hybrid_query,
             vector_query_tools::query,
             vector_query_tools::list_vector_indexes,
+            schema_batch_tools::get_schema,
+            schema_batch_tools::temporal_extent,
+            schema_batch_tools::database_stats,
+            schema_batch_tools::apply_batch,
         ])
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");
