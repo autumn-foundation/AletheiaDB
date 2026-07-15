@@ -5293,6 +5293,65 @@ mod vector_elision_tests {
         assert_eq!(returned_floats, embedding);
     }
 
+    // Issue #2906 (MAJOR 3): `update_node_embedding` merges the new embedding
+    // into the node's existing properties inside a SINGLE write transaction.
+    // This exercises the exact transactional read-merge-write mechanism the
+    // handler uses (without needing a model): reading the node from the
+    // transaction's own snapshot, inserting the vector into the existing
+    // property builder, and updating — proving every other property is
+    // preserved and the merge is atomic (so a lost-update race cannot silently
+    // drop a concurrent writer's non-embedding change).
+    #[test]
+    fn update_embedding_transactional_merge_preserves_other_properties() {
+        use crate::api::transaction::{ReadOps, WriteOps, WriteRequestOptions};
+
+        let db = AletheiaDB::new().expect("db");
+
+        // Seed a node with non-embedding properties and an initial embedding.
+        let initial = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .try_insert_vector("embedding", &[0.1f32, 0.2, 0.3, 0.4])
+            .expect("seed vector")
+            .build();
+        let node_id = db.create_node("Person", initial).expect("create");
+
+        // Merge a NEW embedding, reproducing the handler's transaction closure.
+        let new_embedding = vec![0.9f32, 0.8, 0.7, 0.6];
+        db.write(|tx| {
+            let node = tx.get_node(node_id)?;
+            let properties = node
+                .properties
+                .builder()
+                .try_insert_vector("embedding", &new_embedding)
+                .expect("insert vector")
+                .build();
+            tx.update_node_with_options(node_id, properties, WriteRequestOptions::new())?;
+            Ok::<(), crate::Error>(())
+        })
+        .expect("transactional update");
+
+        // Non-embedding properties survive the embedding-only update.
+        let node = db.get_node(node_id).expect("get after update");
+        assert_eq!(
+            node.properties.get("name").and_then(|v| v.as_str()),
+            Some("Alice"),
+            "name must be preserved across the embedding update"
+        );
+        assert_eq!(
+            node.properties.get("age").and_then(|v| v.as_int()),
+            Some(30),
+            "age must be preserved across the embedding update"
+        );
+        // And the embedding itself was updated to the new vector.
+        let stored = node
+            .properties
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .expect("embedding vector present");
+        assert_eq!(stored, new_embedding.as_slice(), "embedding was updated");
+    }
+
     #[test]
     fn test_list_nodes_elides_vectors_by_default() {
         let server = create_test_server();
@@ -16665,6 +16724,68 @@ mod embedding_tools_tests {
             let (v, err) = dispatch(&server, "embed_text", serde_json::json!({"texts": texts}));
             assert!(err);
             assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        // Issue #2906 AC: `max_chunks: 0` can never return anything useful and is
+        // rejected as a caller error *before* any model is required.
+        #[test]
+        fn embed_text_zero_max_chunks_is_invalid_argument() {
+            let server = create_test_server(); // no model needed: validated first
+            let (v, err) = dispatch(
+                &server,
+                "embed_text",
+                serde_json::json!({"texts": ["hello"], "max_chunks": 0}),
+            );
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        // Issue #2906 AC: `embed_text` performs REAL chunk expansion. The
+        // model-independent splitter is the load-bearing piece — a long document
+        // becomes MULTIPLE chunks (never silently truncated to one vector), each
+        // chunk is bounded, and reassembling the chunks reproduces the input
+        // exactly (no data dropped). The per-chunk embeddings are then aligned to
+        // these chunk texts via EmbedData, so alignment is by identity, not a
+        // positional zip.
+        #[test]
+        fn split_text_into_chunks_short_input_is_single_chunk() {
+            let chunks = crate::mcp::server::split_text_into_chunks("hello", 1000);
+            assert_eq!(chunks, vec!["hello".to_string()]);
+        }
+
+        #[test]
+        fn split_text_into_chunks_long_input_expands_to_many_bounded_chunks() {
+            let text = "a".repeat(25);
+            let chunks = crate::mcp::server::split_text_into_chunks(&text, 4);
+            // 25 chars / 4 per window = 7 chunks (6 full + 1 remainder).
+            assert_eq!(chunks.len(), 7, "long text must expand to many chunks");
+            for c in &chunks {
+                assert!(c.chars().count() <= 4, "each chunk is bounded: {c:?}");
+            }
+            // Lossless: concatenation reproduces the original document exactly.
+            assert_eq!(chunks.concat(), text, "no data dropped across chunks");
+        }
+
+        #[test]
+        fn split_text_into_chunks_respects_char_boundaries() {
+            // Multibyte scalars must never be split mid-encoding; every chunk is
+            // valid UTF-8 (String guarantees it) and counts by scalar value.
+            let text = "héllo wörld 🌍🌎🌏";
+            let chunks = crate::mcp::server::split_text_into_chunks(text, 3);
+            for c in &chunks {
+                assert!(c.chars().count() <= 3);
+                assert!(std::str::from_utf8(c.as_bytes()).is_ok());
+            }
+            assert_eq!(chunks.concat(), text);
+            assert!(chunks.len() > 1, "multibyte document still expands");
+        }
+
+        #[test]
+        fn split_text_into_chunks_empty_input_yields_one_empty_chunk() {
+            assert_eq!(
+                crate::mcp::server::split_text_into_chunks("", 1000),
+                vec![String::new()]
+            );
         }
 
         #[test]

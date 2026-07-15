@@ -215,6 +215,48 @@ const MAX_EMBED_TEXTS: usize = 256;
 #[cfg(feature = "embeddings")]
 const MAX_EMBED_CHUNKS: usize = 512;
 
+/// Character window size used to chunk-expand each `embed_text` input document
+/// before embedding (Issue #2906). A long document is split into contiguous
+/// windows of at most this many Unicode scalar values, so it yields MULTIPLE
+/// aligned embeddings instead of being silently truncated to a single vector.
+/// Matches `embed_anything`'s default document chunk size.
+#[cfg(feature = "embeddings")]
+const EMBED_CHUNK_SIZE_CHARS: usize = 1000;
+
+/// Split `text` into contiguous character windows of at most `chunk_size_chars`
+/// Unicode scalar values each (Issue #2906 chunk expansion).
+///
+/// A deterministic, model-independent splitter so a long `embed_text` input
+/// document expands into MULTIPLE chunks (each subsequently embedded and
+/// aligned to its own [`EmbedData`](crate::embeddings::EmbedData)) rather than
+/// being silently truncated to a single vector. Splits on Unicode scalar
+/// boundaries, so every chunk is valid UTF-8. Empty input yields a single empty
+/// chunk (callers validate non-empty input upstream). `chunk_size_chars` must
+/// be non-zero.
+#[cfg(feature = "embeddings")]
+pub(crate) fn split_text_into_chunks(text: &str, chunk_size_chars: usize) -> Vec<String> {
+    debug_assert!(chunk_size_chars > 0, "chunk size must be non-zero");
+    let chunk_size_chars = chunk_size_chars.max(1);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0usize;
+    for ch in text.chars() {
+        current.push(ch);
+        count += 1;
+        if count == chunk_size_chars {
+            chunks.push(std::mem::take(&mut current));
+            count = 0;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 /// Default maximum number of operations accepted by a single `apply_batch`
 /// call (Issue #3231). Deliberately far below the core transaction buffer's
 /// own DoS cap (`WriteBuffer::DEFAULT_MAX_OPERATIONS` = 50,000), so the MCP
@@ -4101,9 +4143,14 @@ impl AletheiaMcpServer {
     ///
     /// Returns `Err(CallToolResult)` — a structured `UNAVAILABLE` — instead of
     /// panicking when there is no current runtime or the runtime is
-    /// single-threaded (`block_in_place` requires the multi-thread flavor). The
-    /// `aletheia-mcp` binary and `aletheia-server` both run on a multi-thread
-    /// runtime, so the happy path always applies there.
+    /// single-threaded. `tokio::task::block_in_place` (which lets us block the
+    /// current worker on the embedding future without stalling the whole
+    /// runtime) is only legal on a **multi-thread** runtime worker; it panics on
+    /// a current-thread runtime. That is exactly why the current-thread flavor
+    /// is pre-checked here and short-circuited to `UNAVAILABLE` rather than
+    /// allowed to reach `block_in_place`. The `aletheia-mcp` binary and
+    /// `aletheia-server` both run on a multi-thread runtime, so the happy path
+    /// always applies there.
     #[cfg(feature = "embeddings")]
     #[allow(clippy::result_large_err)]
     fn block_on_embedding<F>(&self, fut: F) -> std::result::Result<F::Output, CallToolResult>
@@ -4167,9 +4214,11 @@ impl AletheiaMcpServer {
         let data = match embedded {
             Ok(d) => d,
             Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("embed_query: embedding generation failed: {e}");
                 return self.error_result(McpError::new(
                     McpErrorCode::Internal,
-                    format!("Embedding generation failed: {e}"),
+                    "embedding generation failed",
                 ));
             }
         };
@@ -4188,9 +4237,17 @@ impl AletheiaMcpServer {
         }
     }
 
-    /// Embed multiple texts, returning per-chunk dense embeddings aligned via
-    /// [`EmbedData`](crate::embeddings::EmbedData) (never a positional zip),
-    /// honoring a chunk cap (Issue #2906).
+    /// Embed multiple texts with real chunk expansion (Issue #2906): each input
+    /// document is split into contiguous character windows
+    /// ([`split_text_into_chunks`]) and every chunk is embedded independently
+    /// via [`process_chunks`](crate::embeddings::process_chunks), so a long
+    /// document produces MULTIPLE embeddings rather than one truncated vector.
+    /// Results are aligned to their source chunk through
+    /// [`EmbedData`](crate::embeddings::EmbedData) (`.text`/`.metadata`), never
+    /// a positional zip; `metadata` carries the originating `source_index` and
+    /// `chunk_index`. `max_chunks` is a hard cap on the returned embeddings; the
+    /// response sets `truncated: true` when the cap trims the expansion. A
+    /// `max_chunks` of `0` is rejected as INVALID_ARGUMENT.
     #[cfg(feature = "embeddings")]
     fn handle_embed_text(&self, args: serde_json::Value) -> CallToolResult {
         let req: EmbedTextRequest = match serde_json::from_value(args) {
@@ -4214,6 +4271,10 @@ impl AletheiaMcpServer {
                 oversized.len()
             ));
         }
+        // A zero cap is a caller error: it can never return anything useful.
+        if req.max_chunks == Some(0) {
+            return self.invalid_argument("max_chunks must be greater than zero");
+        }
         let chunk_cap = req
             .max_chunks
             .map_or(MAX_EMBED_CHUNKS, |m| m.min(MAX_EMBED_CHUNKS));
@@ -4222,10 +4283,36 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
-        let texts = req.texts;
+        // Chunk-expand each input document into contiguous character windows,
+        // preserving source alignment via metadata (never a positional zip).
+        // Each chunk is embedded independently and re-aligned to its own
+        // `EmbedData` below, so a long document yields MULTIPLE embeddings
+        // instead of being silently truncated to one vector (Issue #2906 AC).
+        let mut chunk_texts: Vec<String> = Vec::new();
+        let mut chunk_meta: Vec<Option<std::collections::HashMap<String, String>>> = Vec::new();
+        for (source_index, text) in req.texts.iter().enumerate() {
+            for (chunk_index, chunk) in split_text_into_chunks(text, EMBED_CHUNK_SIZE_CHARS)
+                .into_iter()
+                .enumerate()
+            {
+                let mut meta = std::collections::HashMap::new();
+                meta.insert("source_index".to_string(), source_index.to_string());
+                meta.insert("chunk_index".to_string(), chunk_index.to_string());
+                chunk_texts.push(chunk);
+                chunk_meta.push(Some(meta));
+            }
+        }
+        // Honor `max_chunks` as a hard cap on the returned embeddings, and
+        // disclose when the cap trimmed the expansion.
+        let truncated = chunk_texts.len() > chunk_cap;
+        if truncated {
+            chunk_texts.truncate(chunk_cap);
+            chunk_meta.truncate(chunk_cap);
+        }
+
         let embedded = match self.block_on_embedding(async move {
-            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-            crate::embeddings::embed_query(&refs, embedder.as_ref(), None).await
+            crate::embeddings::process_chunks(&chunk_texts, &chunk_meta, &embedder, None, None)
+                .await
         }) {
             Ok(r) => r,
             Err(result) => return result,
@@ -4233,15 +4320,20 @@ impl AletheiaMcpServer {
         let data = match embedded {
             Ok(d) => d,
             Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("embed_text: embedding generation failed: {e}");
                 return self.error_result(McpError::new(
                     McpErrorCode::Internal,
-                    format!("Embedding generation failed: {e}"),
+                    "embedding generation failed",
                 ));
             }
         };
 
+        // `process_chunks` returns a fresh `Arc<Vec<EmbedData>>` (refcount 1),
+        // so `try_unwrap` recovers the owned vector without cloning.
+        let data = Arc::try_unwrap(data).unwrap_or_else(|arc| arc.as_ref().clone());
         let mut chunks = Vec::new();
-        for item in crate::embeddings::embed_data_to_dense_iter(data, Some(chunk_cap)) {
+        for item in crate::embeddings::embed_data_to_dense_iter(data, None) {
             match item {
                 Ok(dense) => {
                     let dim = dense.embedding.len();
@@ -4260,7 +4352,7 @@ impl AletheiaMcpServer {
             }
         }
         let count = chunks.len();
-        self.success_json(json!({ "chunks": chunks, "count": count }))
+        self.success_json(json!({ "chunks": chunks, "count": count, "truncated": truncated }))
     }
 
     /// Embed `query_text` and reuse the exact `find_similar` path so the
@@ -4301,9 +4393,11 @@ impl AletheiaMcpServer {
         let data = match embedded {
             Ok(d) => d,
             Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("semantic_search: embedding generation failed: {e}");
                 return self.error_result(McpError::new(
                     McpErrorCode::Internal,
-                    format!("Embedding generation failed: {e}"),
+                    "embedding generation failed",
                 ));
             }
         };
@@ -4415,7 +4509,8 @@ impl AletheiaMcpServer {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let now = time::now();
-                    let response = self.node_to_response(&node, false, now);
+                    // Write path returns the full vector it just wrote.
+                    let response = self.node_to_response(&node, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -4430,8 +4525,14 @@ impl AletheiaMcpServer {
     /// Embed `text` and update ONLY the embedding property of an existing node,
     /// preserving all other properties (Issue #2906).
     ///
-    /// `update_node` replaces every property, so this first reads the node and
-    /// merges its existing properties before overriding the embedding.
+    /// The embedding is generated FIRST (a slow, network/CPU-bound step holding
+    /// no snapshot or lock), then the read-merge-write runs inside a SINGLE
+    /// [`write`](crate::db::AletheiaDB::write) transaction: `update_node`
+    /// replaces every property, so the existing properties are re-read from the
+    /// transaction's own snapshot and merged before overriding the embedding.
+    /// Doing the read and the write in one transaction closes the lost-update
+    /// race — a concurrent writer that commits in the window is caught by
+    /// commit-time conflict detection instead of being silently overwritten.
     #[cfg(feature = "embeddings")]
     fn handle_update_node_embedding(&self, args: serde_json::Value) -> CallToolResult {
         let req: UpdateNodeEmbeddingRequest = match serde_json::from_value(args) {
@@ -4459,50 +4560,65 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
-        // Read current properties FIRST so the update preserves every other
-        // property (update_node replaces all properties).
-        let node = match self.db.get_node(node_id) {
-            Ok(n) => n,
-            Err(e) => return self.db_error(e),
-        };
-
+        // Embed FIRST (slow, network/CPU-bound), holding no snapshot or lock,
+        // so the transaction window below stays as short as possible.
         let embedding = match self.embed_one(&req.text, embedder) {
             Ok(v) => v,
             Err(result) => return result,
         };
 
-        let properties = match node
-            .properties
-            .builder()
-            .try_insert_vector(&req.embedding_property, &embedding)
-        {
-            Ok(b) => b.build(),
-            Err(e) => {
-                return self.invalid_argument(&format!("Invalid embedding property: {}", e));
-            }
-        };
-
-        let mut options = crate::api::transaction::WriteRequestOptions::new();
-        if let Some(valid_from) = valid_from {
-            options = options.with_valid_from(valid_from);
-        }
         // Stamp the authenticated principal (if any) onto the version.
         let provenance = match self.parse_opt_provenance(None) {
             Ok(p) => p,
             Err(result) => return result,
         };
-        if let Some(provenance) = provenance {
-            options = options.with_provenance(provenance);
+
+        // Read + merge + write inside ONE transaction so the merge sees the
+        // transaction's own snapshot and commit-time conflict detection guards
+        // against a concurrent writer being silently lost (Issue #2906 fix).
+        let embedding_property = req.embedding_property;
+
+        /// Local error type bridging the property-builder failure (a caller
+        /// fault) and storage errors through the `db.write` closure.
+        enum UpdateEmbeddingError {
+            Db(crate::core::error::Error),
+            Vector(String),
+        }
+        impl From<crate::core::error::Error> for UpdateEmbeddingError {
+            fn from(e: crate::core::error::Error) -> Self {
+                UpdateEmbeddingError::Db(e)
+            }
         }
 
-        match self
-            .db
-            .update_node_with_options(node_id, properties, options)
-        {
+        let write_result = self.db.write(|tx| {
+            use crate::api::transaction::ReadOps;
+            let node = tx.get_node(node_id)?;
+            let properties = node
+                .properties
+                .builder()
+                .try_insert_vector(&embedding_property, &embedding)
+                .map_err(|e| {
+                    UpdateEmbeddingError::Vector(format!("Invalid embedding property: {e}"))
+                })?
+                .build();
+
+            let mut options = crate::api::transaction::WriteRequestOptions::new();
+            if let Some(valid_from) = valid_from {
+                options = options.with_valid_from(valid_from);
+            }
+            if let Some(provenance) = provenance {
+                options = options.with_provenance(provenance);
+            }
+            tx.update_node_with_options(node_id, properties, options)?;
+            Ok::<(), UpdateEmbeddingError>(())
+        });
+
+        match write_result {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let now = time::now();
-                    let response = self.node_to_response(&node, false, now);
+                    // Write path returns the full vector it just wrote.
+                    let response = self.node_to_response(&node, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -4510,7 +4626,8 @@ impl AletheiaMcpServer {
                 }
                 Err(e) => self.db_error(e),
             },
-            Err(e) => self.db_error(e),
+            Err(UpdateEmbeddingError::Vector(msg)) => self.invalid_argument(&msg),
+            Err(UpdateEmbeddingError::Db(e)) => self.db_error(e),
         }
     }
 
@@ -4528,9 +4645,11 @@ impl AletheiaMcpServer {
             crate::embeddings::embed_query(&[owned.as_str()], embedder.as_ref(), None).await
         })?;
         let data = embedded.map_err(|e| {
+            // Do not leak upstream provider/model/path detail to the caller.
+            eprintln!("embed_one: embedding generation failed: {e}");
             self.error_result(McpError::new(
                 McpErrorCode::Internal,
-                format!("Embedding generation failed: {e}"),
+                "embedding generation failed",
             ))
         })?;
         match crate::embeddings::to_dense_iter(data.into_iter().map(|d| d.embedding), Some(1))
@@ -7455,11 +7574,17 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "embed_text",
-            "Generate dense embeddings for multiple texts (Issue #2906). Returns per-chunk \
-                     results `{text, metadata, embedding, dim}` aligned to their source chunks \
-                     (never a positional zip), honoring an optional `max_chunks` cap. Requires the \
-                     `embeddings` feature and a configured model; otherwise returns a structured \
-                     FAILED_PRECONDITION error. Input count and size are bounded.",
+            "Generate dense embeddings for multiple texts with real chunk expansion (Issue \
+                     #2906): each input document is split into contiguous character windows and \
+                     every chunk is embedded independently, so a long document yields MULTIPLE \
+                     embeddings instead of one truncated vector. Returns per-chunk results \
+                     `{text, metadata, embedding, dim}` aligned to their source chunk via the \
+                     model's own chunk output (never a positional zip); `metadata` carries the \
+                     originating `source_index` and `chunk_index`. An optional `max_chunks` caps \
+                     the returned embeddings (a value of 0 is rejected as INVALID_ARGUMENT); the \
+                     response sets `truncated: true` when the cap trims the expansion. Requires \
+                     the `embeddings` feature and a configured model; otherwise returns a \
+                     structured FAILED_PRECONDITION error. Input count and size are bounded.",
             make_input_schema::<EmbedTextRequest>(),
         ),
         Tool::new(

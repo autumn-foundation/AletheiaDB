@@ -31,7 +31,7 @@
 //!
 //! This registry is anchored on `tests/parity/inventory.json` — the inventory's
 //! `mcp.tools[].access_class` is the shared source of truth. It enumerates all
-//! 46 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
+//! 51 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
 //! checks it bidirectionally against the inventory, and
 //! `mcp_routable_tools_are_all_classified` checks the live routable set is a
 //! subset (every routable tool classified). Handlers become routable one slice

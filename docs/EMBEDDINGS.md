@@ -185,7 +185,7 @@ configured they return `FAILED_PRECONDITION` ("no embedding model configured").
 | Tool | Class | Input | Returns |
 |------|-------|-------|---------|
 | `embed_query` | read | `{text, model?}` | `{embedding, dim}` |
-| `embed_text` | read | `{texts[], model?, max_chunks?}` | `{chunks:[{text, metadata, embedding, dim}], count}` |
+| `embed_text` | read | `{texts[], model?, max_chunks?}` | `{chunks:[{text, metadata, embedding, dim}], count, truncated}` |
 | `semantic_search` | read | `{property_name, query_text, k?, offset?, include_vectors?, model?}` | the exact `find_similar` envelope |
 | `create_node_with_embedding` | write | `{label, text, embedding_property, properties?, valid_time?, provenance?}` | the created node |
 | `update_node_embedding` | write | `{node_id, text, embedding_property, valid_time?}` | the updated node |
@@ -197,9 +197,22 @@ Notes:
   `score`, `temporal` block, vector elision, offset pagination, token budget). It
   refuses with `FAILED_PRECONDITION` when no vector index exists for
   `property_name`, and `INVALID_ARGUMENT` on an embedding-dimension mismatch.
-- `update_node_embedding` **preserves** every other property: because
-  `update_node` replaces all properties, it first reads the node and merges its
-  existing properties, then overrides only `embedding_property`.
+- `embed_text` performs **real chunk expansion**: each input document is split
+  into contiguous character windows (`process_chunks` under the hood, not a
+  single whole-document `embed_query`), so a long document yields **multiple**
+  per-chunk embeddings instead of one silently-truncated vector. Every chunk's
+  embedding is aligned to its source chunk text via `EmbedData` (never a
+  positional zip); each chunk's `metadata` carries the originating `source_index`
+  and `chunk_index`. `max_chunks` is a **hard cap** on the total returned
+  embeddings — when it trims the expansion the response sets `truncated: true`;
+  `max_chunks: 0` is rejected as `INVALID_ARGUMENT`.
+- `update_node_embedding` **preserves** every other property, and does so
+  **race-free**: it embeds first (holding no snapshot or lock), then performs the
+  read-merge-write inside a **single** write transaction (because `update_node`
+  replaces all properties, it re-reads the node from the transaction's own
+  snapshot and merges the existing properties before overriding only
+  `embedding_property`). A concurrent writer that commits in the window is caught
+  by commit-time conflict detection instead of being silently lost.
 - Inputs are bounded (per-text byte cap, text-count cap, chunk cap); over-cap
   inputs are rejected with `INVALID_ARGUMENT`.
 - The `model` field is reserved/advisory in v1 — the server always uses its

@@ -120,7 +120,7 @@
       "pinned_by": "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable"
     },
     "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable (external mirror — internal-consistency only)",
-    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 46 pairs — the authoritative drift detector)",
+    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 51 pairs — the authoritative drift detector)",
     "budgetable_read_tools": ["get_node", "list_nodes", "get_edge", "list_edges", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "semantic_search", "hybrid_query", "query", "find_nodes_at_time", "get_node_history", "get_schema"],
     "provenance_filterable_read_tools": {
       "$comment": "Issue #3348: read tools that accept the optional additive provenance filter params (provenance_source, provenance_sources, min_confidence, include_unattributed). Purely additive — omitting all four is byte-identical to prior behavior, so this does NOT change the tool name/class golden. Source of truth: PROVENANCE_FILTERABLE_TOOLS in src/mcp/server.rs. Behavior pinned by src/mcp/tests.rs::provenance_filter_tests.",
@@ -187,8 +187,8 @@
       "area": "MCP advertised-tool dispatch sweep",
       "status": "partially closed",
       "why": "tool_definitions()/list_tools_for_test()/dispatch_tool are pub(crate); the rmcp ServerHandler list_tools/call_tool entry is not reachable from an external test crate (rmcp is not a dev-dependency and is not re-exported). Per house rules we do not add pub to production code.",
-      "closed_part": "Full 46-name/class DRIFT DETECTION is now closed: the in-crate golden src/mcp/auth_tests.rs::live_tool_inventory_matches_golden reads the live registry and fails on any tool added/removed/renamed/reclassified. The external tests/parity_mcp.rs::tool_inventory_golden_is_stable mirrors that constant cross-crate.",
-      "remaining_gap": "What stays external-unreachable is per-tool RUNTIME BEHAVIOR for the 42 non-behavior-tested tools: only the 4 behavior-pinned tools (get_node, create_node, create_edge, traverse) have black-box runtime assertions in tests/parity_mcp.rs; the other 42 are name/class-pinned only. Their dispatch/error-on-invalid-args behavior remains enforced in-crate.",
+      "closed_part": "Full 51-name/class DRIFT DETECTION is now closed: the in-crate golden src/mcp/auth_tests.rs::live_tool_inventory_matches_golden reads the live registry and fails on any tool added/removed/renamed/reclassified. The external tests/parity_mcp.rs::tool_inventory_golden_is_stable mirrors that constant cross-crate.",
+      "remaining_gap": "What stays external-unreachable is per-tool RUNTIME BEHAVIOR for the 47 non-behavior-tested tools: only the 4 behavior-pinned tools (get_node, create_node, create_edge, traverse) have black-box runtime assertions in tests/parity_mcp.rs; the other 47 are name/class-pinned only. Their dispatch/error-on-invalid-args behavior remains enforced in-crate.",
       "referenced_test": "src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments (~line 9257); src/mcp/auth_tests.rs::live_tool_inventory_matches_golden"
     },
     {

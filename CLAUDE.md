@@ -511,10 +511,11 @@ temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
 `get_node_history`), which have no `include_vectors` flag and always return
 full vectors.
 
-**Token-budget-aware responses (Issue #3353)**: the thirteen budgetable read
+**Token-budget-aware responses (Issue #3353)**: the fourteen budgetable read
 tools — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
 `get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
-`hybrid_query`, `query`, `find_nodes_at_time`, `get_node_history`, `get_schema`
+`semantic_search`, `hybrid_query`, `query`, `find_nodes_at_time`,
+`get_node_history`, `get_schema`
 (the single source of truth is `BUDGETABLE_READ_TOOLS`; not *every* read tool —
 e.g. `get_node_at_time`, `get_edge_history`, `diff_node_versions`,
 `temporal_extent`, `database_stats`, `count_nodes` are out of scope) — accept an

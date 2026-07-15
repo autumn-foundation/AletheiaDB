@@ -723,11 +723,15 @@ pub struct EmbedQueryRequest {
 /// (`embed_text`).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EmbedTextRequest {
-    /// The texts to embed. Each entry yields one or more per-chunk embeddings.
+    /// The texts to embed. Each entry is chunk-expanded into one or more
+    /// per-chunk embeddings.
     #[schemars(
-        description = "The texts to embed. Each entry yields one or more per-chunk embeddings, \
-                       each aligned to its source chunk text and metadata (never positionally \
-                       zipped)."
+        description = "The texts to embed. Each entry is split into contiguous character-window \
+                       chunks and every chunk is embedded independently, so a long document yields \
+                       MULTIPLE per-chunk embeddings (never truncated to one). Each embedding is \
+                       aligned to its source chunk text and metadata via the model's own chunk \
+                       output (never positionally zipped); the metadata carries the originating \
+                       source_index and chunk_index."
     )]
     pub texts: Vec<String>,
 
@@ -740,8 +744,10 @@ pub struct EmbedTextRequest {
 
     /// Optional cap on the number of returned chunk embeddings.
     #[schemars(
-        description = "Optional cap on the number of returned per-chunk embeddings. Clamped to the \
-                       server maximum."
+        description = "Optional hard cap on the number of returned per-chunk embeddings across all \
+                       inputs. Clamped to the server maximum. When the cap trims the chunk \
+                       expansion the response sets `truncated: true`. A value of 0 is rejected as \
+                       INVALID_ARGUMENT."
     )]
     pub max_chunks: Option<usize>,
 }
