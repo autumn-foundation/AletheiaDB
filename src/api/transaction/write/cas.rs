@@ -8,7 +8,13 @@
 //! time. If the precondition holds, the persisted artifact is an ordinary
 //! `UpdateNode`/`UpdateEdge` op carrying the full replacement property map, so
 //! there is **zero WAL on-disk format change**. If it fails, the whole
-//! transaction aborts with [`TransactionError::CasMismatch`] and writes nothing.
+//! transaction aborts with [`TransactionError::CasMismatch`] and applies nothing
+//! to in-memory state. A pure-CAS mismatch is rejected pre-WAL by the fast-path
+//! (see below), so the common single-threaded case writes nothing durable
+//! either; a mismatch that only manifests under the commit guard (a concurrent
+//! pure-CAS race, or any lease claim) still leaves a durable frame that would
+//! replay on crash absent WAL abort framing (#3413) — the same accepted caveat
+//! as the #3416 sibling write-skew checks.
 //!
 //! CAS uses **full-replace** semantics for the property map (like the #3549
 //! replace API, not the PATCH merge of `update_node`): a CAS is a conditional
@@ -17,21 +23,29 @@
 //!
 //! # Where the authoritative check lives
 //!
-//! The precondition is re-checked in [`detect_cas_precondition_violations`],
-//! invoked from [`apply::apply_changes`](super::apply::apply_changes) **under
-//! the already-held `historical.write()` commit-serialization guard** — the same
+//! The **authoritative** precondition check lives in
+//! [`detect_cas_precondition_violations`], invoked from
+//! [`apply::apply_changes`](super::apply::apply_changes) **under the
+//! already-held `historical.write()` commit-serialization guard** — the same
 //! place the #3416 delete-orphan / dangling-endpoint write-skew re-checks run.
-//!
-//! A pre-lock check (e.g. in [`conflict::detect_conflicts`](super::conflict))
-//! would be a TOCTOU race: two claimants opened on the same snapshot could both
-//! read `expected == current` before either commits, both pass, and both write.
 //! Only re-reading the committed head **while holding the guard that serializes
-//! commits** makes the second claimant observe the first's new version and abort.
-//! Consequently CAS-target entities are **excluded** from the pre-lock
-//! snapshot-isolation conflict check (see `conflict::detect_conflicts`): the
-//! version-based CAS precondition wholly replaces first-committer-wins for those
-//! entities, and its abort is a non-retriable `CasMismatch` rather than a
-//! retriable `SerializationFailure` (a lost claim must not be blindly retried).
+//! commits** makes the second of two concurrent claimants observe the first's
+//! new version and abort. Its abort is a non-retriable `CasMismatch` rather than
+//! a retriable `SerializationFailure` (a lost claim must not be blindly retried),
+//! which is why CAS-target entities are **excluded** from the pre-lock
+//! snapshot-isolation conflict check.
+//!
+//! A **best-effort pre-lock fast-path** in
+//! [`conflict::detect_conflicts`](super::conflict) additionally short-circuits a
+//! **pure** CAS (`lease: None`) whose expected version already fails to match
+//! the committed head, BEFORE any WAL frame is appended — so the common,
+//! single-threaded stale-CAS path writes nothing durable at all. This is only
+//! sound for pure CAS: the committed head advances monotonically, so a pre-lock
+//! mismatch can never become a match at commit. It is NOT sound for a lease
+//! claim (whose expiry OR-branch can flip true relative to the later commit
+//! timestamp) and is NOT a replacement for the under-guard check (two concurrent
+//! pure-CAS both pass the fast-path; the under-guard check catches the loser).
+//! See `conflict::detect_conflicts` for the full argument.
 //!
 //! # Lock order
 //!
@@ -280,6 +294,11 @@ impl WriteTransaction {
     ///
     /// The property key names are caller-supplied (a convention, not a hardcoded
     /// schema). Lease expiry is evaluated against the commit HLC timestamp.
+    ///
+    /// Note: the lease is stored and compared at **wallclock-microsecond**
+    /// granularity — `lease_until.wallclock()` drops the HLC logical component,
+    /// as does the commit-timestamp comparison in `lease_until_expired_at` — so
+    /// two leases differing only in their logical tick compare equal.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn claim_with_lease_impl(
         &mut self,
@@ -397,17 +416,73 @@ fn node_lease_expired(
     commit_timestamp: Timestamp,
 ) -> bool {
     match tx.current.get_node(node_id) {
-        Ok(node) => match node
-            .properties
-            .get(lease_until_key)
-            .and_then(|v| v.as_int())
-        {
-            // Lease held until `until_us`; expired iff that instant is at or
-            // before the commit timestamp.
-            Some(until_us) => until_us <= commit_timestamp.wallclock(),
-            // No integer lease recorded — treat as unclaimed / expired.
-            None => true,
-        },
+        Ok(node) => {
+            // A missing key OR a non-integer value (e.g. a String `lease_until`)
+            // maps to `None` here, which the predicate treats as unclaimed —
+            // admitting the claim. This is intentional: a malformed lease is not
+            // a valid hold.
+            let until_us = node
+                .properties
+                .get(lease_until_key)
+                .and_then(|v| v.as_int());
+            lease_until_expired_at(until_us, commit_timestamp.wallclock())
+        }
         Err(_) => false,
+    }
+}
+
+/// Pure boundary predicate for lease expiry: is a `lease_until` of `until_us`
+/// microseconds (or `None` for absent/non-integer, i.e. unclaimed) expired at
+/// commit wallclock `commit_wallclock`?
+///
+/// The lease is considered **expired** (claim admitted) iff `until_us <=
+/// commit_wallclock` — so a lease whose expiry instant is *exactly* the commit
+/// timestamp counts as EXPIRED (boundary is inclusive), and one microsecond
+/// later counts as HELD. `None` (no integer lease recorded) is unclaimed →
+/// expired. Extracted as a pure fn so the exact boundary is unit-testable
+/// without constructing a live transaction.
+fn lease_until_expired_at(until_us: Option<i64>, commit_wallclock: i64) -> bool {
+    match until_us {
+        Some(until_us) => until_us <= commit_wallclock,
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod lease_boundary_tests {
+    use super::lease_until_expired_at;
+
+    #[test]
+    fn lease_until_equal_to_commit_is_expired() {
+        // Boundary: lease_until == commit wallclock. The code uses `<=`, so this
+        // must count as EXPIRED (claim admitted).
+        assert!(
+            lease_until_expired_at(Some(1_000), 1_000),
+            "lease_until == commit must be EXPIRED (inclusive boundary)"
+        );
+    }
+
+    #[test]
+    fn lease_until_one_micro_after_commit_is_held() {
+        // lease_until == commit + 1 microsecond -> still HELD.
+        assert!(
+            !lease_until_expired_at(Some(1_001), 1_000),
+            "lease_until == commit + 1us must be HELD"
+        );
+    }
+
+    #[test]
+    fn lease_until_before_commit_is_expired() {
+        assert!(lease_until_expired_at(Some(999), 1_000));
+    }
+
+    #[test]
+    fn absent_or_non_integer_lease_is_unclaimed() {
+        // `None` models both a missing key and a non-integer value (e.g. a
+        // String `lease_until`, which `as_int()` yields `None` for): unclaimed.
+        assert!(
+            lease_until_expired_at(None, 1_000),
+            "absent / non-integer lease must be treated as unclaimed (expired)"
+        );
     }
 }

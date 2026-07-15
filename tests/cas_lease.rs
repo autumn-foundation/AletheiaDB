@@ -370,6 +370,176 @@ fn claim_succeeds_when_lease_expired_despite_stale_version() {
 }
 
 // -------------------------------------------------------------------------
+// 8b. Concurrent claim of an EXPIRED lease: exactly one claimant wins.
+//     Both threads open on the same base (an expired lease + stale v1) and
+//     race to commit a FUTURE lease. The lease-expired OR-branch admits both
+//     pre-lock (lease claims are excluded from the pure-CAS fast-path), so the
+//     AUTHORITATIVE under-guard re-check is what enforces "exactly one winner":
+//     the loser observes the winner's fresh (future) lease and aborts.
+// -------------------------------------------------------------------------
+#[test]
+fn concurrent_expired_lease_claim_exactly_one_wins() {
+    let db = Arc::new(AletheiaDB::new().unwrap());
+    let id = db
+        .create_node("Job", PropertyMapBuilder::new().insert("j", "J1").build())
+        .unwrap();
+    let v1 = db.get_node(id).unwrap().current_version;
+
+    // Owner A claims with a lease ALREADY in the past -> head advances to v2 and
+    // the lease is expired relative to any later commit timestamp.
+    db.claim_with_lease(
+        id,
+        v1,
+        "lease_owner",
+        "lease_until",
+        PropertyValue::from("A"),
+        past_ts(60),
+        PropertyMapBuilder::new().insert("j", "J1").build(),
+    )
+    .unwrap();
+
+    // Two claimants B and C, both opened on the SAME base (v1 is stale, lease
+    // expired), each writing a FUTURE lease. Exactly one may win.
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+    for owner in ["B", "C"] {
+        let db = Arc::clone(&db);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let mut tx = db.write_transaction().unwrap();
+            tx.claim_with_lease(
+                id,
+                v1,
+                "lease_owner",
+                "lease_until",
+                PropertyValue::from(owner),
+                future_ts(3600),
+                PropertyMapBuilder::new().insert("j", "J1").build(),
+            )
+            .unwrap();
+            barrier.wait();
+            tx.commit()
+        }));
+    }
+
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let successes = results.iter().filter(|r| r.is_ok()).count();
+    let mismatches = results
+        .iter()
+        .filter(|r| matches!(r, Err(e) if matches!(e, Error::Transaction(TransactionError::CasMismatch { .. }))))
+        .count();
+
+    assert_eq!(
+        successes, 1,
+        "exactly one expired-lease claim wins: {results:?}"
+    );
+    assert_eq!(
+        mismatches, 1,
+        "the loser must get CasMismatch (lease now held by the winner): {results:?}"
+    );
+
+    // The winner holds a future lease.
+    let node = db.get_node(id).unwrap();
+    let owner = node
+        .get_property("lease_owner")
+        .and_then(|v| v.as_str().map(String::from));
+    assert!(
+        owner == Some("B".to_string()) || owner == Some("C".to_string()),
+        "winner is one of the two claimants, got {owner:?}"
+    );
+    assert!(
+        node.get_property("lease_until")
+            .and_then(|v| v.as_int())
+            .map(|until| until > time::now().wallclock())
+            .unwrap_or(false),
+        "winner installed a future lease_until"
+    );
+}
+
+// -------------------------------------------------------------------------
+// 8c. claim_with_lease on a nonexistent node -> CasMismatch { actual: None }
+//     (no panic, mirrors the pure-CAS nonexistent-node contract).
+// -------------------------------------------------------------------------
+#[test]
+fn claim_with_lease_nonexistent_node_is_cas_mismatch_none() {
+    let db = AletheiaDB::new().unwrap();
+    let ghost = aletheiadb::core::NodeId::new(888_888).unwrap();
+    let err = db
+        .claim_with_lease(
+            ghost,
+            VersionId::new(1).unwrap(),
+            "lease_owner",
+            "lease_until",
+            PropertyValue::from("worker"),
+            future_ts(60),
+            PropertyMapBuilder::new().insert("j", "J1").build(),
+        )
+        .expect_err("claim of a nonexistent node must fail, not panic");
+    assert_cas_mismatch(&err, Some(false));
+}
+
+// -------------------------------------------------------------------------
+// 8d. Non-integer `lease_until` is treated as UNCLAIMED (expired): a claim on
+//     a stale version whose current lease_until is a String is admitted. This
+//     documents the `as_int() -> None => unclaimed` behavior (a malformed lease
+//     is not a valid hold). Behavior is intentional; asserted, not changed.
+// -------------------------------------------------------------------------
+#[test]
+fn non_integer_lease_until_is_treated_as_unclaimed() {
+    let db = AletheiaDB::new().unwrap();
+    // Node carries a STRING lease_until (not the integer-microseconds convention).
+    let id = db
+        .create_node(
+            "Job",
+            PropertyMapBuilder::new()
+                .insert("j", "J1")
+                .insert("lease_until", "whenever")
+                .build(),
+        )
+        .unwrap();
+    let v1 = db.get_node(id).unwrap().current_version;
+
+    // Advance the head (PATCH update preserves the String lease_until) so v1 is
+    // stale. The version branch will NOT match at claim time.
+    db.update_node_with_valid_time(
+        id,
+        PropertyMapBuilder::new().insert("j", "J1b").build(),
+        None,
+    )
+    .unwrap();
+    assert_ne!(db.get_node(id).unwrap().current_version, v1);
+
+    // Claim with the STALE v1. Version does not match, but the current
+    // lease_until is a non-integer String -> treated as unclaimed -> admitted.
+    let new_version = db
+        .claim_with_lease(
+            id,
+            v1,
+            "lease_owner",
+            "lease_until",
+            PropertyValue::from("taker"),
+            future_ts(60),
+            PropertyMapBuilder::new().insert("j", "J1b").build(),
+        )
+        .expect("non-integer lease_until must be treated as unclaimed, admitting the claim");
+
+    let node = db.get_node(id).unwrap();
+    assert_eq!(node.current_version, new_version);
+    assert_eq!(
+        node.get_property("lease_owner")
+            .and_then(|v| v.as_str().map(String::from)),
+        Some("taker".to_string())
+    );
+    // The claim installed the integer-microseconds convention going forward.
+    assert!(
+        node.get_property("lease_until")
+            .and_then(|v| v.as_int())
+            .is_some(),
+        "claim overwrote the malformed lease_until with an integer"
+    );
+}
+
+// -------------------------------------------------------------------------
 // 10. Returned versions chain: CAS(expected=v2) ok, CAS(expected=v1) fails.
 // -------------------------------------------------------------------------
 #[test]

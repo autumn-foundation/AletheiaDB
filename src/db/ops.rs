@@ -748,6 +748,42 @@ impl AletheiaDB {
         })
     }
 
+    /// [`claim_with_lease`](Self::claim_with_lease) with a
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle, so a top-level caller can backdate the claim's `valid_from` and/or
+    /// attach write-time provenance (Issue #3577).
+    ///
+    /// The "exactly one winner" lease guarantee is unaffected: claimants write a
+    /// **future** `lease_until`, so at most one concurrent claim can find the
+    /// lease expired-or-matching under the commit-serialization guard. See
+    /// [`WriteOps::claim_with_lease_with_options`](crate::api::transaction::WriteOps::claim_with_lease_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_lease_with_options(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.claim_with_lease_with_options(
+                node_id,
+                expected_version,
+                lease_owner_key,
+                lease_until_key,
+                owner,
+                lease_until,
+                properties,
+                options,
+            )
+        })
+    }
+
     // ===== Replace / tombstone (non-PATCH) writes (Issue #3549) =====
 
     /// Replace a node's entire property map AND label (full overwrite, non-PATCH).
