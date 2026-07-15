@@ -1,0 +1,60 @@
+{
+  "name": "@aletheiadb/client",
+  "version": "0.1.0",
+  "description": "Official TypeScript client SDK for AletheiaDB — typed bi-temporal graph + vector queries over the HTTP API.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "COMPATIBILITY.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.examples.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "node scripts/smoke.mjs && node scripts/smoke.cjs",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run test && npm run build"
+  },
+  "keywords": [
+    "aletheiadb",
+    "graph-database",
+    "bi-temporal",
+    "temporal",
+    "vector-search",
+    "llm",
+    "client",
+    "sdk"
+  ],
+  "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "@types/node": "^20.19.43",
+    "eslint": "^9.13.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.11.0",
+    "vitest": "^2.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/madmax983/AletheiaDB.git",
+    "directory": "clients/typescript"
+  }
+}

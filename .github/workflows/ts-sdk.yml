@@ -1,0 +1,60 @@
+# TypeScript client SDK checks (Issue #3369).
+#
+# NEW, informational workflow scoped to `clients/typescript/**`. It does NOT
+# modify or gate any existing job; it runs the SDK's own install/lint/typecheck/
+# test/build pipeline on Node LTS. Tests use record-replay fetch fixtures (no
+# live server binary), so no Rust build is required here.
+name: ts-sdk
+
+on:
+  push:
+    paths:
+      - 'clients/typescript/**'
+      - '.github/workflows/ts-sdk.yml'
+  pull_request:
+    paths:
+      - 'clients/typescript/**'
+      - '.github/workflows/ts-sdk.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: clients/typescript
+
+jobs:
+  build-and-test:
+    name: lint · typecheck · test · build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: clients/typescript/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint (bans `any` in the public surface)
+        run: npm run lint
+
+      - name: Typecheck (strict; src + examples)
+        run: npm run typecheck
+
+      - name: Test (vitest, record-replay fixtures)
+        run: npm run test
+
+      - name: Build (ESM + CJS + d.ts)
+        run: npm run build
+
+      - name: Entry-point smoke (ESM + CJS import cleanly)
+        run: npm run smoke
