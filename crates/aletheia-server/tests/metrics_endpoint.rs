@@ -12,6 +12,7 @@
 //! process-wide enum (`category`, `event`). These tests assert that no
 //! credential material leaks into the body.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use aletheia_server::build_server_client;
@@ -25,6 +26,44 @@ const METRICS_TOKEN: &str = "metrics-probe-token-abcdef";
 /// The exact content type the endpoint must advertise (Prometheus text format
 /// version 0.0.4, per the issue's acceptance criteria).
 const PROM_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
+
+/// The complete, bounded set of label keys the exposition is allowed to emit —
+/// both are process-wide enums, neither is per-principal/per-request.
+const ALLOWED_LABEL_KEYS: &[&str] = &["category", "event"];
+
+/// The exact number of time series the exposition emits: 7 error categories +
+/// 3 critical events + 2 unlabeled scalars (write_conflicts, transaction_commits).
+/// Pinning this count makes a future label/series addition fail loudly rather
+/// than silently widening the exposed surface.
+const EXPECTED_SERIES_COUNT: usize = 12;
+
+/// Parse every sample line's label KEYS (the identifiers left of each `=`) and
+/// count the total number of sample (time-series) lines. Comment/blank lines are
+/// ignored. This is the allowlist primitive the info-disclosure guard uses.
+fn label_keys_and_series_count(body: &str) -> (BTreeSet<String>, usize) {
+    let mut keys = BTreeSet::new();
+    let mut series = 0usize;
+    for line in body.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        series += 1;
+        let Some(open) = line.find('{') else {
+            continue; // an unlabeled scalar sample
+        };
+        let close = line
+            .find('}')
+            .expect("labelled sample must close its brace");
+        for pair in line[open + 1..close].split(',') {
+            if pair.trim().is_empty() {
+                continue;
+            }
+            let key = pair.split('=').next().expect("label pair has a key").trim();
+            keys.insert(key.to_string());
+        }
+    }
+    (keys, series)
+}
 
 /// A minimal DB plus an auth store carrying an admin key and a metrics-role key.
 fn fixture() -> (Arc<AletheiaDB>, Arc<AuthStore>) {
@@ -211,8 +250,9 @@ async fn metrics_endpoint_does_not_leak_credentials() {
         .await;
     assert_eq!(resp.status.as_u16(), 200);
     let body = resp.text();
-    // No token, principal id, key prefix, role name, or principal-y label key
-    // may appear anywhere in the exposition.
+
+    // Denylist (kept): no token, principal id, key prefix, or role name may
+    // appear anywhere in the exposition.
     assert!(!body.contains(ADMIN_TOKEN), "admin token must not leak");
     assert!(!body.contains(METRICS_TOKEN), "metrics token must not leak");
     for forbidden in ["principal", "api_key", "apikey", "token", "key_prefix"] {
@@ -221,4 +261,19 @@ async fn metrics_endpoint_does_not_leak_credentials() {
             "exposition must not contain a {forbidden:?} label/name"
         );
     }
+
+    // Allowlist (stronger): the set of emitted label KEYS must be a subset of the
+    // two bounded process-wide enums, and the total time-series count must equal
+    // the pinned constant. This fails loudly if a future edit wires in an extra
+    // label (e.g. the unused durability_mode/status constants) or a new series.
+    let allowed: BTreeSet<String> = ALLOWED_LABEL_KEYS.iter().map(|s| s.to_string()).collect();
+    let (keys, series) = label_keys_and_series_count(&body);
+    assert!(
+        keys.is_subset(&allowed),
+        "emitted label keys {keys:?} must be a subset of the bounded set {allowed:?}"
+    );
+    assert_eq!(
+        series, EXPECTED_SERIES_COUNT,
+        "exposition must emit exactly {EXPECTED_SERIES_COUNT} time series (7 error categories + 3 critical events + 2 scalars)"
+    );
 }

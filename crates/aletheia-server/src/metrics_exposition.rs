@@ -278,13 +278,50 @@ mod tests {
 
     #[test]
     fn labels_are_bounded_enums_only_no_secrets() {
+        use std::collections::BTreeSet;
+
         let body = render_prometheus(&distinct_snapshot());
-        // The only label keys ever emitted are `category` and `event`.
+
+        // Denylist (kept): no secret-y substring may appear.
         for forbidden in ["principal", "api_key", "token", "key_prefix", "role="] {
             assert!(
                 !body.contains(forbidden),
                 "exposition must not emit a {forbidden:?} label"
             );
         }
+
+        // Allowlist (stronger): parse the label KEYS off every sample line and
+        // assert the set is a subset of the two bounded process-wide enums, and
+        // that the total series count is exactly 12 (7 error categories + 3
+        // critical events + 2 unlabeled scalars). A future edit that wires in an
+        // extra label (e.g. the unused `METRIC_LABEL_DURABILITY_MODE` /
+        // `METRIC_LABEL_STATUS`) or a new series fails here.
+        let allowed: BTreeSet<&str> = ["category", "event"].into_iter().collect();
+        let mut keys: BTreeSet<String> = BTreeSet::new();
+        let mut series = 0usize;
+        for line in body.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            series += 1;
+            if let Some(open) = line.find('{') {
+                let close = line.find('}').expect("labelled sample closes its brace");
+                for pair in line[open + 1..close].split(',') {
+                    if pair.trim().is_empty() {
+                        continue;
+                    }
+                    let key = pair.split('=').next().expect("label pair has a key").trim();
+                    keys.insert(key.to_string());
+                }
+            }
+        }
+        assert!(
+            keys.iter().all(|k| allowed.contains(k.as_str())),
+            "emitted label keys {keys:?} must be a subset of {allowed:?}"
+        );
+        assert_eq!(
+            series, 12,
+            "render must emit exactly 12 time series (7 error categories + 3 critical events + 2 scalars)"
+        );
     }
 }
