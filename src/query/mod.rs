@@ -99,8 +99,6 @@ pub mod planner;
 pub mod read_only;
 pub mod result;
 pub mod semantic_pathfinding;
-/// Query execution traits.
-pub mod traits;
 
 // Re-export commonly used types
 pub use ast::QueryAst;
@@ -115,4 +113,3 @@ pub use plan::{LogicalOp, LogicalPlan};
 pub use planner::{PhysicalPlan, QueryPlanner};
 pub use result::{EntityHistory, VersionDiff, VersionInfo, VersionSummary};
 pub use semantic_pathfinding::SemanticPathfinder;
-pub use traits::GraphView;
