@@ -214,10 +214,14 @@ impl RateLimitSettings {
 ///
 /// **Unified 403 envelope (Issue #3234):** the HTTP-surface 403 now carries the
 /// same nested `{error: {code, message, retriable, details}}` envelope as the
-/// MCP surface, including `details: {required_class, principal_role}`. The
-/// legacy message-only body has been retired in the breaking HTTP error-envelope
-/// unification; the `required_class` / `principal_role` are threaded through the
-/// [`AletheiaHttpError::PermissionDenied`] variant.
+/// MCP surface, including `details: {required_class, principal_role}`.
+/// Single-shape 403 (supersedes cross-lane ruling F4 (two-shape 403), per the
+/// user-approved #3234 unification): HTTP 403 carries
+/// `details:{required_class, principal_role}` identically to the MCP surface —
+/// no NEW disclosure (MCP already surfaced these via the same shared enums).
+/// The legacy message-only body has been retired in the breaking HTTP
+/// error-envelope unification; the `required_class` / `principal_role` are
+/// threaded through the [`AletheiaHttpError::PermissionDenied`] variant.
 ///
 /// # Errors
 ///

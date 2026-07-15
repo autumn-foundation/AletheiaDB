@@ -243,13 +243,14 @@ impl AletheiaHttpError {
     #[must_use]
     pub(crate) fn code_str(&self) -> &'static str {
         match self {
-            Self::BadRequest(_) | Self::QueryParse(_) => "INVALID_ARGUMENT",
+            Self::BadRequest(_) | Self::QueryParse(_) | Self::InvalidLimitOverride(_) => {
+                "INVALID_ARGUMENT"
+            }
             Self::NotFound(_) => "NOT_FOUND",
             Self::Internal(_) | Self::StateMissing => "INTERNAL",
             Self::Unauthorized => "UNAUTHENTICATED",
             Self::PermissionDenied { .. } => "PERMISSION_DENIED",
             Self::ResourceLimitExceeded(_) => "RESOURCE_EXHAUSTED",
-            Self::InvalidLimitOverride(_) => "INVALID_ARGUMENT",
             Self::InFlightCapacityExceeded { .. } => "UNAVAILABLE",
         }
     }

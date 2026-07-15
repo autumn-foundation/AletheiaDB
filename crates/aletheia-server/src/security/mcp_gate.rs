@@ -60,9 +60,13 @@
 //! HTTP-surface 403 ([`crate::security::authorize_class`] →
 //! [`AletheiaHttpError::PermissionDenied`]) emit the **same** nested
 //! `{error:{code, message, retriable, details}}` envelope, including
-//! `details: {required_class, principal_role}`. The legacy asymmetry (a
-//! message-only HTTP 403) was retired in the breaking HTTP error-envelope
-//! unification, so the two surfaces are now byte-shape-identical. Because the
+//! `details: {required_class, principal_role}`. Single-shape 403 (supersedes
+//! cross-lane ruling F4 (two-shape 403), per the user-approved #3234
+//! unification): HTTP 403 now carries `details:{required_class, principal_role}`
+//! identically to the MCP surface — no NEW disclosure (MCP already surfaced
+//! these via the same shared enums). The legacy message-only HTTP 403 was
+//! retired in the breaking HTTP error-envelope unification, so the two surfaces
+//! are now byte-shape-identical. Because the
 //! gate fails closed on every tool-executing frame it cannot identify (point 4),
 //! no MCP tools/call reaches the dispatch handler's 403 path without first
 //! passing the gate's detail-carrying precheck.

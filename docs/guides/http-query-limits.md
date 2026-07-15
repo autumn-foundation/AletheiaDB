@@ -150,9 +150,12 @@ The merge is a single tested function
 
 ## Error contract
 
-All limit errors keep the existing `{success:false, error:"…"}` body and add the
-`code` / `retriable` / `details` fields (aligning the HTTP surface toward the MCP
-`#3234` contract). Existing non-limit error bodies are unchanged.
+Since the #3234 HTTP error-envelope unification, all limit errors render the
+nested `{"error":{"code","message","retriable","details"}}` body (byte-shape-
+identical to the MCP surface), with the active trace id carried additively as a
+top-level `trace_id` sibling of `error`. The legacy flat
+`{"success":false,"error":"…"}` body has been removed. Existing non-limit error
+bodies now use this same nested shape.
 
 ### `429` — wall-clock timeout
 
