@@ -9,10 +9,19 @@
 //! `find_similar_as_of(now)` returned a phantom hit for a fact whose embedding
 //! had been deleted.
 //!
-//! The bi-temporal contract these tests pin down: removing/overwriting an
+//! The bi-temporal contract these tests exercise: removing/overwriting an
 //! embedding CLOSES the interval at the current time (a snapshot taken AFTER the
 //! change no longer contains the old vector), while snapshots taken BEFORE the
 //! change still retain it (history is preserved, never erased).
+//!
+//! Fix-discriminating vs regression-lock: only the REMOVAL case (`Some -> None`)
+//! actually fails on trunk before the fix — that is what the add-only temporal
+//! helper mishandled — so `remove_vector_property_deindexes_current_but_preserves_history`
+//! is the guard that pins the fix. The overwrite (`Some -> Some`) and
+//! unrelated-update tests below PASS on trunk too (trunk's add-only helper
+//! already upserted on `Some -> Some` via `HnswIndex::add`); they are kept as
+//! regression locks that the de-index change did not break overwrite or
+//! over-remove on an unrelated update.
 
 use aletheiadb::core::temporal::{Timestamp, time};
 use aletheiadb::db::SimilarityQuery;
@@ -148,6 +157,11 @@ fn remove_vector_property_deindexes_current_but_preserves_history() {
 /// Overwriting a vector property replaces the old embedding at the current time
 /// (nearest to the NEW vector, no longer to the old region), while an earlier
 /// snapshot still returns it nearest to the OLD vector.
+///
+/// Regression lock, not a fix discriminator: this `Some -> Some` overwrite
+/// already passes on trunk (the add-only temporal helper upserted on overwrite
+/// via `HnswIndex::add`). It guards that the #3621 de-index change did not
+/// regress the overwrite path.
 #[test]
 fn overwrite_vector_property_deindexes_old_but_preserves_history() {
     let db = temporal_db();
@@ -207,8 +221,19 @@ fn overwrite_vector_property_deindexes_old_but_preserves_history() {
     );
 }
 
-/// Sanity: without touching the vector (a non-vector-property update), the
-/// embedding stays indexed — the fix must not over-remove.
+/// Sanity: without touching the vector (a non-vector-property update that
+/// re-supplies the same embedding), the embedding stays indexed — the fix must
+/// not over-remove.
+///
+/// Regression lock, not a fix discriminator: this passes on trunk too (the
+/// `Some -> Some` unchanged case was already a no-op via the `if o != n` guard).
+/// It guards that the de-index change did not over-remove on an unrelated
+/// update. (A no-churn assertion — that re-supplying the same embedding does
+/// not redundantly re-add — is intentionally omitted: the temporal index's
+/// change-tracking is `HashSet<NodeId>`-keyed, so a single node re-supplying the
+/// same vector yields the identical count whether or not the guard fires, and
+/// snapshot counts grow per commit regardless; no reachable, non-fragile
+/// observable discriminates the guard.)
 #[test]
 fn unrelated_update_keeps_vector_indexed() {
     let db = temporal_db();

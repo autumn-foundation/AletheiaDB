@@ -1983,8 +1983,16 @@ impl CurrentStorage {
     /// is reflected in any snapshot taken **after** it — but they never erase
     /// snapshots taken **before** it. History is therefore preserved: a
     /// `find_similar_as_of` anchored before the change still returns the old
-    /// embedding, while an as-of-now query no longer returns the stale phantom
-    /// (Issue #3621). Because this is the exact method the WAL-replay
+    /// embedding (Issue #3621). The de-index is also applied to the live
+    /// current-state HNSW **immediately** (via `current_state.vectors`), so a
+    /// current-state `find_similar` stops returning the stale phantom right away.
+    /// The as-of-now temporal side, by contrast, is only as fresh as the last
+    /// snapshot: between this de-index and the next snapshot a
+    /// `find_similar_as_of(now)` still reads the prior snapshot and returns the
+    /// old embedding — inherent snapshot cadence, symmetric with how newly added
+    /// vectors only appear in an as-of-now query once the next snapshot is taken.
+    /// Once a snapshot is taken after the change, the as-of-now query no longer
+    /// returns the phantom. Because this is the exact method the WAL-replay
     /// `update_node_direct` invokes, crash recovery reconstructs the same
     /// corrected point-in-time state.
     ///
@@ -2008,6 +2016,14 @@ impl CurrentStorage {
                     index.add(node_id, v, timestamp)?;
                 }
                 (Some(_), None) => {
+                    // Propagate the error via `?` on purpose: unlike the
+                    // current-state `update_vector_index` (which swallows removal
+                    // errors with `let _ =`), a fault from the temporal index is a
+                    // real bi-temporal-bookkeeping failure the caller must see so
+                    // the node update aborts rather than committing a stale phantom.
+                    // Safe because `HnswIndex::remove` returns `Ok(())` for a
+                    // missing id — enabling an index after the node already exists
+                    // (so the id was never added) is a no-op, not a spurious abort.
                     index.remove(node_id, timestamp)?;
                 }
                 (Some(o), Some(n)) => {
@@ -2026,10 +2042,12 @@ impl CurrentStorage {
     /// Mirrors [`try_remove_from_index`](Self::try_remove_from_index): removal is
     /// attempted on ALL indexes even when one fails, so a per-index error never
     /// leaves stale entries behind in the remaining indexes. The first error
-    /// encountered is returned after every index has been attempted. Note that
-    /// `remove` may fail for an index that never contained the node; callers
-    /// treating removal as best-effort (e.g. `delete_node_direct`) ignore the
-    /// returned error for this reason.
+    /// encountered is returned after every index has been attempted. A missing
+    /// id is **not** an error — `HnswIndex::remove` returns `Ok(())` when the
+    /// node was never indexed — so an index that never contained the node does
+    /// not contribute a spurious failure here. Any error returned therefore
+    /// reflects a genuine index fault; callers treating removal as best-effort
+    /// (e.g. `delete_node_direct`) may still ignore it.
     fn try_remove_temporal_vector(&self, node_id: NodeId, timestamp: Timestamp) -> Result<()> {
         let mut first_err = None;
         for (_, index) in self.collect_temporal_vector_indexes() {
@@ -2825,6 +2843,12 @@ mod deindex_replay_tests {
 
     /// Replaying a create then an embedding overwrite reconstructs the new
     /// vector at the current time and the old vector as-of the earlier snapshot.
+    ///
+    /// Regression lock, not a fix discriminator: this `Some -> Some` overwrite
+    /// already reconstructs correctly on trunk (the add-only temporal helper
+    /// upserted on overwrite). The fix-discriminating replay guard is
+    /// `replay_remove_vector_deindexes_current_but_preserves_history` above (the
+    /// `Some -> None` removal that trunk's add-only helper leaked).
     #[test]
     fn replay_overwrite_vector_reconstructs_corrected_state() {
         let storage = CurrentStorage::new();
