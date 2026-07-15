@@ -118,12 +118,34 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      # The instrumented full-workspace llvm-cov build is by far the largest
+      # object graph CI produces (per-target instrumented rlibs + raw profraw),
+      # and it repeatedly ENOSPC'd on stock ubuntu-latest runners (~39 MB free
+      # at peak -> flaky red on #3605 / #3607). Reclaim aggressively BEFORE the
+      # build: the well-known GH-runner preinstalled bloat (~30+ GB of dotnet,
+      # android SDK, GHC, Swift, CodeQL, boost, powershell, JVMs, hosted tool
+      # cache, node) plus the Docker image cache and apt archive. This is the
+      # manual equivalent of jlumbroso/free-disk-space, inlined to avoid a
+      # third-party action in the coverage path (Issue #3625).
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
-            /usr/lib/jvm "$AGENT_TOOLSDIRECTORY" || true
-          df -h
+          echo "== disk before reclaim =="
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            /usr/lib/jvm \
+            /usr/local/lib/node_modules \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get clean || true
+          echo "== disk after reclaim =="
+          df -h /
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -145,8 +167,11 @@ jobs:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
+      # sql + cypher are added to the feature set so their modules
+      # (src/sql, src/cypher) are compiled and measured -- previously omitted,
+      # leaving that code entirely unmeasured (Issue #3625).
       - name: Generate coverage report
-        run: cargo llvm-cov -p aletheiadb -p aletheia-server --features "config-toml,mcp-server,sharding-rpc" --lcov --output-path lcov.info
+        run: cargo llvm-cov -p aletheiadb -p aletheia-server --features "config-toml,mcp-server,sharding-rpc,sql,cypher" --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
@@ -159,7 +184,7 @@ jobs:
           verbose: true
 
       - name: Check coverage thresholds
-        run: cargo llvm-cov -p aletheiadb -p aletheia-server --features "config-toml,mcp-server,sharding-rpc" --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88
+        run: cargo llvm-cov -p aletheiadb -p aletheia-server --features "config-toml,mcp-server,sharding-rpc,sql,cypher" --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88
 
   lint:
     name: Linting
