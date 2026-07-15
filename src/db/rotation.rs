@@ -62,7 +62,6 @@ use crate::encryption::cipher::Cipher;
 use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
 use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::KeyDerivation;
-use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvider};
 use crate::storage::index_persistence::common::ENC_INDEX_KEY_VERSION_V1;
 use crate::storage::index_persistence::{
     IndexKeyRotation, IndexPersistenceManager, RotationError, RotationStatus,
@@ -117,11 +116,14 @@ fn rotation_failure_category(e: &Error) -> &'static str {
 }
 
 /// Source an MEK from a key-provider config (no key material is logged).
+///
+/// Delegates to the central [`KeyProviderConfig::build_provider`] dispatch
+/// (Issue #3587) so every provider backend — file, env, passphrase, KMS, Vault
+/// — is constructed in exactly one place.
 fn load_mek(cfg: &KeyProviderConfig) -> std::result::Result<Zeroizing<[u8; 32]>, RotationError> {
-    let provider: Box<dyn KeyProvider> = match cfg {
-        KeyProviderConfig::File { path } => Box::new(FileKeyProvider::new(path)),
-        KeyProviderConfig::Env { variable } => Box::new(EnvKeyProvider::new(variable)),
-    };
+    let provider = cfg
+        .build_provider()
+        .map_err(|e| RotationError::KeyProvider(e.to_string()))?;
     provider
         .get_mek()
         .map_err(|e| RotationError::KeyProvider(e.to_string()))
@@ -486,9 +488,26 @@ fn write_rotation_state(
     new_source: &KeyProviderConfig,
     direction: RotationDirection,
 ) -> Result<()> {
+    // Only file/env sources carry a single, non-secret identifying reference the
+    // breadcrumb can persist and reconstruct on crash-resume. Rotating TO a
+    // passphrase/KMS/Vault source is a documented follow-up (Issue #3587): those
+    // carry secrets (passphrase/token env) or multi-field config that the simple
+    // line breadcrumb cannot round-trip, so refuse fail-closed rather than write
+    // a breadcrumb that would not resume. Note that index-key rotation already
+    // refuses whenever any non-index encrypted layer is present, so the current
+    // MEK source is unaffected — this bounds only the NEW source.
     let (kind, value) = match new_source {
         KeyProviderConfig::File { path } => ("file", path.to_string_lossy().into_owned()),
         KeyProviderConfig::Env { variable } => ("env", variable.clone()),
+        KeyProviderConfig::PassphraseFile { .. }
+        | KeyProviderConfig::Kms { .. }
+        | KeyProviderConfig::Vault { .. } => {
+            let (provider_type, _) = new_source.describe();
+            return Err(StorageError::PersistenceError(format!(
+                "index key rotation to a {provider_type} key source is not yet supported"
+            ))
+            .into());
+        }
     };
     let body = format!(
         "version=1\ndirection={}\nnew_version={new_version}\nnew_source_kind={kind}\nnew_source_value={value}\n",
