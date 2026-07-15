@@ -12,7 +12,7 @@
 //! header carries the `key_version` that wrote it. During a rotation the data
 //! dir holds a MIX of old- and new-key files; the engine:
 //!
-//! 1. Holds BOTH generations in an [`IndexKeyring`](super::common::IndexKeyring)
+//! 1. Holds BOTH generations in an `IndexKeyring`
 //!    (so live reads dispatch on the header `key_version`).
 //! 2. Walks the `indexes/` tree and, for each file still tagged with the OLD
 //!    `key_version`, decrypts it with the old generation and re-encrypts it with

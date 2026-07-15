@@ -341,8 +341,8 @@ pub(crate) fn fsync_dir(dir: &std::path::Path) {
 /// on to resolve those ids MUST first restore the interner (via
 /// [`strings::restore_string_interner`], obtaining an
 /// [`InternerRemap`](strings::InternerRemap)) and then translate the returned
-/// data through [`InternerRemap::remap_graph_index_data`] /
-/// [`InternerRemap::remap_temporal_index_data`] before resolving — otherwise
+/// data through `InternerRemap::remap_graph_index_data` /
+/// `InternerRemap::remap_temporal_index_data` before resolving — otherwise
 /// persisted ids silently resolve to the wrong strings when the live interner
 /// order diverges from the saved file (the #3490 corruption). This is a latent
 /// trap: there are currently no production callers, and the startup path
