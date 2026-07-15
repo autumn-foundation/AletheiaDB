@@ -1,0 +1,79 @@
+name: Eval Harness
+
+# Informational (non-gating) workflow for the retrieval-evaluation harness
+# (Issue #3366). The root `Cargo.toml` sets `default-members = ["."]`, so the
+# main CI `cargo test` deliberately excludes the `aletheia-eval` crate. This
+# workflow is what actually runs the harness's unit/integration tests AND
+# executes the bundled regression gates end-to-end on every change under
+# `crates/aletheia-eval/**`, satisfying the "runs in CI (<10 min) with
+# thresholds as regression gates" acceptance criterion. Both bundled datasets
+# run in well under a second, so total runtime is comfortably inside the budget.
+
+on:
+  push:
+    paths:
+      - 'crates/aletheia-eval/**'
+      - '.github/workflows/eval-harness.yml'
+  pull_request:
+    paths:
+      - 'crates/aletheia-eval/**'
+      - '.github/workflows/eval-harness.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  eval-harness:
+    name: Retrieval Eval Harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/powershell /usr/share/swift \
+            /usr/local/.ghcup /usr/lib/jvm "$AGENT_TOOLSDIRECTORY" || true
+          df -h
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-v2-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      # The crate is excluded from the workspace default-members, so it is only
+      # built/tested when explicitly selected with -p.
+      - name: Run aletheia-eval tests
+        run: cargo test -p aletheia-eval
+
+      # Execute the bundled regression gates end-to-end. The binary exits 0 only
+      # when every configured threshold in each eval.toml passes (2 on a gate
+      # breach, 1 on error), so these steps ARE the regression gate.
+      - name: Regression gate — temporal_qa
+        run: cargo run -p aletheia-eval -- run crates/aletheia-eval/datasets/temporal_qa/eval.toml
+
+      - name: Regression gate — multihop_qa
+        run: cargo run -p aletheia-eval -- run crates/aletheia-eval/datasets/multihop_qa/eval.toml

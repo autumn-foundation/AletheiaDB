@@ -4,10 +4,16 @@
 //! top-level [`AletheiaDBConfig`](crate::config::AletheiaDBConfig) so that all
 //! persistence settings are in one place.
 
+use std::fmt;
 use std::path::PathBuf;
 
+use zeroize::Zeroizing;
+
 use crate::encryption::audit::AuditLevel;
+use crate::encryption::error::KeyProviderError;
 use crate::encryption::factory::Algorithm;
+use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvider};
+use crate::encryption::passphrase::PassphraseFileKeyProvider;
 
 /// Where audit log lines are written.
 ///
@@ -74,7 +80,12 @@ impl Default for AuditConfig {
 /// Key provider backend configuration.
 ///
 /// Determines where the Master Encryption Key (MEK) is sourced from at startup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is implemented manually (never derived) so the KMS
+/// `encrypted_data_key` wrapped-key blob is redacted, mirroring
+/// [`KmsConfig`](crate::encryption::kms_provider::KmsConfig)'s redacting `Debug`.
+/// Non-secret fields (paths, env-var names, key ids, addresses) remain visible.
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 /// Configuration options for the Master Encryption Key (MEK) provider.
@@ -94,6 +105,268 @@ pub enum KeyProviderConfig {
         /// Name of the environment variable.
         variable: String,
     },
+    /// Load the MEK from a passphrase-wrapped key file (Issue #3587).
+    ///
+    /// The passphrase itself is **never** stored in config; it is read at
+    /// startup from the environment variable named by `passphrase_env`.
+    PassphraseFile {
+        /// Path to the passphrase-wrapped key file (`AEKF` format).
+        path: PathBuf,
+        /// Name of the environment variable holding the passphrase.
+        passphrase_env: String,
+    },
+    /// Decrypt the MEK from an AWS KMS-wrapped data key (Issue #3587).
+    ///
+    /// Requires the `encryption-aws-kms` feature; otherwise
+    /// [`build_provider`](KeyProviderConfig::build_provider) returns
+    /// [`KeyProviderError::Unavailable`].
+    Kms {
+        /// KMS key id or ARN used to decrypt the data key.
+        key_id: String,
+        /// Base64-encoded KMS-encrypted data-key ciphertext blob (wrapped MEK).
+        encrypted_data_key: String,
+        /// AWS region (defaults to `us-east-1` / `AWS_REGION` if unset).
+        #[cfg_attr(feature = "serde", serde(default))]
+        region: Option<String>,
+        /// Optional custom endpoint URL (e.g. LocalStack or a VPC endpoint).
+        #[cfg_attr(feature = "serde", serde(default))]
+        endpoint_url: Option<String>,
+    },
+    /// Read the MEK from a HashiCorp Vault KV v2 secret (Issue #3587).
+    ///
+    /// The Vault token is **never** stored in config; it is read at startup
+    /// from the environment variable named by `token_env`. Requires the
+    /// `encryption-vault` feature; otherwise
+    /// [`build_provider`](KeyProviderConfig::build_provider) returns
+    /// [`KeyProviderError::Unavailable`].
+    Vault {
+        /// Base address, e.g. `https://vault.example.com:8200`.
+        address: String,
+        /// Name of the environment variable holding the Vault token.
+        token_env: String,
+        /// KV v2 mount point (default `secret`).
+        #[cfg_attr(feature = "serde", serde(default = "default_vault_mount"))]
+        mount: String,
+        /// Secret path under the mount.
+        path: String,
+        /// Field within the secret data holding the key (default `key`).
+        #[cfg_attr(feature = "serde", serde(default = "default_vault_key_field"))]
+        key_field: String,
+        /// Optional Vault namespace (Enterprise).
+        #[cfg_attr(feature = "serde", serde(default))]
+        namespace: Option<String>,
+        /// Optional path to a PEM CA certificate for TLS verification.
+        #[cfg_attr(feature = "serde", serde(default))]
+        ca_cert: Option<PathBuf>,
+    },
+}
+
+impl fmt::Debug for KeyProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The KMS `encrypted_data_key` is a wrapped-key ciphertext blob and is
+        // treated as sensitive material — NEVER print it. Every other field
+        // (paths, env-var NAMES, key ids, addresses, mounts) is non-secret.
+        match self {
+            KeyProviderConfig::File { path } => f.debug_struct("File").field("path", path).finish(),
+            KeyProviderConfig::Env { variable } => {
+                f.debug_struct("Env").field("variable", variable).finish()
+            }
+            KeyProviderConfig::PassphraseFile {
+                path,
+                passphrase_env,
+            } => f
+                .debug_struct("PassphraseFile")
+                .field("path", path)
+                .field("passphrase_env", passphrase_env)
+                .finish(),
+            KeyProviderConfig::Kms {
+                key_id,
+                encrypted_data_key: _,
+                region,
+                endpoint_url,
+            } => f
+                .debug_struct("Kms")
+                .field("key_id", key_id)
+                .field("encrypted_data_key", &"<redacted>")
+                .field("region", region)
+                .field("endpoint_url", endpoint_url)
+                .finish(),
+            KeyProviderConfig::Vault {
+                address,
+                token_env,
+                mount,
+                path,
+                key_field,
+                namespace,
+                ca_cert,
+            } => f
+                .debug_struct("Vault")
+                .field("address", address)
+                .field("token_env", token_env)
+                .field("mount", mount)
+                .field("path", path)
+                .field("key_field", key_field)
+                .field("namespace", namespace)
+                .field("ca_cert", ca_cert)
+                .finish(),
+        }
+    }
+}
+
+/// Serde default for [`KeyProviderConfig::Vault::mount`].
+#[cfg(feature = "serde")]
+fn default_vault_mount() -> String {
+    "secret".to_string()
+}
+
+/// Serde default for [`KeyProviderConfig::Vault::key_field`].
+#[cfg(feature = "serde")]
+fn default_vault_key_field() -> String {
+    "key".to_string()
+}
+
+impl KeyProviderConfig {
+    /// Construct the concrete [`KeyProvider`] backend for this configuration.
+    ///
+    /// Central dispatch used by the encryption manager and key-rotation engine
+    /// so provider construction lives in exactly one place. Feature-gated
+    /// backends (`Kms`, `Vault`) return [`KeyProviderError::Unavailable`] with a
+    /// key-safe message when their feature is not compiled in — never a panic.
+    ///
+    /// # Security
+    ///
+    /// Secret material (passphrase, Vault token) is read from the environment at
+    /// call time and moved directly into the provider; it is never stored in the
+    /// config, logged, or placed in an error message. A missing secret env var
+    /// yields [`KeyProviderError::Unavailable`] naming only the variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyProviderError`] if a required secret environment variable is
+    /// absent, a feature-gated backend is not compiled in, or the backend fails
+    /// to construct (e.g. an invalid KMS ciphertext blob).
+    pub fn build_provider(&self) -> Result<Box<dyn KeyProvider>, KeyProviderError> {
+        match self {
+            KeyProviderConfig::File { path } => Ok(Box::new(FileKeyProvider::new(path))),
+            KeyProviderConfig::Env { variable } => Ok(Box::new(EnvKeyProvider::new(variable))),
+            KeyProviderConfig::PassphraseFile {
+                path,
+                passphrase_env,
+            } => {
+                // Land the secret in a zeroizing buffer immediately so it is
+                // wiped on drop rather than lingering in a plain `String`.
+                let passphrase = Zeroizing::new(std::env::var(passphrase_env).map_err(|_| {
+                    // Name only the variable — never the passphrase value.
+                    KeyProviderError::Unavailable(format!(
+                        "passphrase environment variable {passphrase_env} is not set"
+                    ))
+                })?);
+                Ok(Box::new(PassphraseFileKeyProvider::new(
+                    path,
+                    passphrase.as_str(),
+                )))
+            }
+            KeyProviderConfig::Kms {
+                key_id,
+                encrypted_data_key,
+                region,
+                endpoint_url,
+            } => {
+                #[cfg(feature = "encryption-aws-kms")]
+                {
+                    let cfg = crate::encryption::kms_provider::KmsConfig {
+                        key_id: key_id.clone(),
+                        encrypted_data_key: encrypted_data_key.clone(),
+                        region: region.clone(),
+                        endpoint_url: endpoint_url.clone(),
+                    };
+                    Ok(Box::new(
+                        crate::encryption::kms_provider::KmsKeyProvider::new(&cfg)?,
+                    ))
+                }
+                #[cfg(not(feature = "encryption-aws-kms"))]
+                {
+                    // Silence unused-binding warnings without touching secrets.
+                    let _ = (key_id, encrypted_data_key, region, endpoint_url);
+                    Err(KeyProviderError::Unavailable(
+                        "KMS key provider is not compiled in (enable the encryption-aws-kms feature)"
+                            .to_string(),
+                    ))
+                }
+            }
+            KeyProviderConfig::Vault {
+                address,
+                token_env,
+                mount,
+                path,
+                key_field,
+                namespace,
+                ca_cert,
+            } => {
+                #[cfg(feature = "encryption-vault")]
+                {
+                    // Land the bearer token in a zeroizing buffer immediately so
+                    // it is wiped on drop rather than lingering in a plain
+                    // `String`.
+                    let token = Zeroizing::new(std::env::var(token_env).map_err(|_| {
+                        // Name only the variable — never the token value.
+                        KeyProviderError::Unavailable(format!(
+                            "Vault token environment variable {token_env} is not set"
+                        ))
+                    })?);
+                    let cfg = crate::encryption::vault_provider::VaultConfig {
+                        address: address.clone(),
+                        token: token.as_str().to_owned(),
+                        mount: mount.clone(),
+                        path: path.clone(),
+                        key_field: key_field.clone(),
+                        namespace: namespace.clone(),
+                        ca_cert: ca_cert.clone(),
+                    };
+                    Ok(Box::new(
+                        crate::encryption::vault_provider::VaultKeyProvider::new(&cfg)?,
+                    ))
+                }
+                #[cfg(not(feature = "encryption-vault"))]
+                {
+                    let _ = (
+                        address, token_env, mount, path, key_field, namespace, ca_cert,
+                    );
+                    Err(KeyProviderError::Unavailable(
+                        "Vault key provider is not compiled in (enable the encryption-vault feature)"
+                            .to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// A non-secret `(type, detail)` status pair describing this provider, for
+    /// diagnostics and the `encryption status` CLI command.
+    ///
+    /// # Security
+    ///
+    /// The returned detail is deliberately non-secret: a file path, an env var
+    /// *name*, a KMS key id, or a Vault address — **never** a passphrase, token,
+    /// or key material.
+    #[must_use]
+    pub fn describe(&self) -> (&'static str, String) {
+        match self {
+            KeyProviderConfig::File { path } => ("file", path.display().to_string()),
+            KeyProviderConfig::Env { variable } => ("env", variable.clone()),
+            KeyProviderConfig::PassphraseFile {
+                path,
+                passphrase_env,
+            } => (
+                "passphrase",
+                format!("{} (passphrase from ${passphrase_env})", path.display()),
+            ),
+            KeyProviderConfig::Kms { key_id, .. } => ("kms", key_id.clone()),
+            KeyProviderConfig::Vault { address, path, .. } => {
+                ("vault", format!("{address} ({path})"))
+            }
+        }
+    }
 }
 
 impl Default for KeyProviderConfig {
@@ -264,6 +537,44 @@ retention_days = 90
                 .level,
             AuditLevel::None
         );
+    }
+
+    #[test]
+    fn key_provider_config_debug_does_not_leak_blob() {
+        // The KMS wrapped-key ciphertext blob must never appear in Debug output,
+        // for the enum itself or the enclosing EncryptionConfig.
+        let blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5"; // arbitrary base64
+        let cfg = KeyProviderConfig::Kms {
+            key_id: "alias/prod".to_string(),
+            encrypted_data_key: blob.to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint_url: None,
+        };
+
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains(blob),
+            "KeyProviderConfig Debug leaked the wrapped-key blob: {dbg}"
+        );
+        assert!(dbg.contains("redacted"), "expected redaction marker: {dbg}");
+        // Non-secret fields stay visible for diagnostics.
+        assert!(dbg.contains("alias/prod"));
+        assert!(dbg.contains("us-east-1"));
+
+        // The blob must also not leak through the enclosing EncryptionConfig's
+        // (derived) Debug, which delegates to the manual impl above.
+        let enclosing = EncryptionConfig {
+            enabled: true,
+            algorithm: Algorithm::default(),
+            key_provider: cfg,
+            audit: AuditConfig::default(),
+        };
+        let enc_dbg = format!("{enclosing:?}");
+        assert!(
+            !enc_dbg.contains(blob),
+            "EncryptionConfig Debug leaked the wrapped-key blob: {enc_dbg}"
+        );
+        assert!(enc_dbg.contains("redacted"));
     }
 
     #[cfg(feature = "config-toml")]

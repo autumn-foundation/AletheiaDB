@@ -1,0 +1,10 @@
+# Full-feature retrieval: hybrid graph expansion (2 hops) + provenance filter.
+# Temporal anchoring is off because this dataset has no valid-time dimension.
+# Diff against baseline.toml: hybrid and provenance_filter flip on.
+k = 5
+hybrid = true
+temporal_anchoring = false
+provenance_filter = true
+max_hops = 2
+trusted_sources = ["curated"]
+seed = 42

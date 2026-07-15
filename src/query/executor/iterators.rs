@@ -20,7 +20,8 @@ use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate,
-    PredicateValue, ProvenancePredicate, ScoreThreshold, SortKey,
+    PredicateValue, ProvenanceField, ProvenancePredicate, ProvenanceProjection, ScoreThreshold,
+    SortKey,
 };
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
@@ -3165,6 +3166,52 @@ impl ResultIterator for DistinctIterator {
     }
 }
 
+/// Resolve the write-time provenance bundle recorded on the version a row's
+/// entity represents (node or edge), at the query's bi-temporal coordinate
+/// (Issue #3354).
+///
+/// The entity's `current_version` already reflects an `AS OF` reconstruction
+/// (mirroring [`FilterIterator::resolve_node_provenance`]), so provenance is
+/// read as recorded at that coordinate. Returns `None` for an unattributed
+/// version, a non-entity row, or a lookup error.
+fn resolve_entity_provenance(
+    entity: &EntityResult,
+    historical: &Arc<RwLock<HistoricalStorage>>,
+) -> Option<Provenance> {
+    match entity {
+        EntityResult::Node(n) => historical
+            .read()
+            .get_node_version_provenance(n.current_version)
+            .ok()
+            .flatten(),
+        EntityResult::Edge(e) => historical
+            .read()
+            .get_edge_version_provenance(e.current_version)
+            .ok()
+            .flatten(),
+        _ => None,
+    }
+}
+
+/// Map a provenance field to its projected [`PropertyValue`] (Issue #3354).
+///
+/// An absent bundle, or a bundle missing the requested field, projects
+/// [`PropertyValue::Null`] -- distinguishing "no value" from any real value,
+/// exactly as the `WHERE` accessor semantics treat a missing field.
+fn provenance_field_value(prov: Option<&Provenance>, field: ProvenanceField) -> PropertyValue {
+    match field {
+        ProvenanceField::Source => prov
+            .and_then(Provenance::source)
+            .map_or(PropertyValue::Null, |s| PropertyValue::String(s.into())),
+        ProvenanceField::Confidence => prov
+            .and_then(Provenance::confidence)
+            .map_or(PropertyValue::Null, PropertyValue::Float),
+        ProvenanceField::Reason => prov
+            .and_then(Provenance::note)
+            .map_or(PropertyValue::Null, |s| PropertyValue::String(s.into())),
+    }
+}
+
 /// Look up a value for ordering by column/property name: first a node property
 /// (entity rows), then a computed aggregate column (`row.columns`) so ORDER BY
 /// can sort grouped/aggregate rows by a group key or aggregate alias.
@@ -3190,16 +3237,43 @@ pub struct SortIterator {
     keys: Vec<(SortKey, bool)>,
     output: std::vec::IntoIter<QueryRow>,
     drained: bool,
+    /// Historical storage, needed only to resolve a [`SortKey::Provenance`] key
+    /// (Issue #3354) from each row entity's write-time provenance. `None` when
+    /// no provenance sort key is present (the common case), so an ordinary
+    /// property/score sort never touches historical storage.
+    historical: Option<Arc<RwLock<HistoricalStorage>>>,
 }
 
 impl SortIterator {
     /// Create a new ORDER BY iterator sorting by `keys` (first = primary).
+    ///
+    /// Carries no historical handle, so a [`SortKey::Provenance`] key would
+    /// resolve to null for every row. Use [`with_historical`](Self::with_historical)
+    /// when an `ORDER BY` may reference a provenance accessor.
     pub fn new(input: Box<dyn ResultIterator>, keys: Vec<(SortKey, bool)>) -> Self {
         SortIterator {
             input: Some(input),
             keys,
             output: Vec::new().into_iter(),
             drained: false,
+            historical: None,
+        }
+    }
+
+    /// Create a sort iterator with access to historical storage so a
+    /// [`SortKey::Provenance`] key (Issue #3354) resolves each row entity's
+    /// write-time provenance at the version the row represents.
+    pub fn with_historical(
+        input: Box<dyn ResultIterator>,
+        keys: Vec<(SortKey, bool)>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        SortIterator {
+            input: Some(input),
+            keys,
+            output: Vec::new().into_iter(),
+            drained: false,
+            historical: Some(historical),
         }
     }
 
@@ -3220,7 +3294,7 @@ impl SortIterator {
     fn cmp_rows(&self, a: &QueryRow, b: &QueryRow) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         for (key, descending) in &self.keys {
-            let ord = Self::cmp_by_key(a, b, key, *descending);
+            let ord = self.cmp_by_key(a, b, key, *descending);
             if ord != Ordering::Equal {
                 return ord;
             }
@@ -3228,9 +3302,41 @@ impl SortIterator {
         Ordering::Equal
     }
 
+    /// Compare two nullable values with openCypher null placement (nulls last
+    /// for ASC, first for DESC), applying `descending` to present-present pairs.
+    fn cmp_optional(
+        x: Option<&PropertyValue>,
+        y: Option<&PropertyValue>,
+        descending: bool,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (x, y) {
+            (Some(x), Some(y)) => {
+                let ord = compare_property(x, y);
+                if descending { ord.reverse() } else { ord }
+            }
+            (Some(_), None) => {
+                if descending {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (None, Some(_)) => {
+                if descending {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (None, None) => Ordering::Equal,
+        }
+    }
+
     /// Compare two rows by a single key, applying openCypher null placement
     /// (nulls last for ASC, first for DESC).
     fn cmp_by_key(
+        &self,
         a: &QueryRow,
         b: &QueryRow,
         key: &SortKey,
@@ -3238,28 +3344,23 @@ impl SortIterator {
     ) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match key {
-            SortKey::Property(prop) => match (row_value(a, prop), row_value(b, prop)) {
-                (Some(x), Some(y)) => {
-                    let ord = compare_property(x, y);
-                    if descending { ord.reverse() } else { ord }
-                }
-                // openCypher: nulls last for ASC, first for DESC.
-                (Some(_), None) => {
-                    if descending {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Less
+            SortKey::Property(prop) => {
+                Self::cmp_optional(row_value(a, prop), row_value(b, prop), descending)
+            }
+            // Resolve each row entity's provenance value on the fly (Issue
+            // #3354). Matches the WHERE-clause resolution: an unattributed row
+            // (or a bundle missing the field) sorts as null.
+            SortKey::Provenance(field) => {
+                let resolve = |row: &QueryRow| -> Option<PropertyValue> {
+                    let historical = self.historical.as_ref()?;
+                    let prov = resolve_entity_provenance(&row.entity, historical);
+                    match provenance_field_value(prov.as_ref(), *field) {
+                        PropertyValue::Null => None,
+                        v => Some(v),
                     }
-                }
-                (None, Some(_)) => {
-                    if descending {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                }
-                (None, None) => Ordering::Equal,
-            },
+                };
+                Self::cmp_optional(resolve(a).as_ref(), resolve(b).as_ref(), descending)
+            }
             SortKey::Score => {
                 let ord = a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal);
                 if descending { ord.reverse() } else { ord }
@@ -3283,6 +3384,87 @@ impl ResultIterator for SortIterator {
             }
         }
         self.output.next().map(Ok)
+    }
+}
+
+/// Provenance-projection iterator (Issue #3354): for each input row, resolves
+/// the row entity's write-time provenance and attaches one output column per
+/// projected accessor (`RETURN source(n)`, `RETURN n, confidence(n) AS conf`).
+///
+/// When the projection names a bare entity variable (`entity_binding`), the row
+/// is emitted through the **bindings + columns** shape so the entity stays
+/// observable alongside the projected columns (mirroring the multi-variable /
+/// aggregation row shape, and keeping the entity from being dropped by a
+/// columns-only consumer); otherwise a pure columns row is produced. The score,
+/// path, and timestamp of the input row are preserved.
+///
+/// Runs last in the pipeline (after Sort/Skip/Limit), so it is 1:1 and never
+/// perturbs ordering or pagination.
+pub struct ProvenanceProjectIterator {
+    input: Box<dyn ResultIterator>,
+    projection: ProvenanceProjection,
+    historical: Arc<RwLock<HistoricalStorage>>,
+}
+
+impl ProvenanceProjectIterator {
+    /// Create a provenance-projection iterator resolving against `historical`.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        projection: ProvenanceProjection,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        ProvenanceProjectIterator {
+            input,
+            projection,
+            historical,
+        }
+    }
+
+    /// Build the projected columns for one row's entity.
+    fn project_row(&self, row: &QueryRow) -> QueryRow {
+        let prov = resolve_entity_provenance(&row.entity, &self.historical);
+        let columns: Vec<(String, PropertyValue)> = self
+            .projection
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.output_name.clone(),
+                    provenance_field_value(prov.as_ref(), item.field),
+                )
+            })
+            .collect();
+
+        // Preserve any bare entity via the bindings channel so it survives
+        // columns-only consumers (e.g. the MCP serializer); otherwise emit a
+        // pure columns row like aggregation output.
+        let bindings = self
+            .projection
+            .entity_binding
+            .as_ref()
+            .map(|var| vec![(var.clone(), row.entity.clone())]);
+
+        QueryRow {
+            entity: EntityResult::Null,
+            score: row.score,
+            path: row.path.clone(),
+            timestamp: row.timestamp,
+            columns: Some(columns),
+            bindings,
+        }
+    }
+}
+
+impl ResultIterator for ProvenanceProjectIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        match self.input.next()? {
+            Ok(row) => Some(Ok(self.project_row(&row))),
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.input.size_hint()
     }
 }
 

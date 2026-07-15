@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use crate::encryption::audit::{AuditEvent, EncryptionAuditLogger};
 use crate::encryption::cipher::Cipher;
-use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
+use crate::encryption::config::EncryptionConfig;
 use crate::encryption::error::KeyProviderError;
 use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::{
     CHECKPOINT_DEK_CONTEXT, COLD_DEK_CONTEXT, INDEX_DEK_CONTEXT, KeyDerivation, WAL_DEK_CONTEXT,
 };
-use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvider};
+use crate::encryption::key_provider::KeyProvider;
 
 /// The key version tracked by the manager for the currently-loaded MEK.
 ///
@@ -107,10 +107,20 @@ impl EncryptionManager {
         config: &EncryptionConfig,
         audit: EncryptionAuditLogger,
     ) -> Result<Self, KeyProviderError> {
-        // 1. Create the key provider.
-        let provider: Box<dyn KeyProvider> = match &config.key_provider {
-            KeyProviderConfig::File { path } => Box::new(FileKeyProvider::new(path)),
-            KeyProviderConfig::Env { variable } => Box::new(EnvKeyProvider::new(variable)),
+        // 1. Create the key provider via central dispatch (Issue #3587). A
+        //    provider that fails to construct (e.g. a missing passphrase/token
+        //    env var, or a feature-gated backend not compiled in) is audited
+        //    with a key-safe category before returning.
+        let provider: Box<dyn KeyProvider> = match config.key_provider.build_provider() {
+            Ok(p) => p,
+            Err(e) => {
+                let (kind, _) = config.key_provider.describe();
+                audit.log(&AuditEvent::KeyAccessDenied {
+                    provider: kind.to_string(),
+                    error: error_category(&e).to_string(),
+                });
+                return Err(e);
+            }
         };
 
         let name = provider.provider_name().to_string();

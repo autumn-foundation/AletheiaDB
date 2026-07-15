@@ -62,7 +62,6 @@ use crate::encryption::cipher::Cipher;
 use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
 use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::KeyDerivation;
-use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvider};
 use crate::storage::index_persistence::common::ENC_INDEX_KEY_VERSION_V1;
 use crate::storage::index_persistence::{
     IndexKeyRotation, IndexPersistenceManager, RotationError, RotationStatus,
@@ -117,14 +116,41 @@ fn rotation_failure_category(e: &Error) -> &'static str {
 }
 
 /// Source an MEK from a key-provider config (no key material is logged).
+///
+/// Delegates to the central [`KeyProviderConfig::build_provider`] dispatch
+/// (Issue #3587) so every provider backend — file, env, passphrase, KMS, Vault
+/// — is constructed in exactly one place.
 fn load_mek(cfg: &KeyProviderConfig) -> std::result::Result<Zeroizing<[u8; 32]>, RotationError> {
-    let provider: Box<dyn KeyProvider> = match cfg {
-        KeyProviderConfig::File { path } => Box::new(FileKeyProvider::new(path)),
-        KeyProviderConfig::Env { variable } => Box::new(EnvKeyProvider::new(variable)),
-    };
+    let provider = cfg
+        .build_provider()
+        .map_err(|e| RotationError::KeyProvider(e.to_string()))?;
     provider
         .get_mek()
         .map_err(|e| RotationError::KeyProvider(e.to_string()))
+}
+
+/// Statically refuse rotating TO a key source the durable breadcrumb cannot
+/// round-trip (passphrase/KMS/Vault), on the *variant alone* — BEFORE any
+/// `load_mek`/network call (Issue #3587).
+///
+/// Without this, rotating to an unreachable KMS/Vault endpoint would surface a
+/// network/transport error from `load_mek` instead of the clean "not yet
+/// supported" refusal. `write_rotation_state` performs the same check as
+/// defense-in-depth; this one fails fast and offline. Fail-closed: only
+/// file/env sources proceed.
+fn refuse_unsupported_new_source(new_source: &KeyProviderConfig) -> Result<()> {
+    match new_source {
+        KeyProviderConfig::File { .. } | KeyProviderConfig::Env { .. } => Ok(()),
+        KeyProviderConfig::PassphraseFile { .. }
+        | KeyProviderConfig::Kms { .. }
+        | KeyProviderConfig::Vault { .. } => {
+            let (provider_type, _) = new_source.describe();
+            Err(StorageError::PersistenceError(format!(
+                "index key rotation to a {provider_type} key source is not yet supported"
+            ))
+            .into())
+        }
+    }
 }
 
 /// Derive the index DEK for a MEK using the shared HKDF context.
@@ -369,6 +395,29 @@ impl AletheiaDB {
         })
     }
 
+    /// Resume an interrupted index key rotation (Issue #488), if one is pending.
+    ///
+    /// Thin `&self` wrapper over the free [`resume_pending_rotation`] that
+    /// sources the (crate-private) persistence manager and startup encryption
+    /// config from this instance, so operator surfaces (the CLI, Issue #490)
+    /// can drive a manual resume without reaching into internals. Returns
+    /// `Ok(None)` when no rotation was pending. Does not weaken any durability
+    /// invariant — it only invokes the existing idempotent resume pass.
+    ///
+    /// # Errors
+    ///
+    /// * index persistence or encryption is not configured;
+    /// * the breadcrumb is present but corrupt (fail-closed);
+    /// * the recorded new key source cannot be sourced, or the pass fails.
+    pub fn resume_pending_index_rotation(&self) -> Result<Option<RotationReport>> {
+        let manager = self.require_rotation_prereqs()?;
+        let enc_cfg = self
+            .encryption_config
+            .clone()
+            .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
+        resume_pending_rotation(&manager, &enc_cfg)
+    }
+
     fn run_rotation(
         &self,
         manager: &Arc<IndexPersistenceManager>,
@@ -376,6 +425,11 @@ impl AletheiaDB {
         new_key_source: &KeyProviderConfig,
         started: Instant,
     ) -> Result<RotationReport> {
+        // Refuse an unsupported NEW source on its variant alone, BEFORE any
+        // load_mek / network call — rotating to an unreachable KMS/Vault must
+        // surface the clean refusal, not a transport error (Issue #3587).
+        refuse_unsupported_new_source(new_key_source)?;
+
         // Shared, mutable keyring handle (mutations are observed by the manager).
         let keyring = manager
             .keyring()
@@ -486,9 +540,26 @@ fn write_rotation_state(
     new_source: &KeyProviderConfig,
     direction: RotationDirection,
 ) -> Result<()> {
+    // Only file/env sources carry a single, non-secret identifying reference the
+    // breadcrumb can persist and reconstruct on crash-resume. Rotating TO a
+    // passphrase/KMS/Vault source is a documented follow-up (Issue #3587): those
+    // carry secrets (passphrase/token env) or multi-field config that the simple
+    // line breadcrumb cannot round-trip, so refuse fail-closed rather than write
+    // a breadcrumb that would not resume. Note that index-key rotation already
+    // refuses whenever any non-index encrypted layer is present, so the current
+    // MEK source is unaffected — this bounds only the NEW source.
     let (kind, value) = match new_source {
         KeyProviderConfig::File { path } => ("file", path.to_string_lossy().into_owned()),
         KeyProviderConfig::Env { variable } => ("env", variable.clone()),
+        KeyProviderConfig::PassphraseFile { .. }
+        | KeyProviderConfig::Kms { .. }
+        | KeyProviderConfig::Vault { .. } => {
+            let (provider_type, _) = new_source.describe();
+            return Err(StorageError::PersistenceError(format!(
+                "index key rotation to a {provider_type} key source is not yet supported"
+            ))
+            .into());
+        }
     };
     let body = format!(
         "version=1\ndirection={}\nnew_version={new_version}\nnew_source_kind={kind}\nnew_source_value={value}\n",
@@ -947,6 +1018,78 @@ mod tests {
         assert!(
             err.to_string().contains("same key") || err.to_string().contains("equals"),
             "expected same-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resume_pending_index_rotation_is_none_when_no_breadcrumb() {
+        // The `&self` resume wrapper (Issue #490 CLI drive-point) must return
+        // Ok(None) — not an error, not a phantom rotation — on a configured,
+        // encrypted, index-persistent DB with no rotation.state breadcrumb.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let key = root.join("k.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key).unwrap();
+
+        let db = build_db(root, &key);
+        seed(&db);
+        // No breadcrumb was ever written.
+        assert!(!root.join("data").join("rotation.state").exists());
+
+        let report = db
+            .resume_pending_index_rotation()
+            .expect("resume with no pending rotation must be Ok, not Err");
+        assert!(
+            report.is_none(),
+            "resume with no breadcrumb must report nothing pending (Ok(None)), got {report:?}"
+        );
+    }
+
+    #[test]
+    fn rotate_to_remote_source_refuses_without_reaching_endpoint() {
+        // Rotating TO a KMS/Vault/passphrase source must return the clean
+        // "not yet supported" refusal on the variant alone — BEFORE any network
+        // call — so an unreachable endpoint never turns the refusal into a
+        // transport error (Issue #3587). Index-only DB so we reach run_rotation.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+
+        let db = build_db_index_only(root, &old_key);
+        seed(&db);
+
+        // Vault pointed at an unreachable address: must NOT be dialed.
+        let err = db
+            .rotate_index_keys(KeyProviderConfig::Vault {
+                address: "https://127.0.0.1:1".to_string(),
+                token_env: "NOPE_TOKEN".to_string(),
+                mount: "secret".to_string(),
+                path: "app/mek".to_string(),
+                key_field: "key".to_string(),
+                namespace: None,
+                ca_cert: None,
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported") && err.to_string().contains("vault"),
+            "expected clean vault refusal, got: {err}"
+        );
+        // And no breadcrumb was written by the refused rotation.
+        assert!(!root.join("data").join("rotation.state").exists());
+
+        // KMS is refused the same way (no endpoint contacted).
+        let err = db
+            .rotate_index_keys(KeyProviderConfig::Kms {
+                key_id: "alias/prod".to_string(),
+                encrypted_data_key: "AAAA".to_string(),
+                region: None,
+                endpoint_url: Some("http://127.0.0.1:1".to_string()),
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported") && err.to_string().contains("kms"),
+            "expected clean kms refusal, got: {err}"
         );
     }
 
