@@ -673,3 +673,169 @@ fn non_numeric_property_skipped() {
     assert_eq!(col_i64(&result[0], "numeric_n"), Some(0));
     assert_eq!(col_i64(&result[0], "present"), Some(1));
 }
+
+// ---------------------------------------------------------------------------
+// Grammar error paths: every structurally-malformed WINDOW clause is rejected
+// as a SyntaxError (never a panic or a silently-wrong parse). Each line below
+// exercises a distinct `expect`/`expect_kw`/`parse_identifier` failure branch in
+// the window-clause parser. A trailing clause after `WINDOW ... RETURN` is also
+// rejected (the window clause is self-terminating).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn window_clause_grammar_errors_are_syntax_errors() {
+    let db = AletheiaDB::new().expect("db");
+    let _ = create_product(&db, 100, ts("2024-01-01T00:00:00Z"));
+
+    let bad_queries = [
+        // Unit is not an identifier (an integer follows the window size).
+        "MATCH (p:Product) WINDOW 1 2 OVER VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN AVG(p.price)",
+        // Missing OVER.
+        "MATCH (p:Product) WINDOW 1 day VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN AVG(p.price)",
+        // Missing VALID_TIME.
+        "MATCH (p:Product) WINDOW 1 day OVER \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN AVG(p.price)",
+        // Missing FROM.
+        "MATCH (p:Product) WINDOW 1 day OVER VALID_TIME \
+         '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN AVG(p.price)",
+        // Missing TO (two timestamps in a row).
+        "MATCH (p:Product) WINDOW 1 day OVER VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' '2024-02-01T00:00:00Z' RETURN AVG(p.price)",
+        // AS without OF (partial AS OF SYSTEM_TIME).
+        "MATCH (p:Product) WINDOW 1 day OVER VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' AS SYSTEM_TIME 0 \
+         RETURN AVG(p.price)",
+        // AS OF without SYSTEM_TIME.
+        "MATCH (p:Product) WINDOW 1 day OVER VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' AS OF WALLCLOCK 0 \
+         RETURN AVG(p.price)",
+        // Aggregate function name missing (opens straight into a paren).
+        "MATCH (p:Product) WINDOW 1 day OVER VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN (p.price)",
+        // Missing '(' after the aggregate function.
+        "MATCH (p:Product) WINDOW 1 day OVER VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN AVG p.price",
+        // Missing ')' closing the aggregate argument (runs to end of query).
+        "MATCH (p:Product) WINDOW 1 day OVER VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN AVG(p.price",
+        // Trailing clause after a self-terminating WINDOW ... RETURN.
+        "MATCH (p:Product) WINDOW 1 day OVER VALID_TIME \
+         FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN AVG(p.price) LIMIT 10",
+    ];
+
+    for q in bad_queries {
+        assert!(
+            matches!(
+                db.execute_aql(q),
+                Err(Error::Query(QueryError::SyntaxError { .. }))
+            ),
+            "expected a SyntaxError for malformed window query:\n{q}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A granularity/range pair that would generate an enormous number of windows is
+// rejected with a structured InvalidParameter (the TooManyWindows guard), rather
+// than allocating unbounded rows.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn too_many_windows_rejected_with_structured_error() {
+    let db = AletheiaDB::new().expect("db");
+    let _ = create_product(&db, 100, ts("2024-01-01T00:00:00Z"));
+
+    // 24 years at 1-minute granularity is ~12.6M windows, far over the cap.
+    assert!(
+        matches!(
+            db.execute_aql(
+                "MATCH (p:Product) WINDOW 1 minute OVER VALID_TIME \
+                 FROM '2000-01-01T00:00:00Z' TO '2024-01-01T00:00:00Z' RETURN COUNT(*)"
+            ),
+            Err(Error::Query(QueryError::InvalidParameter { .. }))
+        ),
+        "an over-cap window count must be InvalidParameter"
+    );
+
+    // A window multiplier exceeding u32 is likewise an InvalidParameter.
+    assert!(
+        matches!(
+            db.execute_aql(
+                "MATCH (p:Product) WINDOW 5000000000 day OVER VALID_TIME \
+                 FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' RETURN COUNT(*)"
+            ),
+            Err(Error::Query(QueryError::InvalidParameter { .. }))
+        ),
+        "a window size exceeding u32 must be InvalidParameter"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Value aggregates over float-valued properties keep float arithmetic (SUM/AVG
+// stay floats; the all-integer promotion path is not taken).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn float_property_value_aggregates() {
+    let db = AletheiaDB::new().expect("db");
+    db.create_node_with_options(
+        "Gadget",
+        PropertyMapBuilder::new().insert("price", 100.5f64).build(),
+        WriteRequestOptions::new().with_valid_from(ts("2024-01-01T00:00:00Z")),
+    )
+    .expect("create");
+    db.create_node_with_options(
+        "Gadget",
+        PropertyMapBuilder::new().insert("price", 200.25f64).build(),
+        WriteRequestOptions::new().with_valid_from(ts("2024-01-01T00:00:00Z")),
+    )
+    .expect("create");
+
+    let result = rows(
+        &db,
+        "MATCH (g:Gadget) \
+         WINDOW 1 month OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' \
+         RETURN SUM(g.price) AS total, AVG(g.price) AS avg_price, \
+                MIN(g.price) AS lo, MAX(g.price) AS hi",
+    );
+    assert_eq!(result.len(), 1);
+    // Floating sum/avg over {100.5, 200.25}.
+    assert_eq!(col_f64(&result[0], "total"), Some(300.75));
+    assert_eq!(col_f64(&result[0], "avg_price"), Some(150.375));
+    assert_eq!(col_f64(&result[0], "lo"), Some(100.5));
+    assert_eq!(col_f64(&result[0], "hi"), Some(200.25));
+}
+
+// ---------------------------------------------------------------------------
+// Bare-entity (`COUNT(v)` / `CHANGES(v)`) and `CHANGES(*)` argument forms, plus
+// the default (unaliased) output-column naming for each argument shape.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bare_entity_and_star_aggregates_with_default_names() {
+    let db = AletheiaDB::new().expect("db");
+    let id = create_product(&db, 100, ts("2024-01-01T00:00:00Z"));
+    // A second version starting inside the window is one entity change-point.
+    update_price(&db, id, 150, ts("2024-01-15T00:00:00Z"));
+
+    let result = rows(
+        &db,
+        "MATCH (p:Product) \
+         WINDOW 1 month OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' \
+         RETURN COUNT(p), COUNT(*), CHANGES(p), CHANGES(*)",
+    );
+    assert_eq!(result.len(), 1);
+
+    // Default output names follow `func(arg)` (lower-cased), for entity and star.
+    assert_eq!(
+        col_i64(&result[0], "count(p)"),
+        Some(1),
+        "entity present once"
+    );
+    assert_eq!(col_i64(&result[0], "count(*)"), Some(1));
+    // Two version-starts inside January (Jan 1 and Jan 15).
+    assert_eq!(col_i64(&result[0], "changes(p)"), Some(2));
+    assert_eq!(col_i64(&result[0], "changes(*)"), Some(2));
+}

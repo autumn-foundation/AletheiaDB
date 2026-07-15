@@ -452,4 +452,45 @@ mod tests {
         assert_eq!(WindowUnit::parse("HOURS"), Some(WindowUnit::Hour));
         assert_eq!(WindowUnit::parse("fortnight"), None);
     }
+
+    #[test]
+    fn parse_naive_datetime_forms_are_utc() {
+        // Naive date-times (no explicit offset) are interpreted as UTC, in both
+        // the `T`-separated and space-separated forms, and must agree with the
+        // equivalent RFC 3339 `Z` instant.
+        let expected = micros_of("2024-03-04T05:06:07Z");
+        assert_eq!(
+            parse_boundary_micros("2024-03-04T05:06:07").unwrap(),
+            expected
+        );
+        assert_eq!(
+            parse_boundary_micros("2024-03-04 05:06:07").unwrap(),
+            expected
+        );
+        // Whitespace around the token is tolerated.
+        assert_eq!(
+            parse_boundary_micros("  2024-03-04T05:06:07  ").unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn format_rfc3339_falls_back_for_out_of_range_micros() {
+        // `i64::MAX` microseconds is far outside chrono's representable range,
+        // so formatting falls back to the `<micros>us` token rather than
+        // panicking.
+        assert_eq!(format_rfc3339(i64::MAX), format!("{}us", i64::MAX));
+    }
+
+    #[test]
+    fn window_start_timestamp_matches_start_micros() {
+        let w = Window {
+            start_micros: 1_704_067_200_000_000,
+            end_micros: 1_704_070_800_000_000,
+        };
+        assert_eq!(
+            window_start_timestamp(&w),
+            Timestamp::from(1_704_067_200_000_000)
+        );
+    }
 }
