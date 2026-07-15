@@ -16707,6 +16707,119 @@ mod semantic_search_tools_tests {
         }
 
         #[test]
+        fn semantic_path_no_path_is_not_found() {
+            // c has no outgoing edges (a->b->c, a->d), so there is no route
+            // from c back to a. Both nodes carry the embedding, so this is a
+            // genuine "disconnected pair", not a missing-vector fault. It must
+            // surface as NOT_FOUND (a normal outcome), never INTERNAL.
+            let (server, [a, _b, c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "semantic_path",
+                json!({ "start": c, "end": a, "property_name": "embedding" }),
+            );
+            let err = value
+                .get("error")
+                .unwrap_or_else(|| panic!("expected an error, got: {value}"));
+            assert_eq!(err["code"], "NOT_FOUND", "{value}");
+            assert_eq!(err["retriable"], false, "{value}");
+            let msg = err["message"].as_str().unwrap_or("");
+            assert!(
+                msg.contains("no path found between nodes"),
+                "message must describe the disconnected pair: {value}"
+            );
+        }
+
+        #[test]
+        fn semantic_path_budget_exhausted_is_failed_precondition() {
+            // Build a long linear chain (longer than the minimum expansion
+            // budget of max_depth=1 -> 1000 expansions) so the DoS-protection
+            // budget is exhausted before the far end is reached. That is a
+            // resource-limit refusal (FAILED_PRECONDITION), not an INTERNAL
+            // error.
+            let server = create_test_server();
+            server.enable_vector_index(EnableVectorIndexRequest {
+                property_name: "embedding".to_string(),
+                dimensions: 2,
+                distance_metric: Some("cosine".to_string()),
+            });
+
+            let mk = |server: &AletheiaMcpServer| -> u64 {
+                let mut props = HashMap::new();
+                props.insert("embedding".to_string(), json!([1.0, 0.0]));
+                let resp = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
+                    label: "Doc".to_string(),
+                    properties: Some(props),
+                    provenance: None,
+                });
+                let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+                v["id"].as_u64().expect("node id")
+            };
+
+            // 1100 nodes > 1000 expansion budget at max_depth=1.
+            let ids: Vec<u64> = (0..1100).map(|_| mk(&server)).collect();
+            for w in ids.windows(2) {
+                server.create_edge(CreateEdgeRequest {
+                    source_id: w[0],
+                    target_id: w[1],
+                    label: "NEXT".to_string(),
+                    properties: None,
+                    valid_time: None,
+                    provenance: None,
+                    derived_from: None,
+                });
+            }
+
+            let value = parse(
+                &server,
+                "semantic_path",
+                json!({
+                    "start": ids[0],
+                    "end": ids[ids.len() - 1],
+                    "property_name": "embedding",
+                    "max_depth": 1
+                }),
+            );
+            let err = value
+                .get("error")
+                .unwrap_or_else(|| panic!("expected an error, got: {value}"));
+            assert_eq!(err["code"], "FAILED_PRECONDITION", "{value}");
+            assert_eq!(err["retriable"], false, "{value}");
+            assert_eq!(
+                err["details"]["reason"], "expansion_budget_exceeded",
+                "{value}"
+            );
+            assert_eq!(err["details"]["max_expansions"], 1000, "{value}");
+        }
+
+        #[test]
+        fn find_duplicate_candidates_excludes_self() {
+            // The similarity query resolves against the target's own embedding,
+            // so it can return the target itself. A node is never its own
+            // duplicate -- the target id must not appear among candidates.
+            let (server, [a, _b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "find_duplicate_candidates",
+                json!({ "node_id": a, "property_name": "embedding", "threshold": 0.5, "limit": 10 }),
+            );
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            let candidates = value["candidates"].as_array().expect("candidates");
+            assert!(
+                candidates.iter().all(|c| c["node_id"].as_u64() != Some(a)),
+                "target must not be its own duplicate: {value}"
+            );
+            // count must match the filtered candidate list length.
+            assert_eq!(
+                value["count"].as_u64(),
+                Some(candidates.len() as u64),
+                "count must reflect the filtered candidates: {value}"
+            );
+        }
+
+        #[test]
         fn horizon_threshold_out_of_range_is_invalid_argument() {
             let (server, [a, _b, _c, _d]) = semantic_server();
             let value = parse(

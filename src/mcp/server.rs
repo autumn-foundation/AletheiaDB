@@ -3938,8 +3938,9 @@ impl AletheiaMcpServer {
 
         let navigator =
             crate::semantic_search::semantic_navigator::SemanticNavigator::new(&self.db);
+        use crate::semantic_search::semantic_navigator::PathSearchOutcome;
         match navigator.find_path_bounded(start, end, &req.property_name, max_expansions) {
-            Ok(path) => {
+            Ok(PathSearchOutcome::Found(path)) => {
                 let ids: Vec<u64> = path.iter().map(|n| n.as_u64()).collect();
                 self.success_json(json!({
                     "path": ids,
@@ -3949,6 +3950,35 @@ impl AletheiaMcpServer {
                     "property_name": req.property_name,
                 }))
             }
+            // A genuinely disconnected pair is a NORMAL outcome, not a server
+            // bug: report NOT_FOUND (non-retriable) rather than INTERNAL, so an
+            // LLM treats it as "no such route" instead of escalating.
+            Ok(PathSearchOutcome::NoPath) => self.error_result(McpError::new(
+                McpErrorCode::NotFound,
+                format!(
+                    "no path found between nodes {} and {} within max_depth {}",
+                    req.start, req.end, max_depth
+                ),
+            )),
+            // The DoS-protection expansion budget was exhausted before a path
+            // was found. This is a resource-limit refusal (FAILED_PRECONDITION,
+            // matching StorageError::CapacityExceeded's classification), not an
+            // internal error: the caller can lower max_depth or pick closer
+            // endpoints and retry a smaller search.
+            Ok(PathSearchOutcome::BudgetExhausted { max_expansions }) => self.error_result(
+                McpError::new(
+                    McpErrorCode::FailedPrecondition,
+                    format!(
+                        "semantic path search hit its expansion budget of {max_expansions} \
+                             node expansions before finding a path; lower max_depth or choose \
+                             closer endpoints"
+                    ),
+                )
+                .details(json!({
+                    "reason": "expansion_budget_exceeded",
+                    "max_expansions": max_expansions,
+                })),
+            ),
             Err(e) => self.db_error(e),
         }
     }
@@ -4065,13 +4095,18 @@ impl AletheiaMcpServer {
         let detector = crate::semantic_search::highlander::HighlanderDetector::new(&self.db);
         match detector.find_duplicates(node_id, threshold, limit) {
             Ok(results) => {
+                // The underlying similarity query resolves against the target's
+                // own embedding, so it can return the target itself (similarity
+                // ~= 1.0). A node is never its own duplicate — filter it out.
                 let candidates: Vec<serde_json::Value> = results
                     .iter()
+                    .filter(|(id, _)| *id != node_id)
                     .map(|(id, sim)| json!({ "node_id": id.as_u64(), "similarity": sim }))
                     .collect();
+                let count = candidates.len();
                 self.success_json(json!({
                     "candidates": candidates,
-                    "count": results.len(),
+                    "count": count,
                     "threshold": threshold,
                     "target": req.node_id,
                 }))
@@ -4128,6 +4163,25 @@ impl AletheiaMcpServer {
                     "horizon": horizon,
                 }))
             }
+            // The visited-node DoS cap (a resource-limit refusal) surfaces as a
+            // FAILED_PRECONDITION naming the cap, not an INTERNAL error, so a
+            // caller knows to narrow the query (lower max_depth / raise
+            // threshold) rather than escalate a server bug.
+            Err(crate::core::error::Error::Storage(
+                crate::core::error::StorageError::CapacityExceeded { limit, .. },
+            )) => self.error_result(
+                McpError::new(
+                    McpErrorCode::FailedPrecondition,
+                    format!(
+                        "semantic horizon search hit its visited-node cap of {limit} nodes; \
+                         narrow the query by lowering max_depth or raising threshold"
+                    ),
+                )
+                .details(json!({
+                    "reason": "visit_cap_exceeded",
+                    "max_visited_nodes": limit,
+                })),
+            ),
             Err(e) => self.db_error(e),
         }
     }
@@ -4161,8 +4215,13 @@ impl AletheiaMcpServer {
                 let aspects_json: Vec<serde_json::Value> = aspects
                     .iter()
                     .map(|aspect| {
-                        let exemplars: Vec<u64> =
+                        // Sort exemplars by ascending node id for deterministic,
+                        // reproducible LLM-facing output (Chameleon clustering
+                        // order is not guaranteed stable). Mirrors the sorted
+                        // interior/horizon sets in semantic_horizon.
+                        let mut exemplars: Vec<u64> =
                             aspect.exemplars.iter().map(|n| n.as_u64()).collect();
+                        exemplars.sort_unstable();
                         // Elide the centroid vector by default (#3220).
                         let centroid = if include_vectors {
                             json!(aspect.centroid)
