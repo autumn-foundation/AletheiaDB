@@ -1277,6 +1277,11 @@ impl AletheiaMcpServer {
     ///
     /// Collapses the otherwise-duplicated "if present, parse, else None" handling for the
     /// changefeed's optional time bounds.
+    // clippy::result_large_err: the Err is rmcp's `CallToolResult` (~176B), the
+    // MCP error-response type carried across the whole tool surface; boxing it
+    // would ripple through the entire MCP `Result` API and every `?` call site.
+    // Cold error path. Allowed pending a deliberate Box refactor.
+    #[allow(clippy::result_large_err)]
     fn parse_opt_timestamp(
         &self,
         label: &str,
@@ -1301,6 +1306,9 @@ impl AletheiaMcpServer {
     /// (transaction_time defaults to now), matching the Rust API's
     /// `get_node_at_valid_time`/`get_node_at_transaction_time` convenience
     /// methods, which default the unspecified dimension the same way.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     fn resolve_bitemporal_as_of(
         &self,
         as_of_valid_time: &Option<String>,
@@ -1335,6 +1343,9 @@ impl AletheiaMcpServer {
     /// deliberately has no `principal` field, so callers cannot forge it.
     /// Anonymous-mode sessions (and the embedded `new()` constructor)
     /// record no principal -- the field is absent, not an empty string.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn parse_opt_provenance(
         &self,
         value: Option<crate::mcp::tools::ProvenanceRequest>,
@@ -1391,6 +1402,9 @@ impl AletheiaMcpServer {
     /// Invalid values fail closed with a structured `INVALID_ARGUMENT` whose
     /// `details.field` names the offending parameter (AC5) — never a silent
     /// empty result.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn parse_provenance_filter(
         &self,
         args: &serde_json::Value,
@@ -1491,6 +1505,9 @@ impl AletheiaMcpServer {
     /// version actually *exists* is checked by the write path
     /// (`validate_sources`) so a dangling reference becomes a `NOT_FOUND`
     /// rather than an `INVALID_ARGUMENT`.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     fn parse_lineage_ref(
         &self,
         req: &crate::mcp::tools::LineageRefRequest,
@@ -1516,6 +1533,10 @@ impl AletheiaMcpServer {
     /// Parse the optional `derived_from` list on a write request into core
     /// [`LineageRef`](crate::core::lineage::LineageRef)s (Issue #3371). `None`
     /// or an empty list yields an empty vec (no lineage recorded).
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    // Also covers the inner `map(|r| self.parse_lineage_ref(r))` closure.
+    #[allow(clippy::result_large_err)]
     fn parse_derived_from(
         &self,
         value: &Option<Vec<crate::mcp::tools::LineageRefRequest>>,
@@ -1894,6 +1915,9 @@ impl AletheiaMcpServer {
     /// applying the same optional exact-property filter `list_nodes` /
     /// `find_nodes_at_time` support. Returns a structured error result on a
     /// bad property value.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     fn fetch_node_candidates(
         &self,
         label: &str,
