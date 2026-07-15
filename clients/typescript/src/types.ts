@@ -229,7 +229,19 @@ export interface BudgetOptions {
   maxResponseTokens?: number;
   /** Byte-exact response cap. */
   maxResponseBytes?: number;
-  /** Property keys to protect first as the response degrades. */
+  /**
+   * Property keys to protect first as the response degrades.
+   *
+   * **POST-body reads only.** It is honored on the JSON-body reads
+   * ({@link AletheiaClient.findNodesAtTime}, {@link AletheiaClient.findSimilar},
+   * {@link AletheiaClient.hybridQuery}). It is **ignored on GET-query reads**
+   * (`getNode`/`listNodes`/`listEdges`/`getEdge`/`traverse`/adjacency/history):
+   * the server's GET query-string extractor (`serde_urlencoded`) cannot decode
+   * an array field, so this SDK does not place it on the query string (doing so
+   * would 400 the request). To prioritize properties on a GET read, use
+   * `maxResponseBytes`/`maxResponseTokens` and, if needed, fetch specific
+   * entities individually.
+   */
   priorityProperties?: string[];
 }
 

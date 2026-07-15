@@ -662,10 +662,9 @@ export class AletheiaClient {
    * `GET /schema` — node labels, edge types, and property keys with counts
    * (optional bi-temporal via `asOf*`).
    *
-   * Only the scalar token/byte budget is sent: `priority_properties` is a
-   * repeated-key array that the server's `GET` query-string extractor
-   * (`serde_urlencoded`) cannot decode into a `Vec<String>`, so it is
-   * deliberately not forwarded (see {@link GetSchemaOptions}).
+   * Only the scalar token/byte budget is sent — `priority_properties` is an
+   * array the `GET` query-string extractor cannot decode (see
+   * {@link budgetQuery} / {@link GetSchemaOptions}).
    */
   getSchema(opts: GetSchemaOptions = {}): Promise<SchemaResponse> {
     return this.transport.request<SchemaResponse>({
@@ -674,8 +673,7 @@ export class AletheiaClient {
       query: {
         as_of_valid_time: optTime(opts.asOfValidTime),
         as_of_transaction_time: optTime(opts.asOfTransactionTime),
-        max_response_tokens: opts.maxResponseTokens,
-        max_response_bytes: opts.maxResponseBytes,
+        ...budgetQuery(opts),
       },
     });
   }
@@ -753,16 +751,32 @@ function reqTime(t: TimeInput): string {
   return toWireTime(t);
 }
 
-/** Build the #3353 budget query fragment (query-string form). */
+/**
+ * Build the #3353 budget query fragment (query-string form) — **scalar params
+ * only**.
+ *
+ * `priority_properties` is deliberately NOT emitted on GET reads. The autumn
+ * GET routes decode the query string with `axum::extract::Query`, i.e.
+ * `serde_urlencoded` 0.7.1, whose value deserializer forwards `deserialize_seq`
+ * to `deserialize_any` and visits a plain string
+ * (`serde_urlencoded-0.7.1/src/de.rs:234-249`, the `Part` deserializer). A
+ * `Vec<String>` field therefore cannot be produced from **any** query encoding
+ * — a repeated key, a comma-joined single key, anything — every form is a
+ * `serde` type error and the extractor returns 400. Emitting it here would turn
+ * every budgeted GET read into a hard 400. The scalar `max_response_tokens` /
+ * `max_response_bytes` (`u64`) parse fine.
+ *
+ * Array budgeting (`priorityProperties`) is honored only on the POST-body reads
+ * (`findNodesAtTime`, `findSimilar`, `hybridQuery`), whose JSON body is parsed
+ * by `serde_json` — see {@link budgetBody}.
+ */
 function budgetQuery(opts: {
   maxResponseTokens?: number;
   maxResponseBytes?: number;
-  priorityProperties?: string[];
-}): Record<string, string | number | string[] | undefined> {
+}): Record<string, number | undefined> {
   return {
     max_response_tokens: opts.maxResponseTokens,
     max_response_bytes: opts.maxResponseBytes,
-    priority_properties: opts.priorityProperties,
   };
 }
 
