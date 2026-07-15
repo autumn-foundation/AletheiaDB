@@ -65,6 +65,10 @@ fn nodes_and_relationships_round_trip() {
     assert_eq!(report.relationships_imported, 2);
     assert!(report.zero_loss, "report: {report:?}");
     assert_eq!(db.node_count(), 3);
+    // AC4: property count is reported. Alice(name,age,active)=3 + Bob(name,age,
+    // score)=3 + Paris(name)=1 + KNOWS(since)=1 = 8 (UNIQUE IMPORT ID consumed,
+    // LIVES_IN has no properties, single-label nodes store no `_labels`).
+    assert_eq!(report.properties_imported, 8, "report: {report:?}");
 
     let alice = resolve(&importer, "0");
     let node = db.get_node(alice).unwrap();
@@ -128,7 +132,7 @@ fn multi_label_first_wins_and_labels_preserved() {
     let dump = "CREATE (:`Person`:`Employee`:`Manager` {`name`:\"Al\", `UNIQUE IMPORT ID`:0});\n";
     let path = write_file(&files, "d.cypher", dump);
     let mut importer = db.import();
-    importer
+    let report = importer
         .neo4j_import_cypher(&path, &Neo4jCypherOptions::new())
         .expect("import");
     let node = db.get_node(resolve(&importer, "0")).unwrap();
@@ -138,6 +142,19 @@ fn multi_label_first_wins_and_labels_preserved() {
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0], PropertyValue::string("Person"));
     assert_eq!(arr[2], PropertyValue::string("Manager"));
+
+    // AC4: the coerced table records the multi-label flatten with a count and a
+    // non-empty detail (assert contents, not just presence).
+    let ml = report
+        .coerced
+        .iter()
+        .find(|c| c.kind == "multi_label_flattened")
+        .unwrap_or_else(|| panic!("expected multi_label_flattened coercion: {report:?}"));
+    assert_eq!(ml.column, ":LABEL");
+    assert_eq!(ml.count, 1);
+    assert!(!ml.detail.is_empty(), "coercion detail must be populated");
+    // AC4: property count == stored `name` + the synthesized `_labels` array.
+    assert_eq!(report.properties_imported, 2, "report: {report:?}");
 }
 
 // ---- Value coverage (AC2) --------------------------------------------------
@@ -295,15 +312,19 @@ CALL db.myProc();
         .expect("import");
     assert_eq!(report.nodes_imported, 1);
     assert!(!report.zero_loss, "unsupported present -> not zero-loss");
-    // Three distinct unsupported constructs, each counted.
-    let kinds: Vec<&str> = report
-        .unsupported
-        .iter()
-        .map(|u| u.column.as_str())
-        .collect();
-    assert!(kinds.contains(&"CREATE CONSTRAINT"), "{kinds:?}");
-    assert!(kinds.contains(&"CREATE INDEX"), "{kinds:?}");
-    assert!(kinds.contains(&"CALL"), "{kinds:?}");
+    // Three distinct unsupported constructs, each counted with an exact count
+    // VALUE (AC8 — never silently dropped).
+    let count_of = |col: &str| -> usize {
+        report
+            .unsupported
+            .iter()
+            .find(|u| u.column == col)
+            .unwrap_or_else(|| panic!("missing unsupported '{col}': {report:?}"))
+            .count
+    };
+    assert_eq!(count_of("CREATE CONSTRAINT"), 1);
+    assert_eq!(count_of("CREATE INDEX"), 1);
+    assert_eq!(count_of("CALL"), 1);
 }
 
 #[test]
@@ -346,13 +367,100 @@ fn point_and_duration_values_reported() {
     );
     assert_eq!(node.properties.get("pos"), None);
     assert_eq!(node.properties.get("dur"), None);
-    let types: Vec<&str> = report
+    // AC8: each unsupported value type is reported with an exact count VALUE.
+    let by_type = |ty: &str| -> usize {
+        report
+            .unsupported
+            .iter()
+            .find(|u| u.neo4j_type == ty)
+            .unwrap_or_else(|| panic!("missing unsupported type '{ty}': {report:?}"))
+            .count
+    };
+    assert_eq!(by_type("point"), 1);
+    assert_eq!(by_type("duration"), 1);
+}
+
+/// AC8: the unsupported-value COUNT aggregates across statements — the same
+/// unsupported constructor on N nodes reports `count == N`, not merely presence.
+#[test]
+fn repeated_unsupported_value_count_aggregates() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let mut dump = String::new();
+    for i in 0..3 {
+        dump.push_str(&format!(
+            "CREATE (:`Loc`:`UNIQUE IMPORT LABEL` {{`pos`:point({{`x`:{i}.0}}), `UNIQUE IMPORT ID`:{i}}});\n"
+        ));
+    }
+    let path = write_file(&files, "d.cypher", &dump);
+    let mut importer = db.import();
+    let report = importer
+        .neo4j_import_cypher(&path, &Neo4jCypherOptions::new())
+        .expect("import");
+    assert_eq!(report.nodes_imported, 3);
+    let point = report
         .unsupported
         .iter()
-        .map(|u| u.neo4j_type.as_str())
-        .collect();
-    assert!(types.contains(&"point"), "{types:?}");
-    assert!(types.contains(&"duration"), "{types:?}");
+        .find(|u| u.neo4j_type == "point")
+        .unwrap_or_else(|| panic!("expected point unsupported: {report:?}"));
+    // `pos` appears on all three nodes -> count 3 (one UnsupportedNote row).
+    assert_eq!(point.column, "pos");
+    assert_eq!(point.count, 3);
+    assert!(!report.zero_loss);
+}
+
+/// AC8: a byte array reaches the importer only as an (unknown) constructor — the
+/// Cypher dump carries no `:byte[]` type annotation, unlike the CSV header path —
+/// so it is captured by the unsupported-constructor fallback (never silently
+/// dropped), reported with its constructor name and a count. A byte array
+/// serialized as a bare integer list is instead imported as an integer array
+/// (its data is preserved), which is why only the constructor form is reportable.
+#[test]
+fn byte_array_constructor_reported_as_unsupported() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    // apoc has no standard byte[] literal; a binary/unknown constructor value
+    // (here `bytes(...)`) falls through to the unsupported path.
+    let dump = "CREATE (:`Blob`:`UNIQUE IMPORT LABEL` {`name`:\"b\", \
+        `data`:bytes('SGVsbG8='), `UNIQUE IMPORT ID`:0});\n";
+    let path = write_file(&files, "d.cypher", dump);
+    let mut importer = db.import();
+    let report = importer
+        .neo4j_import_cypher(&path, &Neo4jCypherOptions::new())
+        .expect("import");
+    assert_eq!(report.nodes_imported, 1);
+    // The node still imports, minus the unsupported byte value.
+    let node = db.get_node(resolve(&importer, "0")).unwrap();
+    assert_eq!(
+        node.properties.get("name"),
+        Some(&PropertyValue::string("b"))
+    );
+    assert_eq!(node.properties.get("data"), None);
+    let data = report
+        .unsupported
+        .iter()
+        .find(|u| u.column == "data")
+        .unwrap_or_else(|| panic!("byte value must be reported: {report:?}"));
+    assert_eq!(data.neo4j_type, "bytes");
+    assert_eq!(data.count, 1);
+    assert!(!report.zero_loss);
+}
+
+/// AC8: under `--strict-types`, an unsupported byte/binary constructor value is a
+/// hard error (not a silent drop), naming the offending constructor.
+#[test]
+fn strict_types_rejects_byte_array_constructor() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let dump =
+        "CREATE (:`Blob`:`UNIQUE IMPORT LABEL` {`data`:bytes('AAg='), `UNIQUE IMPORT ID`:0});\n";
+    let path = write_file(&files, "d.cypher", dump);
+    let opts = Neo4jCypherOptions::new().strict_types(true);
+    let mut importer = db.import();
+    let err = importer
+        .neo4j_import_cypher(&path, &opts)
+        .expect_err("strict types should hard-error on a byte constructor");
+    assert!(err.to_string().contains("bytes"), "was: {err}");
 }
 
 #[test]
@@ -388,6 +496,75 @@ fn temporal_constructors_map_to_micros() {
     assert_eq!(
         node.properties.get("at"),
         Some(&PropertyValue::Int(1_705_276_800_000_000))
+    );
+}
+
+/// AC2: `date()` and `localdatetime()` also coerce to epoch micros, and
+/// `time()`/`localtime()` (no epoch anchor) are preserved as strings.
+#[test]
+fn date_localdatetime_time_and_localtime_round_trip() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let dump = "CREATE (:`E`:`UNIQUE IMPORT LABEL` {\
+        `d`:date('2024-01-15'), \
+        `ldt`:localdatetime('2024-01-15T12:30:00'), \
+        `t`:time('12:30:00Z'), \
+        `lt`:localtime('12:30:00'), \
+        `UNIQUE IMPORT ID`:0});\n";
+    let path = write_file(&files, "d.cypher", &dump.replace("        ", ""));
+    let mut importer = db.import();
+    let report = importer
+        .neo4j_import_cypher(&path, &Neo4jCypherOptions::new())
+        .expect("import");
+    let node = db.get_node(resolve(&importer, "0")).unwrap();
+    // date('2024-01-15') -> midnight UTC micros.
+    assert_eq!(
+        node.properties.get("d"),
+        Some(&PropertyValue::Int(1_705_276_800_000_000))
+    );
+    // localdatetime('2024-01-15T12:30:00') -> assumed UTC.
+    // 1_705_276_800 + 12*3600 + 30*60 = 1_705_321_800 s.
+    assert_eq!(
+        node.properties.get("ldt"),
+        Some(&PropertyValue::Int(1_705_321_800_000_000))
+    );
+    // time-of-day values keep their string form (no epoch anchor).
+    assert_eq!(
+        node.properties.get("t"),
+        Some(&PropertyValue::string("12:30:00Z"))
+    );
+    assert_eq!(
+        node.properties.get("lt"),
+        Some(&PropertyValue::string("12:30:00"))
+    );
+    // Coercions are recorded with their stable kind tokens.
+    let kinds: Vec<&str> = report.coerced.iter().map(|c| c.kind.as_str()).collect();
+    assert!(kinds.contains(&"temporal_to_micros"), "{kinds:?}");
+    assert!(kinds.contains(&"time_to_string"), "{kinds:?}");
+}
+
+/// AC2: a string array round-trips with its ELEMENT values intact (not merely
+/// its length).
+#[test]
+fn string_array_element_values_preserved() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let dump = "CREATE (:`T`:`UNIQUE IMPORT LABEL` \
+        {`tags`:[\"alpha\",\"beta\",\"gamma\"], `UNIQUE IMPORT ID`:0});\n";
+    let path = write_file(&files, "d.cypher", dump);
+    let mut importer = db.import();
+    importer
+        .neo4j_import_cypher(&path, &Neo4jCypherOptions::new())
+        .expect("import");
+    let node = db.get_node(resolve(&importer, "0")).unwrap();
+    let tags = node.properties.get("tags").unwrap().as_array().unwrap();
+    assert_eq!(
+        tags,
+        &[
+            PropertyValue::string("alpha"),
+            PropertyValue::string("beta"),
+            PropertyValue::string("gamma"),
+        ]
     );
 }
 
@@ -575,6 +752,169 @@ fn huge_property_value_does_not_panic() {
         node.properties.get("s").unwrap().as_str().unwrap().len(),
         1_000_000
     );
+}
+
+/// BLOCKER regression: a balanced but pathologically deep value must fail with
+/// a typed error, never a native stack-overflow (SIGABRT). ~100k levels of
+/// nesting would recurse ~100k deep without the depth cap; the cap turns it
+/// into a per-statement [`RowError`], so both failure modes stay in control.
+#[test]
+fn deeply_nested_value_errors_not_stack_overflow() {
+    let depth = 100_000usize;
+    let nested = format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+    let dump =
+        format!("CREATE (:`P`:`UNIQUE IMPORT LABEL` {{`deep`:{nested}, `UNIQUE IMPORT ID`:0}});\n");
+
+    // Abort mode: the whole import returns a typed error (no panic/abort).
+    {
+        let files = TempDir::new().unwrap();
+        let (_tmp, db) = create_test_db().unwrap();
+        let path = write_file(&files, "d.cypher", &dump);
+        let mut importer = db.import();
+        let err = importer
+            .neo4j_import_cypher(&path, &Neo4jCypherOptions::new())
+            .expect_err("deep nesting must error in abort mode");
+        assert!(err.to_string().contains("depth"), "was: {err}");
+    }
+
+    // Skip-and-report mode: the offending statement is collected, not fatal.
+    {
+        let files = TempDir::new().unwrap();
+        let (_tmp, db) = create_test_db().unwrap();
+        let path = write_file(&files, "d.cypher", &dump);
+        let mut importer = db.import().failure_mode(FailureMode::SkipAndReport);
+        let report = importer
+            .neo4j_import_cypher(&path, &Neo4jCypherOptions::new())
+            .expect("skip mode must not error on deep nesting");
+        assert_eq!(report.nodes_imported, 0);
+        assert_eq!(report.skipped.len(), 1);
+        assert!(
+            report.skipped[0].message.contains("depth"),
+            "was: {:?}",
+            report.skipped[0]
+        );
+        assert!(!report.zero_loss);
+    }
+}
+
+// ---- Full-type equivalence round-trip (AC7) --------------------------------
+
+/// AC7 equivalence: a committed multi-label / multi-type golden dump covering
+/// every supported value type round-trips zero-loss, with counts-by-label and
+/// counts-by-type matching, and a sampled-neighborhood check that a traversed
+/// edge resolves both endpoints with their expected properties.
+#[test]
+fn all_types_equivalence_round_trip() {
+    let (_tmp, db) = create_test_db().unwrap();
+    let path = fixture("apoc_all_types.cypher");
+    let opts = Neo4jCypherOptions::new().vector_property("emb");
+    let mut importer = db.import();
+    let report = importer
+        .neo4j_import_cypher(&path, &opts)
+        .expect("all-types import");
+
+    // (a) counts-by-label and counts-by-type match expected.
+    assert_eq!(report.nodes_imported, 3);
+    assert_eq!(report.relationships_imported, 3);
+    assert!(report.zero_loss, "must be zero-loss: {report:?}");
+
+    let label_count = |neo4j: &str| -> usize {
+        report
+            .label_mapping
+            .iter()
+            .find(|e| e.neo4j_labels == neo4j)
+            .unwrap_or_else(|| panic!("missing label mapping '{neo4j}': {report:?}"))
+            .count
+    };
+    assert_eq!(label_count("Person"), 2);
+    assert_eq!(label_count("City"), 1);
+
+    let type_count = |ty: &str| -> usize {
+        report
+            .type_mapping
+            .iter()
+            .find(|e| e.neo4j_type == ty)
+            .unwrap_or_else(|| panic!("missing type mapping '{ty}': {report:?}"))
+            .count
+    };
+    assert_eq!(type_count("KNOWS"), 2);
+    assert_eq!(type_count("LIVES_IN"), 1);
+
+    // Every supported value type maps to the expected AletheiaDB representation.
+    let alice = resolve(&importer, "0");
+    let a = db.get_node(alice).unwrap();
+    assert!(a.has_label_str("Person"));
+    assert_eq!(
+        a.properties.get("name"),
+        Some(&PropertyValue::string("Alice"))
+    );
+    // char -> 1-char string.
+    assert_eq!(
+        a.properties.get("initial"),
+        Some(&PropertyValue::string("A"))
+    );
+    assert_eq!(a.properties.get("age"), Some(&PropertyValue::Int(30)));
+    // long -> Int.
+    assert_eq!(
+        a.properties.get("big"),
+        Some(&PropertyValue::Int(9_999_999_999))
+    );
+    // double -> Float.
+    assert_eq!(a.properties.get("score"), Some(&PropertyValue::Float(9.5)));
+    assert_eq!(a.properties.get("active"), Some(&PropertyValue::Bool(true)));
+    // date / datetime / localdatetime -> epoch micros (Int).
+    assert_eq!(
+        a.properties.get("created"),
+        Some(&PropertyValue::Int(1_577_836_800_000_000))
+    );
+    assert!(matches!(
+        a.properties.get("born"),
+        Some(PropertyValue::Int(_))
+    ));
+    assert!(matches!(
+        a.properties.get("last_seen"),
+        Some(PropertyValue::Int(_))
+    ));
+    // string array -> Array with element values intact.
+    let tags = a.properties.get("tags").unwrap().as_array().unwrap();
+    assert_eq!(
+        tags,
+        &[PropertyValue::string("x"), PropertyValue::string("y")]
+    );
+    // numeric array + vector flag -> Vector.
+    assert_eq!(
+        a.properties.get("emb").unwrap().as_vector().unwrap().len(),
+        3
+    );
+
+    // (b) sampled-neighborhood check: traverse an imported KNOWS edge and verify
+    // both endpoints resolve and carry expected properties.
+    let bob = resolve(&importer, "1");
+    let knows = db.get_outgoing_edges_with_label(alice, "KNOWS");
+    assert_eq!(knows.len(), 1);
+    assert_eq!(db.get_edge_target(knows[0]).unwrap(), bob);
+    assert_eq!(
+        db.get_edge(knows[0]).unwrap().properties.get("since"),
+        Some(&PropertyValue::Int(2020))
+    );
+    let bob_node = db.get_node(bob).unwrap();
+    assert!(bob_node.has_label_str("Person"));
+    assert_eq!(
+        bob_node.properties.get("name"),
+        Some(&PropertyValue::string("Bob"))
+    );
+    assert_eq!(
+        bob_node.properties.get("active"),
+        Some(&PropertyValue::Bool(false))
+    );
+
+    // (c) zero_loss already asserted above; the City endpoint of LIVES_IN also
+    // resolves, proving the second label + type participate in the graph.
+    let paris = resolve(&importer, "2");
+    let lives = db.get_outgoing_edges_with_label(alice, "LIVES_IN");
+    assert_eq!(lives.len(), 1);
+    assert_eq!(db.get_edge_target(lives[0]).unwrap(), paris);
+    assert!(db.get_node(paris).unwrap().has_label_str("City"));
 }
 
 // ---- Scale smoke (AC7) -----------------------------------------------------

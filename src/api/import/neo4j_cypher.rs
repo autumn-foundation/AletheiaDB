@@ -36,9 +36,15 @@
 //! # Out of scope (reported, never silently dropped)
 //!
 //! User-defined `CREATE CONSTRAINT` / `CREATE INDEX`, `DROP`, `CALL`, `MERGE`,
-//! spatial `point(..)`, `duration(..)`, and byte arrays are enumerated in the
+//! spatial `point(..)`, `duration(..)`, and any unknown constructor (the form a
+//! byte array takes when apoc wraps it in a function) are enumerated in the
 //! fidelity report's `unsupported` list with counts (and set `zero_loss =
 //! false`). `--strict-types` promotes an unsupported *value* to a hard error.
+//! Note that — unlike the CSV importer, which reads a `:byte[]` type annotation
+//! from the header — a Cypher dump carries no per-value type tags, so a byte
+//! array serialized as a bare integer list is indistinguishable from a
+//! `long[]` and imports as an integer array (its data is preserved); only the
+//! constructor form is reportable as unsupported.
 //! apoc's own `UNIQUE IMPORT` scaffolding (the constraint it creates/drops and
 //! the `REMOVE`-cleanup statement) manages import-only artifacts this importer
 //! already strips, so it is ignored **losslessly** and does not affect
@@ -688,6 +694,19 @@ impl Cursor {
 
 // ---- Value parsing ---------------------------------------------------------
 
+/// Maximum nesting depth for a property value (lists / maps). A dump with
+/// deeper balanced nesting is rejected with a typed [`RowError`] rather than
+/// recursing until the native stack overflows (SIGABRT) — a hostile or
+/// corrupt dump must never crash the process, only fail the statement (so
+/// `SkipAndReport` can carry on). Neo4j property values are primitives or flat
+/// arrays in practice, so 128 is far beyond any real dump.
+const MAX_VALUE_DEPTH: usize = 128;
+
+/// Error text for a value that nests past [`MAX_VALUE_DEPTH`].
+fn depth_exceeded() -> String {
+    format!("maximum value nesting depth ({MAX_VALUE_DEPTH}) exceeded")
+}
+
 /// The outcome of parsing one property value.
 enum PropOutcome {
     /// A stored value.
@@ -915,16 +934,20 @@ fn parse_value(
     prop_name: &str,
     opts: &Neo4jCypherOptions,
     note: &mut FidelityNote,
+    depth: usize,
 ) -> std::result::Result<PropOutcome, String> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(depth_exceeded());
+    }
     cur.skip_ws();
     match cur.peek() {
         None => Err("unexpected end of value".to_string()),
         Some('\'') | Some('"') => Ok(PropOutcome::Value(PropertyValue::string(parse_string(
             cur,
         )?))),
-        Some('[') => parse_list_value(cur, prop_name, opts),
+        Some('[') => parse_list_value(cur, prop_name, opts, depth + 1),
         Some('{') => {
-            let json = parse_json_value(cur, opts)?;
+            let json = parse_json_value(cur, opts, depth + 1)?;
             note.note_coercion(prop_name, "map_to_json");
             Ok(PropOutcome::Value(PropertyValue::string(json.to_string())))
         }
@@ -953,7 +976,11 @@ fn parse_list_value(
     cur: &mut Cursor,
     prop_name: &str,
     opts: &Neo4jCypherOptions,
+    depth: usize,
 ) -> std::result::Result<PropOutcome, String> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(depth_exceeded());
+    }
     cur.expect('[')?;
     let mut elems: Vec<serde_json::Value> = Vec::new();
     cur.skip_ws();
@@ -961,7 +988,7 @@ fn parse_list_value(
         cur.pos += 1;
     } else {
         loop {
-            let v = parse_json_value(cur, opts)?;
+            let v = parse_json_value(cur, opts, depth + 1)?;
             elems.push(v);
             cur.skip_ws();
             match cur.peek() {
@@ -999,12 +1026,16 @@ fn parse_list_value(
 fn parse_json_value(
     cur: &mut Cursor,
     opts: &Neo4jCypherOptions,
+    depth: usize,
 ) -> std::result::Result<serde_json::Value, String> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(depth_exceeded());
+    }
     cur.skip_ws();
     match cur.peek() {
         None => Err("unexpected end of value".to_string()),
         Some('\'') | Some('"') => Ok(serde_json::Value::String(parse_string(cur)?)),
-        Some('{') => parse_json_map(cur, opts),
+        Some('{') => parse_json_map(cur, opts, depth + 1),
         Some('[') => {
             cur.pos += 1;
             let mut arr = Vec::new();
@@ -1014,7 +1045,7 @@ fn parse_json_value(
                 return Ok(serde_json::Value::Array(arr));
             }
             loop {
-                arr.push(parse_json_value(cur, opts)?);
+                arr.push(parse_json_value(cur, opts, depth + 1)?);
                 cur.skip_ws();
                 match cur.peek() {
                     Some(',') => cur.pos += 1,
@@ -1077,7 +1108,11 @@ fn parse_json_value(
 fn parse_json_map(
     cur: &mut Cursor,
     opts: &Neo4jCypherOptions,
+    depth: usize,
 ) -> std::result::Result<serde_json::Value, String> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(depth_exceeded());
+    }
     cur.expect('{')?;
     let mut map = serde_json::Map::new();
     cur.skip_ws();
@@ -1088,7 +1123,7 @@ fn parse_json_map(
     loop {
         let key = cur.parse_ident()?;
         cur.expect(':')?;
-        let val = parse_json_value(cur, opts)?;
+        let val = parse_json_value(cur, opts, depth + 1)?;
         map.insert(key, val);
         cur.skip_ws();
         match cur.peek() {
@@ -1234,7 +1269,7 @@ fn parse_prop_map(
     loop {
         let key = cur.parse_ident()?;
         cur.expect(':')?;
-        let val = parse_value(cur, &key, opts, note)?;
+        let val = parse_value(cur, &key, opts, note, 0)?;
         out.push((key, val));
         cur.skip_ws();
         match cur.peek() {
@@ -1492,7 +1527,7 @@ fn parse_unwind(
     let mut cur = Cursor::new(text);
     cur.consume_keyword("UNWIND")?;
     cur.skip_ws();
-    let rows = parse_json_value(&mut cur, opts)?;
+    let rows = parse_json_value(&mut cur, opts, 0)?;
     let serde_json::Value::Array(rows) = rows else {
         return Err("UNWIND expects a list literal".to_string());
     };
@@ -1726,9 +1761,12 @@ fn json_valid_from(
 ) -> std::result::Result<Option<Timestamp>, String> {
     match val {
         serde_json::Value::Null => Ok(None),
-        serde_json::Value::Number(n) if n.as_i64().is_some() => {
-            Ok(Some(Timestamp::from(n.as_i64().unwrap())))
-        }
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(micros) => Ok(Some(Timestamp::from(micros))),
+            None => Err(format!(
+                "valid-from property '{name}' is not a temporal value ({n})"
+            )),
+        },
         serde_json::Value::String(s) => parse::parse_valid_time(s)
             .map(Some)
             .map_err(|m| format!("valid-from property '{name}': {m}")),
@@ -1880,7 +1918,11 @@ impl Importer<'_> {
 
         let rows: parse::RowIter = Box::new((0..count).map(|_| Ok(Row::new(1, HashMap::new()))));
         let result = self.import_nodes_with(rows, |_row| {
-            let unit = iter.next().expect("row/unit counts match");
+            let unit = iter.next().ok_or_else(|| RowError {
+                row: 0,
+                message: "internal invariant: node unit iterator exhausted before rows".to_string(),
+                file: None,
+            })?;
             fold_note(report, &unit.note);
             Ok(unit.node)
         });
@@ -1909,7 +1951,14 @@ impl Importer<'_> {
 
         let rows: parse::RowIter = Box::new((0..count).map(|_| Ok(Row::new(1, HashMap::new()))));
         let result = self.import_edges_with(rows, |key_to_id, _row| {
-            let unit = iter.next().expect("row/unit counts match");
+            let unit = iter.next().ok_or_else(|| {
+                EdgePrepError::Row(RowError {
+                    row: 0,
+                    message: "internal invariant: edge unit iterator exhausted before rows"
+                        .to_string(),
+                    file: None,
+                })
+            })?;
             let source = key_to_id.get(&unit.source_key).copied().ok_or_else(|| {
                 EdgePrepError::Unresolved(UnresolvedEndpoint {
                     row: unit.line,
@@ -1957,8 +2006,14 @@ fn build_node_stmt(
     let pattern = parse_node_pattern(&mut cur, opts, &mut note)?;
     // Merge any coercions recorded during pattern parsing (values) into the node.
     let mut unit = build_node(pattern, opts, seq)?;
-    // Fold value-level coercions/unsupported captured on the pattern note.
+    // Fold value-level coercions/unsupported captured on the pattern note. A
+    // coercion on the property consumed as `valid_from` is suppressed: that
+    // value is folded into the version's valid-time interval, not stored, so
+    // reporting it as a property coercion would be misleading.
     for (c, k) in note.coercions {
+        if opts.valid_from_property.as_deref() == Some(c.as_str()) {
+            continue;
+        }
         unit.note.note_coercion(&c, k);
     }
     for (c, t) in note.unsupported {

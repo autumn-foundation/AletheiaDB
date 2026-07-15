@@ -717,10 +717,11 @@ fn read_chain_head(path: &str) -> Result<ChainHead, String> {
 /// `aletheia import` — load an external graph export.
 ///
 /// Dispatches on `--format`: `neo4j-csv` (the default) loads a Neo4j CSV export
-/// (Issue #3356); `parquet` loads a Parquet file via the mapping contract
-/// (Issue #3364, requires `--features parquet`). A binary Neo4j `.dump` archive and
-/// the APOC Cypher-script dump are unsupported and rejected with an actionable
-/// message (documented follow-ups).
+/// (Issue #3356); `neo4j-cypher` (or any `.cypher` input) loads an
+/// `apoc.export.cypher.all` script dump via [`handle_import_cypher`] (Issue
+/// #3356); `parquet` loads a Parquet file via the mapping contract (Issue
+/// #3364, requires `--features parquet`). A binary Neo4j `.dump` archive is
+/// unsupported and rejected with an actionable message pointing at CSV/Cypher.
 #[cfg(feature = "import")]
 fn handle_import(args: Vec<String>) -> Result<(), String> {
     use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCsvOptions};
@@ -2947,5 +2948,71 @@ mod parquet_cli_tests {
         ])
         .unwrap_err();
         assert!(err.contains("mode"), "got: {err}");
+    }
+}
+
+/// CLI smoke tests for the APOC Cypher-script dump import verb (Issue #3356,
+/// AC1 — the CLI half). Exercises the `import` dispatch end-to-end: argument
+/// parsing, `.cypher`/`--format` routing to [`handle_import_cypher`], opening
+/// the database, running the import, and rendering the fidelity report.
+#[cfg(all(test, feature = "import"))]
+mod cypher_cli_tests {
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    const DUMP: &str = "\
+:begin
+CREATE (:`Person`:`UNIQUE IMPORT LABEL` {`name`:\"Alice\", `UNIQUE IMPORT ID`:0});
+CREATE (:`Person`:`UNIQUE IMPORT LABEL` {`name`:\"Bob\", `UNIQUE IMPORT ID`:1});
+MATCH (a:`UNIQUE IMPORT LABEL`{`UNIQUE IMPORT ID`:0}), (b:`UNIQUE IMPORT LABEL`{`UNIQUE IMPORT ID`:1}) CREATE (a)-[:`KNOWS`]->(b);
+:commit
+";
+
+    fn write_dump(dir: &TempDir, name: &str) -> String {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(DUMP.as_bytes()).unwrap();
+        path.display().to_string()
+    }
+
+    /// A `.cypher` input routes through the dedicated importer end-to-end and
+    /// the `--report` file captures the fidelity report.
+    #[test]
+    fn import_cypher_file_end_to_end_writes_report() {
+        let dir = TempDir::new().unwrap();
+        let dump = write_dump(&dir, "graph.cypher");
+        let report = dir.path().join("report.json").display().to_string();
+        super::handle_import(vec![s("--nodes"), dump, s("--report"), report.clone()])
+            .expect("cypher import via CLI dispatch should succeed");
+        let json = std::fs::read_to_string(&report).expect("report file written");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid report JSON");
+        assert_eq!(v["nodes_imported"], 2);
+        assert_eq!(v["relationships_imported"], 1);
+        assert_eq!(v["zero_loss"], true);
+    }
+
+    /// `--format neo4j-cypher` routes to the cypher handler even when the file
+    /// does not carry a `.cypher` extension.
+    #[test]
+    fn import_format_neo4j_cypher_routes_to_handler() {
+        let dir = TempDir::new().unwrap();
+        let dump = write_dump(&dir, "graph.txt");
+        super::handle_import(vec![s("--format"), s("neo4j-cypher"), s("--nodes"), dump])
+            .expect("--format neo4j-cypher should import");
+    }
+
+    /// Two dump files is a usage error: one apoc dump holds both nodes and
+    /// relationships. (Fails during argument validation, before opening a db.)
+    #[test]
+    fn import_cypher_rejects_multiple_dump_files() {
+        let dir = TempDir::new().unwrap();
+        let a = write_dump(&dir, "a.cypher");
+        let b = write_dump(&dir, "b.cypher");
+        let err = super::handle_import(vec![s("--nodes"), a, s("--nodes"), b]).unwrap_err();
+        assert!(err.contains("single dump file"), "got: {err}");
     }
 }

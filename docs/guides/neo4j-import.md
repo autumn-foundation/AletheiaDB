@@ -337,12 +337,20 @@ does.
 | `CALL ...` (non-`awaitIndexes`) | `unsupported`: `CALL` |
 | `MERGE ...` | `unsupported`: `MERGE` |
 | inline `CREATE (a)-[:R]->(b)` (no `MATCH`) | `unsupported`: `CREATE (inline relationship)` |
-| `point(..)`, `duration(..)`, byte arrays, unknown constructors | property dropped, `unsupported`: the constructor name |
+| `point(..)`, `duration(..)`, byte/binary or unknown constructors | property dropped, `unsupported`: the constructor name |
 
 Every entry carries a **count**. With `--strict-types`, an unsupported *value*
 (`point(..)`, `duration(..)`, an unknown constructor) is a **hard error** instead
 of a reported-and-counted drop. Unsupported *constructs* (constraints/indexes/
 procedures) stay report-only regardless of `--strict-types`.
+
+> **Byte arrays.** Unlike the CSV path — which reads a `:byte[]` type annotation
+> from the header and reports it as unsupported — a Cypher dump carries **no
+> per-value type tags**. A byte array serialized as a bare integer list is
+> therefore indistinguishable from a `long[]` and imports as an **integer
+> array** (its data is preserved, `zero_loss` stays `true`). Only a byte array
+> that apoc wraps in a **constructor** (an unknown function call) hits the
+> unsupported-value path above and is reported with a count.
 
 > **apoc's own scaffolding is losslessly ignored.** A real
 > `apoc.export.cypher.all` dump always contains the `UNIQUE IMPORT` constraint it
@@ -375,8 +383,18 @@ procedures) stay report-only regardless of `--strict-types`.
   either mode.
 - `--on-error abort` (default): the first malformed statement, `--strict-types`
   unsupported value, or unresolved endpoint returns an error naming the source
-  **file** and the 1-based **line** the statement began on. Because the whole
-  dump is parsed before committing, an abort leaves nothing committed.
+  **file** and the 1-based **line** the statement began on.
+  - A **parse-phase** failure (a malformed statement or a `--strict-types`
+    value) is raised while the dump is still being parsed, *before* any commit
+    — so it leaves nothing committed.
+  - An **unresolved-endpoint** failure, however, is detected during the
+    edge-commit phase, which runs *after* nodes are committed (the import is
+    chunked, not one global transaction: nodes commit first to build the
+    business-key map, then edges). So an abort there can leave the successfully
+    imported nodes — and any earlier edge chunks — already committed. The
+    `--report` output still reflects exactly what was written. Use
+    `--on-error skip` if you want the import to finish and collect the
+    unresolved endpoints instead of aborting mid-way.
 - `--on-error skip`: malformed statements land in `skipped` (each with its line
   and file), unresolved relationship endpoints land in `unresolved_endpoints`,
   and the import continues.
