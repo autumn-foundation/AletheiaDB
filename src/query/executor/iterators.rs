@@ -17,7 +17,7 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
 use crate::core::provenance::Provenance;
 use crate::core::vector::DistanceMetric as VectorMetric;
-use crate::core::{NodeId, Timestamp};
+use crate::core::{EdgeId, NodeId, Timestamp};
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate,
     PredicateValue, ProvenanceField, ProvenancePredicate, ProvenanceProjection, ScoreThreshold,
@@ -585,6 +585,129 @@ impl ResultIterator for NodeScanIterator {
             // Paged: the remaining live count is not cheaply known here.
             ScanMode::Paged { .. } => (0, None),
         }
+    }
+}
+
+/// Edge-type filter state for an [`EdgeScanIterator`], resolved once at
+/// construction.
+///
+/// Mirrors [`ScanFilter`] for the node scan: a requested edge type is resolved
+/// to its interned id up front so each candidate edge is accepted/rejected by a
+/// cheap `InternedString` comparison rather than a string compare.
+enum EdgeScanFilter {
+    /// No edge-type filter: every existing edge is yielded.
+    All,
+    /// Yield only edges whose interned label equals this id.
+    Type(crate::core::interning::InternedString),
+    /// An edge type was requested but has never been interned, so no edge can
+    /// match. The scan yields nothing (as opposed to [`EdgeScanFilter::All`]).
+    None,
+}
+
+/// Sequential edge scan iterator, optionally applying an edge-type filter.
+///
+/// This is the edge counterpart to [`NodeScanIterator`] and backs the SQL
+/// `SELECT * FROM edges` path (`PhysicalOp::EdgeScan`). Edges have no id
+/// high-water mark analogous to [`CurrentStorage::get_max_node_id`], so the
+/// dense `[0, max_id)` sweep the node scan uses does not apply. Instead the
+/// iterator snapshots the live edge id set once at construction
+/// (via [`CurrentStorage::get_all_edge_ids`] -- an id-only snapshot, which does
+/// not clone the edges) and then materializes each [`Edge`] lazily with
+/// [`CurrentStorage::get_edge`] as `next()` is pulled. Only 8-byte ids are held
+/// resident; edge payloads are never all materialized at once.
+///
+/// # Filtering
+///
+/// An edge type is resolved to its interned id once. A requested-but-never-
+/// interned type short-circuits to an empty scan (mirroring the node scan's
+/// unknown-label semantics: unknown type yields nothing, **not** an unfiltered
+/// scan). SQL always emits `edge_type: None` (a bare `FROM edges`), so the
+/// `Type` path is exercised at the iterator/IR level; a `WHERE` predicate over
+/// edge properties is applied by the `FilterIterator` layered above this scan.
+///
+/// # Concurrency
+///
+/// No storage lock is held across a `next()` yield: the id snapshot is taken
+/// once, and each per-edge `get_edge` acquires and releases its shard lock
+/// internally. An edge deleted after the snapshot but before its `get_edge`
+/// surfaces as `EdgeNotFound` and is skipped (relaxed, non-isolated snapshot
+/// semantics, exactly like the node scan tolerating deleted ids).
+pub struct EdgeScanIterator {
+    filter: EdgeScanFilter,
+    edge_ids: std::vec::IntoIter<EdgeId>,
+    current: Arc<CurrentStorage>,
+}
+
+impl EdgeScanIterator {
+    /// Create a new edge scan, optionally filtered to a single edge type.
+    ///
+    /// Passing `None` scans every edge; passing `Some(type)` yields only edges
+    /// of that type (or nothing, if the type was never interned).
+    pub fn new(edge_type: Option<String>, current: Arc<CurrentStorage>) -> Self {
+        // Resolve the requested type to an interned id exactly once. An unknown
+        // type short-circuits to `None` so the scan yields nothing rather than
+        // degrading to an unfiltered scan.
+        let filter = match edge_type {
+            Option::None => EdgeScanFilter::All,
+            Some(ref t) => match GLOBAL_INTERNER.get_id(t) {
+                Some(id) => EdgeScanFilter::Type(id),
+                Option::None => EdgeScanFilter::None,
+            },
+        };
+
+        // Snapshot the live edge id set once. For an unknown type the snapshot
+        // is skipped entirely (no edge can match), so the scan drains
+        // immediately without touching storage.
+        let edge_ids = if matches!(filter, EdgeScanFilter::None) {
+            Vec::new()
+        } else {
+            current.get_all_edge_ids()
+        };
+
+        EdgeScanIterator {
+            filter,
+            edge_ids: edge_ids.into_iter(),
+            current,
+        }
+    }
+}
+
+impl ResultIterator for EdgeScanIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        // An edge type that was never interned can match no edge.
+        if matches!(self.filter, EdgeScanFilter::None) {
+            return None;
+        }
+
+        loop {
+            let id = self.edge_ids.next()?;
+
+            match self.current.get_edge(id) {
+                Ok(edge) => {
+                    // Apply the edge-type filter on the fully-loaded edge.
+                    if let EdgeScanFilter::Type(type_id) = self.filter
+                        && edge.label != type_id
+                    {
+                        continue;
+                    }
+                    return Some(Ok(QueryRow::from_entity(EntityResult::Edge(edge))));
+                }
+                // The id was live when the snapshot was taken but was deleted
+                // before this load; skip it (relaxed snapshot semantics).
+                Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::EdgeNotFound(_),
+                )) => continue,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if matches!(self.filter, EdgeScanFilter::None) {
+            return (0, Some(0));
+        }
+        // Upper bound only: a type filter or a concurrent deletion may drop ids.
+        (0, Some(self.edge_ids.len()))
     }
 }
 
@@ -4945,6 +5068,92 @@ mod tests {
         iter.next();
         // After consuming one id the remaining upper bound shrinks.
         assert_eq!(iter.size_hint(), (0, Some(3)));
+    }
+
+    // ==================== EdgeScanIterator Tests ====================
+
+    /// Build a small graph (2 nodes, 2 KNOWS edges + 1 FOLLOWS edge) for edge
+    /// scan tests. Returns the storage and the count of KNOWS edges (2).
+    fn edge_scan_fixture() -> Arc<CurrentStorage> {
+        let current = Arc::new(CurrentStorage::new());
+        let a = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        let b = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        current
+            .create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        current
+            .create_edge(b, a, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        current
+            .create_edge(a, b, "FOLLOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        current
+    }
+
+    fn drain(mut iter: EdgeScanIterator) -> Vec<crate::core::graph::Edge> {
+        let mut edges = Vec::new();
+        while let Some(item) = iter.next() {
+            edges.push(item.unwrap().entity.as_edge().unwrap().clone());
+        }
+        edges
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_all_edges() {
+        // `edge_type: None` scans every edge regardless of type.
+        let current = edge_scan_fixture();
+        let edges = drain(EdgeScanIterator::new(None, current));
+        assert_eq!(edges.len(), 3, "unfiltered scan yields all 3 edges");
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_type_filter_matches_only_that_type() {
+        // `edge_type: Some("KNOWS")` yields only the two KNOWS edges.
+        let current = edge_scan_fixture();
+        let edges = drain(EdgeScanIterator::new(Some("KNOWS".to_string()), current));
+        assert_eq!(edges.len(), 2, "type filter must yield only KNOWS edges");
+        assert!(
+            edges.iter().all(|e| e.has_label_str("KNOWS")),
+            "every yielded edge must be a KNOWS edge"
+        );
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_unknown_type_yields_nothing() {
+        // A type filter whose type was never interned must yield zero rows,
+        // NOT degrade into an unfiltered full scan (mirrors NodeScan).
+        let current = edge_scan_fixture();
+        let mut iter = EdgeScanIterator::new(Some("NONEXISTENT".to_string()), current);
+        assert!(
+            iter.next().is_none(),
+            "unknown edge type must match no edges, not all of them"
+        );
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_empty_storage() {
+        let current = Arc::new(CurrentStorage::new());
+        let mut iter = EdgeScanIterator::new(None, current);
+        assert!(iter.next().is_none(), "no edges -> no rows");
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_yields_edge_entities() {
+        // Every yielded row must be an Edge entity (not a Node).
+        let current = edge_scan_fixture();
+        let mut iter = EdgeScanIterator::new(None, current);
+        while let Some(item) = iter.next() {
+            let row = item.unwrap();
+            assert!(
+                row.entity.as_edge().is_some(),
+                "edge scan must yield Edge entities"
+            );
+        }
     }
 
     // ==================== VectorResultIterator Tests ====================

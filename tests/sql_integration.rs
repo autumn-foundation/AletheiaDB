@@ -12,11 +12,13 @@
 //! so nodes must be created with lowercase labels to match SQL label-filtered queries.
 //! Use `FROM nodes` (no label filter) to query nodes regardless of label case.
 //!
-//! # Executor Limitations
+//! # Executor Support
 //!
-//! The query executor does not yet support `Sort` or `EdgeScan` physical operators.
-//! Tests for ORDER BY and edge scanning verify parsing succeeds and document the
-//! expected execution error as a known limitation.
+//! The query executor executes `Sort` (ORDER BY) and `EdgeScan` (`FROM edges`)
+//! physical operators end-to-end. `SELECT * FROM edges` yields edge rows
+//! consumed via `collect_all()` (the node-centric `collect_structured()` /
+//! `collect_nodes()` helpers remain node-only, see the v1 limitation note in
+//! the `select_edges` module); ORDER BY returns rows in sorted order.
 
 #![cfg(feature = "sql")]
 
@@ -475,11 +477,34 @@ mod limit_and_offset {
 }
 
 // =============================================================================
-// Part 5: ORDER BY -- Parse succeeds, execution not yet supported
+// Part 5: ORDER BY -- Parse succeeds AND executes with sorted output
 // =============================================================================
 
 mod order_by {
     use super::*;
+    use aletheiadb::PropertyValue;
+
+    /// Extract the integer `age` property from a node row, in row order.
+    fn ages(rows: &[aletheiadb::query::executor::QueryRow]) -> Vec<i64> {
+        rows.iter()
+            .filter_map(|row| row.entity.as_node())
+            .filter_map(|node| match node.get_property("age") {
+                Some(PropertyValue::Int(age)) => Some(*age),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Extract the string `name` property from a node row, in row order.
+    fn names(rows: &[aletheiadb::query::executor::QueryRow]) -> Vec<String> {
+        rows.iter()
+            .filter_map(|row| row.entity.as_node())
+            .filter_map(|node| match node.get_property("name") {
+                Some(PropertyValue::String(name)) => Some(name.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn order_by_asc_parses_successfully() {
@@ -503,26 +528,60 @@ mod order_by {
     }
 
     #[test]
-    fn order_by_execution_returns_error() {
-        // The Sort physical operator is not yet implemented in the executor.
-        // This test documents this as a known limitation.
+    fn order_by_age_asc_returns_ascending_rows() {
+        // The Sort physical operator executes end-to-end: rows come back sorted
+        // by the requested key, ascending.
+        let db = setup_person_db();
+        let query = parse_sql("SELECT * FROM nodes ORDER BY age ASC").expect("Failed to parse SQL");
+        let results = db.execute_query(query).expect("ORDER BY should execute");
+        let rows = results.collect_all().expect("Failed to collect results");
+
+        assert_eq!(
+            ages(&rows),
+            vec![25, 30, 35],
+            "ORDER BY age ASC must return ages in ascending order (Bob, Alice, Carol)"
+        );
+    }
+
+    #[test]
+    fn order_by_name_desc_returns_descending_rows() {
         let db = setup_person_db();
         let query =
-            parse_sql("SELECT * FROM nodes ORDER BY name ASC").expect("Failed to parse SQL");
-        let result = db.execute_query(query);
-        assert!(
-            result.is_err(),
-            "ORDER BY execution should return an error (Sort operator not yet supported)"
+            parse_sql("SELECT * FROM nodes ORDER BY name DESC").expect("Failed to parse SQL");
+        let results = db.execute_query(query).expect("ORDER BY should execute");
+        let rows = results.collect_all().expect("Failed to collect results");
+
+        assert_eq!(
+            names(&rows),
+            vec!["Carol".to_string(), "Bob".to_string(), "Alice".to_string()],
+            "ORDER BY name DESC must return names in descending order"
         );
     }
 }
 
 // =============================================================================
-// Part 6: Edge Scanning -- Parse succeeds, execution not yet supported
+// Part 6: Edge Scanning -- Parse succeeds AND executes, yielding edge rows
 // =============================================================================
-
+//
+// ## v1 limitations
+//
+// `SELECT * FROM edges` yields `EntityResult::Edge` rows that are consumed via
+// `collect_all()` / `count_all()` / direct iteration (the paths these tests
+// use). The node-centric structured helpers `collect_structured()` /
+// `collect_nodes()` intentionally remain node-only (they populate a
+// `Vec<NodeId>`), so they silently drop edge rows -- a pre-existing shape that
+// this change deliberately does not widen (that would ripple into the
+// node-oriented structured-result consumers). Consume edge scans via
+// `collect_all()`.
+//
+// A `WHERE` predicate over *edge property* leaves does not yet filter edge rows
+// (the FilterIterator's single-entity AQL edge pipeline passes non-provenance
+// property leaves through -- Issue #3354a). That is a separate pre-existing gap,
+// not part of #311's EdgeScan execution; see
+// `select_edges_where_passes_through_edge_rows`.
 mod select_edges {
     use super::*;
+    use aletheiadb::PropertyValue;
 
     #[test]
     fn select_edges_parses_successfully() {
@@ -534,16 +593,198 @@ mod select_edges {
     }
 
     #[test]
-    fn select_edges_execution_returns_error() {
-        // The EdgeScan physical operator is not yet implemented in the executor.
-        // This test documents this as a known limitation.
+    fn select_edges_returns_all_edges() {
+        // The EdgeScan physical operator executes end-to-end and yields one
+        // Edge row per stored edge.
         let db = setup_graph_db();
         let query = parse_sql("SELECT * FROM edges").expect("Failed to parse SQL");
-        let result = db.execute_query(query);
-        assert!(
-            result.is_err(),
-            "Edge scan execution should return an error (EdgeScan operator not yet supported)"
+        let results = db.execute_query(query).expect("Edge scan should execute");
+        let rows = results.collect_all().expect("Failed to collect results");
+
+        assert_eq!(rows.len(), 2, "setup_graph_db has exactly 2 KNOWS edges");
+        for row in &rows {
+            let edge = row
+                .entity
+                .as_edge()
+                .expect("each row should be an Edge entity");
+            assert!(
+                edge.has_label_str("KNOWS"),
+                "every edge should carry the KNOWS label"
+            );
+        }
+    }
+
+    #[test]
+    fn select_edges_preserves_endpoints() {
+        // The two KNOWS edges are Alice->Bob and Bob->Carol. Verify the exact
+        // (source, target) endpoint pairs round-trip through the scan.
+        let db = setup_graph_db();
+
+        // Resolve node ids by name so the assertion does not depend on id order.
+        let node_query = parse_sql("SELECT * FROM nodes").expect("Failed to parse SQL");
+        let node_rows = db
+            .execute_query(node_query)
+            .expect("node scan should execute")
+            .collect_all()
+            .expect("Failed to collect node rows");
+        let id_of = |name: &str| {
+            node_rows
+                .iter()
+                .filter_map(|r| r.entity.as_node())
+                .find(|n| n.get_property("name") == Some(&PropertyValue::String(name.into())))
+                .map(|n| n.id)
+                .unwrap_or_else(|| panic!("node named {name} should exist"))
+        };
+        let (alice, bob, carol) = (id_of("Alice"), id_of("Bob"), id_of("Carol"));
+
+        let query = parse_sql("SELECT * FROM edges").expect("Failed to parse SQL");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        let mut endpoints: Vec<(u64, u64)> = rows
+            .iter()
+            .filter_map(|r| r.entity.as_edge())
+            .map(|e| (e.source.as_u64(), e.target.as_u64()))
+            .collect();
+        endpoints.sort_unstable();
+
+        let mut expected = vec![
+            (alice.as_u64(), bob.as_u64()),
+            (bob.as_u64(), carol.as_u64()),
+        ];
+        expected.sort_unstable();
+
+        assert_eq!(
+            endpoints, expected,
+            "edge rows must carry the correct (source, target) endpoints"
         );
+    }
+
+    #[test]
+    fn select_edges_carries_properties() {
+        // Edge properties must round-trip through the scan. Build a local
+        // fixture with a distinctive edge property and assert it survives.
+        let db = AletheiaDB::new().expect("Failed to create database");
+        let a = db
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .expect("create a");
+        let b = db
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .expect("create b");
+        db.create_edge(
+            a,
+            b,
+            "FOLLOWS",
+            PropertyMapBuilder::new().insert("weight", 42).build(),
+        )
+        .expect("create edge");
+
+        let query = parse_sql("SELECT * FROM edges").expect("Failed to parse SQL");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        assert_eq!(rows.len(), 1, "exactly one edge was created");
+        let edge = rows[0]
+            .entity
+            .as_edge()
+            .expect("row should be an Edge entity");
+        assert!(edge.has_label_str("FOLLOWS"));
+        assert_eq!(
+            edge.get_property("weight"),
+            Some(&PropertyValue::Int(42)),
+            "edge property must round-trip through the scan"
+        );
+    }
+
+    #[test]
+    fn select_edges_where_passes_through_edge_rows() {
+        // v1 limitation: a WHERE predicate over *edge property* leaves does NOT
+        // filter edge rows. The shared FilterIterator sits above the EdgeScan,
+        // but its single-entity AQL edge pipeline deliberately passes
+        // non-provenance property leaves through on edge rows (Issue #3354a,
+        // covered by `edge_non_provenance_leaf_is_pass_through` in
+        // `src/query/executor/iterators.rs`). EdgeScan surfaces the edges; edge
+        // *property* filtering is a separate, pre-existing gap tracked outside
+        // #311. This test pins the current behavior so a future edge-predicate
+        // implementation flips it deliberately rather than by accident.
+        let db = setup_graph_db(); // edges have `since` = 2020 and 2021
+        let query =
+            parse_sql("SELECT * FROM edges WHERE since = 2021").expect("Failed to parse SQL");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        // Both edges are returned: the edge-property predicate is a pass-through.
+        assert_eq!(
+            rows.len(),
+            2,
+            "edge-property WHERE leaves pass through in v1 (pre-existing FilterIterator limitation)"
+        );
+        assert!(
+            rows.iter().all(|r| r.entity.as_edge().is_some()),
+            "every returned row is still an Edge entity"
+        );
+        // Sanity: the property values are intact on the returned edge rows.
+        let mut since: Vec<i64> = rows
+            .iter()
+            .filter_map(|r| r.entity.as_edge())
+            .filter_map(|e| match e.get_property("since") {
+                Some(PropertyValue::Int(v)) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        since.sort_unstable();
+        assert_eq!(since, vec![2020, 2021]);
+    }
+
+    #[test]
+    fn select_edges_limit_restricts_count() {
+        let db = setup_graph_db();
+        let query = parse_sql("SELECT * FROM edges LIMIT 1").expect("Failed to parse SQL");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        assert_eq!(rows.len(), 1, "LIMIT 1 should cap the edge scan to 1 row");
+    }
+
+    #[test]
+    fn select_edges_empty_database_returns_ok_zero_rows() {
+        // A database with no edges yields zero rows and does NOT error.
+        let db = setup_person_db(); // nodes only, no edges
+        let query = parse_sql("SELECT * FROM edges").expect("Failed to parse SQL");
+        let results = db.execute_query(query).expect("Edge scan should execute");
+        let count = results.count_all().expect("Failed to count results");
+        assert_eq!(count, 0, "a db with no edges must return zero edge rows");
+    }
+
+    #[test]
+    fn select_edges_collect_all_is_the_consumption_path() {
+        // Explicitly assert the primary consumption path (collect_all) surfaces
+        // edge rows -- the node-centric collect_nodes()/collect_structured()
+        // helpers remain node-only by design (see the module v1-limitation note).
+        let db = setup_graph_db();
+        let query = parse_sql("SELECT * FROM edges").expect("Failed to parse SQL");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+        assert!(
+            rows.iter().all(|r| r.entity.as_edge().is_some()),
+            "collect_all must surface every row as an Edge entity"
+        );
+        assert_eq!(rows.len(), 2);
     }
 }
 
