@@ -651,6 +651,103 @@ impl AletheiaDB {
         self.write(|tx| tx.update_edge_with_options(edge_id, properties, options))
     }
 
+    /// Compare-and-set a node's properties, conditional on its committed head
+    /// still being `expected_version` (Issue #3577).
+    ///
+    /// A conditional **full replace** of the property map (label preserved). On
+    /// success the new version id is returned; on a lost claim the write is
+    /// aborted with
+    /// [`TransactionError::CasMismatch`](crate::core::error::TransactionError::CasMismatch)
+    /// (non-retriable) and nothing is written. The version match is re-checked
+    /// at commit under the commit-serialization guard, so concurrent claimants
+    /// cannot both win. See
+    /// [`WriteOps::compare_and_set_node`](crate::api::transaction::WriteOps::compare_and_set_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn compare_and_set_node(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+    ) -> Result<VersionId> {
+        self.write(|tx| tx.compare_and_set_node(node_id, expected_version, properties))
+    }
+
+    /// [`compare_and_set_node`](Self::compare_and_set_node) with a
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle (backdated `valid_from` and/or write-time provenance).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn compare_and_set_node_with_options(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.compare_and_set_node_with_options(node_id, expected_version, properties, options)
+        })
+    }
+
+    /// Compare-and-set an edge's properties, conditional on its committed head
+    /// still being `expected_version` (Issue #3577). Endpoints and type are
+    /// immutable. See [`compare_and_set_node`](Self::compare_and_set_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn compare_and_set_edge(
+        &self,
+        edge_id: EdgeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+    ) -> Result<VersionId> {
+        self.write(|tx| tx.compare_and_set_edge(edge_id, expected_version, properties))
+    }
+
+    /// [`compare_and_set_edge`](Self::compare_and_set_edge) with a
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions) bundle.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn compare_and_set_edge_with_options(
+        &self,
+        edge_id: EdgeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.compare_and_set_edge_with_options(edge_id, expected_version, properties, options)
+        })
+    }
+
+    /// Claim a node via a lease, succeeding iff the version still matches OR the
+    /// existing lease is expired at commit time (Issue #3577).
+    ///
+    /// Stamps `lease_owner_key = owner` and `lease_until_key = lease_until` into
+    /// the property map (full replace) and enforces the claim under the
+    /// commit-serialization guard. See
+    /// [`WriteOps::claim_with_lease`](crate::api::transaction::WriteOps::claim_with_lease).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_lease(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.claim_with_lease(
+                node_id,
+                expected_version,
+                lease_owner_key,
+                lease_until_key,
+                owner,
+                lease_until,
+                properties,
+            )
+        })
+    }
+
     /// Get the provenance bundle attached to a node's *current* version, if any.
     ///
     /// Returns `Ok(None)` (not an error) if the node has no provenance --

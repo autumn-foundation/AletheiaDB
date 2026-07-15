@@ -787,6 +787,29 @@ pub enum TransactionError {
         /// The resource whose lock was poisoned
         resource: String,
     },
+    /// Compare-and-set (CAS) precondition failure (Issue #3577).
+    ///
+    /// A conditional write (`compare_and_set_node`/`compare_and_set_edge` or the
+    /// `claim_with_lease` convenience) found, at commit time under the
+    /// commit-serialization guard, that the entity's committed `current_version`
+    /// did not equal the caller-supplied `expected` version — and, for a lease
+    /// claim, the lease was not expired either.
+    ///
+    /// This is a **caller-fault precondition failure**, NOT a transient
+    /// serialization conflict: retrying the *same* call with the same stale
+    /// `expected` version can never succeed (the claim was lost to another
+    /// writer), so it is non-retriable. It maps to the MCP `FAILED_PRECONDITION`
+    /// code, deliberately distinct from the retriable `SerializationFailure`.
+    ///
+    /// `actual` is the entity's current head version at commit time, or `None`
+    /// when the entity does not exist (never created, or fully deleted).
+    #[error("{}", format_cas_mismatch(*expected, actual))]
+    CasMismatch {
+        /// The version the caller expected the entity's head to still be.
+        expected: VersionId,
+        /// The entity's actual committed head version, or `None` if absent.
+        actual: Option<VersionId>,
+    },
     /// Clock skew exceeds acceptable bounds.
     ///
     /// This occurs when the system clock jumps forward or backward by more than
@@ -804,6 +827,18 @@ pub enum TransactionError {
         /// Maximum allowed drift for this direction
         max_allowed: i64,
     },
+}
+
+/// Format the `CasMismatch` display message (Issue #3577).
+fn format_cas_mismatch(expected: VersionId, actual: &Option<VersionId>) -> String {
+    match actual {
+        Some(current) => format!(
+            "compare-and-set failed: expected head version {expected}, but the entity's current version is {current}"
+        ),
+        None => format!(
+            "compare-and-set failed: expected head version {expected}, but the entity does not exist"
+        ),
+    }
 }
 
 /// Format the `ClockSkew` display message with computed direction.

@@ -738,6 +738,138 @@ pub trait WriteOps: ReadOps {
         options: WriteRequestOptions,
     ) -> Result<()>;
 
+    /// Compare-and-set a node's properties, conditional on its committed head
+    /// still being `expected_version` (Issue #3577).
+    ///
+    /// This is a conditional **full replace** of the node's property map (not a
+    /// PATCH merge): the whole `properties` map becomes the new state, matching
+    /// the "write the whole claim state" semantics the lease layer builds on.
+    /// The label and node id are preserved.
+    ///
+    /// # Semantics
+    ///
+    /// The precondition is enforced at **commit time, under the
+    /// commit-serialization guard** — so two claimants opened on the same
+    /// snapshot cannot both succeed (the second observes the first's new version
+    /// and aborts). On success the new version id is returned. On a lost claim
+    /// the whole transaction aborts with
+    /// [`TransactionError::CasMismatch`](crate::core::error::TransactionError::CasMismatch)
+    /// (a non-retriable precondition failure, distinct from the retriable
+    /// `SerializationFailure`) and **nothing is written**. A CAS against a
+    /// nonexistent or deleted node fails with `CasMismatch { actual: None }`
+    /// rather than a `NodeNotFound`.
+    fn compare_and_set_node(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+    ) -> Result<crate::core::id::VersionId> {
+        self.compare_and_set_node_with_options(
+            node_id,
+            expected_version,
+            properties,
+            WriteRequestOptions::default(),
+        )
+    }
+
+    /// [`compare_and_set_node`](Self::compare_and_set_node) with a
+    /// [`WriteRequestOptions`] bundle (backdated `valid_from` and/or write-time
+    /// provenance parity with `update_node`). This is the most general node-CAS
+    /// method; `compare_and_set_node` delegates to it.
+    fn compare_and_set_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<crate::core::id::VersionId>;
+
+    /// Compare-and-set an edge's properties, conditional on its committed head
+    /// still being `expected_version` (Issue #3577).
+    ///
+    /// Like [`compare_and_set_node`](Self::compare_and_set_node), but for an
+    /// edge: endpoints and type are immutable (only the property map is
+    /// conditionally replaced, mirroring `replace_edge`). Returns the new
+    /// version id on success; aborts with
+    /// [`TransactionError::CasMismatch`](crate::core::error::TransactionError::CasMismatch)
+    /// on a version mismatch.
+    fn compare_and_set_edge(
+        &mut self,
+        edge_id: EdgeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+    ) -> Result<crate::core::id::VersionId> {
+        self.compare_and_set_edge_with_options(
+            edge_id,
+            expected_version,
+            properties,
+            WriteRequestOptions::default(),
+        )
+    }
+
+    /// [`compare_and_set_edge`](Self::compare_and_set_edge) with a
+    /// [`WriteRequestOptions`] bundle. The most general edge-CAS method.
+    fn compare_and_set_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<crate::core::id::VersionId>;
+
+    /// Claim a node via a lease, succeeding iff the version still matches OR the
+    /// existing lease is expired (Issue #3577).
+    ///
+    /// A thin convenience over [`compare_and_set_node`](Self::compare_and_set_node):
+    /// it stamps `lease_owner_key = owner` and `lease_until_key = lease_until`
+    /// (as integer microseconds since epoch) into `properties` (a full replace),
+    /// then buffers a CAS whose commit-time precondition is
+    /// `current_version == expected_version` **OR** the entity's current
+    /// `lease_until_key` property is `<=` the commit timestamp (the lease is
+    /// expired / unclaimed). The property key names are caller-supplied — this is
+    /// a convention, not a hardcoded schema. Lease expiry is evaluated against
+    /// the commit HLC timestamp, not the transaction snapshot. Returns the new
+    /// version id on success; aborts with
+    /// [`TransactionError::CasMismatch`](crate::core::error::TransactionError::CasMismatch)
+    /// when the version is stale AND the lease is still held.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+    ) -> Result<crate::core::id::VersionId> {
+        self.claim_with_lease_with_options(
+            node_id,
+            expected_version,
+            lease_owner_key,
+            lease_until_key,
+            owner,
+            lease_until,
+            properties,
+            WriteRequestOptions::default(),
+        )
+    }
+
+    /// [`claim_with_lease`](Self::claim_with_lease) with a
+    /// [`WriteRequestOptions`] bundle. The most general claim method.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<crate::core::id::VersionId>;
+
     /// Update a node's properties.
     ///
     /// This performs a PATCH update: only the specified properties are updated;

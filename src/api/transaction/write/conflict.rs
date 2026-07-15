@@ -62,11 +62,21 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
         }
     }
 
+    // Compare-and-set targets (Issue #3577) are DELIBERATELY excluded from the
+    // pre-lock snapshot-isolation check: their conflict semantics is the
+    // version-based CAS precondition, re-checked under the `historical.write()`
+    // guard (`cas::detect_cas_precondition_violations`). Applying
+    // first-committer-wins here too would preempt that authoritative check and
+    // surface a retriable `SerializationFailure` for a lost claim that must
+    // instead be the non-retriable `CasMismatch`.
+    let cas_nodes = tx.cas_target_nodes();
+    let cas_edges = tx.cas_target_edges();
+
     for write in tx.buffer.operations() {
         match write {
             // UpdateNode: check if node was modified or deleted after our snapshot
             crate::api::transaction::BufferedWrite::UpdateNode { node_id, .. } => {
-                if created_nodes.contains(node_id) {
+                if created_nodes.contains(node_id) || cas_nodes.contains(node_id) {
                     continue;
                 }
                 match tx.current.get_node(*node_id) {
@@ -100,7 +110,7 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
 
             // UpdateEdge: check if edge was modified or deleted after our snapshot
             crate::api::transaction::BufferedWrite::UpdateEdge { edge_id, .. } => {
-                if created_edges.contains(edge_id) {
+                if created_edges.contains(edge_id) || cas_edges.contains(edge_id) {
                     continue;
                 }
                 match tx.current.get_edge(*edge_id) {

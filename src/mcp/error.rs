@@ -344,7 +344,11 @@ fn classify_transaction_error(e: &TransactionError) -> (McpErrorCode, bool) {
         | TransactionError::Aborted { .. } => (McpErrorCode::Conflict, true),
         TransactionError::InvalidState { .. }
         | TransactionError::AlreadyCommitted { .. }
-        | TransactionError::ValidationFailed { .. } => (McpErrorCode::FailedPrecondition, false),
+        | TransactionError::ValidationFailed { .. }
+        // A lost compare-and-set (Issue #3577) is a caller-fault precondition
+        // failure: retrying the same call with the same stale `expected` version
+        // can never succeed, so it is NON-retriable (unlike SerializationFailure).
+        | TransactionError::CasMismatch { .. } => (McpErrorCode::FailedPrecondition, false),
         TransactionError::ClockSkew { .. } => (McpErrorCode::Unavailable, true),
         TransactionError::CommitFailed { .. }
         | TransactionError::RollbackFailed { .. }

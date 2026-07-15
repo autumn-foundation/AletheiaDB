@@ -114,3 +114,6 @@ mod property_based_tests;
 
 #[path = "recovery/tombstone_version_id_tests.rs"]
 mod tombstone_version_id_tests;
+
+#[path = "recovery/cas_recovery.rs"]
+mod cas_recovery;

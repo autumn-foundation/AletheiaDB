@@ -21,7 +21,7 @@ use crate::core::hlc::{
 };
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::property::{PropertyMap, PropertyMapBuilder};
+use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::temporal::{Timestamp, time};
 use crate::core::version::VersionMetadata;
@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod apply;
+pub(crate) mod cas;
 mod conflict;
 pub(crate) mod constraint;
 mod in_flight;
@@ -113,6 +114,15 @@ pub struct WriteTransaction {
     /// created without a tracker (legacy / tests): such commits skip watermark
     /// registration and behave exactly as before.
     pub(crate) in_flight: Option<Arc<InFlightLsns>>,
+
+    /// Compare-and-set preconditions buffered by `compare_and_set_*` /
+    /// `claim_with_lease` (Issue #3577). Each carries the condition (expected
+    /// version, optional lease OR-branch) for its buffered full-replace
+    /// `UpdateNode`/`UpdateEdge`; they are re-checked at commit under the
+    /// `historical.write()` guard by [`cas::detect_cas_precondition_violations`]
+    /// and excluded from the pre-lock snapshot-isolation conflict check. Empty
+    /// for transactions that use no conditional writes (zero overhead).
+    pub(crate) cas_preconditions: Vec<cas::CasPrecondition>,
 }
 
 impl WriteTransaction {
@@ -251,6 +261,7 @@ impl WriteTransaction {
             durability_mode,
             constraint_registry: None,
             in_flight: None,
+            cas_preconditions: Vec::new(),
         }
     }
 
@@ -1307,6 +1318,53 @@ impl WriteOps for WriteTransaction {
         })();
 
         result.record_error_metric()
+    }
+
+    fn compare_and_set_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.cas_node_impl(node_id, expected_version, properties, None, options)
+            .record_error_metric()
+    }
+
+    fn compare_and_set_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.cas_edge_impl(edge_id, expected_version, properties, options)
+            .record_error_metric()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.claim_with_lease_impl(
+            node_id,
+            expected_version,
+            lease_owner_key,
+            lease_until_key,
+            owner,
+            lease_until,
+            properties,
+            options,
+        )
+        .record_error_metric()
     }
 
     fn update_node_with_options(

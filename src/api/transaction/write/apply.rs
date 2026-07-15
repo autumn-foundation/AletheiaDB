@@ -668,6 +668,15 @@ pub(crate) fn apply_changes<'a>(
     // create-side check re-verifies both endpoints under the guard.
     detect_create_edge_dangling_endpoint(tx)?;
 
+    // Issue #3577 — authoritative compare-and-set re-check. Run under the SAME
+    // exclusive `historical.write()` guard so two claimants opened on the same
+    // snapshot cannot both pass: the second observes the first's committed head
+    // version and aborts with `CasMismatch` (non-retriable). Lease expiry is
+    // judged against `commit_timestamp` (the HLC taken under `current_timestamp`),
+    // not the tx snapshot. Runs BEFORE any op is applied, so a failed CAS writes
+    // nothing. Zero cost for transactions with no conditional writes.
+    super::cas::detect_cas_precondition_violations(tx, commit_timestamp)?;
+
     // Issue #3406: the closing-version IDs (delete tombstones + retraction
     // versions) are pre-generated once per commit — BEFORE the WAL log phase —
     // so the identical ids are recorded in the WAL and applied here. We simply
