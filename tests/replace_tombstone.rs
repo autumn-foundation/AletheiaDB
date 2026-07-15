@@ -9,10 +9,11 @@
 //!
 //! These are end-to-end API tests against the public `AletheiaDB` surface.
 
-use aletheiadb::api::transaction::WriteOps;
+use aletheiadb::api::transaction::{ReadOps, WriteOps};
 use aletheiadb::core::GLOBAL_INTERNER;
 use aletheiadb::core::hlc::HybridTimestamp;
 use aletheiadb::core::temporal::time;
+use aletheiadb::core::{EdgeId, NodeId};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 fn node_label(n: &aletheiadb::core::graph::Node) -> Option<String> {
@@ -130,6 +131,17 @@ fn replace_removal_survives_delta_reconstruction() {
         "the replace must be stored as a delta to exercise delta removal, delta_count={}",
         stats.node_delta_count
     );
+
+    // Clear the property reconstruction cache FIRST. `HistoricalStorage`
+    // populates `node_property_cache` with the fully-materialized map for every
+    // version at write time, so a cached `get_node_at_version` would return
+    // that map WITHOUT ever running `reconstruct_node_properties_iterative` /
+    // `PropertyDelta::apply`'s removed-set subtraction — a broken delta
+    // encoding would still pass. Clearing forces genuine reconstruction from
+    // the anchor+delta chain.
+    db.__test_historical_storage()
+        .read()
+        .__test_clear_property_cache();
 
     // Reconstruct v2 THROUGH the delta chain (anchor v1 + delta v2).
     let v2 = db.get_node_at_version(id, 2).expect("version 2");
@@ -430,6 +442,17 @@ fn replace_honors_valid_time_and_provenance() {
         "at/after replace_valid the replacement map (no age) is valid"
     );
 
+    // Half-open interval [valid_from, valid_to) boundary exactness: AT EXACTLY
+    // replace_valid the NEW replacement map holds (the interval start is
+    // inclusive), so age is already gone at the boundary itself.
+    let at_boundary = db
+        .get_node_at_time(id, replace_valid, time::now())
+        .expect("as-of exactly replace_valid");
+    assert!(
+        at_boundary.get_property("age").is_none(),
+        "at EXACTLY replace_valid the replacement map (no age) holds — half-open interval start is inclusive"
+    );
+
     // Before replace_valid the OLD map (with age) is valid — anchor BOTH
     // dimensions before the replace commit.
     let mid = HybridTimestamp::new(time::now().wallclock() - 5_400_000_000, 0).expect("ts"); // 1.5h ago
@@ -556,3 +579,540 @@ fn replace_removes_vector_property_updates_index() {
         "untouched decoy remains indexed"
     );
 }
+
+// -------------------------------------------------------------------------
+// MAJOR 3 — a removed key cannot resurface when a fresh anchor is rebuilt.
+// -------------------------------------------------------------------------
+
+/// After a key is removed, applying enough further updates to force a fresh
+/// ANCHOR (default `anchor_interval` = 10) to be materialized from a delta
+/// chain that includes the removal must NOT resurrect the removed key: a
+/// version reconstructed from/through the rebuilt anchor still lacks it.
+#[test]
+fn removal_survives_anchor_rebuild() {
+    let db = AletheiaDB::new().expect("db");
+
+    // v1 anchor: {a, b, c}
+    let id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("a", 1i64)
+                .insert("b", 2i64)
+                .insert("c", 3i64)
+                .build(),
+        )
+        .expect("create");
+
+    // v2 delta: drop b -> {a, c}
+    db.remove_node_property(id, "b").expect("remove b");
+
+    // Apply 10 more PATCH updates (v3..v12), none re-adding b, to force a fresh
+    // ANCHOR to be MATERIALIZED past the removal (v11 becomes the 2nd anchor).
+    for i in 0..10i64 {
+        db.update_node_with_valid_time(
+            id,
+            PropertyMapBuilder::new().insert("a", 10 + i).build(),
+            None,
+        )
+        .expect("update");
+    }
+
+    // Confirm a second anchor was actually built past the removal.
+    let stats = db.historical_stats().expect("stats");
+    assert!(
+        stats.node_anchor_count >= 2,
+        "expected a rebuilt anchor past the removal, anchor_count={}",
+        stats.node_anchor_count
+    );
+
+    // Defeat the write-time property cache so reconstruction genuinely runs
+    // the anchor+delta chain (see `replace_removal_survives_delta_reconstruction`).
+    db.__test_historical_storage()
+        .read()
+        .__test_clear_property_cache();
+
+    // Reconstruct the LATEST version (from the rebuilt anchor) — b must be gone.
+    let latest = db.get_node_history(id).expect("hist").version_count() as u64;
+    let node = db
+        .get_node_at_version(id, latest)
+        .expect("reconstruct latest version");
+    assert!(
+        node.get_property("b").is_none(),
+        "removed key 'b' must not resurface when a new anchor is materialized"
+    );
+    assert!(node.get_property("a").is_some(), "a still present");
+    assert_eq!(
+        node.get_property("c").and_then(|v| v.as_int()),
+        Some(3),
+        "untouched c still present after anchor rebuild"
+    );
+}
+
+// -------------------------------------------------------------------------
+// MAJOR 4 — error paths return Err (never panic) on missing / deleted ids.
+// -------------------------------------------------------------------------
+
+/// `replace_node` errors (not panics) on a never-created id and on a
+/// previously-deleted id.
+#[test]
+fn replace_node_errors_on_missing_and_deleted() {
+    let db = AletheiaDB::new().expect("db");
+
+    // (a) never existed
+    let missing = NodeId::new(999_999).expect("nid");
+    let err = db
+        .replace_node(missing, "Person", PropertyMapBuilder::new().build())
+        .expect_err("replace on nonexistent node must error");
+    assert!(
+        format!("{err:?}").contains("NodeNotFound"),
+        "expected NodeNotFound, got {err:?}"
+    );
+
+    // (b) created then deleted
+    let id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("create");
+    db.delete_node_with_valid_time(id, None).expect("delete");
+    let err = db
+        .replace_node(id, "Person", PropertyMapBuilder::new().build())
+        .expect_err("replace on deleted node must error");
+    assert!(
+        format!("{err:?}").contains("NodeNotFound"),
+        "expected NodeNotFound on deleted node, got {err:?}"
+    );
+}
+
+/// `replace_edge` errors on a never-created id and on a previously-deleted id.
+#[test]
+fn replace_edge_errors_on_missing_and_deleted() {
+    let db = AletheiaDB::new().expect("db");
+
+    let missing = EdgeId::new(999_999).expect("eid");
+    let err = db
+        .replace_edge(missing, PropertyMapBuilder::new().build())
+        .expect_err("replace on nonexistent edge must error");
+    assert!(
+        format!("{err:?}").contains("EdgeNotFound"),
+        "expected EdgeNotFound, got {err:?}"
+    );
+
+    let a = db
+        .create_node("N", PropertyMapBuilder::new().build())
+        .expect("a");
+    let b = db
+        .create_node("N", PropertyMapBuilder::new().build())
+        .expect("b");
+    let e = db
+        .create_edge(
+            a,
+            b,
+            "R",
+            PropertyMapBuilder::new().insert("x", 1i64).build(),
+        )
+        .expect("edge");
+    db.delete_edge_with_valid_time(e, None)
+        .expect("delete edge");
+    let err = db
+        .replace_edge(e, PropertyMapBuilder::new().build())
+        .expect_err("replace on deleted edge must error");
+    assert!(
+        format!("{err:?}").contains("EdgeNotFound"),
+        "expected EdgeNotFound on deleted edge, got {err:?}"
+    );
+}
+
+/// `remove_node_property` errors on a never-created id and on a deleted id.
+#[test]
+fn remove_node_property_errors_on_missing_and_deleted() {
+    let db = AletheiaDB::new().expect("db");
+
+    let missing = NodeId::new(999_999).expect("nid");
+    let err = db
+        .remove_node_property(missing, "age")
+        .expect_err("remove on nonexistent node must error");
+    assert!(
+        format!("{err:?}").contains("NodeNotFound"),
+        "expected NodeNotFound, got {err:?}"
+    );
+
+    let id = db
+        .create_node("Person", props3("Alice", 30, "London"))
+        .expect("create");
+    db.delete_node_with_valid_time(id, None).expect("delete");
+    let err = db
+        .remove_node_property(id, "age")
+        .expect_err("remove on deleted node must error");
+    assert!(
+        format!("{err:?}").contains("NodeNotFound"),
+        "expected NodeNotFound on deleted node, got {err:?}"
+    );
+}
+
+/// `remove_edge_property` errors on a never-created id and on a deleted id.
+#[test]
+fn remove_edge_property_errors_on_missing_and_deleted() {
+    let db = AletheiaDB::new().expect("db");
+
+    let missing = EdgeId::new(999_999).expect("eid");
+    let err = db
+        .remove_edge_property(missing, "x")
+        .expect_err("remove on nonexistent edge must error");
+    assert!(
+        format!("{err:?}").contains("EdgeNotFound"),
+        "expected EdgeNotFound, got {err:?}"
+    );
+
+    let a = db
+        .create_node("N", PropertyMapBuilder::new().build())
+        .expect("a");
+    let b = db
+        .create_node("N", PropertyMapBuilder::new().build())
+        .expect("b");
+    let e = db
+        .create_edge(
+            a,
+            b,
+            "R",
+            PropertyMapBuilder::new().insert("x", 1i64).build(),
+        )
+        .expect("edge");
+    db.delete_edge_with_valid_time(e, None)
+        .expect("delete edge");
+    let err = db
+        .remove_edge_property(e, "x")
+        .expect_err("remove on deleted edge must error");
+    assert!(
+        format!("{err:?}").contains("EdgeNotFound"),
+        "expected EdgeNotFound on deleted edge, got {err:?}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// MINOR — same-transaction read-your-own-writes (buffer-aware, Issue #3417).
+// -------------------------------------------------------------------------
+
+/// Inside ONE transaction: create a node then replace it before commit. The
+/// replace must see the buffered (still-uncommitted) create, not 404 against
+/// committed storage.
+#[test]
+fn same_tx_create_then_replace_node_ryow() {
+    let db = AletheiaDB::new().expect("db");
+    let mut tx = db.write_transaction().expect("tx");
+
+    let id = tx
+        .create_node("Person", props3("Alice", 30, "London"))
+        .expect("buffered create");
+
+    // Replace the still-uncommitted node (full overwrite: only {name}).
+    tx.replace_node(
+        id,
+        "Employee",
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+    )
+    .expect("replace must see the buffered create");
+
+    // Read-your-own-writes reflects the replacement immediately.
+    let buffered = tx.get_node(id).expect("read own");
+    assert!(buffered.get_property("age").is_none(), "age gone in buffer");
+    assert_eq!(node_label(&buffered).as_deref(), Some("Employee"));
+
+    tx.commit().expect("commit");
+
+    let node = db.get_node(id).expect("get after commit");
+    assert!(node.get_property("name").is_some());
+    assert!(node.get_property("age").is_none(), "age removed by replace");
+    assert!(node.get_property("city").is_none());
+    assert_eq!(node_label(&node).as_deref(), Some("Employee"));
+}
+
+/// Inside ONE transaction: create a node then `remove_node_property` on it
+/// before commit — the remove must see the buffered create.
+#[test]
+fn same_tx_create_then_remove_property_node_ryow() {
+    let db = AletheiaDB::new().expect("db");
+    let mut tx = db.write_transaction().expect("tx");
+
+    let id = tx
+        .create_node("Person", props3("Alice", 30, "London"))
+        .expect("buffered create");
+
+    tx.remove_node_property(id, "age")
+        .expect("remove must see the buffered create");
+
+    let buffered = tx.get_node(id).expect("read own");
+    assert!(
+        buffered.get_property("age").is_none(),
+        "age removed in buffer"
+    );
+    assert!(buffered.get_property("name").is_some());
+
+    tx.commit().expect("commit");
+
+    let node = db.get_node(id).expect("get after commit");
+    assert!(node.get_property("age").is_none());
+    assert!(node.get_property("name").is_some());
+    assert!(node.get_property("city").is_some());
+}
+
+/// Inside ONE transaction: create an edge then replace / remove-property on it
+/// before commit — both must see the buffered create.
+#[test]
+fn same_tx_create_then_replace_edge_ryow() {
+    let db = AletheiaDB::new().expect("db");
+    let mut tx = db.write_transaction().expect("tx");
+
+    let a = tx
+        .create_node("N", PropertyMapBuilder::new().build())
+        .expect("a");
+    let b = tx
+        .create_node("N", PropertyMapBuilder::new().build())
+        .expect("b");
+    let e = tx
+        .create_edge(
+            a,
+            b,
+            "R",
+            PropertyMapBuilder::new()
+                .insert("x", 1i64)
+                .insert("y", 2i64)
+                .build(),
+        )
+        .expect("buffered edge");
+
+    // Replace the still-uncommitted edge (keep only {x: 9}).
+    tx.replace_edge(e, PropertyMapBuilder::new().insert("x", 9i64).build())
+        .expect("replace must see the buffered edge");
+
+    let buffered = tx.get_edge(e).expect("read own edge");
+    assert_eq!(buffered.get_property("x").and_then(|v| v.as_int()), Some(9));
+    assert!(buffered.get_property("y").is_none(), "y gone in buffer");
+    assert_eq!(buffered.source, a, "endpoints preserved through buffer");
+    assert_eq!(buffered.target, b);
+
+    // remove_edge_property on the same buffered edge.
+    tx.remove_edge_property(e, "x")
+        .expect("remove must see the buffered edge");
+
+    tx.commit().expect("commit");
+
+    let edge = db.get_edge(e).expect("get after commit");
+    assert!(edge.get_property("x").is_none(), "x removed");
+    assert!(edge.get_property("y").is_none(), "y removed");
+    assert_eq!(edge.source, a);
+    assert_eq!(edge.target, b);
+}
+
+// -------------------------------------------------------------------------
+// MINOR — replace on a node with connected edges leaves the edges intact.
+// -------------------------------------------------------------------------
+
+/// Replacing (and relabeling) a node with connected edges leaves the edge, its
+/// endpoints, and its type unchanged, and the node stays traversable.
+#[test]
+fn replace_node_with_connected_edges_keeps_edges() {
+    let db = AletheiaDB::new().expect("db");
+    let a = db
+        .create_node("Person", PropertyMapBuilder::new().insert("n", "A").build())
+        .expect("a");
+    let b = db
+        .create_node("Person", PropertyMapBuilder::new().insert("n", "B").build())
+        .expect("b");
+    let e = db
+        .create_edge(
+            a,
+            b,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+        )
+        .expect("edge");
+
+    // Replace A, including a relabel to Employee.
+    db.replace_node(
+        a,
+        "Employee",
+        PropertyMapBuilder::new().insert("n", "A2").build(),
+    )
+    .expect("replace a");
+
+    // The edge is unchanged: endpoints and type intact.
+    let edge = db.get_edge(e).expect("get edge");
+    assert_eq!(edge.source, a, "edge source unchanged");
+    assert_eq!(edge.target, b, "edge target unchanged");
+    assert_eq!(
+        edge_label(&edge).as_deref(),
+        Some("KNOWS"),
+        "type unchanged"
+    );
+    assert_eq!(
+        edge.get_property("since").and_then(|v| v.as_int()),
+        Some(2020),
+        "edge properties unchanged"
+    );
+
+    // A -> B still traversable.
+    let outs = db.get_outgoing_edges(a);
+    assert!(outs.contains(&e), "A->B edge still present after replace");
+
+    // Endpoints intact; A relabeled, B untouched.
+    let na = db.get_node(a).expect("a");
+    assert_eq!(node_label(&na).as_deref(), Some("Employee"));
+    let nb = db.get_node(b).expect("b");
+    assert_eq!(node_label(&nb).as_deref(), Some("Person"));
+}
+
+// -------------------------------------------------------------------------
+// MINOR — self-loop edge (source == target) replace / remove.
+// -------------------------------------------------------------------------
+
+/// `replace_edge` and `remove_edge_property` behave correctly on a self-loop
+/// edge (source == target).
+#[test]
+fn replace_and_remove_on_self_loop_edge() {
+    let db = AletheiaDB::new().expect("db");
+    let a = db
+        .create_node("N", PropertyMapBuilder::new().build())
+        .expect("a");
+    let e = db
+        .create_edge(
+            a,
+            a,
+            "SELF",
+            PropertyMapBuilder::new()
+                .insert("x", 1i64)
+                .insert("y", 2i64)
+                .build(),
+        )
+        .expect("self-loop edge");
+
+    // Replace: keep only {x: 9}; y must vanish, endpoints stay (a, a).
+    db.replace_edge(e, PropertyMapBuilder::new().insert("x", 9i64).build())
+        .expect("replace self-loop");
+    let edge = db.get_edge(e).expect("get");
+    assert_eq!(edge.source, a, "self-loop source stays");
+    assert_eq!(edge.target, a, "self-loop target stays");
+    assert_eq!(edge.get_property("x").and_then(|v| v.as_int()), Some(9));
+    assert!(edge.get_property("y").is_none(), "y removed on self-loop");
+
+    // remove_edge_property on the self-loop.
+    db.remove_edge_property(e, "x").expect("remove x");
+    let edge = db.get_edge(e).expect("get2");
+    assert!(edge.get_property("x").is_none(), "x removed on self-loop");
+    assert_eq!(edge.source, a);
+    assert_eq!(edge.target, a);
+}
+
+// -------------------------------------------------------------------------
+// MINOR — remove a present key twice: first records a version, second no-ops.
+// -------------------------------------------------------------------------
+
+/// Removing a present key records exactly one new version; removing it a second
+/// time (now absent) is a no-op that records no further version.
+#[test]
+fn remove_present_property_twice_second_is_noop() {
+    let db = AletheiaDB::new().expect("db");
+    let id = db
+        .create_node("Person", props3("Alice", 30, "London"))
+        .expect("create");
+
+    let v0 = db.get_node_history(id).expect("hist").version_count();
+
+    // First removal of a PRESENT key records +1 version.
+    db.remove_node_property(id, "age").expect("remove age #1");
+    let v1 = db.get_node_history(id).expect("hist").version_count();
+    assert_eq!(
+        v1,
+        v0 + 1,
+        "first removal of present key records one version"
+    );
+
+    // Second removal of the now-ABSENT key is a no-op: no new version.
+    db.remove_node_property(id, "age")
+        .expect("remove age #2 noop");
+    let v2 = db.get_node_history(id).expect("hist").version_count();
+    assert_eq!(v2, v1, "second (absent) removal records no new version");
+
+    let node = db.get_node(id).expect("get");
+    assert!(node.get_property("age").is_none(), "age stays removed");
+    assert!(node.get_property("name").is_some());
+}
+
+// -------------------------------------------------------------------------
+// MINOR — removal delta survives index-persistence save + reload
+// (complements the WAL-replay recovery test).
+// -------------------------------------------------------------------------
+
+/// A delta-encoded key removal reconstructs correctly after an
+/// index-persistence save + reopen (the persisted temporal index restores the
+/// anchor+delta chain).
+#[test]
+fn removal_delta_survives_index_persistence_reload() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let data_dir = tempdir.path().join("db");
+
+    let node_id: u64;
+    {
+        let db = AletheiaDB::open(&data_dir).expect("open durable db");
+        let id = db
+            .create_node("Person", props3("Alice", 30, "London"))
+            .expect("create"); // v1 anchor
+        node_id = id.as_u64();
+
+        db.replace_node(
+            id,
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("replace"); // v2 delta (removes age, city)
+
+        // Explicitly persist the indexes (including the temporal chain).
+        db.persist_indexes().expect("persist indexes");
+        drop(db);
+    }
+
+    // Reopen — loads the persisted indexes (current + historical chain).
+    let db = AletheiaDB::open(&data_dir).expect("reopen durable db");
+    let id = NodeId::new(node_id).expect("nid");
+
+    // Current state carries the reduced map.
+    let node = db.get_node(id).expect("get after reload");
+    assert!(
+        node.get_property("age").is_none(),
+        "age must stay removed after index-persistence reload"
+    );
+    assert!(node.get_property("name").is_some(), "name retained");
+
+    // The delta-encoded v2 reconstructs through the restored chain. Clear the
+    // property cache first so reconstruction genuinely runs.
+    db.__test_historical_storage()
+        .read()
+        .__test_clear_property_cache();
+    let v2 = db
+        .get_node_at_version(id, 2)
+        .expect("reconstruct v2 after reload");
+    assert!(
+        v2.get_property("age").is_none(),
+        "delta removal must reconstruct (age absent) after reload"
+    );
+    assert!(
+        v2.get_property("city").is_none(),
+        "delta removal must reconstruct (city absent) after reload"
+    );
+    assert!(v2.get_property("name").is_some(), "name retained in v2");
+}
+
+// NOTE (temporal vector index removal — deliberately NOT tested here):
+// replacing away a vector property does NOT de-index the *temporal* vector
+// index. The temporal-index write path (`CurrentStorage::update_node_direct`
+// -> `try_index_temporal_vector`, src/storage/current/mod.rs) only ADDS
+// vectors present in the new property map; it never calls
+// `try_remove_temporal_vector` when a property is dropped (only
+// `delete_node_direct` removes). This add-only behavior is shared with PATCH
+// `update_node` and predates Issue #3549 — the replace path correctly buffers
+// an `UpdateNode` carrying the reduced map (the CURRENT vector index DOES
+// de-index it, see `replace_removes_vector_property_updates_index`). Asserting
+// temporal de-indexing would test behavior that does not exist; wiring a
+// removal into the temporal update path is a separate follow-up.

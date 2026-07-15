@@ -3,9 +3,19 @@
 //! A replace that REMOVES keys is buffered as an `UpdateNode`/`UpdateEdge` WAL
 //! op carrying the *exact* target property map (no PATCH merge). This proves the
 //! removal survives pure WAL replay: a durable database records create+replace,
-//! is dropped WITHOUT persisting indexes (forcing WAL-only recovery), then
-//! reopened — the reconstructed map must be the reduced one, and a relabel must
-//! recover the new label.
+//! is dropped, its **index snapshot + manifest are deleted**, then reopened —
+//! forcing recovery to replay the FULL WAL from `LSN::initial()` and decode the
+//! replace's `UpdateNode`/`UpdateEdge` entries (rather than being satisfied by
+//! an index snapshot written at a later LSN by the background persistence worker
+//! on shutdown). The reconstructed map must be the reduced one, and a relabel
+//! must recover the new label.
+//!
+//! Deleting the `indexes/` directory is load-bearing: `AletheiaDB::open()`
+//! enables index persistence whose background worker does an unconditional
+//! `persist_all_indexes` on drop, writing a manifest at an LSN AFTER the
+//! replace ops; without removing it, replay would start at that manifest LSN
+//! and skip the replace's WAL entries, so the assertions would be satisfied by
+//! the snapshot, not by WAL decode.
 //!
 //! Mirrors the harness in `tests/wal_string_labels_recovery.rs`.
 
@@ -66,11 +76,20 @@ fn replace_removed_keys_survive_wal_replay() {
         )
         .expect("replace edge");
 
-        // Deliberately NO persist_indexes(): recovery must come from WAL alone.
+        // Deliberately NO explicit persist_indexes(). The background worker
+        // still persists on drop, so we delete the snapshot below to force
+        // WAL-only replay.
         drop(db);
     }
 
-    // Reopen — forces WAL replay (no index snapshot exists).
+    // Delete the index snapshot + manifest that the background persistence
+    // worker wrote on shutdown at an LSN AFTER the replace ops. Without this,
+    // reopen would load the snapshot and replay the WAL only from the manifest
+    // LSN, SKIPPING the replace's WAL entries — the assertions below would then
+    // pass via the snapshot, not via genuine WAL decode of UpdateNode/UpdateEdge.
+    std::fs::remove_dir_all(data_dir.join("indexes")).ok();
+
+    // Reopen — forces a full WAL replay from LSN::initial() (no index snapshot).
     let db = AletheiaDB::open(&data_dir).expect("reopen durable db");
 
     let node = db
