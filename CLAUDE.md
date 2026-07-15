@@ -385,6 +385,13 @@ Recovery loop: `retriable: true` -> retry with backoff; `INVALID_ARGUMENT` /
 `message` + `details` and re-issue; otherwise escalate. Codes may be added
 over time but never change meaning; treat unknown codes as non-retriable. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#structured-error-codes-and-the-retriable-contract).
+**The HTTP surface now shares this exact nested envelope (breaking change):**
+`AletheiaHttpError` emits `{"error":{"code","message","retriable","details"?}}`
+(with `trace_id`, when present, a **top-level** sibling of `error`) — the legacy
+flat HTTP body (`{"success":false,"error":"<msg>","code":…}`, top-level
+`success`/`error`/`code`/`retriable`/`details`) has been **removed**, so HTTP and
+MCP error bodies are byte-shape-identical. Success responses are unchanged
+(`{"success":true,"data":…}`).
 
 **Database stats (Issue #3222)**: `database_stats` (no arguments) returns a
 holistic snapshot in one call so an LLM/operator can orient itself before
@@ -630,7 +637,11 @@ per call (revocation is immediate); auth failures are a uniform
 `UNAUTHENTICATED` (never distinguishing missing/unknown/revoked), role
 denials are `PERMISSION_DENIED` with `details.required_class` /
 `details.principal_role` — both additive to the #3234 enum, both
-`retriable: false`. Authenticated writes stamp the principal's name into
+`retriable: false`. Since the #3234 HTTP error-envelope unification these
+denials render identically on **both** surfaces as the nested
+`{"error":{"code","message","retriable","details"}}` body (the HTTP surface no
+longer emits the legacy flat `{"success":false,…}` shape, and its 403 now carries
+`error.details.{required_class,principal_role}` too). Authenticated writes stamp the principal's name into
 version provenance (`provenance.principal`, composing with the
 caller-supplied `source`) on the structured create/update node/edge
 paths of both surfaces — deletes/retracts and HTTP AQL-statement writes

@@ -189,9 +189,9 @@ async fn rbac_reader_reads_ok_but_admin_route_forbidden() {
     // Admin route: reader (denies Admin) → 403 PERMISSION_DENIED.
     let (status, body) = get_bearer(&client, "/admin/keys", Some(READER_TOKEN)).await;
     assert_eq!(status, 403, "reader may not reach the admin surface");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
     assert_ne!(
-        body["retriable"],
+        body["error"]["retriable"],
         json!(true),
         "authz denial is not retriable"
     );
@@ -209,7 +209,7 @@ async fn rbac_metrics_token_only_reaches_metrics_class() {
     // /nodes is ReadClass → metrics (denies Read) 403.
     let (status, body) = get_bearer(&client, "/nodes", Some(METRICS_TOKEN)).await;
     assert_eq!(status, 403, "metrics may not read graph data");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 
     // /admin/keys is AdminClass → metrics 403.
     let (status, _) = get_bearer(&client, "/admin/keys", Some(METRICS_TOKEN)).await;
@@ -228,10 +228,10 @@ async fn rbac_metrics_token_denied_read_tool_over_mcp_with_details() {
     let (status, body) = mcp_post(&client, &rpc, Some(METRICS_TOKEN)).await;
 
     assert_eq!(status, 403, "metrics→get_node over /mcp is refused: {body}");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
-    assert_eq!(body["retriable"], false);
-    assert_eq!(body["details"]["required_class"], "read");
-    assert_eq!(body["details"]["principal_role"], "metrics");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["required_class"], "read");
+    assert_eq!(body["error"]["details"]["principal_role"], "metrics");
 }
 
 /// Extractor-class ↔ inventory conformance (load-bearing): for every routable
@@ -282,7 +282,7 @@ async fn rbac_routable_tool_extractor_class_matches_registry() {
             deny_status, 403,
             "{tool}: metrics denied {registry_class} → 403 (enforced class matches registry)"
         );
-        assert_eq!(deny_body["code"], "PERMISSION_DENIED");
+        assert_eq!(deny_body["error"]["code"], "PERMISSION_DENIED");
     }
 }
 
@@ -465,9 +465,16 @@ async fn error_contract_http_401_shape() {
     let client = build_server_client(db, store, AuthMode::Required);
     let (status, body) = get_bearer(&client, "/nodes", None).await;
     assert_eq!(status, 401);
-    assert_eq!(body["code"], "UNAUTHENTICATED");
-    assert_eq!(body["success"], false);
-    assert_ne!(body["retriable"], json!(true), "auth failure not retriable");
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_ne!(
+        body["error"]["retriable"],
+        json!(true),
+        "auth failure not retriable"
+    );
 }
 
 #[tokio::test]
@@ -476,9 +483,9 @@ async fn error_contract_http_403_shape() {
     let client = build_server_client(db, store, AuthMode::Required);
     let (status, body) = get_bearer(&client, "/admin/keys", Some(READER_TOKEN)).await;
     assert_eq!(status, 403);
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
     assert_ne!(
-        body["retriable"],
+        body["error"]["retriable"],
         json!(true),
         "authz failure not retriable"
     );
@@ -498,10 +505,10 @@ async fn error_contract_http_413_byte_cap() {
         status, 413,
         "8-byte budget forces a payload-too-large: {body}"
     );
-    assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-    assert_eq!(body["retriable"], false);
-    assert_eq!(body["details"]["dimension"], "result_bytes");
-    assert_eq!(body["details"]["limit"], 8);
+    assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["dimension"], "result_bytes");
+    assert_eq!(body["error"]["details"]["limit"], 8);
 }
 
 #[tokio::test]
@@ -511,10 +518,13 @@ async fn error_contract_mcp_401_shape() {
     let (status, body) = mcp_post(&client, &rpc_tools_list(), None).await;
     assert_eq!(status, 401);
     assert_eq!(
-        body["code"], "UNAUTHENTICATED",
+        body["error"]["code"], "UNAUTHENTICATED",
         "/mcp 401 is enveloped: {body}"
     );
-    assert_eq!(body["success"], false);
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
 }
 
 #[tokio::test]
@@ -524,10 +534,10 @@ async fn error_contract_mcp_403_shape_with_details() {
     let rpc = rpc_tools_call("get_node", json!({ "id": node_id.as_u64() }));
     let (status, body) = mcp_post(&client, &rpc, Some(METRICS_TOKEN)).await;
     assert_eq!(status, 403);
-    assert_eq!(body["code"], "PERMISSION_DENIED");
-    assert_eq!(body["retriable"], false);
-    assert_eq!(body["details"]["required_class"], "read");
-    assert_eq!(body["details"]["principal_role"], "metrics");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["required_class"], "read");
+    assert_eq!(body["error"]["details"]["principal_role"], "metrics");
 }
 
 /// The transient-vs-fault `retriable` matrix on the shared envelope both
@@ -540,22 +550,28 @@ async fn error_contract_retriable_matrix_on_shared_envelope() {
 
     let (s, b) = render_error(timeout_error(Duration::from_millis(100), false)).await;
     assert_eq!(s, 429);
-    assert_eq!(b["code"], "RESOURCE_EXHAUSTED");
-    assert_eq!(b["retriable"], true, "read timeout is retriable");
+    assert_eq!(b["error"]["code"], "RESOURCE_EXHAUSTED");
+    assert_eq!(b["error"]["retriable"], true, "read timeout is retriable");
 
     let (s, b) = render_error(timeout_error(Duration::from_millis(100), true)).await;
     assert_eq!(s, 429);
-    assert_eq!(b["retriable"], false, "write timeout is NOT retriable");
+    assert_eq!(
+        b["error"]["retriable"], false,
+        "write timeout is NOT retriable"
+    );
 
     let (s, b) = render_error(byte_cap_error(1024, 4096)).await;
     assert_eq!(s, 413);
-    assert_eq!(b["code"], "RESOURCE_EXHAUSTED");
-    assert_eq!(b["retriable"], false);
+    assert_eq!(b["error"]["code"], "RESOURCE_EXHAUSTED");
+    assert_eq!(b["error"]["retriable"], false);
 
     let (s, b) = render_error(AletheiaHttpError::InFlightCapacityExceeded { cap: 4 }).await;
     assert_eq!(s, 503);
-    assert_eq!(b["code"], "UNAVAILABLE");
-    assert_eq!(b["retriable"], true, "capacity overload is retriable");
+    assert_eq!(b["error"]["code"], "UNAVAILABLE");
+    assert_eq!(
+        b["error"]["retriable"], true,
+        "capacity overload is retriable"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -581,7 +597,7 @@ async fn revocation_takes_effect_on_the_next_request() {
     assert!(store.revoke(&principal.id).expect("revoke"));
     let (status, body) = get_bearer(&client, &uri, Some(&key)).await;
     assert_eq!(status, 401, "revoked key is rejected immediately: {body}");
-    assert_eq!(body["code"], "UNAUTHENTICATED");
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -605,7 +621,7 @@ async fn attack_right_token_wrong_class_is_403() {
     // Writer may write/read but not administer keys.
     let (status, body) = get_bearer(&client, "/admin/keys", Some(WRITER_TOKEN)).await;
     assert_eq!(status, 403);
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }
 
 #[tokio::test]
@@ -629,6 +645,6 @@ async fn attack_in_flight_cap_exhaustion_is_503() {
         .expect_err("second slot rejected at cap");
     let (status, body) = render_error(err).await;
     assert_eq!(status, 503);
-    assert_eq!(body["code"], "UNAVAILABLE");
-    assert_eq!(body["retriable"], true);
+    assert_eq!(body["error"]["code"], "UNAVAILABLE");
+    assert_eq!(body["error"]["retriable"], true);
 }

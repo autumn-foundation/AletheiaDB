@@ -303,9 +303,13 @@ async fn bulk_execute_query_enforces_total_row_budget() {
     .await;
 
     assert_eq!(status, 400, "expected request-level row budget rejection");
-    assert_eq!(body["success"], false);
     assert!(
-        body["error"]
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        body["error"]["message"]
             .as_str()
             .unwrap_or_default()
             .contains("result budget exceeded")

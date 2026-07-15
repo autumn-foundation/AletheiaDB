@@ -124,5 +124,12 @@ async fn provenance_type_mismatch_fails_closed_over_http() {
         "type-misused accessor must be a structured error, not a silent empty result: \
          status={status} body={body}"
     );
-    assert_eq!(body["success"], false, "{body}");
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert!(
+        body["error"]["code"].is_string(),
+        "structured nested error envelope expected: {body}"
+    );
 }

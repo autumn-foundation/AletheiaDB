@@ -150,9 +150,12 @@ The merge is a single tested function
 
 ## Error contract
 
-All limit errors keep the existing `{success:false, error:"…"}` body and add the
-`code` / `retriable` / `details` fields (aligning the HTTP surface toward the MCP
-`#3234` contract). Existing non-limit error bodies are unchanged.
+Since the #3234 HTTP error-envelope unification, all limit errors render the
+nested `{"error":{"code","message","retriable","details"}}` body (byte-shape-
+identical to the MCP surface), with the active trace id carried additively as a
+top-level `trace_id` sibling of `error`. The legacy flat
+`{"success":false,"error":"…"}` body has been removed. Existing non-limit error
+bodies now use this same nested shape.
 
 ### `429` — wall-clock timeout
 
@@ -160,13 +163,18 @@ Carries a `Retry-After: 1` response header. `retriable` is `true` for a read
 timeout and `false` for a write timeout (a committed write must not be
 duplicated — see [Write operations are exempt](#write-operations-are-exempt-from-the-result-caps)).
 
+Since the #3234 HTTP error-envelope unification the body is the nested
+`{"error":{…}}` shape (byte-shape-identical to MCP); the legacy flat
+`{"success":false,…}` body has been removed.
+
 ```json
 {
-  "success": false,
-  "error": "query exceeded the wall-clock timeout of 30000 ms",
-  "code": "RESOURCE_EXHAUSTED",
-  "retriable": true,
-  "details": { "dimension": "wall_clock_timeout", "limit_ms": 30000 }
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "query exceeded the wall-clock timeout of 30000 ms",
+    "retriable": true,
+    "details": { "dimension": "wall_clock_timeout", "limit_ms": 30000 }
+  }
 }
 ```
 
@@ -174,11 +182,12 @@ duplicated — see [Write operations are exempt](#write-operations-are-exempt-fr
 
 ```json
 {
-  "success": false,
-  "error": "query response exceeded the byte limit of 1048576 (serialized 2400512)",
-  "code": "RESOURCE_EXHAUSTED",
-  "retriable": false,
-  "details": { "dimension": "result_bytes", "limit": 1048576, "consumed": 2400512 }
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "query response exceeded the byte limit of 1048576 (serialized 2400512)",
+    "retriable": false,
+    "details": { "dimension": "result_bytes", "limit": 1048576, "consumed": 2400512 }
+  }
 }
 ```
 
@@ -203,11 +212,12 @@ pre-#3368 responses.
 
 ```json
 {
-  "success": false,
-  "error": "limit override for 'result_rows' (1000) exceeds the maximum allowed (100)",
-  "code": "INVALID_ARGUMENT",
-  "retriable": false,
-  "details": { "dimension": "result_rows", "requested": 1000, "ceiling": 100 }
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "message": "limit override for 'result_rows' (1000) exceeds the maximum allowed (100)",
+    "retriable": false,
+    "details": { "dimension": "result_rows", "requested": 1000, "ceiling": 100 }
+  }
 }
 ```
 

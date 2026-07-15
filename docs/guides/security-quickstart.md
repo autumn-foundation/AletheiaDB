@@ -157,6 +157,16 @@ can act on — see the
 [error-code contract](mcp-query-tool.md#structured-error-codes-and-the-retriable-contract)
 (`UNAUTHENTICATED` / `PERMISSION_DENIED`, both `retriable: false`).
 
+> **Breaking change (Issue #3234):** the **HTTP** error body now uses the same
+> nested envelope as the MCP surface —
+> `{"error":{"code","message","retriable","details"?}}`, with `trace_id` (when
+> present) a top-level sibling of `error`. The legacy flat HTTP body
+> (`{"success":false,"error":"<msg>","code":…}`) has been removed; read
+> `error.code` / `error.message` / `error.retriable` / `error.details`. A
+> `403 PERMISSION_DENIED` now also carries
+> `error.details:{required_class, principal_role}` on the HTTP surface, matching
+> MCP exactly. Success responses are unchanged (`{"success":true,"data":…}`).
+
 ## Step 4 — Audit and revoke
 
 Listing is **masked by construction** — the response can only carry the

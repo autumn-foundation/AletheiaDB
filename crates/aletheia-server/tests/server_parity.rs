@@ -166,7 +166,7 @@ async fn status_unauthenticated_401_byte_parity() {
     let (l_status, l_body) = legacy_request(router, "GET", "/status", None, None).await;
     assert_eq!(s_status, 401);
     assert_eq!(s_status, l_status);
-    assert_eq!(s_body["code"], "UNAUTHENTICATED");
+    assert_eq!(s_body["error"]["code"], "UNAUTHENTICATED");
     assert_eq!(s_body, l_body, "uniform 401 must equal legacy");
 }
 
@@ -292,7 +292,11 @@ async fn admin_revoke_key_behavior() {
     )
     .await;
     assert_eq!(status, 404);
-    assert_eq!(body["success"], false);
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

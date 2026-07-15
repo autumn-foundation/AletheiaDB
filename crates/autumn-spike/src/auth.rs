@@ -82,10 +82,10 @@ impl SpikeAuth {
                 if p.role.allows(class) {
                     Ok(())
                 } else {
-                    Err(AletheiaHttpError::PermissionDenied(format!(
-                        "role '{}' does not permit {} access",
-                        p.role, class
-                    )))
+                    Err(AletheiaHttpError::PermissionDenied {
+                        required_class: class,
+                        principal_role: p.role,
+                    })
                 }
             }
         }
