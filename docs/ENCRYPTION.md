@@ -155,6 +155,86 @@ export ALETHEIADB_MEK="a1b2c3d4e5f6...64 hex chars..."
 This is useful for container deployments where secrets are injected as environment
 variables (Kubernetes Secrets, Docker secrets, AWS ECS task definitions).
 
+### Passphrase-Wrapped Key File Provider (Issue #3587)
+
+Reads the MEK from a **passphrase-wrapped key file** (`AEKF` format). The 32-byte
+MEK is stored AES-256-GCM-sealed under a wrapping key derived from a
+human-supplied passphrase via a memory-hard KDF (Argon2id by default; PBKDF2
+fallback). Only a salt, the KDF parameters, and the sealed MEK are persisted —
+**the passphrase is never written to disk**. The seal binds the file header
+(magic/version/KDF id/params/salt/nonce) as AEAD associated data, and KDF cost
+params read from the file are clamped to sane ceilings, so a tampered or crafted
+header fails closed rather than deriving a wrong key or attempting a huge
+allocation.
+
+The passphrase is supplied at startup from the environment variable named by
+`passphrase_env` — **never** on the command line (which would leak via the
+process table).
+
+```toml
+[encryption.key_provider]
+type = "passphrase_file"
+path = "/etc/aletheiadb/master.aekf"
+passphrase_env = "ALETHEIADB_KEY_PASSPHRASE"
+```
+
+Generate a passphrase-wrapped key file via the CLI (the passphrase is read from
+`ALETHEIADB_KEY_PASSPHRASE`, never argv, never echoed, never printed):
+
+```bash
+export ALETHEIADB_KEY_PASSPHRASE="correct horse battery staple"
+aletheia keys generate --passphrase --key-file /etc/aletheiadb/master.aekf
+```
+
+A missing or empty `ALETHEIADB_KEY_PASSPHRASE` fails closed. The passphrase is
+held only in a zeroizing buffer for the duration of key derivation.
+
+### AWS KMS Provider (`encryption-aws-kms` feature)
+
+Decrypts the MEK from a **KMS-wrapped data key** (envelope encryption). The
+config carries a KMS key id/ARN and a base64-encoded KMS-encrypted data-key
+ciphertext blob; at startup the provider calls KMS `Decrypt` to recover the
+32-byte MEK. The plaintext MEK is never stored on disk, logged, or exposed via
+`Debug` (the wrapped blob is redacted).
+
+```toml
+[encryption.key_provider]
+type = "kms"
+key_id = "arn:aws:kms:us-east-1:123456789012:key/abcd-…"
+encrypted_data_key = "<base64 KMS ciphertext blob>"
+region = "us-east-1"          # optional; defaults to $AWS_REGION or us-east-1
+# endpoint_url = "http://localhost:4566"  # optional (LocalStack / VPC endpoint)
+```
+
+Credentials come from the standard `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` environment variables. Requires
+building with `--features encryption-aws-kms`; without it the provider returns a
+typed `Unavailable` error (never a panic).
+
+### HashiCorp Vault Provider (`encryption-vault` feature)
+
+Reads the MEK from a Vault **KV v2** secret over HTTPS. The Vault token is
+supplied at startup from the environment variable named by `token_env` (never
+stored in config, never logged). The key material may be stored as 64 hex
+characters or base64 of 32 bytes. Construct/call this provider from a
+**synchronous** context (it uses `reqwest::blocking`).
+
+```toml
+[encryption.key_provider]
+type = "vault"
+address = "https://vault.example.com:8200"
+token_env = "VAULT_TOKEN"
+mount = "secret"              # optional; KV v2 mount (default "secret")
+path = "aletheiadb/mek"
+key_field = "key"             # optional; field within the secret (default "key")
+# namespace = "team-a"        # optional (Vault Enterprise)
+# ca_cert = "/etc/ssl/vault-ca.pem"  # optional PEM CA for TLS verification
+```
+
+Requires building with `--features encryption-vault`; without it the provider
+returns a typed `Unavailable` error. The Vault path is TLS-backend agnostic
+(reqwest `rustls-tls` + `reqwest::Certificate::from_pem`).
+
 ### Generating Keys
 
 Generate a new random 256-bit key file:
@@ -347,6 +427,18 @@ rotation.complete_rotation()?;
 
 **Note:** Background re-encryption of existing data written with the old key is
 planned for a future phase. Currently, rotation applies only to new writes.
+
+**Rotating _to_ passphrase/KMS/Vault sources is not yet supported (fail-closed).**
+Index-key rotation (`rotate_index_keys`) refuses — on the target source's variant
+alone, before any key-source/network call — to rotate _to_ a `passphrase_file`,
+`kms`, or `vault` key source, returning a typed "not yet supported" error. The
+durable rotation breadcrumb records only a single non-secret reference (a file
+path or env-var name) so an interrupted rotation can resume; passphrase/KMS/Vault
+sources carry secrets (passphrase/token env vars) or multi-field config the
+line-based breadcrumb cannot round-trip. This refusal is checked statically, so
+rotating _to_ an unreachable KMS/Vault endpoint surfaces the clean refusal rather
+than a transport error. Full-MEK rotation across every layer (which would also
+re-key the WAL/checkpoint/cold files) is the tracked follow-up.
 
 ## Audit Logging
 

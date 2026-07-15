@@ -129,6 +129,30 @@ fn load_mek(cfg: &KeyProviderConfig) -> std::result::Result<Zeroizing<[u8; 32]>,
         .map_err(|e| RotationError::KeyProvider(e.to_string()))
 }
 
+/// Statically refuse rotating TO a key source the durable breadcrumb cannot
+/// round-trip (passphrase/KMS/Vault), on the *variant alone* — BEFORE any
+/// `load_mek`/network call (Issue #3587).
+///
+/// Without this, rotating to an unreachable KMS/Vault endpoint would surface a
+/// network/transport error from `load_mek` instead of the clean "not yet
+/// supported" refusal. `write_rotation_state` performs the same check as
+/// defense-in-depth; this one fails fast and offline. Fail-closed: only
+/// file/env sources proceed.
+fn refuse_unsupported_new_source(new_source: &KeyProviderConfig) -> Result<()> {
+    match new_source {
+        KeyProviderConfig::File { .. } | KeyProviderConfig::Env { .. } => Ok(()),
+        KeyProviderConfig::PassphraseFile { .. }
+        | KeyProviderConfig::Kms { .. }
+        | KeyProviderConfig::Vault { .. } => {
+            let (provider_type, _) = new_source.describe();
+            Err(StorageError::PersistenceError(format!(
+                "index key rotation to a {provider_type} key source is not yet supported"
+            ))
+            .into())
+        }
+    }
+}
+
 /// Derive the index DEK for a MEK using the shared HKDF context.
 fn derive_index_dek(
     mek: Zeroizing<[u8; 32]>,
@@ -378,6 +402,11 @@ impl AletheiaDB {
         new_key_source: &KeyProviderConfig,
         started: Instant,
     ) -> Result<RotationReport> {
+        // Refuse an unsupported NEW source on its variant alone, BEFORE any
+        // load_mek / network call — rotating to an unreachable KMS/Vault must
+        // surface the clean refusal, not a transport error (Issue #3587).
+        refuse_unsupported_new_source(new_key_source)?;
+
         // Shared, mutable keyring handle (mutations are observed by the manager).
         let keyring = manager
             .keyring()
@@ -966,6 +995,54 @@ mod tests {
         assert!(
             err.to_string().contains("same key") || err.to_string().contains("equals"),
             "expected same-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rotate_to_remote_source_refuses_without_reaching_endpoint() {
+        // Rotating TO a KMS/Vault/passphrase source must return the clean
+        // "not yet supported" refusal on the variant alone — BEFORE any network
+        // call — so an unreachable endpoint never turns the refusal into a
+        // transport error (Issue #3587). Index-only DB so we reach run_rotation.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+
+        let db = build_db_index_only(root, &old_key);
+        seed(&db);
+
+        // Vault pointed at an unreachable address: must NOT be dialed.
+        let err = db
+            .rotate_index_keys(KeyProviderConfig::Vault {
+                address: "https://127.0.0.1:1".to_string(),
+                token_env: "NOPE_TOKEN".to_string(),
+                mount: "secret".to_string(),
+                path: "app/mek".to_string(),
+                key_field: "key".to_string(),
+                namespace: None,
+                ca_cert: None,
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported") && err.to_string().contains("vault"),
+            "expected clean vault refusal, got: {err}"
+        );
+        // And no breadcrumb was written by the refused rotation.
+        assert!(!root.join("data").join("rotation.state").exists());
+
+        // KMS is refused the same way (no endpoint contacted).
+        let err = db
+            .rotate_index_keys(KeyProviderConfig::Kms {
+                key_id: "alias/prod".to_string(),
+                encrypted_data_key: "AAAA".to_string(),
+                region: None,
+                endpoint_url: Some("http://127.0.0.1:1".to_string()),
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported") && err.to_string().contains("kms"),
+            "expected clean kms refusal, got: {err}"
         );
     }
 

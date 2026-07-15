@@ -481,10 +481,14 @@ fn keys_generate(args: &[String]) -> Result<(), String> {
     // passphrase is NEVER taken from argv (it would leak via the process table),
     // NEVER echoed, and NEVER printed; a missing/empty variable fails closed.
     let result = if args.iter().any(|a| a == "--passphrase") {
-        let passphrase = std::env::var("ALETHEIADB_KEY_PASSPHRASE").map_err(|_| {
-            "the --passphrase flag requires the ALETHEIADB_KEY_PASSPHRASE environment variable to be set"
-                .to_string()
-        })?;
+        // Land the secret in a zeroizing buffer immediately so it is wiped on
+        // drop rather than lingering in a plain `String`.
+        let passphrase = zeroize::Zeroizing::new(
+            std::env::var("ALETHEIADB_KEY_PASSPHRASE").map_err(|_| {
+                "the --passphrase flag requires the ALETHEIADB_KEY_PASSPHRASE environment variable to be set"
+                    .to_string()
+            })?,
+        );
         if passphrase.is_empty() {
             return Err(
                 "ALETHEIADB_KEY_PASSPHRASE must not be empty when --passphrase is used".to_string(),
@@ -492,12 +496,11 @@ fn keys_generate(args: &[String]) -> Result<(), String> {
         }
         let result = aletheiadb::encryption::cli::generate_passphrase_key_with_overwrite(
             path,
-            &passphrase,
+            passphrase.as_str(),
             force,
         )
         .map_err(|e| format!("failed to generate passphrase key: {e}"));
-        // Drop the passphrase from this frame promptly; the generator already
-        // consumed it into a zeroizing buffer for the KDF.
+        // Drop the passphrase from this frame promptly; it is zeroized on drop.
         drop(passphrase);
         result?
     } else {

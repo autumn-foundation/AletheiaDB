@@ -39,7 +39,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use aes_gcm::aead::Aead;
+use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce as AesNonce};
 use rand::RngCore;
 use zeroize::Zeroizing;
@@ -71,6 +71,21 @@ const OFF_NONCE: usize = OFF_SALT + SALT_LEN; // 38
 const OFF_CT: usize = OFF_NONCE + NONCE_LEN; // 50
 const OFF_TAG: usize = OFF_CT + CT_LEN; // 82
 const FILE_LEN: usize = OFF_TAG + TAG_LEN; // 98
+
+// Sane ceilings on KDF cost parameters read from an *untrusted* key file. A
+// crafted AEKF header could otherwise carry, e.g., `m_cost ≈ u32::MAX` and
+// trigger a multi-terabyte allocation the instant the file is opened. Params
+// beyond these bounds are rejected with `InvalidKeyFormat` BEFORE any Argon2
+// allocation is attempted. The ceilings are far above any legitimate config
+// (the Argon2id default is 19 MiB / 2 passes / 1 lane).
+/// Max Argon2 memory cost accepted from a key file: 2 GiB (in KiB).
+const MAX_ARGON2_M_COST_KIB: u32 = 2 * 1024 * 1024;
+/// Max Argon2 time cost (passes) accepted from a key file.
+const MAX_ARGON2_T_COST: u32 = 4096;
+/// Max Argon2 parallelism (lanes) accepted from a key file.
+const MAX_ARGON2_P_COST: u32 = 256;
+/// Max PBKDF2 iteration count accepted from a key file (~67M, bounds CPU DoS).
+const MAX_PBKDF2_ITERATIONS: u32 = 1 << 26;
 
 /// Key-derivation function used to derive the wrapping key from a passphrase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +187,18 @@ impl PassphraseKdf {
                 p_cost,
             } => {
                 use argon2::{Algorithm, Argon2, Params, Version};
+                // Reject absurd cost params from an untrusted key file BEFORE
+                // constructing `Params` (which would let a huge `m_cost` reach
+                // the allocator). Fail-closed with a typed error, never OOM.
+                if m_cost > MAX_ARGON2_M_COST_KIB
+                    || t_cost > MAX_ARGON2_T_COST
+                    || p_cost > MAX_ARGON2_P_COST
+                {
+                    return Err(KeyProviderError::InvalidKeyFormat(format!(
+                        "Argon2 KDF parameters exceed safe limits \
+                         (m_cost={m_cost} KiB, t_cost={t_cost}, p_cost={p_cost})"
+                    )));
+                }
                 let params = Params::new(m_cost, t_cost, p_cost, Some(32)).map_err(|e| {
                     KeyProviderError::InvalidKeyFormat(format!("invalid Argon2 params: {e}"))
                 })?;
@@ -187,6 +214,12 @@ impl PassphraseKdf {
                     })?;
             }
             Self::Pbkdf2 { iterations } => {
+                // Bound the iteration count from an untrusted file to cap CPU DoS.
+                if iterations > MAX_PBKDF2_ITERATIONS {
+                    return Err(KeyProviderError::InvalidKeyFormat(format!(
+                        "PBKDF2 iteration count {iterations} exceeds safe limit"
+                    )));
+                }
                 // pbkdf2 0.12 is built on the digest 0.10 ecosystem; pair it with
                 // the sha2 0.10 copy aliased as `sha2_pbkdf2`.
                 pbkdf2::pbkdf2_hmac::<sha2_pbkdf2::Sha256>(
@@ -256,17 +289,26 @@ impl PassphraseFileKeyProvider {
         let nonce = &raw[OFF_NONCE..OFF_CT];
         // ciphertext || tag is what aes-gcm's `decrypt` expects.
         let sealed = &raw[OFF_CT..FILE_LEN];
+        // The entire pre-ciphertext prefix (magic, version, kdf_id, kdf params,
+        // salt, nonce) is bound as AEAD associated data so tampering with any
+        // header byte — including the otherwise-unauthenticated reserved KDF
+        // param bytes — fails the authenticated decrypt rather than silently
+        // deriving/using a key.
+        let aad = &raw[OFF_MAGIC..OFF_CT];
 
         let wrapping = kdf.derive(self.passphrase.as_bytes(), salt)?;
         let cipher = Aes256Gcm::new_from_slice(wrapping.as_ref()).map_err(|_| {
             KeyProviderError::InvalidKeyFormat("invalid wrapping key length".to_string())
         })?;
-        let plaintext = cipher
-            .decrypt(AesNonce::from_slice(nonce), sealed)
+        // Bind the plaintext MEK in a zeroizing buffer so it is wiped on drop
+        // even before it is copied into the fixed-size array below.
+        let plaintext: Zeroizing<Vec<u8>> = cipher
+            .decrypt(AesNonce::from_slice(nonce), Payload { msg: sealed, aad })
+            .map(Zeroizing::new)
             .map_err(|_| {
                 // A GCM tag mismatch is the expected outcome of a wrong
-                // passphrase or tampered file. Return AccessDenied WITHOUT any
-                // key/passphrase material.
+                // passphrase or a tampered file/header. Return AccessDenied
+                // WITHOUT any key/passphrase material.
                 KeyProviderError::AccessDenied(
                     "passphrase key unwrap failed (wrong passphrase or corrupt file)".to_string(),
                 )
@@ -360,13 +402,32 @@ pub fn generate_passphrase_key_file_with_kdf(
     let mut nonce = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    // Derive wrapping key and seal the MEK.
+    // Build the header (everything before the ciphertext: magic, version,
+    // kdf_id, kdf params, salt, nonce) FIRST so it can be bound as AEAD
+    // associated data on the seal — authenticating the whole header, including
+    // the reserved KDF param bytes, against tampering.
+    let mut header = Vec::with_capacity(OFF_CT);
+    header.extend_from_slice(MAGIC);
+    header.push(FORMAT_VERSION);
+    header.push(kdf.kdf_id());
+    header.extend_from_slice(&kdf.encode_params());
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&nonce);
+    debug_assert_eq!(header.len(), OFF_CT);
+
+    // Derive wrapping key and seal the MEK, binding the header as AAD.
     let wrapping = kdf.derive(passphrase.as_bytes(), &salt)?;
     let cipher = Aes256Gcm::new_from_slice(wrapping.as_ref()).map_err(|_| {
         KeyProviderError::InvalidKeyFormat("invalid wrapping key length".to_string())
     })?;
     let sealed = cipher
-        .encrypt(AesNonce::from_slice(&nonce), &mek[..])
+        .encrypt(
+            AesNonce::from_slice(&nonce),
+            Payload {
+                msg: &mek[..],
+                aad: &header,
+            },
+        )
         .map_err(|e| {
             KeyProviderError::Provider(Box::new(std::io::Error::other(format!(
                 "key wrap failed: {e}"
@@ -380,14 +441,9 @@ pub fn generate_passphrase_key_file_with_kdf(
         )));
     }
 
-    // Assemble the file buffer.
+    // Assemble the file buffer: header || ciphertext || tag.
     let mut buf = Zeroizing::new(Vec::with_capacity(FILE_LEN));
-    buf.extend_from_slice(MAGIC);
-    buf.push(FORMAT_VERSION);
-    buf.push(kdf.kdf_id());
-    buf.extend_from_slice(&kdf.encode_params());
-    buf.extend_from_slice(&salt);
-    buf.extend_from_slice(&nonce);
+    buf.extend_from_slice(&header);
     buf.extend_from_slice(&sealed);
     debug_assert_eq!(buf.len(), FILE_LEN);
 
@@ -558,8 +614,70 @@ mod tests {
         let generated =
             generate_passphrase_key_file_with_kdf(&path, "pw", true, fast_argon()).unwrap();
         let provider = PassphraseFileKeyProvider::new(&path, "pw");
-        // Single-version provider: any version -> the sole key.
-        let v = provider.get_key_version(99).unwrap();
-        assert_eq!(v.as_ref(), generated.as_ref());
+        // Single-version provider: the current version (1) and the sentinel 0
+        // resolve to the sole key; any other version is a typed KeyNotFound.
+        assert_eq!(
+            provider.get_key_version(0).unwrap().as_ref(),
+            generated.as_ref()
+        );
+        assert_eq!(
+            provider.get_key_version(1).unwrap().as_ref(),
+            generated.as_ref()
+        );
+        assert!(matches!(
+            provider.get_key_version(99).unwrap_err(),
+            KeyProviderError::KeyNotFound
+        ));
+    }
+
+    #[test]
+    fn flipping_header_byte_fails_authenticated_decrypt() {
+        // The seal binds the whole header as AAD, so tampering with an
+        // otherwise-unauthenticated header byte fails the authenticated decrypt
+        // (AccessDenied) instead of silently succeeding. A *reserved* KDF param
+        // byte is chosen deliberately: it neither changes the derived key nor is
+        // read by `decode`, so before AAD binding this flip would decrypt fine.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aad.aekf");
+        generate_passphrase_key_file_with_kdf(&path, "pw", true, fast_argon()).unwrap();
+
+        let mut raw = std::fs::read(&path).unwrap();
+        // Argon2id kdf_params layout: m_cost|t_cost|p_cost|reserved (each u32 BE).
+        // The reserved word starts 12 bytes into kdf_params.
+        let reserved_off = OFF_KDF_PARAMS + 12;
+        raw[reserved_off] ^= 0xFF;
+        std::fs::write(&path, &raw).unwrap();
+
+        let provider = PassphraseFileKeyProvider::new(&path, "pw");
+        let err = provider.get_mek().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KeyProviderError::AccessDenied(_) | KeyProviderError::InvalidKeyFormat(_)
+            ),
+            "tampered header must fail authenticated decrypt, got: {err}"
+        );
+    }
+
+    #[test]
+    fn absurd_m_cost_header_is_rejected_without_oom() {
+        // A crafted AEKF whose Argon2 m_cost is ~u32::MAX must be rejected with a
+        // typed InvalidKeyFormat BEFORE any Argon2 allocation is attempted — no
+        // OOM. The clamp in `derive` fires ahead of the AEAD decrypt.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absurd.aekf");
+        generate_passphrase_key_file_with_kdf(&path, "pw", true, fast_argon()).unwrap();
+
+        let mut raw = std::fs::read(&path).unwrap();
+        // Overwrite the m_cost word (first 4 bytes of kdf_params) with u32::MAX.
+        raw[OFF_KDF_PARAMS..OFF_KDF_PARAMS + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        std::fs::write(&path, &raw).unwrap();
+
+        let provider = PassphraseFileKeyProvider::new(&path, "pw");
+        let err = provider.get_mek().unwrap_err();
+        assert!(
+            matches!(err, KeyProviderError::InvalidKeyFormat(_)),
+            "absurd m_cost must be rejected as InvalidKeyFormat, got: {err}"
+        );
     }
 }
