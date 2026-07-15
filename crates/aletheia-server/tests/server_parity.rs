@@ -563,7 +563,7 @@ async fn mcp_routable_tools_are_all_classified() {
 /// drift to a non-Read (e.g. write) pinned name fails here.
 #[tokio::test]
 async fn dispatch_pinned_names_match_routed_class() {
-    use aletheia_server::edge_tools::DISPATCH_ROUTED_READ_TOOLS;
+    use aletheia_server::edge_tools::{ALL_DISPATCH_ROUTED, DISPATCH_ROUTED_READ_TOOLS};
     use std::collections::BTreeSet;
 
     let (db, store, _) = fixture();
@@ -586,11 +586,15 @@ async fn dispatch_pinned_names_match_routed_class() {
         .map(|t| t["name"].as_str().expect("tool name").to_string())
         .collect();
 
+    // Iterate the SUPERSET `ALL_DISPATCH_ROUTED` so EVERY dispatch_tool_json call
+    // site is covered — the budgetable/cursorable slow reads AND the three
+    // non-budgetable provenance-hash-chain tools (`audit_export`, `verify_chain`,
+    // `export_chain_head`, Issue #3524 PR7) that also pin a literal name.
     assert!(
-        !DISPATCH_ROUTED_READ_TOOLS.is_empty(),
+        !ALL_DISPATCH_ROUTED.is_empty(),
         "the pinned-name table must not be empty"
     );
-    for (pinned, class) in DISPATCH_ROUTED_READ_TOOLS {
+    for (pinned, class) in ALL_DISPATCH_ROUTED {
         // (1) pinned ↔ routed: the literal a handler forwards must be a real,
         // routed tool name (never a typo or an off-surface name).
         assert!(
@@ -605,6 +609,17 @@ async fn dispatch_pinned_names_match_routed_class() {
             Some(*class),
             "pinned dispatch name {pinned:?} registry class must equal the handler's \
              Authorized<C> class ({class:?}) — a read handler pinning a write name is escalation"
+        );
+    }
+
+    // Subset invariant: every budgetable-routed entry must appear in the superset,
+    // so `DISPATCH_ROUTED_READ_TOOLS` and `ALL_DISPATCH_ROUTED` can never drift
+    // (a budgetable read added to one but not the other would fail here).
+    for entry in DISPATCH_ROUTED_READ_TOOLS {
+        assert!(
+            ALL_DISPATCH_ROUTED.contains(entry),
+            "DISPATCH_ROUTED_READ_TOOLS entry {entry:?} is missing from the \
+             ALL_DISPATCH_ROUTED superset — the two tables have drifted"
         );
     }
 }

@@ -700,13 +700,19 @@ async fn all_eight_tools_routable_on_mcp_with_correct_class() {
 
 // ════════════════════════════════════════════════════════════════════════════
 // Conformance: none of the eight is budgetable/cursorable, so none is registered
-// in the shared DISPATCH_ROUTED_READ_TOOLS pinned-name table (the three
-// audit-chain tools use dispatch_tool_json but pin their OWN name — no
-// cross-tool escalation, so they are intentionally not pinned).
+// in the shared DISPATCH_ROUTED_READ_TOOLS (budgetable-reads) pinned-name table.
+// The three audit-chain tools DO forward through dispatch_tool_json (pinning
+// their OWN name — no cross-tool escalation), so they appear in the
+// ALL_DISPATCH_ROUTED superset (Issue #3524 PR7) that the shared
+// `dispatch_pinned_names_match_routed_class` conformance test now iterates; the
+// five typed-method tools are in NEITHER table.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn none_of_the_eight_is_dispatch_routed() {
+async fn dispatch_routed_split_is_exactly_the_three_chain_tools() {
+    use aletheia_server::edge_tools::ALL_DISPATCH_ROUTED;
+
+    // None of the eight is budgetable/cursorable → none in DISPATCH_ROUTED_READ_TOOLS.
     for name in [
         "enable_vector_index",
         "enable_unique_constraint",
@@ -719,7 +725,33 @@ async fn none_of_the_eight_is_dispatch_routed() {
     ] {
         assert!(
             !DISPATCH_ROUTED_READ_TOOLS.iter().any(|(n, _)| *n == name),
-            "{name} is non-budgetable/non-cursorable and must NOT be dispatch-routed"
+            "{name} is non-budgetable/non-cursorable and must NOT be in DISPATCH_ROUTED_READ_TOOLS"
+        );
+    }
+
+    // The three chain tools DO use dispatch_tool_json → they must be in the
+    // ALL_DISPATCH_ROUTED superset (Read class), covered by the conformance test.
+    for name in ["audit_export", "verify_chain", "export_chain_head"] {
+        assert!(
+            ALL_DISPATCH_ROUTED
+                .iter()
+                .any(|(n, c)| *n == name && *c == AccessClass::Read),
+            "{name} forwards via dispatch_tool_json and must be pinned in ALL_DISPATCH_ROUTED (Read)"
+        );
+    }
+
+    // The five typed-method tools forward via a public method (not
+    // dispatch_tool_json), so they are in NEITHER table.
+    for name in [
+        "enable_vector_index",
+        "enable_unique_constraint",
+        "list_unique_constraints",
+        "lineage_upstream",
+        "lineage_downstream",
+    ] {
+        assert!(
+            !ALL_DISPATCH_ROUTED.iter().any(|(n, _)| *n == name),
+            "{name} forwards via a typed method and must NOT be in ALL_DISPATCH_ROUTED"
         );
     }
 }
