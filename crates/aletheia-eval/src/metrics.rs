@@ -68,6 +68,12 @@ pub fn grounding_precision(retrieved: &[String], gold: &BTreeSet<String>) -> f64
     if retrieved.is_empty() {
         return 0.0;
     }
+    // Note: unlike `precision_at_k`'s `hits_in_top_k`, the numerator here does
+    // not de-duplicate — a repeated relevant key would be counted once per
+    // occurrence. This is harmless because the harness builds `retrieved` from a
+    // node-id-deduplicated candidate list (see `harness::run`), so the keys are
+    // already distinct; the denominator counts the same list, keeping the ratio
+    // well-defined.
     let relevant = retrieved.iter().filter(|item| gold.contains(*item)).count();
     relevant as f64 / retrieved.len() as f64
 }

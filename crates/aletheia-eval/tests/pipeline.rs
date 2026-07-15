@@ -114,6 +114,57 @@ fn temporal_question_that_changed_scores_one_for_full_zero_for_baseline() {
 }
 
 #[test]
+fn citation_validity_distinguishes_supporting_from_nonsupporting_versions() {
+    // Proves the metric is NOT a constant 1.0: the past-era question's citation
+    // is valid under the anchoring (full) config but invalid under the
+    // non-anchoring baseline, which cites the current-state tenure whose CEO does
+    // not support the past-era answer.
+    let dataset = tiny_temporal_dataset();
+
+    let (fdb, fgraph) = index_dataset(&dataset, 42).unwrap();
+    let full = run(&fdb, &fgraph, &dataset, &full_config()).unwrap();
+    let (bdb, bgraph) = index_dataset(&dataset, 42).unwrap();
+    let baseline = run(&bdb, &bgraph, &dataset, &baseline_config()).unwrap();
+
+    // Full anchors each citation at the question's era → every cited tenure
+    // version carries the gold CEO → perfect.
+    assert_eq!(full.metrics.citation_validity, 1.0);
+    // Baseline cites the current-state tenure regardless of the anchor, so the
+    // past-era question's citation resolves to a version whose CEO != the gold
+    // answer → INVALID → drags aggregate validity below 1.0.
+    assert!(
+        baseline.metrics.citation_validity < 1.0,
+        "baseline citation validity {} must be penalised for the past-era \
+         citation that does not support the answer",
+        baseline.metrics.citation_validity
+    );
+    assert!(full.metrics.citation_validity > baseline.metrics.citation_validity);
+
+    // Per-question: the changed (past-era) fact's citation is valid under full,
+    // invalid under baseline; the current-era fact is valid under both.
+    let full_past = full.per_question.iter().find(|q| q.id == "past").unwrap();
+    let base_past = baseline
+        .per_question
+        .iter()
+        .find(|q| q.id == "past")
+        .unwrap();
+    let base_now = baseline
+        .per_question
+        .iter()
+        .find(|q| q.id == "now")
+        .unwrap();
+    assert!(full_past.citations_valid, "full past-era citation is valid");
+    assert!(
+        !base_past.citations_valid,
+        "baseline past-era citation must be invalid (current CEO != gold)"
+    );
+    assert!(
+        base_now.citations_valid,
+        "baseline current-era citation is valid (current CEO == gold)"
+    );
+}
+
+#[test]
 fn determinism_two_runs_byte_identical() {
     let dataset = tiny_temporal_dataset();
 

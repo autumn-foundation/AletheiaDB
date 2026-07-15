@@ -61,10 +61,35 @@ unit-tested in `crates/aletheia-eval/src/metrics.rs`.
 | **recall@k** | `|R_k ∩ G| / |G|` | empty gold → `1.0` (vacuously perfect) |
 | **grounding precision** | `|R ∩ G| / |R|` | empty retrieval → `0.0`; no `k` cap — measures purity of what was grounded on |
 | **temporal accuracy** | mean over time-anchored questions of `answer(anchor) == gold_answer` | no temporal questions → `0.0` |
-| **citation validity** | fraction of returned citations that resolve to a real supporting version | no citations → `1.0` |
+| **citation validity** | fraction of returned citations whose cited version, reconstructed at the citation coordinate, actually **carries** the gold answer | no citations → `1.0` |
 
 Duplicate retrieved keys are credited once (a retriever can't inflate a score by
-repeating a relevant item). A citation to a non-existent version scores invalid.
+repeating a relevant item).
+
+**What `temporal_accuracy` measures (and does not).** It is a **temporal
+reconstruction ablation**, not an end-to-end RAG accuracy number. The
+answer-bearing fact is resolved by an *oracle* point-in-time lookup
+(`find_nodes_by_property_at` on the fact label as of the anchor for the full
+config, or current state for the baseline) — the **only** difference between the
+two configs is the valid-time coordinate. It therefore isolates *"can the store
+reconstruct the fact that was true at time T?"* and is **independent of whether
+the vector/graph retriever surfaced the tenure node**. Read the +66.7pp headline
+as "temporally-anchored reconstruction recovers the historically-correct fact
+where a current-state read cannot", not as a claim about full-pipeline retrieval
+quality.
+
+**What `citation_validity` measures (and how it discriminates).** For an
+answer-bearing question the citation is the fact node the answer was read from,
+and it is valid **only if that node — reconstructed at the citation coordinate —
+carries `answer_property == gold_answer`**. A citation that resolves to *some*
+version but one that does **not** support the answer scores invalid: e.g. a
+past-era question answered by the non-anchoring baseline cites the *current*
+tenure, whose CEO ≠ the gold answer, so the citation is invalid (this is why the
+metric is no longer a constant 1.0 — see the `temporal_qa` baseline below). A
+citation to a retracted-away or non-existent version is likewise invalid. For a
+structural question with no gold answer, citations are the retrieved
+gold-evidence nodes, valid iff each reconstructs to a real version at the
+coordinate.
 
 ## Configuration format
 
@@ -184,11 +209,16 @@ Seed 42, k 5. Reproduce from a fresh clone with the run commands above.
 | recall@k | 1.000 | 1.000 | +0.000 |
 | grounding_precision | 0.200 | 0.200 | +0.000 |
 | **temporal_accuracy** | **1.000** | **0.333** | **+0.667** |
-| citation_validity | 1.000 | 1.000 | +0.000 |
+| citation_validity | 1.000 | 0.333 | +0.667 |
 
-**Headline substantiated:** temporally-anchored retrieval scores **+0.667
+**Headline substantiated:** temporally-anchored reconstruction scores **+0.667
 (66.7 percentage points)** higher temporal accuracy than the vector-only
-baseline — well past the 25pp bar.
+baseline — well past the 25pp bar. (As framed above, this is a reconstruction
+ablation, not an end-to-end pipeline number.) Citation validity moves in
+lockstep here (**+0.667**): the baseline's past-era citations point at the
+current tenure, which does not carry the historically-correct CEO, so they score
+invalid — demonstrating the metric now discriminates rather than reporting a
+constant 1.0.
 
 ### multihop_qa
 
