@@ -134,6 +134,37 @@ impl RotationStatus {
     }
 }
 
+/// Result of the manifest-/index-body decrypt probe (Issue #3618).
+///
+/// [`RotationStatus`] classifies files by their 10-byte `AEIX` header
+/// `key_version` ONLY; it never AEAD-decrypts the body. A wrong key that happens
+/// to share the same `key_version` number therefore passes header classification
+/// (`unknown == 0`) even though it cannot actually decrypt anything — a
+/// false-PASS for `encryption verify`. This report captures an *active* decrypt
+/// probe: it attempts to AEAD-decrypt representative index bodies with the live
+/// keyring and records what actually authenticated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DecryptProbeReport {
+    /// Number of encrypted files whose body the probe actually attempted to
+    /// decrypt (bounded — see [`IndexKeyRotation::verify_decryptable`]).
+    pub probed: usize,
+    /// Probed files whose body AEAD-decrypted successfully under the keyring.
+    pub decrypted_ok: usize,
+    /// Plaintext (non-`AEIX`) files encountered — skipped, NOT a failure.
+    pub plaintext: usize,
+    /// Paths of probed files whose body did NOT decrypt (wrong key material or
+    /// corruption). Path only — never any key bytes.
+    pub decrypt_failed: Vec<PathBuf>,
+}
+
+impl DecryptProbeReport {
+    /// True when the probe attempted at least one decrypt and none failed.
+    #[must_use]
+    pub fn all_decrypted(&self) -> bool {
+        self.decrypt_failed.is_empty()
+    }
+}
+
 /// Per-file outcome of the byte-level re-encryption primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileOutcome {
@@ -205,6 +236,75 @@ impl IndexKeyRotation {
             }
         }
         Ok(status)
+    }
+
+    /// Actively probe that index bodies decrypt under the live keyring
+    /// (Issue #3618).
+    ///
+    /// [`status`](Self::status) classifies files by their `AEIX` header
+    /// `key_version` alone and cannot catch a wrong key that shares the same
+    /// version number (the body is never touched). This probe closes that hole:
+    /// it AEAD-decrypts representative index *bodies* through the keyring and
+    /// reports which authenticated. A wrong key (or a corrupted body) fails the
+    /// AEAD auth tag — the header is AAD — so `decrypt_failed` becomes non-empty.
+    ///
+    /// **Bounded cost.** `verify` is an operator command, not a hot path, and
+    /// decrypting every file of a huge database would be wasteful. The probe
+    /// therefore decrypts the manifest body (the small canonical file every
+    /// encrypted database writes) plus ONE representative encrypted file per
+    /// distinct `key_version` actually present on disk. That fully catches a
+    /// uniformly-wrong configured key — the Issue #3618 scenario — since a wrong
+    /// key fails on the very first file of each generation.
+    ///
+    /// Plaintext (non-`AEIX`) files are counted under `plaintext` and skipped;
+    /// they are not decrypt failures. Recorded failure paths never carry key
+    /// material.
+    pub fn verify_decryptable(&self) -> Result<DecryptProbeReport, RotationError> {
+        use std::collections::HashSet;
+
+        let mut report = DecryptProbeReport::default();
+        let mut probed_versions: HashSet<u32> = HashSet::new();
+        let manifest_path = self.indexes_dir.join("manifest.idx");
+
+        // Walk EVERY non-scratch file (not just encrypted ones) so plaintext
+        // files are counted rather than silently invisible. Sorted for a
+        // deterministic representative per key-version.
+        let mut files = Vec::new();
+        if self.indexes_dir.exists() {
+            collect_all_files(&self.indexes_dir, &mut files)?;
+        }
+        files.sort();
+
+        for path in files {
+            // verify may run against a LIVE db: a file listed a moment ago can be
+            // removed/renamed by a concurrent writer's atomic_write between the
+            // scan and this read. A vanished file is benign — skip it rather than
+            // fail the probe; any OTHER io error still propagates.
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let Some(key_version) = index_file_key_version(&bytes) else {
+                // Not an AEIX-encrypted file: plaintext, skip (not a failure).
+                report.plaintext += 1;
+                continue;
+            };
+            // Bounded cost: always probe the manifest body; otherwise probe only
+            // the first file seen for each distinct key_version.
+            let is_manifest = path == manifest_path;
+            let first_of_version = probed_versions.insert(key_version);
+            if !is_manifest && !first_of_version {
+                continue;
+            }
+            report.probed += 1;
+            match decrypt_index_bytes_with_keyring(&bytes, &path, Some(&self.keyring)) {
+                Ok(_) => report.decrypted_ok += 1,
+                // Path only — never any key bytes.
+                Err(_) => report.decrypt_failed.push(path),
+            }
+        }
+        Ok(report)
     }
 
     /// Re-encrypt every old-key file to the new key (forward pass).
@@ -371,6 +471,32 @@ fn peek_key_version(path: &Path) -> Result<Option<u32>, RotationError> {
 /// A temp/scratch file the rotation engine must never treat as an index file.
 fn is_scratch_file(name: &str) -> bool {
     name.ends_with(".tmp") || name.contains(".tmp.") || name.starts_with(".aeix-usearch-tmp-")
+}
+
+/// Recursively collect every regular, non-scratch file under `dir` — encrypted
+/// AND plaintext. Unlike [`collect_index_files`], this does NOT filter to files
+/// carrying the `AEIX` header, so the decrypt probe (Issue #3618) can count
+/// plaintext files instead of treating them as absent.
+fn collect_all_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), RotationError> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_all_files(&path, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if is_scratch_file(&name) {
+            continue;
+        }
+        out.push(path);
+    }
+    Ok(())
 }
 
 fn collect_index_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), RotationError> {
@@ -707,6 +833,271 @@ mod tests {
             std::fs::read(&plain).unwrap(),
             b"\x00plaintext-not-encrypted"
         );
+    }
+
+    // ── Issue #3618: manifest-/index-body decrypt probe ──────────────
+
+    #[test]
+    fn verify_decryptable_passes_with_correct_key() {
+        // Files written and probed with the SAME key: every probed body
+        // authenticates, nothing fails.
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let good = cipher_from_seed(0x11);
+
+        write_enc(
+            &indexes.join("manifest.idx"),
+            &good,
+            OLD_V,
+            b"MANIFEST-body-0",
+        );
+        write_enc(
+            &indexes.join("graph").join("adjacency.idx"),
+            &good,
+            OLD_V,
+            b"graph-body-1",
+        );
+
+        let ring = IndexKeyring::single_versioned(good.clone(), OLD_V);
+        let eng = IndexKeyRotation::new(&indexes, ring, OLD_V, good.clone(), OLD_V, good.clone());
+
+        let report = eng.verify_decryptable().unwrap();
+        assert!(
+            report.decrypt_failed.is_empty(),
+            "correct key must decrypt every probed body: {report:?}"
+        );
+        assert!(
+            report.decrypted_ok > 0,
+            "at least one body must be probed and decrypt: {report:?}"
+        );
+        assert!(report.all_decrypted());
+    }
+
+    #[test]
+    fn verify_decryptable_catches_same_version_wrong_key() {
+        // THE core red test (Issue #3618): a wrong key that shares the SAME
+        // key_version number passes header classification (status()) but MUST be
+        // caught by the body decrypt probe.
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let good = cipher_from_seed(0x11); // key material X
+        let wrong = cipher_from_seed(0x99); // DIFFERENT key material Y
+
+        // Bodies written by the GOOD key at key_version 1.
+        write_enc(
+            &indexes.join("manifest.idx"),
+            &good,
+            OLD_V,
+            b"MANIFEST-body",
+        );
+        write_enc(
+            &indexes.join("graph").join("adjacency.idx"),
+            &good,
+            OLD_V,
+            b"graph-body",
+        );
+
+        // Engine holds the WRONG key at the SAME version 1.
+        let wrong_ring = IndexKeyring::single_versioned(wrong.clone(), OLD_V);
+        let eng = IndexKeyRotation::new(
+            &indexes,
+            wrong_ring,
+            OLD_V,
+            wrong.clone(),
+            OLD_V,
+            wrong.clone(),
+        );
+
+        // (a) Header classification PASSES — this is the bug: the version number
+        // matches, so status() sees only "current" files and nothing unknown.
+        let status = eng.status().unwrap();
+        assert!(
+            status.at_current > 0,
+            "header classification should see current-version files: {status:?}"
+        );
+        assert_eq!(
+            status.unknown, 0,
+            "header classification cannot detect the wrong key: {status:?}"
+        );
+
+        // (b) The body decrypt probe CATCHES it: nothing authenticates under the
+        // wrong key.
+        let report = eng.verify_decryptable().unwrap();
+        assert!(
+            !report.decrypt_failed.is_empty(),
+            "decrypt probe must flag the wrong key: {report:?}"
+        );
+        assert_eq!(
+            report.decrypted_ok, 0,
+            "no body can decrypt under the wrong key: {report:?}"
+        );
+        assert!(!report.all_decrypted());
+    }
+
+    #[test]
+    fn verify_decryptable_ignores_plaintext_files() {
+        // A legacy plaintext (non-AEIX) file is counted as plaintext, never as a
+        // decrypt failure.
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let good = cipher_from_seed(0x11);
+
+        write_enc(
+            &indexes.join("manifest.idx"),
+            &good,
+            OLD_V,
+            b"MANIFEST-body",
+        );
+        std::fs::create_dir_all(&indexes).unwrap();
+        std::fs::write(indexes.join("legacy.idx"), b"\x00plaintext-not-encrypted").unwrap();
+
+        let ring = IndexKeyring::single_versioned(good.clone(), OLD_V);
+        let eng = IndexKeyRotation::new(&indexes, ring, OLD_V, good.clone(), OLD_V, good.clone());
+
+        let report = eng.verify_decryptable().unwrap();
+        assert_eq!(
+            report.plaintext, 1,
+            "the plaintext file must be counted as plaintext: {report:?}"
+        );
+        assert!(
+            report.decrypt_failed.is_empty(),
+            "a plaintext file is not a decrypt failure: {report:?}"
+        );
+        assert!(
+            report.decrypted_ok >= 1,
+            "the encrypted manifest must still be probed and decrypt: {report:?}"
+        );
+    }
+
+    #[test]
+    fn verify_decryptable_catches_wrong_key_in_one_of_multiple_generations() {
+        // Multi-generation coverage: bodies exist at BOTH key_version 1 and 2.
+        // The keyring holds the CORRECT v1 cipher but a WRONG v2 cipher (same
+        // version slot, different key bytes). The per-key-version dedup probes one
+        // representative body per generation, so the v1 files decrypt while the v2
+        // representative fails — exactly what would happen if a later generation's
+        // configured key were wrong.
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let good_v1 = cipher_from_seed(0x11); // correct v1 key material
+        let good_v2 = cipher_from_seed(0x22); // the key that actually wrote v2 files
+        let wrong_v2 = cipher_from_seed(0x99); // different bytes, same version slot
+
+        // v1 bodies (manifest + one file) written by the good v1 key.
+        write_enc(
+            &indexes.join("manifest.idx"),
+            &good_v1,
+            OLD_V,
+            b"MANIFEST-v1",
+        );
+        write_enc(
+            &indexes.join("graph").join("adjacency.idx"),
+            &good_v1,
+            OLD_V,
+            b"graph-v1",
+        );
+        // v2 bodies written by the good v2 key (a later generation on disk).
+        write_enc(
+            &indexes.join("vector").join("emb").join("meta.idx"),
+            &good_v2,
+            NEW_V,
+            b"vector-v2",
+        );
+
+        // Keyring: correct v1, WRONG v2.
+        let ring = IndexKeyring::single_versioned(good_v1.clone(), OLD_V);
+        ring.add_generation(NEW_V, wrong_v2.clone());
+        let eng = IndexKeyRotation::new(
+            &indexes,
+            ring,
+            OLD_V,
+            good_v1.clone(),
+            NEW_V,
+            wrong_v2.clone(),
+        );
+
+        let report = eng.verify_decryptable().unwrap();
+        assert!(
+            !report.decrypt_failed.is_empty(),
+            "the v2 representative under the wrong key must fail: {report:?}"
+        );
+        assert!(
+            report.decrypted_ok >= 1,
+            "the v1 files must still decrypt under the correct v1 key: {report:?}"
+        );
+    }
+
+    #[test]
+    fn verify_decryptable_always_probes_manifest() {
+        // Bounded-cost design: the manifest is ALWAYS probed, plus the first file
+        // (sorted) of each distinct key_version. With three same-version files —
+        // one sorting before `manifest.idx`, the manifest, one sorting after —
+        // the probe hits exactly two: `aaa.idx` (first-of-version) and the
+        // always-probed manifest; `zzz.idx` (a third same-version body) is
+        // intentionally NOT probed.
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let good = cipher_from_seed(0x11);
+
+        write_enc(&indexes.join("aaa.idx"), &good, OLD_V, b"aaa-body");
+        write_enc(
+            &indexes.join("manifest.idx"),
+            &good,
+            OLD_V,
+            b"MANIFEST-body",
+        );
+        write_enc(&indexes.join("zzz.idx"), &good, OLD_V, b"zzz-body");
+
+        let ring = IndexKeyring::single_versioned(good.clone(), OLD_V);
+        let eng = IndexKeyRotation::new(&indexes, ring, OLD_V, good.clone(), OLD_V, good.clone());
+
+        let report = eng.verify_decryptable().unwrap();
+        assert_eq!(
+            report.probed, 2,
+            "expected manifest + aaa.idx probed, zzz.idx skipped: {report:?}"
+        );
+        assert!(
+            report.all_decrypted(),
+            "all probed bodies decrypt: {report:?}"
+        );
+    }
+
+    #[test]
+    fn verify_decryptable_empty_or_missing_manifest_is_pass() {
+        let good = cipher_from_seed(0x11);
+
+        // (a) Non-existent indexes dir: the exists() guard means nothing is
+        // walked; the probe returns a clean pass (no panic).
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let ring = IndexKeyring::single_versioned(good.clone(), OLD_V);
+        let eng = IndexKeyRotation::new(&missing, ring, OLD_V, good.clone(), OLD_V, good.clone());
+        let report = eng.verify_decryptable().unwrap();
+        assert_eq!(
+            report.probed, 0,
+            "nothing to probe in a missing dir: {report:?}"
+        );
+        assert!(report.decrypt_failed.is_empty());
+        assert!(report.all_decrypted());
+
+        // (b) Encrypted non-manifest files but NO manifest.idx: still a pass — the
+        // first-of-version representative is probed and decrypts.
+        let dir2 = tempfile::tempdir().unwrap();
+        let indexes = dir2.path().join("indexes");
+        write_enc(
+            &indexes.join("graph").join("adjacency.idx"),
+            &good,
+            OLD_V,
+            b"graph-body",
+        );
+        let ring2 = IndexKeyring::single_versioned(good.clone(), OLD_V);
+        let eng2 = IndexKeyRotation::new(&indexes, ring2, OLD_V, good.clone(), OLD_V, good.clone());
+        let report2 = eng2.verify_decryptable().unwrap();
+        assert!(
+            report2.decrypt_failed.is_empty(),
+            "no manifest present is not a failure: {report2:?}"
+        );
+        assert!(report2.all_decrypted());
     }
 
     #[test]
