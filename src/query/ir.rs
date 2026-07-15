@@ -212,6 +212,45 @@ pub enum QueryOp {
 
     /// Project specific properties
     Project(Vec<String>),
+
+    /// Project one or more provenance accessors (`RETURN source(x)`,
+    /// `RETURN n, confidence(n) AS conf`, Issue #3354) as output columns.
+    ///
+    /// This op runs **last** in the pipeline (after any Sort/Skip/Limit) so it
+    /// never interferes with entity-based ordering or pagination. For each input
+    /// row it resolves the row entity's write-time provenance (at the query's
+    /// bi-temporal coordinate, exactly as the `WHERE` provenance leaves do) and
+    /// attaches one column per projection. When the `RETURN` also names a bare
+    /// entity variable, the row is emitted through the bindings+columns shape so
+    /// the entity survives alongside the projected columns (mirroring the
+    /// multi-variable / aggregation row shape); otherwise a pure columns row is
+    /// produced.
+    ProjectProvenance(ProvenanceProjection),
+}
+
+/// A single provenance accessor projected as an output column
+/// (`source(x) AS alias`, Issue #3354).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceProjectionItem {
+    /// The output column name (the alias if one was given, else the accessor
+    /// rendered as `"<accessor>(<var>)"`).
+    pub output_name: String,
+    /// Which provenance field to resolve.
+    pub field: ProvenanceField,
+}
+
+/// The plan for [`QueryOp::ProjectProvenance`]: the bare-entity binding to
+/// preserve (if any) plus the ordered provenance columns to project
+/// (Issue #3354).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceProjection {
+    /// The variable name of a bare entity also returned (`RETURN n, source(n)`),
+    /// preserved via the bindings channel so it stays observable. `None` when
+    /// only accessors are projected (`RETURN source(n)`), yielding a pure
+    /// columns row.
+    pub entity_binding: Option<String>,
+    /// The provenance columns to project, in `RETURN` order.
+    pub items: Vec<ProvenanceProjectionItem>,
 }
 
 /// A comparison operator for a [`ScoreThreshold`].
@@ -421,6 +460,14 @@ pub enum SortKey {
     Score,
     /// Sort by timestamp (for temporal queries)
     Timestamp,
+    /// Sort by a provenance accessor (`ORDER BY source(x)`/`confidence(x)`/
+    /// `reason(x)`, Issue #3354). The value is resolved per row from the write-
+    /// time provenance recorded on the version the row represents (the historical
+    /// version at the query's bi-temporal coordinate for an `AS OF` query),
+    /// exactly as the `WHERE`-clause provenance leaves resolve it. An
+    /// unattributed row (or a bundle missing the field) sorts as a null value,
+    /// following the same openCypher null placement as any other key.
+    Provenance(ProvenanceField),
 }
 
 /// Property predicates for filtering nodes and edges.

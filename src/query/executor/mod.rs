@@ -522,7 +522,23 @@ impl QueryExecutor {
 
             PhysicalOp::Sort { input, keys } => {
                 let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::SortIterator::new(input_iter, keys.clone()))
+                // Pass historical storage so a `SortKey::Provenance` key
+                // (Issue #3354) can resolve each row entity's write-time
+                // provenance; property/score sorts never touch it.
+                Box::new(iterators::SortIterator::with_historical(
+                    input_iter,
+                    keys.clone(),
+                    Arc::clone(&self.historical),
+                ))
+            }
+
+            PhysicalOp::ProjectProvenance { input, projection } => {
+                let input_iter = self.build_op(input, profile, child_depth)?;
+                Box::new(iterators::ProvenanceProjectIterator::new(
+                    input_iter,
+                    projection.clone(),
+                    Arc::clone(&self.historical),
+                ))
             }
 
             PhysicalOp::Count { input } => {
