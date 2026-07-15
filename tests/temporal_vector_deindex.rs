@@ -221,6 +221,104 @@ fn overwrite_vector_property_deindexes_old_but_preserves_history() {
     );
 }
 
+/// A plain PATCH `update_node` that overwrites the embedding key with a
+/// NON-vector value (and carries no other vector property) must fire a temporal
+/// snapshot so the phantom is de-indexed as-of-now — not left stale until an
+/// unrelated future vector transaction happens to snapshot.
+///
+/// Fix discriminator for the snapshot-gating gap (Issue #3621, PATCH path):
+/// `WriteBuffer::add` sets `has_vector_operations` only from the merged/new
+/// property map, so a PATCH that turns `embedding` from a vector into a scalar
+/// leaves the flag false → `on_temporal_vector_transaction` never fires → no
+/// snapshot at t2 → `find_similar_as_of(now)` keeps returning the phantom
+/// (unbounded staleness). The `update_node_with_options` gate on the EXISTING
+/// node's vector — mirroring `buffer_node_replace` — closes it. The storage
+/// layer already de-indexes the LIVE temporal index; only the snapshot was
+/// missing.
+#[test]
+fn patch_overwriting_vector_with_scalar_deindexes_current_but_preserves_history() {
+    let db = temporal_db();
+
+    // A decoy keeps the temporal index non-empty across the change so a
+    // snapshot is always materialized (orthogonal to the query so it never
+    // masks the target assertion).
+    let decoy = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert("name", "decoy")
+                .insert_vector("embedding", &[0.0f32, 0.0, 0.0, 1.0])
+                .build(),
+        )
+        .expect("create decoy");
+
+    let target = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert("name", "target")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("create target");
+
+    advance();
+    let t_before: Timestamp = time::now();
+    advance();
+
+    // PLAIN PATCH `update_node` (routes through `update_node_with_options`, the
+    // ungated path — NOT `replace_node`): overwrite the vector-typed key with a
+    // scalar, with NO other vector property in the patch. The merged map has no
+    // vector, so `WriteBuffer::add` leaves `has_vector_operations` false.
+    db.write(|tx| {
+        tx.update_node(
+            target,
+            PropertyMapBuilder::new()
+                .insert("embedding", "not-a-vector")
+                .build(),
+        )?;
+        Ok::<_, Error>(())
+    })
+    .expect("PATCH overwrites embedding with scalar");
+
+    advance();
+    let t_after: Timestamp = time::now();
+
+    // NO further/unrelated vector transaction is issued after this point.
+
+    let query = [1.0f32, 0.0, 0.0, 0.0];
+
+    // History preserved: as-of BEFORE the change, the target is still found.
+    let historical = as_of(&db, &query, 10, t_before);
+    assert!(
+        contains(&historical, target),
+        "target must remain findable as-of before the PATCH (history preserved), got {historical:?}"
+    );
+
+    // De-indexed now: as-of AFTER the change, the phantom must be gone — this is
+    // what fails without the snapshot-gating fix (no snapshot fired at t2).
+    let current = as_of(&db, &query, 10, t_after);
+    assert!(
+        !contains(&current, target),
+        "target must NOT be returned by temporal similarity as-of after the PATCH (Issue #3621 snapshot-gating phantom), got {current:?}"
+    );
+
+    // The decoy survives — the change only de-indexed the target.
+    assert!(
+        contains(&current, decoy),
+        "decoy must remain indexed after the target's PATCH, got {current:?}"
+    );
+
+    // Current-state index must also exclude the target.
+    let live = db
+        .similarity_search(SimilarityQuery::from_embedding(query.to_vec()).k(10))
+        .expect("current-state search");
+    assert!(
+        !contains(&live, target),
+        "target must be gone from the current-state index too, got {live:?}"
+    );
+}
+
 /// Sanity: without touching the vector (a non-vector-property update that
 /// re-supplies the same embedding), the embedding stays indexed — the fix must
 /// not over-remove.
