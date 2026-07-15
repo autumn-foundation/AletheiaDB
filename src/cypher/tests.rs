@@ -7398,11 +7398,24 @@ mod multi_pattern {
 
     #[test]
     fn test_multi_pattern_binding_cap_enforced() {
-        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+        use crate::test_utils::unique_wal_dir;
         // Cap the materialized binding count low via the configurable
         // `max_schema_as_of_entities` limit, then build enough nodes that the
         // (a),(b) product exceeds it. Must return a structured error, not OOM.
+        //
+        // Isolate the WAL dir (Issue #3500): this test builds its own config,
+        // so without an explicit `wal_dir` it would fall back to the shared
+        // CWD-relative `aletheiadb/wal` default and cross-pollute other
+        // default-config tests (a stray segment replayed at open hard-errors
+        // with `CorruptedData("Unknown WAL operation type: ...")`).
+        let wal_home = unique_wal_dir();
         let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(wal_home.path().join("wal"))
+                    .build(),
+            )
             .historical(
                 HistoricalConfigBuilder::new()
                     .max_schema_as_of_entities(5)
