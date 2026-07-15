@@ -1,0 +1,682 @@
+//! End-to-end tests for the `aletheia keys rotate` verb and the `aletheia
+//! encryption` subcommand group (Issue #490 -- CLI wiring for the shipped key
+//! rotation engine, Issue #488).
+//!
+//! Each test invokes the real built binary via `env!("CARGO_BIN_EXE_aletheia")`
+//! in its own process, mirroring `tests/cli_keys.rs`.
+//!
+//! Security-critical invariant asserted throughout: raw key hex must NEVER
+//! appear in stdout/stderr, in any encoding an error message might use.
+//!
+//! ## Architectural note (why no successful-rotation CLI test)
+//!
+//! The shipped rotation engine (`AletheiaDB::rotate_index_keys`) is *index
+//! layer only* and hard-refuses whenever any OTHER at-rest layer (WAL, cold,
+//! checkpoint) is encrypted under the same master key -- rotating the index
+//! alone to a new MEK would strand those layers (`rotation.rs` P0.1). Because
+//! AletheiaDB's config encrypts *uniformly* (enabling encryption encrypts the
+//! WAL too; there is no config knob for index-only encryption), a normally
+//! opened encrypted database ALWAYS has an encrypted WAL. Therefore
+//! `keys rotate --new-key` against any config-encrypted database correctly
+//! REFUSES with the cross-layer guard -- and that honest refusal is what these
+//! tests assert. A CLI-reachable successful rotation must wait on the
+//! documented full-MEK (all-layer) rotation follow-up.
+
+use std::path::Path;
+use std::process::Command;
+
+use tempfile::TempDir;
+
+/// Result of running the CLI binary once.
+struct CliRun {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl CliRun {
+    /// Combined stdout+stderr, lowercased, for message assertions.
+    fn combined_lower(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr).to_lowercase()
+    }
+}
+
+/// Run the `aletheia` binary with `args` and an explicit environment: every
+/// pair in `env` is set, and any ambient `ALETHEIADB_CONFIG` / `ALETHEIADB_DATA_DIR`
+/// not overridden by `env` is removed so the child sees a deterministic config.
+fn run_env(args: &[&str], env: &[(&str, &str)]) -> CliRun {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_aletheia"));
+    cmd.args(args);
+    cmd.env_remove("ALETHEIADB_CONFIG");
+    cmd.env_remove("ALETHEIADB_DATA_DIR");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("failed to spawn aletheia binary");
+    CliRun {
+        code: output.status.code().expect("process terminated by signal"),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Run with no ambient database config.
+fn run(args: &[&str]) -> CliRun {
+    run_env(args, &[])
+}
+
+/// Decode a hex string into bytes, or `None` if it is not valid even-length hex.
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    for pair in bytes.chunks_exact(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
+}
+
+/// Standard-alphabet base64 (with `=` padding) of `data` — a self-contained
+/// encoder so the no-leak check does not depend on the optional `base64` crate
+/// feature being enabled in the test build.
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Assert no encoding of any key in `key_files` leaks into the output: the raw
+/// key hex, its base64, AND its raw 32-byte form. Catching all three makes the
+/// no-leak guarantee airtight against a future error message that reaches for a
+/// different encoding of the same secret.
+fn assert_no_key_leak(r: &CliRun, key_files: &[&Path]) {
+    for kf in key_files {
+        let raw = std::fs::read_to_string(kf).unwrap_or_default();
+        let hex = raw.trim().to_string();
+        if hex.is_empty() {
+            continue;
+        }
+        let mut forbidden = vec![hex.clone()];
+        if let Some(bytes) = hex_decode(&hex) {
+            forbidden.push(base64_encode(&bytes));
+            // The raw 32-byte form, as it would appear in lossily-decoded output.
+            forbidden.push(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        for out in [&r.stdout, &r.stderr] {
+            for secret in &forbidden {
+                if secret.is_empty() {
+                    continue;
+                }
+                assert!(
+                    !out.contains(secret.as_str()),
+                    "output must NEVER contain any encoding of the key from {kf:?}; \
+                     leaked={secret:?} got={out:?}"
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
+// keys rotate -- behavior WITHOUT a configured database (not-configured paths)
+// ============================================================================
+
+#[test]
+fn keys_rotate_bare_requires_a_key_source_or_action() {
+    // Bare `keys rotate` (no --new-key / --status / --resume / --cancel) is a
+    // usage error -- NOT the old "not yet available" stub, and NOT the generic
+    // "unknown subcommand" fallback.
+    let r = run(&["keys", "rotate"]);
+    assert_ne!(r.code, 0, "bare keys rotate must exit non-zero");
+    let c = r.combined_lower();
+    assert!(
+        c.contains("rotate") && (c.contains("--new-key") || c.contains("usage")),
+        "bare keys rotate must show usage naming a key source; got={c:?}"
+    );
+    assert!(
+        !c.contains("not yet available"),
+        "keys rotate must no longer report the deferred stub; got={c:?}"
+    );
+    assert!(
+        !c.contains("unknown keys subcommand"),
+        "keys rotate must not use the generic unknown-subcommand message; got={c:?}"
+    );
+}
+
+#[test]
+fn keys_rotate_status_without_encryption_reports_not_configured() {
+    // No ambient DB -> ephemeral, no persistence/encryption -> a clear
+    // not-configured error, non-zero, no panic.
+    let r = run(&["keys", "rotate", "--status"]);
+    assert_ne!(r.code, 0, "rotate --status on a plaintext DB must fail");
+    let c = r.combined_lower();
+    assert!(
+        c.contains("encryption") || c.contains("persistence") || c.contains("not configured"),
+        "must explain rotation needs an encrypted persistent DB; got={c:?}"
+    );
+    assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+}
+
+#[test]
+fn keys_rotate_start_without_encryption_reports_not_configured() {
+    let dir = TempDir::new().unwrap();
+    let key = dir.path().join("new.key");
+    let g = run(&["keys", "generate", "--output", key.to_str().unwrap()]);
+    assert_eq!(g.code, 0, "generate must succeed");
+
+    let r = run(&["keys", "rotate", "--new-key", key.to_str().unwrap()]);
+    assert_ne!(
+        r.code, 0,
+        "rotate --new-key on a plaintext DB must fail (nothing to rotate)"
+    );
+    let c = r.combined_lower();
+    assert!(
+        c.contains("encryption") || c.contains("persistence") || c.contains("not configured"),
+        "must explain rotation needs an encrypted persistent DB; got={c:?}"
+    );
+    assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+    assert_no_key_leak(&r, &[key.as_path()]);
+}
+
+#[test]
+fn keys_rotate_two_actions_reports_choose_exactly_one() {
+    // --new-key together with --status selects two actions; the guard rejects it
+    // BEFORE opening any database, so no config is needed.
+    let dir = TempDir::new().unwrap();
+    let key = dir.path().join("new.key");
+    let g = run(&["keys", "generate", "--output", key.to_str().unwrap()]);
+    assert_eq!(g.code, 0, "generate must succeed");
+
+    let r = run(&[
+        "keys",
+        "rotate",
+        "--new-key",
+        key.to_str().unwrap(),
+        "--status",
+    ]);
+    assert_ne!(r.code, 0, "two actions must be a usage error");
+    let c = r.combined_lower();
+    assert!(
+        c.contains("exactly one"),
+        "must tell the operator to choose exactly one action; got={c:?}"
+    );
+    assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+    assert_no_key_leak(&r, &[key.as_path()]);
+}
+
+#[test]
+fn keys_rotate_new_key_missing_value_is_usage_error() {
+    // `--new-key` with no following value selects no action (arg_value yields
+    // None), so it degrades to the bare usage error rather than panicking.
+    let r = run(&["keys", "rotate", "--new-key"]);
+    assert_ne!(r.code, 0, "missing --new-key value must fail");
+    let c = r.combined_lower();
+    assert!(
+        c.contains("usage") || c.contains("rotate"),
+        "must show rotate usage; got={c:?}"
+    );
+    assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+}
+
+// ============================================================================
+// encryption -- routing, disabled status, and honest enable/disable errors
+// ============================================================================
+
+#[test]
+fn encryption_status_disabled_is_informational() {
+    let r = run(&["encryption", "status"]);
+    assert_eq!(
+        r.code, 0,
+        "encryption status with no config must be informational (exit 0); stderr={:?}",
+        r.stderr
+    );
+    let lower = r.stdout.to_lowercase();
+    assert!(
+        lower.contains("disabled") || lower.contains("not configured"),
+        "status must state encryption is not configured; stdout={:?}",
+        r.stdout
+    );
+    // Per-layer table names the at-rest layers even when disabled.
+    assert!(
+        lower.contains("wal") && lower.contains("index"),
+        "status must show a per-layer table; stdout={:?}",
+        r.stdout
+    );
+}
+
+#[test]
+fn encryption_enable_reports_missing_migration_engine() {
+    let r = run(&["encryption", "enable"]);
+    assert_ne!(
+        r.code, 0,
+        "encryption enable must exit non-zero (no engine)"
+    );
+    let c = r.combined_lower();
+    assert!(
+        c.contains("migration")
+            && (c.contains("not") && c.contains("implement") || c.contains("not supported")),
+        "enable must honestly name the missing migration engine; got={c:?}"
+    );
+    assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+}
+
+#[test]
+fn encryption_disable_reports_missing_migration_engine() {
+    let r = run(&["encryption", "disable"]);
+    assert_ne!(
+        r.code, 0,
+        "encryption disable must exit non-zero (no engine)"
+    );
+    let c = r.combined_lower();
+    assert!(
+        c.contains("migration")
+            && (c.contains("not") && c.contains("implement") || c.contains("not supported")),
+        "disable must honestly name the missing migration engine; got={c:?}"
+    );
+}
+
+#[test]
+fn encryption_unknown_subcommand_fails() {
+    let r = run(&["encryption", "frobnicate"]);
+    assert_ne!(r.code, 0, "unknown encryption subcommand must fail");
+    assert!(
+        !r.combined_lower().contains("panicked"),
+        "must not panic; stderr={:?}",
+        r.stderr
+    );
+}
+
+#[test]
+fn encryption_no_subcommand_shows_usage() {
+    let r = run(&["encryption"]);
+    assert_ne!(
+        r.code, 0,
+        "encryption with no subcommand must fail with usage"
+    );
+    assert!(
+        r.combined_lower().contains("usage"),
+        "must mention usage; stderr={:?} stdout={:?}",
+        r.stderr,
+        r.stdout
+    );
+}
+
+#[test]
+fn encryption_verify_disabled_is_informational() {
+    // No configured DB -> nothing encrypted to verify -> informational exit 0.
+    let r = run(&["encryption", "verify"]);
+    assert_eq!(
+        r.code, 0,
+        "verify with no encryption is informational (exit 0); stderr={:?}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.to_lowercase().contains("not enabled")
+            || r.stdout.to_lowercase().contains("nothing to verify")
+            || r.stdout.to_lowercase().contains("disabled"),
+        "verify must say there is nothing to verify; stdout={:?}",
+        r.stdout
+    );
+}
+
+// ============================================================================
+// Encrypted-database fixtures (require config-toml to author the ALETHEIADB_CONFIG
+// the CLI child opens). Default builds include config-toml.
+// ============================================================================
+
+#[cfg(feature = "config-toml")]
+mod encrypted {
+    use super::*;
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
+    use aletheiadb::encryption::FileKeyProvider;
+    use aletheiadb::encryption::config::EncryptionConfig;
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::storage::wal::DurabilityMode;
+    use aletheiadb::{PropertyMap, PropertyMapBuilder};
+
+    /// A prepared encrypted-database fixture: the on-disk data dir plus the
+    /// TOML config path the CLI child opens via `ALETHEIADB_CONFIG`.
+    struct EncryptedFixture {
+        _dir: TempDir,
+        toml_path: std::path::PathBuf,
+        key_path: std::path::PathBuf,
+    }
+
+    /// Build the AletheiaDBConfig for an encrypted, persistent database rooted
+    /// at `root` and keyed by `key`.
+    fn encrypted_config(root: &Path, key: &Path) -> AletheiaDBConfig {
+        AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(root.join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_delay_ms: 5,
+                        max_batch_size: 64,
+                    })
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: root.join("data"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .encryption(EncryptionConfig::file_based(key))
+            .build()
+    }
+
+    /// Create an encrypted database on disk with persisted index files, then
+    /// drop it, leaving a TOML config the CLI can reopen.
+    fn make_encrypted_db() -> EncryptedFixture {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let key_path = root.join("master.key");
+        FileKeyProvider::generate_key_file(&key_path).unwrap();
+
+        let toml_path = root.join("aletheia.toml");
+        let config = encrypted_config(root, &key_path);
+        config.to_toml_file(&toml_path).unwrap();
+
+        // Seed from the SAME TOML the CLI will open, so paths match exactly.
+        {
+            let cfg = AletheiaDBConfig::from_toml_file(&toml_path).unwrap();
+            let db = AletheiaDB::with_unified_config(cfg).unwrap();
+            let a = db
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )
+                .unwrap();
+            let b = db
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
+                )
+                .unwrap();
+            db.create_edge(a, b, "KNOWS", PropertyMap::new()).unwrap();
+            db.persist_indexes().unwrap();
+        }
+
+        EncryptedFixture {
+            _dir: dir,
+            toml_path,
+            key_path,
+        }
+    }
+
+    fn cfg_env(f: &EncryptedFixture) -> Vec<(&'static str, String)> {
+        vec![("ALETHEIADB_CONFIG", f.toml_path.display().to_string())]
+    }
+
+    /// Adapt owned env pairs to the &str slice `run_env` wants.
+    fn run_with(args: &[&str], env: &[(&'static str, String)]) -> CliRun {
+        let borrowed: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        run_env(args, &borrowed)
+    }
+
+    #[test]
+    fn keys_rotate_status_fresh_encrypted_reports_no_pending() {
+        let f = make_encrypted_db();
+        let r = run_with(&["keys", "rotate", "--status"], &cfg_env(&f));
+        assert_eq!(
+            r.code, 0,
+            "rotate --status on a fresh encrypted DB must exit 0; stderr={:?}",
+            r.stderr
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("no rotation") || c.contains("fully") || c.contains("current"),
+            "status must report no pending rotation / fully at current key; got={c:?}"
+        );
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    #[test]
+    fn keys_rotate_start_uniform_encrypted_refuses_cross_layer() {
+        let f = make_encrypted_db();
+        // A brand-new key to rotate TO.
+        let new_key = f.toml_path.parent().unwrap().join("rotate-to.key");
+        FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        let r = run_with(
+            &["keys", "rotate", "--new-key", new_key.to_str().unwrap()],
+            &cfg_env(&f),
+        );
+        assert_ne!(
+            r.code, 0,
+            "rotate on a uniformly-encrypted DB must refuse (WAL encrypted); stdout={:?}",
+            r.stdout
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("wal") && c.contains("encrypted"),
+            "refusal must name the conflicting WAL layer; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        assert_no_key_leak(&r, &[f.key_path.as_path(), new_key.as_path()]);
+    }
+
+    #[test]
+    fn keys_rotate_cancel_nothing_pending_reports_clearly() {
+        let f = make_encrypted_db();
+        let r = run_with(&["keys", "rotate", "--cancel"], &cfg_env(&f));
+        assert_ne!(
+            r.code, 0,
+            "cancel with nothing pending must exit non-zero; stdout={:?}",
+            r.stdout
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("no key rotation")
+                || c.contains("not in progress")
+                || c.contains("no rotation"),
+            "cancel must clearly say nothing is pending; got={c:?}"
+        );
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    #[test]
+    fn encryption_status_encrypted_shows_per_layer_table() {
+        let f = make_encrypted_db();
+        let r = run_with(&["encryption", "status"], &cfg_env(&f));
+        assert_eq!(
+            r.code, 0,
+            "encryption status on an encrypted DB must exit 0; stderr={:?}",
+            r.stderr
+        );
+        let c = r.combined_lower();
+        assert!(c.contains("enabled"), "overall must be ENABLED; got={c:?}");
+        assert!(
+            c.contains("wal") && c.contains("index"),
+            "per-layer table must name WAL and Index layers; got={c:?}"
+        );
+        // The WAL and Index rows must actually report ENCRYPTED, not merely
+        // appear as layer names.
+        let out_lower = r.stdout.to_lowercase();
+        for row in ["wal:", "index:"] {
+            let line = out_lower
+                .lines()
+                .find(|l| l.trim_start().starts_with(row))
+                .unwrap_or_else(|| panic!("per-layer table must have a {row:?} row; got={c:?}"));
+            assert!(
+                line.contains("encrypted"),
+                "the {row:?} row must report ENCRYPTED; got line={line:?}"
+            );
+        }
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    #[test]
+    fn keys_rotate_resume_nothing_pending_reports_clearly() {
+        // A fresh encrypted DB has no rotation.state breadcrumb, so `--resume`
+        // takes the Ok(None) path: exit 0 with a clear "nothing to resume"
+        // message (drives AletheiaDB::resume_pending_index_rotation, Issue #490).
+        let f = make_encrypted_db();
+        let r = run_with(&["keys", "rotate", "--resume"], &cfg_env(&f));
+        assert_eq!(
+            r.code, 0,
+            "resume with nothing pending must exit 0; stderr={:?}",
+            r.stderr
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("no pending") && c.contains("resume"),
+            "resume must clearly say nothing is pending; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    #[test]
+    fn keys_rotate_start_via_env_var_refuses_cross_layer() {
+        // Exercises the `--new-env-var` start path (KeyProviderConfig::Env
+        // branch). On a uniformly-encrypted DB the cross-layer guard refuses
+        // before the env var is ever sourced, so the var need not exist.
+        let f = make_encrypted_db();
+        let r = run_with(
+            &["keys", "rotate", "--new-env-var", "ALETHEIADB_MEK_NEW"],
+            &cfg_env(&f),
+        );
+        assert_ne!(
+            r.code, 0,
+            "rotate via env-var on a uniformly-encrypted DB must refuse; stdout={:?}",
+            r.stdout
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("wal") && c.contains("encrypted"),
+            "refusal must name the conflicting WAL layer; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    /// Overwrite the 4-byte little-endian `key_version` field (offset 6..10) of
+    /// the first `AEIX`-headed index file found under `indexes_dir` with
+    /// `version`, leaving the rest of the file intact. Returns the tampered
+    /// file's path. Mirrors the on-disk header layout in
+    /// `storage::index_persistence::common` (`[AEIX:4][fmt:1][alg:1][ver:4]`).
+    fn stamp_first_index_file_version(indexes_dir: &Path, version: u32) -> std::path::PathBuf {
+        fn walk(dir: &Path, version: u32) -> Option<std::path::PathBuf> {
+            for e in std::fs::read_dir(dir).ok()?.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if let Some(hit) = walk(&p, version) {
+                        return Some(hit);
+                    }
+                    continue;
+                }
+                let mut bytes = match std::fs::read(&p) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if bytes.len() >= 10 && &bytes[..4] == b"AEIX" {
+                    bytes[6..10].copy_from_slice(&version.to_le_bytes());
+                    std::fs::write(&p, &bytes).unwrap();
+                    return Some(p);
+                }
+            }
+            None
+        }
+        walk(indexes_dir, version).expect("no AEIX-headed index file found to tamper")
+    }
+
+    #[test]
+    fn encryption_verify_foreign_key_version_index_file_fails() {
+        // Re-stamp one persisted index file's AEIX header with a key version the
+        // configured keyring does NOT hold (as a file written under a foreign
+        // key generation would carry). verify's index probe must classify it as
+        // `unknown` and FAIL — not false-PASS. This is the genuine index
+        // failure branch (Issue #490 review): a wrong-key with the SAME version
+        // number cannot be caught by header classification alone, but a file the
+        // keyring cannot account for is, and a real scan/IO error propagates as
+        // FAILED rather than being swallowed as a benign not-configured PASS.
+        let f = make_encrypted_db();
+        let indexes_dir = f.toml_path.parent().unwrap().join("data").join("indexes");
+        let tampered = stamp_first_index_file_version(&indexes_dir, 0xFFFF_FFFF);
+        assert!(tampered.exists(), "a file should have been tampered");
+
+        let r = run_with(&["encryption", "verify"], &cfg_env(&f));
+        assert_ne!(
+            r.code, 0,
+            "verify with a foreign-key-version index file must FAIL; stdout={:?}",
+            r.stdout
+        );
+        let c = r.combined_lower();
+        assert!(c.contains("failed"), "verify must report FAILED; got={c:?}");
+        assert!(
+            !c.contains("verify: pass"),
+            "verify must NOT false-PASS on an unaccountable index file; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    #[test]
+    fn encryption_verify_good_encrypted_passes() {
+        let f = make_encrypted_db();
+        let r = run_with(&["encryption", "verify"], &cfg_env(&f));
+        assert_eq!(
+            r.code, 0,
+            "verify of a good encrypted DB must pass (exit 0); stderr={:?}",
+            r.stderr
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("pass") || c.contains("verified") || c.contains("ok"),
+            "verify must report success; got={c:?}"
+        );
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    #[test]
+    fn encryption_verify_missing_key_fails_clearly() {
+        let f = make_encrypted_db();
+        // Author a second TOML whose key path does not exist -> the cipher
+        // cannot be constructed -> open fails -> verify fails.
+        let bad_key = f.toml_path.parent().unwrap().join("does-not-exist.key");
+        let bad_config = encrypted_config(f.toml_path.parent().unwrap(), &bad_key);
+        let bad_toml = f.toml_path.parent().unwrap().join("bad.toml");
+        bad_config.to_toml_file(&bad_toml).unwrap();
+
+        let r = run_with(
+            &["encryption", "verify"],
+            &[("ALETHEIADB_CONFIG", bad_toml.display().to_string())],
+        );
+        assert_ne!(
+            r.code, 0,
+            "verify with a missing key must fail; stdout={:?}",
+            r.stdout
+        );
+        let c = r.combined_lower();
+        assert!(
+            !c.contains("panicked"),
+            "must fail cleanly, not panic; got={c:?}"
+        );
+        // Nothing decryptable happened; the real key's hex cannot appear.
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+}

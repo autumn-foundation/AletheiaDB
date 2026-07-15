@@ -369,6 +369,29 @@ impl AletheiaDB {
         })
     }
 
+    /// Resume an interrupted index key rotation (Issue #488), if one is pending.
+    ///
+    /// Thin `&self` wrapper over the free [`resume_pending_rotation`] that
+    /// sources the (crate-private) persistence manager and startup encryption
+    /// config from this instance, so operator surfaces (the CLI, Issue #490)
+    /// can drive a manual resume without reaching into internals. Returns
+    /// `Ok(None)` when no rotation was pending. Does not weaken any durability
+    /// invariant — it only invokes the existing idempotent resume pass.
+    ///
+    /// # Errors
+    ///
+    /// * index persistence or encryption is not configured;
+    /// * the breadcrumb is present but corrupt (fail-closed);
+    /// * the recorded new key source cannot be sourced, or the pass fails.
+    pub fn resume_pending_index_rotation(&self) -> Result<Option<RotationReport>> {
+        let manager = self.require_rotation_prereqs()?;
+        let enc_cfg = self
+            .encryption_config
+            .clone()
+            .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
+        resume_pending_rotation(&manager, &enc_cfg)
+    }
+
     fn run_rotation(
         &self,
         manager: &Arc<IndexPersistenceManager>,
@@ -947,6 +970,30 @@ mod tests {
         assert!(
             err.to_string().contains("same key") || err.to_string().contains("equals"),
             "expected same-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resume_pending_index_rotation_is_none_when_no_breadcrumb() {
+        // The `&self` resume wrapper (Issue #490 CLI drive-point) must return
+        // Ok(None) — not an error, not a phantom rotation — on a configured,
+        // encrypted, index-persistent DB with no rotation.state breadcrumb.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let key = root.join("k.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key).unwrap();
+
+        let db = build_db(root, &key);
+        seed(&db);
+        // No breadcrumb was ever written.
+        assert!(!root.join("data").join("rotation.state").exists());
+
+        let report = db
+            .resume_pending_index_rotation()
+            .expect("resume with no pending rotation must be Ok, not Err");
+        assert!(
+            report.is_none(),
+            "resume with no breadcrumb must report nothing pending (Ok(None)), got {report:?}"
         );
     }
 
