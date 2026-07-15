@@ -50,11 +50,14 @@ jobs:
       - name: Typecheck (strict; src + examples)
         run: npm run typecheck
 
-      - name: Test (vitest, record-replay fixtures)
-        run: npm run test
-
+      # Build BEFORE test so test/build.test.ts observes the dist artifacts and
+      # its ESM/CJS smoke `describe` actually runs (it self-skips when dist is
+      # absent). Order: build -> test -> smoke.
       - name: Build (ESM + CJS + d.ts)
         run: npm run build
+
+      - name: Test (vitest, record-replay fixtures)
+        run: npm run test
 
       - name: Entry-point smoke (ESM + CJS import cleanly)
         run: npm run smoke

@@ -71,13 +71,16 @@ function isRetriable(err: unknown): boolean {
 /**
  * Run `op` under the resolved retry policy. Retries strictly on retriable
  * {@link AletheiaError}s while attempts remain; a non-retriable error (or a
- * non-AletheiaDB throwable) propagates on the first occurrence.
+ * non-AletheiaDB throwable) propagates on the first occurrence. If `signal`
+ * aborts during a backoff wait, the wait rejects promptly and no further
+ * attempt is made.
  *
  * @typeParam T - the operation's resolved value.
  */
 export async function withRetry<T>(
   op: () => Promise<T>,
   cfg: ResolvedRetryOptions,
+  signal?: AbortSignal,
 ): Promise<T> {
   const attempts = cfg.enabled ? Math.max(1, cfg.maxAttempts) : 1;
   let lastError: unknown;
@@ -90,12 +93,54 @@ export async function withRetry<T>(
       if (!canRetry) {
         throw err;
       }
-      await cfg.sleep(computeDelay(attempt, cfg));
+      await abortableSleep(cfg.sleep, computeDelay(attempt, cfg), signal);
     }
   }
   // Unreachable in practice (the loop either returns or throws), but keeps the
   // type checker satisfied and preserves the last error if it ever is reached.
   throw lastError;
+}
+
+/** The reason to reject with when `signal` is aborted. */
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+}
+
+/**
+ * Sleep for `ms`, but reject immediately if `signal` aborts first. Without a
+ * signal this is exactly `sleep(ms)`.
+ */
+function abortableSleep(
+  sleep: (ms: number) => Promise<void>,
+  ms: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    sleep(ms).then(
+      () => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      },
+      (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 /** Exponential backoff with jitter for the given 1-based attempt number. */

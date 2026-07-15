@@ -8,6 +8,7 @@
 
 import {
   AletheiaError,
+  makeError,
   parseHttpError,
   parseMcpError,
   statusToCode,
@@ -53,6 +54,26 @@ export interface ClientOptions {
   headers?: Record<string, string>;
   /** Built-in retry policy. Off by default; honors `retriable` only. */
   retry?: RetryOptions;
+  /**
+   * A default {@link AbortSignal} applied to every request. Aborting it cancels
+   * the in-flight fetch and, under the retry policy, interrupts any pending
+   * backoff so no further attempts are made.
+   */
+  signal?: AbortSignal;
+  /**
+   * A default per-request timeout in milliseconds. When set, each request
+   * derives an {@link AbortSignal} that fires after `timeoutMs`, combined with
+   * any caller-supplied signal. Omit (or `0`) to disable.
+   */
+  timeoutMs?: number;
+}
+
+/** Per-request overrides for cancellation and timeout. */
+export interface RequestOptions {
+  /** An {@link AbortSignal} for this request; overrides the client-level signal. */
+  signal?: AbortSignal;
+  /** A timeout in milliseconds for this request; overrides the client-level timeout. */
+  timeoutMs?: number;
 }
 
 /** An internal request descriptor. */
@@ -78,6 +99,8 @@ export class Transport {
   private readonly fetchImpl: FetchLike;
   private readonly baseHeaders: Record<string, string>;
   private readonly retryCfg: ResolvedRetryOptions;
+  private readonly defaultSignal: AbortSignal | undefined;
+  private readonly defaultTimeoutMs: number | undefined;
 
   constructor(options: ClientOptions) {
     if (!options.baseUrl) {
@@ -97,6 +120,8 @@ export class Transport {
     this.fetchImpl = chosen;
     this.baseHeaders = { ...(options.headers ?? {}) };
     this.retryCfg = resolveRetryOptions(options.retry);
+    this.defaultSignal = options.signal;
+    this.defaultTimeoutMs = options.timeoutMs;
   }
 
   /** The resolved retry configuration (exposed for a per-call override). */
@@ -135,11 +160,13 @@ export class Transport {
   /**
    * Perform a single request (no retry). Decodes the response into JSON and
    * throws a typed {@link AletheiaError} for any error envelope or non-2xx
-   * status.
+   * status. A rejected fetch (network failure) is surfaced as a retriable
+   * `UNAVAILABLE` {@link AletheiaError}; an aborted/timed-out request propagates
+   * the (non-retriable) abort reason unchanged.
    *
    * @typeParam T - the expected decoded success shape.
    */
-  async requestOnce<T>(spec: RequestSpec): Promise<T> {
+  async requestOnce<T>(spec: RequestSpec, signal?: AbortSignal): Promise<T> {
     const headers: Record<string, string> = {
       accept: 'application/json',
       ...this.baseHeaders,
@@ -149,13 +176,35 @@ export class Transport {
       method?: string;
       headers?: Record<string, string>;
       body?: string;
+      signal?: AbortSignal;
     } = { method: spec.method, headers };
     if (spec.body !== undefined) {
       headers['content-type'] = 'application/json';
       init.body = JSON.stringify(spec.body);
     }
+    if (signal) {
+      // Reject before touching the network if already aborted.
+      if (signal.aborted) throw abortReason(signal);
+      init.signal = signal;
+    }
 
-    const resp = await this.fetchImpl(this.url(spec), init);
+    let resp: FetchResponseLike;
+    try {
+      resp = await this.fetchImpl(this.url(spec), init);
+    } catch (err) {
+      // An abort/timeout is deliberate and non-retriable: propagate it as-is.
+      if (signal?.aborted || isAbortError(err)) {
+        throw err;
+      }
+      // A transient network/DNS/connection failure is retriable under the
+      // opt-in policy.
+      const msg = err instanceof Error ? err.message : String(err);
+      throw makeError({
+        code: 'UNAVAILABLE',
+        message: `Network error: ${msg}`,
+        retriable: true,
+      });
+    }
     const raw = await resp.text();
     const parsed = raw.length > 0 ? safeJsonParse(raw) : undefined;
 
@@ -177,13 +226,92 @@ export class Transport {
 
   /**
    * Perform a request under the retry policy. With retries disabled (default)
-   * this is a single attempt.
+   * this is a single attempt. An effective abort signal is derived from the
+   * per-request options, the client-level default signal, and any timeout;
+   * aborting it cancels the in-flight fetch and interrupts pending backoff.
    *
    * @typeParam T - the expected decoded success shape.
    */
-  async request<T>(spec: RequestSpec): Promise<T> {
-    return withRetry(() => this.requestOnce<T>(spec), this.retryCfg);
+  async request<T>(spec: RequestSpec, options?: RequestOptions): Promise<T> {
+    const caller = options?.signal ?? this.defaultSignal;
+    const timeoutMs = options?.timeoutMs ?? this.defaultTimeoutMs;
+    const handle = makeSignal(caller, timeoutMs);
+    try {
+      return await withRetry(
+        () => this.requestOnce<T>(spec, handle.signal),
+        this.retryCfg,
+        handle.signal,
+      );
+    } finally {
+      handle.cleanup();
+    }
   }
+}
+
+/** The reason to reject with when `signal` is aborted. */
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+}
+
+/** Whether a thrown value is an abort/timeout error (native `AbortError`/`TimeoutError`). */
+function isAbortError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'name' in err &&
+    ((err as { name: unknown }).name === 'AbortError' ||
+      (err as { name: unknown }).name === 'TimeoutError')
+  );
+}
+
+/** A derived signal plus a cleanup that releases its timers/listeners. */
+interface SignalHandle {
+  signal: AbortSignal | undefined;
+  cleanup: () => void;
+}
+
+/**
+ * Derive an effective {@link AbortSignal} from a caller signal and/or a
+ * timeout, dependency-free (no `AbortSignal.any`, which is not on Node 18).
+ * Returns `{ signal: undefined }` when neither is supplied.
+ */
+function makeSignal(caller: AbortSignal | undefined, timeoutMs: number | undefined): SignalHandle {
+  const hasTimeout = typeof timeoutMs === 'number' && timeoutMs > 0;
+  if (!caller && !hasTimeout) {
+    return { signal: undefined, cleanup: () => {} };
+  }
+
+  const controller = new AbortController();
+  const cleanups: Array<() => void> = [];
+  const abortWith = (reason: unknown): void => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+
+  if (caller) {
+    if (caller.aborted) {
+      abortWith(caller.reason);
+    } else {
+      const onAbort = (): void => abortWith(caller.reason);
+      caller.addEventListener('abort', onAbort, { once: true });
+      cleanups.push(() => caller.removeEventListener('abort', onAbort));
+    }
+  }
+
+  if (hasTimeout && !controller.signal.aborted) {
+    const timer = setTimeout(() => {
+      abortWith(new DOMException(`Request timed out after ${String(timeoutMs)} ms`, 'TimeoutError'));
+    }, timeoutMs);
+    // Don't keep the event loop alive solely for this timer (Node only).
+    (timer as { unref?: () => void }).unref?.();
+    cleanups.push(() => clearTimeout(timer));
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      for (const c of cleanups) c();
+    },
+  };
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

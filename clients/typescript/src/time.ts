@@ -80,14 +80,17 @@ export function toEpochMicros(value: TimeInput): number {
 
 /**
  * Coerce a {@link TimeInput} to the value placed on the wire. The AletheiaDB
- * HTTP surface accepts either an RFC 3339 string or integer epoch microseconds
- * for every temporal field; this SDK always sends epoch microseconds so that
- * a `Date`, its ISO string, and its epoch-microsecond number are byte-for-byte
- * identical requests.
+ * HTTP surface deserializes every temporal field as a Rust `String` (serde
+ * cannot coerce a JSON number into `String`), so this SDK always sends the
+ * epoch-microseconds value as a **decimal string** — a `Date`, its ISO string,
+ * and its epoch-microsecond number therefore produce byte-for-byte identical
+ * requests. In a query string the value is stringified either way, so the
+ * string form is equally correct there.
  *
  * @param value - the temporal input to serialize.
- * @returns integer epoch microseconds, ready to embed in a query string or body.
+ * @returns epoch microseconds as a decimal string, ready to embed in a query
+ *   string or JSON body.
  */
-export function toWireTime(value: TimeInput): number {
-  return toEpochMicros(value);
+export function toWireTime(value: TimeInput): string {
+  return String(toEpochMicros(value));
 }

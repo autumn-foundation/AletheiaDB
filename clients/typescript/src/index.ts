@@ -22,6 +22,7 @@ export { TemporalView } from './temporal-view.js';
 
 export type {
   ClientOptions,
+  RequestOptions,
   AuthScheme,
   FetchLike,
   FetchResponseLike,

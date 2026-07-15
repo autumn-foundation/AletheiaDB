@@ -3,8 +3,10 @@
  *
  * Wraps the 34 merged autumn-server REST routes (node/edge/traverse/temporal +
  * admin/health) as typed methods. Endpoints that are not yet merged server-side
- * (vector/hybrid/query/schema/stats/batch/lineage/constraints/audit) are
- * provided as typed stubs that throw {@link NotImplementedError}.
+ * (find_similar, hybrid_query, query, enable_vector_index, list_vector_indexes,
+ * get_schema, database_stats, temporal_extent, apply_batch, lineage_upstream,
+ * lineage_downstream) are provided as typed stubs that throw
+ * {@link NotImplementedError}.
  *
  * @packageDocumentation
  */
@@ -551,7 +553,7 @@ export class AletheiaClient {
   // ───────────────────────────────────────────────────────────────────────────
   // Not-yet-merged endpoints — typed stubs (throw NotImplementedError).
   // TODO(#3369-followup): wire when PR5–PR8 land (vector/hybrid/query/schema/
-  // stats/batch/lineage/constraints/audit REST routes).
+  // stats/batch/lineage REST routes).
   // ───────────────────────────────────────────────────────────────────────────
 
   /** STUB: `find_similar` (vector k-NN). Not merged server-side yet. */
@@ -615,12 +617,12 @@ export class AletheiaClient {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Coerce an optional {@link TimeInput} to a wire value, or `undefined`. */
-function optTime(t: TimeInput | undefined): number | undefined {
+function optTime(t: TimeInput | undefined): string | undefined {
   return t === undefined ? undefined : toWireTime(t);
 }
 
 /** Coerce a required {@link TimeInput} to a wire value. */
-function reqTime(t: TimeInput): number {
+function reqTime(t: TimeInput): string {
   return toWireTime(t);
 }
 

@@ -193,9 +193,20 @@ export function parseMcpError(body: unknown, httpStatus?: number): AletheiaError
 }
 
 /**
- * Normalize an HTTP-envelope error (`{ success: false, ... }`) or a bare non-2xx
- * response into an {@link AletheiaError}. `statusFallbackCode` maps the HTTP
- * status to a code when the body carries none (401/403 in particular).
+ * Default retriability for an HTTP error. Mirrors {@link defaultRetriable} but
+ * additionally treats HTTP 429 (Too Many Requests) as retriable — the server's
+ * plain 429 shape carries no `retriable` flag, yet a backoff-and-retry is the
+ * correct response to rate limiting.
+ */
+function httpRetriableDefault(code: string, httpStatus: number): boolean {
+  return httpStatus === 429 ? true : defaultRetriable(code);
+}
+
+/**
+ * Normalize an HTTP-envelope error (`{ success: false, ... }`), a plain-text
+ * error body, or a bare non-2xx response into an {@link AletheiaError}.
+ * `statusFallbackCode` maps the HTTP status to a code when the body carries
+ * none (401/403 in particular).
  */
 export function parseHttpError(
   body: unknown,
@@ -214,18 +225,22 @@ export function parseHttpError(
       return makeError({
         code,
         message,
-        retriable: env.retriable ?? defaultRetriable(code),
+        retriable: env.retriable ?? httpRetriableDefault(code, httpStatus),
         details: env.details,
         httpStatus,
         traceId: env.trace_id,
       });
     }
   }
+  // A non-empty plain-text body (e.g. a proxy's "502 Bad Gateway" page) becomes
+  // the error message so the caller sees the server's actual payload.
+  const message =
+    typeof body === 'string' && body.length > 0 ? body : `HTTP ${httpStatus}`;
   // No usable envelope: synthesize from the status.
   return makeError({
     code: statusFallbackCode,
-    message: `HTTP ${httpStatus}`,
-    retriable: defaultRetriable(statusFallbackCode),
+    message,
+    retriable: httpRetriableDefault(statusFallbackCode, httpStatus),
     httpStatus,
   });
 }
