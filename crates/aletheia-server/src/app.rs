@@ -17,6 +17,7 @@ use crate::node_tools;
 use crate::security::{self, SecurityConfig};
 use crate::state::ServerState;
 use crate::traverse_temporal_tools;
+use crate::vector_query_tools;
 use aletheiadb::AletheiaDB;
 use aletheiadb::auth::{AuthMode, AuthStore};
 use autumn_web::openapi::OpenApiConfig;
@@ -98,6 +99,10 @@ pub fn try_build_server_testapp(
             traverse_temporal_tools::get_edge_at_valid_time,
             traverse_temporal_tools::get_edge_at_transaction_time,
             traverse_temporal_tools::diff_edge_versions,
+            vector_query_tools::find_similar,
+            vector_query_tools::hybrid_query,
+            vector_query_tools::query,
+            vector_query_tools::list_vector_indexes,
         ])
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");
