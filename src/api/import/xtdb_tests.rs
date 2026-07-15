@@ -490,7 +490,7 @@ fn xtdb_scale_smoke_1k_entities_10k_versions() {
     let files = TempDir::new().unwrap();
     let (_tmp, db) = create_test_db().unwrap();
 
-    let is_retracted = |e: usize| e % 100 == 0;
+    let is_retracted = |e: usize| e.is_multiple_of(100);
 
     let mut buf = String::from("[");
     for e in 0..1_000 {
