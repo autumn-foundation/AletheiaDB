@@ -180,11 +180,88 @@ all-or-nothing.
 
 #### Path B — full history replay with provenance (fidelity-preserving)
 
-To preserve **every datom version** of an entity, replay its assertions in
-transaction order: `create_node_with_options` for the first, then
-`update_node_with_options` per subsequent change. Each carries the origin
-`:db/txInstant` as `valid_from` (the mapping rule) and the Datomic tx metadata as
-provenance:
+##### Recommended: the built-in `datomic_import` (Issue #3384)
+
+Since Issue #3384 you do **not** hand-write the replay loop. Export two **EDN**
+artifacts — a flat, tx-ordered **datom stream** (`d/tx-range` → a vector of
+`{:e … :a … :v … :tx … :tx-instant #inst … :op true/false}` maps) and an
+**attribute-schema map** (`ident → {:db/valueType … :db/cardinality …}`, which
+tells the importer which attributes are refs) — and hand both to the importer:
+
+```rust
+use aletheiadb::AletheiaDB;
+use aletheiadb::api::import::DatomicOptions;
+
+let db = AletheiaDB::new()?;
+let mut importer = db.import();
+
+// One call: groups datoms by :e, orders by :tx, makes each tx a node version
+// stamped at its :db/txInstant, promotes :db.type/ref attrs to edges, and stamps
+// provenance (source `datomic-import::<file>`, note `datomic tx=… txInstant=…`,
+// correlation `datomic:tx:<tx>`).
+let report = importer.datomic_import(
+    "datomic-log.edn",
+    "datomic-schema.edn",
+    &DatomicOptions::default(),
+)?;
+
+assert!(report.zero_loss);
+println!("entities = {}", report.entities_read);
+println!("versions = {}", report.node_versions_written);
+println!("edges    = {}", report.edges_created);
+```
+
+**Options** (`DatomicOptions`): `label_attr` (attribute whose value is the node
+label; default derives the label from the attribute **namespace** —
+`:person/name` → `Person`), `default_label` (fallback `"Entity"`), `id_property`
+(where `:e` is stored, default `"db/id"`), `valid_time_attr` (redirect the
+single-axis rule off `:db/txInstant` onto a domain effective-date attribute),
+`cardinality_many_scalar` (`LastValue` — the default, reported — or `List`, which
+accumulates all asserted values into an array), and `failure_mode` (`Abort` or
+`SkipAndReport`).
+
+**Reported, never dropped.** Schema-alteration datoms (`:db/ident`,
+`:db.install/attribute`, …), transaction functions (`:db/fn`), and excision
+(`:db/excise`) are skipped and enumerated in `report.unsupported` (with
+`zero_loss = false`); a scalar `:db/retract` with no same-tx re-assert becomes an
+explicit `Null` reported as `attr_retract_as_null`; an attribute absent from the
+schema is kept as a scalar string property and reported as `unknown_attribute`
+(never silently guessed to be a ref).
+
+**CLI** (`--features import`):
+
+```bash
+aletheia import --format datomic --datoms datomic-log.edn --schema datomic-schema.edn \
+  [--valid-time-attr person/effective-date] [--default-label Entity] \
+  [--label-attr person/kind] [--on-error abort|skip] [--report report.json]
+```
+
+**AS-OF probe set — verify the migration landed.** As with XTDB, a **superseded**
+segment needs both dimensions anchored; the current segment reads at `now`:
+
+```rust
+use aletheiadb::core::temporal::time;
+let person = importer.resolve_key("200").unwrap();
+let v0_tx  = db.get_node_history(person)?.versions[0].temporal.transaction_time().start();
+
+// Superseded "Engineer" era (txInstant 2021-03) — anchor valid-time AND v0's tx:
+let engineer = db.get_node_at_time(person, time::from_secs(1_622_505_600), v0_tx)?; // 2021-06
+// Current-knowledge "CEO" era (txInstant 2023-01):
+let ceo = db.get_node_at_valid_time(person, time::from_secs(1_685_577_600))?;       // 2023-06
+// Before creation is NotFound at v0's tx:
+assert!(db.get_node_at_time(person, time::from_secs(1_577_836_800), v0_tx).is_err()); // 2020-01
+```
+
+The test suite runs this grid at **≥20 coordinates**, asserting each
+reconstructed segment.
+
+##### Under the hood — the manual equivalent
+
+The importer does exactly what the loop below does — replay each entity's
+assertions in transaction order, `create_node_with_options` for the first tx and
+`update_node_with_options` per subsequent change, **each in its own commit**.
+Each carries the origin `:db/txInstant` as `valid_from` (the mapping rule) and
+the Datomic tx metadata as provenance:
 
 ```rust
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, Provenance};
@@ -268,10 +345,12 @@ println!("edges_retracted = {}", result.edges_retracted);
   advisory**: an `update_node…` whose `valid_from` precedes the node's creation
   `valid_from` is **rejected** at write time (`validate_valid_from_not_before_creation`),
   so a mis-ordered replay fails loudly rather than silently corrupting the chain.
-- **Re-runs:** the Rust replay path is **not** automatically idempotent — a
-  second run against the same target duplicates the graph. Import into a **fresh**
-  database, or guard each create with `importer.resolve_key(db_id)`. Treat a
-  partial import as failed and restart from empty rather than re-running over it.
+- **Re-runs:** `datomic_import` is **idempotent-or-refused** — it guards every
+  `:e` up front and returns an `AlreadyImported` error (before any write) if an
+  entity id is already present in the importer session, so a second run never
+  silently duplicates the graph. Import into a **fresh** database; treat a partial
+  import as failed and restart from empty. (The hand-written loop has no such
+  guard — check `importer.resolve_key(db_id)` yourself if you replay manually.)
 
 ---
 
