@@ -356,6 +356,7 @@ impl PhysicalPlan {
             | PhysicalOp::Sort { input, .. }
             | PhysicalOp::Limit { input, .. }
             | PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }
@@ -676,6 +677,17 @@ pub enum PhysicalOp {
         properties: Vec<String>,
     },
 
+    /// Project provenance accessors as output columns (Issue #3354). The
+    /// executor resolves each row entity's write-time provenance (via the
+    /// historical store handle the executor injects) and attaches one column per
+    /// projection, preserving a bare entity via the bindings channel when named.
+    ProjectProvenance {
+        /// Input operator
+        input: Box<PhysicalOp>,
+        /// The provenance projection plan.
+        projection: crate::query::ir::ProvenanceProjection,
+    },
+
     /// Distinct/deduplicate
     Distinct {
         /// Input operator
@@ -789,6 +801,7 @@ impl PhysicalOp {
             PhysicalOp::Sort { .. } => "Sort",
             PhysicalOp::Limit { .. } => "Limit",
             PhysicalOp::Project { .. } => "Project",
+            PhysicalOp::ProjectProvenance { .. } => "ProjectProvenance",
             PhysicalOp::Distinct { .. } => "Distinct",
             PhysicalOp::Count { .. } => "Count",
             PhysicalOp::Aggregate { .. } => "Aggregate",
@@ -840,6 +853,7 @@ impl PhysicalOp {
             | PhysicalOp::Sort { input, .. }
             | PhysicalOp::Limit { input, .. }
             | PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }
@@ -1048,6 +1062,7 @@ impl PhysicalOp {
             | PhysicalOp::Sort { input, .. }
             | PhysicalOp::Limit { input, .. }
             | PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }

@@ -489,6 +489,11 @@ impl QueryPlanner {
 
             QueryOp::Project(props) => Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input)),
 
+            QueryOp::ProjectProvenance(projection) => Ok(LogicalOp::unary(
+                UnaryOp::ProjectProvenance(projection.clone()),
+                input,
+            )),
+
             QueryOp::Sort { key, descending } => Ok(LogicalOp::unary(
                 UnaryOp::Sort {
                     key: key.clone(),
@@ -940,6 +945,11 @@ impl QueryPlanner {
             UnaryOp::Project(props) => Ok(PhysicalOp::Project {
                 input: Box::new(input),
                 properties: props.clone(),
+            }),
+
+            UnaryOp::ProjectProvenance(projection) => Ok(PhysicalOp::ProjectProvenance {
+                input: Box::new(input),
+                projection: projection.clone(),
             }),
 
             UnaryOp::Distinct => Ok(PhysicalOp::Distinct {
