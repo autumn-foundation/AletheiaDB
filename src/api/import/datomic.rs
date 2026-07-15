@@ -315,7 +315,7 @@ impl<'a> Importer<'a> {
             }
         }
 
-        replay(self, &prepared, &mut report)?;
+        replay(self, &prepared, &mut report, &opts.id_property)?;
         report.finalize();
         Ok(report)
     }
@@ -474,7 +474,14 @@ fn build_datomic_entity(
                 report.note_unsupported("unknown_attribute", &d.attr_full);
             }
             if is_ref {
-                handle_ref_datom(d, schema, &provenance, &mut ref_edges, &mut edge_index);
+                handle_ref_datom(
+                    d,
+                    schema,
+                    &provenance,
+                    &mut ref_edges,
+                    &mut edge_index,
+                    report,
+                );
                 continue;
             }
             if d.op {
@@ -553,6 +560,7 @@ fn build_datomic_entity(
 
     Ok(PreparedEntity {
         key,
+        id_value: PropertyValue::Int(e),
         versions,
         ref_edges,
         retraction: None,
@@ -566,8 +574,16 @@ fn handle_ref_datom(
     provenance: &Provenance,
     ref_edges: &mut Vec<PreparedRefEdge>,
     edge_index: &mut HashMap<(String, String), usize>,
+    report: &mut ImportFidelityReport,
 ) {
     let Some(target_key) = ref_target_key(&d.v) else {
+        // A ref-typed attribute whose value is not a scalar entity key (a map,
+        // vector, nil, …) cannot become an edge endpoint. Report it — never a
+        // silent drop (the reported-not-dropped AC contract).
+        report.note_unsupported(
+            "ref_non_scalar_value",
+            &format!("{} (value kind: {})", d.attr_full, d.v.kind()),
+        );
         return;
     };
     let label = schema

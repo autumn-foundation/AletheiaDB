@@ -16,7 +16,7 @@
 use super::{Endpoint, Importer, RowError, UnresolvedEndpoint};
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
-use crate::core::property::PropertyMap;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::temporal::Timestamp;
 
@@ -224,6 +224,10 @@ pub(crate) struct PreparedRefEdge {
 pub(crate) struct PreparedEntity {
     /// The entity's business key (`:xt/id` / `:e`).
     pub key: String,
+    /// The exact value stored under the id property — a `String` for XTDB, an
+    /// `Int` for Datomic. The durable re-import guard probes with this so the
+    /// property-value type matches how the importer stamped it.
+    pub id_value: PropertyValue,
     /// Node versions, ascending by valid-time (create first, then updates).
     pub versions: Vec<PreparedVersion>,
     /// Ref edges sourced at this entity.
@@ -243,9 +247,19 @@ pub(crate) fn replay(
     importer: &mut Importer<'_>,
     entities: &[PreparedEntity],
     report: &mut ImportFidelityReport,
+    id_property: &str,
 ) -> Result<()> {
-    // Guard: every key must be new. Checked up front, before any write, so a
-    // re-import is refused atomically rather than partially duplicating.
+    // Guard (AC5 — no silent duplication). Checked up front, before any write,
+    // so a re-import is refused atomically rather than partially duplicating.
+    //
+    // Two layers:
+    //   1. In-memory session guard — a second call on the same `Importer`.
+    //   2. **Durable** guard — probe the target database's current state for a
+    //      node already carrying this importer's business-key property, so a
+    //      fresh-process re-run against a persistent target is refused too (not
+    //      just a same-session repeat). The probe is a current-state
+    //      label+property lookup keyed on the exact `id_property` value the
+    //      importer stamps.
     for entity in entities {
         if importer.key_to_id.contains_key(&entity.key) {
             return Err(Error::other(format!(
@@ -253,6 +267,20 @@ pub(crate) fn replay(
                  history imports must run against a fresh database",
                 entity.key
             )));
+        }
+        if let Some(v0) = entity.versions.first() {
+            let existing =
+                importer
+                    .db
+                    .find_nodes_by_property(&v0.label, id_property, &entity.id_value);
+            if !existing.is_empty() {
+                return Err(Error::other(format!(
+                    "AlreadyImported: the target database already contains a {} node with \
+                     {id_property}='{}'; history imports must run against a fresh database \
+                     (no silent duplication)",
+                    v0.label, entity.key
+                )));
+            }
         }
     }
 

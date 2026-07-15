@@ -194,6 +194,77 @@ fn xtdb_vector_of_refs_fanout() {
     );
 }
 
+// ---- disjoint valid intervals: honor the close, report reincarnation --------
+
+#[test]
+fn xtdb_disjoint_intervals_close_and_report() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    // Live A [2021-01, 2022-01), GAP, live B [2023-01, ...). The engine cannot
+    // reincarnate a retracted node (retraction removes it from current state),
+    // so A's close is honored (in-gap coordinate correctly ABSENT, not a stale
+    // fact) and B is reported as disjoint_reincarnation — never silently dropped.
+    let edn = "[{:xt/id :a :history [\
+        {:xtdb.api/valid-time #inst \"2021-01-01T00:00:00Z\" \
+         :xtdb.api/valid-to #inst \"2022-01-01T00:00:00Z\" \
+         :xtdb.api/tx-id 1 :xtdb.api/doc {:xt/id :a :type \"P\" :title \"A\"}}\
+        {:xtdb.api/valid-time #inst \"2023-01-01T00:00:00Z\" \
+         :xtdb.api/tx-id 2 :xtdb.api/doc {:xt/id :a :type \"P\" :title \"B\"}}]}]";
+    let path = write_file(&files, "disjoint.edn", edn);
+    let mut importer = db.import();
+    let report = importer
+        .xtdb_import(&path, &XtdbOptions::default())
+        .expect("import");
+    let a = importer.resolve_key("a").unwrap();
+
+    // Pre-gap window returns A at current knowledge (after the close).
+    assert_eq!(
+        title_at(&db, a, "2021-06-01T00:00:00Z").as_deref(),
+        Some("A")
+    );
+    // In-gap coordinate is ABSENT — the intermediate close is honored.
+    assert!(
+        db.get_node_at_valid_time(a, ts("2022-06-01T00:00:00Z"))
+            .is_err(),
+        "in-gap coordinate must be absent, not a stale fact"
+    );
+    // The un-revivable later segment is reported, not silently dropped.
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|u| u.kind == "disjoint_reincarnation"),
+        "reincarnation must be reported: {report:?}"
+    );
+    assert!(!report.zero_loss);
+}
+
+// ---- durable re-import refusal (AC5) ---------------------------------------
+
+#[test]
+fn xtdb_reimport_refused_across_fresh_session() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let edn = "[{:xt/id :x :history [{:xtdb.api/valid-time #inst \"2021-01-01T00:00:00Z\" \
+                :xtdb.api/tx-id 1 :xtdb.api/doc {:xt/id :x :type \"P\" :name \"X\"}}]}]";
+    let path = write_file(&files, "x.edn", edn);
+
+    // First import via one importer session.
+    {
+        let mut importer = db.import();
+        importer
+            .xtdb_import(&path, &XtdbOptions::default())
+            .expect("first import");
+    }
+    // A brand-new importer (empty in-memory key map) simulates a fresh process
+    // against the now-populated database — the DURABLE guard must still refuse.
+    let mut importer2 = db.import();
+    let err = importer2
+        .xtdb_import(&path, &XtdbOptions::default())
+        .expect_err("durable refusal across a fresh session");
+    assert!(err.to_string().contains("AlreadyImported"), "got: {err}");
+}
+
 // ---- 6: provenance recorded ------------------------------------------------
 
 #[test]
@@ -410,11 +481,16 @@ fn xtdb_skip_and_report_mode() {
 }
 
 // ---- 20 / E.5: inline scale fixture (1_000 entities x 10 versions) ----------
+// AC4: >= 10K historical versions with BOTH supersessions and retractions. A
+// fraction of entities (e % 100 == 0) get a terminal nil-doc delete, so the
+// fixture mixes 10 superseding versions per entity with 10 terminal retractions.
 
 #[test]
 fn xtdb_scale_smoke_1k_entities_10k_versions() {
     let files = TempDir::new().unwrap();
     let (_tmp, db) = create_test_db().unwrap();
+
+    let is_retracted = |e: usize| e % 100 == 0;
 
     let mut buf = String::from("[");
     for e in 0..1_000 {
@@ -429,6 +505,15 @@ fn xtdb_scale_smoke_1k_entities_10k_versions() {
                 e * 10 + v
             ));
         }
+        // A terminal delete (retraction) at 2019-06-01 for a fraction of entities.
+        if is_retracted(e) {
+            buf.push_str(&format!(
+                "{{:xtdb.api/valid-time #inst \"2019-06-01T00:00:00Z\" \
+                   :xtdb.api/tx-time #inst \"2019-06-01T00:00:00Z\" :xtdb.api/tx-id {} \
+                   :xtdb.api/doc nil}}",
+                e * 10 + 100
+            ));
+        }
         buf.push_str("]}");
     }
     buf.push(']');
@@ -441,11 +526,13 @@ fn xtdb_scale_smoke_1k_entities_10k_versions() {
     assert_eq!(report.entities_read, 1_000);
     assert_eq!(report.nodes_created, 1_000);
     assert_eq!(report.node_versions_written, 10_000);
-    assert!(report.zero_loss, "scale import should be lossless");
+    // The terminal deletes are retractions (interval closes), not fresh versions.
+    assert_eq!(report.retractions, 10); // 10 retracted entities (e % 100 == 0), no edges
+    assert!(report.zero_loss, "handled deletes keep the import lossless");
 
     // Sample >= 20 AS-OF coordinates across eras and entities. Each era is a
     // superseded segment, so anchor the tx dimension to that version's record
-    // time; the final era (v=9) is also verifiable at current knowledge.
+    // time.
     let mut sampled = 0;
     for e in (0..1_000).step_by(100) {
         let id = importer.resolve_key(&format!("n{e}")).unwrap();
@@ -459,11 +546,25 @@ fn xtdb_scale_smoke_1k_entities_10k_versions() {
             );
             sampled += 1;
         }
-        // The latest era is current knowledge.
+        // These sampled entities (e % 100 == 0) are all RETRACTED at 2019-06-01:
+        // present (T9) just before the delete, absent just after.
+        assert!(is_retracted(e));
         assert_eq!(
-            title_at(&db, id, "2019-06-01T00:00:00Z").as_deref(),
-            Some("T9")
+            title_at(&db, id, "2019-03-01T00:00:00Z").as_deref(),
+            Some("T9"),
+            "retracted entity n{e} present before its delete"
+        );
+        assert!(
+            db.get_node_at_valid_time(id, ts("2019-09-01T00:00:00Z"))
+                .is_err(),
+            "retracted entity n{e} absent after its delete"
         );
     }
+    // A non-retracted entity's latest era survives at current knowledge.
+    let live = importer.resolve_key("n50").unwrap();
+    assert_eq!(
+        title_at(&db, live, "2019-06-01T00:00:00Z").as_deref(),
+        Some("T9")
+    );
     assert!(sampled >= 20, "sampled {sampled} coordinates");
 }

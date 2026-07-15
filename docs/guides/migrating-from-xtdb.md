@@ -351,14 +351,18 @@ println!("edges_retracted = {}", result.edges_retracted);
   advisory**: an `update_node…` whose `valid_from` precedes the node's creation
   `valid_from` is **rejected** at write time (`validate_valid_from_not_before_creation`),
   so a mis-ordered replay fails loudly instead of silently corrupting the chain.
-- **Re-runs:** `xtdb_import` is **idempotent-or-refused** — it guards every
-  `:xt/id` up front and returns an `AlreadyImported` error (before any write) if
-  a key is already present in the importer session, so a second run never
-  silently duplicates the graph. Import into a **fresh** database
-  (`AletheiaDB::new()` or a clean data dir); treat a partially-imported target as
-  failed and restart from empty rather than re-running over it. (The hand-written
-  loop has no such guard — check `importer.resolve_key(xt_id)` yourself if you
-  replay manually.)
+- **Re-runs:** `xtdb_import` is **idempotent-or-refused** — before any write it
+  refuses (with an `AlreadyImported` error) if the business key already exists.
+  The guard is **durable**, not merely in-session: it probes the target
+  database's current state for a node already carrying this importer's
+  business-key property (`xt/id` by default), so a *fresh-process* re-run against
+  a persistent target is refused too — not just a repeat call on the same
+  `Importer`. (One caveat: a node that was *deleted* in the first import is
+  absent from current state, so re-importing an all-deleted dataset is not
+  detected by the current-state probe; any surviving node triggers the refusal.)
+  Import into a **fresh** database and restart from empty rather than re-running
+  over a partial import. (The hand-written loop has no such guard — check
+  `importer.resolve_key(xt_id)` yourself if you replay manually.)
 
 ---
 
@@ -451,6 +455,16 @@ Enumerated honestly — nothing is silently dropped.
   transaction-time axis and is recalled by anchoring both dimensions (see
   [update = supersession](#the-one-subtlety-that-bites-update--supersession)).
   The data is fully preserved; the *single-coordinate query ergonomics differ*.
+- **Disjoint valid-time intervals for one `:xt/id` (reincarnation).** An entity
+  that is valid, then has an explicit `::xt/valid-to` gap, then becomes valid
+  *again* under the same id cannot be fully reconstructed: closing the first
+  interval **retracts** the node, and the engine removes a retracted node from
+  current state, so it cannot be "revived" through the write API. The importer
+  honors the first interval's close (so an in-gap `AS OF VALID_TIME` correctly
+  returns **absent**, never a stale fact) and **reports** each un-revivable later
+  segment as `disjoint_reincarnation` in the fidelity report — it is never
+  silently dropped, and `zero_loss` becomes `false`. Contiguous supersessions
+  (no gap) are unaffected.
 - **Schemaless heterogeneity within one `:xt/id`.** If a single XTDB entity's
   document shape changes radically across versions (different property sets),
   you must pick one AletheiaDB **label** for it; per-version properties still

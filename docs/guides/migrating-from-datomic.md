@@ -226,7 +226,9 @@ accumulates all asserted values into an array), and `failure_mode` (`Abort` or
 `zero_loss = false`); a scalar `:db/retract` with no same-tx re-assert becomes an
 explicit `Null` reported as `attr_retract_as_null`; an attribute absent from the
 schema is kept as a scalar string property and reported as `unknown_attribute`
-(never silently guessed to be a ref).
+(never silently guessed to be a ref); and a `:db.type/ref` datom whose `:v` is
+**not** a scalar entity key (a map, vector, …) cannot form an edge and is
+reported as `ref_non_scalar_value` rather than silently dropped.
 
 **CLI** (`--features import`):
 
@@ -345,12 +347,14 @@ println!("edges_retracted = {}", result.edges_retracted);
   advisory**: an `update_node…` whose `valid_from` precedes the node's creation
   `valid_from` is **rejected** at write time (`validate_valid_from_not_before_creation`),
   so a mis-ordered replay fails loudly rather than silently corrupting the chain.
-- **Re-runs:** `datomic_import` is **idempotent-or-refused** — it guards every
-  `:e` up front and returns an `AlreadyImported` error (before any write) if an
-  entity id is already present in the importer session, so a second run never
-  silently duplicates the graph. Import into a **fresh** database; treat a partial
-  import as failed and restart from empty. (The hand-written loop has no such
-  guard — check `importer.resolve_key(db_id)` yourself if you replay manually.)
+- **Re-runs:** `datomic_import` is **idempotent-or-refused** — before any write
+  it refuses (with an `AlreadyImported` error) if the `:e` already exists. The
+  guard is **durable**: it probes the target database's current state for a node
+  already carrying this importer's business-key property (`db/id` by default), so
+  a *fresh-process* re-run against a persistent target is refused too, not just a
+  repeat call on the same `Importer`. Import into a **fresh** database and restart
+  from empty. (The hand-written loop has no such guard — check
+  `importer.resolve_key(db_id)` yourself if you replay manually.)
 
 ---
 

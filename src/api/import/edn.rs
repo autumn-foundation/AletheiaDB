@@ -331,12 +331,19 @@ impl Parser {
     fn parse_value(&mut self, depth: usize) -> Result<Edn, EdnError> {
         loop {
             self.skip_ws();
-            // Handle `#_` datum discard: skip the next form and continue.
+            // Handle `#_` datum discard: skip the next form and continue. Each
+            // discard recurses to parse the form it drops, so it MUST count
+            // against the depth budget — otherwise `#_#_#_…0` recurses unbounded
+            // and overflows the stack (the reader's never-panic contract).
             if self.peek() == Some('#') && self.peek_at(1) == Some('_') {
+                let (line, col) = self.pos_tuple();
+                if depth >= MAX_DEPTH {
+                    return Err(EdnError::TooDeep { line, col });
+                }
                 self.bump();
                 self.bump();
                 // Discard exactly one following form.
-                self.parse_value(depth)?;
+                self.parse_value(depth + 1)?;
                 continue;
             }
             break;
@@ -490,10 +497,15 @@ impl Parser {
                 col,
             }),
             Some('_') => {
-                // Should have been handled in parse_value, but be defensive.
+                // Should have been handled in parse_value, but be defensive —
+                // and, like that path, count the discard against the depth
+                // budget so a `#_` chain reaching here cannot recurse unbounded.
+                if depth >= MAX_DEPTH {
+                    return Err(EdnError::TooDeep { line, col });
+                }
                 self.bump();
-                self.parse_value(depth)?;
-                self.parse_value(depth)
+                self.parse_value(depth + 1)?;
+                self.parse_value(depth + 1)
             }
             Some(c) if is_symbol_start(c) => {
                 let tag = self.read_token();
@@ -762,12 +774,26 @@ pub(crate) fn parse_one(input: &str) -> Result<Edn, EdnError> {
 /// entity-history export and the Datomic datom stream are both a single
 /// top-level vector; this is the artifact entry point.
 pub(crate) fn parse_top_vector(input: &str) -> Result<Vec<Edn>, EdnError> {
-    match parse_one(input)? {
+    let mut parser = Parser::new(input);
+    parser.skip_ws();
+    // Capture the position of the top-level form so a non-vector error points at
+    // the real start rather than a hardcoded 1:1.
+    let (line, col) = parser.pos_tuple();
+    let value = parser.parse_value(0)?;
+    parser.skip_ws();
+    if parser.peek().is_some() {
+        let (tline, tcol) = parser.pos_tuple();
+        return Err(EdnError::TrailingData {
+            line: tline,
+            col: tcol,
+        });
+    }
+    match value {
         Edn::Vector(items) | Edn::List(items) => Ok(items),
         other => Err(EdnError::Unsupported {
             construct: format!("top-level {} (expected a vector)", other.kind()),
-            line: 1,
-            col: 1,
+            line,
+            col,
         }),
     }
 }

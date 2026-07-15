@@ -357,6 +357,72 @@ fn datomic_cardinality_many_scalar_policy() {
     }
 }
 
+// ---- ref datom with a non-scalar value is reported, not dropped ------------
+
+#[test]
+fn datomic_ref_non_scalar_value_reported() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    // A ref-typed attribute whose :v is a map cannot become an edge endpoint —
+    // it must be reported (never silently dropped).
+    let datoms = "[{:e 1 :a :person/name :v \"Alice\" :tx 1 \
+        :tx-instant #inst \"2021-01-01T00:00:00Z\" :op true}\n \
+        {:e 1 :a :person/employer :v {:nested \"x\"} :tx 1 \
+        :tx-instant #inst \"2021-01-01T00:00:00Z\" :op true}]";
+    let schema = "{:person/name {:db/valueType :db.type/string :db/cardinality :db.cardinality/one}\n \
+        :person/employer {:db/valueType :db.type/ref :aletheia/edge-label \"EMPLOYER\"}}";
+    let dpath = write_file(&files, "d.edn", datoms);
+    let spath = write_file(&files, "s.edn", schema);
+    let mut importer = db.import();
+    let report = importer
+        .datomic_import(&dpath, &spath, &DatomicOptions::default())
+        .expect("import");
+    assert_eq!(report.edges_created, 0);
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|u| u.kind == "ref_non_scalar_value"),
+        "non-scalar ref value must be reported: {report:?}"
+    );
+    assert!(!report.zero_loss);
+}
+
+// ---- durable re-import refusal (AC5) ---------------------------------------
+
+#[test]
+fn datomic_reimport_refused() {
+    let (_tmp, db) = create_test_db().unwrap();
+    let mut importer = db.import();
+    importer
+        .datomic_import(
+            fixture("datomic_log_basic.edn"),
+            fixture("datomic_schema_basic.edn"),
+            &DatomicOptions::default(),
+        )
+        .expect("first import");
+    // Same session: refused.
+    let err = importer
+        .datomic_import(
+            fixture("datomic_log_basic.edn"),
+            fixture("datomic_schema_basic.edn"),
+            &DatomicOptions::default(),
+        )
+        .expect_err("second import refused");
+    assert!(err.to_string().contains("AlreadyImported"), "got: {err}");
+
+    // Fresh importer against the populated DB: the durable guard still refuses.
+    let mut importer2 = db.import();
+    let err2 = importer2
+        .datomic_import(
+            fixture("datomic_log_basic.edn"),
+            fixture("datomic_schema_basic.edn"),
+            &DatomicOptions::default(),
+        )
+        .expect_err("durable refusal across a fresh session");
+    assert!(err2.to_string().contains("AlreadyImported"), "got: {err2}");
+}
+
 // ---- 28: unresolved ref endpoint -------------------------------------------
 
 #[test]
@@ -458,11 +524,17 @@ fn datomic_as_of_grid() {
 }
 
 // ---- scale: 1_000 entities in a flat datom stream --------------------------
+// AC4: >= 10K historical versions with BOTH supersessions and retractions. A
+// fraction of entities (e % 100 == 0) get a terminal `:op false` attribute
+// retraction (Datomic's retraction semantics), which v1 records as an explicit
+// null and reports as `attr_retract_as_null`.
 
 #[test]
 fn datomic_scale_smoke_1k_entities() {
     let files = TempDir::new().unwrap();
     let (_tmp, db) = create_test_db().unwrap();
+
+    let is_retracted = |e: usize| e % 100 == 0;
 
     let mut buf = String::from("[");
     for e in 0..1_000 {
@@ -473,6 +545,15 @@ fn datomic_scale_smoke_1k_entities() {
                 1000 + e,
                 (e * 10 + v) + 100_000,
                 10 + v
+            ));
+        }
+        // A terminal attribute retraction (no same-tx re-assert) for a fraction.
+        if is_retracted(e) {
+            buf.push_str(&format!(
+                "{{:e {} :a :person/title :v \"T9\" :tx {} \
+                   :tx-instant #inst \"2019-06-01T00:00:00Z\" :op false}}\n",
+                1000 + e,
+                200_000 + e
             ));
         }
     }
@@ -488,8 +569,15 @@ fn datomic_scale_smoke_1k_entities() {
         .expect("scale import");
     assert_eq!(report.entities_read, 1_000);
     assert_eq!(report.nodes_created, 1_000);
-    assert_eq!(report.node_versions_written, 10_000);
-    assert!(report.zero_loss);
+    // 10_000 asserted versions + one retraction version per retracted entity.
+    assert_eq!(report.node_versions_written, 10_010);
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|u| u.kind == "attr_retract_as_null")
+    );
+    assert!(!report.zero_loss); // attribute retractions are reported
 
     let mut sampled = 0;
     for e in (0..1_000).step_by(100) {
@@ -503,11 +591,21 @@ fn datomic_scale_smoke_1k_entities() {
             );
             sampled += 1;
         }
-        // Latest era is current knowledge.
+        // These sampled entities (e % 100 == 0) are RETRACTED: the title reads as
+        // an explicit null at current knowledge (v1 attr-retract semantics).
+        assert!(is_retracted(e));
         assert_eq!(
-            title_at(&db, id, "2019-06-01T00:00:00Z").as_deref(),
-            Some("T9")
+            db.get_node(id).unwrap().properties.get("title"),
+            Some(&PropertyValue::Null),
+            "retracted entity {} title is explicit null",
+            1000 + e
         );
     }
+    // A non-retracted entity keeps its latest asserted value at current knowledge.
+    let live = importer.resolve_key("1050").unwrap();
+    assert_eq!(
+        title_at(&db, live, "2019-06-01T00:00:00Z").as_deref(),
+        Some("T9")
+    );
     assert!(sampled >= 20);
 }

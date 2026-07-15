@@ -264,7 +264,7 @@ impl<'a> Importer<'a> {
             }
         }
 
-        replay(self, &prepared, &mut report)?;
+        replay(self, &prepared, &mut report, &opts.id_property)?;
         report.finalize();
         Ok(report)
     }
@@ -310,7 +310,10 @@ impl<'a> Importer<'a> {
         let mut retraction: Option<PreparedRetraction> = None;
         let mut last_live_valid_to: Option<i64> = None;
 
-        for seg in segments {
+        let n = segments.len();
+        let mut i = 0;
+        while i < n {
+            let seg = segments[i];
             report.versions_read += 1;
             let valid_from = seg
                 .map_get_local("valid-time")
@@ -322,11 +325,7 @@ impl<'a> Importer<'a> {
                 .map_err(|e| err(format!("provenance: {e}")))?;
 
             let doc = seg.map_get_local("doc");
-            let is_delete = match doc {
-                None => true,
-                Some(Edn::Nil) => true,
-                Some(_) => false,
-            };
+            let is_delete = matches!(doc, None | Some(Edn::Nil));
 
             if is_delete {
                 // Tombstone: close the entity's valid interval at this segment's
@@ -337,6 +336,7 @@ impl<'a> Importer<'a> {
                     detach: true,
                 });
                 last_live_valid_to = None;
+                i += 1;
                 continue;
             }
 
@@ -376,11 +376,50 @@ impl<'a> Importer<'a> {
                 property_count: prop_count,
             });
 
-            last_live_valid_to = seg.map_get_local("valid-to").and_then(inst_micros);
+            let this_valid_to = seg.map_get_local("valid-to").and_then(inst_micros);
+            last_live_valid_to = this_valid_to;
+
+            // Disjoint-interval detection: this live segment explicitly ends
+            // (`::xt/valid-to`) strictly BEFORE the next segment begins — a gap.
+            // The engine cannot reincarnate a retracted node (retraction removes
+            // it from current storage), so we honor THIS close (making the in-gap
+            // coordinate correctly absent instead of returning a stale fact) and
+            // report every un-revivable later segment rather than dropping it
+            // silently.
+            if let Some(vt) = this_valid_to
+                && i + 1 < n
+            {
+                let next_vf = segments[i + 1]
+                    .map_get_local("valid-time")
+                    .and_then(inst_micros)
+                    .unwrap_or(i64::MIN);
+                if next_vf > vt {
+                    let close_prov = xtdb_provenance(file, tx_id, tx_time)
+                        .map_err(|e| err(format!("provenance: {e}")))?;
+                    retraction = Some(PreparedRetraction {
+                        valid_to: Timestamp::from(vt),
+                        provenance: Some(close_prov),
+                        detach: true,
+                    });
+                    for _skipped in &segments[i + 1..] {
+                        report.versions_read += 1;
+                        report.note_unsupported(
+                            "disjoint_reincarnation",
+                            &format!(
+                                "{key}: a valid segment after a gap (closed at {vt}) cannot be \
+                                 reincarnated — the engine removes a retracted node from current \
+                                 state; segment reported, not silently dropped"
+                            ),
+                        );
+                    }
+                    break;
+                }
+            }
+            i += 1;
         }
 
         // A trailing live segment with an explicit valid-to closes the interval
-        // (only when no later delete already set a retraction).
+        // (only when no later delete/gap already set a retraction).
         if retraction.is_none()
             && let Some(valid_to) = last_live_valid_to
         {
@@ -398,8 +437,10 @@ impl<'a> Importer<'a> {
             return Ok(None);
         }
 
+        let id_value = PropertyValue::string(&key);
         Ok(Some(PreparedEntity {
             key,
+            id_value,
             versions,
             ref_edges,
             retraction,

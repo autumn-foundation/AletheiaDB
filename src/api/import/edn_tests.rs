@@ -230,6 +230,15 @@ fn deeply_nested_collection_is_too_deep_not_stack_overflow() {
 }
 
 #[test]
+fn datum_discard_chain_is_depth_bounded_not_stack_overflow() {
+    // A long `#_#_#_…0` chain recurses once per discard; it must bail with a
+    // typed TooDeep error, never overflow the stack.
+    let s = format!("{}0", "#_".repeat(MAX_DEPTH + 50));
+    let err = parse_one(&s).unwrap_err();
+    assert!(matches!(err, EdnError::TooDeep { .. }), "got: {err}");
+}
+
+#[test]
 fn error_carries_one_based_line_and_col() {
     // The bad character (a backtick, which starts no EDN form) is on line 3.
     let input = "[1\n 2\n `]";
