@@ -242,6 +242,10 @@ pub enum UnaryOp {
     /// Project specific properties
     Project(Vec<String>),
 
+    /// Project provenance accessors as output columns (Issue #3354). Mirrors
+    /// [`super::ir::QueryOp::ProjectProvenance`].
+    ProjectProvenance(super::ir::ProvenanceProjection),
+
     /// Limit number of results
     Limit(usize),
 

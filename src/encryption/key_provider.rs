@@ -11,6 +11,13 @@ use zeroize::Zeroizing;
 
 use crate::encryption::KeyProviderError;
 
+/// The single logical key version a single-version provider exposes.
+///
+/// File/env/passphrase providers hold exactly one key; it answers to this
+/// version (and the sentinel `0`). Multi-version backends (KMS/Vault envelope
+/// models) use the same value for their current generation.
+pub const CURRENT_KEY_VERSION: u32 = 1;
+
 /// Sources the Master Encryption Key (MEK) for the database.
 ///
 /// Implementations must be `Send + Sync` to allow concurrent access from
@@ -18,6 +25,23 @@ use crate::encryption::KeyProviderError;
 pub trait KeyProvider: Send + Sync {
     /// Retrieve the 32-byte master encryption key.
     fn get_mek(&self) -> Result<Zeroizing<[u8; 32]>, KeyProviderError>;
+
+    /// Retrieve a specific key version (Issue #3587).
+    ///
+    /// The default implementation is for single-version providers (file, env,
+    /// passphrase): they hold exactly one key, so the **current** version
+    /// ([`CURRENT_KEY_VERSION`]) and the sentinel `0` resolve to that sole key
+    /// via [`get_mek`](Self::get_mek); any **other** version is rejected with
+    /// [`KeyProviderError::KeyNotFound`]. This mirrors the KMS/Vault envelope
+    /// backends' contract (unknown version → `KeyNotFound`) instead of silently
+    /// returning the current key for an arbitrary version. It never panics.
+    fn get_key_version(&self, version: u32) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
+        if version == 0 || version == CURRENT_KEY_VERSION {
+            self.get_mek()
+        } else {
+            Err(KeyProviderError::KeyNotFound)
+        }
+    }
 
     /// Human-readable provider name for logging/diagnostics.
     fn provider_name(&self) -> &str;
@@ -444,5 +468,56 @@ mod tests {
 
         let env_provider = EnvKeyProvider::new("MY_KEY");
         assert_eq!(env_provider.provider_name(), "env");
+    }
+
+    #[test]
+    fn file_provider_get_key_version_returns_sole_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("versioned.hex");
+
+        let (hex_str, expected) = hex_key_string();
+        std::fs::write(&path, &hex_str).unwrap();
+
+        let provider = FileKeyProvider::new(&path);
+        // A single-version provider resolves the current version (1) and the
+        // sentinel 0 to its sole key; any other version is KeyNotFound.
+        assert_eq!(
+            provider.get_key_version(1).unwrap().as_ref(),
+            expected.as_ref()
+        );
+        assert_eq!(
+            provider.get_key_version(0).unwrap().as_ref(),
+            expected.as_ref()
+        );
+        assert!(matches!(
+            provider.get_key_version(42).unwrap_err(),
+            KeyProviderError::KeyNotFound
+        ));
+    }
+
+    #[test]
+    fn env_provider_get_key_version_returns_sole_key() {
+        let var = unique_env_var("VERSIONED");
+        let (hex_str, expected) = hex_key_string();
+        // SAFETY: test-only, unique var names prevent races
+        unsafe { std::env::set_var(&var, &hex_str) };
+
+        let provider = EnvKeyProvider::new(&var);
+        // Current version (1) and the sentinel 0 resolve to the sole key; any
+        // other version is KeyNotFound.
+        assert_eq!(
+            provider.get_key_version(1).unwrap().as_ref(),
+            expected.as_ref()
+        );
+        assert_eq!(
+            provider.get_key_version(0).unwrap().as_ref(),
+            expected.as_ref()
+        );
+        assert!(matches!(
+            provider.get_key_version(7).unwrap_err(),
+            KeyProviderError::KeyNotFound
+        ));
+
+        unsafe { std::env::remove_var(&var) };
     }
 }

@@ -748,6 +748,113 @@ impl AletheiaDB {
         })
     }
 
+    // ===== Replace / tombstone (non-PATCH) writes (Issue #3549) =====
+
+    /// Replace a node's entire property map AND label (full overwrite, non-PATCH).
+    ///
+    /// Unlike [`update_node`](Self::update_node) (PATCH-merge), the node's
+    /// resulting map is *exactly* `properties`: any prior key it omits is
+    /// removed from current state (history preserved), and the label is
+    /// overwritten. See
+    /// [`WriteOps::replace_node_with_options`](crate::api::transaction::WriteOps::replace_node_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_node(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_node(node_id, label, properties))
+    }
+
+    /// Replace a node's entire map and label with an optional backdated valid time.
+    ///
+    /// See [`replace_node`](Self::replace_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_node_with_valid_time(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_node_with_valid_time(node_id, label, properties, valid_from))
+    }
+
+    /// Replace a node's entire map and label with an optional
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle (backdated `valid_from` and/or write-time provenance).
+    ///
+    /// See [`replace_node`](Self::replace_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_node_with_options(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_node_with_options(node_id, label, properties, options))
+    }
+
+    /// Replace an edge's entire property map (full overwrite, non-PATCH).
+    ///
+    /// The edge's source, target, and type are immutable and preserved; any
+    /// prior property key omitted from `properties` is removed from current
+    /// state (history preserved). See
+    /// [`WriteOps::replace_edge_with_options`](crate::api::transaction::WriteOps::replace_edge_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_edge(&self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
+        self.write(|tx| tx.replace_edge(edge_id, properties))
+    }
+
+    /// Replace an edge's entire map with an optional backdated valid time.
+    ///
+    /// See [`replace_edge`](Self::replace_edge).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_edge_with_valid_time(
+        &self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_edge_with_valid_time(edge_id, properties, valid_from))
+    }
+
+    /// Replace an edge's entire map with an optional
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions) bundle.
+    ///
+    /// See [`replace_edge`](Self::replace_edge).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_edge_with_options(
+        &self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_edge_with_options(edge_id, properties, options))
+    }
+
+    /// Remove a single property key from a node (read-modify-replace).
+    ///
+    /// Removing an absent key is a no-op success that records no new version.
+    /// See
+    /// [`WriteOps::remove_node_property`](crate::api::transaction::WriteOps::remove_node_property).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn remove_node_property(&self, node_id: NodeId, key: &str) -> Result<()> {
+        self.write(|tx| tx.remove_node_property(node_id, key))
+    }
+
+    /// Remove a single property key from an edge (read-modify-replace).
+    ///
+    /// Removing an absent key is a no-op success that records no new version.
+    /// See
+    /// [`WriteOps::remove_edge_property`](crate::api::transaction::WriteOps::remove_edge_property).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn remove_edge_property(&self, edge_id: EdgeId, key: &str) -> Result<()> {
+        self.write(|tx| tx.remove_edge_property(edge_id, key))
+    }
+
     /// Get the provenance bundle attached to a node's *current* version, if any.
     ///
     /// Returns `Ok(None)` (not an error) if the node has no provenance --

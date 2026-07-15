@@ -155,6 +155,86 @@ export ALETHEIADB_MEK="a1b2c3d4e5f6...64 hex chars..."
 This is useful for container deployments where secrets are injected as environment
 variables (Kubernetes Secrets, Docker secrets, AWS ECS task definitions).
 
+### Passphrase-Wrapped Key File Provider (Issue #3587)
+
+Reads the MEK from a **passphrase-wrapped key file** (`AEKF` format). The 32-byte
+MEK is stored AES-256-GCM-sealed under a wrapping key derived from a
+human-supplied passphrase via a memory-hard KDF (Argon2id by default; PBKDF2
+fallback). Only a salt, the KDF parameters, and the sealed MEK are persisted —
+**the passphrase is never written to disk**. The seal binds the file header
+(magic/version/KDF id/params/salt/nonce) as AEAD associated data, and KDF cost
+params read from the file are clamped to sane ceilings, so a tampered or crafted
+header fails closed rather than deriving a wrong key or attempting a huge
+allocation.
+
+The passphrase is supplied at startup from the environment variable named by
+`passphrase_env` — **never** on the command line (which would leak via the
+process table).
+
+```toml
+[encryption.key_provider]
+type = "passphrase_file"
+path = "/etc/aletheiadb/master.aekf"
+passphrase_env = "ALETHEIADB_KEY_PASSPHRASE"
+```
+
+Generate a passphrase-wrapped key file via the CLI (the passphrase is read from
+`ALETHEIADB_KEY_PASSPHRASE`, never argv, never echoed, never printed):
+
+```bash
+export ALETHEIADB_KEY_PASSPHRASE="correct horse battery staple"
+aletheia keys generate --passphrase --key-file /etc/aletheiadb/master.aekf
+```
+
+A missing or empty `ALETHEIADB_KEY_PASSPHRASE` fails closed. The passphrase is
+held only in a zeroizing buffer for the duration of key derivation.
+
+### AWS KMS Provider (`encryption-aws-kms` feature)
+
+Decrypts the MEK from a **KMS-wrapped data key** (envelope encryption). The
+config carries a KMS key id/ARN and a base64-encoded KMS-encrypted data-key
+ciphertext blob; at startup the provider calls KMS `Decrypt` to recover the
+32-byte MEK. The plaintext MEK is never stored on disk, logged, or exposed via
+`Debug` (the wrapped blob is redacted).
+
+```toml
+[encryption.key_provider]
+type = "kms"
+key_id = "arn:aws:kms:us-east-1:123456789012:key/abcd-…"
+encrypted_data_key = "<base64 KMS ciphertext blob>"
+region = "us-east-1"          # optional; defaults to $AWS_REGION or us-east-1
+# endpoint_url = "http://localhost:4566"  # optional (LocalStack / VPC endpoint)
+```
+
+Credentials come from the standard `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` environment variables. Requires
+building with `--features encryption-aws-kms`; without it the provider returns a
+typed `Unavailable` error (never a panic).
+
+### HashiCorp Vault Provider (`encryption-vault` feature)
+
+Reads the MEK from a Vault **KV v2** secret over HTTPS. The Vault token is
+supplied at startup from the environment variable named by `token_env` (never
+stored in config, never logged). The key material may be stored as 64 hex
+characters or base64 of 32 bytes. Construct/call this provider from a
+**synchronous** context (it uses `reqwest::blocking`).
+
+```toml
+[encryption.key_provider]
+type = "vault"
+address = "https://vault.example.com:8200"
+token_env = "VAULT_TOKEN"
+mount = "secret"              # optional; KV v2 mount (default "secret")
+path = "aletheiadb/mek"
+key_field = "key"             # optional; field within the secret (default "key")
+# namespace = "team-a"        # optional (Vault Enterprise)
+# ca_cert = "/etc/ssl/vault-ca.pem"  # optional PEM CA for TLS verification
+```
+
+Requires building with `--features encryption-vault`; without it the provider
+returns a typed `Unavailable` error. The Vault path is TLS-backend agnostic
+(reqwest `rustls-tls` + `reqwest::Certificate::from_pem`).
+
 ### Generating Keys
 
 Generate a new random 256-bit key file:
@@ -348,6 +428,18 @@ rotation.complete_rotation()?;
 **Note:** Background re-encryption of existing data written with the old key is
 planned for a future phase. Currently, rotation applies only to new writes.
 
+**Rotating _to_ passphrase/KMS/Vault sources is not yet supported (fail-closed).**
+Index-key rotation (`rotate_index_keys`) refuses — on the target source's variant
+alone, before any key-source/network call — to rotate _to_ a `passphrase_file`,
+`kms`, or `vault` key source, returning a typed "not yet supported" error. The
+durable rotation breadcrumb records only a single non-secret reference (a file
+path or env-var name) so an interrupted rotation can resume; passphrase/KMS/Vault
+sources carry secrets (passphrase/token env vars) or multi-field config the
+line-based breadcrumb cannot round-trip. This refusal is checked statically, so
+rotating _to_ an unreachable KMS/Vault endpoint surfaces the clean refusal rather
+than a transport error. Full-MEK rotation across every layer (which would also
+re-key the WAL/checkpoint/cold files) is the tracked follow-up.
+
 ## Audit Logging
 
 Encryption operations emit structured audit events for compliance tracking.
@@ -519,3 +611,123 @@ Overall:        ENABLED
 Algorithm:      Auto (AES-256-GCM if AES-NI, else ChaCha20-Poly1305)
 Key Provider:   file (master.key)
 ```
+
+## CLI Operator Commands (Issue #490)
+
+The `aletheia` binary exposes encryption operator commands. Key bytes and
+passphrases are **never** printed by any of them. Commands that inspect or
+operate on a live database open it from the ambient configuration
+(`ALETHEIADB_CONFIG` TOML, or `ALETHEIADB_DATA_DIR`).
+
+### `keys` — key material
+
+```bash
+# Provision a new 32-byte master key (0600 on Unix; refuses overwrite w/o --force)
+aletheia keys generate --output /etc/aletheiadb/master.key
+
+# Show provider / algorithm / key version (no key material printed). Alias: info
+aletheia keys status --key-file /etc/aletheiadb/master.key
+
+# Health-check that a key file loads and is valid
+aletheia keys verify --key-file /etc/aletheiadb/master.key
+```
+
+### `keys rotate` — index key rotation (engine: Issue #488)
+
+**Read this first:** the shipped engine performs an *index-only* rotation and
+**safely refuses** on any uniformly-encrypted database — i.e. any database
+created the normal way, because enabling encryption encrypts the WAL (and
+cold/checkpoint) under the same master key too, and rotating the index alone
+would strand those layers. In practice `keys rotate --new-key` against a
+config-encrypted database therefore refuses (see the cross-layer note below);
+`--status`, `--resume`, and `--cancel` remain useful for inspecting and
+finishing an in-flight rotation. Full-MEK (all-layer) rotation is a documented
+follow-up.
+
+Rotates the index-encryption key, re-encrypting every persisted index file from
+the old key to the new one. All modes require an **encrypted, index-persistent**
+database opened via `ALETHEIADB_CONFIG`.
+
+```bash
+export ALETHEIADB_CONFIG=/etc/aletheiadb/aletheia.toml
+
+# How far along is a rotation? (on-disk key-generation classification)
+aletheia keys rotate --status
+
+# Start a rotation to a new key (file- or env-var-sourced)
+aletheia keys rotate --new-key /etc/aletheiadb/new-master.key
+aletheia keys rotate --new-env-var ALETHEIADB_MEK_NEW
+
+# Finish an interrupted rotation (idempotent) / roll one back
+aletheia keys rotate --resume
+aletheia keys rotate --cancel
+```
+
+A successful start prints an old→new key-version summary and per-file counts;
+progress is written to **stderr** so it can be separated from the report.
+
+> **Important — cross-layer refusal.** The shipped engine performs an
+> *index-only* rotation and **safely refuses** while any *other* at-rest layer
+> (WAL, cold storage, checkpoint) is encrypted under the same master key —
+> rotating the index alone would strand those layers. Because AletheiaDB
+> encrypts **uniformly** (enabling encryption encrypts the WAL too), a normally
+> configured encrypted database has an encrypted WAL, so `keys rotate --new-key`
+> will correctly report:
+>
+> ```
+> error: index-only key rotation is unsupported while other encrypted-at-rest layers are present (wal); rotating the index alone to a new key would leave those layers undecryptable
+> ```
+>
+> Full-MEK (all-layer) rotation, which re-keys the WAL/cold/checkpoint too, is a
+> documented follow-up.
+
+### `encryption` — at-rest status & verification
+
+```bash
+export ALETHEIADB_CONFIG=/etc/aletheiadb/aletheia.toml
+
+# Per-layer status table (WAL / index / checkpoints / cold)
+aletheia encryption status
+
+# Check the configured database's encrypted data at rest under its key.
+aletheia encryption verify
+```
+
+`encryption verify` gives **two signals of different strength**, and is careful
+not to overstate either:
+
+- **WAL — a genuine decrypt proof.** Opening the database replays the
+  (encrypted) WAL through the configured cipher; a wrong or missing key fails
+  the open with an authentication error, so a successful open *proves* the WAL
+  actually AEAD-decrypts.
+- **Index — a header classification, not a body decrypt.** On success it then
+  *classifies* each persisted index file by its 10-byte `AEIX` header
+  key-version against the live keyring (`at_current` / `at_old` / `unknown` /
+  `plaintext`). This reads only the header bytes; it does **not** AEAD-decrypt
+  the index bodies. A full index-body decrypt proof additionally requires
+  `persistence.load_on_startup = true` (the durable `open()` path sets this), so
+  that the index load itself would fail on a bad key.
+
+It operates on the **configured** database only (ambient `ALETHEIADB_CONFIG` /
+`ALETHEIADB_DATA_DIR`); it does not take `--key-file` / `--env-var`, which would
+not change what the real open path reads. It exits `0` with
+`encryption verify: PASS` when the checks pass, and non-zero with a
+`FAILED` message (no key bytes) otherwise — including when the index scan hits a
+real IO error or an unreadable/short `AEIX` header, which fail rather than
+false-pass.
+
+### `encryption enable` / `disable` — not yet supported
+
+In-place migration of a database **between** plaintext and encrypted-at-rest is
+**not implemented**. It requires a full-database migration engine that
+re-encrypts every WAL segment, checkpoint, index file, and cold-storage entry
+crash-consistently — distinct from the `keys rotate` engine, which only re-keys
+*already-encrypted* index files between generations. These subcommands therefore
+return a specific, non-zero error rather than faking success:
+
+```bash
+aletheia encryption enable    # error: ... requires a full-database migration engine ...
+```
+
+To use encryption at rest, create the database with encryption enabled in its
+configuration **from the start** (`[encryption] enabled = true`).

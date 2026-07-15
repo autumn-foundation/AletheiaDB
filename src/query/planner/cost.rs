@@ -465,6 +465,7 @@ impl CostModel {
             }
 
             PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. }
             | PhysicalOp::Distinct { input }
             | PhysicalOp::Count { input }
             | PhysicalOp::Aggregate { input, .. }
@@ -543,7 +544,9 @@ impl CostModel {
             PhysicalOp::Limit { count, input, .. } => {
                 (*count).min(self.estimate_cardinality(input, stats))
             }
-            PhysicalOp::Sort { input, .. } | PhysicalOp::Project { input, .. } => {
+            PhysicalOp::Sort { input, .. }
+            | PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. } => {
                 self.estimate_cardinality(input, stats)
             }
             PhysicalOp::Distinct { input } => {

@@ -1,0 +1,30 @@
+[package]
+name = "aletheia-eval"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["AletheiaDB Contributors"]
+description = "Deterministic retrieval evaluation harness + gold datasets for AletheiaDB (Issue #3366)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+# The AletheiaDB core we evaluate against. Default features are enough for the
+# public read/write/vector/temporal API the harness exercises (create_node,
+# update_node_with_options, find_similar_by_embedding, get_node_at_time,
+# get_outgoing_edges, vector_index(..).hnsw(..).enable()). No server/mcp/http
+# feature is needed.
+aletheiadb = { path = "../.." }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"
+# ISO 8601 / RFC 3339 date parsing for dataset valid-time anchors. Already in
+# the workspace lockfile (a root-crate dependency), so no new resolution.
+chrono = "0.4"
+
+[[bin]]
+name = "aletheia-eval"
+path = "src/bin/aletheia_eval.rs"

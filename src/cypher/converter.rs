@@ -47,8 +47,8 @@ use crate::query::converter::{
 };
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Predicate, PredicateValue,
-    ProvenanceCmp, ProvenanceField, ProvenanceOperand, ProvenancePredicate, QueryOp,
-    ScoreComparison, ScoreThreshold, SortKey, TraversalDepth,
+    ProvenanceCmp, ProvenanceField, ProvenanceOperand, ProvenancePredicate, ProvenanceProjection,
+    ProvenanceProjectionItem, QueryOp, ScoreComparison, ScoreThreshold, SortKey, TraversalDepth,
 };
 use crate::query::plan::{QueryHints, TemporalContext};
 
@@ -425,7 +425,9 @@ impl CypherConverter {
                 //    yields (computed column rows), so RETURN DISTINCT and the
                 //    ORDER BY / vector-rank projection are only applied on the
                 //    non-aggregate path.
-                if let Some(aggregate_op) = self.build_aggregate(&return_clause)? {
+                let aggregate_op = self.build_aggregate(&return_clause)?;
+                let aggregated = aggregate_op.is_some();
+                if let Some(aggregate_op) = aggregate_op {
                     ops.push(aggregate_op);
                     // ORDER BY over aggregate output: sort by the output column
                     // name / aggregate alias (RETURN DISTINCT is subsumed by
@@ -469,6 +471,13 @@ impl CypherConverter {
                     // If we already emitted a RankBySimilarity (which includes top_k),
                     // still emit the Limit for the general pipeline.
                     ops.push(QueryOp::Limit(limit));
+                }
+
+                // Provenance accessor projection (Issue #3354) runs LAST so it
+                // never perturbs ordering/pagination. Only on the non-aggregate
+                // path: aggregation produces its own computed columns.
+                if !aggregated && let Some(op) = self.build_provenance_projection(&return_clause)? {
+                    ops.push(op);
                 }
 
                 Ok(Query {
@@ -1651,11 +1660,17 @@ impl CypherConverter {
     /// # Errors
     ///
     /// Returns [`CypherError::UnsupportedFeature`] if the expression is not a
-    /// property access or variable reference.
+    /// property access, variable reference, or provenance accessor.
     fn convert_order_item_to_sort_key(
         &self,
         item: &CypherOrderItem,
     ) -> Result<SortKey, CypherError> {
+        // ORDER BY a provenance accessor (Issue #3354): resolved per row from
+        // the row entity's write-time provenance. `as_provenance_accessor`
+        // returns `Err` for a malformed accessor argument (never silent).
+        if let Some(field) = self.as_provenance_accessor(&item.expr)? {
+            return Ok(SortKey::Provenance(field));
+        }
         match &item.expr {
             CypherExpr::Property { property, .. } => Ok(SortKey::Property(property.clone())),
             CypherExpr::Variable(name) => Ok(SortKey::Property(name.clone())),
@@ -1663,6 +1678,64 @@ impl CypherConverter {
                 "unsupported expression in ORDER BY clause: {:?}",
                 item.expr
             ))),
+        }
+    }
+
+    /// Detect provenance accessors in a `RETURN` clause and build a
+    /// [`QueryOp::ProjectProvenance`] op (Issue #3354), or `None` when the
+    /// clause projects none. A provenance-named accessor with a malformed
+    /// argument is a structured error (never silently dropped), reusing the same
+    /// [`as_provenance_accessor`](Self::as_provenance_accessor) recognition the
+    /// `WHERE` half uses.
+    fn build_provenance_projection(
+        &self,
+        return_clause: &CypherReturn,
+    ) -> Result<Option<QueryOp>, CypherError> {
+        let mut items = Vec::new();
+        let mut entity_binding: Option<String> = None;
+        for item in &return_clause.items {
+            let (expr, alias) = match item {
+                CypherReturnItem::Expression { expr, alias } => (expr, alias.clone()),
+                // A bare `RETURN n` variable item -- preserve it as the entity
+                // binding so it stays observable alongside projected columns.
+                CypherReturnItem::Variable(name) => {
+                    if entity_binding.is_none() {
+                        entity_binding = Some(name.clone());
+                    }
+                    continue;
+                }
+                CypherReturnItem::Star => continue,
+            };
+            match expr {
+                // The parser emits a bare variable as an `Expression` item.
+                CypherExpr::Variable(name) => {
+                    if entity_binding.is_none() {
+                        entity_binding = Some(name.clone());
+                    }
+                }
+                CypherExpr::FunctionCall { args, .. } => {
+                    if let Some(field) = self.as_provenance_accessor(expr)? {
+                        // `as_provenance_accessor` guarantees exactly one bound
+                        // variable argument.
+                        let var = match args.as_slice() {
+                            [CypherExpr::Variable(v)] => v.clone(),
+                            _ => String::new(),
+                        };
+                        let output_name =
+                            alias.unwrap_or_else(|| format!("{}({})", field.accessor_name(), var));
+                        items.push(ProvenanceProjectionItem { output_name, field });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(QueryOp::ProjectProvenance(ProvenanceProjection {
+                entity_binding,
+                items,
+            })))
         }
     }
 

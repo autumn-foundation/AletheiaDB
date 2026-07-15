@@ -183,7 +183,8 @@ use super::ast::{
 use super::builder::Query;
 use super::ir::{
     Predicate, PredicateValue, ProvenanceCmp, ProvenanceField, ProvenanceOperand,
-    ProvenancePredicate, QueryOp, SortKey, TraversalDepth,
+    ProvenancePredicate, ProvenanceProjection, ProvenanceProjectionItem, QueryOp, SortKey,
+    TraversalDepth,
 };
 use super::plan::{QueryHints, TemporalContext};
 
@@ -611,11 +612,73 @@ impl AstConverter {
         // 7. Convert SKIP and LIMIT
         self.convert_pagination(ast.skip, ast.limit, &mut ops);
 
+        // 8. Provenance accessor projection (Issue #3354). Emitted LAST so it
+        //    never perturbs entity-based ordering or pagination; it attaches the
+        //    projected provenance columns (and preserves a bare entity via the
+        //    bindings channel) as the final 1:1 step.
+        if let Some(ref return_clause) = ast.return_clause
+            && let Some(op) = self.build_provenance_projection(return_clause)?
+        {
+            ops.push(op);
+        }
+
         Ok(Query {
             ops,
             temporal_context,
             hints,
         })
+    }
+
+    /// Detect provenance accessors (`source(x)`/`confidence(x)`/`reason(x)`) in
+    /// a `RETURN` clause and build a [`QueryOp::ProjectProvenance`] op
+    /// (Issue #3354), or `None` when the clause projects none. A
+    /// provenance-named accessor with a malformed argument is a structured error
+    /// (never silently dropped), mirroring the `WHERE`-clause accessor
+    /// recognition.
+    fn build_provenance_projection(&self, return_clause: &ReturnClause) -> Result<Option<QueryOp>> {
+        let mut items = Vec::new();
+        let mut entity_binding: Option<String> = None;
+        for item in &return_clause.items {
+            match &item.expression {
+                // A bare variable returned alongside the accessors is preserved
+                // through the bindings channel so it stays observable.
+                Expression::Identifier(name) => {
+                    if entity_binding.is_none() {
+                        entity_binding = Some(name.clone());
+                    }
+                }
+                Expression::FunctionCall { name, args } => {
+                    if let Some(field) = provenance_field_name(name) {
+                        let var = match args.as_slice() {
+                            [Expression::Identifier(v)] => v.clone(),
+                            _ => {
+                                return Err(Error::Query(QueryError::SyntaxError {
+                                    message: format!(
+                                        "{}(x) provenance accessor requires exactly one bound \
+                                         variable argument",
+                                        field.accessor_name()
+                                    ),
+                                }));
+                            }
+                        };
+                        let output_name = item
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| format!("{}({})", field.accessor_name(), var));
+                        items.push(ProvenanceProjectionItem { output_name, field });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(QueryOp::ProjectProvenance(ProvenanceProjection {
+                entity_binding,
+                items,
+            })))
+        }
     }
 
     fn convert_where_clause(
@@ -1257,6 +1320,31 @@ impl AstConverter {
                         "score" => SortKey::Score,
                         "timestamp" => SortKey::Timestamp,
                         _ => SortKey::Property(name.clone()),
+                    }
+                }
+                // ORDER BY a provenance accessor (Issue #3354): the value is
+                // resolved per row from the row entity's write-time provenance.
+                Expression::FunctionCall { name, args }
+                    if provenance_field_name(name).is_some() =>
+                {
+                    // `provenance_field_name` just matched, so this is safe; the
+                    // arm guard guarantees `Some`.
+                    let field = provenance_field_name(name).ok_or_else(|| {
+                        Error::Query(QueryError::SyntaxError {
+                            message: "unrecognized provenance accessor in ORDER BY".to_string(),
+                        })
+                    })?;
+                    match args.as_slice() {
+                        [Expression::Identifier(_)] => SortKey::Provenance(field),
+                        _ => {
+                            return Err(Error::Query(QueryError::SyntaxError {
+                                message: format!(
+                                    "{}(x) provenance accessor requires exactly one bound \
+                                     variable argument",
+                                    field.accessor_name()
+                                ),
+                            }));
+                        }
                     }
                 }
                 _ => {

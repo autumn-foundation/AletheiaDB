@@ -1,0 +1,363 @@
+{
+  "version": "1.0.0",
+  "name": "multihop_qa",
+  "license": "CC0-1.0",
+  "description": "Synthetic multi-hop graph dataset. Each question names a person and asks about the country of the company they work for; the gold evidence (company and country) is two hops away along WORKS_AT then HEADQUARTERED_IN. Vector similarity alone retrieves only the named person, so answering requires graph traversal. Two untrusted 'rumor'-sourced distractors are near some questions to exercise the provenance filter.",
+  "entities": [
+    {
+      "key": "alice",
+      "label": "Person",
+      "text": "Alice Nguyen backend engineer",
+      "properties": {
+        "name": "Alice"
+      },
+      "source": "curated"
+    },
+    {
+      "key": "northwind",
+      "label": "Company",
+      "text": "Northwind logistics carrier freight",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "germany",
+      "label": "Country",
+      "text": "Germany federal republic bavaria",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "bob",
+      "label": "Person",
+      "text": "Bob Okafor product designer",
+      "properties": {
+        "name": "Bob"
+      },
+      "source": "curated"
+    },
+    {
+      "key": "contoso",
+      "label": "Company",
+      "text": "Contoso appliances retailer",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "japan",
+      "label": "Country",
+      "text": "Japan archipelago honshu prefecture",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "carol",
+      "label": "Person",
+      "text": "Carol Mendes quantitative analyst",
+      "properties": {
+        "name": "Carol"
+      },
+      "source": "curated"
+    },
+    {
+      "key": "fabrikam",
+      "label": "Company",
+      "text": "Fabrikam turbines aerospace",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "brazil",
+      "label": "Country",
+      "text": "Brazil amazonas savanna",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "dave",
+      "label": "Person",
+      "text": "Dave Larsson site reliability",
+      "properties": {
+        "name": "Dave"
+      },
+      "source": "curated"
+    },
+    {
+      "key": "tailspin",
+      "label": "Company",
+      "text": "Tailspin aviation charter",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "canada",
+      "label": "Country",
+      "text": "Canada ontario maritime tundra",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "erin",
+      "label": "Person",
+      "text": "Erin Castellano growth marketer",
+      "properties": {
+        "name": "Erin"
+      },
+      "source": "curated"
+    },
+    {
+      "key": "wingtip",
+      "label": "Company",
+      "text": "Wingtip toys distributor",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "kenya",
+      "label": "Country",
+      "text": "Kenya rift valley savanna",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "frank",
+      "label": "Person",
+      "text": "Frank Dubois compiler researcher",
+      "properties": {
+        "name": "Frank"
+      },
+      "source": "curated"
+    },
+    {
+      "key": "litware",
+      "label": "Company",
+      "text": "Litware databases middleware",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "france",
+      "label": "Country",
+      "text": "France gascony provence riviera",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "grace",
+      "label": "Person",
+      "text": "Grace Halloran robotics lead",
+      "properties": {
+        "name": "Grace"
+      },
+      "source": "curated"
+    },
+    {
+      "key": "proseware",
+      "label": "Company",
+      "text": "Proseware sensors instrumentation",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "sweden",
+      "label": "Country",
+      "text": "Sweden lapland baltic archipelago",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "henry",
+      "label": "Person",
+      "text": "Henry Nakamura payments architect",
+      "properties": {
+        "name": "Henry"
+      },
+      "source": "curated"
+    },
+    {
+      "key": "adventureworks",
+      "label": "Company",
+      "text": "Adventureworks cycles outfitter",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "chile",
+      "label": "Country",
+      "text": "Chile atacama patagonia andes",
+      "properties": {},
+      "source": "curated"
+    },
+    {
+      "key": "alice_rumor",
+      "label": "Person",
+      "text": "Alice Nguyen impersonator unverified profile",
+      "properties": {},
+      "source": "rumor"
+    },
+    {
+      "key": "carol_rumor",
+      "label": "Person",
+      "text": "Carol Mendes disputed unverified dossier",
+      "properties": {},
+      "source": "rumor"
+    }
+  ],
+  "updates": [],
+  "edges": [
+    {
+      "source": "alice",
+      "target": "northwind",
+      "label": "WORKS_AT"
+    },
+    {
+      "source": "northwind",
+      "target": "germany",
+      "label": "HEADQUARTERED_IN"
+    },
+    {
+      "source": "bob",
+      "target": "contoso",
+      "label": "WORKS_AT"
+    },
+    {
+      "source": "contoso",
+      "target": "japan",
+      "label": "HEADQUARTERED_IN"
+    },
+    {
+      "source": "carol",
+      "target": "fabrikam",
+      "label": "WORKS_AT"
+    },
+    {
+      "source": "fabrikam",
+      "target": "brazil",
+      "label": "HEADQUARTERED_IN"
+    },
+    {
+      "source": "dave",
+      "target": "tailspin",
+      "label": "WORKS_AT"
+    },
+    {
+      "source": "tailspin",
+      "target": "canada",
+      "label": "HEADQUARTERED_IN"
+    },
+    {
+      "source": "erin",
+      "target": "wingtip",
+      "label": "WORKS_AT"
+    },
+    {
+      "source": "wingtip",
+      "target": "kenya",
+      "label": "HEADQUARTERED_IN"
+    },
+    {
+      "source": "frank",
+      "target": "litware",
+      "label": "WORKS_AT"
+    },
+    {
+      "source": "litware",
+      "target": "france",
+      "label": "HEADQUARTERED_IN"
+    },
+    {
+      "source": "grace",
+      "target": "proseware",
+      "label": "WORKS_AT"
+    },
+    {
+      "source": "proseware",
+      "target": "sweden",
+      "label": "HEADQUARTERED_IN"
+    },
+    {
+      "source": "henry",
+      "target": "adventureworks",
+      "label": "WORKS_AT"
+    },
+    {
+      "source": "adventureworks",
+      "target": "chile",
+      "label": "HEADQUARTERED_IN"
+    }
+  ],
+  "questions": [
+    {
+      "id": "alice_hq",
+      "text": "In which nation is the firm that Alice works for headquartered",
+      "gold_evidence": [
+        "northwind",
+        "germany"
+      ],
+      "seed_entity": "alice"
+    },
+    {
+      "id": "bob_hq",
+      "text": "In which nation is the firm that Bob works for headquartered",
+      "gold_evidence": [
+        "contoso",
+        "japan"
+      ],
+      "seed_entity": "bob"
+    },
+    {
+      "id": "carol_hq",
+      "text": "In which nation is the firm that Carol works for headquartered",
+      "gold_evidence": [
+        "fabrikam",
+        "brazil"
+      ],
+      "seed_entity": "carol"
+    },
+    {
+      "id": "dave_hq",
+      "text": "In which nation is the firm that Dave works for headquartered",
+      "gold_evidence": [
+        "tailspin",
+        "canada"
+      ],
+      "seed_entity": "dave"
+    },
+    {
+      "id": "erin_hq",
+      "text": "In which nation is the firm that Erin works for headquartered",
+      "gold_evidence": [
+        "wingtip",
+        "kenya"
+      ],
+      "seed_entity": "erin"
+    },
+    {
+      "id": "frank_hq",
+      "text": "In which nation is the firm that Frank works for headquartered",
+      "gold_evidence": [
+        "litware",
+        "france"
+      ],
+      "seed_entity": "frank"
+    },
+    {
+      "id": "grace_hq",
+      "text": "In which nation is the firm that Grace works for headquartered",
+      "gold_evidence": [
+        "proseware",
+        "sweden"
+      ],
+      "seed_entity": "grace"
+    },
+    {
+      "id": "henry_hq",
+      "text": "In which nation is the firm that Henry works for headquartered",
+      "gold_evidence": [
+        "adventureworks",
+        "chile"
+      ],
+      "seed_entity": "henry"
+    }
+  ]
+}

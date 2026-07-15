@@ -27,7 +27,7 @@ categories = ["database-implementations", "data-structures"]
 # 0.5's proc-macros hard-code `::autumn_web`, so the 0.5 surface must live in a
 # crate whose extern prelude binds `autumn_web` to 0.5. It requires an explicit
 # `-p aletheia-server`; bare cargo stays root-scoped via `default-members`.
-members = ["crates/autumn-spike", "crates/aletheia-server"]
+members = ["crates/autumn-spike", "crates/aletheia-server", "crates/aletheia-eval"]
 default-members = ["."]
 # `python/` and `fuzz/` are independent crates with their own manifests (the
 # Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
@@ -155,7 +155,23 @@ chacha20poly1305 = "0.10"
 hkdf = "0.13"
 sha2 = "0.11"
 zeroize = { version = "1.8", features = ["derive"] }
-aws-sdk-kms = { version = "1.106.0", optional = true }
+aws-sdk-kms = { version = "1.106.0", optional = true, features = ["behavior-version-latest"] }
+# Mocked AWS transport for the KMS provider's Decrypt success-path test
+# (Issue #3587 review). Enabled ONLY by the `encryption-aws-kms` feature and
+# referenced solely from `#[cfg(test)]` code, so it never touches a normal build
+# without KMS. aws-sdk-kms already pulls the smithy runtime transitively; this
+# adds the purpose-built mock client on top.
+aws-smithy-mocks = { version = "0.3.0", optional = true }
+
+# Passphrase-wrapped master-key files (Issue #3587). The passphrase module is
+# always compiled with the (non-feature-gated) encryption module, so these KDF
+# crates are non-optional. `argon2` is the memory-hard default; `pbkdf2` is the
+# interoperable fallback. `pbkdf2` 0.12 is built on the digest-0.10 ecosystem,
+# so it is paired with a sha2-0.10 copy aliased as `sha2_pbkdf2` (the primary
+# `sha2` dep is 0.11, a different digest generation).
+argon2 = { version = "0.5", features = ["zeroize"] }
+pbkdf2 = "0.12"
+sha2_pbkdf2 = { package = "sha2", version = "0.10" }
 
 # Constant-time equality for API-key digest comparison (Issue #3350).
 subtle = "2.6"
@@ -350,10 +366,24 @@ mvcc-snapshots-tdd = []
 encryption = ["serde"]
 
 # AWS KMS key provider (optional)
-encryption-aws-kms = ["encryption", "dep:tokio"]
+# `aws-sdk-kms/test-util` supplies the `with_test_defaults_v2` config hook the
+# `mock_client!` macro needs for the #3587 Decrypt success-path test; it is only
+# pulled in when this feature is enabled and is referenced solely from
+# `#[cfg(test)]` code.
+encryption-aws-kms = [
+    "encryption",
+    "dep:tokio",
+    "aws-sdk-kms",
+    "aws-sdk-kms/test-util",
+    "dep:base64",
+    "dep:aws-smithy-mocks",
+]
 
-# HashiCorp Vault key provider (optional)
-encryption-vault = ["encryption", "dep:tokio", "dep:reqwest", "dep:native-tls"]
+# HashiCorp Vault key provider (optional). Uses blocking reqwest, so no async
+# runtime bridge (and no `dep:tokio`) is required. The vault path is TLS-backend
+# agnostic — reqwest's `rustls-tls` plus `reqwest::Certificate::from_pem` — so no
+# `native-tls`/OpenSSL dependency is pulled in.
+encryption-vault = ["encryption", "dep:reqwest", "dep:base64"]
 aws-sdk-kms = ["dep:aws-sdk-kms"]
 
 [profile.dev]

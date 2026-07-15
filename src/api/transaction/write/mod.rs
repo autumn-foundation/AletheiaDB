@@ -992,6 +992,166 @@ impl WriteTransaction {
         self.current.get_edge(id)
     }
 
+    /// Shared body for node replace (Issue #3549): buffer a full-overwrite
+    /// `UpdateNode` carrying `label_interned` + the *exact* `properties` map
+    /// (no PATCH merge). Callers pass an already-interned label so
+    /// [`remove_node_property`](WriteOps::remove_node_property) can reuse the
+    /// node's existing label without a (deprecated) interner `resolve`.
+    ///
+    /// Does not record the error metric — the public `WriteOps` entry points
+    /// wrap the call and do so.
+    fn buffer_node_replace(
+        &mut self,
+        node_id: NodeId,
+        label_interned: crate::core::interning::InternedString,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
+        // Check transaction state
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into());
+        }
+
+        // Verify the node exists (read-your-own-writes, Issue #3417) — a
+        // replace targets an existing entity, never conjures one. Unlike PATCH
+        // `update_node`, the existing map is NOT seeded into the new version:
+        // `properties` becomes the node's map *exactly*, so any prior key it
+        // omits is removed from current state (removal is encoded natively by
+        // the anchor/delta diff and survives WAL replay). The label is
+        // overwritten too.
+        let existing = self.read_own_node(node_id)?;
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+
+        // A replace may add, change, OR remove vector properties; mark the
+        // buffer so the temporal vector index is notified on commit if either
+        // the old or the new state carries a vector.
+        if !self.buffer.has_vector_operations()
+            && (existing.properties.contains_vector() || properties.contains_vector())
+        {
+            self.buffer.mark_has_vector_operations();
+        }
+
+        // Get timestamp: use provided valid_from or default to transaction start time
+        let timestamp = self.start_timestamp;
+        let valid_from = options.valid_from.unwrap_or(timestamp);
+
+        // Validate valid_from is not too far in future
+        validation::validate_valid_from_future(valid_from)?;
+
+        // Validate valid_from is not before entity creation.
+        let creation_time = {
+            let historical = self.historical.read();
+            historical.node_creation_time(node_id)
+        };
+        if let Some(creation_time) = creation_time {
+            validation::validate_valid_from_not_before_creation(
+                &format!("node:{}", node_id.as_u64()),
+                creation_time,
+                valid_from,
+            )?;
+        }
+
+        // Normalize an all-absent provenance bundle to `None` (Issue #3224).
+        let provenance = options
+            .provenance
+            .filter(|p| !p.is_empty())
+            .map(std::sync::Arc::new);
+
+        // Buffer the FULL overwrite. Reuses the UpdateNode op (no new WAL
+        // variant / format bump, Issue #3549): the exact target map plus a
+        // possibly-new label is the payload.
+        self.buffer.add(super::BufferedWrite::UpdateNode {
+            node_id,
+            version_id,
+            label: label_interned,
+            properties,
+            valid_from,
+            provenance,
+        })?;
+
+        Ok(())
+    }
+
+    /// Shared body for edge replace (Issue #3549): buffer a full-overwrite
+    /// `UpdateEdge` carrying the *exact* `properties` map (no PATCH merge),
+    /// preserving the already-read `edge`'s immutable source/target/type.
+    /// Callers pass an already-read `edge` so
+    /// [`remove_edge_property`](WriteOps::remove_edge_property) need not read it
+    /// a second time (mirrors [`buffer_node_replace`](Self::buffer_node_replace)).
+    ///
+    /// Does not record the error metric — the public `WriteOps` entry points
+    /// wrap the call and do so.
+    fn buffer_edge_replace(
+        &mut self,
+        edge: Edge,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
+        // Check transaction state
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into());
+        }
+
+        let edge_id = edge.id;
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+
+        // A replace may add/change/remove vector properties.
+        if !self.buffer.has_vector_operations()
+            && (edge.properties.contains_vector() || properties.contains_vector())
+        {
+            self.buffer.mark_has_vector_operations();
+        }
+
+        // Get timestamp: use provided valid_from or default to transaction start time
+        let timestamp = self.start_timestamp;
+        let valid_from = options.valid_from.unwrap_or(timestamp);
+
+        // Validate valid_from is not too far in future
+        validation::validate_valid_from_future(valid_from)?;
+
+        // Validate valid_from is not before the edge's own creation time
+        let creation_time = {
+            let historical = self.historical.read();
+            historical.edge_creation_time(edge_id)
+        };
+        if let Some(creation_time) = creation_time {
+            validation::validate_valid_from_not_before_creation(
+                &format!("edge:{}", edge_id.as_u64()),
+                creation_time,
+                valid_from,
+            )?;
+        }
+
+        // Normalize an all-absent provenance bundle to `None` (Issue #3224).
+        let provenance = options
+            .provenance
+            .filter(|p| !p.is_empty())
+            .map(std::sync::Arc::new);
+
+        // Buffer the FULL overwrite via the existing UpdateEdge op (no WAL
+        // format change, Issue #3549), preserving endpoints and type.
+        self.buffer.add(super::BufferedWrite::UpdateEdge {
+            edge_id,
+            version_id,
+            source: edge.source,
+            target: edge.target,
+            label: edge.label,
+            properties,
+            valid_from,
+            provenance,
+        })?;
+
+        Ok(())
+    }
+
     /// Enumerate edges CREATED earlier in THIS transaction that reference
     /// `node_id` as source or target and are still live in the buffer (Issue
     /// #3416 Pt4).
@@ -1530,6 +1690,128 @@ impl WriteOps for WriteTransaction {
         })();
 
         result.record_error_metric()
+    }
+
+    fn replace_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
+        let result = (|| {
+            // Check transaction state BEFORE interning so a replace on an
+            // inactive tx never interns the label (mirrors
+            // `update_node_with_options`; `buffer_node_replace` re-checks state
+            // for the `remove_node_property` caller).
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
+            }
+
+            let label_interned = GLOBAL_INTERNER.intern(label)?;
+            self.buffer_node_replace(node_id, label_interned, properties, options)
+        })();
+
+        result.record_error_metric()
+    }
+
+    fn replace_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
+            }
+
+            // Verify the edge exists and capture its immutable endpoints/type
+            // (read-your-own-writes, Issue #3417). Full overwrite of properties
+            // only: source/target/label are preserved from the existing edge.
+            let edge = self.read_own_edge(edge_id)?;
+            self.buffer_edge_replace(edge, properties, options)
+        })();
+
+        result.record_error_metric()
+    }
+
+    fn remove_node_property(&mut self, node_id: NodeId, key: &str) -> Result<()> {
+        // Check transaction state up front so an absent-key no-op on an
+        // inactive transaction still reports the state error.
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into())
+            .record_error_metric();
+        }
+
+        // Read-your-own-writes current map.
+        let node = match self.read_own_node(node_id) {
+            Ok(node) => node,
+            Err(e) => return Err(e).record_error_metric(),
+        };
+
+        // Absent key: no-op success, record NO new version (Issue #3549).
+        if !node.properties.contains_key(key) {
+            return Ok(());
+        }
+
+        // Drop the key and replace with the reduced map, preserving the node's
+        // existing (already-interned) label — no interner `resolve` needed.
+        let new_properties = PropertyMapBuilder::from_map(node.properties.clone())
+            .remove(key)
+            .build();
+
+        self.buffer_node_replace(
+            node_id,
+            node.label,
+            new_properties,
+            WriteRequestOptions::default(),
+        )
+        .record_error_metric()
+    }
+
+    fn remove_edge_property(&mut self, edge_id: EdgeId, key: &str) -> Result<()> {
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into())
+            .record_error_metric();
+        }
+
+        let edge = match self.read_own_edge(edge_id) {
+            Ok(edge) => edge,
+            Err(e) => return Err(e).record_error_metric(),
+        };
+
+        // Absent key: no-op success, record NO new version.
+        if !edge.properties.contains_key(key) {
+            return Ok(());
+        }
+
+        let new_properties = PropertyMapBuilder::from_map(edge.properties.clone())
+            .remove(key)
+            .build();
+
+        // Reuse the already-read edge (NIT: avoid a second `read_own_edge`).
+        // `buffer_edge_replace` preserves endpoints/type; record the error
+        // metric here since the helper does not.
+        self.buffer_edge_replace(edge, new_properties, WriteRequestOptions::default())
+            .record_error_metric()
     }
 
     fn delete_node_with_options(

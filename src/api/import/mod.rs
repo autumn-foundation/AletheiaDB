@@ -44,6 +44,7 @@
 
 mod mapping;
 mod neo4j;
+mod neo4j_cypher;
 mod parse;
 
 #[cfg(feature = "parquet")]
@@ -58,11 +59,15 @@ mod parquet_tests;
 #[cfg(test)]
 mod neo4j_tests;
 
+#[cfg(test)]
+mod neo4j_cypher_tests;
+
 pub use mapping::{ColumnType, EdgeMapping, LabelSource, NodeMapping, PropertyMapping};
 pub use neo4j::{
     CoercionNote, LabelMapEntry, LabelStrategy, Neo4jCsvOptions, Neo4jFidelityReport, TypeMapEntry,
     UnsupportedNote,
 };
+pub use neo4j_cypher::Neo4jCypherOptions;
 
 use std::collections::HashMap;
 use std::fmt;

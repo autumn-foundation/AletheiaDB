@@ -31,6 +31,7 @@ pub mod app;
 pub mod edge_tools;
 pub mod http_routes;
 pub mod node_tools;
+pub mod schema_batch_tools;
 pub mod security;
 pub mod state;
 pub mod traverse_temporal_tools;
