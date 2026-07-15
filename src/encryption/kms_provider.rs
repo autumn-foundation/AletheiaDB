@@ -155,6 +155,24 @@ impl KmsKeyProvider {
         })
     }
 
+    /// Test-only constructor injecting an already-built KMS `Client` (e.g. one
+    /// backed by a mocked transport) plus the raw ciphertext blob, bypassing the
+    /// real AWS credential/endpoint config. Not part of the public API; lets the
+    /// Decrypt success path be exercised without a live KMS.
+    #[cfg(test)]
+    fn with_client_for_test(client: Client, blob: Vec<u8>) -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        Self {
+            client,
+            key_id: "alias/test".to_string(),
+            blob,
+            runtime,
+        }
+    }
+
     /// Run the (owned, `'static`) decrypt future to completion, bridging the
     /// async client into the synchronous trait without panicking inside an
     /// ambient runtime.
@@ -359,6 +377,49 @@ mod tests {
         assert!(
             matches!(err, KeyProviderError::KeyNotFound),
             "unknown version must be KeyNotFound, got: {err}"
+        );
+    }
+
+    #[test]
+    fn mocked_decrypt_returns_exact_plaintext() {
+        // Replay a canned KMS Decrypt success whose plaintext is a fixed, known
+        // 32 bytes and assert get_mek() returns exactly those bytes — the
+        // success path the unreachable-endpoint test cannot cover.
+        use aws_sdk_kms::operation::decrypt::DecryptOutput;
+        use aws_smithy_mocks::{mock, mock_client};
+
+        let expected = [0x5Au8; 32];
+        let rule = mock!(aws_sdk_kms::Client::decrypt).then_output(move || {
+            DecryptOutput::builder()
+                .plaintext(Blob::new(expected.to_vec()))
+                .build()
+        });
+        let client = mock_client!(aws_sdk_kms, &[&rule]);
+
+        let provider = KmsKeyProvider::with_client_for_test(client, b"wrapped-blob".to_vec());
+        let mek = provider.get_mek().expect("mocked decrypt should succeed");
+        assert_eq!(mek.as_ref(), &expected);
+    }
+
+    #[test]
+    fn mocked_decrypt_non_32_byte_plaintext_is_invalid_format() {
+        // A mocked Decrypt returning a non-32-byte plaintext must map to a typed
+        // InvalidKeyFormat, never a panic.
+        use aws_sdk_kms::operation::decrypt::DecryptOutput;
+        use aws_smithy_mocks::{mock, mock_client};
+
+        let rule = mock!(aws_sdk_kms::Client::decrypt).then_output(|| {
+            DecryptOutput::builder()
+                .plaintext(Blob::new(vec![1u8; 16]))
+                .build()
+        });
+        let client = mock_client!(aws_sdk_kms, &[&rule]);
+
+        let provider = KmsKeyProvider::with_client_for_test(client, b"wrapped-blob".to_vec());
+        let err = provider.get_mek().unwrap_err();
+        assert!(
+            matches!(err, KeyProviderError::InvalidKeyFormat(_)),
+            "non-32-byte plaintext must be InvalidKeyFormat, got: {err}"
         );
     }
 

@@ -98,6 +98,14 @@ impl VaultConfig {
 }
 
 /// Reads the MEK from a Vault KV v2 secret over HTTPS/HTTP.
+///
+/// # Runtime context
+///
+/// This provider uses `reqwest::blocking` internally, so it must be
+/// **constructed and called from a synchronous context** (not from within a
+/// running Tokio runtime, which would panic on the nested blocking call).
+/// Unlike the KMS provider it has no ambient-runtime bridge; sourcing the MEK at
+/// synchronous database startup is the intended path.
 pub struct VaultKeyProvider {
     client: reqwest::blocking::Client,
     address: String,
@@ -229,9 +237,10 @@ impl VaultKeyProvider {
 fn decode_key_material(value: &str) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
     let trimmed = value.trim();
 
-    // Hex first (64 chars).
+    // Hex first (64 chars). Hold the decoded key material in a zeroizing buffer
+    // so it is wiped on drop even before it is copied into the fixed array.
     if trimmed.len() == 64
-        && let Some(decoded) = crate::core::hex::decode(trimmed)
+        && let Some(decoded) = crate::core::hex::decode(trimmed).map(Zeroizing::new)
         && decoded.len() == 32
     {
         let mut key = Zeroizing::new([0u8; 32]);
@@ -240,7 +249,7 @@ fn decode_key_material(value: &str) -> Result<Zeroizing<[u8; 32]>, KeyProviderEr
     }
 
     // Base64 of exactly 32 bytes.
-    if let Ok(decoded) = BASE64.decode(trimmed.as_bytes())
+    if let Ok(decoded) = BASE64.decode(trimmed.as_bytes()).map(Zeroizing::new)
         && decoded.len() == 32
     {
         let mut key = Zeroizing::new([0u8; 32]);
