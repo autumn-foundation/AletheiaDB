@@ -744,20 +744,25 @@ fn handle_import(args: Vec<String>) -> Result<(), String> {
     let nodes = arg_values(&args, "--nodes");
     let rels = arg_values(&args, "--relationships");
 
-    // Reject binary dump / Cypher-script inputs with a clear pointer to CSV.
+    // APOC Cypher-script dump import (Issue #3356): a single `.cypher` file (or
+    // `--format neo4j-cypher`) carries both nodes and relationships. Route it to
+    // the dedicated library entry point before the CSV-specific handling.
+    let cypher_selected = matches!(format.as_str(), "neo4j-cypher" | "cypher");
+    let has_cypher_file = nodes
+        .iter()
+        .chain(rels.iter())
+        .any(|p| p.to_ascii_lowercase().ends_with(".cypher"));
+    if cypher_selected || has_cypher_file {
+        return handle_import_cypher(&args, &nodes, &rels);
+    }
+
+    // Reject binary dump inputs with a clear pointer to CSV.
     for path in nodes.iter().chain(rels.iter()) {
         let lower = path.to_ascii_lowercase();
         if lower.ends_with(".dump") {
             return Err(
                 "neo4j binary dump import is not supported; export to CSV with \
                 'neo4j-admin database import' headers or apoc.export.csv"
-                    .to_string(),
-            );
-        }
-        if lower.ends_with(".cypher") {
-            return Err(
-                "neo4j Cypher-script dump import is a documented follow-up; \
-                use CSV export (neo4j-admin database import / apoc.export.csv)"
                     .to_string(),
             );
         }
@@ -838,6 +843,81 @@ fn handle_import(args: Vec<String>) -> Result<(), String> {
     let value =
         serde_json::to_value(&report).map_err(|e| format!("failed to render report JSON: {e}"))?;
     if let Some(report_path) = arg_value(&args, "--report") {
+        let rendered = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("failed to render report JSON: {e}"))?;
+        fs::write(&report_path, rendered)
+            .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
+    }
+    print_json_pretty(&value)
+}
+
+/// Import an APOC Cypher-script dump (`apoc.export.cypher.all`), Issue #3356.
+///
+/// A single `.cypher` dump file carries both nodes and relationships, so it is
+/// supplied via `--nodes <file>` (or `--relationships <file>`). Options mirror
+/// the CSV importer's `--label-strategy`, `--vector-property`,
+/// `--valid-from-property`, `--strict-types`, and `--on-error` flags.
+#[cfg(feature = "import")]
+fn handle_import_cypher(args: &[String], nodes: &[String], rels: &[String]) -> Result<(), String> {
+    use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCypherOptions};
+
+    let paths: Vec<String> = nodes.iter().chain(rels.iter()).cloned().collect();
+    let path = match paths.as_slice() {
+        [single] => single.clone(),
+        [] => {
+            return Err(
+                "usage: aletheia import --format neo4j-cypher --nodes <dump.cypher> [options]"
+                    .to_string(),
+            );
+        }
+        _ => {
+            return Err(
+                "the APOC Cypher-script dump import takes a single dump file (one \
+                 apoc.export.cypher.all output holds both nodes and relationships)"
+                    .to_string(),
+            );
+        }
+    };
+
+    let mut opts = Neo4jCypherOptions::new();
+    for name in arg_values(args, "--vector-property") {
+        opts.vector_properties.insert(name);
+    }
+    if let Some(name) = arg_value(args, "--valid-from-property") {
+        opts.valid_from_property = Some(name);
+    }
+    if let Some(strategy) = arg_value(args, "--label-strategy") {
+        opts.label_strategy = match strategy.as_str() {
+            "first" => LabelStrategy::First,
+            "concat" => LabelStrategy::Concat,
+            "property" => LabelStrategy::Property,
+            other => {
+                return Err(format!(
+                    "invalid --label-strategy '{other}', expected first|concat|property"
+                ));
+            }
+        };
+    }
+    if args.iter().any(|a| a == "--strict-types") {
+        opts.strict_types = true;
+    }
+    let failure_mode = match arg_value(args, "--on-error").as_deref() {
+        None | Some("abort") => FailureMode::Abort,
+        Some("skip") => FailureMode::SkipAndReport,
+        Some(other) => {
+            return Err(format!("invalid --on-error '{other}', expected abort|skip"));
+        }
+    };
+
+    let db = open_db()?;
+    let mut importer = db.import().failure_mode(failure_mode);
+    let report = importer
+        .neo4j_import_cypher(&path, &opts)
+        .map_err(|e| format!("import failed: {e}"))?;
+
+    let value =
+        serde_json::to_value(&report).map_err(|e| format!("failed to render report JSON: {e}"))?;
+    if let Some(report_path) = arg_value(args, "--report") {
         let rendered = serde_json::to_string_pretty(&value)
             .map_err(|e| format!("failed to render report JSON: {e}"))?;
         fs::write(&report_path, rendered)
