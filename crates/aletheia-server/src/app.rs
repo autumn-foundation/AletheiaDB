@@ -11,6 +11,7 @@
 //! (`routes`/`openapi`/`mount_mcp`/`secure_mcp`/`state_initializer`), so Lane B
 //! can lift this into a `run_server` with minimal change.
 
+use crate::constraints_lineage_audit_tools;
 use crate::edge_tools;
 use crate::http_routes;
 use crate::node_tools;
@@ -108,6 +109,14 @@ pub fn try_build_server_testapp(
             schema_batch_tools::temporal_extent,
             schema_batch_tools::database_stats,
             schema_batch_tools::apply_batch,
+            constraints_lineage_audit_tools::enable_vector_index,
+            constraints_lineage_audit_tools::enable_unique_constraint,
+            constraints_lineage_audit_tools::list_unique_constraints,
+            constraints_lineage_audit_tools::lineage_upstream,
+            constraints_lineage_audit_tools::lineage_downstream,
+            constraints_lineage_audit_tools::audit_export,
+            constraints_lineage_audit_tools::verify_chain,
+            constraints_lineage_audit_tools::export_chain_head,
         ])
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");

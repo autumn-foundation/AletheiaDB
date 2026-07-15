@@ -53,3 +53,6 @@ zeroize = "1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }
 # `tower::ServiceExt::oneshot` drives the legacy 0.4 router in parity tests.
 tower = { version = "0.5", features = ["util"] }
+# Chain-enabled DB fixtures (verify_chain / export_chain_head parity, PR7) need a
+# durable data dir; matches the main crate's tempfile pin.
+tempfile = "3.27"
