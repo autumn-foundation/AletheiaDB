@@ -1051,6 +1051,127 @@ pub trait WriteOps: ReadOps {
     fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
         self.delete_edge_with_valid_time(edge_id, None)
     }
+
+    // ===== Replace / tombstone (non-PATCH) writes (Issue #3549) =====
+
+    /// Replace a node's **entire** property map and label (non-PATCH overwrite).
+    ///
+    /// Unlike [`update_node`](Self::update_node) (PATCH: merges the incoming map
+    /// onto the existing one), this performs a full overwrite: the node's
+    /// resulting property map is *exactly* `properties`, and its label becomes
+    /// `label`. Any key present on the prior version but absent from
+    /// `properties` is **removed** from current state — its history is
+    /// preserved and still recallable `AS OF` an earlier bi-temporal coordinate
+    /// (anchor *both* dimensions before the replace). Passing an empty map
+    /// removes all properties while keeping the node in existence.
+    ///
+    /// Node label mutation is only possible through this method;
+    /// [`update_node`](Self::update_node) preserves the label.
+    ///
+    /// This is the most general node-replace method; the other `replace_node*`
+    /// methods delegate to it. The provenance recorded here describes *this*
+    /// version only — it is not inherited from the version being replaced.
+    fn replace_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()>;
+
+    /// Replace a node's entire property map and label with an optional backdated
+    /// `valid_from` time. See [`replace_node_with_options`](Self::replace_node_with_options).
+    fn replace_node_with_valid_time(
+        &mut self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.replace_node_with_options(
+            node_id,
+            label,
+            properties,
+            WriteRequestOptions {
+                valid_from,
+                provenance: None,
+            },
+        )
+    }
+
+    /// Replace a node's entire property map and label (full overwrite).
+    ///
+    /// Convenience wrapper: `valid_from` defaults to the transaction start time.
+    /// See [`replace_node_with_options`](Self::replace_node_with_options).
+    fn replace_node(
+        &mut self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+    ) -> Result<()> {
+        self.replace_node_with_valid_time(node_id, label, properties, None)
+    }
+
+    /// Replace an edge's **entire** property map (non-PATCH overwrite).
+    ///
+    /// Overwrites the property map exactly, like
+    /// [`replace_node_with_options`](Self::replace_node_with_options), but the
+    /// edge's `source`, `target`, and edge type (label) are **immutable** and
+    /// preserved from the existing edge (edge-type mutation is out of scope).
+    /// Any key absent from `properties` is removed from current state; history
+    /// is preserved. Passing an empty map removes all properties.
+    ///
+    /// This is the most general edge-replace method; the other `replace_edge*`
+    /// methods delegate to it.
+    fn replace_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()>;
+
+    /// Replace an edge's entire property map with an optional backdated
+    /// `valid_from` time. See [`replace_edge_with_options`](Self::replace_edge_with_options).
+    fn replace_edge_with_valid_time(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.replace_edge_with_options(
+            edge_id,
+            properties,
+            WriteRequestOptions {
+                valid_from,
+                provenance: None,
+            },
+        )
+    }
+
+    /// Replace an edge's entire property map (full overwrite; endpoints/type
+    /// immutable). Convenience wrapper: `valid_from` defaults to the
+    /// transaction start time. See
+    /// [`replace_edge_with_options`](Self::replace_edge_with_options).
+    fn replace_edge(&mut self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
+        self.replace_edge_with_valid_time(edge_id, properties, None)
+    }
+
+    /// Remove a single property key from a node (read-modify-replace).
+    ///
+    /// Reads the node's current property map (read-your-own-writes within the
+    /// transaction), drops `key`, and records a full replacement version with
+    /// the reduced map and the node's existing label. Removing a key that is
+    /// **absent** is a no-op that still succeeds and records **no** new version.
+    /// History is preserved: the removed key is still recallable `AS OF` an
+    /// earlier bi-temporal coordinate.
+    fn remove_node_property(&mut self, node_id: NodeId, key: &str) -> Result<()>;
+
+    /// Remove a single property key from an edge (read-modify-replace).
+    ///
+    /// Edge counterpart of [`remove_node_property`](Self::remove_node_property);
+    /// the edge's endpoints and type are preserved. Removing an absent key is a
+    /// no-op success that records no new version.
+    fn remove_edge_property(&mut self, edge_id: EdgeId, key: &str) -> Result<()>;
 }
 
 #[cfg(test)]
