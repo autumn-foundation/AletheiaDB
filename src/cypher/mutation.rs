@@ -37,10 +37,30 @@
 //!   relationships is refused (use `DETACH DELETE`).
 //! - `RETURN` of bound variables (bare or `AS`-aliased).
 //!
-//! Deferred to follow-ups and rejected cleanly: `MERGE`, `REMOVE`, label
-//! mutation (`SET n:Label`), whole-entity replacement (`SET n = {...}`),
-//! variable-length relationships in a write, and aggregate/property `RETURN`
-//! projections.
+//! - `MERGE <pattern> [ON CREATE SET ...] [ON MATCH SET ...]` (Issue #3548):
+//!   match the pattern if present, otherwise create the *whole* pattern
+//!   (openCypher whole-pattern semantics). A bare match records no new version;
+//!   a create records new versions; `ON MATCH SET` on a matched entity records
+//!   a version (it is an update). Matching reuses the current-state matcher
+//!   (`match_bindings`) as a pre-transaction (check-then-act) read.
+//!
+//!   For a **single-node** MERGE pattern (one node, no relationship), matching
+//!   additionally consults a statement-local ledger of nodes created earlier in
+//!   the same statement, so repeated single-node MERGEs of the same key --
+//!   across multiple reading-clause rows OR multiple MERGE clauses -- dedup to a
+//!   single node (openCypher requires exactly one). A **relationship/path**
+//!   MERGE keeps whole-pattern semantics: the end node is (re)created per row
+//!   when the whole path is absent (the well-known openCypher MERGE-on-a-path
+//!   behavior), so it is *not* deduped against the ledger.
+//!
+//!   `ON` and `MERGE` are now **reserved keywords** (a backward-incompatible
+//!   consequence of adding the MERGE grammar): they can no longer be used as
+//!   bare identifiers, labels, relationship types, or property keys.
+//!
+//! Deferred to follow-ups and rejected cleanly: `REMOVE`, label mutation
+//! (`SET n:Label`), whole-entity replacement (`SET n = {...}`), variable-length
+//! relationships in a write, multi-label MERGE nodes, and aggregate/property
+//! `RETURN` projections.
 
 use std::collections::HashSet;
 
@@ -58,7 +78,7 @@ use super::ast::{
 };
 use super::converter::CypherParameterValue;
 use super::error::CypherError;
-use super::multi_pattern::{Binding, cypher_value_to_property, match_bindings};
+use super::multi_pattern::{Binding, cypher_value_to_property, loosely_equal, match_bindings};
 
 type Params = std::collections::HashMap<String, CypherParameterValue>;
 
@@ -108,18 +128,26 @@ pub fn execute(
         // ledger lets a plain DELETE of such an endpoint refuse cleanly instead
         // of aborting at commit with a cryptic dangling-edge error (Minor 1).
         let mut created_edges: Vec<(EdgeId, NodeId, NodeId)> = Vec::new();
+        // Nodes CREATEd by THIS statement, as (node, label, resolved properties).
+        // A single-node MERGE consults this ledger (in addition to committed
+        // current state) so repeated single-node MERGEs of the same key across
+        // rows/clauses dedup to one node -- the committed `match_bindings` read
+        // never sees this transaction's own buffered creates (Core bug fix).
+        let mut created_nodes: Vec<(NodeId, String, PropertyMap)> = Vec::new();
 
         for base in &base_rows {
             let mut binding = base.clone();
             for clause in &write.clauses {
                 apply_clause(
                     tx,
+                    db,
                     clause,
                     &mut binding,
                     params,
                     &mut deleted_nodes,
                     &mut deleted_edges,
                     &mut created_edges,
+                    &mut created_nodes,
                 )?;
             }
             if let Some(ret) = &write.return_clause {
@@ -151,11 +179,19 @@ fn validate(write: &CypherWriteStatement) -> std::result::Result<(), CypherError
         }
     }
     for clause in &write.clauses {
-        if let CypherWriteClause::Create(patterns) = clause {
-            for pattern in patterns {
-                reject_varlength(pattern, "a CREATE pattern")?;
-                validate_create_pattern(pattern)?;
+        match clause {
+            CypherWriteClause::Create(patterns) => {
+                for pattern in patterns {
+                    reject_varlength(pattern, "a CREATE pattern")?;
+                    validate_create_pattern(pattern)?;
+                }
             }
+            CypherWriteClause::Merge { pattern, .. } => {
+                reject_varlength(pattern, "a MERGE pattern")?;
+                validate_create_pattern(pattern)?;
+                validate_merge_pattern(pattern)?;
+            }
+            CypherWriteClause::Set(_) | CypherWriteClause::Delete { .. } => {}
         }
     }
     if let Some(ret) = &write.return_clause {
@@ -198,6 +234,25 @@ fn validate_create_pattern(pattern: &CypherPattern) -> std::result::Result<(), C
     Ok(())
 }
 
+/// Statically validate a `MERGE` pattern's nodes: AletheiaDB nodes are
+/// single-labelled, so a multi-label node (`(n:A:B)`) can never be created and
+/// is rejected before any transaction opens. A node with zero labels is allowed
+/// (it must resolve to a variable already bound by a leading `MATCH`; that is
+/// checked at runtime).
+fn validate_merge_pattern(pattern: &CypherPattern) -> std::result::Result<(), CypherError> {
+    for element in &pattern.elements {
+        if let CypherPatternElement::Node(node) = element
+            && node.labels.len() > 1
+        {
+            return Err(CypherError::UnsupportedFeature(
+                "MERGE does not support multi-label nodes (AletheiaDB nodes are single-labelled)"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate the `RETURN` of a write statement: only bound variables (bare or
 /// `AS`-aliased) or `*`, with no ordering/pagination/deduplication in v1.
 fn validate_return(ret: &CypherReturn) -> std::result::Result<(), CypherError> {
@@ -234,17 +289,19 @@ fn validate_return(ret: &CypherReturn) -> std::result::Result<(), CypherError> {
 #[allow(clippy::too_many_arguments)]
 fn apply_clause(
     tx: &mut crate::api::transaction::WriteTransaction,
+    db: &AletheiaDB,
     clause: &CypherWriteClause,
     binding: &mut Binding,
     params: &Params,
     deleted_nodes: &mut HashSet<NodeId>,
     deleted_edges: &mut HashSet<EdgeId>,
     created_edges: &mut Vec<(EdgeId, NodeId, NodeId)>,
+    created_nodes: &mut Vec<(NodeId, String, PropertyMap)>,
 ) -> Result<()> {
     match clause {
         CypherWriteClause::Create(patterns) => {
             for pattern in patterns {
-                create_pattern(tx, pattern, binding, params, created_edges)?;
+                create_pattern(tx, pattern, binding, params, created_edges, created_nodes)?;
             }
             Ok(())
         }
@@ -260,7 +317,229 @@ fn apply_clause(
             deleted_edges,
             created_edges,
         ),
+        CypherWriteClause::Merge {
+            pattern,
+            on_create,
+            on_match,
+        } => apply_merge(
+            tx,
+            db,
+            pattern,
+            on_create,
+            on_match,
+            binding,
+            params,
+            deleted_nodes,
+            deleted_edges,
+            created_edges,
+            created_nodes,
+        ),
     }
+}
+
+/// Apply a `MERGE` clause (Issue #3548): match the pattern if it already exists,
+/// otherwise create the *entire* pattern (openCypher whole-pattern semantics).
+///
+/// The match is a pre-transaction (check-then-act) read against committed
+/// current state via [`match_bindings`], filtered to rows consistent with the
+/// variables already bound in this row (so a leading variable bound by a prior
+/// `MATCH` constrains the match rather than re-scanning freely).
+///
+/// # Bi-temporal correctness
+///
+/// - A bare **match** records **no** new version: `on_match` is empty, so
+///   [`apply_set`] performs no update.
+/// - A **create** records new versions (one per created node/edge).
+/// - `ON MATCH SET` on a matched entity records a new version (it is an update).
+/// - `ON CREATE SET` folds into the same first version window as the create's
+///   own `SET` coalescing (a separate `update_node`, mirroring `CREATE ... SET`).
+///
+/// # Same-statement dedup (single-node MERGE)
+///
+/// The committed [`match_bindings`] read cannot see this transaction's own
+/// buffered creates, so a naive per-row MERGE would create openCypher-illegal
+/// duplicates for a **single-node** pattern (e.g.
+/// `MATCH (p:Person) MERGE (c:City {name:'NYC'})` over N persons must yield ONE
+/// NYC, not N). To fix this, when the pattern is a single node and no committed
+/// match exists, we also consult a statement-local ledger of nodes created
+/// earlier in this same statement (`created_nodes`), matching by label and the
+/// pattern's specified properties. A ledger hit is treated as a MATCH (bind it,
+/// apply `on_match`, no new node/version); a miss creates and records the node.
+///
+/// A **relationship/path** MERGE deliberately does NOT dedup against the ledger:
+/// openCypher matches the *whole path*, so
+/// `MATCH (p:Person) MERGE (p)-[:R]->(c:City {name:'NYC'})` correctly creates
+/// one NYC per person (a NYC connected only to p1 does not satisfy p2's path).
+///
+/// # v1 limitation: multi-match
+///
+/// The single-binding-per-row write executor cannot expand one MERGE into
+/// multiple output rows. A MERGE whose pattern matches MORE THAN ONE committed
+/// entity is therefore **rejected** with a structured `UnsupportedFeature`
+/// error rather than silently binding the first (openCypher would bind all and
+/// apply `ON MATCH SET` to every one). Add a uniquely-identifying property or a
+/// unique constraint so the pattern identifies at most one entity.
+///
+/// # v1 concurrency
+///
+/// Without a unique constraint on the merged property, the pre-transaction
+/// match is a documented check-then-act window (mirrors Issue #560): two racing
+/// MERGE-creates can both create. Declaring
+/// `db.unique_constraint(label, prop).enable()` closes the window --- the second
+/// committer aborts (first-committer-wins).
+#[allow(clippy::too_many_arguments)]
+fn apply_merge(
+    tx: &mut crate::api::transaction::WriteTransaction,
+    db: &AletheiaDB,
+    pattern: &CypherPattern,
+    on_create: &[CypherSetItem],
+    on_match: &[CypherSetItem],
+    binding: &mut Binding,
+    params: &Params,
+    deleted_nodes: &HashSet<NodeId>,
+    deleted_edges: &HashSet<EdgeId>,
+    created_edges: &mut Vec<(EdgeId, NodeId, NodeId)>,
+    created_nodes: &mut Vec<(NodeId, String, PropertyMap)>,
+) -> Result<()> {
+    // Pre-transaction match against committed current state, filtered to rows
+    // consistent with variables already bound in this row. Collected into a Vec
+    // so the borrow of `binding` ends before the branches mutate it.
+    let committed: Vec<Binding> = match_bindings(db, std::slice::from_ref(pattern), None, params)?
+        .into_iter()
+        .filter(|row| consistent_with(row, binding))
+        .collect();
+
+    // Second finding: a MERGE pattern that matches more than one committed
+    // entity cannot be expressed by the single-binding-per-row executor. Reject
+    // rather than silently binding the first / dropping rows (openCypher would
+    // bind ALL matches and apply ON MATCH SET to every one).
+    if committed.len() > 1 {
+        return Err(CypherError::UnsupportedFeature(
+            "MERGE pattern matched multiple existing entities; MERGE requires a pattern that \
+             identifies at most one (add a uniquely-identifying property or a unique constraint)"
+                .to_string(),
+        )
+        .into());
+    }
+
+    if let Some(row) = committed.into_iter().next() {
+        // MATCH branch: adopt the newly-discovered bindings (a leading
+        // variable already present is rebound to the same id), then apply
+        // ON MATCH SET only. A bare match (empty on_match) records nothing.
+        for (name, entity) in row {
+            bind(binding, &name, entity);
+        }
+        apply_set(tx, on_match, binding, params, deleted_nodes, deleted_edges)?;
+        return Ok(());
+    }
+
+    // No committed match. For a single-node pattern that would be created (an
+    // unbound/labelled node), consult this statement's created-node ledger so
+    // repeated single-node MERGEs of the same key dedup to one node.
+    if let Some(node) = single_creatable_node(pattern, binding)
+        && let Some(id) = find_created_single_node(node, created_nodes, params)?
+    {
+        // Ledger MATCH branch: bind the buffered-created node and apply
+        // ON MATCH SET only (no create, no whole-pattern duplicate).
+        if let Some(var) = &node.variable {
+            bind(binding, var, EntityResult::NodeId(id));
+        }
+        apply_set(tx, on_match, binding, params, deleted_nodes, deleted_edges)?;
+        return Ok(());
+    }
+
+    // CREATE branch: create the whole pattern (a bound leading variable is
+    // reused; the unbound remainder is created), then ON CREATE SET.
+    create_pattern(tx, pattern, binding, params, created_edges, created_nodes)?;
+    apply_set(tx, on_create, binding, params, deleted_nodes, deleted_edges)?;
+    Ok(())
+}
+
+/// If a MERGE pattern is a single node that would be *created* (exactly one
+/// label and not an already-bound variable), return that node element; else
+/// `None`. A bound leading variable (`MATCH (a) MERGE (a) ...`) already resolves
+/// to an existing node, and a relationship/path pattern keeps whole-pattern
+/// semantics, so neither participates in single-node ledger dedup.
+fn single_creatable_node<'p>(
+    pattern: &'p CypherPattern,
+    binding: &Binding,
+) -> Option<&'p CypherNodePattern> {
+    let [CypherPatternElement::Node(node)] = pattern.elements.as_slice() else {
+        return None;
+    };
+    if node.labels.len() != 1 {
+        return None;
+    }
+    if let Some(var) = &node.variable
+        && lookup(binding, var).is_some()
+    {
+        return None; // already bound to an existing node
+    }
+    Some(node)
+}
+
+/// Find a node created earlier in this same statement whose label equals the
+/// pattern node's label and whose stored properties satisfy every property the
+/// pattern node specifies. Mirrors the current-state matcher's label+property
+/// check against buffered creates.
+fn find_created_single_node(
+    node: &CypherNodePattern,
+    created_nodes: &[(NodeId, String, PropertyMap)],
+    params: &Params,
+) -> Result<Option<NodeId>> {
+    let want_label = &node.labels[0];
+    for (id, label, props) in created_nodes {
+        if label != want_label {
+            continue;
+        }
+        if node_props_satisfied(&node.properties, props, params)? {
+            return Ok(Some(*id));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether every `(key, value)` the pattern node specifies is present in a
+/// created node's stored property map and equal (with int/float coercion,
+/// matching the current-state matcher's `loosely_equal`).
+fn node_props_satisfied(
+    props: &[(String, CypherValue)],
+    stored: &PropertyMap,
+    params: &Params,
+) -> Result<bool> {
+    for (key, want) in props {
+        let want = cypher_value_to_property(want, params)?;
+        match stored.get(key) {
+            Some(actual) if loosely_equal(actual, &want) => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+/// A matched candidate row is usable only if it agrees with every variable
+/// already bound in the current row: for each shared variable the entity ids
+/// must be identical. Variables bound only in the candidate (the freshly
+/// matched remainder) impose no constraint.
+fn consistent_with(row: &Binding, binding: &Binding) -> bool {
+    binding
+        .iter()
+        .all(|(name, entity)| match lookup(row, name) {
+            Some(other) => entity_same(entity, other),
+            None => true,
+        })
+}
+
+/// Two [`EntityResult`]s refer to the same graph entity (same node id or same
+/// edge id).
+fn entity_same(a: &EntityResult, b: &EntityResult) -> bool {
+    if let (Some(x), Some(y)) = (node_id_of(a), node_id_of(b)) {
+        return x == y;
+    }
+    if let (Some(x), Some(y)) = (edge_id_of(a), edge_id_of(b)) {
+        return x == y;
+    }
+    false
 }
 
 /// Create the nodes and relationships described by one `CREATE` pattern,
@@ -271,13 +550,14 @@ fn create_pattern(
     binding: &mut Binding,
     params: &Params,
     created_edges: &mut Vec<(EdgeId, NodeId, NodeId)>,
+    created_nodes: &mut Vec<(NodeId, String, PropertyMap)>,
 ) -> Result<()> {
     let mut prev_node: Option<NodeId> = None;
     let mut idx = 0;
     while idx < pattern.elements.len() {
         match &pattern.elements[idx] {
             CypherPatternElement::Node(node) => {
-                let id = resolve_or_create_node(tx, node, binding, params)?;
+                let id = resolve_or_create_node(tx, node, binding, params, created_nodes)?;
                 prev_node = Some(id);
                 idx += 1;
             }
@@ -294,7 +574,7 @@ fn create_pattern(
                     )
                     .into());
                 };
-                let right = resolve_or_create_node(tx, right_pat, binding, params)?;
+                let right = resolve_or_create_node(tx, right_pat, binding, params, created_nodes)?;
 
                 // Direction/type validated statically; exactly one type present.
                 let rel_type = &rel.rel_types[0];
@@ -330,6 +610,7 @@ fn resolve_or_create_node(
     node: &CypherNodePattern,
     binding: &mut Binding,
     params: &Params,
+    created_nodes: &mut Vec<(NodeId, String, PropertyMap)>,
 ) -> Result<NodeId> {
     if let Some(var) = &node.variable
         && let Some(existing) = lookup(binding, var)
@@ -360,7 +641,10 @@ fn resolve_or_create_node(
         .into());
     }
     let props = build_props(&node.properties, params)?;
-    let id = tx.create_node(&node.labels[0], props)?;
+    let id = tx.create_node(&node.labels[0], props.clone())?;
+    // Record in the statement-local ledger so a later single-node MERGE of the
+    // same (label, properties) key can dedup to this buffered-created node.
+    created_nodes.push((id, node.labels[0].clone(), props));
     if let Some(var) = &node.variable {
         bind(binding, var, EntityResult::NodeId(id));
     }

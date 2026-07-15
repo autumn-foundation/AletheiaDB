@@ -640,6 +640,14 @@ fn supported_execute_cases() -> Vec<Case> {
             "CREATE (n:Person {name: 'Zed'})",
             Executes(0),
         ),
+        // MERGE (Issue #3548): no `Zed` in the seed, so this creates and returns
+        // one node (the match branch is exercised in `cypher::tests::mutations`).
+        Case::new(
+            "mutating",
+            "merge",
+            "MERGE (n:Person {name: 'Zed'}) RETURN n",
+            Executes(1),
+        ),
         Case::new(
             "mutating",
             "create_relationship",
@@ -821,19 +829,12 @@ fn rejected_cases() -> Vec<Case> {
 
     vec![
         // ---- mutating clauses still intentionally unsupported ---------------
-        // CREATE / SET / DELETE / DETACH DELETE are now *supported* and executed
-        // (see supported_execute_cases). MERGE and REMOVE are deferred to
-        // follow-ups (Issue #560): MERGE (match-or-create) is its own design
-        // problem; REMOVE (property/label deletion) needs a replace/tombstone
-        // write API the native surface does not yet expose (update is
-        // PATCH-merge only) and label mutation conflicts with the single-label
-        // model. Both must still reject cleanly rather than partially apply.
-        Case::new(
-            "mutating",
-            "merge",
-            "MERGE (n:Person {name: 'Zed'}) RETURN n",
-            Rejected(Parse, ""),
-        ),
+        // CREATE / MERGE / SET / DELETE / DETACH DELETE are now *supported* and
+        // executed (see supported_execute_cases). REMOVE is deferred to a
+        // follow-up (Issue #560): it needs a replace/tombstone write API the
+        // native surface does not yet expose (update is PATCH-merge only) and
+        // label mutation conflicts with the single-label model. It must still
+        // reject cleanly rather than partially apply.
         Case::new(
             "mutating",
             "remove",

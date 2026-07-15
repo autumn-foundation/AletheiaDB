@@ -7828,16 +7828,498 @@ mod mutations {
         }
     }
 
+    // ---- MERGE (Issue #3548) ---------------------------------------------
+
+    /// #1 Create-when-absent: on an empty db, MERGE creates the node, RETURN
+    /// binds it, and exactly one node exists.
     #[test]
-    fn merge_is_rejected() {
+    fn merge_creates_when_absent() {
         let db = AletheiaDB::new().unwrap();
-        // MERGE is deferred to a follow-up; it must reject cleanly (parse error),
-        // never partially apply.
+        let rows = run(&db, "MERGE (n:Person {name: 'Zed'}) RETURN n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "Zed");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// #2 Match-when-present: MERGE of an existing node creates no duplicate and
+    /// records NO new version (a bare match is not a write).
+    #[test]
+    fn merge_matches_when_present_no_new_version() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        let id = node_id_by_name(&db, "Person", "Alice");
+        let before_versions = db.get_node_history(id).unwrap().version_count();
+        let before_count = db.node_count();
+
+        run(&db, "MERGE (n:Person {name: 'Alice'})");
+
+        assert_eq!(db.node_count(), before_count, "no duplicate node created");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+        assert_eq!(
+            db.get_node_history(id).unwrap().version_count(),
+            before_versions,
+            "a bare MERGE match must record no new version"
+        );
+    }
+
+    /// #3 `ON CREATE SET` fires only on the create branch; a second identical
+    /// MERGE (which now matches) does not re-apply it.
+    #[test]
+    fn merge_on_create_set_fires_only_on_create() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Zed'}) ON CREATE SET n.created = 1",
+        );
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "created"), Some(1));
+
+        // A second identical MERGE matches; ON CREATE SET must not fire again.
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Zed'}) ON CREATE SET n.created = 99",
+        );
+        assert_eq!(
+            int_prop_node(&db, "Person", "Zed", "created"),
+            Some(1),
+            "ON CREATE SET must not re-apply on the match branch"
+        );
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// #4 `ON MATCH SET` fires only on the match branch AND records a new
+    /// version (it is an update); it does not fire on the create branch. This
+    /// test carries NO `ON CREATE SET` clause -- it asserts only ON MATCH SET
+    /// behavior on both branches; the on_create/on_match interaction is covered
+    /// by #5 (`merge_both_on_create_and_on_match`).
+    #[test]
+    fn merge_on_match_set_fires_only_on_match_and_records_version() {
+        let db = AletheiaDB::new().unwrap();
+        let (id, t0) = db
+            .write_with_timestamp(|tx| {
+                tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )
+            })
+            .unwrap();
+        let before_versions = db.get_node_history(id).unwrap().version_count();
+
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.seen = 1",
+        );
+
+        assert_eq!(int_prop_node(&db, "Person", "Alice", "seen"), Some(1));
+        assert_eq!(
+            db.get_node_history(id).unwrap().version_count(),
+            before_versions + 1,
+            "ON MATCH SET on a matched node must record a new version"
+        );
+        // The pre-update version had no `seen` property.
+        let old = db.get_node_at_time(id, t0, t0).unwrap();
+        assert_eq!(old.get_property("seen"), None);
+
+        // On the create branch, ON MATCH SET must NOT fire.
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Zed'}) ON MATCH SET n.seen = 7",
+        );
+        assert_eq!(
+            int_prop_node(&db, "Person", "Zed", "seen"),
+            None,
+            "ON MATCH SET must not fire on the create branch"
+        );
+    }
+
+    /// #5 A statement carrying both `ON CREATE SET` and `ON MATCH SET`: the
+    /// create path applies only on_create; the match path applies only on_match.
+    #[test]
+    fn merge_both_on_create_and_on_match() {
+        let db = AletheiaDB::new().unwrap();
+        let stmt = "MERGE (n:Person {name: 'Zed'}) \
+                    ON CREATE SET n.origin = 1 ON MATCH SET n.touched = 1";
+
+        // Create path.
+        run(&db, stmt);
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "origin"), Some(1));
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "touched"), None);
+
+        // Match path.
+        run(&db, stmt);
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "touched"), Some(1));
+        // origin is unchanged (on_create did not fire again).
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "origin"), Some(1));
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// #6 Relationship MERGE creates the whole pattern (both nodes + edge) when
+    /// absent.
+    #[test]
+    fn merge_relationship_creates_whole_pattern() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "MERGE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})",
+        );
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 2);
+        assert_eq!(db.edge_count(), 1);
+        let a = node_id_by_name(&db, "Person", "A");
+        let b = node_id_by_name(&db, "Person", "B");
+        let out = db.get_outgoing_edges(a);
+        assert_eq!(out.len(), 1);
+        assert_eq!(db.get_edge(out[0]).unwrap().target, b);
+    }
+
+    /// #7 Relationship MERGE matches the whole pattern the second time: running
+    /// the same MERGE twice yields exactly one A, one B, one KNOWS edge.
+    #[test]
+    fn merge_relationship_matches_whole_pattern_no_duplicate() {
+        let db = AletheiaDB::new().unwrap();
+        let stmt = "MERGE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})";
+        run(&db, stmt);
+        run(&db, stmt);
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 2);
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    /// #8 Relationship MERGE with a bound leading variable: the `MATCH` binds
+    /// `a`, MERGE reuses it and creates only the unbound remainder (b + edge).
+    #[test]
+    fn merge_relationship_with_bound_leading_var() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'}) MERGE (a)-[:KNOWS]->(b:Person {name: 'C'})",
+        );
+        // Exactly one new node (C) was created; A was reused.
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 2);
+        assert_eq!(db.edge_count(), 1);
+        let out = db.get_outgoing_edges(a);
+        assert_eq!(out.len(), 1);
+        let c = node_id_by_name(&db, "Person", "C");
+        assert_eq!(db.get_edge(out[0]).unwrap().target, c);
+    }
+
+    /// #9 Whole-pattern (not element-by-element) semantics: when a node exists
+    /// but the full path does not, MERGE creates the ENTIRE pattern including a
+    /// duplicate of the existing node. This is the documented openCypher
+    /// whole-pattern rule (constraint (a) of Issue #3548).
+    #[test]
+    fn merge_whole_pattern_creates_duplicate_node() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "A").build(),
+        )
+        .unwrap();
+        // A exists, but there is no (A)-[:KNOWS]->(B:name=B) path, so the WHOLE
+        // pattern is created: a NEW A, a new B, and the edge.
+        run(
+            &db,
+            "MERGE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("Person").count(),
+            3,
+            "whole-pattern create duplicates the pre-existing A (openCypher rule)"
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("Person")
+                .filter(|id| db.get_node(*id).unwrap().get_property("name")
+                    == Some(&PropertyValue::from("A")))
+                .count(),
+            2,
+            "two nodes named A: the original and the whole-pattern duplicate"
+        );
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    /// #10 Parsing: a well-formed MERGE now parses (no longer a ParseError); a
+    /// malformed MERGE is a clean ParseError with no partial write.
+    #[test]
+    fn merge_parses_and_malformed_is_clean_parse_error() {
+        let db = AletheiaDB::new().unwrap();
         assert!(
             db.execute_cypher("MERGE (n:Person {name: 'Zed'}) RETURN n")
+                .is_ok(),
+            "a well-formed MERGE must parse and execute"
+        );
+
+        let db2 = AletheiaDB::new().unwrap();
+        // `ON CREATE` without `SET` is malformed.
+        assert!(
+            db2.execute_cypher("MERGE (n:Person {name: 'Zed'}) ON CREATE n.x = 1")
                 .is_err()
         );
-        assert_eq!(db.node_count(), 0);
+        assert_eq!(db2.node_count(), 0, "no partial write on a parse error");
+    }
+
+    /// #11 Unsupported MERGE shapes are rejected statically (before any
+    /// transaction) with no partial write.
+    #[test]
+    fn merge_rejects_unsupported_shapes() {
+        // Multi-label node.
+        let db = AletheiaDB::new().unwrap();
+        assert_query_error(&db, "MERGE (n:Person:Admin {name: 'x'})");
+        assert_eq!(db.node_count(), 0, "no partial write (multi-label)");
+
+        // Variable-length relationship.
+        let db2 = AletheiaDB::new().unwrap();
+        assert_query_error(&db2, "MERGE (a:Person)-[:KNOWS*1..2]->(b:Person)");
+        assert_eq!(db2.node_count(), 0, "no partial write (var-length rel)");
+    }
+
+    /// #12 Uniqueness/concurrency: with a unique constraint, two sequential
+    /// MERGE-creates of the same name do not duplicate (the second matches);
+    /// and a genuine duplicate CREATE of the constrained property aborts.
+    #[test]
+    fn merge_uniqueness_constraint_prevents_duplicate() {
+        let db = AletheiaDB::new().unwrap();
+        db.unique_constraint("Person", "name").enable().unwrap();
+
+        run(&db, "MERGE (n:Person {name: 'Alice'})");
+        run(&db, "MERGE (n:Person {name: 'Alice'})");
+        assert_eq!(
+            db.scan_nodes_by_label("Person").count(),
+            1,
+            "the second MERGE matches; no duplicate"
+        );
+
+        // A genuine duplicate CREATE of the constrained (label, property) aborts
+        // at commit (constraint-abort path), leaving the single node intact.
+        assert!(
+            db.execute_cypher("CREATE (n:Person {name: 'Alice'})")
+                .is_err(),
+            "a duplicate CREATE under the unique constraint must abort"
+        );
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// #13 Read-only guard regression: the MCP `query` / HTTP surface still
+    /// rejects MERGE before parsing (it stays in the mutating-keyword list).
+    #[test]
+    fn merge_still_rejected_on_read_only_surface() {
+        assert_eq!(
+            crate::query::read_only::detect_mutating_clause(
+                "MERGE (n:Person {name: 'Zed'}) RETURN n"
+            ),
+            Some("MERGE"),
+            "MERGE must remain a rejected mutating clause on the read-only surface"
+        );
+    }
+
+    /// #14 Single-node MERGE dedups across MULTIPLE reading-clause rows within
+    /// one statement: `MATCH (p:Person) MERGE (c:City {name:'NYC'})` over N
+    /// persons must create exactly ONE NYC (openCypher), not N. The committed
+    /// pre-transaction match cannot see the buffered create, so this relies on
+    /// the statement-local created-node ledger (the core bug fix).
+    #[test]
+    fn merge_single_node_dedups_across_reading_rows() {
+        let db = AletheiaDB::new().unwrap();
+        for name in ["A", "B", "C"] {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", name).build(),
+            )
+            .unwrap();
+        }
+        run(&db, "MATCH (p:Person) MERGE (c:City {name: 'NYC'})");
+        assert_eq!(
+            db.scan_nodes_by_label("City").count(),
+            1,
+            "single-node MERGE over 3 persons must yield exactly ONE NYC"
+        );
+    }
+
+    /// #15 Two single-node MERGE clauses with the same key in ONE statement
+    /// dedup to a single node (the second MERGE sees the first's buffered
+    /// create via the ledger).
+    #[test]
+    fn merge_two_single_node_clauses_same_key_dedup() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "MERGE (a:City {name: 'NYC'}) MERGE (b:City {name: 'NYC'})",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("City").count(),
+            1,
+            "two single-node MERGE clauses of the same key must yield ONE node"
+        );
+    }
+
+    /// #16 A ledger-bound single-node MERGE applies `ON MATCH SET` to the
+    /// buffered-created node (the second clause matches the first clause's
+    /// create), updating it sanely without a duplicate or error.
+    #[test]
+    fn merge_ledger_match_applies_on_match_set() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "MERGE (a:City {name: 'NYC'}) MERGE (b:City {name: 'NYC'}) ON MATCH SET b.touched = 1",
+        );
+        assert_eq!(db.scan_nodes_by_label("City").count(), 1, "one NYC only");
+        assert_eq!(
+            int_prop_node(&db, "City", "NYC", "touched"),
+            Some(1),
+            "ON MATCH SET on the ledger-bound node must apply"
+        );
+    }
+
+    /// #17 Relationship/path MERGE is NOT deduped by the ledger: the whole path
+    /// is matched, so `MATCH (p:Person) MERGE (p)-[:LIVES_IN]->(c:City)` creates
+    /// one City PER person (the openCypher MERGE-on-a-path gotcha), distinct
+    /// from the single-node case in #14.
+    #[test]
+    fn merge_relationship_path_creates_end_node_per_row() {
+        let db = AletheiaDB::new().unwrap();
+        for name in ["A", "B", "C"] {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", name).build(),
+            )
+            .unwrap();
+        }
+        run(
+            &db,
+            "MATCH (p:Person) MERGE (p)-[:LIVES_IN]->(c:City {name: 'NYC'})",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("City").count(),
+            3,
+            "relationship-path MERGE creates one City per person (openCypher gotcha)"
+        );
+        assert_eq!(db.edge_count(), 3);
+    }
+
+    /// #18 Second finding: a MERGE whose pattern matches MORE THAN ONE committed
+    /// entity is rejected (the single-binding-per-row executor cannot expand
+    /// rows), with a structured error and NO partial write.
+    #[test]
+    fn merge_multi_match_is_rejected_no_partial_write() {
+        let db = AletheiaDB::new().unwrap();
+        // Two Persons named 'Dup': a bare `MERGE (n:Person {name:'Dup'})` matches
+        // both, which cannot be expressed as a single row.
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let before = db.node_count();
+        assert_query_error(
+            &db,
+            "MERGE (n:Person {name: 'Dup'}) ON MATCH SET n.touched = 1",
+        );
+        assert_eq!(db.node_count(), before, "no partial write on multi-match");
+        assert_eq!(
+            int_prop_node(&db, "Person", "Dup", "touched"),
+            None,
+            "ON MATCH SET must not have applied to either match"
+        );
+    }
+
+    /// #19 A pre-bound variable re-matched by the MERGE candidate scan exercises
+    /// the `consistent_with` true-branch and `entity_same` node path:
+    /// `MATCH (a:Person {name:'A'}) MERGE (a:Person {name:'A'})` binds `a`, the
+    /// scan re-finds it, and it is kept (same id) -- no duplicate, no new
+    /// version (bare match).
+    #[test]
+    fn merge_prebound_variable_rematched_is_consistent() {
+        let db = AletheiaDB::new().unwrap();
+        let id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let before_versions = db.get_node_history(id).unwrap().version_count();
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'}) MERGE (a:Person {name: 'A'})",
+        );
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1, "no duplicate");
+        assert_eq!(
+            db.get_node_history(id).unwrap().version_count(),
+            before_versions,
+            "a consistent re-match records no new version"
+        );
+    }
+
+    /// #20 Variant of #19 where the pre-bound variable's candidate does NOT
+    /// match (different property), so `consistent_with` filters it out and the
+    /// MERGE takes the create branch (whole-pattern create of a NEW node).
+    #[test]
+    fn merge_prebound_variable_inconsistent_takes_create_branch() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "A").build(),
+        )
+        .unwrap();
+        // `a` is bound to the existing A, but the MERGE pattern requires name 'B'
+        // on the same variable: no committed candidate is consistent, so a new
+        // node is created (whole-pattern create).
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'}) MERGE (b:Person {name: 'B'})",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("Person").count(),
+            2,
+            "the inconsistent MERGE creates a new node"
+        );
+    }
+
+    /// #21 RETURN of the bound variable on the MATCH branch of a MERGE: an
+    /// existing node is matched and returned (not recreated).
+    #[test]
+    fn merge_match_branch_returns_bound_variable() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+        let rows = run(&db, "MERGE (n:Person {name: 'Alice'}) RETURN n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "Alice");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1, "no duplicate");
+    }
+
+    /// #22 Parser error arms: `ON` followed by neither CREATE nor MATCH is a
+    /// clean ParseError with no partial write; and a statement opening with
+    /// `ON CREATE SET ...` (no MERGE) is likewise a clean error.
+    #[test]
+    fn merge_on_error_arms_are_clean_parse_errors() {
+        let db = AletheiaDB::new().unwrap();
+        assert!(
+            db.execute_cypher("MERGE (n:Person {name: 'Zed'}) ON FOO SET n.x = 1")
+                .is_err(),
+            "ON not followed by CREATE/MATCH must be a parse error"
+        );
+        assert_eq!(db.node_count(), 0, "no partial write (ON FOO)");
+
+        let db2 = AletheiaDB::new().unwrap();
+        assert!(
+            db2.execute_cypher("ON CREATE SET n.x = 1").is_err(),
+            "a statement starting with ON (no MERGE) must be a clean error"
+        );
+        assert_eq!(db2.node_count(), 0, "no partial write (leading ON)");
     }
 
     #[test]

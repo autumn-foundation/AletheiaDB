@@ -234,10 +234,11 @@ impl CypherParser {
         // with no reading part (Issue #560). A leading temporal clause has no
         // meaning for a write, so reject the combination rather than silently
         // dropping the qualifier.
-        if self.at(TokenKind::Create) {
+        if self.at(TokenKind::Create) || self.at(TokenKind::Merge) {
             if temporal.is_some() {
                 return Err(self.error(
-                    "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a CREATE statement",
+                    "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a CREATE or MERGE \
+                     statement",
                 ));
             }
             return self.parse_write_statement(None);
@@ -250,11 +251,16 @@ impl CypherParser {
     }
 
     /// Returns `true` if the current token starts a write clause
-    /// (`CREATE` / `SET` / `DELETE` / `DETACH DELETE`), Issue #560.
+    /// (`CREATE` / `MERGE` / `SET` / `DELETE` / `DETACH DELETE`),
+    /// Issues #560 and #3548.
     fn at_write_clause(&self) -> bool {
         matches!(
             self.peek().kind,
-            TokenKind::Create | TokenKind::Set | TokenKind::Delete | TokenKind::Detach
+            TokenKind::Create
+                | TokenKind::Merge
+                | TokenKind::Set
+                | TokenKind::Delete
+                | TokenKind::Detach
         )
     }
 
@@ -274,6 +280,16 @@ impl CypherParser {
                     self.advance();
                     let patterns = self.parse_pattern_list()?;
                     clauses.push(CypherWriteClause::Create(patterns));
+                }
+                TokenKind::Merge => {
+                    self.advance();
+                    let pattern = self.parse_pattern()?;
+                    let (on_create, on_match) = self.parse_merge_actions()?;
+                    clauses.push(CypherWriteClause::Merge {
+                        pattern,
+                        on_create,
+                        on_match,
+                    });
                 }
                 TokenKind::Set => {
                     self.advance();
@@ -302,7 +318,7 @@ impl CypherParser {
         }
 
         if clauses.is_empty() {
-            return Err(self.error("expected a write clause (CREATE / SET / DELETE)"));
+            return Err(self.error("expected a write clause (CREATE / MERGE / SET / DELETE)"));
         }
 
         let return_clause = if self.at(TokenKind::Return) {
@@ -357,6 +373,39 @@ impl CypherParser {
             }
         }
         Ok(items)
+    }
+
+    /// Parse zero or more `ON CREATE SET <items>` / `ON MATCH SET <items>`
+    /// sub-clauses following a `MERGE` pattern (Issue #3548). Returns the
+    /// accumulated `(on_create, on_match)` set items in source order.
+    ///
+    /// Repeated `ON CREATE` / `ON MATCH` sub-clauses accumulate. A malformed
+    /// sub-clause (`ON` not followed by `CREATE`/`MATCH`, or a missing `SET`)
+    /// is a clean parse error.
+    fn parse_merge_actions(
+        &mut self,
+    ) -> Result<(Vec<CypherSetItem>, Vec<CypherSetItem>), CypherError> {
+        let mut on_create = Vec::new();
+        let mut on_match = Vec::new();
+        while self.at(TokenKind::On) {
+            self.advance();
+            match self.peek().kind {
+                TokenKind::Create => {
+                    self.advance();
+                    self.expect(TokenKind::Set)?;
+                    on_create.extend(self.parse_set_items()?);
+                }
+                TokenKind::Match => {
+                    self.advance();
+                    self.expect(TokenKind::Set)?;
+                    on_match.extend(self.parse_set_items()?);
+                }
+                _ => {
+                    return Err(self.error("expected CREATE or MATCH after ON in a MERGE clause"));
+                }
+            }
+        }
+        Ok((on_create, on_match))
     }
 
     /// Parse the target variables of a `DELETE` / `DETACH DELETE` clause:

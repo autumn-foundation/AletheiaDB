@@ -47,6 +47,10 @@ pub enum TokenKind {
     Delete,
     /// `DETACH` (used in `DETACH DELETE`)
     Detach,
+    /// `MERGE` (match-or-create), Issue #3548
+    Merge,
+    /// `ON` (used in `ON CREATE SET` / `ON MATCH SET`), Issue #3548
+    On,
 
     // -- Keywords: ordering / projection ------------------------------------
     /// `ORDER`
@@ -653,6 +657,8 @@ impl<'a> CypherLexer<'a> {
             "SET" => TokenKind::Set,
             "DELETE" => TokenKind::Delete,
             "DETACH" => TokenKind::Detach,
+            "MERGE" => TokenKind::Merge,
+            "ON" => TokenKind::On,
 
             // Ordering / projection
             "ORDER" => TokenKind::Order,
@@ -725,6 +731,8 @@ mod unit_tests {
             "SET",
             "DELETE",
             "DETACH",
+            "MERGE",
+            "ON",
             "ORDER",
             "BY",
             "LIMIT",
