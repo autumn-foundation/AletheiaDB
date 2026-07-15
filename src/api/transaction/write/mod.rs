@@ -470,6 +470,16 @@ impl WriteTransaction {
         // guaranteed present in any current+historical snapshot.
         let mut in_flight_guard: Option<in_flight::InFlightGuard> = None;
 
+        // Issue #3375 (ordered emit, HIGH review fix): the push-changefeed emit ticket.
+        // Reserved UNDER the `current_timestamp` lock below (right after the commit timestamp
+        // is assigned) so its sequence totally orders commits by commit timestamp; consumed on
+        // the success path by `EmitTicket::submit`. Declared in the OUTER scope so that if the
+        // commit aborts/`?`-returns after reservation but before submit (a WAL failure, or the
+        // Issue #3416 commit-time write-skew re-check in `apply_changes`), dropping this
+        // `Option` releases an empty slot for the reserved seq — the sequencer never stalls on
+        // a reserved-but-never-submitted sequence.
+        let mut emit_ticket: Option<crate::core::changefeed_subscription::EmitTicket> = None;
+
         // Acquire commit timestamp and perform mode-aware WAL flush.
         //
         // CRITICAL: We must hold the timestamp lock until WAL logging is complete
@@ -594,6 +604,19 @@ impl WriteTransaction {
             // Persist observation only after we successfully advanced the frontier.
             *previous_observed_at = observed_at;
             drop(previous_observed_at);
+
+            // Issue #3375 (ordered emit): reserve the push-changefeed emit ticket HERE, while
+            // the `current_timestamp` lock is still held and monotonic ordering is guaranteed,
+            // so the ticket's sequence == this commit's timestamp order == ChangeCursor order.
+            // Gated on `has_subscribers()` so the zero-subscriber fast path stays a single
+            // atomic load with no sequencer work (no reservation, no ticket). The reservation
+            // itself is a lock-free `fetch_add`, so taking it under `current_timestamp` does
+            // not violate the write-path lock order.
+            if let Some(broadcaster) = &self.changefeed
+                && broadcaster.has_subscribers()
+            {
+                emit_ticket = Some(broadcaster.reserve_emit_ticket());
+            }
 
             #[cfg(feature = "observability")]
             let wal_start = std::time::Instant::now();
@@ -756,25 +779,32 @@ impl WriteTransaction {
         // is durable (WAL fsynced), applied (current + historical), and visible
         // (`register_commit`). No write-path lock is held: the records are built via a fresh,
         // short `historical.read()` (a leaf acquisition — nothing later in the lock order is
-        // held) whose guard is dropped before `emit`, and `emit` only ever touches the
-        // broadcaster's own leaf lock. A slow subscriber cannot back-pressure this writer.
-        if let Some(broadcaster) = &self.changefeed
-            && broadcaster.has_subscribers()
-        {
+        // held) whose guard is dropped before submitting.
+        //
+        // HIGH review fix (ordered emit): we consume the ticket reserved under the
+        // `current_timestamp` lock. `submit` releases records to subscriber buffers in strict
+        // reserved-sequence (== commit-timestamp == ChangeCursor) order, so per-subscriber
+        // delivery is cursor-ascending even when concurrent commits finish their record-build
+        // out of order — the precondition that makes `last_delivered` a zero-loss resume
+        // high-water-mark. A slow subscriber cannot back-pressure this writer. We submit even
+        // an empty record set so the reserved sequence is released and never stalls the
+        // sequencer.
+        if let Some(ticket) = emit_ticket.take() {
             let (node_vids, edge_vids) =
                 self.committed_changefeed_version_ids(&closing_version_ids);
-            if !node_vids.is_empty() || !edge_vids.is_empty() {
-                let mut records: Vec<crate::core::changefeed::ChangeRecord> = {
+            let mut records: Vec<crate::core::changefeed::ChangeRecord> =
+                if node_vids.is_empty() && edge_vids.is_empty() {
+                    Vec::new()
+                } else {
                     let hist = self.historical.read();
                     hist.collect_committed_changes(&node_vids, &edge_vids)
                         .into_iter()
                         .map(|raw| raw.into_record())
                         .collect()
                 };
-                // Deterministic #3216 total order (tx-time, kind, entity, version).
-                records.sort_by_key(|r| r.cursor());
-                broadcaster.emit(&records);
-            }
+            // Deterministic #3216 total order (tx-time, kind, entity, version).
+            records.sort_by_key(|r| r.cursor());
+            ticket.submit(records);
         }
 
         #[cfg(feature = "observability")]

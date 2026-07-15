@@ -146,6 +146,21 @@ those commits on restart via the same `list_changes` catch-up above, before goin
 Persist your resume token alongside whatever state you derive from the feed (e.g. a cache) and
 the derived state can never silently drift from the database.
 
+> **Tiered-storage note (hot → cold migration window).** The live broadcast builds a commit's
+> records from a short read of just that transaction's hot-tier versions. In the rare case a
+> just-committed version is migrated from the hot tier to the cold (disk) tier *before* that
+> read runs, it is skipped live — but it remains fully present in the durable `list_changes`
+> ground truth (whose scan spans both tiers), so a resume pull still recovers it. At-least-once
+> therefore holds across the migration window exactly as it does across a crash.
+
+> **Authentication / authorization dependency (Issue #3350).** This Rust-API slice performs no
+> access-control filtering: an embedded caller with a `subscribe_changes` handle sees every
+> committed change matching its `ChangeFilter`. The role-gated MCP / HTTP surface that wraps
+> this feed is a coordinated Lane 1 follow-up; once #3350's RBAC composes over it, a subscriber
+> will see only the changes its role is permitted to read (reader-class), and the catch-up
+> `list_changes` pull will be gated identically. Do not expose the raw embedded subscription
+> across a trust boundary until that authorization layer is in place.
+
 ### The agent cache-invalidation pattern
 
 A common use is keeping an LLM/agent's working cache in sync with the graph:
@@ -192,13 +207,22 @@ applies to **future** subscriptions (existing ones keep the capacity they were c
 
 ## Ordering guarantees
 
-Within a single committed transaction, records are delivered in the #3216 deterministic total
-order `(tx_time, kind, entity_id, version_id)`. Sequential commits are delivered in commit
-order. Under **concurrent** writers the live interleaving of distinct commits follows emit
-order (each commit's records stay contiguous per subscriber — never torn), which is
-tx-time-ascending in the common case; the authoritative, strictly-sorted order is always the
-pull feed. No record is ever lost or duplicated *within* the live stream (duplicates arise
-only from an overlapping resume pull, deduped by cursor).
+Per-subscriber delivery is **strictly cursor-ascending** — the `(tx_time, kind, entity_id,
+version_id)` total order of the #3216 pull feed — **within and across commits, including under
+concurrent writers**. A commit reserves its release slot under the commit-timestamp lock and an
+ordered-emit sequencer releases each commit's records into subscriber buffers only once every
+earlier-committed commit has been released, so a later-committing transaction can never appear
+before an earlier one even when the two finish their post-commit record build out of order. Each
+commit's records stay contiguous (never torn).
+
+This ordering is exactly the precondition that makes the resume token a zero-loss anchor:
+because delivery is cursor-ascending, `resume_token()` (the last delivered cursor) is a true
+**high-water-mark** — every change with a smaller-or-equal cursor has already been delivered,
+and `list_changes(cursor = resume_token)` recovers precisely the rest. **No record is ever
+lost**, given the two-part precondition: (1) ordered (cursor-ascending) live delivery, and
+(2) recovery via a `list_changes` resume from `last_delivered` (the `resume_token`) on every
+lag/reconnect/restart. Duplicates arise only from an overlapping resume pull and are deduped by
+the stable cursor.
 
 ## Performance
 

@@ -350,6 +350,82 @@ fn crash_before_notify_recovers_via_cursor() {
 }
 
 #[test]
+fn durable_reopen_recovers_pre_crash_changes_via_cursor() {
+    // A stronger crash-recovery proxy than `crash_before_notify_recovers_via_cursor`: use a
+    // real durable database, commit changes, DROP it (a clean crash — Drop flushes and the
+    // WAL is on disk), then REOPEN from the same data dir (WAL replay + index load rebuild
+    // history). A consumer that persisted an early cursor recovers every pre-crash change via
+    // `list_changes` over the reopened database's rebuilt history — zero missed. This proves
+    // the no-loss contract against real durable recovery, not just an in-memory simulation.
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("changefeed-durable");
+
+    // Phase 1: durable writes, capture an early resume cursor (after the first "anchor"
+    // change), then drop the handle to simulate a crash after everything is fsynced.
+    let early_cursor: Option<String> = {
+        let db = AletheiaDB::open(&data_dir).unwrap();
+
+        // A live subscriber drains the anchor change so we hold its resume cursor — exactly
+        // what a real consumer persists (`sub.resume_token()`) before a crash.
+        let sub = db.subscribe_changes(ChangeFilter::all()).unwrap();
+        db.write(|tx| {
+            tx.create_node("Person", props("anchor"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+        let delivered = sub.poll();
+        assert_eq!(delivered.len(), 1);
+        let cursor = sub.resume_token();
+        assert!(cursor.is_some(), "resume token after draining the anchor");
+        drop(sub);
+
+        // These commits are the "pre-crash" changes the consumer never saw live.
+        for i in 0..5 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("precrash{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        cursor
+        // db dropped here: Drop synchronously flushes, so state is durable on disk.
+    };
+
+    // Phase 2: reopen from the same directory — WAL replay rebuilds the full history.
+    let db = AletheiaDB::open(&data_dir).unwrap();
+
+    // The changefeed's list_changes works over pre-crash history post-reopen: resuming from
+    // the early cursor returns exactly the 5 changes committed after the anchor.
+    let q = ChangeFeedQuery {
+        tx_from: Timestamp::from(0),
+        tx_to: TIMESTAMP_MAX,
+        valid_from: None,
+        valid_to: None,
+        label: None,
+        limit: 100_000,
+        cursor: early_cursor,
+    };
+    let recovered = db.list_changes(&q).unwrap().changes;
+    assert_eq!(
+        recovered.len(),
+        5,
+        "all pre-crash changes after the anchor recover post-reopen"
+    );
+
+    // A fresh subscriber on the reopened db goes live from here; combined with the resume
+    // pull above, no pre-crash change is ever lost.
+    let _sub = db.subscribe_changes(ChangeFilter::all()).unwrap();
+    let full = ground_truth(&db);
+    assert_eq!(
+        full.len(),
+        6,
+        "anchor + 5 pre-crash changes all present after reopen"
+    );
+}
+
+#[test]
 fn bounded_buffer_overflow_disconnects_and_is_recoverable() {
     let db = AletheiaDB::new().unwrap();
     db.set_changefeed_config(ChangefeedConfig {
@@ -546,4 +622,99 @@ fn concurrent_writer_and_subscribers_no_loss_or_deadlock() {
     // (plus any residual poll) covers it with no loss — validate via a final resume.
     let truth = ground_truth(&db);
     assert_eq!(truth.len(), WRITERS * PER_WRITER);
+}
+
+/// The HIGH-review regression test: under concurrent writers, a consumer that drains part of
+/// the live feed, captures its resume token, and "disconnects" mid-stream must lose **zero**
+/// events — `union(live-delivered, list_changes(resume_token))` equals the full ground truth.
+///
+/// Why this catches the ordered-emit bug: the resume token is the cursor of the *last event
+/// drained*, used by `list_changes` as a strict `> cursor` high-water-mark. That is only a
+/// zero-loss anchor if per-subscriber delivery is cursor-ascending. Without the ordered-emit
+/// sequencer, two concurrent commits (tx=100, tx=101) can be pushed to the buffer out of order
+/// (101 before 100); a consumer that drains `[101]`, records `resume = cursor(101)`, and
+/// disconnects before `[100]` arrives would then resume from cursor(101), which *excludes*
+/// cursor(100) — event 100 is permanently lost and the union is missing it. With the sequencer,
+/// every subscriber buffer is strictly cursor-ascending, so `last_delivered` is a true
+/// high-water-mark and the union is always complete. Many trials + a mid-stream disconnect
+/// exercise the reorder window.
+#[test]
+fn concurrent_writers_union_equals_ground_truth() {
+    use std::time::Instant;
+
+    const WRITERS: usize = 4;
+    const PER_WRITER: usize = 40;
+    const TOTAL: usize = WRITERS * PER_WRITER;
+
+    for trial in 0..20 {
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        // A moderate buffer: large enough to usually keep pace, small enough that a slow
+        // trial may Lag — both paths must remain lossless via the resume token.
+        db.set_changefeed_config(ChangefeedConfig {
+            max_subscriptions: 16,
+            buffer_capacity: 128,
+        });
+        let sub = db.subscribe_changes(ChangeFilter::all()).unwrap();
+
+        // Everything the consumer drained live, and the resume anchor at its disconnect point.
+        let mut delivered: Vec<ChangeRecord> = Vec::new();
+        let mut resume: Option<String> = sub.resume_token(); // baseline anchor (#3375 F4)
+
+        std::thread::scope(|scope| {
+            for w in 0..WRITERS {
+                let db = Arc::clone(&db);
+                scope.spawn(move || {
+                    for i in 0..PER_WRITER {
+                        db.write(|tx| {
+                            tx.create_node("Person", props(&format!("t{trial}w{w}n{i}")))?;
+                            Ok::<_, Error>(())
+                        })
+                        .unwrap();
+                    }
+                });
+            }
+
+            // Drain live until we've seen roughly a third, then "disconnect" mid-stream while
+            // writers are still committing (maximizing the reorder window that the buggy path
+            // would lose events through).
+            let disconnect_at = TOTAL / 3;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                match sub.recv_timeout(Duration::from_millis(5)) {
+                    Ok(batch) => delivered.extend(batch),
+                    Err(_) => break, // Lagged: resume anchor already captured below
+                }
+                if delivered.len() >= disconnect_at {
+                    break;
+                }
+            }
+            // Grab anything already buffered, then snapshot the resume high-water-mark.
+            delivered.append(&mut sub.poll());
+            resume = sub.resume_token();
+            drop(sub); // simulated disconnect; writers keep running to completion here
+        });
+
+        // Writers are done. Resume the durable pull from the last delivered cursor and assert
+        // the union covers the full window with zero loss.
+        let q = ChangeFeedQuery {
+            tx_from: Timestamp::from(0),
+            tx_to: TIMESTAMP_MAX,
+            valid_from: None,
+            valid_to: None,
+            label: None,
+            limit: 100_000,
+            cursor: resume,
+        };
+        let gap = db.list_changes(&q).unwrap().changes;
+
+        let truth = key_set(&ground_truth(&db));
+        assert_eq!(truth.len(), TOTAL, "trial {trial}: ground truth complete");
+
+        let mut union = key_set(&delivered);
+        union.extend(key_set(&gap));
+        assert_eq!(
+            union, truth,
+            "trial {trial}: union(live-delivered, resume-pull) must miss zero events"
+        );
+    }
 }

@@ -26,11 +26,17 @@
 //!
 //! # Concurrency & lock discipline
 //!
-//! The broadcaster's locks are **leaves**: [`emit`](ChangefeedBroadcaster::emit) is called
-//! from the commit path only *after* every write-path lock has been released, and it never
-//! calls back into historical / WAL / timestamp state. A slow consumer can never
-//! back-pressure the writer or another subscriber — a full buffer is dropped-into-Lagged,
-//! not awaited.
+//! The broadcaster's locks (registry, per-subscriber, and the ordered-emit `sequencer`) are
+//! **leaves**: the commit path reserves an ordered ticket
+//! ([`reserve_emit_ticket`](ChangefeedBroadcaster::reserve_emit_ticket) — a lock-free atomic
+//! taken under the `current_timestamp` lock so ticket order == commit-timestamp order) and,
+//! only *after* every write-path lock has been released, submits its records
+//! ([`EmitTicket::submit`]). The sequencer then releases records into subscriber buffers in
+//! strict commit order, so per-subscriber delivery is cursor-ascending regardless of the order
+//! concurrent commits finish — the precondition that makes `last_delivered` a zero-loss resume
+//! high-water-mark. None of these leaf locks ever call back into historical / WAL / timestamp
+//! state. A slow consumer can never back-pressure the writer or another subscriber — a full
+//! buffer is dropped-into-Lagged, not awaited.
 //!
 //! The blocking [`recv_timeout`](Subscription::recv_timeout) is a synchronous
 //! `Mutex`+`Condvar` long-poll (no async runtime dependency); an HTTP SSE surface and an
@@ -38,7 +44,7 @@
 
 use crate::core::changefeed::{ChangeRecord, ChangeType, EntityKind};
 use crate::core::error::{Result, StorageError};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
@@ -161,8 +167,12 @@ impl ChangeFilter {
 pub enum RecvError {
     /// The subscription overflowed its bounded buffer and was disconnected. No further
     /// live events will arrive. Recover losslessly by resuming a `list_changes` pull from
-    /// `resume_token` (the cursor of the last event the consumer drained, or `None` if it
-    /// never drained one — in which case resume from the subscription's start time).
+    /// `resume_token` — the cursor of the last event the consumer drained, or, if it never
+    /// drained one, the **baseline frontier cursor captured at subscribe time** (see
+    /// [`ChangefeedBroadcaster::subscribe_with_baseline`]) so "resume from the subscription's
+    /// start point" is always a well-defined, gap-free anchor. `None` only for a core-level
+    /// subscription created without a baseline (the DB [`crate::db::AletheiaDB::subscribe_changes`]
+    /// API always sets one).
     Lagged {
         /// Encoded [`ChangeCursor`](crate::core::changefeed) to resume from, if any.
         resume_token: Option<String>,
@@ -201,10 +211,13 @@ impl SubscriberState {
             return false;
         }
 
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("changefeed subscriber lock poisoned");
+        // Poison-safety (Issue #3375 review F6/F9): `push_matching` runs synchronously on a
+        // writer's commit thread AFTER that transaction is already committed. A poisoned
+        // subscriber lock (some *other* consumer thread panicked while draining) must NEVER
+        // unwind this unrelated, already-committed writer — recover the guard and treat the
+        // faulty subscriber as just another buffer to push into (it will be dropped/Lagged
+        // on its own). No production path panics on poisoning.
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.lagged {
             return false;
         }
@@ -255,7 +268,7 @@ impl Subscription {
     /// Lagged and already drained — check [`is_lagged`](Self::is_lagged) /
     /// [`recv_timeout`](Self::recv_timeout) to observe the Lagged transition).
     pub fn poll(&self) -> Vec<ChangeRecord> {
-        let mut inner = self.state.inner.lock().expect("changefeed lock poisoned");
+        let mut inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
         let drained: Vec<ChangeRecord> = inner.queue.drain(..).collect();
         if let Some(last) = drained.last() {
             inner.last_delivered = Some(last.cursor().encode());
@@ -275,7 +288,7 @@ impl Subscription {
         timeout: Duration,
     ) -> std::result::Result<Vec<ChangeRecord>, RecvError> {
         let deadline = Instant::now().checked_add(timeout);
-        let mut inner = self.state.inner.lock().expect("changefeed lock poisoned");
+        let mut inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if !inner.queue.is_empty() {
                 let drained: Vec<ChangeRecord> = inner.queue.drain(..).collect();
@@ -300,7 +313,7 @@ impl Subscription {
                 .state
                 .cvar
                 .wait_timeout(inner, remaining)
-                .expect("changefeed lock poisoned");
+                .unwrap_or_else(|e| e.into_inner());
             inner = guard;
             if wait.timed_out() && inner.queue.is_empty() && !inner.lagged {
                 return Ok(Vec::new());
@@ -315,7 +328,7 @@ impl Subscription {
         self.state
             .inner
             .lock()
-            .expect("changefeed lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .last_delivered
             .clone()
     }
@@ -325,7 +338,7 @@ impl Subscription {
         self.state
             .inner
             .lock()
-            .expect("changefeed lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .lagged
     }
 }
@@ -347,19 +360,101 @@ impl Drop for Subscription {
     }
 }
 
+/// Ordered-emit sequencer state (Issue #3375 HIGH review fix).
+///
+/// Guards the strict commit-timestamp-ascending release of records into subscriber buffers.
+/// A commit reserves a monotonic `seq` *under the `current_timestamp` lock* (so `seq` order
+/// == commit-timestamp order == [`ChangeCursor`](crate::core::changefeed) order), then, once
+/// its records are built post-commit, [`submit`](ChangefeedBroadcaster::submit_sequenced)s
+/// `(seq, records)`. `submit` parks the records if an earlier `seq` has not been released yet,
+/// or drains `pending` in order — pushing to subscriber buffers *inside* this critical section
+/// — otherwise. This guarantees every subscriber sees records cursor-ascending regardless of
+/// the order concurrent commits finish their apply/record-build, which is exactly what makes
+/// the `last_delivered`-as-high-water-mark resume token a zero-loss contract.
+struct EmitSequencer {
+    /// The next `seq` eligible for release.
+    next_release: u64,
+    /// Reserved-but-not-yet-released records, keyed by `seq` (ascending).
+    pending: BTreeMap<u64, Vec<ChangeRecord>>,
+}
+
 /// Fan-out hub for the push changefeed.
 ///
 /// Held as an `Arc` on the database; [`subscribe`](Self::subscribe) hands out
-/// [`Subscription`]s and the commit path calls [`emit`](Self::emit) with each committed
-/// transaction's records.
+/// [`Subscription`]s and the commit path reserves an ordered ticket
+/// ([`reserve_emit_ticket`](Self::reserve_emit_ticket)) then submits each committed
+/// transaction's records through it (which releases them to subscribers in cursor order).
 pub struct ChangefeedBroadcaster {
     subscribers: RwLock<HashMap<u64, Arc<SubscriberState>>>,
     next_id: AtomicU64,
-    /// Lock-free fast-path gate: `emit` returns immediately when this is zero, so the
-    /// zero-subscriber write path pays only a single relaxed load.
+    /// Lock-free fast-path gate: emit-related work is skipped entirely when this is zero, so
+    /// the zero-subscriber write path pays only a single atomic load and reserves no ticket.
+    ///
+    /// Ordering (review F10): loaded `Acquire` (in [`has_subscribers`](Self::has_subscribers) /
+    /// [`emit`](Self::emit)) and stored `Release` (in [`subscribe`](Self::subscribe) /
+    /// [`deregister`](Self::deregister)) so a just-completed subscribe happens-before a
+    /// subsequent commit's gate check — a weakly-ordered arch cannot skip emit for a
+    /// consumer that has already subscribed.
     subscriber_count: AtomicUsize,
     max_subscriptions: AtomicUsize,
     buffer_capacity: AtomicUsize,
+    /// Monotonic ticket reservation counter (Issue #3375 ordered emit). Bumped once per
+    /// commit that has subscribers, *while the `current_timestamp` lock is held*, so a
+    /// ticket's `seq` totally orders commits by commit timestamp.
+    emit_ticket_counter: AtomicU64,
+    /// The ordered-release sequencer. A leaf lock acquired only post-commit (never while a
+    /// write-path primitive is held); it never re-enters historical / WAL / current_timestamp.
+    sequencer: Mutex<EmitSequencer>,
+}
+
+/// RAII reservation for the ordered emit of one commit (Issue #3375 HIGH review fix).
+///
+/// Reserved *under the `current_timestamp` lock* via
+/// [`ChangefeedBroadcaster::reserve_emit_ticket`] so its [`seq`](Self::seq) totally orders
+/// commits. The success path consumes it with [`submit`](Self::submit). If the commit instead
+/// **aborts or panics** after reserving but before submitting (e.g. a WAL failure or the
+/// Issue #3416 commit-time write-skew re-check in `apply_changes`), `Drop` submits an **empty**
+/// release for the reserved `seq` so the sequencer never stalls on a hole — a reserved-but-
+/// never-submitted `seq` would otherwise permanently block every later commit's records.
+#[must_use = "an EmitTicket must be submitted (or dropped to release its sequence)"]
+pub struct EmitTicket {
+    broadcaster: Arc<ChangefeedBroadcaster>,
+    seq: u64,
+    submitted: bool,
+}
+
+impl EmitTicket {
+    /// The reserved sequence number (commit-timestamp order).
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Submit this commit's `records` for ordered release to subscribers, consuming the
+    /// ticket. Records are pushed to subscriber buffers only once every earlier `seq` has
+    /// been released, in strict cursor order.
+    pub fn submit(mut self, records: Vec<ChangeRecord>) {
+        self.submitted = true;
+        self.broadcaster.submit_sequenced(self.seq, records);
+    }
+}
+
+impl Drop for EmitTicket {
+    fn drop(&mut self) {
+        if !self.submitted {
+            // Aborted/panicked after reserving: release an empty slot so the sequencer
+            // never stalls waiting for a `seq` that will never be submitted.
+            self.broadcaster.submit_sequenced(self.seq, Vec::new());
+        }
+    }
+}
+
+impl std::fmt::Debug for EmitTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmitTicket")
+            .field("seq", &self.seq)
+            .field("submitted", &self.submitted)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for ChangefeedBroadcaster {
@@ -395,6 +490,11 @@ impl ChangefeedBroadcaster {
             subscriber_count: AtomicUsize::new(0),
             max_subscriptions: AtomicUsize::new(config.max_subscriptions.max(1)),
             buffer_capacity: AtomicUsize::new(config.buffer_capacity.max(1)),
+            emit_ticket_counter: AtomicU64::new(0),
+            sequencer: Mutex::new(EmitSequencer {
+                next_release: 0,
+                pending: BTreeMap::new(),
+            }),
         }
     }
 
@@ -415,10 +515,32 @@ impl ChangefeedBroadcaster {
     /// Returns [`StorageError::CapacityExceeded`] when the broadcaster is already at its
     /// `max_subscriptions` cap (maps to the MCP/#3234 `FAILED_PRECONDITION`/resource class).
     pub fn subscribe(self: &Arc<Self>, filter: ChangeFilter) -> Result<Subscription> {
-        let mut subs = self
-            .subscribers
-            .write()
-            .expect("changefeed registry poisoned");
+        self.subscribe_with_baseline(filter, None)
+    }
+
+    /// Register a new subscription, seeding its resume anchor with `baseline` (Issue #3375
+    /// review F4).
+    ///
+    /// `baseline` is the encoded [`ChangeCursor`](crate::core::changefeed) of the committed
+    /// frontier at subscribe time (captured by
+    /// [`crate::db::AletheiaDB::subscribe_changes`] under the `current_timestamp` lock). It
+    /// becomes the subscription's initial `last_delivered`, so [`Subscription::resume_token`]
+    /// is well-defined *before the consumer drains anything* and a
+    /// `RecvError::Lagged { resume_token }` on an as-yet-undrained subscription still yields a
+    /// gap-free "resume from where I subscribed" anchor. Draining the first event overwrites
+    /// it with that event's cursor as usual. Pass `None` for no anchor (used by the core-level
+    /// unit tests).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::CapacityExceeded`] when the broadcaster is already at its
+    /// `max_subscriptions` cap.
+    pub fn subscribe_with_baseline(
+        self: &Arc<Self>,
+        filter: ChangeFilter,
+        baseline: Option<String>,
+    ) -> Result<Subscription> {
+        let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
         let max = self.max_subscriptions.load(Ordering::Relaxed);
         if subs.len() >= max {
             return Err(StorageError::CapacityExceeded {
@@ -435,57 +557,115 @@ impl ChangefeedBroadcaster {
             buffer_capacity: self.buffer_capacity.load(Ordering::Relaxed),
             inner: Mutex::new(SubscriberInner {
                 queue: VecDeque::new(),
-                last_delivered: None,
+                last_delivered: baseline,
                 lagged: false,
             }),
             cvar: Condvar::new(),
         });
         subs.insert(id, Arc::clone(&state));
-        self.subscriber_count.store(subs.len(), Ordering::Relaxed);
+        // Release: publish the subscriber insertion before the count becomes visible, so a
+        // subsequent commit's Acquire gate load observes this subscriber (review F10).
+        self.subscriber_count.store(subs.len(), Ordering::Release);
         Ok(Subscription {
             state,
             broadcaster: Arc::downgrade(self),
         })
     }
 
-    /// Push a committed transaction's `records` to every matching subscriber.
+    /// Push a committed transaction's `records` to every matching subscriber, **unordered**.
     ///
-    /// Called from the commit path *after* all write-path locks are released. Cheap when
-    /// there are no subscribers (single relaxed load) and never blocks on a slow consumer
-    /// (overflow marks that subscriber Lagged and moves on).
+    /// This is the raw fan-out primitive (also the direct entry point used by the core unit
+    /// tests). The production commit path does **not** call this directly; it goes through the
+    /// ordered [`reserve_emit_ticket`](Self::reserve_emit_ticket) / [`EmitTicket::submit`]
+    /// path, which invokes [`push_to_subscribers`](Self::push_to_subscribers) only from inside
+    /// the ordered drain. Cheap when there are no subscribers (single Acquire load) and never
+    /// blocks on a slow consumer (overflow marks that subscriber Lagged and moves on).
     pub fn emit(&self, records: &[ChangeRecord]) {
-        if records.is_empty() || self.subscriber_count.load(Ordering::Relaxed) == 0 {
+        if records.is_empty() || self.subscriber_count.load(Ordering::Acquire) == 0 {
             return;
         }
-        let subs = self
-            .subscribers
-            .read()
-            .expect("changefeed registry poisoned");
+        self.push_to_subscribers(records);
+    }
+
+    /// The registry-fanout half of emit: push `records` to every matching subscriber buffer.
+    /// Invoked from [`emit`](Self::emit) and, on the production path, from inside the ordered
+    /// drain in [`submit_sequenced`](Self::submit_sequenced) (so per-subscriber delivery is
+    /// cursor-ascending).
+    fn push_to_subscribers(&self, records: &[ChangeRecord]) {
+        let subs = self.subscribers.read().unwrap_or_else(|e| e.into_inner());
         for state in subs.values() {
             state.push_matching(records);
         }
     }
 
+    /// Reserve a monotonic ordered-emit ticket for the commit currently in progress.
+    ///
+    /// MUST be called while the `current_timestamp` lock is held (right after the commit
+    /// timestamp is assigned), so the ticket's `seq` totally orders commits by commit
+    /// timestamp — equivalently by [`ChangeCursor`](crate::core::changefeed). The reservation
+    /// is a single atomic `fetch_add` (no lock taken), so it does not violate the write-path
+    /// lock order. The returned [`EmitTicket`] MUST later be
+    /// [`submit`](EmitTicket::submit)ted (success) or dropped (abort → empty release).
+    pub fn reserve_emit_ticket(self: &Arc<Self>) -> EmitTicket {
+        let seq = self.emit_ticket_counter.fetch_add(1, Ordering::Relaxed);
+        EmitTicket {
+            broadcaster: Arc::clone(self),
+            seq,
+            submitted: false,
+        }
+    }
+
+    /// Insert `(seq, records)` into the sequencer and drain every now-contiguous prefix into
+    /// subscriber buffers in strict `seq` (== cursor) order.
+    ///
+    /// The push happens **inside** the sequencer critical section so two concurrent submits
+    /// can never reorder their pushes: whichever holds the lock releases its contiguous run
+    /// atomically. A writer never *waits* here — it either drains (possibly cascading records
+    /// parked earlier by other, later-finishing commits) or parks its own records and returns.
+    /// The sequencer lock is a leaf (only registry + subscriber leaf locks are taken beneath
+    /// it, post-commit); it never re-enters historical / WAL / current_timestamp.
+    fn submit_sequenced(&self, seq: u64, records: Vec<ChangeRecord>) {
+        let mut seqr = self.sequencer.lock().unwrap_or_else(|e| e.into_inner());
+        seqr.pending.insert(seq, records);
+        // Drain the contiguous run starting at `next_release`.
+        loop {
+            let next = seqr.next_release;
+            // Only release when the lowest parked seq is exactly the watermark.
+            match seqr.pending.first_key_value() {
+                Some((&k, _)) if k == next => {}
+                _ => break,
+            }
+            let recs = seqr
+                .pending
+                .remove(&next)
+                .expect("first_key_value just confirmed the entry is present");
+            seqr.next_release += 1;
+            // Push under the sequencer lock to preserve global release order. Empty runs
+            // (aborted tickets, or commits with no changefeed records) just advance the
+            // watermark without touching subscribers.
+            if !recs.is_empty() {
+                self.push_to_subscribers(&recs);
+            }
+        }
+    }
+
     /// Whether any subscription is currently live (fast, lock-free).
     pub fn has_subscribers(&self) -> bool {
-        self.subscriber_count.load(Ordering::Relaxed) != 0
+        self.subscriber_count.load(Ordering::Acquire) != 0
     }
 
     /// The number of currently-live subscriptions.
     pub fn subscription_count(&self) -> usize {
         self.subscribers
             .read()
-            .expect("changefeed registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .len()
     }
 
     fn deregister(&self, id: u64) {
-        let mut subs = self
-            .subscribers
-            .write()
-            .expect("changefeed registry poisoned");
+        let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
         if subs.remove(&id).is_some() {
-            self.subscriber_count.store(subs.len(), Ordering::Relaxed);
+            self.subscriber_count.store(subs.len(), Ordering::Release);
         }
     }
 }
@@ -783,6 +963,118 @@ mod tests {
         let got = sub.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(got.len(), 1);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn sequencer_releases_records_in_ascending_seq_order() {
+        // HIGH review fix: submitting seq 1 (records B@101) BEFORE seq 0 (records A@100) must
+        // deliver NOTHING until seq 0 is submitted, then both in ascending cursor order.
+        let b = Arc::new(ChangefeedBroadcaster::new());
+        let sub = b.subscribe(ChangeFilter::all()).unwrap();
+
+        let t0 = b.reserve_emit_ticket();
+        let t1 = b.reserve_emit_ticket();
+        assert_eq!(t0.seq(), 0);
+        assert_eq!(t1.seq(), 1);
+
+        // Submit the LATER sequence first: it must park, delivering nothing.
+        t1.submit(vec![record(
+            101,
+            101,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            101,
+        )]);
+        assert!(
+            sub.poll().is_empty(),
+            "seq 1 must not be delivered before seq 0 is released"
+        );
+
+        // Now release seq 0: both cascade out in ascending order (A then B).
+        t0.submit(vec![record(
+            100,
+            100,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            100,
+        )]);
+        let got = sub.poll();
+        assert_eq!(
+            got.len(),
+            2,
+            "both records released once the hole is filled"
+        );
+        assert_eq!(got[0].entity_id, 100, "A (seq 0) delivered first");
+        assert_eq!(got[1].entity_id, 101, "B (seq 1) delivered second");
+    }
+
+    #[test]
+    fn dropped_ticket_empty_release_does_not_stall_sequencer() {
+        // RAII contract: reserving seq 0 then DROPPING it without submit must not stall the
+        // sequencer — seq 1 must still be released.
+        let b = Arc::new(ChangefeedBroadcaster::new());
+        let sub = b.subscribe(ChangeFilter::all()).unwrap();
+
+        let t0 = b.reserve_emit_ticket();
+        let t1 = b.reserve_emit_ticket();
+        assert_eq!(t0.seq(), 0);
+        assert_eq!(t1.seq(), 1);
+
+        // Abort seq 0: Drop submits an empty release so the watermark advances past it.
+        drop(t0);
+
+        // seq 1 must now flow through (no permanent stall on the never-submitted seq 0).
+        t1.submit(vec![record(
+            101,
+            101,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            101,
+        )]);
+        let got = sub.poll();
+        assert_eq!(got.len(), 1, "seq 1 released despite seq 0 being dropped");
+        assert_eq!(got[0].entity_id, 101);
+    }
+
+    #[test]
+    fn dropped_ticket_before_earlier_submit_still_orders() {
+        // A dropped middle ticket must not block a later one, and an earlier real submit still
+        // leads. Reserve 0,1,2; drop 1 (empty); submit 2 then 0. Expect [A(0), C(2)].
+        let b = Arc::new(ChangefeedBroadcaster::new());
+        let sub = b.subscribe(ChangeFilter::all()).unwrap();
+
+        let t0 = b.reserve_emit_ticket();
+        let t1 = b.reserve_emit_ticket();
+        let t2 = b.reserve_emit_ticket();
+
+        drop(t1); // seq 1 empty-released (parked until seq 0 releases)
+        t2.submit(vec![record(
+            102,
+            102,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            102,
+        )]);
+        // Nothing yet: seq 0 still outstanding.
+        assert!(sub.poll().is_empty());
+
+        t0.submit(vec![record(
+            100,
+            100,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            100,
+        )]);
+        let got = sub.poll();
+        // seq 0 -> A, seq 1 -> empty (dropped), seq 2 -> C.
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].entity_id, 100);
+        assert_eq!(got[1].entity_id, 102);
     }
 
     #[test]

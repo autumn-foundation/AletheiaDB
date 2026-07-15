@@ -157,6 +157,26 @@ impl ChangeCursor {
         crate::core::hex::encode(raw.as_bytes())
     }
 
+    /// Encode a **baseline resume anchor** positioned strictly after every version committed
+    /// at or before `frontier` (Issue #3375 review F4).
+    ///
+    /// Uses `frontier`'s `(wallclock, logical)` with maximal kind/entity/version tiebreakers,
+    /// so a `list_changes` resume from this token (strict `> cursor`) returns exactly the
+    /// changes committed *after* `frontier` — i.e. everything a subscriber that captured
+    /// `frontier` at subscribe time could have missed, and nothing it should not re-see.
+    /// Because every future commit gets a strictly greater HLC timestamp, no future event is
+    /// ever excluded by this anchor.
+    pub(crate) fn baseline_after(frontier: Timestamp) -> String {
+        ChangeCursor {
+            tx_wallclock: frontier.wallclock(),
+            tx_logical: frontier.logical(),
+            kind_ord: u8::MAX,
+            entity_id: u64::MAX,
+            version_id: u64::MAX,
+        }
+        .encode()
+    }
+
     /// Decode an opaque continuation token produced by [`ChangeCursor::encode`].
     ///
     /// Returns a `QueryError::InvalidParameter` (never panics) when the token is malformed.

@@ -53,7 +53,19 @@ impl AletheiaDB {
     /// ```
     #[must_use = "the returned Subscription must be held to keep receiving changes"]
     pub fn subscribe_changes(&self, filter: ChangeFilter) -> Result<Subscription> {
-        self.changefeed.subscribe(filter)
+        // Capture the committed frontier as the subscription's initial resume anchor
+        // (Issue #3375 review F4). Reading `current_timestamp` (lock order class 1, taken
+        // alone here) snapshots the last commit's HLC; any future commit gets a strictly
+        // greater timestamp, so `baseline_after(frontier)` is a gap-free "resume from where I
+        // subscribed" cursor even before the consumer drains its first event. Poison-recover
+        // the guard so a panicked writer elsewhere can never make subscribe unwind.
+        let frontier = *self
+            .current_timestamp
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let baseline = crate::core::changefeed::ChangeCursor::baseline_after(frontier);
+        self.changefeed
+            .subscribe_with_baseline(filter, Some(baseline))
     }
 
     /// Reconfigure the changefeed caps (max concurrent subscriptions and per-subscription
