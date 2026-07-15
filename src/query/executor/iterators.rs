@@ -5156,6 +5156,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_edge_scan_iterator_skips_edge_deleted_after_snapshot() {
+        // Exercises the `EdgeNotFound => continue` skip arm: the id snapshot is
+        // taken at construction, then one edge is deleted from storage before
+        // the scan is drained. The deleted id must be skipped (no panic, no
+        // error) and only the surviving edges yielded.
+        let current = edge_scan_fixture(); // 3 edges
+        let all_ids = current.get_all_edge_ids();
+        assert_eq!(all_ids.len(), 3, "fixture must start with 3 edges");
+
+        // Construct the iterator first so it snapshots all 3 ids...
+        let iter = EdgeScanIterator::new(None, Arc::clone(&current));
+        // ...then delete one edge out from under the snapshot.
+        current
+            .delete_edge(all_ids[0])
+            .expect("delete_edge should succeed");
+
+        let edges = drain(iter);
+        assert_eq!(
+            edges.len(),
+            2,
+            "the edge deleted after the snapshot must be skipped, leaving 2"
+        );
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_size_hint_reports_edge_count() {
+        // A full (unfiltered) scan's size_hint upper bound equals the number of
+        // snapshotted edge ids.
+        let current = edge_scan_fixture(); // 3 edges
+        let iter = EdgeScanIterator::new(None, current);
+        assert_eq!(iter.size_hint(), (0, Some(3)));
+    }
+
     // ==================== VectorResultIterator Tests ====================
 
     #[test]

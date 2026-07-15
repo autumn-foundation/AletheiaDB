@@ -574,11 +574,15 @@ mod order_by {
 // node-oriented structured-result consumers). Consume edge scans via
 // `collect_all()`.
 //
-// A `WHERE` predicate over *edge property* leaves does not yet filter edge rows
+// A `WHERE` predicate over *edge property* leaves cannot yet filter edge rows
 // (the FilterIterator's single-entity AQL edge pipeline passes non-provenance
-// property leaves through -- Issue #3354a). That is a separate pre-existing gap,
-// not part of #311's EdgeScan execution; see
-// `select_edges_where_passes_through_edge_rows`.
+// property leaves through -- Issue #3354a), and an `ORDER BY` over an edge
+// property cannot yet sort them (the Sort iterator reads keys from nodes only).
+// Rather than silently ignore them, the SQL converter rejects an edge-property
+// `WHERE`/`ORDER BY` with a structured "not yet supported" error; see
+// `select_edges_where_property_is_rejected` /
+// `select_edges_order_by_property_is_rejected`. The supported edge form is
+// `SELECT * FROM edges [LIMIT n]`.
 mod select_edges {
     use super::*;
     use aletheiadb::PropertyValue;
@@ -703,46 +707,51 @@ mod select_edges {
     }
 
     #[test]
-    fn select_edges_where_passes_through_edge_rows() {
-        // v1 limitation: a WHERE predicate over *edge property* leaves does NOT
-        // filter edge rows. The shared FilterIterator sits above the EdgeScan,
-        // but its single-entity AQL edge pipeline deliberately passes
-        // non-provenance property leaves through on edge rows (Issue #3354a,
-        // covered by `edge_non_provenance_leaf_is_pass_through` in
-        // `src/query/executor/iterators.rs`). EdgeScan surfaces the edges; edge
-        // *property* filtering is a separate, pre-existing gap tracked outside
-        // #311. This test pins the current behavior so a future edge-predicate
-        // implementation flips it deliberately rather than by accident.
-        let db = setup_graph_db(); // edges have `since` = 2020 and 2021
-        let query =
-            parse_sql("SELECT * FROM edges WHERE since = 2021").expect("Failed to parse SQL");
-        let rows = db
+    fn select_edges_where_property_is_rejected() {
+        // A WHERE predicate over an *edge property* would be silently ignored:
+        // the shared FilterIterator sits above the EdgeScan but its
+        // single-entity AQL edge pipeline passes non-provenance property leaves
+        // through on edge rows (covered by `edge_non_provenance_leaf_is_pass_through`
+        // in `src/query/executor/iterators.rs`), and SQL's WHERE lowering can
+        // only ever emit property predicates. So every SQL edge-WHERE would
+        // return ALL edges unfiltered -- a silent wrong result. The SQL lane
+        // therefore rejects it at conversion time rather than executing.
+        let err = parse_sql("SELECT * FROM edges WHERE since = 2021")
+            .expect_err("edge-property WHERE must be rejected, not silently ignored");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("filtering `FROM edges`") && msg.contains("not yet supported"),
+            "error must explain edge-property filtering is unsupported, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn select_edges_order_by_property_is_rejected() {
+        // Symmetric to the WHERE rejection: ordering edge rows by a property key
+        // would silently no-op (the Sort iterator extracts sort keys from nodes
+        // only), so the SQL lane rejects it at conversion time.
+        let err = parse_sql("SELECT * FROM edges ORDER BY since ASC")
+            .expect_err("edge-property ORDER BY must be rejected, not silently ignored");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ordering `FROM edges`") && msg.contains("not yet supported"),
+            "error must explain edge-property ordering is unsupported, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn select_edges_count_all_non_empty() {
+        // Non-empty `count_all()` over an edge scan: the fixture has exactly 2
+        // KNOWS edges, so counting the stream yields 2 (complements the
+        // empty-database zero-count case).
+        let db = setup_graph_db();
+        let query = parse_sql("SELECT * FROM edges").expect("Failed to parse SQL");
+        let count = db
             .execute_query(query)
             .expect("Edge scan should execute")
-            .collect_all()
-            .expect("Failed to collect results");
-
-        // Both edges are returned: the edge-property predicate is a pass-through.
-        assert_eq!(
-            rows.len(),
-            2,
-            "edge-property WHERE leaves pass through in v1 (pre-existing FilterIterator limitation)"
-        );
-        assert!(
-            rows.iter().all(|r| r.entity.as_edge().is_some()),
-            "every returned row is still an Edge entity"
-        );
-        // Sanity: the property values are intact on the returned edge rows.
-        let mut since: Vec<i64> = rows
-            .iter()
-            .filter_map(|r| r.entity.as_edge())
-            .filter_map(|e| match e.get_property("since") {
-                Some(PropertyValue::Int(v)) => Some(*v),
-                _ => None,
-            })
-            .collect();
-        since.sort_unstable();
-        assert_eq!(since, vec![2020, 2021]);
+            .count_all()
+            .expect("Failed to count results");
+        assert_eq!(count, 2, "setup_graph_db has exactly 2 edges");
     }
 
     #[test]

@@ -1210,15 +1210,32 @@ mod phase3_graph {
     }
 
     #[test]
-    fn test_parse_select_from_edges_with_filter() {
-        let query = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'").unwrap();
+    fn test_parse_select_from_edges_with_filter_is_rejected() {
+        // An edge-property WHERE would be silently ignored (SQL can only emit
+        // property predicates, which the FilterIterator passes through on edge
+        // rows), so the converter rejects it rather than returning all edges.
+        let err = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'")
+            .expect_err("edge-property WHERE must be rejected");
+        assert!(matches!(err, SqlError::UnsupportedFeature(_)));
+        let msg = err.to_string();
         assert!(
-            query
-                .ops
-                .iter()
-                .any(|op| matches!(op, QueryOp::ScanEdges { .. }))
+            msg.contains("filtering `FROM edges`"),
+            "unexpected error message: {msg}"
         );
-        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    #[test]
+    fn test_parse_select_from_edges_with_property_order_by_is_rejected() {
+        // Symmetric to the WHERE rejection: an edge-property ORDER BY would
+        // silently no-op (the Sort iterator reads keys from nodes only).
+        let err = parse_sql("SELECT * FROM edges ORDER BY weight DESC")
+            .expect_err("edge-property ORDER BY must be rejected");
+        assert!(matches!(err, SqlError::UnsupportedFeature(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ordering `FROM edges`"),
+            "unexpected error message: {msg}"
+        );
     }
 
     #[test]
