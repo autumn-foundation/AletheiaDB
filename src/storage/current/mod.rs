@@ -767,13 +767,19 @@ impl CurrentStorage {
         // (partial work); the node update itself is not applied.
         // Update every enabled current-state AND temporal vector index using the
         // old properties, so a removed/overwritten embedding is de-indexed (not
-        // just re-added) on both. Without the old props (node not previously in
-        // storage — e.g. a replay create routed here) fall back to the add-only
-        // path, which is correct because there is no prior vector to remove.
+        // just re-added) on both. Without the old props the node is not yet in
+        // current storage — e.g. WAL replay applying an `UpdateNode` against a
+        // lagging index snapshot that never saw the node's create (recovery.rs
+        // applies these idempotently to converge). In that case there is no
+        // prior vector to remove, so we ADD to both the current-state HNSW and
+        // the temporal index, exactly mirroring `insert_node_direct`; indexing
+        // only the temporal side would leave the vector invisible to
+        // current-state `find_similar`.
         if let Some(old_p) = old_props {
             self.update_vector_index(node.id, &node.properties, &old_p)?;
             self.update_temporal_vector_index(node.id, &node.properties, &old_p, timestamp)?;
         } else {
+            self.try_index_vector(node.id, &node.properties)?;
             self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
         }
 
@@ -2882,6 +2888,48 @@ mod deindex_replay_tests {
                 .find(|(id, _)| *id == target_id)
                 .is_none_or(|(_, s)| *s < 0.1),
             "replay must drop the old embedding region after overwrite, got {after_old:?}"
+        );
+    }
+
+    /// Regression for the Gemini review on PR #3632: an `UpdateNode` replayed
+    /// against a node ABSENT from the (lagging) current-state index — the
+    /// `old_props == None` create-through-update branch of `update_node_direct`
+    /// — must index the vector into the current-state HNSW too, not only the
+    /// temporal index. Otherwise the vector is invisible to current-state
+    /// `find_similar` after recovery. Mirrors `insert_node_direct`, which
+    /// indexes both.
+    #[test]
+    fn update_create_path_indexes_current_state_hnsw() {
+        let storage = CurrentStorage::new();
+        // Current-state (non-temporal) vector index enabled; temporal one too,
+        // to exercise the exact fan-out the create-through-update branch runs.
+        storage
+            .enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+            .unwrap();
+        storage
+            .enable_temporal_vector_index("embedding", temporal_config())
+            .unwrap();
+
+        // Drive update_node_direct on a node that was NEVER inserted, so
+        // old_props resolves to None (the create-through-update / lagging-replay
+        // path). This is exactly `current.update_node_direct(...)` at
+        // recovery.rs when the create was already truncated past the snapshot.
+        let target_id = NodeId::new(1).unwrap();
+        let props = PropertyMapBuilder::new()
+            .insert("name", "target")
+            .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build();
+        storage
+            .update_node_direct(node(1, 1, props), time::now())
+            .unwrap();
+
+        // The node must now be findable via the CURRENT-STATE HNSW.
+        let results = storage
+            .find_similar_by_embedding(&[1.0f32, 0.0, 0.0, 0.0], 10)
+            .unwrap();
+        assert!(
+            results.iter().any(|(id, _)| *id == target_id),
+            "create-through-update must index the current-state HNSW, got {results:?}"
         );
     }
 }
