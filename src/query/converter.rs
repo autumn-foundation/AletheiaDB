@@ -167,7 +167,7 @@
 //! - **Avoid large IN lists**: Large `IN [...]` clauses are converted to sequential
 //!   value checks; consider using joins for very large lists
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::core::NodeId;
@@ -617,7 +617,7 @@ impl AstConverter {
         //    projected provenance columns (and preserves a bare entity via the
         //    bindings channel) as the final 1:1 step.
         if let Some(ref return_clause) = ast.return_clause
-            && let Some(op) = self.build_provenance_projection(return_clause)?
+            && let Some(op) = self.build_provenance_projection(return_clause, &ast.source)?
         {
             ops.push(op);
         }
@@ -635,9 +635,26 @@ impl AstConverter {
     /// provenance-named accessor with a malformed argument is a structured error
     /// (never silently dropped), mirroring the `WHERE`-clause accessor
     /// recognition.
-    fn build_provenance_projection(&self, return_clause: &ReturnClause) -> Result<Option<QueryOp>> {
+    ///
+    /// v1 supports only the clean single-entity forms
+    /// (`RETURN <entity>, <accessor(s)>` and `RETURN <accessor(s)>` over a single
+    /// bound node). Building general property-projection-into-columns is out of
+    /// scope, so a `RETURN` that mixes an accessor with a property projection
+    /// (`RETURN n.name, source(n)`), or references a variable other than the
+    /// single bound MATCH entity (`RETURN a, source(b)`, or an accessor over an
+    /// edge/traversal variable), is **rejected** with a structured error rather
+    /// than silently dropping the property or resolving the wrong entity.
+    fn build_provenance_projection(
+        &self,
+        return_clause: &ReturnClause,
+        source: &SourceClause,
+    ) -> Result<Option<QueryOp>> {
         let mut items = Vec::new();
         let mut entity_binding: Option<String> = None;
+        // Distinct entity variables referenced across the bare entity and every
+        // accessor argument; the supported form references exactly one.
+        let mut referenced_vars: BTreeSet<String> = BTreeSet::new();
+        let mut has_property_projection = false;
         for item in &return_clause.items {
             match &item.expression {
                 // A bare variable returned alongside the accessors is preserved
@@ -646,6 +663,13 @@ impl AstConverter {
                     if entity_binding.is_none() {
                         entity_binding = Some(name.clone());
                     }
+                    referenced_vars.insert(name.clone());
+                }
+                // A property projection (`n.name`) alongside an accessor is the
+                // unsupported mix (rejected below once we know an accessor is
+                // present).
+                Expression::Property(_) => {
+                    has_property_projection = true;
                 }
                 Expression::FunctionCall { name, args } => {
                     if let Some(field) = provenance_field_name(name) {
@@ -661,6 +685,7 @@ impl AstConverter {
                                 }));
                             }
                         };
+                        referenced_vars.insert(var.clone());
                         let output_name = item
                             .alias
                             .clone()
@@ -672,13 +697,62 @@ impl AstConverter {
             }
         }
         if items.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(QueryOp::ProjectProvenance(ProvenanceProjection {
-                entity_binding,
-                items,
-            })))
+            return Ok(None);
         }
+
+        // An accessor is projected: enforce the v1 single-entity contract.
+        if has_property_projection {
+            return Err(Error::Query(QueryError::SyntaxError {
+                message: "combining a property projection with a provenance accessor in RETURN \
+                          is not supported (v1); return the entity itself \
+                          (RETURN n, source(n)) or the accessors alone (RETURN source(n))"
+                    .to_string(),
+            }));
+        }
+        // The supported form binds exactly one entity: a single MATCH node with a
+        // variable. Every referenced variable (bare entity + accessor args) must
+        // be that node. This rejects the multi-variable mismatch
+        // (`RETURN a, source(b)`) and edge/traversal-variable accessors, which the
+        // single-entity positional pipeline would otherwise resolve against the
+        // wrong (or a nonexistent) entity.
+        let sole_entity = Self::sole_match_node_var(source);
+        let matches_sole = match &sole_entity {
+            Some(v) => referenced_vars.len() == 1 && referenced_vars.contains(v),
+            None => false,
+        };
+        if !matches_sole {
+            return Err(Error::Query(QueryError::SyntaxError {
+                message: "provenance projection in RETURN is supported only for a single bound \
+                          entity whose accessor variable matches the returned node \
+                          (RETURN n, source(n)); projecting an accessor over a different \
+                          variable, an edge/traversal variable, or a multi-entity match is not \
+                          supported (v1)"
+                    .to_string(),
+            }));
+        }
+
+        Ok(Some(QueryOp::ProjectProvenance(ProvenanceProjection {
+            entity_binding,
+            items,
+        })))
+    }
+
+    /// The variable of the single bound node when `source` is a `MATCH` of
+    /// exactly one node pattern with a variable and no relationships; `None`
+    /// otherwise (a traversal, multiple patterns, an unnamed node, or a
+    /// vector/similarity source). This is the one entity the single-entity
+    /// positional pipeline can correctly attribute a provenance accessor to.
+    fn sole_match_node_var(source: &SourceClause) -> Option<String> {
+        let SourceClause::Match(patterns) = source else {
+            return None;
+        };
+        let [pattern] = patterns.as_slice() else {
+            return None;
+        };
+        let [PatternElement::Node(node)] = pattern.elements.as_slice() else {
+            return None;
+        };
+        node.variable.clone()
     }
 
     fn convert_where_clause(
@@ -1327,13 +1401,12 @@ impl AstConverter {
                 Expression::FunctionCall { name, args }
                     if provenance_field_name(name).is_some() =>
                 {
-                    // `provenance_field_name` just matched, so this is safe; the
-                    // arm guard guarantees `Some`.
-                    let field = provenance_field_name(name).ok_or_else(|| {
-                        Error::Query(QueryError::SyntaxError {
+                    // The arm guard guarantees `Some`; bind it once.
+                    let Some(field) = provenance_field_name(name) else {
+                        return Err(Error::Query(QueryError::SyntaxError {
                             message: "unrecognized provenance accessor in ORDER BY".to_string(),
-                        })
-                    })?;
+                        }));
+                    };
                     match args.as_slice() {
                         [Expression::Identifier(_)] => SortKey::Provenance(field),
                         _ => {

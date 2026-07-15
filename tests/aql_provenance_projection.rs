@@ -219,17 +219,164 @@ fn order_by_confidence_not_in_return_sorts_and_hides_column() {
 }
 
 #[test]
+fn reason_projects_real_string_value() {
+    let db = make_db();
+    // alice's reason is a real string ("verified") -- assert the projected value,
+    // not just the Null case.
+    let rows = rows(&db, "MATCH (n:Person) RETURN n, reason(n)");
+    let alice = rows
+        .iter()
+        .find(|r| row_name(r).as_deref() == Some("String(\"alice\")"))
+        .expect("alice row");
+    assert_eq!(
+        col(alice, "reason(n)"),
+        Some(&PropertyValue::String("verified".into()))
+    );
+}
+
+#[test]
 fn source_only_projection_without_entity_is_columns_row() {
     let db = make_db();
     // No bare entity returned -> a pure columns row (like aggregation output).
     let rows = rows(&db, "MATCH (n:Person) RETURN source(n)");
     assert_eq!(rows.len(), 4);
+    // Every row is a pure columns row: no bindings, entity is Null (matching this
+    // test's name -- a columns-only shape).
+    for r in &rows {
+        assert!(r.bindings.is_none(), "columns-only row carries no bindings");
+        assert!(
+            matches!(r.entity, EntityResult::Null),
+            "columns-only row has a Null entity"
+        );
+    }
     let sources: Vec<PropertyValue> = rows
         .iter()
         .filter_map(|r| col(r, "source(n)").cloned())
         .collect();
     assert!(sources.contains(&PropertyValue::String("hr-system".into())));
     assert!(sources.contains(&PropertyValue::Null)); // dave
+}
+
+#[test]
+fn where_provenance_filter_composes_with_projection() {
+    let db = make_db();
+    // WHERE narrows to the two hr-system rows (alice, carol); the projected
+    // confidence column must still be correct on the surviving rows.
+    let rows = rows(
+        &db,
+        "MATCH (n:Person) WHERE source(n) = 'hr-system' RETURN n, confidence(n)",
+    );
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "String(\"alice\")".to_string(),
+            "String(\"carol\")".to_string()
+        ],
+        "filter narrows to the two hr-system rows"
+    );
+    let alice = rows
+        .iter()
+        .find(|r| row_name(r).as_deref() == Some("String(\"alice\")"))
+        .expect("alice row");
+    match col(alice, "confidence(n)") {
+        Some(PropertyValue::Float(f)) => assert!((f - 0.95).abs() < 1e-9, "got {f}"),
+        other => panic!("expected 0.95, got {other:?}"),
+    }
+}
+
+#[test]
+fn order_by_confidence_desc_with_skip_limit_pages_projected_rows() {
+    // ProjectProvenance runs LAST (after Sort/Skip/Limit), so it is strictly 1:1
+    // over the paged rows. Full DESC order is [dave(null), alice 0.95, carol 0.80,
+    // bob 0.60]; SKIP 1 LIMIT 2 keeps exactly [alice, carol], each carrying its
+    // own projected confidence column.
+    let db = make_db();
+    let rows = rows(
+        &db,
+        "MATCH (n:Person) RETURN n, confidence(n) ORDER BY confidence(n) DESC SKIP 1 LIMIT 2",
+    );
+    let order: Vec<String> = rows.iter().filter_map(row_name).collect();
+    assert_eq!(
+        order,
+        vec![
+            "String(\"alice\")".to_string(),
+            "String(\"carol\")".to_string()
+        ],
+        "SKIP 1 LIMIT 2 over the DESC ordering keeps alice then carol"
+    );
+    // Each surviving row carries the correct projected confidence.
+    match col(&rows[0], "confidence(n)") {
+        Some(PropertyValue::Float(f)) => assert!((f - 0.95).abs() < 1e-9, "alice got {f}"),
+        other => panic!("expected alice 0.95, got {other:?}"),
+    }
+    match col(&rows[1], "confidence(n)") {
+        Some(PropertyValue::Float(f)) => assert!((f - 0.80).abs() < 1e-9, "carol got {f}"),
+        other => panic!("expected carol 0.80, got {other:?}"),
+    }
+}
+
+#[test]
+fn order_by_source_string_places_two_nulls_last() {
+    // Two unattributed nodes exercise the (None, None) comparison arm and the
+    // String ORDER BY path with openCypher null placement (nulls last for ASC).
+    let db = AletheiaDB::new().expect("db");
+    create_person(&db, "alice", Some(prov(Some("hr-system"), None, None)));
+    create_person(&db, "bob", Some(prov(Some("crm-sync"), None, None)));
+    create_person(&db, "dave", None); // unattributed
+    create_person(&db, "erin", None); // second unattributed -> two nulls
+    let rows = rows(&db, "MATCH (n:Person) RETURN n ORDER BY source(n)");
+    let order: Vec<String> = rows.iter().filter_map(row_name).collect();
+    // ASC on the string source: crm-sync (bob) < hr-system (alice), then the two
+    // nulls last, stable in insertion order (dave before erin).
+    assert_eq!(
+        order,
+        vec![
+            "String(\"bob\")",
+            "String(\"alice\")",
+            "String(\"dave\")",
+            "String(\"erin\")",
+        ]
+    );
+}
+
+#[test]
+fn rejects_property_and_accessor_mix() {
+    // (a) A property projection mixed with an accessor is a structured error, not
+    // a silently-dropped property.
+    let db = make_db();
+    assert!(
+        db.execute_aql("MATCH (n:Person) RETURN n.name, source(n)")
+            .is_err(),
+        "property + accessor mix must be rejected"
+    );
+}
+
+#[test]
+fn rejects_multi_variable_accessor_mismatch() {
+    // (c) The accessor names a variable other than the single bound entity: must
+    // be rejected rather than resolving the wrong (or a nonexistent) entity.
+    let db = make_db();
+    assert!(
+        db.execute_aql("MATCH (n:Person) RETURN n, source(m)")
+            .is_err(),
+        "accessor over a non-bound variable must be rejected"
+    );
+}
+
+#[test]
+fn rejects_edge_variable_accessor() {
+    // MUST-FIX 3: edge-entity provenance projection is not supported in v1 (the
+    // AQL positional pipeline never binds an edge as the row entity). An accessor
+    // over an edge/traversal variable must REJECT with a structured error rather
+    // than silently resolving the traversal-terminal node's provenance.
+    let db = make_db();
+    assert!(
+        db.execute_aql("MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN r, source(r)")
+            .is_err(),
+        "edge-variable accessor must be rejected (node-entity-scoped in v1)"
+    );
 }
 
 #[test]
