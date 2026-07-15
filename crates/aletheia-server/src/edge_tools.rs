@@ -111,6 +111,14 @@ pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
+    // Semantic-search analysis tools (Issue #2907): budgetable read tools that
+    // forward raw args through dispatch_tool_json under the slow-read guard.
+    ("semantic_path", AccessClass::Read),
+    ("concept_analogy", AccessClass::Read),
+    ("concept_mean", AccessClass::Read),
+    ("find_duplicate_candidates", AccessClass::Read),
+    ("semantic_horizon", AccessClass::Read),
+    ("context_aspects", AccessClass::Read),
 ];
 
 /// The **superset** of *every* handler that forwards a hardcoded literal tool
@@ -150,6 +158,13 @@ pub const ALL_DISPATCH_ROUTED: &[(&str, AccessClass)] = &[
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
+    // Semantic-search analysis tools (Issue #2907) — budgetable, dispatch-routed.
+    ("semantic_path", AccessClass::Read),
+    ("concept_analogy", AccessClass::Read),
+    ("concept_mean", AccessClass::Read),
+    ("find_duplicate_candidates", AccessClass::Read),
+    ("semantic_horizon", AccessClass::Read),
+    ("context_aspects", AccessClass::Read),
     // Issue #3524 PR7 — dispatch_tool_json call sites that are NOT budgetable
     // (so absent from DISPATCH_ROUTED_READ_TOOLS). Literals match the pinned
     // names in `constraints_lineage_audit_tools.rs` char-for-char.

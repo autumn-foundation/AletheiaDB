@@ -88,6 +88,12 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `get_incoming_edges` | read |
 | `traverse` | read |
 | `find_similar` | read |
+| `semantic_path` | read |
+| `concept_analogy` | read |
+| `concept_mean` | read |
+| `find_duplicate_candidates` | read |
+| `semantic_horizon` | read |
+| `context_aspects` | read |
 | `list_vector_indexes` | read |
 | `list_unique_constraints` | read |
 | `get_node_at_time` | read |

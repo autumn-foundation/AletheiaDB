@@ -316,6 +316,7 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | **Batch** | `apply_batch` (ordered multi-op write batch committing all-or-nothing in one transaction; edge ops may reference batch-created nodes via `$alias`/`$<index>` local refs; see below) |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
+| **Semantic** | `semantic_path`, `concept_analogy`, `concept_mean`, `find_duplicate_candidates`, `semantic_horizon`, `context_aspects` (read-only analysis over the stable `semantic-search` cohort; gated on the `semantic-search` feature — return `FAILED_PRECONDITION` with `required_feature` when absent; see [docs/guides/mcp-semantic-search-tools.md](docs/guides/mcp-semantic-search-tools.md)) |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |

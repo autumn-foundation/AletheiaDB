@@ -418,3 +418,328 @@ pub async fn list_vector_indexes(_auth: Authorized<ReadClass>, state: ServerStat
     let server = state.mcp_server();
     tool_json(server.list_vector_indexes(ListVectorIndexesRequest {}))
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Semantic-search analysis tools (Issue #2907) — six [`ReadClass`], budgetable
+// (#3353), NOT cursorable, potentially slow reads. Each forwards raw arguments
+// through `dispatch_tool_json` (so the #3353 budget applies) under the B4
+// resource-limits wiring, exactly like `find_similar`. The tool bodies are gated
+// on the main crate's `semantic-search` feature (Design A): when that feature is
+// absent the shared server returns a structured `FAILED_PRECONDITION`
+// (`required_feature: "semantic-search"`) which this handler forwards verbatim.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Request body for [`semantic_path`] — all-optional mirror of the MCP
+/// `SemanticPathRequest` (requiredness enforced at dispatch) plus the #3353
+/// token budget.
+#[derive(Debug, Default, Deserialize)]
+pub struct SemanticPathBody {
+    /// Starting node id (logically required; enforced at dispatch).
+    pub start: Option<u64>,
+    /// Target node id (logically required; enforced at dispatch).
+    pub end: Option<u64>,
+    /// The property holding the vector embedding used to guide the search.
+    pub property_name: Option<String>,
+    /// Optional maximum traversal depth (clamped to the server maximum).
+    pub max_depth: Option<usize>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+}
+
+/// `semantic_path` — vector-similarity-guided (bounded A*) pathfinding between
+/// two nodes. [`ReadClass`]; budgetable (#3353), not cursorable. HTTP + MCP tool.
+#[post("/semantic/path")]
+#[api_doc(
+    description = "Find a vector-similarity-guided (bounded A*) path between two nodes over the semantic-search cohort",
+    mcp
+)]
+pub async fn semantic_path(
+    _auth: Authorized<ReadClass>,
+    security: ServerSecurityState,
+    state: ServerState,
+    Json(opts): Json<SemanticPathBody>,
+) -> Result<Json<Value>, AletheiaHttpError> {
+    let mut args = Map::new();
+    insert_opt(&mut args, "start", opts.start.map(Value::from));
+    insert_opt(&mut args, "end", opts.end.map(Value::from));
+    insert_opt(
+        &mut args,
+        "property_name",
+        opts.property_name.map(Value::from),
+    );
+    insert_opt(&mut args, "max_depth", opts.max_depth.map(Value::from));
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    dispatch_slow_read(&security, &state, "semantic_path", Value::Object(args)).await
+}
+
+/// Request body for [`concept_analogy`].
+#[derive(Debug, Default, Deserialize)]
+pub struct ConceptAnalogyBody {
+    /// Node id `a` in the analogy `a : b :: c : ?`.
+    pub a: Option<u64>,
+    /// Node id `b` in the analogy `a : b :: c : ?`.
+    pub b: Option<u64>,
+    /// Node id `c` in the analogy `a : b :: c : ?`.
+    pub c: Option<u64>,
+    /// The property holding the vector embedding.
+    pub property_name: Option<String>,
+    /// Number of results to return (clamped to the server maximum).
+    pub k: Option<usize>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+}
+
+/// `concept_analogy` — vector analogy `a : b :: c : ?` over node embeddings.
+/// [`ReadClass`]; budgetable (#3353), not cursorable. HTTP + MCP tool.
+#[post("/semantic/analogy")]
+#[api_doc(
+    description = "Solve a vector analogy a : b :: c : ? over node embeddings (Concept Algebra)",
+    mcp
+)]
+pub async fn concept_analogy(
+    _auth: Authorized<ReadClass>,
+    security: ServerSecurityState,
+    state: ServerState,
+    Json(opts): Json<ConceptAnalogyBody>,
+) -> Result<Json<Value>, AletheiaHttpError> {
+    let mut args = Map::new();
+    insert_opt(&mut args, "a", opts.a.map(Value::from));
+    insert_opt(&mut args, "b", opts.b.map(Value::from));
+    insert_opt(&mut args, "c", opts.c.map(Value::from));
+    insert_opt(
+        &mut args,
+        "property_name",
+        opts.property_name.map(Value::from),
+    );
+    insert_opt(&mut args, "k", opts.k.map(Value::from));
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    dispatch_slow_read(&security, &state, "concept_analogy", Value::Object(args)).await
+}
+
+/// Request body for [`concept_mean`].
+#[derive(Debug, Default, Deserialize)]
+pub struct ConceptMeanBody {
+    /// Node ids whose embeddings are averaged (capped at dispatch).
+    pub nodes: Option<Vec<u64>>,
+    /// The property holding the vector embedding.
+    pub property_name: Option<String>,
+    /// Number of results to return (clamped to the server maximum).
+    pub k: Option<usize>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+}
+
+/// `concept_mean` — rank the top-k nodes nearest the centroid of a set of nodes.
+/// [`ReadClass`]; budgetable (#3353), not cursorable. HTTP + MCP tool.
+#[post("/semantic/mean")]
+#[api_doc(
+    description = "Rank the top-k nodes nearest the centroid (mean embedding) of a set of nodes (Concept Algebra)",
+    mcp
+)]
+pub async fn concept_mean(
+    _auth: Authorized<ReadClass>,
+    security: ServerSecurityState,
+    state: ServerState,
+    Json(opts): Json<ConceptMeanBody>,
+) -> Result<Json<Value>, AletheiaHttpError> {
+    let mut args = Map::new();
+    insert_opt(&mut args, "nodes", opts.nodes.map(Value::from));
+    insert_opt(
+        &mut args,
+        "property_name",
+        opts.property_name.map(Value::from),
+    );
+    insert_opt(&mut args, "k", opts.k.map(Value::from));
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    dispatch_slow_read(&security, &state, "concept_mean", Value::Object(args)).await
+}
+
+/// Request body for [`find_duplicate_candidates`].
+#[derive(Debug, Default, Deserialize)]
+pub struct FindDuplicateCandidatesBody {
+    /// The node whose near-duplicates are sought.
+    pub node_id: Option<u64>,
+    /// The property whose vector index is validated (v1: search uses the node's
+    /// indexed embedding).
+    pub property_name: Option<String>,
+    /// Minimum cosine similarity in [0, 1] for a candidate to be reported.
+    pub threshold: Option<f32>,
+    /// Maximum number of candidates to return (clamped to the server maximum).
+    pub limit: Option<usize>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+}
+
+/// `find_duplicate_candidates` — near-duplicate detection by embedding
+/// similarity (Highlander). [`ReadClass`]; budgetable (#3353), not cursorable.
+/// HTTP + MCP tool.
+#[post("/semantic/duplicates")]
+#[api_doc(
+    description = "Find near-duplicate candidates for a node by embedding similarity (Highlander entity resolution)",
+    mcp
+)]
+pub async fn find_duplicate_candidates(
+    _auth: Authorized<ReadClass>,
+    security: ServerSecurityState,
+    state: ServerState,
+    Json(opts): Json<FindDuplicateCandidatesBody>,
+) -> Result<Json<Value>, AletheiaHttpError> {
+    let mut args = Map::new();
+    insert_opt(&mut args, "node_id", opts.node_id.map(Value::from));
+    insert_opt(
+        &mut args,
+        "property_name",
+        opts.property_name.map(Value::from),
+    );
+    insert_opt(&mut args, "threshold", opts.threshold.map(Value::from));
+    insert_opt(&mut args, "limit", opts.limit.map(Value::from));
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    dispatch_slow_read(
+        &security,
+        &state,
+        "find_duplicate_candidates",
+        Value::Object(args),
+    )
+    .await
+}
+
+/// Request body for [`semantic_horizon`].
+#[derive(Debug, Default, Deserialize)]
+pub struct SemanticHorizonBody {
+    /// The seed node the horizon is mapped from.
+    pub seed: Option<u64>,
+    /// The property holding the vector embedding.
+    pub property_name: Option<String>,
+    /// Similarity threshold in [0, 1]; neighbours below it form the horizon.
+    pub threshold: Option<f32>,
+    /// Optional maximum traversal depth (clamped to the server maximum).
+    pub max_depth: Option<usize>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+}
+
+/// `semantic_horizon` — map a node's semantic event horizon (Horizon engine).
+/// [`ReadClass`]; budgetable (#3353), not cursorable. HTTP + MCP tool.
+#[post("/semantic/horizon")]
+#[api_doc(
+    description = "Map a node's semantic event horizon: interior (similar) vs. boundary neighbours (Horizon engine)",
+    mcp
+)]
+pub async fn semantic_horizon(
+    _auth: Authorized<ReadClass>,
+    security: ServerSecurityState,
+    state: ServerState,
+    Json(opts): Json<SemanticHorizonBody>,
+) -> Result<Json<Value>, AletheiaHttpError> {
+    let mut args = Map::new();
+    insert_opt(&mut args, "seed", opts.seed.map(Value::from));
+    insert_opt(
+        &mut args,
+        "property_name",
+        opts.property_name.map(Value::from),
+    );
+    insert_opt(&mut args, "threshold", opts.threshold.map(Value::from));
+    insert_opt(&mut args, "max_depth", opts.max_depth.map(Value::from));
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    dispatch_slow_read(&security, &state, "semantic_horizon", Value::Object(args)).await
+}
+
+/// Request body for [`context_aspects`].
+#[derive(Debug, Default, Deserialize)]
+pub struct ContextAspectsBody {
+    /// The node whose neighbourhood is decomposed.
+    pub node_id: Option<u64>,
+    /// The property holding the vector embedding.
+    pub property_name: Option<String>,
+    /// Number of aspects (clusters) to extract (clamped to the server maximum).
+    pub k: Option<usize>,
+    /// Return full centroid vectors instead of the elided descriptor (#3220).
+    pub include_vectors: Option<bool>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+}
+
+/// `context_aspects` — decompose a node's neighbourhood into distinct semantic
+/// aspects (Chameleon). [`ReadClass`]; budgetable (#3353), not cursorable.
+/// HTTP + MCP tool.
+#[post("/semantic/aspects")]
+#[api_doc(
+    description = "Decompose a node's neighbourhood into distinct semantic aspects with exemplars (Chameleon)",
+    mcp
+)]
+pub async fn context_aspects(
+    _auth: Authorized<ReadClass>,
+    security: ServerSecurityState,
+    state: ServerState,
+    Json(opts): Json<ContextAspectsBody>,
+) -> Result<Json<Value>, AletheiaHttpError> {
+    let mut args = Map::new();
+    insert_opt(&mut args, "node_id", opts.node_id.map(Value::from));
+    insert_opt(
+        &mut args,
+        "property_name",
+        opts.property_name.map(Value::from),
+    );
+    insert_opt(&mut args, "k", opts.k.map(Value::from));
+    insert_opt(
+        &mut args,
+        "include_vectors",
+        opts.include_vectors.map(Value::from),
+    );
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    dispatch_slow_read(&security, &state, "context_aspects", Value::Object(args)).await
+}

@@ -123,6 +123,41 @@ impl<'a> SemanticNavigator<'a> {
     /// - `Ok(Vec<NodeId>)`: The path from start to end (inclusive).
     /// - `Err`: If start/end nodes are invalid, missing vectors, or no path exists.
     pub fn find_path(&self, start: NodeId, end: NodeId, vector_prop: &str) -> Result<Vec<NodeId>> {
+        // The unbounded variant is a thin wrapper over the bounded search with an
+        // effectively-infinite expansion budget, so the two share one code path.
+        self.find_path_bounded(start, end, vector_prop, usize::MAX)
+    }
+
+    /// Bounded variant of [`find_path`](Self::find_path) for untrusted callers
+    /// (e.g. the MCP surface).
+    ///
+    /// The plain A* search is **unbounded**: on a large or adversarial graph it
+    /// can expand an arbitrary number of nodes before concluding, a denial-of-
+    /// service risk when the endpoints are attacker-controlled. This variant caps
+    /// the number of node expansions (pops from the open set) at
+    /// `max_expansions`; once the budget is exhausted without reaching `end`, it
+    /// returns an error instead of continuing to explore. All other semantics are
+    /// identical to [`find_path`](Self::find_path).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Starting node ID.
+    /// * `end` - Target node ID.
+    /// * `vector_prop` - Name of the property containing the vector embedding.
+    /// * `max_expansions` - Maximum number of node expansions before giving up.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Vec<NodeId>)`: The path from start to end (inclusive).
+    /// - `Err`: If start/end are invalid, missing vectors, no path exists, or the
+    ///   expansion budget is exhausted before `end` is reached.
+    pub fn find_path_bounded(
+        &self,
+        start: NodeId,
+        end: NodeId,
+        vector_prop: &str,
+        max_expansions: usize,
+    ) -> Result<Vec<NodeId>> {
         // 1. Validate Start/End and get Goal Vector
         let start_node = self.db.get_node(start)?;
         let end_node = self.db.get_node(end)?;
@@ -172,6 +207,7 @@ impl<'a> SemanticNavigator<'a> {
         // it helps performance on general graphs.
         // However, g_score check implicitly handles this.
 
+        let mut expansions: usize = 0;
         while let Some(State {
             cost: _current_f,
             node: current,
@@ -179,6 +215,16 @@ impl<'a> SemanticNavigator<'a> {
         {
             if current == end {
                 return Ok(self.reconstruct_path(came_from, current));
+            }
+
+            // Enforce the expansion budget (DoS protection for untrusted
+            // callers). We count a node the moment it is popped for expansion.
+            expansions = expansions.saturating_add(1);
+            if expansions > max_expansions {
+                return Err(Error::other(format!(
+                    "No path found within expansion budget ({} nodes)",
+                    max_expansions
+                )));
             }
 
             // Get current vector for cost calculation

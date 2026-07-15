@@ -1063,8 +1063,8 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
     // Everything else must be Read (no fourth class sneaking in).
     assert_eq!(
         TOOL_ACCESS_CLASSES.len(),
-        actual_write.len() + actual_metrics.len() + 33,
-        "Read tool count changed (expected 33); if a tool was added or \
+        actual_write.len() + actual_metrics.len() + 39,
+        "Read tool count changed (expected 39); if a tool was added or \
          removed, re-verify its classification and update this count"
     );
 }
@@ -1087,27 +1087,27 @@ fn classification_uses_known_classes_only() {
 // 6. Live tool-inventory golden (drift detection for the external mirror)
 //
 // The external `tests/parity_mcp.rs::tool_inventory_golden_is_stable` test can
-// only validate a hardcoded 46-tool constant against itself, because the live
+// only validate a hardcoded 52-tool constant against itself, because the live
 // registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)` and
 // unreachable from an external test crate. This in-crate test closes that gap:
 // it derives the LIVE advertised `(tool_name, access_class)` set from the
-// registry and asserts it equals a hardcoded golden snapshot of the 46 pairs.
+// registry and asserts it equals a hardcoded golden snapshot of the 52 pairs.
 // A tool that is added, removed, renamed, or reclassified FAILS here — the
 // authoritative drift detector the external mirror points back to.
 // ============================================================================
 
 /// AC3 (drift): the LIVE advertised MCP tool inventory — every name paired
 /// with the `AccessClass` the registry assigns it — must equal this hardcoded
-/// golden set of exactly 46 pairs. Adding, dropping, renaming, or
+/// golden set of exactly 52 pairs. Adding, dropping, renaming, or
 /// reclassifying a tool changes the live set and fails this assertion; update
 /// the golden here AND the external mirror (`tests/parity_mcp.rs`) +
 /// `tests/parity/inventory.json` deliberately when that happens.
 #[test]
 fn live_tool_inventory_matches_golden() {
-    /// The 46 `(tool_name, access_class)` pairs the server is expected to
+    /// The 52 `(tool_name, access_class)` pairs the server is expected to
     /// advertise, derived from the current live `TOOL_ACCESS_CLASSES`.
-    const GOLDEN: [(&str, AccessClass); 46] = [
-        // Read (33)
+    const GOLDEN: [(&str, AccessClass); 52] = [
+        // Read (39)
         ("get_node", AccessClass::Read),
         ("list_nodes", AccessClass::Read),
         ("count_nodes", AccessClass::Read),
@@ -1118,6 +1118,13 @@ fn live_tool_inventory_matches_golden() {
         ("get_incoming_edges", AccessClass::Read),
         ("traverse", AccessClass::Read),
         ("find_similar", AccessClass::Read),
+        // Semantic-search analysis tools (Issue #2907).
+        ("semantic_path", AccessClass::Read),
+        ("concept_analogy", AccessClass::Read),
+        ("concept_mean", AccessClass::Read),
+        ("find_duplicate_candidates", AccessClass::Read),
+        ("semantic_horizon", AccessClass::Read),
+        ("context_aspects", AccessClass::Read),
         ("list_vector_indexes", AccessClass::Read),
         ("list_unique_constraints", AccessClass::Read),
         ("get_node_at_time", AccessClass::Read),
@@ -1163,7 +1170,7 @@ fn live_tool_inventory_matches_golden() {
         .iter()
         .map(|(name, class)| ((*name).to_string(), class.to_string()))
         .collect();
-    assert_eq!(golden.len(), 46, "golden must be 46 unique tool names");
+    assert_eq!(golden.len(), 52, "golden must be 52 unique tool names");
 
     // Live set derived from the advertised registry + classification table.
     let server = AletheiaMcpServer::new(db());
@@ -1181,7 +1188,7 @@ fn live_tool_inventory_matches_golden() {
     assert_eq!(
         live, golden,
         "the LIVE advertised MCP tool inventory drifted from the golden \
-         46-pair set — a tool was added, removed, renamed, or reclassified. \
+         52-pair set — a tool was added, removed, renamed, or reclassified. \
          Update GOLDEN here, tests/parity_mcp.rs::TOOL_INVENTORY, and \
          tests/parity/inventory.json deliberately."
     );

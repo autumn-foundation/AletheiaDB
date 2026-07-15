@@ -373,7 +373,18 @@ pub(crate) fn shape_response(
 }
 
 fn is_ranked_tool(tool: &str) -> bool {
-    matches!(tool, "find_similar" | "hybrid_query")
+    matches!(
+        tool,
+        "find_similar"
+            | "hybrid_query"
+            // Issue #2907 semantic-search tools whose results are score-ordered
+            // (or a single atomic path); their order/completeness must not be
+            // silently truncated to meet a token budget.
+            | "semantic_path"
+            | "find_duplicate_candidates"
+            | "concept_analogy"
+            | "concept_mean"
+    )
 }
 
 /// Build a candidate response value at `rung`, with the disclosed `budget`
