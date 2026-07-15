@@ -765,12 +765,17 @@ impl CurrentStorage {
         // NOTE: with multiple vector/temporal indexes enabled, a mid-fan-out
         // failure returns Err with indexes visited earlier already updated
         // (partial work); the node update itself is not applied.
+        // Update every enabled current-state AND temporal vector index using the
+        // old properties, so a removed/overwritten embedding is de-indexed (not
+        // just re-added) on both. Without the old props (node not previously in
+        // storage — e.g. a replay create routed here) fall back to the add-only
+        // path, which is correct because there is no prior vector to remove.
         if let Some(old_p) = old_props {
             self.update_vector_index(node.id, &node.properties, &old_p)?;
+            self.update_temporal_vector_index(node.id, &node.properties, &old_p, timestamp)?;
+        } else {
+            self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
         }
-
-        // Update every enabled temporal vector index
-        self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
 
         // Finally, insert node into main indexes. This avoids node.clone().
         self.indexes.insert_node(node);
@@ -1951,6 +1956,65 @@ impl CurrentStorage {
         Ok(())
     }
 
+    /// Update every enabled temporal vector index for a node whose properties
+    /// changed, mirroring [`update_vector_index`](Self::update_vector_index) for
+    /// the current-state HNSW.
+    ///
+    /// For each indexed property this diffs the old vs new vector and applies the
+    /// matching temporal operation:
+    ///
+    /// - `(None, None)` — property absent before and after: no-op.
+    /// - `(None, Some)` — vector added: [`TemporalVectorIndex::add`].
+    /// - `(Some, None)` — vector removed: [`TemporalVectorIndex::remove`], which
+    ///   drops the embedding from the live HNSW **and** from `current_state.vectors`
+    ///   so it no longer leaks into the next snapshot.
+    /// - `(Some, Some)` — vector overwritten: only re-`add` (an upsert) when the
+    ///   value actually changed, avoiding needless HNSW churn.
+    ///
+    /// # Bi-temporal tombstone semantics
+    ///
+    /// `remove`/overwrite CLOSE the vector's interval at `timestamp` — the change
+    /// is reflected in any snapshot taken **after** it — but they never erase
+    /// snapshots taken **before** it. History is therefore preserved: a
+    /// `find_similar_as_of` anchored before the change still returns the old
+    /// embedding, while an as-of-now query no longer returns the stale phantom
+    /// (Issue #3621). Because this is the exact method the WAL-replay
+    /// `update_node_direct` invokes, crash recovery reconstructs the same
+    /// corrected point-in-time state.
+    ///
+    /// Fan-out matches [`try_index_temporal_vector`](Self::try_index_temporal_vector):
+    /// on the first failing index this returns `Err` with earlier indexes already
+    /// updated (partial work); the node update itself is not applied by the caller.
+    fn update_temporal_vector_index(
+        &self,
+        node_id: NodeId,
+        new_props: &PropertyMap,
+        old_props: &PropertyMap,
+        timestamp: Timestamp,
+    ) -> Result<()> {
+        for (property_name, index) in self.collect_temporal_vector_indexes() {
+            let old_vec = old_props.get(&property_name).and_then(|v| v.as_vector());
+            let new_vec = new_props.get(&property_name).and_then(|v| v.as_vector());
+
+            match (old_vec, new_vec) {
+                (None, None) => {}
+                (None, Some(v)) => {
+                    index.add(node_id, v, timestamp)?;
+                }
+                (Some(_), None) => {
+                    index.remove(node_id, timestamp)?;
+                }
+                (Some(o), Some(n)) => {
+                    if o != n {
+                        // add() is an upsert (remove + add) on the temporal index.
+                        index.add(node_id, n, timestamp)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Helper to remove a node's vectors from every enabled temporal vector index.
     ///
     /// Mirrors [`try_remove_from_index`](Self::try_remove_from_index): removal is
@@ -2649,5 +2713,175 @@ mod coverage_tests {
         let result = storage.find_similar_in("embedding", node_id, 5);
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("Vector index not found"));
+    }
+}
+
+/// Issue #3621: WAL replay reruns `update_node_direct`, so the corrected
+/// temporal de-indexing must reconstruct the right point-in-time state after a
+/// crash-recovery replay. These tests drive `insert_node_direct` /
+/// `update_node_direct` — the exact entry points recovery calls at
+/// `storage/recovery.rs` (`current.insert_node_direct` / `current.update_node_direct`)
+/// — with a temporal vector index enabled, then trigger snapshots via
+/// `on_temporal_vector_transaction` (the same hook the commit path fires). A
+/// true open→reopen test cannot cover this: the temporal vector index is an
+/// in-memory index whose config is not persisted, so replay only repopulates it
+/// when it is re-enabled beforehand — which is precisely what exercising the
+/// replay entry points here simulates.
+#[cfg(test)]
+mod deindex_replay_tests {
+    use super::*;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
+    use crate::index::vector::DistanceMetric;
+
+    fn temporal_config() -> TemporalVectorConfig {
+        use crate::index::vector::temporal::{RetentionPolicy, SnapshotStrategy};
+        TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            full_snapshot_interval: 5,
+            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+        }
+    }
+
+    fn node(id: u64, version: u64, props: PropertyMap) -> Node {
+        let label = GLOBAL_INTERNER.intern("Doc").unwrap();
+        Node::new(
+            NodeId::new(id).unwrap(),
+            label,
+            props,
+            VersionId::new(version).unwrap(),
+        )
+    }
+
+    fn advance() {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    /// Replaying a create followed by a vector-property removal through the
+    /// direct (WAL-replay) methods leaves the temporal index de-indexed at the
+    /// current time while an earlier snapshot still finds the vector.
+    #[test]
+    fn replay_remove_vector_deindexes_current_but_preserves_history() {
+        let storage = CurrentStorage::new();
+        storage
+            .enable_temporal_vector_index("embedding", temporal_config())
+            .unwrap();
+
+        // Replay: create a node with an embedding (recovery.rs -> insert_node_direct).
+        let target_id = NodeId::new(1).unwrap();
+        let create_props = PropertyMapBuilder::new()
+            .insert("name", "target")
+            .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build();
+        let t1 = time::now();
+        storage
+            .insert_node_direct(node(1, 1, create_props), t1)
+            .unwrap();
+        storage.on_temporal_vector_transaction().unwrap();
+
+        advance();
+        let t_before_remove = time::now();
+        advance();
+
+        // Replay: update the node, dropping the embedding (recovery.rs -> update_node_direct).
+        let removed_props = PropertyMapBuilder::new().insert("name", "target").build();
+        let t2 = time::now();
+        storage
+            .update_node_direct(node(1, 2, removed_props), t2)
+            .unwrap();
+        storage.on_temporal_vector_transaction().unwrap();
+
+        advance();
+        let t_after_remove = time::now();
+
+        let query = [1.0f32, 0.0, 0.0, 0.0];
+
+        // History preserved: the pre-removal snapshot still finds the target.
+        let historical = storage
+            .find_similar_as_of(&query, 10, t_before_remove)
+            .unwrap();
+        assert!(
+            historical.iter().any(|(id, _)| *id == target_id),
+            "replay must preserve the pre-removal snapshot, got {historical:?}"
+        );
+
+        // De-indexed now: the post-removal snapshot must NOT return the phantom.
+        let current = storage
+            .find_similar_as_of(&query, 10, t_after_remove)
+            .unwrap();
+        assert!(
+            !current.iter().any(|(id, _)| *id == target_id),
+            "replay through update_node_direct must de-index the removed vector, got {current:?}"
+        );
+    }
+
+    /// Replaying a create then an embedding overwrite reconstructs the new
+    /// vector at the current time and the old vector as-of the earlier snapshot.
+    #[test]
+    fn replay_overwrite_vector_reconstructs_corrected_state() {
+        let storage = CurrentStorage::new();
+        storage
+            .enable_temporal_vector_index("embedding", temporal_config())
+            .unwrap();
+
+        let target_id = NodeId::new(1).unwrap();
+        let create_props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build();
+        storage
+            .insert_node_direct(node(1, 1, create_props), time::now())
+            .unwrap();
+        storage.on_temporal_vector_transaction().unwrap();
+
+        advance();
+        let t_before = time::now();
+        advance();
+
+        let overwrite_props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
+            .build();
+        storage
+            .update_node_direct(node(1, 2, overwrite_props), time::now())
+            .unwrap();
+        storage.on_temporal_vector_transaction().unwrap();
+
+        advance();
+        let t_after = time::now();
+
+        // As-of before: old embedding ~identical to old query.
+        let before = storage
+            .find_similar_as_of(&[1.0f32, 0.0, 0.0, 0.0], 10, t_before)
+            .unwrap();
+        assert!(
+            before
+                .iter()
+                .find(|(id, _)| *id == target_id)
+                .is_some_and(|(_, s)| *s > 0.99),
+            "replay must reconstruct the old embedding as-of before, got {before:?}"
+        );
+
+        // As-of after: new embedding ~identical to new query; old region no longer matches.
+        let after_new = storage
+            .find_similar_as_of(&[0.0f32, 1.0, 0.0, 0.0], 10, t_after)
+            .unwrap();
+        assert!(
+            after_new
+                .iter()
+                .find(|(id, _)| *id == target_id)
+                .is_some_and(|(_, s)| *s > 0.99),
+            "replay must reconstruct the new embedding as-of after, got {after_new:?}"
+        );
+        let after_old = storage
+            .find_similar_as_of(&[1.0f32, 0.0, 0.0, 0.0], 10, t_after)
+            .unwrap();
+        assert!(
+            after_old
+                .iter()
+                .find(|(id, _)| *id == target_id)
+                .is_none_or(|(_, s)| *s < 0.1),
+            "replay must drop the old embedding region after overwrite, got {after_old:?}"
+        );
     }
 }
