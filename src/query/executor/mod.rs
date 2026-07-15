@@ -526,6 +526,17 @@ impl QueryExecutor {
                     ))
                 }
 
+                PhysicalOp::TemporalWindowAggregate { input, spec } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    // Historical storage is required to reconstruct each matched
+                    // entity's valid-time history per window (Issue #3363).
+                    Box::new(iterators::TemporalWindowAggregateIterator::new(
+                        input_iter,
+                        spec.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
                 PhysicalOp::Distinct { input } => {
                     let input_iter = self.build_op(input, profile, child_depth)?;
                     Box::new(iterators::DistinctIterator::new(input_iter))

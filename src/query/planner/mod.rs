@@ -485,6 +485,11 @@ impl QueryPlanner {
                 input,
             )),
 
+            QueryOp::TemporalWindowAggregate(spec) => Ok(LogicalOp::unary(
+                UnaryOp::TemporalWindowAggregate(spec.clone()),
+                input,
+            )),
+
             QueryOp::Distinct => Ok(LogicalOp::unary(UnaryOp::Distinct, input)),
 
             QueryOp::Project(props) => Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input)),
@@ -532,6 +537,7 @@ impl QueryPlanner {
             QueryOp::Skip(_) => "Skip",
             QueryOp::Count => "Count",
             QueryOp::Aggregate { .. } => "Aggregate",
+            QueryOp::TemporalWindowAggregate(_) => "TemporalWindowAggregate",
             QueryOp::Distinct => "Distinct",
             QueryOp::Project(_) => "Project",
             QueryOp::ProjectProvenance(_) => "ProjectProvenance",
@@ -973,6 +979,11 @@ impl QueryPlanner {
             UnaryOp::TemporalTrack { time_range } => Ok(PhysicalOp::TemporalTrack {
                 input: Box::new(input),
                 time_range: *time_range,
+            }),
+
+            UnaryOp::TemporalWindowAggregate(spec) => Ok(PhysicalOp::TemporalWindowAggregate {
+                input: Box::new(input),
+                spec: spec.clone(),
             }),
 
             UnaryOp::OptionalApply { steps } => {

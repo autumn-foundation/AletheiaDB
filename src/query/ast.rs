@@ -27,6 +27,11 @@ pub struct QueryAst {
     pub skip: Option<usize>,
     /// LIMIT clause
     pub limit: Option<usize>,
+    /// Temporal aggregation window clause (Issue #3363). When present, the query
+    /// buckets the matched entity's valid-time history into tumbling windows and
+    /// computes per-window aggregates; the window clause carries its own
+    /// aggregate `RETURN` list, so `return_clause` is unused.
+    pub window: Option<WindowClause>,
 }
 
 impl QueryAst {
@@ -41,6 +46,7 @@ impl QueryAst {
             order: None,
             skip: None,
             limit: None,
+            window: None,
         }
     }
 
@@ -93,6 +99,13 @@ impl QueryAst {
         self
     }
 
+    /// Add a temporal aggregation window clause to the query.
+    #[must_use]
+    pub fn with_window(mut self, window: WindowClause) -> Self {
+        self.window = Some(window);
+        self
+    }
+
     /// Check if this query has temporal context.
     pub fn is_temporal(&self) -> bool {
         self.temporal.is_some()
@@ -123,6 +136,66 @@ pub enum TemporalClause {
         start: TimestampLiteral,
         /// End time
         end: TimestampLiteral,
+    },
+}
+
+/// A temporal aggregation window clause (Issue #3363).
+///
+/// Syntax:
+/// ```text
+/// WINDOW <count> <unit> OVER VALID_TIME FROM <ts> TO <ts>
+/// [ AS OF SYSTEM_TIME <ts> ]
+/// RETURN <agg>(<arg>) [AS alias] [, ...]
+/// ```
+///
+/// The unit word and aggregate function names are kept as raw strings and
+/// validated in the converter, where a bad unit/function maps to a structured
+/// [`crate::core::error::QueryError`] the MCP `query` tool surfaces as
+/// `invalid_params` / `unsupported_construct`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowClause {
+    /// The positive window-size multiplier (`3` in `3 months`).
+    pub count: i64,
+    /// The raw unit word (e.g. `"month"`, `"days"`), validated in the converter.
+    pub unit: String,
+    /// Inclusive start of the valid-time range.
+    pub range_start: TimestampLiteral,
+    /// Exclusive end of the valid-time range.
+    pub range_end: TimestampLiteral,
+    /// Optional `AS OF SYSTEM_TIME` transaction-time coordinate (default: now).
+    pub as_of_system_time: Option<TimestampLiteral>,
+    /// The per-window aggregate return items.
+    pub aggregates: Vec<WindowReturnItem>,
+}
+
+/// One aggregate item in a window `RETURN` list (Issue #3363).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowReturnItem {
+    /// The raw aggregate function name (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`/`CHANGES`),
+    /// validated in the converter.
+    pub func: String,
+    /// The aggregate argument.
+    pub arg: WindowAggArg,
+    /// Optional output-column alias (`AS foo`).
+    pub alias: Option<String>,
+}
+
+/// The argument of a window aggregate (Issue #3363).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowAggArg {
+    /// `*` (valid for `COUNT(*)` and `CHANGES(*)`).
+    Star,
+    /// A bare variable `v` (valid for `CHANGES(v)`; counts entity versions).
+    Entity {
+        /// The matched variable name.
+        var: String,
+    },
+    /// A property access `v.key`.
+    Property {
+        /// The matched variable name.
+        var: String,
+        /// The property key.
+        key: String,
     },
 }
 
