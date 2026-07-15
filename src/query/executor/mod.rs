@@ -18,6 +18,8 @@ use crate::storage::historical::HistoricalStorage;
 use super::planner::physical::{PhysicalOp, PhysicalPlan};
 
 #[doc(hidden)]
+pub use iterators::EdgeScanIterator;
+#[doc(hidden)]
 pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
 #[doc(hidden)]
@@ -298,276 +300,285 @@ impl QueryExecutor {
         });
 
         let child_depth = depth + 1;
-        let iter: Box<dyn ResultIterator> = match op {
-            PhysicalOp::NodeLookup { node_ids } => Box::new(iterators::NodeLookupIterator::new(
-                node_ids.clone(),
-                Arc::clone(&self.current),
-            )),
+        let iter: Box<dyn ResultIterator> =
+            match op {
+                PhysicalOp::NodeLookup { node_ids } => Box::new(
+                    iterators::NodeLookupIterator::new(node_ids.clone(), Arc::clone(&self.current)),
+                ),
 
-            PhysicalOp::NodeScan { label, .. } => Box::new(iterators::NodeScanIterator::new(
-                label.clone(),
-                Arc::clone(&self.current),
-            )),
+                PhysicalOp::NodeScan { label, .. } => Box::new(iterators::NodeScanIterator::new(
+                    label.clone(),
+                    Arc::clone(&self.current),
+                )),
 
-            PhysicalOp::HnswSearch {
-                embedding,
-                k,
-                label_filter,
-                property_key,
-            } => self.execute_hnsw_search(
-                embedding,
-                *k,
-                label_filter.as_deref(),
-                property_key.as_deref(),
-            )?,
+                // Full edge scan (SQL `SELECT * FROM edges`). Mirrors `NodeScan`.
+                // Yields `EntityResult::Edge` rows; note these survive `collect_all`
+                // / `count_all` / direct iteration but are dropped by the
+                // node-centric `collect_structured`/`collect_nodes` helpers, which
+                // remain node-only by design (see `results.rs`).
+                PhysicalOp::EdgeScan { edge_type, .. } => Box::new(
+                    iterators::EdgeScanIterator::new(edge_type.clone(), Arc::clone(&self.current)),
+                ),
 
-            PhysicalOp::TemporalNodeLookup {
-                node_ids,
-                valid_time,
-                transaction_time,
-                use_batch,
-            } => {
-                if *use_batch {
-                    // Use batch iterator for large queries (holds lock across all iterations)
-                    Box::new(iterators::BatchTemporalNodeIterator::new(
-                        node_ids.clone(),
-                        *valid_time,
-                        *transaction_time,
-                        Arc::clone(&self.historical),
-                    )?)
-                } else {
-                    // Use per-node iterator for small queries (lock per node)
-                    Box::new(iterators::TemporalNodeIterator::new(
-                        node_ids.clone(),
-                        *valid_time,
-                        *transaction_time,
-                        Arc::clone(&self.historical),
-                    ))
+                PhysicalOp::HnswSearch {
+                    embedding,
+                    k,
+                    label_filter,
+                    property_key,
+                } => self.execute_hnsw_search(
+                    embedding,
+                    *k,
+                    label_filter.as_deref(),
+                    property_key.as_deref(),
+                )?,
+
+                PhysicalOp::TemporalNodeLookup {
+                    node_ids,
+                    valid_time,
+                    transaction_time,
+                    use_batch,
+                } => {
+                    if *use_batch {
+                        // Use batch iterator for large queries (holds lock across all iterations)
+                        Box::new(iterators::BatchTemporalNodeIterator::new(
+                            node_ids.clone(),
+                            *valid_time,
+                            *transaction_time,
+                            Arc::clone(&self.historical),
+                        )?)
+                    } else {
+                        // Use per-node iterator for small queries (lock per node)
+                        Box::new(iterators::TemporalNodeIterator::new(
+                            node_ids.clone(),
+                            *valid_time,
+                            *transaction_time,
+                            Arc::clone(&self.historical),
+                        ))
+                    }
                 }
-            }
 
-            PhysicalOp::TemporalNodeScan {
-                label,
-                valid_time,
-                transaction_time,
-            } => {
-                // Point-in-time label scan (`AS OF`, Issues #550/#551). Enumerate
-                // every ever-versioned node (mirroring the AS OF node-find oracle
-                // `AletheiaDB::find_nodes_at_time`) and reconstruct each at the
-                // requested bi-temporal point, filtering by label; candidates that
-                // did not exist at that instant are skipped, not errors.
-                let node_ids = self.temporal_scan_candidates();
-                Box::new(
-                    iterators::TemporalNodeScanIterator::new(
+                PhysicalOp::TemporalNodeScan {
+                    label,
+                    valid_time,
+                    transaction_time,
+                } => {
+                    // Point-in-time label scan (`AS OF`, Issues #550/#551). Enumerate
+                    // every ever-versioned node (mirroring the AS OF node-find oracle
+                    // `AletheiaDB::find_nodes_at_time`) and reconstruct each at the
+                    // requested bi-temporal point, filtering by label; candidates that
+                    // did not exist at that instant are skipped, not errors.
+                    let node_ids = self.temporal_scan_candidates();
+                    Box::new(
+                        iterators::TemporalNodeScanIterator::new(
+                            node_ids,
+                            *valid_time,
+                            *transaction_time,
+                            Arc::clone(&self.historical),
+                            label.clone(),
+                        )
+                        .skipping_missing(),
+                    )
+                }
+
+                PhysicalOp::TemporalNodeRangeScan {
+                    label,
+                    valid_from,
+                    valid_to,
+                    transaction_time,
+                } => {
+                    // Valid-time range label scan (`BETWEEN`, Issue #552). Same
+                    // candidate enumeration; the iterator emits each node's
+                    // believed-at-`transaction_time` version whose valid interval
+                    // overlaps the range (at most one row per node -- multiple rows
+                    // only across distinct nodes).
+                    let node_ids = self.temporal_scan_candidates();
+                    Box::new(iterators::TemporalNodeRangeScanIterator::new(
                         node_ids,
-                        *valid_time,
+                        *valid_from,
+                        *valid_to,
                         *transaction_time,
                         Arc::clone(&self.historical),
                         label.clone(),
-                    )
-                    .skipping_missing(),
-                )
-            }
+                    ))
+                }
 
-            PhysicalOp::TemporalNodeRangeScan {
-                label,
-                valid_from,
-                valid_to,
-                transaction_time,
-            } => {
-                // Valid-time range label scan (`BETWEEN`, Issue #552). Same
-                // candidate enumeration; the iterator emits each node's
-                // believed-at-`transaction_time` version whose valid interval
-                // overlaps the range (at most one row per node -- multiple rows
-                // only across distinct nodes).
-                let node_ids = self.temporal_scan_candidates();
-                Box::new(iterators::TemporalNodeRangeScanIterator::new(
-                    node_ids,
-                    *valid_from,
-                    *valid_to,
-                    *transaction_time,
-                    Arc::clone(&self.historical),
+                PhysicalOp::TemporalVectorSearch {
+                    embedding,
+                    k,
+                    timestamp,
+                    property_key,
+                } => {
+                    // Always use the multi-property-aware method with explicit property name.
+                    // This ensures correctness in multi-property setups instead of relying on
+                    // the default-property resolution (alphabetically first temporal index).
+                    let prop = property_key.as_deref().unwrap_or("embedding");
+                    let results = self
+                        .current
+                        .find_similar_as_of_in(prop, embedding, *k, *timestamp)?;
+
+                    Box::new(iterators::VectorResultIterator::new(
+                        results,
+                        Arc::clone(&self.current),
+                    ))
+                }
+
+                PhysicalOp::IndexedTraversal {
+                    input,
+                    direction,
+                    label,
+                    min_depth,
+                    depth: traversal_depth,
+                    temporal_context,
+                } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::TraversalIterator::new(
+                        input_iter,
+                        *direction,
+                        label.clone(),
+                        *min_depth,
+                        *traversal_depth,
+                        Arc::clone(&self.current),
+                        Arc::clone(&self.historical),
+                        *temporal_context,
+                    ))
+                }
+
+                PhysicalOp::PropertyScan {
+                    label, key, value, ..
+                } => Box::new(iterators::PropertyScanIterator::new(
                     label.clone(),
-                ))
-            }
-
-            PhysicalOp::TemporalVectorSearch {
-                embedding,
-                k,
-                timestamp,
-                property_key,
-            } => {
-                // Always use the multi-property-aware method with explicit property name.
-                // This ensures correctness in multi-property setups instead of relying on
-                // the default-property resolution (alphabetically first temporal index).
-                let prop = property_key.as_deref().unwrap_or("embedding");
-                let results = self
-                    .current
-                    .find_similar_as_of_in(prop, embedding, *k, *timestamp)?;
-
-                Box::new(iterators::VectorResultIterator::new(
-                    results,
+                    key.clone(),
+                    value,
                     Arc::clone(&self.current),
-                ))
-            }
+                )),
 
-            PhysicalOp::IndexedTraversal {
-                input,
-                direction,
-                label,
-                min_depth,
-                depth: traversal_depth,
-                temporal_context,
-            } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::TraversalIterator::new(
-                    input_iter,
-                    *direction,
-                    label.clone(),
-                    *min_depth,
-                    *traversal_depth,
-                    Arc::clone(&self.current),
-                    Arc::clone(&self.historical),
-                    *temporal_context,
-                ))
-            }
+                PhysicalOp::Filter { input, predicate } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    // Pass historical storage so a `Predicate::Provenance` leaf
+                    // (Issue #3354a) can resolve each row entity's write-time
+                    // provenance; property-only filters never touch it.
+                    Box::new(iterators::FilterIterator::with_historical(
+                        input_iter,
+                        predicate.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
 
-            PhysicalOp::PropertyScan {
-                label, key, value, ..
-            } => Box::new(iterators::PropertyScanIterator::new(
-                label.clone(),
-                key.clone(),
-                value,
-                Arc::clone(&self.current),
-            )),
+                PhysicalOp::VectorRerank {
+                    input,
+                    embedding,
+                    k,
+                    property_key,
+                    metric,
+                    threshold,
+                    score_alias,
+                } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::VectorRerankIterator::with_options(
+                        input_iter,
+                        embedding.clone(),
+                        *k,
+                        Arc::clone(&self.current),
+                        property_key.clone(),
+                        *metric,
+                        *threshold,
+                        score_alias.clone(),
+                    ))
+                }
 
-            PhysicalOp::Filter { input, predicate } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                // Pass historical storage so a `Predicate::Provenance` leaf
-                // (Issue #3354a) can resolve each row entity's write-time
-                // provenance; property-only filters never touch it.
-                Box::new(iterators::FilterIterator::with_historical(
-                    input_iter,
-                    predicate.clone(),
-                    Arc::clone(&self.historical),
-                ))
-            }
+                PhysicalOp::Limit {
+                    input,
+                    count,
+                    offset,
+                } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::LimitIterator::new(input_iter, *offset, *count))
+                }
 
-            PhysicalOp::VectorRerank {
-                input,
-                embedding,
-                k,
-                property_key,
-                metric,
-                threshold,
-                score_alias,
-            } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::VectorRerankIterator::with_options(
-                    input_iter,
-                    embedding.clone(),
+                PhysicalOp::Project { input, properties } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::ProjectIterator::new(
+                        input_iter,
+                        properties.clone(),
+                    ))
+                }
+
+                PhysicalOp::OptionalApply { input, steps } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::OptionalApplyIterator::new(
+                        input_iter,
+                        steps.clone(),
+                        Arc::clone(&self.current),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
+                PhysicalOp::Aggregate {
+                    input,
+                    group_keys,
+                    aggregates,
+                } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::AggregateIterator::new(
+                        input_iter,
+                        group_keys.clone(),
+                        aggregates.clone(),
+                    ))
+                }
+
+                PhysicalOp::Distinct { input } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::DistinctIterator::new(input_iter))
+                }
+
+                PhysicalOp::Sort { input, keys } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    // Pass historical storage so a `SortKey::Provenance` key
+                    // (Issue #3354) can resolve each row entity's write-time
+                    // provenance; property/score sorts never touch it.
+                    Box::new(iterators::SortIterator::with_historical(
+                        input_iter,
+                        keys.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
+                PhysicalOp::ProjectProvenance { input, projection } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::ProvenanceProjectIterator::new(
+                        input_iter,
+                        projection.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
+                PhysicalOp::Count { input } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    Box::new(iterators::CountIterator::new(input_iter))
+                }
+
+                PhysicalOp::Empty => Box::new(iterators::EmptyIterator),
+                PhysicalOp::SimilarToNode {
+                    source_node,
+                    property_key,
+                    k,
+                    label_filter,
+                } => self.execute_similar_to_node(
+                    *source_node,
+                    property_key,
                     *k,
-                    Arc::clone(&self.current),
-                    property_key.clone(),
-                    *metric,
-                    *threshold,
-                    score_alias.clone(),
-                ))
-            }
+                    label_filter.as_deref(),
+                )?,
 
-            PhysicalOp::Limit {
-                input,
-                count,
-                offset,
-            } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::LimitIterator::new(input_iter, *offset, *count))
-            }
-
-            PhysicalOp::Project { input, properties } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::ProjectIterator::new(
-                    input_iter,
-                    properties.clone(),
-                ))
-            }
-
-            PhysicalOp::OptionalApply { input, steps } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::OptionalApplyIterator::new(
-                    input_iter,
-                    steps.clone(),
-                    Arc::clone(&self.current),
-                    Arc::clone(&self.historical),
-                ))
-            }
-
-            PhysicalOp::Aggregate {
-                input,
-                group_keys,
-                aggregates,
-            } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::AggregateIterator::new(
-                    input_iter,
-                    group_keys.clone(),
-                    aggregates.clone(),
-                ))
-            }
-
-            PhysicalOp::Distinct { input } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::DistinctIterator::new(input_iter))
-            }
-
-            PhysicalOp::Sort { input, keys } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                // Pass historical storage so a `SortKey::Provenance` key
-                // (Issue #3354) can resolve each row entity's write-time
-                // provenance; property/score sorts never touch it.
-                Box::new(iterators::SortIterator::with_historical(
-                    input_iter,
-                    keys.clone(),
-                    Arc::clone(&self.historical),
-                ))
-            }
-
-            PhysicalOp::ProjectProvenance { input, projection } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::ProvenanceProjectIterator::new(
-                    input_iter,
-                    projection.clone(),
-                    Arc::clone(&self.historical),
-                ))
-            }
-
-            PhysicalOp::Count { input } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::CountIterator::new(input_iter))
-            }
-
-            PhysicalOp::Empty => Box::new(iterators::EmptyIterator),
-            PhysicalOp::SimilarToNode {
-                source_node,
-                property_key,
-                k,
-                label_filter,
-            } => self.execute_similar_to_node(
-                *source_node,
-                property_key,
-                *k,
-                label_filter.as_deref(),
-            )?,
-
-            // For unsupported operations, return error
-            _ => {
-                return Err(crate::core::error::Error::Query(
-                    crate::core::error::QueryError::SyntaxError {
-                        message: format!("Unsupported physical operator: {:?}", op.name()),
-                    },
-                ));
-            }
-        };
+                // For unsupported operations, return error
+                _ => {
+                    return Err(crate::core::error::Error::Query(
+                        crate::core::error::QueryError::SyntaxError {
+                            message: format!("Unsupported physical operator: {:?}", op.name()),
+                        },
+                    ));
+                }
+            };
 
         // Instrument this operator when profiling.
         Ok(match handle {
