@@ -1,0 +1,10 @@
+# Full-feature retrieval: hybrid graph expansion + temporal anchoring +
+# provenance filtering. This is the configuration under test.
+# Diff against baseline.toml: the three feature toggles below flip on.
+k = 5
+hybrid = true
+temporal_anchoring = true
+provenance_filter = true
+max_hops = 2
+trusted_sources = ["curated"]
+seed = 42

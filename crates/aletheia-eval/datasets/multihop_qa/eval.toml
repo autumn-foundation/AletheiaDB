@@ -1,0 +1,10 @@
+# Paired evaluation manifest for the multi-hop dataset. Gates on the recall lift
+# from graph traversal (gold evidence is 2 hops away and unreachable by vector
+# similarity alone).
+dataset = "dataset.json"
+full = "full.toml"
+baseline = "baseline.toml"
+
+[gates]
+min_recall_delta = 0.5
+min_full_citation_validity = 1.0

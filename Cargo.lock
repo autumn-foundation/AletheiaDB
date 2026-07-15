@@ -92,6 +92,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aletheia-eval"
+version = "0.1.0"
+dependencies = [
+ "aletheiadb",
+ "chrono",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "aletheia-server"
 version = "0.1.0"
 dependencies = [

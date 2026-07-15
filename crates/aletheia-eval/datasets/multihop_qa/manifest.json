@@ -1,0 +1,17 @@
+{
+  "name": "multihop_qa",
+  "version": "1.0.0",
+  "license": "CC0-1.0",
+  "license_note": "Public-domain synthetic data authored for this harness. No real persons or organizations; names are fictional.",
+  "format": "AletheiaDB eval dataset JSON (see crates/aletheia-eval/src/dataset.rs)",
+  "description": "Multi-hop graph QA. Each question names a person and asks about the country of the company they work for; the gold evidence (company and country) is two hops away along WORKS_AT then HEADQUARTERED_IN. Includes two untrusted 'rumor' distractors to exercise the provenance filter.",
+  "size": {
+    "entities": 26,
+    "updates": 0,
+    "edges": 16,
+    "questions": 8,
+    "temporal_questions": 0
+  },
+  "probes": ["recall_at_k", "precision_at_k", "grounding_precision", "citation_validity"],
+  "headline": "Hybrid graph traversal recovers 2-hop gold evidence that vector-only retrieval cannot reach."
+}
