@@ -103,7 +103,7 @@ async fn live_mcp_catalog(client: &TestClient) -> BTreeSet<String> {
         .send()
         .await;
     assert_eq!(resp.status.as_u16(), 200, "tools/list must succeed");
-    let body: Value = serde_json::from_str(&resp.text()).expect("tools/list json");
+    let body: Value = resp.json();
     body["result"]["tools"]
         .as_array()
         .expect("tools array")
