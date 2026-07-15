@@ -28,6 +28,7 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod constraints_lineage_audit_tools;
 pub mod edge_tools;
 pub mod http_routes;
 pub mod node_tools;

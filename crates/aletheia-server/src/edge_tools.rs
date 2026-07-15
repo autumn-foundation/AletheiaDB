@@ -113,6 +113,51 @@ pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("get_schema", AccessClass::Read),
 ];
 
+/// The **superset** of *every* handler that forwards a hardcoded literal tool
+/// name through [`AletheiaMcpServer::dispatch_tool_json`](aletheiadb::mcp::AletheiaMcpServer::dispatch_tool_json)
+/// — the single source of truth for the pinned-name ↔ routed-name ↔
+/// registry-class conformance across **all** dispatch-routed call sites, not
+/// just the budgetable ones.
+///
+/// It is [`DISPATCH_ROUTED_READ_TOOLS`] (the budgetable/cursorable slow reads)
+/// **plus** the three provenance-hash-chain tools (`audit_export`,
+/// `verify_chain`, `export_chain_head`, Issue #3524 PR7) which also pin a literal
+/// name in `dispatch_tool_json` but are **not** budgetable/cursorable (so they
+/// stay out of `DISPATCH_ROUTED_READ_TOOLS`, whose semantic remains "budgetable
+/// reads"). The three chain handlers pin their **own** tool name (a
+/// `Authorized<ReadClass>` handler routing to the `audit_export` read tool), so
+/// there is structurally no cross-tool escalation — but pinning them here brings
+/// them under the same `dispatch_pinned_names_match_routed_class` conformance
+/// guard the budgetable reads have, closing the coverage gap for every
+/// `dispatch_tool_json` call site.
+///
+/// `dispatch_pinned_names_match_routed_class` (in `tests/server_parity.rs`)
+/// iterates this superset and additionally asserts
+/// `DISPATCH_ROUTED_READ_TOOLS ⊆ ALL_DISPATCH_ROUTED`, so the two tables can
+/// never drift. `pub` for the integration test, exactly like
+/// `DISPATCH_ROUTED_READ_TOOLS`.
+pub const ALL_DISPATCH_ROUTED: &[(&str, AccessClass)] = &[
+    ("get_edge", AccessClass::Read),
+    ("list_edges", AccessClass::Read),
+    ("get_outgoing_edges", AccessClass::Read),
+    ("get_incoming_edges", AccessClass::Read),
+    ("get_node", AccessClass::Read),
+    ("list_nodes", AccessClass::Read),
+    ("find_nodes_at_time", AccessClass::Read),
+    ("traverse", AccessClass::Read),
+    ("get_node_history", AccessClass::Read),
+    ("find_similar", AccessClass::Read),
+    ("hybrid_query", AccessClass::Read),
+    ("query", AccessClass::Read),
+    ("get_schema", AccessClass::Read),
+    // Issue #3524 PR7 — dispatch_tool_json call sites that are NOT budgetable
+    // (so absent from DISPATCH_ROUTED_READ_TOOLS). Literals match the pinned
+    // names in `constraints_lineage_audit_tools.rs` char-for-char.
+    ("audit_export", AccessClass::Read),
+    ("verify_chain", AccessClass::Read),
+    ("export_chain_head", AccessClass::Read),
+];
+
 /// Parse an MCP tool method's JSON string result into a [`Value`] for the HTTP
 /// response. A non-JSON result (should not happen) degrades to a JSON string.
 fn tool_json(s: String) -> Json<Value> {
