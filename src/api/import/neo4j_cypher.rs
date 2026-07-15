@@ -1520,8 +1520,10 @@ fn parse_unwind(
                 .and_then(|e| e.get("_id"))
                 .and_then(canonical_key_json)
                 .ok_or_else(|| format!("UNWIND relationship row {i} lacks end._id"))?;
-            let mut note = FidelityNote::default();
-            note.edge_type = Some(rel_type.clone());
+            let mut note = FidelityNote {
+                edge_type: Some(rel_type.clone()),
+                ..Default::default()
+            };
             let (properties, valid_from, prop_count) =
                 unwind_properties(obj.get("properties"), opts, &mut note)?;
             note.prop_count = prop_count;
