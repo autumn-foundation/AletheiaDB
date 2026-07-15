@@ -42,10 +42,14 @@
 //! # }
 //! ```
 
+mod datomic;
+mod edn;
+mod history;
 mod mapping;
 mod neo4j;
 mod neo4j_cypher;
 mod parse;
+mod xtdb;
 
 #[cfg(feature = "parquet")]
 mod parquet;
@@ -62,12 +66,24 @@ mod neo4j_tests;
 #[cfg(test)]
 mod neo4j_cypher_tests;
 
+#[cfg(test)]
+mod edn_tests;
+
+#[cfg(test)]
+mod xtdb_tests;
+
+#[cfg(test)]
+mod datomic_tests;
+
+pub use datomic::{DatomicOptions, ManyScalarPolicy};
+pub use history::{CoercionNote2, ImportFidelityReport, MappingEntry, UnsupportedNote2};
 pub use mapping::{ColumnType, EdgeMapping, LabelSource, NodeMapping, PropertyMapping};
 pub use neo4j::{
     CoercionNote, LabelMapEntry, LabelStrategy, Neo4jCsvOptions, Neo4jFidelityReport, TypeMapEntry,
     UnsupportedNote,
 };
 pub use neo4j_cypher::Neo4jCypherOptions;
+pub use xtdb::XtdbOptions;
 
 use std::collections::HashMap;
 use std::fmt;

@@ -1,0 +1,6 @@
+[{:e 100 :a :company/name :v "Acme Corp" :tx 1000 :tx-instant #inst "2020-01-01T00:00:00Z" :op true}
+ {:e 200 :a :person/name  :v "Alice"     :tx 1001 :tx-instant #inst "2021-03-01T00:00:00Z" :op true}
+ {:e 200 :a :person/title :v "Engineer"  :tx 1001 :tx-instant #inst "2021-03-01T00:00:00Z" :op true}
+ {:e 200 :a :person/employer :v 100      :tx 1001 :tx-instant #inst "2021-03-01T00:00:00Z" :op true}
+ {:e 200 :a :person/title :v "Engineer"  :tx 1002 :tx-instant #inst "2023-01-01T00:00:00Z" :op false}
+ {:e 200 :a :person/title :v "CEO"       :tx 1002 :tx-instant #inst "2023-01-01T00:00:00Z" :op true}]

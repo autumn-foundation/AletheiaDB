@@ -119,6 +119,12 @@ Usage:\n\
     println!(
         "  aletheia import --format neo4j-csv --nodes <f>... --relationships <f>... [options]"
     );
+    #[cfg(feature = "import")]
+    println!("  aletheia import --format xtdb --history <history.edn> [options]");
+    #[cfg(feature = "import")]
+    println!(
+        "  aletheia import --format datomic --datoms <log.edn> --schema <schema.edn> [options]"
+    );
     // The parquet import/export verbs are gated behind the `parquet` feature; only
     // advertise them when they are actually compiled in (a default build returns
     // "unknown command" for them otherwise).
@@ -1188,6 +1194,17 @@ fn handle_import(args: Vec<String>) -> Result<(), String> {
         );
     }
 
+    // History-preserving EDN importers (Issue #3384) read their own flag sets
+    // (`--history` / `--datoms` + `--schema`); dispatch before any neo4j-csv or
+    // cypher handling so those paths are untouched and a plain build still falls
+    // through to the neo4j-csv fallback for every other format.
+    if format == "xtdb" {
+        return handle_import_xtdb(&args);
+    }
+    if format == "datomic" {
+        return handle_import_datomic(&args);
+    }
+
     let nodes = arg_values(&args, "--nodes");
     let rels = arg_values(&args, "--relationships");
 
@@ -1364,6 +1381,115 @@ fn handle_import_cypher(args: &[String], nodes: &[String], rels: &[String]) -> R
 
     let value =
         serde_json::to_value(&report).map_err(|e| format!("failed to render report JSON: {e}"))?;
+    if let Some(report_path) = arg_value(args, "--report") {
+        let rendered = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("failed to render report JSON: {e}"))?;
+        fs::write(&report_path, rendered)
+            .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
+    }
+    print_json_pretty(&value)
+}
+
+/// Import an XTDB entity-history EDN export (Issue #3384), preserving
+/// valid-time, provenance, supersession, and deletes.
+///
+/// `aletheia import --format xtdb --history <history.edn> [--label-field type]
+/// [--default-label Entity] [--ref-field field=LABEL ...] [--on-error abort|skip]
+/// [--report <out.json>]`
+#[cfg(feature = "import")]
+fn handle_import_xtdb(args: &[String]) -> Result<(), String> {
+    use aletheiadb::api::import::XtdbOptions;
+
+    let path = arg_value(args, "--history")
+        .or_else(|| arg_values(args, "--nodes").into_iter().next())
+        .ok_or_else(|| {
+            "usage: aletheia import --format xtdb --history <history.edn> [options]".to_string()
+        })?;
+
+    let mut opts = XtdbOptions::default();
+    if let Some(l) = arg_value(args, "--label-field") {
+        opts.label_field = l;
+    }
+    if let Some(l) = arg_value(args, "--default-label") {
+        opts.default_label = l;
+    }
+    for spec in arg_values(args, "--ref-field") {
+        match spec.split_once('=') {
+            Some((field, label)) => {
+                opts.ref_fields.insert(field.to_string(), label.to_string());
+            }
+            None => {
+                return Err(format!(
+                    "invalid --ref-field '{spec}', expected field=EDGE_LABEL"
+                ));
+            }
+        }
+    }
+    opts.failure_mode = parse_on_error(args)?;
+
+    let db = open_db()?;
+    let mut importer = db.import().failure_mode(opts.failure_mode);
+    let report = importer
+        .xtdb_import(&path, &opts)
+        .map_err(|e| format!("import failed: {e}"))?;
+    emit_import_report(args, &report)
+}
+
+/// Import a Datomic datom-stream EDN export + attribute schema (Issue #3384).
+///
+/// `aletheia import --format datomic --datoms <log.edn> --schema <schema.edn>
+/// [--valid-time-attr ns/attr] [--default-label Entity] [--on-error abort|skip]
+/// [--report <out.json>]`
+#[cfg(feature = "import")]
+fn handle_import_datomic(args: &[String]) -> Result<(), String> {
+    use aletheiadb::api::import::DatomicOptions;
+
+    let datoms = arg_value(args, "--datoms").ok_or_else(|| {
+        "usage: aletheia import --format datomic --datoms <log.edn> --schema <schema.edn> [options]"
+            .to_string()
+    })?;
+    let schema = arg_value(args, "--schema").ok_or_else(|| {
+        "aletheia import --format datomic requires --schema <schema.edn>".to_string()
+    })?;
+
+    let mut opts = DatomicOptions::default();
+    if let Some(a) = arg_value(args, "--valid-time-attr") {
+        opts.valid_time_attr = Some(a);
+    }
+    if let Some(l) = arg_value(args, "--default-label") {
+        opts.default_label = l;
+    }
+    if let Some(a) = arg_value(args, "--label-attr") {
+        opts.label_attr = Some(a);
+    }
+    opts.failure_mode = parse_on_error(args)?;
+
+    let db = open_db()?;
+    let mut importer = db.import().failure_mode(opts.failure_mode);
+    let report = importer
+        .datomic_import(&datoms, &schema, &opts)
+        .map_err(|e| format!("import failed: {e}"))?;
+    emit_import_report(args, &report)
+}
+
+/// Parse the `--on-error abort|skip` flag into a [`FailureMode`], shared by the
+/// XTDB / Datomic history importers (Issue #3384).
+#[cfg(feature = "import")]
+fn parse_on_error(args: &[String]) -> Result<aletheiadb::api::import::FailureMode, String> {
+    use aletheiadb::api::import::FailureMode;
+    match arg_value(args, "--on-error").as_deref() {
+        None | Some("abort") => Ok(FailureMode::Abort),
+        Some("skip") => Ok(FailureMode::SkipAndReport),
+        Some(other) => Err(format!("invalid --on-error '{other}', expected abort|skip")),
+    }
+}
+
+/// Render a serializable import report to stdout and, when `--report <path>` is
+/// given, to a JSON file (Issue #3384).
+#[cfg(feature = "import")]
+fn emit_import_report<R: serde::Serialize>(args: &[String], report: &R) -> Result<(), String> {
+    let value =
+        serde_json::to_value(report).map_err(|e| format!("failed to render report JSON: {e}"))?;
     if let Some(report_path) = arg_value(args, "--report") {
         let rendered = serde_json::to_string_pretty(&value)
             .map_err(|e| format!("failed to render report JSON: {e}"))?;
