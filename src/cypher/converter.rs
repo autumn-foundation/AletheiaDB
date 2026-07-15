@@ -33,7 +33,7 @@
 //! # }
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ast::*;
@@ -474,9 +474,13 @@ impl CypherConverter {
                 }
 
                 // Provenance accessor projection (Issue #3354) runs LAST so it
-                // never perturbs ordering/pagination. Only on the non-aggregate
-                // path: aggregation produces its own computed columns.
-                if !aggregated && let Some(op) = self.build_provenance_projection(&return_clause)? {
+                // never perturbs ordering/pagination. `build_provenance_projection`
+                // is always consulted (even when aggregated) so an accessor mixed
+                // with aggregation is REJECTED rather than silently dropped; a
+                // normal aggregate query with no accessor still yields `None`.
+                if let Some(op) =
+                    self.build_provenance_projection(&return_clause, &pattern, aggregated)?
+                {
                     ops.push(op);
                 }
 
@@ -1687,12 +1691,31 @@ impl CypherConverter {
     /// argument is a structured error (never silently dropped), reusing the same
     /// [`as_provenance_accessor`](Self::as_provenance_accessor) recognition the
     /// `WHERE` half uses.
+    ///
+    /// v1 supports only the clean single-entity forms
+    /// (`RETURN <entity>, <accessor(s)>` and `RETURN <accessor(s)>` over the
+    /// single bound node). Building general property-projection-into-columns is
+    /// out of scope, so an accessor mixed with a property projection
+    /// (`RETURN n.name, source(n)`), an aggregate
+    /// (`RETURN n.dept, count(*), source(n)`), or a variable other than the
+    /// single bound entity (`RETURN a, source(b)`) is **rejected** with a
+    /// structured [`CypherError::UnsupportedFeature`] rather than silently
+    /// dropping a column or resolving the wrong entity. (Edge/traversal-variable
+    /// accessors never reach this path: a multi-variable MATCH routes to the
+    /// multi-pattern evaluator, so provenance projection is node-entity-scoped in
+    /// v1.)
     fn build_provenance_projection(
         &self,
         return_clause: &CypherReturn,
+        patterns: &[CypherPattern],
+        aggregated: bool,
     ) -> Result<Option<QueryOp>, CypherError> {
         let mut items = Vec::new();
         let mut entity_binding: Option<String> = None;
+        // Distinct entity variables referenced across the bare entity and every
+        // accessor argument; the supported form references exactly one.
+        let mut referenced_vars: BTreeSet<String> = BTreeSet::new();
+        let mut has_property_projection = false;
         for item in &return_clause.items {
             let (expr, alias) = match item {
                 CypherReturnItem::Expression { expr, alias } => (expr, alias.clone()),
@@ -1702,6 +1725,7 @@ impl CypherConverter {
                     if entity_binding.is_none() {
                         entity_binding = Some(name.clone());
                     }
+                    referenced_vars.insert(name.clone());
                     continue;
                 }
                 CypherReturnItem::Star => continue,
@@ -1712,6 +1736,12 @@ impl CypherConverter {
                     if entity_binding.is_none() {
                         entity_binding = Some(name.clone());
                     }
+                    referenced_vars.insert(name.clone());
+                }
+                // A property projection (`n.name`) alongside an accessor is the
+                // unsupported mix (rejected below once an accessor is present).
+                CypherExpr::Property { .. } => {
+                    has_property_projection = true;
                 }
                 CypherExpr::FunctionCall { args, .. } => {
                     if let Some(field) = self.as_provenance_accessor(expr)? {
@@ -1721,6 +1751,7 @@ impl CypherConverter {
                             [CypherExpr::Variable(v)] => v.clone(),
                             _ => String::new(),
                         };
+                        referenced_vars.insert(var.clone());
                         let output_name =
                             alias.unwrap_or_else(|| format!("{}({})", field.accessor_name(), var));
                         items.push(ProvenanceProjectionItem { output_name, field });
@@ -1730,13 +1761,64 @@ impl CypherConverter {
             }
         }
         if items.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(QueryOp::ProjectProvenance(ProvenanceProjection {
-                entity_binding,
-                items,
-            })))
+            return Ok(None);
         }
+
+        // An accessor is projected: enforce the v1 single-entity contract.
+        if aggregated {
+            return Err(CypherError::UnsupportedFeature(
+                "combining a provenance accessor with an aggregate in RETURN is not supported \
+                 (v1); an aggregating RETURN produces its own computed columns"
+                    .to_string(),
+            ));
+        }
+        if has_property_projection {
+            return Err(CypherError::UnsupportedFeature(
+                "combining a property projection with a provenance accessor in RETURN is not \
+                 supported (v1); return the entity itself (RETURN n, source(n)) or the accessors \
+                 alone (RETURN source(n))"
+                    .to_string(),
+            ));
+        }
+        // The supported form binds exactly one entity: a single MATCH node with a
+        // variable. Every referenced variable (bare entity + accessor args) must
+        // be that node. This rejects the multi-variable mismatch
+        // (`RETURN a, source(b)`, including an accessor over an unbound variable),
+        // which the single-entity positional pipeline would otherwise resolve
+        // against the wrong (or a nonexistent) entity.
+        let sole_entity = Self::sole_pattern_node_var(patterns);
+        let matches_sole = match &sole_entity {
+            Some(v) => referenced_vars.len() == 1 && referenced_vars.contains(v),
+            None => false,
+        };
+        if !matches_sole {
+            return Err(CypherError::UnsupportedFeature(
+                "provenance projection in RETURN is supported only for a single bound entity \
+                 whose accessor variable matches the returned node (RETURN n, source(n)); \
+                 projecting an accessor over a different variable or a multi-entity match is not \
+                 supported (v1)"
+                    .to_string(),
+            ));
+        }
+
+        Ok(Some(QueryOp::ProjectProvenance(ProvenanceProjection {
+            entity_binding,
+            items,
+        })))
+    }
+
+    /// The variable of the single bound node when the MATCH is exactly one
+    /// pattern consisting of one node element with a variable and no
+    /// relationships; `None` otherwise. This is the one entity the single-entity
+    /// positional pipeline can correctly attribute a provenance accessor to.
+    fn sole_pattern_node_var(patterns: &[CypherPattern]) -> Option<String> {
+        let [pattern] = patterns else {
+            return None;
+        };
+        let [CypherPatternElement::Node(node)] = pattern.elements.as_slice() else {
+            return None;
+        };
+        node.variable.clone()
     }
 
     // =======================================================================

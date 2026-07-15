@@ -3212,6 +3212,19 @@ fn provenance_field_value(prov: Option<&Provenance>, field: ProvenanceField) -> 
     }
 }
 
+/// Provenance field value as an `Option`, collapsing [`PropertyValue::Null`]
+/// (absent bundle or missing field) to `None` so a sort treats it as a null
+/// (Issue #3354). Used by the decorate-sort-undecorate provenance ordering path.
+fn provenance_field_value_opt(
+    prov: Option<&Provenance>,
+    field: ProvenanceField,
+) -> Option<PropertyValue> {
+    match provenance_field_value(prov, field) {
+        PropertyValue::Null => None,
+        v => Some(v),
+    }
+}
+
 /// Look up a value for ordering by column/property name: first a node property
 /// (entity rows), then a computed aggregate column (`row.columns`) so ORDER BY
 /// can sort grouped/aggregate rows by a group key or aggregate alias.
@@ -3286,8 +3299,43 @@ impl SortIterator {
         while let Some(row) = input.next() {
             rows.push(row?);
         }
-        rows.sort_by(|a, b| self.cmp_rows(a, b));
-        self.output = rows.into_iter();
+
+        // Decorate-sort-undecorate for provenance sort keys (Issue #3354): a
+        // `SortKey::Provenance` resolution is a historical read under the shared
+        // `historical` lock. Resolving it inside the comparator would cost
+        // O(n log n) locked lookups; instead resolve each row's provenance
+        // bundle EXACTLY ONCE (n lookups, a single lock span), sort against the
+        // precomputed bundles, then strip. This mirrors the WHERE path's
+        // per-row memoization. Null placement and stable ordering are identical
+        // to the on-the-fly path. When no provenance key is present (the common
+        // case) the ordinary comparator runs and historical is never touched.
+        if self
+            .keys
+            .iter()
+            .any(|(k, _)| matches!(k, SortKey::Provenance(_)))
+        {
+            let mut decorated: Vec<(Option<Provenance>, QueryRow)> = rows
+                .into_iter()
+                .map(|row| {
+                    let prov = self
+                        .historical
+                        .as_ref()
+                        .and_then(|h| resolve_entity_provenance(&row.entity, h));
+                    (prov, row)
+                })
+                .collect();
+            decorated.sort_by(|(a_prov, a), (b_prov, b)| {
+                self.cmp_decorated(a_prov.as_ref(), a, b_prov.as_ref(), b)
+            });
+            self.output = decorated
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect::<Vec<_>>()
+                .into_iter();
+        } else {
+            rows.sort_by(|a, b| self.cmp_rows(a, b));
+            self.output = rows.into_iter();
+        }
         Ok(())
     }
 
@@ -3295,6 +3343,35 @@ impl SortIterator {
         use std::cmp::Ordering;
         for (key, descending) in &self.keys {
             let ord = self.cmp_by_key(a, b, key, *descending);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    }
+
+    /// Compare two rows whose provenance bundles have already been resolved once
+    /// (decorate-sort-undecorate, Issue #3354). A `SortKey::Provenance` key reads
+    /// the precomputed bundle instead of re-resolving; every other key falls
+    /// through to [`cmp_by_key`](Self::cmp_by_key). Ordering (including
+    /// openCypher null placement) is identical to the on-the-fly comparator.
+    fn cmp_decorated(
+        &self,
+        a_prov: Option<&Provenance>,
+        a: &QueryRow,
+        b_prov: Option<&Provenance>,
+        b: &QueryRow,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        for (key, descending) in &self.keys {
+            let ord = match key {
+                SortKey::Provenance(field) => {
+                    let av = provenance_field_value_opt(a_prov, *field);
+                    let bv = provenance_field_value_opt(b_prov, *field);
+                    Self::cmp_optional(av.as_ref(), bv.as_ref(), *descending)
+                }
+                other => self.cmp_by_key(a, b, other, *descending),
+            };
             if ord != Ordering::Equal {
                 return ord;
             }
@@ -3347,17 +3424,16 @@ impl SortIterator {
             SortKey::Property(prop) => {
                 Self::cmp_optional(row_value(a, prop), row_value(b, prop), descending)
             }
-            // Resolve each row entity's provenance value on the fly (Issue
-            // #3354). Matches the WHERE-clause resolution: an unattributed row
-            // (or a bundle missing the field) sorts as null.
+            // Fallback on-the-fly resolution (Issue #3354). The hot path routes
+            // provenance keys through `cmp_decorated` (resolve once per row), so
+            // this arm is only a defensive fallback; it matches the WHERE-clause
+            // resolution: an unattributed row (or a bundle missing the field)
+            // sorts as null.
             SortKey::Provenance(field) => {
                 let resolve = |row: &QueryRow| -> Option<PropertyValue> {
                     let historical = self.historical.as_ref()?;
                     let prov = resolve_entity_provenance(&row.entity, historical);
-                    match provenance_field_value(prov.as_ref(), *field) {
-                        PropertyValue::Null => None,
-                        v => Some(v),
-                    }
+                    provenance_field_value_opt(prov.as_ref(), *field)
                 };
                 Self::cmp_optional(resolve(a).as_ref(), resolve(b).as_ref(), descending)
             }
@@ -3420,10 +3496,11 @@ impl ProvenanceProjectIterator {
         }
     }
 
-    /// Build the projected columns for one row's entity.
-    fn project_row(&self, row: &QueryRow) -> QueryRow {
+    /// Build the projected columns for one row's entity, consuming the input
+    /// row (it is 1:1 replaced by the projected row).
+    fn project_row(&self, row: QueryRow) -> QueryRow {
         let prov = resolve_entity_provenance(&row.entity, &self.historical);
-        let columns: Vec<(String, PropertyValue)> = self
+        let projected: Vec<(String, PropertyValue)> = self
             .projection
             .items
             .iter()
@@ -3444,10 +3521,17 @@ impl ProvenanceProjectIterator {
             .as_ref()
             .map(|var| vec![(var.clone(), row.entity.clone())]);
 
+        // Defense-in-depth (Issue #3354 findings #5/#7): MERGE onto any
+        // pre-existing columns rather than overwriting them. No upstream op
+        // currently populates `columns` before this iterator, but merging keeps
+        // the projection strictly additive if one ever does.
+        let mut columns = row.columns.unwrap_or_default();
+        columns.extend(projected);
+
         QueryRow {
             entity: EntityResult::Null,
             score: row.score,
-            path: row.path.clone(),
+            path: row.path,
             timestamp: row.timestamp,
             columns: Some(columns),
             bindings,
@@ -3458,7 +3542,7 @@ impl ProvenanceProjectIterator {
 impl ResultIterator for ProvenanceProjectIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         match self.input.next()? {
-            Ok(row) => Some(Ok(self.project_row(&row))),
+            Ok(row) => Some(Ok(self.project_row(row))),
             Err(e) => Some(Err(e)),
         }
     }

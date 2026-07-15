@@ -534,6 +534,7 @@ impl QueryPlanner {
             QueryOp::Aggregate { .. } => "Aggregate",
             QueryOp::Distinct => "Distinct",
             QueryOp::Project(_) => "Project",
+            QueryOp::ProjectProvenance(_) => "ProjectProvenance",
             QueryOp::Sort { .. } => "Sort",
             QueryOp::RankBySimilarity { .. } => "RankBySimilarity",
             QueryOp::GetEdges { .. } => "GetEdges",
