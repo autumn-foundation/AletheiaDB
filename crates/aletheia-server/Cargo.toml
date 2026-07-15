@@ -12,6 +12,16 @@ publish = false
 [lints.rust]
 missing_docs = "warn"
 
+[features]
+# Forwarding feature so this crate's tests can `cfg` on whether the Cypher
+# engine is compiled into the linked `aletheiadb` rlib. The Code Coverage CI
+# job builds `-p aletheiadb -p aletheia-server --features ...,cypher`; declaring
+# `cypher` here lets that flag also apply to this package (enabling
+# `aletheiadb/cypher`) and keeps `#[cfg(feature = "cypher")]` in the test tree a
+# recognized cfg (no `unexpected_cfgs` warning under `-D warnings`). Omitting it
+# reproduces the default (Cypher off) build exactly.
+cypher = ["aletheiadb/cypher"]
+
 [dependencies]
 # autumn-web 0.5.0 — UNRENAMED so its proc-macros' hard-coded `::autumn_web`
 # paths resolve (see docs/spikes/autumn-web-migration-spike.md §1). `mcp`
