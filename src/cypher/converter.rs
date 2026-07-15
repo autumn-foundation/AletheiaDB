@@ -514,12 +514,12 @@ impl CypherConverter {
                         .to_string(),
                 ))
             }
-            // Write statements (Issue #560) are executed directly against the
-            // native write APIs by `crate::cypher::mutation`, not lowered into
-            // the read-only `Query` IR. Reject conversion explicitly rather than
-            // fabricate a read plan for a mutation.
+            // Write statements (Issues #560, #3548) are executed directly
+            // against the native write APIs by `crate::cypher::mutation`, not
+            // lowered into the read-only `Query` IR. Reject conversion
+            // explicitly rather than fabricate a read plan for a mutation.
             CypherStatement::Write(_) => Err(CypherError::UnsupportedFeature(
-                "write statements (CREATE / SET / DELETE) do not lower into the \
+                "write statements (CREATE / MERGE / SET / DELETE) do not lower into the \
                  read-only query pipeline; execute them via \
                  AletheiaDB::execute_cypher, which applies the mutation through \
                  the native write APIs"

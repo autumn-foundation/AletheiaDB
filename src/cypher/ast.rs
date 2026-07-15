@@ -26,8 +26,9 @@ use std::sync::Arc;
 
 /// A complete Cypher statement ready for planning and execution.
 ///
-/// Currently only `MATCH` is supported; `CREATE`, `MERGE`, `DELETE`, etc.
-/// will be added as additional variants in future phases.
+/// Reading (`MATCH`) and write (`CREATE` / `MERGE` / `SET` / `DELETE`)
+/// statements are supported; further clause types are added as new variants in
+/// future phases.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CypherStatement {
     /// A `MATCH` (or `OPTIONAL MATCH`) statement that reads from the graph.
@@ -116,6 +117,8 @@ pub enum CypherStatement {
 /// write_clause := CREATE pattern_list
 ///               | SET set_item (',' set_item)*
 ///               | [DETACH] DELETE variable (',' variable)*
+///               | MERGE pattern (ON CREATE SET set_item (',' set_item)*
+///                               | ON MATCH SET set_item (',' set_item)*)*
 /// set_item   := variable '.' property '=' value
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -152,6 +155,18 @@ pub enum CypherWriteClause {
         detach: bool,
         /// The variables to delete (nodes or relationships).
         targets: Vec<String>,
+    },
+    /// `MERGE <pattern> [ON CREATE SET ...] [ON MATCH SET ...]` (Issue #3548) --
+    /// match the pattern if it already exists (per openCypher whole-pattern
+    /// semantics), otherwise create the entire pattern. `ON CREATE SET` applies
+    /// only on the create branch; `ON MATCH SET` only on the match branch.
+    Merge {
+        /// The single graph pattern to match-or-create.
+        pattern: CypherPattern,
+        /// Assignments applied only when the pattern is created.
+        on_create: Vec<CypherSetItem>,
+        /// Assignments applied only when the pattern is matched.
+        on_match: Vec<CypherSetItem>,
     },
 }
 
