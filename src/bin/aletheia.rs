@@ -57,10 +57,14 @@ fn run() -> Result<(), String> {
         Some("backup") => handle_backup(args.collect()),
         Some("restore") => handle_restore(args.collect()),
         Some("verify") => handle_verify(args.collect()),
-        // Encryption key operator commands (Issue #490): the independent,
-        // non-rotation slice. `keys rotate` depends on the rotation engine
-        // (Issue #488) and is intentionally not implemented here.
+        // Encryption key operator commands (Issue #490): `keys generate`,
+        // `keys status`/`info`, `keys verify`, and `keys rotate` (wired to the
+        // shipped rotation engine, Issue #488).
         Some("keys") => handle_keys(args.collect()),
+        // Encryption-at-rest operator commands (Issue #490): per-layer status,
+        // decryptability verification, and (honestly-unimplemented) in-place
+        // enable/disable migration.
+        Some("encryption") => handle_encryption(args.collect()),
         // A single `import` verb serves both formats; `handle_import` reads `--format`
         // and dispatches to the neo4j-csv (Issue #3356) or parquet (Issue #3364) path.
         // `handle_import` is always defined (a stub when the `import` feature is off).
@@ -103,7 +107,11 @@ Usage:\n\
   aletheia verify [--entity <node|edge>:<id>] [--export-head PATH] [--against PATH] [--json]\n\
   aletheia keys generate --output <PATH> [--force]\n\
   aletheia keys status [--key-file PATH | --env-var NAME]   (alias: keys info)\n\
-  aletheia keys verify --key-file <PATH>"
+  aletheia keys verify --key-file <PATH>\n\
+  aletheia keys rotate (--new-key <PATH> | --new-env-var <NAME>) | --status | --resume | --cancel\n\
+  aletheia encryption status [--key-file PATH | --env-var NAME]\n\
+  aletheia encryption verify [--key-file PATH | --env-var NAME]\n\
+  aletheia encryption enable | disable   (in-place migration not yet implemented)"
     );
     // The neo4j-csv import verb is gated behind the `import` feature; only advertise it
     // when it is compiled in.
@@ -179,7 +187,21 @@ Usage:\n\
   keys status   — Show the key configuration (provider, algorithm, version)\n\
                   without reading or printing key material. Alias: keys info.\n\
                   Not configured is reported informationally (exit 0).\n\
-  keys verify   — Verify the named key file loads and is valid (health check).\n"
+  keys verify   — Verify the named key file loads and is valid (health check).\n\
+  keys rotate   — Rotate the index-encryption key (Issue #488). Start a rotation\n\
+                  with --new-key/--new-env-var, or --status/--resume/--cancel an\n\
+                  in-flight one. Requires an encrypted, index-persistent database\n\
+                  (open via ALETHEIADB_CONFIG). NOTE: index-only rotation refuses\n\
+                  safely while any other layer (WAL/cold/checkpoint) is encrypted\n\
+                  under the same key — the normal uniform-MEK case; full-MEK\n\
+                  all-layer rotation is a follow-up.\n\
+\nEncryption at rest (Issue #490):\n\
+  encryption status  — Per-layer (WAL/index/checkpoints/cold) encryption status.\n\
+  encryption verify  — Prove the configured cipher actually decrypts the database\n\
+                       (opens it, replays the WAL, loads index files). PASS/FAIL.\n\
+  encryption enable  — NOT yet supported: in-place plaintext<->encrypted migration\n\
+  encryption disable   needs a full-database migration engine that is not\n\
+                       implemented. Create the DB encrypted from the start instead.\n"
     );
 }
 
@@ -423,31 +445,25 @@ fn handle_verify(args: Vec<String>) -> Result<(), String> {
     finish_verification(&result, "full", json)
 }
 
-/// `aletheia keys <generate|status|verify>` — encryption key operator commands
-/// (Issue #490).
+/// `aletheia keys <generate|status|verify|rotate>` — encryption key operator
+/// commands (Issue #490).
 ///
-/// This is the independent, non-rotation slice of the encryption CLI:
 /// - `generate` provisions a new 32-byte master key file.
 /// - `status` (alias `info`) reports the key configuration without ever
 ///   reading or printing key material.
 /// - `verify` confirms the configured/named key loads and is valid.
-///
-/// `keys rotate` is intentionally NOT implemented: it depends on the key
-/// rotation engine (Issue #488), which is not yet on trunk.
+/// - `rotate` drives the index key rotation engine (Issue #488): start a
+///   rotation to a new key, or `--status`/`--resume`/`--cancel` an in-flight
+///   one.
 fn handle_keys(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("generate") => keys_generate(&args[1..]),
         // `info` is accepted as an alias for `status`.
         Some("status") | Some("info") => keys_status(&args[1..]),
         Some("verify") => keys_verify(&args[1..]),
-        // `rotate` is a known-but-deferred verb: give an honest, specific
-        // message (not a generic "unknown subcommand") so operators know it is
-        // planned, not a typo. Still exits non-zero.
-        Some("rotate") => {
-            Err("keys rotate is not yet available (key rotation engine, Issue #488)".to_string())
-        }
+        Some("rotate") => keys_rotate(&args[1..]),
         Some(sub) => Err(format!("unknown keys subcommand '{sub}'")),
-        None => Err("usage: aletheia keys <generate|status|verify> ...".to_string()),
+        None => Err("usage: aletheia keys <generate|status|verify|rotate> ...".to_string()),
     }
 }
 
@@ -534,6 +550,362 @@ fn keys_verify(args: &[String]) -> Result<(), String> {
         // surface directly.
         Err(e) => Err(format!("key verification failed: {e}")),
     }
+}
+
+/// `aletheia keys rotate ...` — drive the index key rotation engine (Issue
+/// #488) from the operator CLI (Issue #490).
+///
+/// Modes (mutually exclusive):
+/// - `--new-key <PATH>` / `--new-env-var <NAME>`: START a rotation to the new
+///   key source, re-encrypting every persisted index file.
+/// - `--status`: report the on-disk key-generation classification (how far
+///   along a rotation is / whether one looks incomplete).
+/// - `--resume`: finish an interrupted rotation (idempotent).
+/// - `--cancel`: roll back an interrupted rotation to the old key.
+///
+/// All modes open the database from the ambient config (`ALETHEIADB_CONFIG` /
+/// `ALETHEIADB_DATA_DIR`); rotation requires an encrypted, index-persistent
+/// database. Key bytes are NEVER printed.
+///
+/// ## Cross-layer refusal is expected on a normally-encrypted database
+///
+/// The engine performs an *index-only* rotation and refuses (safely) when any
+/// other at-rest layer (WAL / cold / checkpoint) is encrypted under the same
+/// master key. AletheiaDB's config encrypts uniformly, so a normally-opened
+/// encrypted database has an encrypted WAL and `--new-key` will correctly
+/// refuse. Full-MEK (all-layer) rotation is a documented follow-up.
+fn keys_rotate(args: &[String]) -> Result<(), String> {
+    let status = args.iter().any(|a| a == "--status");
+    let resume = args.iter().any(|a| a == "--resume");
+    let cancel = args.iter().any(|a| a == "--cancel");
+    let new_key = arg_value(args, "--new-key");
+    let new_env_var = arg_value(args, "--new-env-var");
+
+    // Exactly one action must be selected.
+    let action_count = [
+        status,
+        resume,
+        cancel,
+        new_key.is_some(),
+        new_env_var.is_some(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
+    if action_count == 0 {
+        return Err(rotate_usage());
+    }
+    if action_count > 1 {
+        return Err(format!(
+            "keys rotate: choose exactly one of --new-key/--new-env-var (start), \
+             --status, --resume, or --cancel\n{}",
+            rotate_usage()
+        ));
+    }
+    if new_key.is_some() && new_env_var.is_some() {
+        return Err("keys rotate: --new-key and --new-env-var are mutually exclusive".to_string());
+    }
+
+    let db = open_db().map_err(rotate_not_configured_hint)?;
+
+    if status {
+        return keys_rotate_status(&db);
+    }
+    if resume {
+        let report = db
+            .resume_pending_index_rotation()
+            .map_err(rotate_error_hint)?;
+        return match report {
+            Some(r) => {
+                print_rotation_report("Resumed index key rotation", &r);
+                Ok(())
+            }
+            None => {
+                println!("No pending index key rotation to resume.");
+                Ok(())
+            }
+        };
+    }
+    if cancel {
+        let report = db.cancel_pending_rotation().map_err(rotate_error_hint)?;
+        print_rotation_report("Cancelled index key rotation (rolled back)", &report);
+        return Ok(());
+    }
+
+    // Start a rotation.
+    let new_source = if let Some(path) = new_key {
+        aletheiadb::encryption::config::KeyProviderConfig::File { path: path.into() }
+    } else if let Some(var) = new_env_var {
+        aletheiadb::encryption::config::KeyProviderConfig::Env { variable: var }
+    } else {
+        return Err(rotate_usage());
+    };
+
+    eprintln!("Starting index key rotation (re-encrypting persisted index files)...");
+    let report = db
+        .rotate_index_keys(new_source)
+        .map_err(rotate_error_hint)?;
+    // Progress/summary to stderr so scripts can separate it from the report.
+    eprintln!(
+        "  re-encrypted {}/{} index files ({} already current) in {} ms",
+        report.files_reencrypted, report.files_total, report.files_skipped, report.duration_ms
+    );
+    print_rotation_report("Index key rotation complete", &report);
+    Ok(())
+}
+
+/// Usage string for `keys rotate`.
+fn rotate_usage() -> String {
+    "usage: aletheia keys rotate (--new-key <PATH> | --new-env-var <NAME>) | \
+     --status | --resume | --cancel\n  \
+     Requires an encrypted, index-persistent database (open via ALETHEIADB_CONFIG)."
+        .to_string()
+}
+
+/// Report the on-disk index key-generation classification.
+fn keys_rotate_status(db: &AletheiaDB) -> Result<(), String> {
+    let s = db.index_rotation_status().map_err(rotate_error_hint)?;
+    println!("Index key rotation status");
+    println!("  files at current key: {}", s.at_current);
+    println!("  files at old key:     {}", s.at_old);
+    println!("  files at unknown key: {}", s.unknown);
+    println!("  plaintext files:      {}", s.plaintext);
+    if s.is_fully_rotated() {
+        println!("  state: no rotation pending (all files at the current key version)");
+    } else {
+        println!(
+            "  state: a rotation appears incomplete — run `keys rotate --resume` to finish \
+             it, or `keys rotate --cancel` to roll it back"
+        );
+    }
+    Ok(())
+}
+
+/// Print a completed [`RotationReport`](aletheiadb::db::rotation::RotationReport)
+/// summary. Contains only version numbers and file counts — never key bytes.
+fn print_rotation_report(headline: &str, r: &aletheiadb::db::rotation::RotationReport) {
+    println!("{headline}");
+    println!("  key version:      {} -> {}", r.old_version, r.new_version);
+    println!("  files total:      {}", r.files_total);
+    println!("  files re-encrypted: {}", r.files_reencrypted);
+    println!("  files skipped:    {}", r.files_skipped);
+    println!("  duration:         {} ms", r.duration_ms);
+}
+
+/// Map a database-open failure into a rotation-specific "not configured" hint.
+fn rotate_not_configured_hint(e: String) -> String {
+    format!(
+        "{e}\n\
+         hint: `keys rotate` requires an encrypted, index-persistent database. Open one via \
+         ALETHEIADB_CONFIG pointing at a TOML config with encryption + index persistence enabled."
+    )
+}
+
+/// Map a rotation engine error into a CLI-friendly message. The engine's error
+/// Display never contains key bytes (only categories, layer names, and version
+/// numbers), so it is safe to surface directly, with a remediation hint for the
+/// common not-configured case.
+fn rotate_error_hint(e: impl std::fmt::Display) -> String {
+    let msg = e.to_string();
+    if msg.contains("not configured") || msg.contains("not enabled") || msg.contains("persistence")
+    {
+        format!(
+            "{msg}\n\
+             hint: `keys rotate` requires an encrypted, index-persistent database. Open one via \
+             ALETHEIADB_CONFIG pointing at a TOML config with encryption + index persistence \
+             enabled."
+        )
+    } else {
+        msg
+    }
+}
+
+/// `aletheia encryption <status|verify|enable|disable>` — encryption-at-rest
+/// operator commands (Issue #490).
+fn handle_encryption(args: Vec<String>) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("status") => encryption_status(&args[1..]),
+        Some("verify") => encryption_verify(&args[1..]),
+        Some(cmd @ ("enable" | "disable")) => encryption_enable_disable(cmd),
+        Some(sub) => Err(format!(
+            "unknown encryption subcommand '{sub}'\n{}",
+            encryption_usage()
+        )),
+        None => Err(format!(
+            "usage: aletheia encryption <status|verify|enable|disable>\n{}",
+            encryption_usage()
+        )),
+    }
+}
+
+/// Usage detail for the `encryption` subcommand group.
+fn encryption_usage() -> String {
+    "  encryption status  [--key-file PATH | --env-var NAME]   Per-layer encryption status\n\
+     \x20 encryption verify  [--key-file PATH | --env-var NAME]   Verify encrypted data decrypts\n\
+     \x20 encryption enable                                       (not yet supported — see below)\n\
+     \x20 encryption disable                                      (not yet supported — see below)"
+        .to_string()
+}
+
+/// `encryption status` — per-layer encryption status table.
+///
+/// The overall/provider/algorithm block is derived from the resolved
+/// [`EncryptionConfig`]. Because AletheiaDB encrypts uniformly (one master key
+/// protects every at-rest layer), when encryption is enabled every layer is
+/// encrypted; the per-layer table reflects that and, when a durable database is
+/// configured, enriches the index row with live rotation status and the cold
+/// row with whether the cold tier is configured.
+fn encryption_status(args: &[String]) -> Result<(), String> {
+    let config = resolve_encryption_config(args)?;
+    let status = aletheiadb::encryption::cli::get_encryption_status(&config);
+    print!(
+        "{}",
+        aletheiadb::encryption::cli::format_encryption_status(&status)
+    );
+
+    println!("\nPer-layer (encryption at rest is uniform: one master key protects every layer)");
+    println!(
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"
+    );
+
+    if !status.enabled {
+        println!("WAL:            PLAINTEXT (encryption disabled)");
+        println!("Index:          PLAINTEXT (encryption disabled)");
+        println!("Checkpoints:    PLAINTEXT (encryption disabled)");
+        println!("Cold storage:   PLAINTEXT (encryption disabled)");
+        return Ok(());
+    }
+
+    // Best-effort live enrichment: only when a durable DB is configured.
+    let live = if env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present() {
+        open_db().ok()
+    } else {
+        None
+    };
+
+    println!("WAL:            ENCRYPTED (master-key-derived DEK)");
+    match live.as_ref().map(|db| db.index_rotation_status()) {
+        Some(Ok(s)) => {
+            let rotated = if s.is_fully_rotated() {
+                "fully rotated"
+            } else {
+                "rotation incomplete"
+            };
+            println!(
+                "Index:          ENCRYPTED ({} files at current key, {} old, {} unknown; {})",
+                s.at_current, s.at_old, s.unknown, rotated
+            );
+        }
+        _ => println!("Index:          ENCRYPTED (master-key-derived DEK)"),
+    }
+    println!("Checkpoints:    ENCRYPTED (master-key-derived DEK)");
+    match live.as_ref().map(aletheiadb::AletheiaDB::stats) {
+        Some(stats) if stats.cold_storage.enabled => {
+            println!("Cold storage:   ENCRYPTED (master-key-derived DEK)");
+        }
+        Some(_) => println!("Cold storage:   not configured"),
+        None => println!("Cold storage:   ENCRYPTED if configured (master-key-derived DEK)"),
+    }
+    Ok(())
+}
+
+/// `encryption verify` — prove that the configured cipher actually decrypts the
+/// database's encrypted data at rest, beyond `keys verify`'s key health-check.
+///
+/// Opening the database replays the (encrypted) WAL and loads the (encrypted)
+/// persisted index files through the configured cipher; a wrong or missing key
+/// fails the open. On success we additionally classify every index file through
+/// the live keyring. Clear PASS/FAIL with a matching exit code; no key bytes.
+fn encryption_verify(args: &[String]) -> Result<(), String> {
+    let config = resolve_encryption_config(args)?;
+    if !config.enabled {
+        println!("Encryption is not enabled for this configuration; nothing to verify.");
+        return Ok(());
+    }
+
+    if !(env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present()) {
+        return Err(
+            "encryption verify requires a configured database to open and decrypt. Set \
+             ALETHEIADB_CONFIG (or ALETHEIADB_DATA_DIR) to point at the database."
+                .to_string(),
+        );
+    }
+
+    // Opening decrypts the WAL (replay) and index files (load-on-startup). A
+    // wrong/missing key fails here — the primary decryptability signal.
+    let db = open_db().map_err(|e| format!("encryption verify FAILED: {e}"))?;
+
+    if !db.is_encryption_enabled() {
+        println!(
+            "Opened database is not encrypted at rest; nothing to verify (WAL/index are plaintext)."
+        );
+        return Ok(());
+    }
+
+    // Active probe: classify every persisted index file through the live
+    // keyring. An `unknown`-key file means something did not decrypt cleanly.
+    match db.index_rotation_status() {
+        Ok(s) => {
+            if s.unknown > 0 {
+                return Err(format!(
+                    "encryption verify FAILED: {} index file(s) are not decryptable under the \
+                     configured key(s)",
+                    s.unknown
+                ));
+            }
+            let stats = db.stats();
+            println!("encryption verify: PASS");
+            println!(
+                "  WAL:   decrypted and replayed ({} nodes, {} edges recovered)",
+                stats.current.node_count, stats.current.edge_count
+            );
+            println!(
+                "  Index: {} encrypted file(s) decrypt under the current key(s) ({} plaintext)",
+                s.at_current + s.at_old,
+                s.plaintext
+            );
+        }
+        Err(_) => {
+            // Index persistence not enabled: the successful open already proved
+            // WAL decryptability, which is a valid PASS.
+            let stats = db.stats();
+            println!("encryption verify: PASS");
+            println!(
+                "  WAL:   decrypted and replayed ({} nodes, {} edges recovered)",
+                stats.current.node_count, stats.current.edge_count
+            );
+            println!("  Index: index persistence not enabled (nothing to classify)");
+        }
+    }
+    Ok(())
+}
+
+/// `encryption enable` / `encryption disable` — HONESTLY unimplemented.
+///
+/// Converting a database between plaintext and encrypted-at-rest in place
+/// requires a full-database migration engine (re-writing every WAL segment,
+/// checkpoint, index file, and cold-storage entry through/around the cipher,
+/// crash-consistently). No such engine exists on trunk today (the shipped
+/// rotation engine, Issue #488, only re-keys *already-encrypted* index files
+/// between generations). Rather than fake success or silently corrupt data,
+/// this returns a specific, non-zero error naming the missing engine.
+fn encryption_enable_disable(which: &str) -> Result<(), String> {
+    Err(format!(
+        "encryption {which} is not supported: switching a database between plaintext and \
+         encrypted-at-rest in place requires a full-database migration engine (re-encrypting \
+         every WAL segment, checkpoint, index file, and cold-storage entry crash-consistently), \
+         which is not yet implemented. The shipped key-rotation engine (Issue #488) only re-keys \
+         already-encrypted index files between generations.\n\
+         To use encryption at rest, create the database with encryption enabled in its config \
+         from the start (ALETHEIADB_CONFIG TOML with `[encryption] enabled = true`)."
+    ))
+}
+
+/// Whether `ALETHEIADB_CONFIG` is present in the environment (a durable DB is
+/// configured via TOML). Kept as a helper so the check reads the same across
+/// the encryption handlers regardless of the `config-toml` feature.
+fn config_env_present() -> bool {
+    env::var(aletheiadb::config::CONFIG_ENV).is_ok()
 }
 
 /// Resolve the [`EncryptionConfig`](aletheiadb::encryption::config::EncryptionConfig)

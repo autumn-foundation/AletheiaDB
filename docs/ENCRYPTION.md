@@ -519,3 +519,95 @@ Overall:        ENABLED
 Algorithm:      Auto (AES-256-GCM if AES-NI, else ChaCha20-Poly1305)
 Key Provider:   file (master.key)
 ```
+
+## CLI Operator Commands (Issue #490)
+
+The `aletheia` binary exposes encryption operator commands. Key bytes and
+passphrases are **never** printed by any of them. Commands that inspect or
+operate on a live database open it from the ambient configuration
+(`ALETHEIADB_CONFIG` TOML, or `ALETHEIADB_DATA_DIR`).
+
+### `keys` — key material
+
+```bash
+# Provision a new 32-byte master key (0600 on Unix; refuses overwrite w/o --force)
+aletheia keys generate --output /etc/aletheiadb/master.key
+
+# Show provider / algorithm / key version (no key material printed). Alias: info
+aletheia keys status --key-file /etc/aletheiadb/master.key
+
+# Health-check that a key file loads and is valid
+aletheia keys verify --key-file /etc/aletheiadb/master.key
+```
+
+### `keys rotate` — index key rotation (engine: Issue #488)
+
+Rotates the index-encryption key, re-encrypting every persisted index file from
+the old key to the new one. All modes require an **encrypted, index-persistent**
+database opened via `ALETHEIADB_CONFIG`.
+
+```bash
+export ALETHEIADB_CONFIG=/etc/aletheiadb/aletheia.toml
+
+# How far along is a rotation? (on-disk key-generation classification)
+aletheia keys rotate --status
+
+# Start a rotation to a new key (file- or env-var-sourced)
+aletheia keys rotate --new-key /etc/aletheiadb/new-master.key
+aletheia keys rotate --new-env-var ALETHEIADB_MEK_NEW
+
+# Finish an interrupted rotation (idempotent) / roll one back
+aletheia keys rotate --resume
+aletheia keys rotate --cancel
+```
+
+A successful start prints an old→new key-version summary and per-file counts;
+progress is written to **stderr** so it can be separated from the report.
+
+> **Important — cross-layer refusal.** The shipped engine performs an
+> *index-only* rotation and **safely refuses** while any *other* at-rest layer
+> (WAL, cold storage, checkpoint) is encrypted under the same master key —
+> rotating the index alone would strand those layers. Because AletheiaDB
+> encrypts **uniformly** (enabling encryption encrypts the WAL too), a normally
+> configured encrypted database has an encrypted WAL, so `keys rotate --new-key`
+> will correctly report:
+>
+> ```
+> error: ... refusing: other encrypted-at-rest layers (wal) are present ...
+> ```
+>
+> Full-MEK (all-layer) rotation, which re-keys the WAL/cold/checkpoint too, is a
+> documented follow-up.
+
+### `encryption` — at-rest status & verification
+
+```bash
+export ALETHEIADB_CONFIG=/etc/aletheiadb/aletheia.toml
+
+# Per-layer status table (WAL / index / checkpoints / cold)
+aletheia encryption status
+
+# Prove the configured cipher actually DECRYPTS the data at rest: opens the
+# database, replays the (encrypted) WAL, loads the (encrypted) index files, and
+# classifies them through the live keyring. A wrong/missing key fails the open.
+aletheia encryption verify
+```
+
+`encryption verify` exits `0` with `encryption verify: PASS` when the data
+decrypts, and non-zero with a `FAILED` message (no key bytes) otherwise.
+
+### `encryption enable` / `disable` — not yet supported
+
+In-place migration of a database **between** plaintext and encrypted-at-rest is
+**not implemented**. It requires a full-database migration engine that
+re-encrypts every WAL segment, checkpoint, index file, and cold-storage entry
+crash-consistently — distinct from the `keys rotate` engine, which only re-keys
+*already-encrypted* index files between generations. These subcommands therefore
+return a specific, non-zero error rather than faking success:
+
+```bash
+aletheia encryption enable    # error: ... requires a full-database migration engine ...
+```
+
+To use encryption at rest, create the database with encryption enabled in its
+configuration **from the start** (`[encryption] enabled = true`).

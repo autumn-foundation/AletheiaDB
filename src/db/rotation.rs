@@ -369,6 +369,29 @@ impl AletheiaDB {
         })
     }
 
+    /// Resume an interrupted index key rotation (Issue #488), if one is pending.
+    ///
+    /// Thin `&self` wrapper over the free [`resume_pending_rotation`] that
+    /// sources the (crate-private) persistence manager and startup encryption
+    /// config from this instance, so operator surfaces (the CLI, Issue #490)
+    /// can drive a manual resume without reaching into internals. Returns
+    /// `Ok(None)` when no rotation was pending. Does not weaken any durability
+    /// invariant — it only invokes the existing idempotent resume pass.
+    ///
+    /// # Errors
+    ///
+    /// * index persistence or encryption is not configured;
+    /// * the breadcrumb is present but corrupt (fail-closed);
+    /// * the recorded new key source cannot be sourced, or the pass fails.
+    pub fn resume_pending_index_rotation(&self) -> Result<Option<RotationReport>> {
+        let manager = self.require_rotation_prereqs()?;
+        let enc_cfg = self
+            .encryption_config
+            .clone()
+            .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
+        resume_pending_rotation(&manager, &enc_cfg)
+    }
+
     fn run_rotation(
         &self,
         manager: &Arc<IndexPersistenceManager>,
