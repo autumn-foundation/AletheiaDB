@@ -6,10 +6,12 @@
  * 1. **MCP-tool / structured errors (Issue #3234)** — returned in-band with an
  *    HTTP 200 as `{ error: { code, message, retriable, details? } }`. The node/
  *    edge/traverse routes forward these verbatim.
- * 2. **HTTP envelope errors** — real non-2xx responses shaped
- *    `{ success: false, error, code?, retriable?, details?, trace_id? }` (auth
- *    401/403 and resource-limit 413/422/429 carry `code`/`retriable`/`details`;
- *    plain 400/404/500 carry only `{ success, error }`).
+ * 2. **HTTP envelope errors (Issue #3629)** — real non-2xx responses now share
+ *    the *exact same* nested shape, `{ error: { code, message, retriable,
+ *    details? } }`, with `trace_id` (when present) a **top-level** sibling of
+ *    `error`. The legacy flat `{ success: false, error, code?, … }` body has
+ *    been removed server-side; the flat branch below is retained only for
+ *    backward compatibility with older servers.
  *
  * Every error becomes an {@link AletheiaError} subclass keyed off `code`. The
  * `retriable` flag is preserved exactly and drives the opt-in retry policy;
@@ -149,7 +151,12 @@ export function makeError(init: AletheiaErrorInit): AletheiaError {
   return new AletheiaError({ ...init, retriable: false });
 }
 
-/** The MCP-style in-band error object: `{ error: { code, message, retriable, details? } }`. */
+/**
+ * The nested structured error object shared by the MCP in-band surface (#3234)
+ * and — since Issue #3629 — the HTTP error surface: `{ error: { code, message,
+ * retriable, details? } }`. On the HTTP surface a `trace_id` may sit as a
+ * top-level sibling of `error` (never inside it).
+ */
 interface McpErrorEnvelope {
   error: {
     code: string;
@@ -157,6 +164,8 @@ interface McpErrorEnvelope {
     retriable?: boolean;
     details?: ErrorDetails;
   };
+  /** Present only on the HTTP surface (#3629); a top-level sibling of `error`. */
+  trace_id?: string;
 }
 
 /** The HTTP envelope: `{ success: false, error, code?, retriable?, details?, trace_id? }`. */
@@ -174,8 +183,10 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * If `body` is an MCP-style in-band structured error
- * (`{ error: { code, ... } }`), return its normalized form; else `null`.
+ * If `body` is a nested structured error (`{ error: { code, ... } }`), return
+ * its normalized form; else `null`. Handles both the MCP in-band 200 shape and
+ * the unified HTTP error envelope (#3629), capturing a top-level `trace_id`
+ * sibling when present.
  */
 export function parseMcpError(body: unknown, httpStatus?: number): AletheiaError | null {
   if (!isObject(body)) return null;
@@ -183,12 +194,14 @@ export function parseMcpError(body: unknown, httpStatus?: number): AletheiaError
   if (!isObject(err) || typeof err['code'] !== 'string') return null;
   const envelope = body as unknown as McpErrorEnvelope;
   const code = envelope.error.code;
+  const traceId = typeof envelope.trace_id === 'string' ? envelope.trace_id : undefined;
   return makeError({
     code,
     message: envelope.error.message ?? code,
     retriable: envelope.error.retriable ?? defaultRetriable(code),
     details: envelope.error.details,
     httpStatus,
+    traceId,
   });
 }
 

@@ -522,3 +522,254 @@ export interface RevokeKeyResponse {
   revoked: boolean;
   id: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Vector search (find_similar / enable_vector_index / list_vector_indexes)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A supported vector distance metric for {@link AletheiaClient.enableVectorIndex}. */
+export type DistanceMetric = 'cosine' | 'euclidean' | 'dot';
+
+/** `POST /find_similar` request — k-NN over a property's embeddings. */
+export interface FindSimilarRequest extends IncludeVectorsOption, BudgetOptions {
+  /** The property name that contains the vector embedding (e.g. `"embedding"`). */
+  propertyName: string;
+  /** The query embedding vector. */
+  embedding: number[];
+  /** Number of similar results to return (default 10). */
+  k?: number;
+  /** Number of results to skip (offset pagination, #3226). */
+  offset?: number;
+}
+
+/** One ranked node from {@link AletheiaClient.findSimilar} with its similarity score. */
+export interface SimilarityResult {
+  node: NodeEntity;
+  /** The similarity score; always returned in full, never elided/budget-dropped. */
+  score: number;
+}
+
+/** `POST /find_similar` response. */
+export interface FindSimilarResponse extends Completeness {
+  results: SimilarityResult[];
+}
+
+/** `POST /vector/indexes` request — enable HNSW indexing on a node property. */
+export interface EnableVectorIndexRequest {
+  /** The property name to index (e.g. `"embedding"`). */
+  propertyName: string;
+  /** The dimension of the vectors. */
+  dimensions: number;
+  /** Distance metric (default `"cosine"`). */
+  distanceMetric?: DistanceMetric;
+}
+
+/** `POST /vector/indexes` response. */
+export interface EnableVectorIndexResponse {
+  success: boolean;
+  property_name: string;
+  dimensions: number;
+  distance_metric: string;
+}
+
+/** One active vector index's configuration. */
+export interface VectorIndexInfo {
+  property_name: string;
+  dimensions: number;
+  distance_metric: string;
+}
+
+/** `GET /vector/indexes` response. */
+export interface ListVectorIndexesResponse {
+  indexes: VectorIndexInfo[];
+  count: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hybrid query (graph + vector + temporal)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `POST /hybrid_query` request — combined graph traversal + vector + temporal. */
+export interface HybridQueryRequest extends IncludeVectorsOption, BudgetOptions {
+  /** Starting node id (for graph-first queries). */
+  startNodeId?: number;
+  /** Edge label for traversal. */
+  traverseEdge?: string;
+  /** Traversal depth (default 1). */
+  traverseDepth?: number;
+  /** Property name for vector similarity. */
+  vectorProperty?: string;
+  /** Query embedding for vector similarity. */
+  queryEmbedding?: number[];
+  /** Number of similar results for the vector stage. */
+  topK?: number;
+  /** Valid-time coordinate for temporal filtering. */
+  validTime?: TimeInput;
+  /** Transaction-time coordinate for temporal filtering. */
+  transactionTime?: TimeInput;
+  /** Filter results by node label. */
+  filterLabel?: string;
+  /** Maximum number of results (default 100). */
+  limit?: number;
+}
+
+/** One hybrid-query result row. Carries a `similarity_score` when the vector stage ran. */
+export interface HybridResult {
+  entity?: NodeEntity;
+  similarity_score?: number;
+  [key: string]: JsonValue | NodeEntity | undefined;
+}
+
+/** `POST /hybrid_query` response. */
+export interface HybridQueryResponse extends Completeness {
+  results: HybridResult[];
+  as_of_valid_time?: string;
+  as_of_transaction_time?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Read-only declarative query (Cypher / AQL)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `POST /query` request — a single read-only Cypher/AQL statement. */
+export interface QueryRequest extends BudgetOptions {
+  /** Query language. */
+  language: 'cypher' | 'aql';
+  /** The read-only statement to execute. */
+  query: string;
+  /** Optional `$param` bindings (Cypher only). Numeric arrays are treated as embeddings. */
+  params?: Record<string, JsonValue>;
+  /** Maximum rows to return (default 100, capped at 10000). */
+  limit?: number;
+}
+
+/** `POST /query` response — structured rows plus column metadata. */
+export interface QueryResponse {
+  language: string;
+  columns: string[];
+  rows: JsonValue[];
+  row_count: number;
+  truncated?: boolean;
+  [key: string]: JsonValue | undefined;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Schema / stats / temporal extent
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Options for {@link AletheiaClient.getSchema}. `asOf*` switch to a bi-temporal snapshot. */
+export interface GetSchemaOptions extends BudgetOptions {
+  asOfValidTime?: TimeInput;
+  asOfTransactionTime?: TimeInput;
+}
+
+/**
+ * `GET /schema` response — node labels, edge types, and property keys with
+ * counts. Modeled as an open JSON object (the exact shape is a bare tool result).
+ */
+export interface SchemaResponse {
+  node_labels?: JsonValue;
+  edge_types?: JsonValue;
+  [key: string]: JsonValue | undefined;
+}
+
+/** `GET /database_stats` response — a holistic bi-temporal snapshot (open JSON object). */
+export interface DatabaseStats {
+  current?: JsonValue;
+  historical?: JsonValue;
+  cold_storage?: JsonValue;
+  wal?: JsonValue;
+  [key: string]: JsonValue | undefined;
+}
+
+/** Options for {@link AletheiaClient.temporalExtent}. */
+export interface TemporalExtentOptions {
+  /** Additionally return per-node-label / per-edge-type bounds. */
+  byLabel?: boolean;
+}
+
+/**
+ * `GET /temporal_extent` response — the queryable bi-temporal extent (open JSON
+ * object; `valid_time`/`transaction_time` carry `{earliest, latest}` bounds).
+ */
+export interface TemporalExtentResponse {
+  valid_time?: JsonValue;
+  transaction_time?: JsonValue;
+  node_labels?: JsonValue;
+  edge_types?: JsonValue;
+  [key: string]: JsonValue | undefined;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Atomic multi-write batch (apply_batch, #3231)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One operation inside an {@link ApplyBatchRequest}. `op` selects the operation;
+ * remaining fields mirror the single-op request (edge endpoints may reference
+ * batch-created nodes via `"$alias"` / `"$<index>"`).
+ */
+export interface BatchOperation {
+  op:
+    | 'create_node'
+    | 'create_edge'
+    | 'update_node'
+    | 'update_edge'
+    | 'delete_node'
+    | 'delete_edge';
+  [key: string]: JsonValue;
+}
+
+/** `POST /batch` request — an ordered, all-or-nothing batch of write operations. */
+export interface ApplyBatchRequest {
+  operations: BatchOperation[];
+}
+
+/**
+ * `POST /batch` response — per-op results in input order plus a `ref_map`
+ * (alias → committed id). Modeled as an open JSON object.
+ */
+export interface ApplyBatchResponse {
+  results?: JsonValue[];
+  ref_map?: Record<string, number>;
+  [key: string]: JsonValue | undefined;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Derivation lineage (upstream / downstream, #3371)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `POST /lineage/{upstream,downstream}` request — a version-pinned closure query. */
+export interface LineageQueryRequest {
+  /** Whether the root fact is a node or an edge. */
+  entityKind: 'node' | 'edge';
+  /** The root entity's id. */
+  id: number;
+  /** The root fact's version id (lineage is version-pinned). */
+  version: number;
+  /** Maximum transitive hop depth from the root. */
+  maxDepth?: number;
+  /** Maximum closure entries to return (default 100). */
+  limit?: number;
+  /** Number of entries to skip (breadth-first order). */
+  offset?: number;
+  /** Only follow lineage recorded at or before this transaction time. */
+  asOfTransactionTime?: TimeInput;
+}
+
+/** One resolved lineage entry: a version-pinned ref plus its depth and current status. */
+export interface LineageEntry {
+  entity_kind: 'node' | 'edge';
+  id: number;
+  version: number;
+  depth: number;
+  /** Current-state status of the referenced fact (`Current`/`Superseded`/`Absent`). */
+  status: string;
+}
+
+/** `POST /lineage/{upstream,downstream}` response. */
+export interface LineageResponse extends Completeness {
+  direction: 'upstream' | 'downstream';
+  root: LineageRef;
+  entries: LineageEntry[];
+}

@@ -133,17 +133,24 @@ export function mcpError(
   };
 }
 
-/** The HTTP-envelope error shape used by auth/limit variants. */
+/**
+ * The **nested** HTTP error envelope (Issue #3629): `{ error: { code, message,
+ * retriable, details? }, trace_id? }`, byte-shape-identical to the MCP surface
+ * (#3234), with `trace_id` a top-level sibling of `error`. The legacy flat
+ * `{ success: false, error, code, ... }` shape has been removed server-side.
+ */
 export function httpError(
   status: number,
-  error: string,
-  code?: string,
+  message: string,
+  code: string,
   retriable?: boolean,
   details?: Record<string, unknown>,
+  traceId?: string,
 ): CannedResponse {
-  const body: Record<string, unknown> = { success: false, error };
-  if (code !== undefined) body['code'] = code;
-  if (retriable !== undefined) body['retriable'] = retriable;
-  if (details !== undefined) body['details'] = details;
+  const err: Record<string, unknown> = { code, message };
+  if (retriable !== undefined) err['retriable'] = retriable;
+  if (details !== undefined) err['details'] = details;
+  const body: Record<string, unknown> = { error: err };
+  if (traceId !== undefined) body['trace_id'] = traceId;
   return { status, body };
 }
