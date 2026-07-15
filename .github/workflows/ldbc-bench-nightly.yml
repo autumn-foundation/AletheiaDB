@@ -1,0 +1,62 @@
+name: LDBC-style Bench (nightly, informational)
+
+# INFORMATIONAL ONLY — this workflow is NON-GATING. It does NOT run on pull
+# requests and does NOT block merges. It runs the AletheiaDB-only LDBC-style
+# benchmark suite (Issue #3373) nightly and checks the p99 regression gate
+# against the committed baseline. Flipping this to a REQUIRED status check is a
+# deliberate follow-up decision once the numbers stabilize on a reference
+# runner — see crates/aletheia-bench-ldbc/docs/METHODOLOGY.md.
+#
+# It never modifies any existing gating workflow, and is guarded to the main
+# repository so forks don't run it.
+
+on:
+  schedule:
+    # 03:30 UTC daily (offset from the 00:00 Nightly workflow).
+    - cron: '30 3 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ldbc-bench:
+    name: LDBC-style suite + regression gate (non-gating)
+    # Guard to the main repo so this informational job doesn't run on forks.
+    if: github.repository == 'madmax983/AletheiaDB'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-ldbc-bench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run LDBC-style suite (smoke) and check the regression gate
+        # Exits non-zero (code 2) on a >10% p99 regression against the committed
+        # baseline. Because this whole workflow is informational, a failure here
+        # signals a possible regression to investigate but does NOT block PRs.
+        run: |
+          cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- \
+            --scale smoke --iterations 300 --warmup 30 \
+            --out ldbc_results_nightly.json \
+            --check-gate \
+            --baseline crates/aletheia-bench-ldbc/baselines/ldbc_smoke_baseline.json
+
+      - name: Upload results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldbc-bench-results
+          path: ldbc_results_nightly.json
+          if-no-files-found: ignore

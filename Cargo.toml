@@ -27,7 +27,12 @@ categories = ["database-implementations", "data-structures"]
 # 0.5's proc-macros hard-code `::autumn_web`, so the 0.5 surface must live in a
 # crate whose extern prelude binds `autumn_web` to 0.5. It requires an explicit
 # `-p aletheia-server`; bare cargo stays root-scoped via `default-members`.
-members = ["crates/autumn-spike", "crates/aletheia-server"]
+# `aletheia-bench-ldbc` is the LDBC-style benchmark suite (Issue #3373): an
+# isolated member depending only on the root `aletheiadb` public surface. It
+# requires an explicit `-p aletheia-bench-ldbc`; bare cargo stays root-scoped
+# via `default-members`, so the existing CI gates and coverage (`-p` per crate)
+# are entirely unaffected by adding it.
+members = ["crates/autumn-spike", "crates/aletheia-server", "crates/aletheia-bench-ldbc"]
 default-members = ["."]
 # `python/` and `fuzz/` are independent crates with their own manifests (the
 # Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of

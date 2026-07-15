@@ -1,0 +1,30 @@
+;; XTDB (bi-temporal) mappings for the TEMPORAL EXTENSION only, where
+;; expressible. NOT executed in the sandbox — provided for reproduction.
+;;
+;; XTDB is a bi-temporal document/Datalog store, NOT a property graph, so the
+;; traversal is expressed as recursive Datalog and the "as of" is native
+;; valid-time / transaction-time. XTDB has NO native vector/ANN index, so the
+;; vector extension is NOT expressible here (README footnote 4).
+
+;; EXT-TEMPORAL: point-in-time reconstruction of a person's state as of a
+;; historical valid time (native bi-temporality — this is the axis Neo4j/KuzuDB
+;; cannot express natively).
+{:query   (-> (from :person [{:xt/id person-id} first-name city birth-year])
+              (limit 1))
+ :basis   {:current-time #inst "2024-06-01T00:00:00Z"}   ;; transaction time
+ :args    {:person-id "person-42"}
+ :valid-time #inst "2024-01-01T00:00:00Z"}               ;; AS OF valid time
+
+;; EXT-TEMPORAL: AS OF traversal — a person's KNOWS neighbours as of a
+;; historical valid time (recursive Datalog rule).
+{:query
+ (q [:find ?friend
+     :in $ ?person
+     :where
+     [?person :knows ?friend]]
+    {:valid-time #inst "2024-01-01T00:00:00Z"})
+ :args {:person "person-42"}}
+
+;; SNB short/complex reads and the vector extension are intentionally omitted:
+;; XTDB is not a property-graph engine and the interactive graph subset is a
+;; different modeling exercise; the vector k-NN is not expressible natively.
