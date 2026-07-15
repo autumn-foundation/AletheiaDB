@@ -1037,7 +1037,7 @@ fn is_aggregate_name(name: &str) -> bool {
 
 /// Equality with int/float numeric coercion; other types use `PropertyValue`'s
 /// own equality.
-fn loosely_equal(a: &PropertyValue, b: &PropertyValue) -> bool {
+pub(crate) fn loosely_equal(a: &PropertyValue, b: &PropertyValue) -> bool {
     if is_numeric(a) && is_numeric(b) {
         return partial_cmp(a, b) == Some(Ordering::Equal);
     }
