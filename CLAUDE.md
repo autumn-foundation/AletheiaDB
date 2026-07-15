@@ -870,6 +870,32 @@ already-recorded), all non-retriable. Durable persistence of lineage is a
 #3413 follow-up; the #3427 attribution caveat applies. See
 [docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
 
+### Named Snapshots — Reproducible Reads (Issue #3370)
+
+Pins a human-readable name to a bi-temporal coordinate
+`(valid_time, transaction_time)`; reads through the resulting handle resolve
+via the deterministic historical (`*_at_time`) path, so the same handle returns
+**byte-for-byte identical results regardless of later writes**. A snapshot is a
+**coordinate, not a held resource**: it pins no storage, blocks no writers, and
+adds **zero overhead to the write path** (the registry is off the data write
+path). **Rust API:** `create_snapshot(name, description)` (defaults both
+dimensions to the commit frontier under `current_timestamp`, so post-pin
+commits are invisible and pre-pin commits visible) / `create_snapshot_at(name,
+vt, tt, description)` (explicit/backdated, not extent-checked) /
+`snapshot(name) -> Snapshot` / `get_snapshot` / `list_snapshots` (stable order:
+created_at, then name) / `delete_snapshot`. The `Snapshot<'_>` handle pins
+`get_node`/`get_edge`/`find_nodes`/`find_nodes_by_property`, adjacency
+(`get_outgoing_edges`/`get_incoming_edges`), and a pre-pinned `query()` builder
+(traversal at the pin). Errors reuse the #3234 codes (dup name → `CONFLICT`,
+missing → `NOT_FOUND` with the name). Durably persisted (atomic
+temp+rename+fsync, coordinates as i64 micros) to `{data_dir}/snapshots.json`
+when index persistence is enabled — survives restart; in-memory-only for
+ephemeral `AletheiaDB::new()`. Caveats mirror `temporal_extent` (#3238) /
+point-in-time reads: cold-tier/truncation eviction can make a pinned version
+unreadable, and pinning "now" excludes future-valid facts. MCP exposure and an
+`AS OF SNAPSHOT <name>` query DDL are a coordinated follow-up (this wave is
+Rust-API-only). See [docs/guides/snapshot-pin.md](docs/guides/snapshot-pin.md).
+
 ### Feature Flags: Stable vs Experimental
 
 Semantic features are split between a stable cohort and four experimental
