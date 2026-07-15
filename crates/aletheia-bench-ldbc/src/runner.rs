@@ -53,9 +53,9 @@ pub fn run_suite(opts: &RunOptions) -> aletheiadb::Result<BenchmarkReport> {
     let mut operations = Vec::new();
     operations.extend(short_reads(&loaded, opts));
     operations.extend(complex_reads(&loaded, opts));
-    operations.extend(insert_update_stream(&loaded, opts));
+    operations.extend(insert_update_stream(&loaded, opts)?);
     operations.extend(temporal_extension(&loaded, opts));
-    operations.extend(vector_extension(&loaded, opts));
+    operations.extend(vector_extension(&loaded, opts)?);
 
     let unix = now_unix();
     Ok(BenchmarkReport {
@@ -96,6 +96,41 @@ fn bench<F: FnMut(usize)>(warmup: usize, iterations: usize, mut f: F) -> Vec<f64
         samples.push(elapsed.as_nanos() as f64 / 1000.0);
     }
     samples
+}
+
+/// Like [`bench`], but for fallible operations (writes, vector queries) whose
+/// `Result` is otherwise discarded for timing purposes.
+///
+/// The **first measured iteration**'s result is checked: if it failed (a broken
+/// setup, e.g. a missing vector index or a rejected write) the error propagates
+/// as a harness error instead of being silently timed as an error path. The
+/// remaining measured iterations run in the same unbranched hot loop as
+/// [`bench`], with their results discarded. Warmup results are always discarded.
+fn bench_guarded<F>(warmup: usize, iterations: usize, mut f: F) -> aletheiadb::Result<Vec<f64>>
+where
+    F: FnMut(usize) -> aletheiadb::Result<()>,
+{
+    for i in 0..warmup {
+        let _ = f(i);
+    }
+    let mut samples = Vec::with_capacity(iterations);
+    if iterations > 0 {
+        // First measured iteration: time it, then assert it succeeded so a
+        // broken setup fails loudly rather than being timed as an error path.
+        let start = Instant::now();
+        let r = f(0);
+        let elapsed = start.elapsed();
+        r?;
+        samples.push(elapsed.as_nanos() as f64 / 1000.0);
+        // Remaining iterations: unbranched hot loop, results discarded.
+        for i in 1..iterations {
+            let start = Instant::now();
+            let _ = f(i);
+            let elapsed = start.elapsed();
+            samples.push(elapsed.as_nanos() as f64 / 1000.0);
+        }
+    }
+    Ok(samples)
 }
 
 /// Build an [`OperationResult`] from a timing run.
@@ -322,7 +357,10 @@ fn complex_reads(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResult> {
 
 // ---- Insert/update stream (SNB INS-series analogues) ----
 
-fn insert_update_stream(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResult> {
+fn insert_update_stream(
+    g: &LoadedGraph,
+    opts: &RunOptions,
+) -> aletheiadb::Result<Vec<OperationResult>> {
     let db = &g.db;
     let mut out = Vec::new();
 
@@ -332,16 +370,17 @@ fn insert_update_stream(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResu
         "INS1",
         Category::InsertUpdate,
         opts.iterations,
-        bench(opts.warmup, opts.iterations, |i| {
-            let r = db.create_node(
+        bench_guarded(opts.warmup, opts.iterations, |i| {
+            let id = db.create_node(
                 "Person",
                 PropertyMapBuilder::new()
                     .insert("name", format!("StreamPerson{i}").as_str())
                     .insert("city", "Springfield")
                     .build(),
-            );
-            let _ = black_box(r);
-        }),
+            )?;
+            black_box(id);
+            Ok(())
+        })?,
         vec![],
     ));
 
@@ -351,21 +390,23 @@ fn insert_update_stream(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResu
         "INS6",
         Category::InsertUpdate,
         opts.iterations,
-        bench(opts.warmup, opts.iterations, |i| {
-            if let Some(creator) = pick(&g.person_ids, i)
-                && let Ok(post) = db.create_node(
-                    "Post",
-                    PropertyMapBuilder::new().insert("length", 100i64).build(),
-                )
-            {
-                let _ = black_box(db.create_edge(
-                    post,
-                    creator,
-                    "HAS_CREATOR",
-                    PropertyMapBuilder::new().build(),
-                ));
-            }
-        }),
+        bench_guarded(opts.warmup, opts.iterations, |i| {
+            let Some(creator) = pick(&g.person_ids, i) else {
+                return Ok(());
+            };
+            let post = db.create_node(
+                "Post",
+                PropertyMapBuilder::new().insert("length", 100i64).build(),
+            )?;
+            let edge = db.create_edge(
+                post,
+                creator,
+                "HAS_CREATOR",
+                PropertyMapBuilder::new().build(),
+            )?;
+            black_box(edge);
+            Ok(())
+        })?,
         vec![],
     ));
 
@@ -375,22 +416,25 @@ fn insert_update_stream(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResu
         "UPD-PERSON",
         Category::InsertUpdate,
         opts.iterations,
-        bench(opts.warmup, opts.iterations, |i| {
-            if let Some(p) = pick(&g.person_ids, i) {
-                let r = db.update_node_with_valid_time(
-                    p,
-                    PropertyMapBuilder::new()
-                        .insert("city", "Rivertown")
-                        .build(),
-                    None,
-                );
-                let _ = black_box(r);
-            }
-        }),
+        bench_guarded(opts.warmup, opts.iterations, |i| {
+            let Some(p) = pick(&g.person_ids, i) else {
+                return Ok(());
+            };
+            // Returns `()`; the write's DB mutation is an observable side
+            // effect, so no `black_box` is needed to prevent elision.
+            db.update_node_with_valid_time(
+                p,
+                PropertyMapBuilder::new()
+                    .insert("city", "Rivertown")
+                    .build(),
+                None,
+            )?;
+            Ok(())
+        })?,
         vec![],
     ));
 
-    out
+    Ok(out)
 }
 
 // ---- Temporal extension (NON-STANDARD) ----
@@ -447,7 +491,10 @@ fn temporal_extension(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResult
 
 // ---- Vector extension (NON-STANDARD) ----
 
-fn vector_extension(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResult> {
+fn vector_extension(
+    g: &LoadedGraph,
+    opts: &RunOptions,
+) -> aletheiadb::Result<Vec<OperationResult>> {
     let db = &g.db;
     let dim = g.embedding_dim;
     let mut out = Vec::new();
@@ -460,15 +507,17 @@ fn vector_extension(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResult> 
         "EXT-VECTOR",
         Category::VectorExtension,
         opts.iterations,
-        bench(opts.warmup, opts.iterations, |i| {
+        bench_guarded(opts.warmup, opts.iterations, |i| {
             // Perturb the query embedding slightly per iteration so we are not
             // re-issuing one identical query.
             let mut q = g.query_embedding.clone();
             if !q.is_empty() {
                 q[i % dim.max(1)] += 0.001 * (i as f32);
             }
-            let _ = black_box(db.similarity_search(SimilarityQuery::from_embedding(q).k(10)));
-        }),
+            let hits = db.similarity_search(SimilarityQuery::from_embedding(q).k(10))?;
+            black_box(hits);
+            Ok(())
+        })?,
         vec![
             ("knn_k", serde_json::json!(10)),
             ("vector_count", serde_json::json!(g.vector_count)),
@@ -491,18 +540,16 @@ fn vector_extension(g: &LoadedGraph, opts: &RunOptions) -> Vec<OperationResult> 
         "EXT-VECTOR",
         Category::VectorExtension,
         opts.iterations,
-        bench(opts.warmup, opts.iterations, |i| {
-            if let Some(forum) = pick(&g.forum_ids, i) {
-                let _ = black_box(db.traverse_and_rank(
-                    forum,
-                    "CONTAINER_OF",
-                    &g.query_embedding,
-                    10,
-                ));
-            }
-        }),
+        bench_guarded(opts.warmup, opts.iterations, |i| {
+            let Some(forum) = pick(&g.forum_ids, i) else {
+                return Ok(());
+            };
+            let ranked = db.traverse_and_rank(forum, "CONTAINER_OF", &g.query_embedding, 10)?;
+            black_box(ranked);
+            Ok(())
+        })?,
         vec![("knn_k", serde_json::json!(10))],
     ));
 
-    out
+    Ok(out)
 }

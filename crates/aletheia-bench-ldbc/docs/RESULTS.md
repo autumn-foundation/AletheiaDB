@@ -22,7 +22,7 @@
 
 Raw JSON: [`baselines/ldbc_smoke_baseline.json`](../baselines/ldbc_smoke_baseline.json)
 (smoke, 300 iters) and
-[`baselines/ldbc_sf0.1_results.json`](../baselines/ldbc_sf0.1_results.json)
+[`baselines/ldbc_sf0.1_baseline.json`](../baselines/ldbc_sf0.1_baseline.json)
 (SF0.1-equivalent, 200 iters).
 
 ## AletheiaDB results — SF0.1-equivalent (11,280 nodes, 42,660 edges, 2,400 vectors, dim 64)
@@ -55,7 +55,7 @@ Full numbers in [`baselines/ldbc_smoke_baseline.json`](../baselines/ldbc_smoke_b
 
 | Target | Result | Status |
 |--------|--------|--------|
-| SNB short reads consistent with current-state targets | IS1 p50 sub-µs (smoke), ~0.7µs (SF0.1); all IS reads single-digit µs | ✅ |
+| SNB short reads consistent with current-state targets | IS1 p50 sub-µs (0.73µs SF0.1); p99 ~1.8µs slightly exceeds the strict <1µs single-hop target; all IS reads single-digit µs | ✅ (p50) |
 | Temporal-extension reconstruction **< 10 ms** | p99 **0.15µs** (smoke) / **1.85µs** (SF0.1) | ✅ |
 | Vector-extension k-NN (k=10) **< 10 ms** | p99 **12µs** (48 vectors) / **89µs** (2,400 vectors) | ✅ (at the scale run) |
 

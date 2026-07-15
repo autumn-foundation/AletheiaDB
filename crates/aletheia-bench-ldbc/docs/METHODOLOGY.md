@@ -52,7 +52,8 @@ extension reconstructs (person revisions applied at increasing valid times).
 | `sf0.1` ("SF0.1-equivalent") | 1,500 | 14 | 60 | 2,400 | 7,200 | 2,400 |
 
 **Honesty on scale:** these are **not** the official LDBC SF0.1 cardinalities.
-The official SF0.1 has ~tens of thousands of persons and a power-law degree
+The official SF0.1 has on the order of a few thousand persons (the tens-of-thousands
+and larger figures are total/message-node counts, not persons) and a power-law degree
 distribution produced by LDBC Datagen (Spark). We label our points
 "SF0.1-equivalent" and "smoke" to be explicit that they are *shaped like* SNB
 at a size that runs with zero external dependencies in a CI-nightly budget, not
