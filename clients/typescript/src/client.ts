@@ -648,6 +648,7 @@ export class AletheiaClient {
         query: req.query,
         params: req.params,
         limit: req.limit,
+        limits: req.limits,
         ...budgetBody(req),
       },
     });
@@ -657,7 +658,15 @@ export class AletheiaClient {
   // Schema / stats / temporal extent
   // ───────────────────────────────────────────────────────────────────────────
 
-  /** `GET /schema` — node labels, edge types, and property keys with counts (optional bi-temporal). */
+  /**
+   * `GET /schema` — node labels, edge types, and property keys with counts
+   * (optional bi-temporal via `asOf*`).
+   *
+   * Only the scalar token/byte budget is sent: `priority_properties` is a
+   * repeated-key array that the server's `GET` query-string extractor
+   * (`serde_urlencoded`) cannot decode into a `Vec<String>`, so it is
+   * deliberately not forwarded (see {@link GetSchemaOptions}).
+   */
   getSchema(opts: GetSchemaOptions = {}): Promise<SchemaResponse> {
     return this.transport.request<SchemaResponse>({
       method: 'GET',
@@ -665,12 +674,19 @@ export class AletheiaClient {
       query: {
         as_of_valid_time: optTime(opts.asOfValidTime),
         as_of_transaction_time: optTime(opts.asOfTransactionTime),
-        ...budgetQuery(opts),
+        max_response_tokens: opts.maxResponseTokens,
+        max_response_bytes: opts.maxResponseBytes,
       },
     });
   }
 
-  /** `GET /database_stats` — a holistic bi-temporal snapshot (no arguments). */
+  /**
+   * `GET /database_stats` — a holistic bi-temporal snapshot (no arguments).
+   *
+   * Requires the **metrics** (or **admin**) role: a reader/writer-only key is
+   * rejected with `PERMISSION_DENIED` (`database_stats` is classified
+   * `MetricsClass`, not `ReadClass`).
+   */
   databaseStats(): Promise<DatabaseStats> {
     return this.transport.request<DatabaseStats>({
       method: 'GET',

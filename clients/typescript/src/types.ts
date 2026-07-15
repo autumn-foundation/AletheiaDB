@@ -631,6 +631,21 @@ export interface HybridQueryResponse extends Completeness {
 // Read-only declarative query (Cypher / AQL)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Per-call resource-limit overrides for {@link AletheiaClient.query} (Issue
+ * #3368). Each is bounded by an operator ceiling (an over-ceiling value is
+ * rejected with `INVALID_ARGUMENT`); `0` means unlimited (only under an
+ * unbounded ceiling). Field names are the server wire shape (snake_case).
+ */
+export interface QueryLimitsOverride {
+  /** Per-call wall-clock timeout in milliseconds (`0` = unlimited). */
+  timeout_ms?: number;
+  /** Per-call maximum result rows (`0` = unlimited); over-cap results truncate, not reject. */
+  max_result_rows?: number;
+  /** Per-call maximum serialized response bytes (`0` = unlimited); exceeding fails closed. */
+  max_response_bytes?: number;
+}
+
 /** `POST /query` request — a single read-only Cypher/AQL statement. */
 export interface QueryRequest extends BudgetOptions {
   /** Query language. */
@@ -641,6 +656,8 @@ export interface QueryRequest extends BudgetOptions {
   params?: Record<string, JsonValue>;
   /** Maximum rows to return (default 100, capped at 10000). */
   limit?: number;
+  /** Optional per-call resource-limit overrides (#3368). */
+  limits?: QueryLimitsOverride;
 }
 
 /** `POST /query` response — structured rows plus column metadata. */
@@ -657,10 +674,23 @@ export interface QueryResponse {
 // Schema / stats / temporal extent
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Options for {@link AletheiaClient.getSchema}. `asOf*` switch to a bi-temporal snapshot. */
-export interface GetSchemaOptions extends BudgetOptions {
+/**
+ * Options for {@link AletheiaClient.getSchema}. `asOf*` switch to a bi-temporal
+ * snapshot.
+ *
+ * Note: `getSchema` is a `GET`, and the server's query-string extractor
+ * (`serde_urlencoded`) cannot decode a repeated key into a `Vec<String>`, so
+ * `priorityProperties` is **not** offered here (it would 400 the request) — only
+ * the scalar token/byte budget is honored on `GET /schema`. Use
+ * `maxResponseBytes`/`maxResponseTokens` to bound the schema response.
+ */
+export interface GetSchemaOptions {
   asOfValidTime?: TimeInput;
   asOfTransactionTime?: TimeInput;
+  /** Cap the response at roughly this many tokens (estimated `ceil(bytes/4)`). */
+  maxResponseTokens?: number;
+  /** Byte-exact response cap. */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -673,13 +703,90 @@ export interface SchemaResponse {
   [key: string]: JsonValue | undefined;
 }
 
-/** `GET /database_stats` response — a holistic bi-temporal snapshot (open JSON object). */
+/** Current-state (hot tier) graph size. */
+export interface CurrentStateStats {
+  node_count: number;
+  edge_count: number;
+}
+
+/** Bi-temporal depth of the in-RAM historical store, with anchor/delta compression. */
+export interface HistoricalDepthStats {
+  total_node_versions: number;
+  total_edge_versions: number;
+  unique_nodes: number;
+  unique_edges: number;
+  anchor_count: number;
+  delta_count: number;
+  node_anchor_count: number;
+  node_delta_count: number;
+  edge_anchor_count: number;
+  edge_delta_count: number;
+  /** Anchors as a fraction of total versions (0.0–1.0; lower is better compression). */
+  compression_ratio: number;
+}
+
+/** Where historical-version reads were served from (hot/warm/cold distribution). */
+export interface TierAccessStats {
+  hot_hits: number;
+  warm_hits: number;
+  cold_hits: number;
+  misses: number;
+}
+
+/**
+ * Cold-tier (disk) storage state. When disabled the response is exactly
+ * `{ enabled: false }` — the count fields are structurally absent (never a
+ * misleading zero). When enabled, `ColdStorageDetails` is flattened alongside.
+ */
+export interface ColdStorageTierStats {
+  enabled: boolean;
+  /** Present only when `enabled` is `true` (flattened server-side). */
+  node_versions_stored?: number;
+  /** Present only when `enabled` is `true`. */
+  edge_versions_stored?: number;
+  /** Present only when `enabled` is `true`. */
+  compression_ratio?: number;
+  /** Present only when `enabled` is `true`. */
+  tier_access?: TierAccessStats;
+}
+
+/** Write-ahead-log durability state. */
+export interface WalStateStats {
+  enabled: boolean;
+  /** Stable token: `"synchronous"`, `"async"`, `"group_commit"`, or `"async_batched"`. */
+  durability_mode: string;
+  /** The next LSN to be allocated (one past the most recent). */
+  current_lsn: number;
+  total_appends: number;
+  healthy: boolean;
+}
+
+/** Outcome of the most recent provenance-chain verification (Issue #3351). */
+export interface LastVerifiedStats {
+  passed: boolean;
+  at_micros: number;
+}
+
+/** Tamper-evident provenance hash chain status (Issue #3351). */
+export interface ProvenanceChainStats {
+  enabled: boolean;
+  head_seq: number | null;
+  head_digest: string | null;
+  genesis_digest: string | null;
+  last_verified: LastVerifiedStats | null;
+}
+
+/**
+ * `GET /database_stats` response — a holistic bi-temporal snapshot (Issue
+ * #3222), mirroring the Rust `DatabaseStats` struct. Every field is an O(1)
+ * cached counter read.
+ */
 export interface DatabaseStats {
-  current?: JsonValue;
-  historical?: JsonValue;
-  cold_storage?: JsonValue;
-  wal?: JsonValue;
-  [key: string]: JsonValue | undefined;
+  current: CurrentStateStats;
+  historical: HistoricalDepthStats;
+  cold_storage: ColdStorageTierStats;
+  wal: WalStateStats;
+  chain: ProvenanceChainStats;
 }
 
 /** Options for {@link AletheiaClient.temporalExtent}. */
@@ -705,19 +812,94 @@ export interface TemporalExtentResponse {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * One operation inside an {@link ApplyBatchRequest}. `op` selects the operation;
- * remaining fields mirror the single-op request (edge endpoints may reference
- * batch-created nodes via `"$alias"` / `"$<index>"`).
+ * A batch edge endpoint: a committed node id (`number`) or a local reference
+ * string to a node created earlier in the same batch — `"$alias"` (a
+ * `create_node`'s `ref`) or positional `"$<index>"`.
  */
-export interface BatchOperation {
-  op:
-    | 'create_node'
-    | 'create_edge'
-    | 'update_node'
-    | 'update_edge'
-    | 'delete_node'
-    | 'delete_edge';
-  [key: string]: JsonValue;
+export type BatchNodeRef = number | string;
+
+/**
+ * `apply_batch` field names are the **server wire shape (snake_case)**, NOT this
+ * SDK's camelCase single-op requests — the operations array is forwarded to the
+ * server verbatim (`#[serde(tag = "op", rename_all = "snake_case")]`). In
+ * particular:
+ * - endpoints are `source_id`/`target_id`/`node_id`/`edge_id` (never `sourceId`…);
+ * - `valid_time` is an RFC 3339 **string** or decimal-microseconds **string**
+ *   (a JSON number fails server deserialization) — pass `toWireTime(t)`, not a
+ *   `TimeInput`/`Date`/`number`.
+ *
+ * The type is a strict discriminated union with **no** index signature, so a
+ * camelCase key or a numeric `valid_time` is a **compile error**, not a silently
+ * dropped/mis-timed write.
+ */
+export type BatchOperation =
+  | BatchCreateNode
+  | BatchCreateEdge
+  | BatchUpdateNode
+  | BatchUpdateEdge
+  | BatchDeleteNode
+  | BatchDeleteEdge;
+
+/** Create a node; `ref` makes it addressable later as `"$<ref>"`. */
+export interface BatchCreateNode {
+  op: 'create_node';
+  label: string;
+  properties?: PropertyMap;
+  /** RFC 3339 or decimal-µs string (use `toWireTime`). */
+  valid_time?: string;
+  provenance?: Provenance;
+  /** Optional alias for referencing this node later in the batch. */
+  ref?: string;
+}
+
+/** Create an edge; endpoints accept committed ids and local `$refs` interchangeably. */
+export interface BatchCreateEdge {
+  op: 'create_edge';
+  source_id: BatchNodeRef;
+  target_id: BatchNodeRef;
+  label: string;
+  properties?: PropertyMap;
+  /** RFC 3339 or decimal-µs string (use `toWireTime`). */
+  valid_time?: string;
+  provenance?: Provenance;
+}
+
+/** Update a committed node's properties (v1 rejects updating a batch-created ref). */
+export interface BatchUpdateNode {
+  op: 'update_node';
+  node_id: BatchNodeRef;
+  properties: PropertyMap;
+  /** RFC 3339 or decimal-µs string (use `toWireTime`). */
+  valid_time?: string;
+  provenance?: Provenance;
+}
+
+/** Update a committed edge's properties. */
+export interface BatchUpdateEdge {
+  op: 'update_edge';
+  edge_id: number;
+  properties: PropertyMap;
+  /** RFC 3339 or decimal-µs string (use `toWireTime`). */
+  valid_time?: string;
+  provenance?: Provenance;
+}
+
+/** Delete a committed node (safe-by-default DETACH contract; `detach` cascades). */
+export interface BatchDeleteNode {
+  op: 'delete_node';
+  node_id: BatchNodeRef;
+  /** Cascade-remove connected edges. Not supported together with `valid_time`. */
+  detach?: boolean;
+  /** RFC 3339 or decimal-µs string (use `toWireTime`). */
+  valid_time?: string;
+}
+
+/** Delete a committed edge. */
+export interface BatchDeleteEdge {
+  op: 'delete_edge';
+  edge_id: number;
+  /** RFC 3339 or decimal-µs string (use `toWireTime`). */
+  valid_time?: string;
 }
 
 /** `POST /batch` request — an ordered, all-or-nothing batch of write operations. */
