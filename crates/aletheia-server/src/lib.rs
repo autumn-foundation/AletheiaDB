@@ -31,6 +31,7 @@ pub mod app;
 pub mod constraints_lineage_audit_tools;
 pub mod edge_tools;
 pub mod http_routes;
+pub mod metrics_exposition;
 pub mod node_tools;
 pub mod schema_batch_tools;
 pub mod security;
