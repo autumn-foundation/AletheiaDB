@@ -38,6 +38,7 @@
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::VersionId;
+use crate::core::interning::InternedString;
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
@@ -379,6 +380,27 @@ impl QueryResults {
             }
         }
         Ok(nodes)
+    }
+
+    /// Collect only the full edges from the result stream, discarding scores, nodes, and paths.
+    ///
+    /// **Why?** The edge counterpart to [`collect_nodes`](Self::collect_nodes): useful for
+    /// `SELECT * FROM edges` (Issue #3607) and other edge-yielding queries where the caller
+    /// wants the [`Edge`] payloads directly. Node rows in the stream are dropped, mirroring the
+    /// way `collect_nodes` drops edge rows.
+    ///
+    /// ⚡ Bolt Optimization: Consumes the iterator directly to avoid allocating
+    /// a large intermediate `Vec` of all rows before extracting the edges.
+    /// Pre-allocates vector based on iterator's lower size bound.
+    pub fn collect_edges(mut self) -> Result<Vec<Edge>> {
+        let (lower, _) = self.iterator.size_hint();
+        let mut edges = Vec::with_capacity(lower);
+        while let Some(row) = self.iterator.next() {
+            if let EntityResult::Edge(e) = row?.entity {
+                edges.push(e);
+            }
+        }
+        Ok(edges)
     }
 
     /// Collect nodes with their scores
@@ -898,6 +920,253 @@ impl QueryResults {
             versions,
             columns,
         })
+    }
+
+    /// Collect all results into a structured [`EdgeQueryResult`].
+    ///
+    /// The edge counterpart to [`collect_structured`](Self::collect_structured) (Issue
+    /// #3626). Where `collect_structured` projects node rows into a node-shaped
+    /// [`QueryResult`] (and silently drops edges), this projects **edge** rows
+    /// (`SELECT * FROM edges`, Issue #3607) into an edge-shaped [`EdgeQueryResult`]:
+    /// parallel vectors of ids, endpoints, labels, properties, scores, and versions.
+    /// `collect_structured` itself is unchanged and remains node-only.
+    ///
+    /// Node rows in the stream are dropped, symmetric to the way the node-centric helpers
+    /// drop edge rows. The endpoint/label/property vectors are `Some` iff at least one full
+    /// [`EntityResult::Edge`] row was collected; a stream of bare [`EntityResult::EdgeId`]
+    /// rows populates only [`edges`](EdgeQueryResult::edges).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Any row fails to be read from the iterator
+    /// - A timestamp cannot be converted to a valid `VersionId` (exceeds `MAX_VALID_ID`)
+    ///
+    /// # Performance
+    ///
+    /// Like `collect_structured`, this collects **all** rows into memory (two passes). For
+    /// result sets exceeding 100K rows, prefer streaming the iterator directly.
+    pub fn collect_structured_edges(mut self) -> Result<EdgeQueryResult> {
+        // First pass: collect all rows.
+        let (lower, _) = self.iterator.size_hint();
+        let mut rows = Vec::with_capacity(lower);
+        while let Some(row) = self.iterator.next() {
+            rows.push(row?);
+        }
+
+        // Determine which fields we have (single pass). `has_any_full_edges` gates the
+        // endpoint/label/property vectors: they only make sense once a full `Edge` (not a
+        // bare `EdgeId`) has been seen.
+        let (mut has_any_full_edges, mut has_any_scores, mut has_any_versions) =
+            (false, false, false);
+        let mut edge_count = 0usize;
+        for row in &rows {
+            has_any_scores = has_any_scores || row.score.is_some();
+            has_any_versions = has_any_versions || row.timestamp.is_some();
+            match row.entity {
+                EntityResult::Edge(_) => {
+                    has_any_full_edges = true;
+                    edge_count += 1;
+                }
+                EntityResult::EdgeId(_) => edge_count += 1,
+                _ => {}
+            }
+        }
+
+        // Second pass: extract data with padding, keeping every vector parallel to `edges`.
+        let mut edges = Vec::with_capacity(edge_count);
+        let mut sources = has_any_full_edges.then(|| Vec::with_capacity(edge_count));
+        let mut targets = has_any_full_edges.then(|| Vec::with_capacity(edge_count));
+        let mut labels = has_any_full_edges.then(|| Vec::with_capacity(edge_count));
+        let mut properties = has_any_full_edges.then(|| Vec::with_capacity(edge_count));
+        let mut scores = has_any_scores.then(|| Vec::with_capacity(edge_count));
+        let mut versions = has_any_versions.then(|| Vec::with_capacity(edge_count));
+
+        for row in rows {
+            let QueryRow {
+                entity,
+                score,
+                path: _,
+                timestamp,
+                columns: _,
+                bindings: _,
+            } = row;
+
+            // Only edge-bearing rows contribute; node/null rows are dropped (edge-only,
+            // symmetric to `collect_structured`'s edge drop). We must keep the score/version
+            // pushes inside these arms so every parallel vector stays aligned to `edges`.
+            match entity {
+                EntityResult::Edge(e) => {
+                    edges.push(e.id);
+                    if let Some(ref mut s) = sources {
+                        s.push(e.source);
+                    }
+                    if let Some(ref mut t) = targets {
+                        t.push(e.target);
+                    }
+                    if let Some(ref mut l) = labels {
+                        l.push(e.label);
+                    }
+                    if let Some(ref mut p) = properties {
+                        p.push(e.properties);
+                    }
+                }
+                EntityResult::EdgeId(id) => {
+                    edges.push(id);
+                    // Pad the intrinsic-edge vectors: a bare `EdgeId` carries no endpoints,
+                    // label, or properties (mirrors how a bare `NodeId` pads empty properties
+                    // in `collect_structured`). The edge-scan path never produces bare
+                    // `EdgeId` rows, so this only guards a hypothetical mixed stream.
+                    if let Some(ref mut s) = sources {
+                        s.push(NodeId::new_unchecked(0));
+                    }
+                    if let Some(ref mut t) = targets {
+                        t.push(NodeId::new_unchecked(0));
+                    }
+                    if let Some(ref mut l) = labels {
+                        l.push(InternedString::from_raw(0));
+                    }
+                    if let Some(ref mut p) = properties {
+                        p.push(PropertyMap::default());
+                    }
+                }
+                // Nodes / null bindings are not edges: drop them, and do not advance any
+                // parallel vector so alignment with `edges` is preserved.
+                _ => continue,
+            }
+
+            // Extract or pad scores (parallel to `edges`).
+            if let Some(ref mut s) = scores {
+                s.push(score.unwrap_or(0.0));
+            }
+
+            // Extract or pad versions (parallel to `edges`), reusing the node path's
+            // timestamp→VersionId conversion and MAX_VALID_ID validation.
+            if let Some(ref mut v) = versions {
+                if let Some(timestamp) = timestamp {
+                    let wallclock = timestamp.wallclock();
+                    let ts_u64 = if wallclock < 0 {
+                        0_u64
+                    } else {
+                        wallclock as u64
+                    };
+                    let version_id = VersionId::new(ts_u64).map_err(|e| {
+                        crate::core::error::Error::Query(
+                            crate::core::error::QueryError::InvalidParameter {
+                                parameter: "timestamp".to_string(),
+                                reason: format!(
+                                    "Timestamp {} exceeds MAX_VALID_ID: {}",
+                                    timestamp, e
+                                ),
+                            },
+                        )
+                    })?;
+                    v.push(version_id);
+                } else {
+                    // SAFETY: VersionId(0) is always valid as 0 < MAX_VALID_ID.
+                    v.push(VersionId::new(0).expect("VersionId(0) should always be valid"));
+                }
+            }
+        }
+
+        Ok(EdgeQueryResult {
+            edges,
+            sources,
+            targets,
+            labels,
+            properties,
+            scores,
+            versions,
+        })
+    }
+}
+
+/// Aggregated edge query results in a structured format.
+///
+/// The edge-shaped counterpart to [`QueryResult`] (Issue #3626), produced by
+/// [`QueryResults::collect_structured_edges`]. Where `QueryResult` holds node ids plus
+/// parallel node metadata, `EdgeQueryResult` holds edge ids plus the data intrinsic to an
+/// edge — source/target endpoints and the interned label — alongside properties, scores,
+/// and versions.
+///
+/// # Alignment & Padding
+///
+/// Every `Option<Vec<_>>` field, when `Some`, is parallel to [`edges`](Self::edges) (same
+/// length, same order). The endpoint/label/property vectors are `Some` iff at least one
+/// full [`EntityResult::Edge`] row was collected; a stream of bare [`EntityResult::EdgeId`]
+/// rows leaves them `None`. In the (practically unreachable) mixed case, `EdgeId` rows pad
+/// endpoints with `NodeId(0)`, label with `InternedString(0)`, and empty properties —
+/// mirroring how [`QueryResult`] pads a bare `NodeId`'s properties.
+#[derive(Debug, Clone)]
+pub struct EdgeQueryResult {
+    /// Edge IDs from the query results, one per edge row, in stream order.
+    pub edges: Vec<EdgeId>,
+    /// Source node of each edge (parallel to `edges`). `Some` iff at least one full edge
+    /// was collected.
+    pub sources: Option<Vec<NodeId>>,
+    /// Target node of each edge (parallel to `edges`). `Some` iff at least one full edge
+    /// was collected.
+    pub targets: Option<Vec<NodeId>>,
+    /// Interned edge type/label of each edge (parallel to `edges`). `Some` iff at least one
+    /// full edge was collected.
+    pub labels: Option<Vec<InternedString>>,
+    /// Properties of each edge (parallel to `edges`). `Some` iff at least one full edge was
+    /// collected.
+    pub properties: Option<Vec<PropertyMap>>,
+    /// Similarity scores for ranked edge results (parallel to `edges`).
+    pub scores: Option<Vec<f32>>,
+    /// Version IDs for temporal edge results (parallel to `edges`).
+    pub versions: Option<Vec<VersionId>>,
+}
+
+impl EdgeQueryResult {
+    /// Create a new empty edge query result.
+    #[must_use]
+    pub fn new() -> Self {
+        EdgeQueryResult {
+            edges: Vec::new(),
+            sources: None,
+            targets: None,
+            labels: None,
+            properties: None,
+            scores: None,
+            versions: None,
+        }
+    }
+
+    /// Get the number of edge results.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Check if the result is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    /// Get edges zipped with their `(source, target)` endpoints, when endpoints are
+    /// available (i.e. full edges were collected).
+    #[must_use]
+    pub fn edges_with_endpoints(&self) -> Option<Vec<(EdgeId, NodeId, NodeId)>> {
+        match (&self.sources, &self.targets) {
+            (Some(sources), Some(targets)) => Some(
+                self.edges
+                    .iter()
+                    .zip(sources.iter())
+                    .zip(targets.iter())
+                    .map(|((edge, source), target)| (*edge, *source, *target))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+}
+
+impl Default for EdgeQueryResult {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1599,6 +1868,246 @@ mod tests {
         assert!(structured.scores.is_none());
         assert!(structured.paths.is_none());
         assert!(structured.versions.is_none());
+    }
+
+    // -- Edge structured projection (Issue #3626) --------------------------------------
+
+    /// Build an edge with explicit id / endpoints / label / one property so tests can
+    /// assert each field round-trips independently.
+    fn edge_with(id: u64, source: u64, target: u64, label: &str, since: i64) -> Edge {
+        Edge::new(
+            EdgeId::new(id).unwrap(),
+            GLOBAL_INTERNER.intern(label).unwrap(),
+            NodeId::new(source).unwrap(),
+            NodeId::new(target).unwrap(),
+            PropertyMapBuilder::new().insert("since", since).build(),
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_collect_structured_edges_basic() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 2020))),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(11, 2, 3, "LIKES", 2021))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        assert_eq!(structured.len(), 2);
+        assert!(!structured.is_empty());
+
+        assert_eq!(structured.edges[0], EdgeId::new(10).unwrap());
+        assert_eq!(structured.edges[1], EdgeId::new(11).unwrap());
+
+        let sources = structured
+            .sources
+            .as_ref()
+            .expect("full edges carry sources");
+        let targets = structured
+            .targets
+            .as_ref()
+            .expect("full edges carry targets");
+        assert_eq!(sources[0], NodeId::new(1).unwrap());
+        assert_eq!(targets[0], NodeId::new(2).unwrap());
+        assert_eq!(sources[1], NodeId::new(2).unwrap());
+        assert_eq!(targets[1], NodeId::new(3).unwrap());
+
+        let labels = structured.labels.as_ref().expect("full edges carry labels");
+        assert_eq!(labels[0], GLOBAL_INTERNER.intern("KNOWS").unwrap());
+        assert_eq!(labels[1], GLOBAL_INTERNER.intern("LIKES").unwrap());
+
+        let props = structured
+            .properties
+            .as_ref()
+            .expect("full edges carry properties");
+        assert_eq!(props[0].get("since"), Some(&PropertyValue::Int(2020)));
+        assert_eq!(props[1].get("since"), Some(&PropertyValue::Int(2021)));
+
+        // No scores / versions on these rows.
+        assert!(structured.scores.is_none());
+        assert!(structured.versions.is_none());
+    }
+
+    #[test]
+    fn test_collect_structured_edges_preserves_order() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Edge(edge_with(30, 1, 2, "KNOWS", 1))),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 3, 4, "KNOWS", 2))),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(20, 5, 6, "KNOWS", 3))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        let ids: Vec<u64> = structured.edges.iter().map(|e| e.as_u64()).collect();
+        assert_eq!(
+            ids,
+            vec![30, 10, 20],
+            "edges preserve stream order, not sorted"
+        );
+    }
+
+    #[test]
+    fn test_collect_structured_edges_with_scores() {
+        let rows = vec![
+            QueryRow::with_score(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)), 0.9),
+            QueryRow::with_score(EntityResult::Edge(edge_with(11, 2, 3, "KNOWS", 2)), 0.8),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        let scores = structured.scores.expect("scores present");
+        assert_eq!(scores, vec![0.9, 0.8]);
+    }
+
+    #[test]
+    fn test_collect_structured_edges_with_timestamps() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)))
+                .at_time(100.into()),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(11, 2, 3, "KNOWS", 2)))
+                .at_time(200.into()),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        let versions = structured.versions.expect("versions present");
+        assert_eq!(versions[0], VersionId::new(100).unwrap());
+        assert_eq!(versions[1], VersionId::new(200).unwrap());
+    }
+
+    #[test]
+    fn test_collect_structured_edges_drops_nodes() {
+        // A mixed stream: only the edge rows survive; node rows are dropped and do NOT
+        // advance any parallel vector (edge-only, symmetric to collect_structured's edge drop).
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::with_score(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 7)), 0.5),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(9).unwrap())),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        assert_eq!(structured.len(), 1, "only the single edge row survives");
+        assert_eq!(structured.edges[0], EdgeId::new(10).unwrap());
+        // Parallel vectors stayed aligned to the surviving edge only.
+        assert_eq!(structured.sources.as_ref().unwrap().len(), 1);
+        assert_eq!(structured.scores.as_ref().unwrap(), &vec![0.5]);
+    }
+
+    #[test]
+    fn test_collect_structured_edges_empty() {
+        let rows: Vec<QueryRow> = vec![];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        assert!(structured.is_empty());
+        assert_eq!(structured.len(), 0);
+        assert!(structured.sources.is_none());
+        assert!(structured.targets.is_none());
+        assert!(structured.labels.is_none());
+        assert!(structured.properties.is_none());
+        assert!(structured.scores.is_none());
+        assert!(structured.versions.is_none());
+        assert!(structured.edges_with_endpoints().is_none());
+    }
+
+    #[test]
+    fn test_collect_structured_edges_id_only_stream() {
+        // A stream of bare EdgeId rows populates only `edges`; the intrinsic-edge vectors
+        // stay None because no full Edge was seen.
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::EdgeId(EdgeId::new(10).unwrap())),
+            QueryRow::from_entity(EntityResult::EdgeId(EdgeId::new(11).unwrap())),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        assert_eq!(structured.len(), 2);
+        assert_eq!(structured.edges[0], EdgeId::new(10).unwrap());
+        assert!(structured.sources.is_none());
+        assert!(structured.targets.is_none());
+        assert!(structured.labels.is_none());
+        assert!(structured.properties.is_none());
+        assert!(structured.edges_with_endpoints().is_none());
+    }
+
+    #[test]
+    fn test_collect_structured_edges_mixed_full_and_id_pads() {
+        // Mixed full-edge + bare-id: parallel vectors exist (a full edge was seen) and the
+        // bare-id row is padded so every vector stays aligned to `edges`.
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 5))),
+            QueryRow::from_entity(EntityResult::EdgeId(EdgeId::new(11).unwrap())),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        assert_eq!(structured.len(), 2);
+        let sources = structured.sources.as_ref().unwrap();
+        let targets = structured.targets.as_ref().unwrap();
+        let props = structured.properties.as_ref().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(props.len(), 2);
+        // Full edge keeps real data.
+        assert_eq!(sources[0], NodeId::new(1).unwrap());
+        assert_eq!(props[0].get("since"), Some(&PropertyValue::Int(5)));
+        // Bare-id row is padded (endpoints NodeId(0), empty properties).
+        assert_eq!(sources[1], NodeId::new(0).unwrap());
+        assert_eq!(targets[1], NodeId::new(0).unwrap());
+        assert!(props[1].get("since").is_none());
+    }
+
+    #[test]
+    fn test_collect_structured_edges_edges_with_endpoints() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1))),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(11, 3, 4, "KNOWS", 2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        let triples = structured
+            .edges_with_endpoints()
+            .expect("endpoints available");
+        assert_eq!(
+            triples,
+            vec![
+                (
+                    EdgeId::new(10).unwrap(),
+                    NodeId::new(1).unwrap(),
+                    NodeId::new(2).unwrap()
+                ),
+                (
+                    EdgeId::new(11).unwrap(),
+                    NodeId::new(3).unwrap(),
+                    NodeId::new(4).unwrap()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_edges_returns_full_edges_and_drops_nodes() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1))),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(11, 2, 3, "KNOWS", 2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let edges = results.collect_edges().unwrap();
+        assert_eq!(edges.len(), 2, "node row dropped, both edges kept");
+        assert_eq!(edges[0].id, EdgeId::new(10).unwrap());
+        assert_eq!(edges[1].source, NodeId::new(2).unwrap());
+    }
+
+    #[test]
+    fn test_edge_query_result_default_is_empty() {
+        let r = EdgeQueryResult::default();
+        assert!(r.is_empty());
+        assert_eq!(r.len(), 0);
     }
 
     #[test]
