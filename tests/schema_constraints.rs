@@ -788,3 +788,86 @@ fn mixed_per_key_nullability() {
     )
     .unwrap();
 }
+
+// --- 20. every DeclaredType matcher accepts its type and rejects a mismatch --
+
+/// Exercises the `Boolean`, `Float`, `Temporal`, and `Bytes` arms of
+/// `DeclaredType::matches` / `type_name` end-to-end through the write path (the
+/// other tests only cover `String`/`Integer`/`Vector`). The accept path drives
+/// each matcher's `true` branch; the reject path drives its `false` branch and
+/// stamps the declared type's `type_name` into the `TypeViolation`.
+#[test]
+#[serial]
+fn each_declared_type_accepts_match_and_rejects_mismatch() {
+    let db = AletheiaDB::new().unwrap();
+    db.schema_constraint(EntityKind::Node, "Typed")
+        .typed("flag", DeclaredType::Boolean)
+        .typed("ratio", DeclaredType::Float)
+        .typed("ts", DeclaredType::Temporal) // stored as micros-since-epoch int
+        .typed("blob", DeclaredType::Bytes)
+        .enable()
+        .unwrap();
+
+    // Conforming values of each declared type are accepted.
+    db.create_node(
+        "Typed",
+        PropertyMapBuilder::new()
+            .insert("flag", true)
+            .insert("ratio", 1.5f64)
+            .insert("ts", 1_700_000_000i64)
+            .insert("blob", &[1u8, 2, 3][..])
+            .build(),
+    )
+    .unwrap();
+
+    // Each wrong-typed value is rejected with a TypeViolation.
+    for (key, bad) in [
+        ("flag", PropertyValue::Int(1)),
+        ("ratio", PropertyValue::String("x".into())),
+        ("ts", PropertyValue::String("2024".into())),
+        ("blob", PropertyValue::String("x".into())),
+    ] {
+        let err = db
+            .create_node("Typed", PropertyMapBuilder::new().insert(key, bad).build())
+            .unwrap_err();
+        assert!(
+            is_type_violation(&err),
+            "key {key} should type-violate, got {err:?}"
+        );
+    }
+}
+
+// --- 21. builder-wide .nullable(false) default rejects explicit Null ---------
+
+/// Covers the builder-wide [`SchemaConstraintBuilder::nullable`] default (the
+/// per-key `typed_nullable` override is covered by test 19). With the default
+/// flipped to non-nullable, an explicit `Null` on an *optional* key violates,
+/// while omitting the key entirely still passes.
+#[test]
+#[serial]
+fn builder_wide_nullable_false_rejects_explicit_null() {
+    let db = AletheiaDB::new().unwrap();
+    db.schema_constraint(EntityKind::Node, "Strict")
+        .typed("email", DeclaredType::String)
+        .nullable(false) // builder-wide: optional keys may not hold explicit Null
+        .enable()
+        .unwrap();
+
+    // Explicit Null on the optional key is rejected (missing/null category).
+    let err = db
+        .create_node(
+            "Strict",
+            PropertyMapBuilder::new()
+                .insert("email", PropertyValue::Null)
+                .build(),
+        )
+        .unwrap_err();
+    assert!(
+        is_missing_key(&err),
+        "explicit null should violate: {err:?}"
+    );
+
+    // Omitting the optional key entirely is fine (not required).
+    db.create_node("Strict", PropertyMapBuilder::new().build())
+        .unwrap();
+}
