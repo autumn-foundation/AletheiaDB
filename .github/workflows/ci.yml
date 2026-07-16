@@ -114,6 +114,19 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    # The instrumented llvm-cov build links many coverage-instrumented test
+    # binaries; each final link spawns an `ld` whose peak RSS is large (embedded
+    # coverage maps + debuginfo). At the runner's default build parallelism
+    # several `ld` processes are resident at once, and their combined peak has
+    # intermittently exhausted runner memory -> `ld` SIGBUS / core-dump (a
+    # distinct flake mode from the metrics counter race). Cap concurrent
+    # build/link jobs so at most two linkers are resident simultaneously, roughly
+    # halving the peak link-memory ceiling. This throttles the BUILD phase only
+    # (test execution and, crucially, the coverage thresholds/gating below are
+    # untouched); no `timeout-minutes` is set on this job, so the modest
+    # build-time increase is safe.
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
