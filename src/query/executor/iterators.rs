@@ -23,6 +23,7 @@ use crate::query::ir::{
     PredicateValue, ProvenanceField, ProvenancePredicate, ProvenanceProjection, ScoreThreshold,
     SortKey, TemporalWindowSpec, WindowAggArg, WindowAggFunc,
 };
+use crate::query::ir::{AlignNodeSource, TemporalAlignSpec};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use std::cell::RefCell;
@@ -3574,6 +3575,254 @@ fn property_values_equal(a: Option<&PropertyValue>, b: Option<&PropertyValue>) -
 }
 
 impl ResultIterator for TemporalWindowAggregateIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if !self.drained {
+            self.drained = true;
+            if let Err(e) = self.drain() {
+                return Some(Err(e));
+            }
+        }
+        self.output.next().map(Ok)
+    }
+}
+
+/// Temporal join / align iterator (Issue #3379).
+///
+/// On the first `next()` it drains the upstream matched-participant stream. For
+/// each matched row it extracts each participant's node id (and any gating edge
+/// id) per the spec, reconstructs each participant's believed valid-time
+/// timeline (and gating-edge presence intervals) as of the spec's
+/// transaction-time coordinate, and runs the storage-free
+/// [`crate::query::temporal_join`] alignment for the requested mode. Each
+/// resulting alignment coordinate becomes one computed-column [`QueryRow`]
+/// carrying the coordinate (RFC 3339) followed by the resolved `RETURN` items.
+pub struct TemporalJoinIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    spec: TemporalAlignSpec,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    output: std::vec::IntoIter<QueryRow>,
+    drained: bool,
+}
+
+impl TemporalJoinIterator {
+    /// Create a new temporal join iterator.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        spec: TemporalAlignSpec,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        TemporalJoinIterator {
+            input: Some(input),
+            spec,
+            historical,
+            output: Vec::new().into_iter(),
+            drained: false,
+        }
+    }
+
+    /// Extract the node id for a participant from a matched row, per its
+    /// configured [`AlignNodeSource`].
+    fn participant_node_id(row: &QueryRow, source: AlignNodeSource) -> Option<NodeId> {
+        match source {
+            AlignNodeSource::Entity => row.entity.node_id(),
+            AlignNodeSource::PathIndex(i) => match row.path.as_ref()?.get(i)? {
+                EntityId::Node(id) => Some(*id),
+                EntityId::Edge(_) => None,
+            },
+        }
+    }
+
+    /// Extract the gating edge id for a participant from a matched row.
+    fn gate_edge_id(row: &QueryRow, path_index: usize) -> Option<EdgeId> {
+        match row.path.as_ref()?.get(path_index)? {
+            EntityId::Edge(id) => Some(*id),
+            EntityId::Node(_) => None,
+        }
+    }
+
+    /// Reconstruct a node's believed valid-time timeline as of `as_of`: every
+    /// version recorded by `as_of` (`transaction_from <= as_of`) contributes a
+    /// change-point at its `valid_from`; same-`valid_from` corrections keep the
+    /// latest belief (mirrors the #3363 believed-version reconstruction).
+    fn node_timeline(
+        hist: &HistoricalStorage,
+        node_id: NodeId,
+        as_of: Timestamp,
+    ) -> crate::query::temporal_join::Timeline {
+        use crate::query::temporal_join::{ChangePoint, Timeline};
+        let mut by_vf: std::collections::HashMap<
+            i64,
+            (Timestamp, crate::core::property::PropertyMap),
+        > = std::collections::HashMap::new();
+        if let Ok(h) = hist.get_node_history(node_id) {
+            for ver in h.versions {
+                let tx_from = ver.temporal.transaction_time().start();
+                if tx_from > as_of {
+                    continue;
+                }
+                let vf = ver.temporal.valid_time().start().wallclock();
+                match by_vf.get(&vf) {
+                    Some((existing_tx, _)) if *existing_tx >= tx_from => {}
+                    _ => {
+                        by_vf.insert(vf, (tx_from, ver.properties));
+                    }
+                }
+            }
+        }
+        let changes = by_vf
+            .into_iter()
+            .map(|(valid_from, (_, properties))| ChangePoint {
+                valid_from,
+                properties,
+            })
+            .collect();
+        Timeline::from_changes(changes)
+    }
+
+    /// Reconstruct an edge's believed presence intervals as of `as_of`: each
+    /// believed version contributes its half-open valid interval
+    /// `[valid_from, valid_to)` (an open interval ends at `i64::MAX`).
+    fn edge_presence(
+        hist: &HistoricalStorage,
+        edge_id: EdgeId,
+        as_of: Timestamp,
+    ) -> crate::query::temporal_join::PresenceIntervals {
+        use crate::query::temporal_join::PresenceIntervals;
+        let mut by_vf: std::collections::HashMap<i64, (Timestamp, i64)> =
+            std::collections::HashMap::new();
+        if let Ok(h) = hist.get_edge_history(edge_id) {
+            for ver in h.versions {
+                let tx_from = ver.temporal.transaction_time().start();
+                if tx_from > as_of {
+                    continue;
+                }
+                let vf = ver.temporal.valid_time().start().wallclock();
+                let vt = ver.temporal.valid_time().end().wallclock();
+                match by_vf.get(&vf) {
+                    Some((existing_tx, _)) if *existing_tx >= tx_from => {}
+                    _ => {
+                        by_vf.insert(vf, (tx_from, vt));
+                    }
+                }
+            }
+        }
+        let intervals = by_vf.into_iter().map(|(vf, (_, vt))| (vf, vt)).collect();
+        PresenceIntervals { intervals }
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        use crate::query::temporal_join::{
+            self, AlignCoordinate, AlignMode, Participant, PresenceIntervals,
+        };
+
+        let mut input = match self.input.take() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+
+        let as_of = self.spec.as_of_system_time;
+        let from = self.spec.range_start_micros;
+        let to = self.spec.range_end_micros;
+        let mut rows: Vec<QueryRow> = Vec::new();
+
+        let hist = self.historical.read();
+        while let Some(row) = input.next() {
+            let row = row?;
+
+            // Resolve each participant's node id + gating edge for this row.
+            // A participant whose node id cannot be located in the row is
+            // skipped for the whole matched row (the pattern shape guarantees
+            // it, but we defend against a null/optional binding).
+            let mut node_ids: Vec<NodeId> = Vec::with_capacity(self.spec.participants.len());
+            let mut participants: Vec<Participant> =
+                Vec::with_capacity(self.spec.participants.len());
+            let mut incomplete = false;
+            for p in &self.spec.participants {
+                let Some(nid) = Self::participant_node_id(&row, p.node_source) else {
+                    incomplete = true;
+                    break;
+                };
+                node_ids.push(nid);
+                let timeline = Self::node_timeline(&hist, nid, as_of);
+                let gate: Option<PresenceIntervals> = p.edge_gate_path_index.and_then(|idx| {
+                    Self::gate_edge_id(&row, idx).map(|eid| Self::edge_presence(&hist, eid, as_of))
+                });
+                participants.push(Participant { timeline, gate });
+            }
+            if incomplete {
+                continue;
+            }
+
+            // Run the storage-free alignment for the requested mode.
+            let aligned = match self.spec.mode {
+                AlignMode::Events => {
+                    temporal_join::align_events(&participants, self.spec.driver_index, from, to)
+                }
+                AlignMode::Overlap => temporal_join::align_overlap(&participants, from, to),
+            }
+            .map_err(|e| {
+                crate::core::error::Error::Query(crate::core::error::QueryError::InvalidParameter {
+                    parameter: "temporal join".to_string(),
+                    reason: format!("{e:?}"),
+                })
+            })?;
+
+            // Materialize each aligned coordinate into a computed-column row.
+            for arow in aligned {
+                let mut columns: Vec<(String, PropertyValue)> = Vec::new();
+                match arow.coordinate {
+                    AlignCoordinate::Instant(t) => columns.push((
+                        "align_valid_time".to_string(),
+                        PropertyValue::String(Arc::from(
+                            crate::query::temporal_window::format_rfc3339(t).as_str(),
+                        )),
+                    )),
+                    AlignCoordinate::Interval { from: s, to: e } => {
+                        columns.push((
+                            "overlap_from".to_string(),
+                            PropertyValue::String(Arc::from(
+                                crate::query::temporal_window::format_rfc3339(s).as_str(),
+                            )),
+                        ));
+                        columns.push((
+                            "overlap_to".to_string(),
+                            PropertyValue::String(Arc::from(
+                                crate::query::temporal_window::format_rfc3339(e).as_str(),
+                            )),
+                        ));
+                    }
+                }
+
+                for item in &self.spec.output_items {
+                    let pidx = item.participant_index;
+                    let value = match arow.sample_index.get(pidx).copied().flatten() {
+                        None => PropertyValue::Null,
+                        Some(sample_idx) => match &item.key {
+                            None => {
+                                // `RETURN v` (no key) -> the participant's node id.
+                                PropertyValue::Int(node_ids[pidx].as_u64() as i64)
+                            }
+                            Some(key) => participants[pidx].timeline.changes[sample_idx]
+                                .properties
+                                .get(key.as_str())
+                                .cloned()
+                                .unwrap_or(PropertyValue::Null),
+                        },
+                    };
+                    columns.push((item.output_name.clone(), value));
+                }
+
+                rows.push(QueryRow::from_columns(columns));
+            }
+        }
+        drop(hist);
+
+        self.output = rows.into_iter();
+        Ok(())
+    }
+}
+
+impl ResultIterator for TemporalJoinIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         if !self.drained {
             self.drained = true;

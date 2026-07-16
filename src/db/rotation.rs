@@ -64,7 +64,6 @@ use crate::encryption::factory::Algorithm;
 use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::KeyDerivation;
 use crate::storage::index_persistence::common::{ENC_INDEX_KEY_VERSION_V1, IndexKeyring};
-use crate::storage::index_persistence::common::ENC_INDEX_KEY_VERSION_V1;
 use crate::storage::index_persistence::reencrypt::DecryptProbeReport;
 use crate::storage::index_persistence::{
     IndexKeyRotation, IndexPersistenceManager, RotationError, RotationProgress, RotationStatus,

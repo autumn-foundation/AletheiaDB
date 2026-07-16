@@ -26,6 +26,7 @@ AletheiaDB's query language (AQL - Aletheia Query Language) extends the Cypher g
 query           = [ temporal_clause ]
                   ( match_clause | vector_clause )
                   ( window_clause
+                  | align_clause
                   | ( { where_clause }
                       [ return_clause ]
                       [ order_clause ]
@@ -53,6 +54,19 @@ window_unit     = "MINUTE" | "MINUTES" | "HOUR" | "HOURS" | "DAY" | "DAYS"
 window_agg      = window_func "(" window_arg ")" [ "AS" identifier ] ;
 window_func     = "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "CHANGES" ;
 window_arg      = "*" | identifier [ "." identifier ] ;
+
+(* Temporal Join / Align Clause - Issue #3379 *)
+(* A self-contained terminal clause: it carries its own RETURN and may not be
+   combined with WHERE/ORDER/SKIP/LIMIT. It aligns the matched participants at
+   matching valid-time coordinates over an explicit [from, to) range, in either
+   event-aligned (ASOF) or interval-overlap mode. See
+   docs/guides/temporal-joins.md. *)
+align_clause    = "ALIGN" align_mode
+                  "OVER" "VALID_TIME" "FROM" timestamp "TO" timestamp
+                  [ "AS" "OF" "SYSTEM_TIME" timestamp ]
+                  "RETURN" align_item { "," align_item } ;
+align_mode      = "EVENTS" "DRIVER" identifier | "OVERLAP" ;
+align_item      = identifier [ "." identifier ] [ "AS" identifier ] ;
 
 (* Match Clause - Graph Pattern Matching *)
 match_clause    = "MATCH" pattern { "," pattern } ;
@@ -400,6 +414,8 @@ RETURN n
 | `AS OF T1, T2` | `QueryOp::AsOf { valid_time: T1, transaction_time: T2 }` |
 | `BETWEEN T1 AND T2` | `QueryOp::Between { time_range: ... }` |
 | `WINDOW N unit OVER VALID_TIME FROM T1 TO T2 ... RETURN aggs` | `QueryOp::TemporalWindowAggregate(TemporalWindowSpec { ... })` |
+| `ALIGN EVENTS DRIVER v OVER VALID_TIME FROM T1 TO T2 ... RETURN items` | `QueryOp::TemporalAlign(TemporalAlignSpec { ... })` |
+| `ALIGN OVERLAP OVER VALID_TIME FROM T1 TO T2 ... RETURN items` | `QueryOp::TemporalAlign(TemporalAlignSpec { ... })` |
 | `WHERE pred` | `QueryOp::Filter(Predicate)` |
 | `LIMIT N` | `QueryOp::Limit(N)` |
 | `SKIP N` | `QueryOp::Skip(N)` |

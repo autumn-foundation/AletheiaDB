@@ -470,6 +470,7 @@ impl CostModel {
             | PhysicalOp::Count { input }
             | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalWindowAggregate { input, .. }
+            | PhysicalOp::TemporalAlign { input, .. }
             | PhysicalOp::Materialize { input }
             | PhysicalOp::TemporalTrack { input, .. } => self.estimate(input, stats),
 
@@ -594,6 +595,13 @@ impl CostModel {
                 )
                 .map(|w| w.len().max(1))
                 .unwrap_or(1)
+            }
+            PhysicalOp::TemporalAlign { input, .. } => {
+                // Alignment fans each matched participant pairing out into one
+                // row per driver event / overlap sub-interval; the exact count
+                // is data-dependent (needs history), so use the input
+                // cardinality as a cheap storage-free proxy.
+                self.estimate_cardinality(input, stats).max(1)
             }
             PhysicalOp::SimilarToNode { k, .. } => *k,
             PhysicalOp::OptionalApply { input, .. } => {

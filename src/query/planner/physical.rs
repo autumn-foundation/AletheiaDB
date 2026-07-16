@@ -361,6 +361,7 @@ impl PhysicalPlan {
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalWindowAggregate { input, .. }
+            | PhysicalOp::TemporalAlign { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::IndexedTraversal { input, .. }
@@ -733,6 +734,16 @@ pub enum PhysicalOp {
         spec: crate::query::ir::TemporalWindowSpec,
     },
 
+    /// Temporal join / align (Issue #3379). Consumes the upstream matched
+    /// participant stream and emits one computed-column row per alignment
+    /// coordinate. Maps 1:1 to the executor's `TemporalJoinIterator`.
+    TemporalAlign {
+        /// Input operator providing the matched participants.
+        input: Box<PhysicalOp>,
+        /// The resolved temporal-align specification.
+        spec: crate::query::ir::TemporalAlignSpec,
+    },
+
     /// Materialize results into memory
     Materialize {
         /// Input operator
@@ -817,6 +828,7 @@ impl PhysicalOp {
             PhysicalOp::Count { .. } => "Count",
             PhysicalOp::Aggregate { .. } => "Aggregate",
             PhysicalOp::TemporalWindowAggregate { .. } => "TemporalWindowAggregate",
+            PhysicalOp::TemporalAlign { .. } => "TemporalAlign",
             PhysicalOp::TemporalTrack { .. } => "TemporalTrack",
             PhysicalOp::Materialize { .. } => "Materialize",
             PhysicalOp::OptionalApply { .. } => "OptionalApply",
@@ -870,6 +882,7 @@ impl PhysicalOp {
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalWindowAggregate { input, .. }
+            | PhysicalOp::TemporalAlign { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::OptionalApply { input, .. } => 1 + input.depth(),
@@ -1080,6 +1093,7 @@ impl PhysicalOp {
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalWindowAggregate { input, .. }
+            | PhysicalOp::TemporalAlign { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::OptionalApply { input, .. } => Some(input),

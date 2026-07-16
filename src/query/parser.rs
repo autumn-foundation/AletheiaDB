@@ -213,6 +213,23 @@ impl Parser {
             return Ok(query);
         }
 
+        // Parse an optional temporal join / align clause (Issue #3379). Like
+        // WINDOW it is self-contained (carries its own `RETURN`), so no further
+        // read clauses are parsed and the query must end after it.
+        if self.check_kw("ALIGN") {
+            let align = self.parse_align_clause()?;
+            query = query.with_align(align);
+            if !self.is_at_end() {
+                return Err(self.error(
+                    "Unexpected tokens after ALIGN ... RETURN (WHERE/ORDER/SKIP/LIMIT \
+                     are not supported with a temporal join)"
+                        .to_string(),
+                    Some("end of query".to_string()),
+                ));
+            }
+            return Ok(query);
+        }
+
         // Parse optional RANK BY SIMILARITY clause
         if let Some(rank) = self.parse_rank_clause()? {
             query = query.with_rank(rank);
@@ -428,6 +445,106 @@ impl Parser {
         };
 
         Ok(WindowReturnItem { func, arg, alias })
+    }
+
+    // =========================================================
+    // Temporal Join / Align Clause (Issue #3379)
+    // =========================================================
+
+    /// Parse a temporal join / align clause.
+    ///
+    /// # Grammar
+    /// ```text
+    /// align_clause ::= "ALIGN" mode
+    ///                  "OVER" "VALID_TIME" "FROM" timestamp "TO" timestamp
+    ///                  ("AS" "OF" "SYSTEM_TIME" timestamp)?
+    ///                  "RETURN" align_item ("," align_item)*
+    /// mode         ::= "EVENTS" "DRIVER" identifier
+    ///                | "OVERLAP"
+    /// align_item   ::= identifier ("." identifier)? ("AS" identifier)?
+    /// ```
+    fn parse_align_clause(&mut self) -> Result<AlignClause, ParseError> {
+        self.expect_kw("ALIGN")?;
+
+        // mode: EVENTS DRIVER <var> | OVERLAP
+        let (mode, driver) = if self.check_kw("EVENTS") {
+            self.advance();
+            self.expect_kw("DRIVER")?;
+            let var = self.parse_identifier().map_err(|_| {
+                self.error(
+                    "Expected the driving-entity variable after DRIVER".to_string(),
+                    Some("variable".to_string()),
+                )
+            })?;
+            (AlignMode::Events, Some(var))
+        } else if self.check_kw("OVERLAP") {
+            self.advance();
+            (AlignMode::Overlap, None)
+        } else {
+            return Err(self.error(
+                "Expected an alignment mode (EVENTS DRIVER <var> | OVERLAP) after ALIGN"
+                    .to_string(),
+                Some("EVENTS or OVERLAP".to_string()),
+            ));
+        };
+
+        // OVER VALID_TIME FROM <ts> TO <ts>
+        self.expect_kw("OVER")?;
+        self.expect_kw("VALID_TIME")?;
+        self.expect_kw("FROM")?;
+        let range_start = self.parse_timestamp()?;
+        self.expect(&Token::To)?;
+        let range_end = self.parse_timestamp()?;
+
+        // Optional AS OF SYSTEM_TIME <ts>
+        let as_of_system_time = if self.check(&Token::As) {
+            self.advance(); // AS
+            self.expect(&Token::Of)?;
+            self.expect_kw("SYSTEM_TIME")?;
+            Some(self.parse_timestamp()?)
+        } else {
+            None
+        };
+
+        // RETURN <item> [, <item>]*
+        self.expect(&Token::Return)?;
+        let mut items = vec![self.parse_align_item()?];
+        while self.check(&Token::Comma) {
+            self.advance();
+            items.push(self.parse_align_item()?);
+        }
+
+        Ok(AlignClause {
+            mode,
+            driver,
+            range_start,
+            range_end,
+            as_of_system_time,
+            items,
+        })
+    }
+
+    /// Parse one `var[.key] [AS alias]` align return item.
+    fn parse_align_item(&mut self) -> Result<AlignReturnItem, ParseError> {
+        let var = self.parse_identifier().map_err(|_| {
+            self.error(
+                "Expected a bound variable in the ALIGN RETURN list".to_string(),
+                Some("variable".to_string()),
+            )
+        })?;
+        let key = if self.check(&Token::Dot) {
+            self.advance();
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
+        let alias = if self.check(&Token::As) {
+            self.advance();
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
+        Ok(AlignReturnItem { var, key, alias })
     }
 
     fn parse_timestamp(&mut self) -> Result<TimestampLiteral, ParseError> {
@@ -2601,5 +2718,71 @@ mod sentry_tests {
 
         // Element 1 is the relationship
         assert_eq!(patterns[0].elements[1], expected_rel);
+    }
+
+    // =====================================================
+    // Temporal Join / Align Clause Tests (Issue #3379)
+    // =====================================================
+
+    #[test]
+    fn test_parse_align_events_mode() {
+        let query = Parser::parse(
+            "MATCH (o:Purchase)-[:PLACED_BY]->(c:Customer) \
+             ALIGN EVENTS DRIVER o \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2025-01-01T00:00:00Z' \
+             AS OF SYSTEM_TIME '2024-06-01T00:00:00Z' \
+             RETURN o.total, c.tier AS tier",
+        )
+        .expect("parses");
+        let align = query.align.expect("has align clause");
+        assert_eq!(align.mode, AlignMode::Events);
+        assert_eq!(align.driver.as_deref(), Some("o"));
+        assert!(align.as_of_system_time.is_some());
+        assert_eq!(align.items.len(), 2);
+        assert_eq!(align.items[0].var, "o");
+        assert_eq!(align.items[0].key.as_deref(), Some("total"));
+        assert_eq!(align.items[1].var, "c");
+        assert_eq!(align.items[1].alias.as_deref(), Some("tier"));
+        // A terminal clause: no separate RETURN clause is parsed.
+        assert!(query.return_clause.is_none());
+    }
+
+    #[test]
+    fn test_parse_align_overlap_mode_no_driver() {
+        let query = Parser::parse(
+            "MATCH (p:Product) ALIGN OVERLAP \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-06-01T00:00:00Z' \
+             RETURN p.price",
+        )
+        .expect("parses");
+        let align = query.align.expect("has align clause");
+        assert_eq!(align.mode, AlignMode::Overlap);
+        assert!(align.driver.is_none());
+        assert!(align.as_of_system_time.is_none());
+        assert_eq!(align.items.len(), 1);
+        assert_eq!(align.items[0].var, "p");
+        assert_eq!(align.items[0].key.as_deref(), Some("price"));
+    }
+
+    #[test]
+    fn test_parse_align_rejects_trailing_clause_and_bad_mode() {
+        // No trailing read clauses after ALIGN ... RETURN.
+        assert!(
+            Parser::parse(
+                "MATCH (p:Product) ALIGN OVERLAP \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-06-01T00:00:00Z' \
+             RETURN p.price LIMIT 5",
+            )
+            .is_err()
+        );
+        // Unknown mode word.
+        assert!(
+            Parser::parse(
+                "MATCH (p:Product) ALIGN SIDEWAYS \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-06-01T00:00:00Z' \
+             RETURN p.price",
+            )
+            .is_err()
+        );
     }
 }

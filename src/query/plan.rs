@@ -314,6 +314,12 @@ pub enum UnaryOp {
     /// aggregate rows.
     TemporalWindowAggregate(super::ir::TemporalWindowSpec),
 
+    /// Temporal join / align (Issue #3379). Mirrors
+    /// [`super::ir::QueryOp::TemporalAlign`]: aligns the upstream matched
+    /// participants at matching valid-time coordinates and emits per-coordinate
+    /// computed-column rows.
+    TemporalAlign(super::ir::TemporalAlignSpec),
+
     /// Left-outer application of an optional sub-pattern (`OPTIONAL MATCH`).
     ///
     /// For each input row, the `steps` sub-pipeline runs seeded from that row;
