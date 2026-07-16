@@ -1185,7 +1185,10 @@ fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> R
 /// of the parent directory. Guarantees the breadcrumb is on stable storage
 /// before the caller proceeds (Issue #488 P0.2). Leaves no temp file behind on
 /// success.
-fn write_durable(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+///
+/// `pub(crate)` so the encryption-state authority (Issue #3616) can flip its
+/// durable file with the exact same crash-safe ordering as the rotation ledger.
+pub(crate) fn write_durable(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let parent = path.parent().ok_or_else(|| {
         StorageError::io_error("rotation.state path has no parent directory".to_string())

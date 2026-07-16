@@ -353,6 +353,9 @@ impl AletheiaDB {
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_unified_config(config: AletheiaDBConfig) -> Result<Self> {
         let result = (|| {
+            // Rebound mutable so the durable encryption-state authority
+            // (Issue #3616) can override `config.encryption` below.
+            let mut config = config;
             let durability_mode = config.wal.durability_mode;
 
             // Capture provenance-chain settings before `config.wal.wal_dir` is
@@ -365,6 +368,65 @@ impl AletheiaDB {
                 .parent()
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+            // Issue #3616: the durable encryption-state authority
+            // (`{persistence.data_dir}/encryption.state`) is the AUTHORITY for
+            // the encryption on/off decision — it WINS over the TOML/env-derived
+            // `EncryptionConfig`. This is what lets an `encryption enable`
+            // migration flip a database to encrypted-at-rest so the NEXT open()
+            // uses the cipher even though the operator's plaintext config is
+            // unchanged. Precedence & fail-closed contract (see
+            // `db::encryption_state`):
+            //   * absent           -> no override; today's TOML/env behavior.
+            //   * enabled + source -> force encryption ON under that key source.
+            //   * disabled         -> force encryption OFF.
+            //   * corrupt / enabled-without-source -> read returns Err -> open
+            //     aborts loudly (fail-closed; NEVER a silent plaintext fallback).
+            // On DIVERGENCE a LOUD warning naming BOTH sources is logged so an
+            // operator is never silently overridden.
+            if config.persistence.enabled
+                && let Some(authority) = crate::db::encryption_state::read_encryption_state(
+                    &config.persistence.data_dir,
+                )?
+            {
+                if authority.enabled != config.encryption.enabled {
+                    crate::db::encryption_state::log_authority_warning(&format!(
+                        "encryption-state authority at {} records enabled={}, OVERRIDING the \
+                         loaded config (encryption.enabled={}). The durable authority wins; \
+                         opening with enabled={}.",
+                        crate::db::encryption_state::encryption_state_path(
+                            &config.persistence.data_dir
+                        )
+                        .display(),
+                        authority.enabled,
+                        config.encryption.enabled,
+                        authority.enabled,
+                    ));
+                }
+                if authority.enabled {
+                    // The reader guarantees an enabled authority carries a key
+                    // source. Compose that key SOURCE with the config's
+                    // algorithm/audit; a missing/unreadable key then fails
+                    // `EncryptionManager::from_config` below, so open() refuses
+                    // rather than falling back to plaintext (fail-closed).
+                    let key_source =
+                        authority
+                            .key_source
+                            .ok_or_else(|| -> crate::core::error::Error {
+                                crate::core::error::StorageError::InconsistentState {
+                                    reason:
+                                        "encryption-state authority is enabled but resolved no \
+                                         key source"
+                                            .to_string(),
+                                }
+                                .into()
+                            })?;
+                    config.encryption.enabled = true;
+                    config.encryption.key_provider = key_source;
+                } else {
+                    config.encryption.enabled = false;
+                }
+            }
 
             // Create encryption manager if encryption is enabled
             let encryption_manager = if config.encryption.enabled {

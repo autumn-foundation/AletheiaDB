@@ -32,6 +32,8 @@ pub mod changefeed_sub;
 pub mod config;
 /// Uniqueness constraint builder.
 pub mod constraint_builder;
+/// Durable encryption-state authority — `{data_dir}/encryption.state` (Issue #3616).
+pub(crate) mod encryption_state;
 /// Queryable bi-temporal extent of the dataset (Issue #3238).
 pub mod extent;
 /// GraphView implementation.
