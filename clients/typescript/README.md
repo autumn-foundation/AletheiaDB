@@ -6,7 +6,7 @@ The official **TypeScript SDK** for [AletheiaDB](https://github.com/madmax983/Al
 - **ESM + CJS** dual build with full type declarations.
 - **0 `any`** in the published type surface (lint-enforced).
 
-> **Status:** this is the first cut wrapping the **merged** autumn-server HTTP routes (node/edge/traverse/temporal + admin/health). Vector/hybrid/query/schema/stats/batch/lineage endpoints are typed **stubs** that throw `NotImplementedError` until their REST routes land. See [Coverage](#coverage) and [`COMPATIBILITY.md`](./COMPATIBILITY.md).
+> **Status:** wraps the full autumn-server HTTP surface — node/edge/traverse/temporal + admin/health **and** the vector/hybrid/query/schema/stats/batch/lineage tools (all 46 tools, Issue #3627). See [Coverage](#coverage) and [`COMPATIBILITY.md`](./COMPATIBILITY.md).
 
 ## Install
 
@@ -147,14 +147,18 @@ if (page1.has_more) {
 
 ## Coverage
 
-**Wrapped (34 merged routes):**
+**Wrapped:**
 
 - **Nodes:** `getNode`, `listNodes`, `countNodes`, `createNode`, `updateNode`, `deleteNode`, `deleteNodeCascade`, `retractNode`, `findNodesAtTime`
 - **Edges:** `getEdge`, `listEdges`, `countEdges`, `getOutgoingEdges`, `getIncomingEdges`, `createEdge`, `updateEdge`, `deleteEdge`, `retractEdge`
 - **Traversal / temporal:** `traverse`, `getNodeHistory`, `getEdgeHistory`, `getNodeAtTime`, `getEdgeAtTime`, `getNodeAtValidTime`, `getNodeAtTransactionTime`, `getEdgeAtValidTime`, `getEdgeAtTransactionTime`, `diffNodeVersions`, `diffEdgeVersions`, `listChanges`
+- **Vector:** `findSimilar`, `enableVectorIndex`, `listVectorIndexes`
+- **Hybrid / query:** `hybridQuery`, `query`
+- **Schema / stats / extent:** `getSchema`, `databaseStats`, `temporalExtent`
+- **Batch / lineage:** `applyBatch`, `lineageUpstream`, `lineageDownstream`
 - **Admin / health:** `status`, `createKey`, `listKeys`, `revokeKey`
 
-**Stubbed** (throw `NotImplementedError` — REST routes not merged yet; tracked in the #3369 follow-up, PR5–PR8): `findSimilar`, `hybridQuery`, `query`, `enableVectorIndex`, `listVectorIndexes`, `getSchema`, `databaseStats`, `temporalExtent`, `applyBatch`, `lineageUpstream`, `lineageDownstream`.
+All 46 tools are now live on the autumn HTTP surface (Issue #3627). `NotImplementedError` is retained as an exported type for backward compatibility but is no longer thrown by any client method.
 
 ## Development
 
