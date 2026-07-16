@@ -455,15 +455,25 @@ impl QueryExecutor {
                 )),
 
                 PhysicalOp::Filter { input, predicate } => {
+                    // Real edge-property WHERE (Issue #3622): when the filter's
+                    // input stream is rooted at an `EdgeScan` (the SQL `FROM
+                    // edges` lane), the stream is pure edges, so property leaves
+                    // are evaluated against each edge's own properties instead of
+                    // the AQL/Cypher single-entity pass-through. AQL/Cypher never
+                    // emit `EdgeScan`, so this stays `false` there.
+                    let edge_mode = subtree_yields_edges(input);
                     let input_iter = self.build_op(input, profile, child_depth)?;
                     // Pass historical storage so a `Predicate::Provenance` leaf
                     // (Issue #3354a) can resolve each row entity's write-time
                     // provenance; property-only filters never touch it.
-                    Box::new(iterators::FilterIterator::with_historical(
-                        input_iter,
-                        predicate.clone(),
-                        Arc::clone(&self.historical),
-                    ))
+                    Box::new(
+                        iterators::FilterIterator::with_historical(
+                            input_iter,
+                            predicate.clone(),
+                            Arc::clone(&self.historical),
+                        )
+                        .evaluate_edge_properties(edge_mode),
+                    )
                 }
 
                 PhysicalOp::VectorRerank {
@@ -557,15 +567,24 @@ impl QueryExecutor {
                 }
 
                 PhysicalOp::Sort { input, keys } => {
+                    // Real edge-property ORDER BY (Issue #3622): a property sort
+                    // key over an `EdgeScan`-rooted (SQL `FROM edges`) stream
+                    // reads each edge's own properties instead of resolving to
+                    // null. AQL/Cypher never emit `EdgeScan`, so this is `false`
+                    // there and node-only sort-key extraction is unchanged.
+                    let edge_mode = subtree_yields_edges(input);
                     let input_iter = self.build_op(input, profile, child_depth)?;
                     // Pass historical storage so a `SortKey::Provenance` key
                     // (Issue #3354) can resolve each row entity's write-time
                     // provenance; property/score sorts never touch it.
-                    Box::new(iterators::SortIterator::with_historical(
-                        input_iter,
-                        keys.clone(),
-                        Arc::clone(&self.historical),
-                    ))
+                    Box::new(
+                        iterators::SortIterator::with_historical(
+                            input_iter,
+                            keys.clone(),
+                            Arc::clone(&self.historical),
+                        )
+                        .order_by_edge_properties(edge_mode),
+                    )
                 }
 
                 PhysicalOp::ProjectProvenance { input, projection } => {
@@ -714,6 +733,33 @@ impl QueryExecutor {
             results,
             Arc::clone(&self.current),
         )))
+    }
+}
+
+/// Returns `true` when the row stream produced by `op` is composed of edge rows,
+/// i.e. the subtree is rooted at an [`PhysicalOp::EdgeScan`] reached through only
+/// row-preserving unary operators (Issue #3622).
+///
+/// Used to decide whether a `Filter`/`Sort` above the subtree should evaluate
+/// property predicates / sort keys against the edge's own properties. `EdgeScan`
+/// is emitted **only** by the SQL `FROM edges` lane (AQL/Cypher traverse edges
+/// via `TraversalIterator`, which yields target *nodes*), so this is a
+/// zero-false-positive proxy for "pure edge stream where every bare property key
+/// unambiguously refers to the edge". The walked unary ops preserve edge rows
+/// unchanged (`ProjectIterator` rewrites only node rows). Any other operator --
+/// including binary set ops, aggregation, and node/temporal scans -- is treated
+/// as not edge-typed, so the conservative default is the existing pass-through /
+/// node-only behavior.
+fn subtree_yields_edges(op: &PhysicalOp) -> bool {
+    match op {
+        PhysicalOp::EdgeScan { .. } => true,
+        PhysicalOp::Filter { input, .. }
+        | PhysicalOp::Sort { input, .. }
+        | PhysicalOp::Limit { input, .. }
+        | PhysicalOp::Project { input, .. }
+        | PhysicalOp::Distinct { input, .. }
+        | PhysicalOp::VectorRerank { input, .. } => subtree_yields_edges(input),
+        _ => false,
     }
 }
 
@@ -1097,6 +1143,194 @@ mod tests {
         let rows: Vec<_> = results.collect_all().expect("Collection failed");
 
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_subtree_yields_edges_detects_edge_rooted_streams() {
+        use crate::query::ir::{Predicate, SortKey};
+        // Bare EdgeScan is an edge stream.
+        let edge_scan = PhysicalOp::EdgeScan {
+            edge_type: None,
+            estimated_rows: 0,
+        };
+        assert!(subtree_yields_edges(&edge_scan));
+
+        // Filter/Sort/Limit over an EdgeScan preserve the edge typing.
+        let filtered = PhysicalOp::Filter {
+            input: Box::new(PhysicalOp::EdgeScan {
+                edge_type: None,
+                estimated_rows: 0,
+            }),
+            predicate: Predicate::True,
+        };
+        let sorted_over_filter = PhysicalOp::Sort {
+            input: Box::new(filtered),
+            keys: vec![(SortKey::Property("since".to_string()), true)],
+        };
+        assert!(subtree_yields_edges(&sorted_over_filter));
+
+        // A NodeScan-rooted stream (the AQL/Cypher shape) is NOT edge-typed.
+        let node_scan = PhysicalOp::NodeScan {
+            label: None,
+            estimated_rows: 0,
+        };
+        assert!(!subtree_yields_edges(&node_scan));
+        let filter_over_nodes = PhysicalOp::Filter {
+            input: Box::new(PhysicalOp::NodeScan {
+                label: None,
+                estimated_rows: 0,
+            }),
+            predicate: Predicate::True,
+        };
+        assert!(!subtree_yields_edges(&filter_over_nodes));
+    }
+
+    /// Planner-invariant guard (Issue #3622 review fix): every `Filter`/`Sort`
+    /// node in the physical plan for a SQL `FROM edges WHERE ... ORDER BY ...`
+    /// query must root an `EdgeScan` stream (through only row-preserving unary
+    /// ops), so `edge_mode` engages and edge properties are actually evaluated.
+    ///
+    /// If a future optimization inserts a non-whitelisted physical op between a
+    /// `Filter`/`Sort` and its rooting `EdgeScan`, `subtree_yields_edges` would
+    /// return `false`, `edge_mode` would silently turn off, and the lane would
+    /// return ALL edges (pass-through) instead of the filtered/sorted set. This
+    /// test fails LOUDLY in CI rather than letting that regress silently.
+    #[cfg(feature = "sql")]
+    #[test]
+    fn sql_edge_plan_filter_sort_subtrees_stay_edge_typed() {
+        use crate::query::planner::{QueryPlanner, Statistics};
+        use crate::sql::parse_sql;
+
+        // Walk the plan, asserting Filter/Sort subtrees are edge-typed and
+        // counting them so the assertion is not vacuous.
+        fn walk(op: &PhysicalOp, filters: &mut usize, sorts: &mut usize) {
+            match op {
+                PhysicalOp::Filter { input, .. } => {
+                    *filters += 1;
+                    assert!(
+                        subtree_yields_edges(input),
+                        "Filter over SQL `FROM edges` must root an edge stream; \
+                         a non-whitelisted op broke the invariant: {input:?}"
+                    );
+                }
+                PhysicalOp::Sort { input, .. } => {
+                    *sorts += 1;
+                    assert!(
+                        subtree_yields_edges(input),
+                        "Sort over SQL `FROM edges` must root an edge stream; \
+                         a non-whitelisted op broke the invariant: {input:?}"
+                    );
+                }
+                _ => {}
+            }
+            match op {
+                PhysicalOp::Filter { input, .. }
+                | PhysicalOp::Sort { input, .. }
+                | PhysicalOp::Limit { input, .. }
+                | PhysicalOp::Project { input, .. }
+                | PhysicalOp::Distinct { input, .. }
+                | PhysicalOp::VectorRerank { input, .. } => walk(input, filters, sorts),
+                _ => {}
+            }
+        }
+
+        let query = parse_sql("SELECT * FROM edges WHERE since > 2020 ORDER BY since DESC LIMIT 5")
+            .expect("parse edge SQL");
+        let planner = QueryPlanner::new(
+            Arc::new(Statistics::default()),
+            Arc::new(CurrentStorage::new()),
+        );
+        let plan = planner.plan(query).expect("plan edge SQL");
+
+        let (mut filters, mut sorts) = (0usize, 0usize);
+        walk(&plan.root, &mut filters, &mut sorts);
+        assert!(
+            filters >= 1 && sorts >= 1,
+            "the edge WHERE+ORDER BY plan must contain a Filter and a Sort \
+             (found {filters} filters, {sorts} sorts) -- otherwise the guard is vacuous"
+        );
+    }
+
+    /// AQL/Cypher edge-touching regression (Issue #3622 review fix): an AQL
+    /// traversal over `KNOWS` edges (a) returns the correct target nodes AND
+    /// (b) never lowers to `QueryOp::ScanEdges` -- the ONLY logical op that
+    /// becomes the physical `EdgeScan` that `subtree_yields_edges` keys
+    /// `edge_mode` on. So `edge_mode` can never engage for AQL/Cypher and
+    /// behavior is identical to trunk. This is the executable end-to-end
+    /// counterpart to the synthetic `subtree_yields_edges` unit assertion.
+    #[test]
+    fn aql_edge_traversal_never_enters_edge_mode() {
+        use crate::core::property::PropertyValue;
+        use crate::query::ir::QueryOp;
+        use crate::query::parse_query;
+
+        let db = crate::AletheiaDB::new().expect("create db");
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .expect("alice");
+        let bob = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .expect("bob");
+        let carol = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+            )
+            .expect("carol");
+        db.create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020).build(),
+        )
+        .expect("edge alice->bob");
+        db.create_edge(
+            bob,
+            carol,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2021).build(),
+        )
+        .expect("edge bob->carol");
+
+        let query =
+            parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b").expect("parse AQL");
+        // (b) No `ScanEdges` => the physical plan has no `EdgeScan` => `edge_mode`
+        // stays off. If AQL/Cypher ever started sharing the SQL edge scan, this
+        // fails loudly before any silent semantic drift.
+        assert!(
+            !query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. })),
+            "AQL traversal must not emit ScanEdges (would wrongly enable edge_mode)"
+        );
+
+        // (a) Correct target nodes end-to-end (Alice->Bob, Bob->Carol).
+        let rows = db
+            .execute_query(query)
+            .expect("execute AQL")
+            .collect_all()
+            .expect("collect rows");
+        let mut names: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.entity.as_node())
+            .filter_map(|n| match n.get_property("name") {
+                Some(PropertyValue::String(s)) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Bob".to_string(), "Carol".to_string()],
+            "AQL KNOWS traversal must return the correct target nodes (trunk behavior)"
+        );
     }
 
     #[test]

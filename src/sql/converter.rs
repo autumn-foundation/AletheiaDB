@@ -133,32 +133,14 @@ impl SqlConverter {
         // Convert FROM clause
         self.convert_from(&select.from, &mut ops)?;
 
-        // Detect an edge scan (`FROM edges`). Edge property WHERE/ORDER BY are
-        // rejected below because they would otherwise be silent no-ops (the
-        // shared FilterIterator passes non-provenance property leaves through on
-        // edge rows, and the Sort iterator extracts sort keys from nodes only).
-        // SQL's WHERE lowering can only emit property predicates -- never a
-        // `Predicate::Provenance` -- so an edge WHERE is always silently ignored
-        // rather than filtered; likewise an edge property ORDER BY never sorts.
-        // Rather than return silently-wrong results we reject them explicitly.
-        // Real edge-property filtering/sorting is a tracked follow-up that
-        // requires shared-iterator work (which would change AQL/Cypher
-        // semantics), so it is deliberately confined out of the SQL lane here.
-        let scans_edges = ops.iter().any(|op| matches!(op, QueryOp::ScanEdges { .. }));
-
-        // Convert WHERE clause
+        // Convert WHERE clause. Edge-property `WHERE` over a `FROM edges` scan is
+        // evaluated for real (Issue #3622): the executor detects an
+        // `EdgeScan`-rooted stream and runs the shared `FilterIterator` in
+        // edge-property mode, matching each property leaf against the edge's own
+        // properties. (SQL only ever sources edges via a bare `FROM edges`, a
+        // pure edge stream, so every bare property leaf unambiguously refers to
+        // the edge.)
         if let Some(ref selection) = select.selection {
-            if scans_edges {
-                return Err(SqlError::UnsupportedFeature(
-                    "filtering `FROM edges` by a property is not yet supported. \
-                     An edge-property WHERE clause would be silently ignored \
-                     (every edge would be returned), so it is rejected rather \
-                     than producing a wrong result. Query `FROM nodes` with a \
-                     WHERE clause, or drop the WHERE and filter edges in the \
-                     caller. Real edge-property filtering is a tracked follow-up."
-                        .to_string(),
-                ));
-            }
             let predicate = self.convert_expr_to_predicate(selection)?;
             ops.push(QueryOp::Filter(predicate));
         }
@@ -166,9 +148,11 @@ impl SqlConverter {
         // Convert SELECT projection
         self.convert_projection(&select.projection, &mut ops)?;
 
-        // Convert ORDER BY
+        // Convert ORDER BY. A property-key `ORDER BY` over `FROM edges` is
+        // likewise evaluated for real (Issue #3622): the `SortIterator` reads the
+        // edge's own properties when its input is `EdgeScan`-rooted.
         for order_by in &query.order_by {
-            self.convert_order_by(order_by, scans_edges, &mut ops)?;
+            self.convert_order_by(order_by, &mut ops)?;
         }
 
         // Convert OFFSET (must come before LIMIT for correct SQL semantics:
@@ -288,14 +272,13 @@ impl SqlConverter {
 
     /// Convert ORDER BY clause.
     ///
-    /// `scans_edges` is `true` when the query sources rows from `FROM edges`.
-    /// In that case a property-key `ORDER BY` is rejected: the Sort iterator
-    /// extracts sort keys from nodes only, so sorting edge rows by a property
-    /// would silently no-op. `ORDER BY score`/`timestamp` are unaffected.
+    /// A property-key `ORDER BY` over a `FROM edges` scan is honored: the
+    /// executor runs the `SortIterator` in edge-property mode for an
+    /// `EdgeScan`-rooted stream, so edge rows are sorted by their own properties
+    /// (Issue #3622). `ORDER BY score`/`timestamp` are unaffected.
     fn convert_order_by(
         &self,
         order_by: &OrderByExpr,
-        scans_edges: bool,
         ops: &mut Vec<QueryOp>,
     ) -> Result<(), SqlError> {
         let key = match &order_by.expr {
@@ -320,17 +303,6 @@ impl SqlConverter {
                 ));
             }
         };
-
-        if scans_edges && matches!(key, SortKey::Property(_)) {
-            return Err(SqlError::UnsupportedFeature(
-                "ordering `FROM edges` by a property is not yet supported. \
-                 Sorting edge rows by a property key would be silently ignored \
-                 (edges would be returned in scan order), so it is rejected \
-                 rather than producing an unsorted result. Real edge-property \
-                 sorting is a tracked follow-up."
-                    .to_string(),
-            ));
-        }
 
         let descending = order_by.asc.map(|asc| !asc).unwrap_or(false);
 

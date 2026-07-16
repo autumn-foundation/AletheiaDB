@@ -574,15 +574,15 @@ mod order_by {
 // `Vec<NodeId>`) and silently drop edge rows -- edges are surfaced structurally
 // by their own `collect_structured_edges()` counterpart instead.
 //
-// A `WHERE` predicate over *edge property* leaves cannot yet filter edge rows
-// (the FilterIterator's single-entity AQL edge pipeline passes non-provenance
-// property leaves through -- Issue #3354a), and an `ORDER BY` over an edge
-// property cannot yet sort them (the Sort iterator reads keys from nodes only).
-// Rather than silently ignore them, the SQL converter rejects an edge-property
-// `WHERE`/`ORDER BY` with a structured "not yet supported" error; see
-// `select_edges_where_property_is_rejected` /
-// `select_edges_order_by_property_is_rejected`. The supported edge form is
-// `SELECT * FROM edges [LIMIT n]`.
+// A `WHERE` predicate over *edge property* leaves now filters edge rows for real
+// (Issue #3622): the executor detects an `EdgeScan`-rooted stream and runs the
+// shared `FilterIterator` in edge-property mode, matching each property leaf
+// against the edge's own properties. Symmetrically, an `ORDER BY` over an edge
+// property sorts edge rows by that property (the `SortIterator` reads the edge's
+// own properties for an `EdgeScan`-rooted stream). See
+// `select_edges_where_property_filters` / `select_edges_order_by_property_sorts`.
+// Supported edge forms: `SELECT * FROM edges [WHERE <edge-prop pred>]
+// [ORDER BY <edge-prop|score|timestamp>] [LIMIT n]`.
 mod select_edges {
     use super::*;
     use aletheiadb::PropertyValue;
@@ -707,36 +707,129 @@ mod select_edges {
     }
 
     #[test]
-    fn select_edges_where_property_is_rejected() {
-        // A WHERE predicate over an *edge property* would be silently ignored:
-        // the shared FilterIterator sits above the EdgeScan but its
-        // single-entity AQL edge pipeline passes non-provenance property leaves
-        // through on edge rows (covered by `edge_non_provenance_leaf_is_pass_through`
-        // in `src/query/executor/iterators.rs`), and SQL's WHERE lowering can
-        // only ever emit property predicates. So every SQL edge-WHERE would
-        // return ALL edges unfiltered -- a silent wrong result. The SQL lane
-        // therefore rejects it at conversion time rather than executing.
-        let err = parse_sql("SELECT * FROM edges WHERE since = 2021")
-            .expect_err("edge-property WHERE must be rejected, not silently ignored");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("filtering `FROM edges`") && msg.contains("not yet supported"),
-            "error must explain edge-property filtering is unsupported, got: {msg}"
+    fn select_edges_where_property_filters() {
+        // Issue #3622: a WHERE over an edge property now filters edge rows for
+        // real. `setup_graph_db` has two KNOWS edges (`since` = 2020 and 2021);
+        // `WHERE since = 2021` returns exactly the Bob->Carol edge.
+        let db = setup_graph_db();
+        let query = parse_sql("SELECT * FROM edges WHERE since = 2021").expect("Failed to parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        assert_eq!(rows.len(), 1, "only the since=2021 edge matches");
+        let edge = rows[0].entity.as_edge().expect("row should be an Edge");
+        assert_eq!(
+            edge.get_property("since"),
+            Some(&PropertyValue::Int(2021)),
+            "the surviving edge must be the since=2021 one"
         );
     }
 
     #[test]
-    fn select_edges_order_by_property_is_rejected() {
-        // Symmetric to the WHERE rejection: ordering edge rows by a property key
-        // would silently no-op (the Sort iterator extracts sort keys from nodes
-        // only), so the SQL lane rejects it at conversion time.
-        let err = parse_sql("SELECT * FROM edges ORDER BY since ASC")
-            .expect_err("edge-property ORDER BY must be rejected, not silently ignored");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ordering `FROM edges`") && msg.contains("not yet supported"),
-            "error must explain edge-property ordering is unsupported, got: {msg}"
+    fn select_edges_where_property_range_filters() {
+        // A range predicate over an edge property: `since > 2020` keeps only the
+        // 2021 edge, proving comparison predicates (not just equality) evaluate.
+        let db = setup_graph_db();
+        let query = parse_sql("SELECT * FROM edges WHERE since > 2020").expect("Failed to parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        assert_eq!(rows.len(), 1, "only since=2021 is > 2020");
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().get_property("since"),
+            Some(&PropertyValue::Int(2021))
         );
+    }
+
+    #[test]
+    fn select_edges_where_absent_property_excludes_all() {
+        // A WHERE on a property no edge carries excludes every edge (equality on
+        // a missing property is false), rather than silently returning all edges.
+        let db = setup_graph_db();
+        let query =
+            parse_sql("SELECT * FROM edges WHERE nonexistent = 1").expect("Failed to parse");
+        let count = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .count_all()
+            .expect("Failed to count results");
+        assert_eq!(count, 0, "no edge has the property, so none match");
+    }
+
+    #[test]
+    fn select_edges_order_by_property_sorts() {
+        // Issue #3622: ORDER BY over an edge property sorts edge rows for real.
+        // `ORDER BY since DESC` yields [2021, 2020].
+        let db = setup_graph_db();
+        let query = parse_sql("SELECT * FROM edges ORDER BY since DESC").expect("Failed to parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+sort should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        let sinces: Vec<i64> = rows
+            .iter()
+            .map(
+                |r| match r.entity.as_edge().unwrap().get_property("since") {
+                    Some(PropertyValue::Int(v)) => *v,
+                    other => panic!("expected int `since`, got {other:?}"),
+                },
+            )
+            .collect();
+        assert_eq!(sinces, vec![2021, 2020], "edges sorted by since DESC");
+    }
+
+    #[test]
+    fn select_edges_order_by_property_asc_with_limit() {
+        // Ascending order + LIMIT: the smallest `since` (2020) comes first, and
+        // LIMIT 1 keeps exactly it -- proving Sort runs before Limit over edges.
+        let db = setup_graph_db();
+        let query =
+            parse_sql("SELECT * FROM edges ORDER BY since ASC LIMIT 1").expect("Failed to parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+sort+limit should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        assert_eq!(rows.len(), 1, "LIMIT 1 keeps a single row");
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().get_property("since"),
+            Some(&PropertyValue::Int(2020)),
+            "ascending order surfaces the smallest `since` first"
+        );
+    }
+
+    #[test]
+    fn select_edges_where_and_order_by_compose() {
+        // WHERE and ORDER BY compose over an edge stream: filter to since >= 2020
+        // (both edges) then order DESC -> [2021, 2020].
+        let db = setup_graph_db();
+        let query = parse_sql("SELECT * FROM edges WHERE since >= 2020 ORDER BY since DESC")
+            .expect("Failed to parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter+sort should execute")
+            .collect_all()
+            .expect("Failed to collect results");
+
+        let sinces: Vec<i64> = rows
+            .iter()
+            .map(
+                |r| match r.entity.as_edge().unwrap().get_property("since") {
+                    Some(PropertyValue::Int(v)) => *v,
+                    other => panic!("expected int `since`, got {other:?}"),
+                },
+            )
+            .collect();
+        assert_eq!(sinces, vec![2021, 2020], "filtered then sorted DESC");
     }
 
     #[test]
@@ -798,6 +891,171 @@ mod select_edges {
         assert_eq!(rows.len(), 2);
     }
 
+    // -------------------------------------------------------------------------
+    // Reserved STRUCTURAL fields: type / source / target (Issue #3622 review
+    // fix). These live on the Edge STRUCT, not in `properties`, so before the
+    // fix `WHERE type = 'KNOWS'`, `WHERE source = <id>`, and `ORDER BY type`
+    // silently returned zero rows / no-op sorts. These runtime tests assert the
+    // now-correct end-to-end behavior.
+    // -------------------------------------------------------------------------
+
+    /// A fixture with two DISTINCT edge types between distinct endpoints so that
+    /// `type`, `source`, and `target` each partition the two-edge set uniquely.
+    /// Returns the database and the three node ids (a, b, c). Edges: a-KNOWS->b,
+    /// b-FOLLOWS->c.
+    fn setup_typed_edges_db() -> (AletheiaDB, u64, u64, u64) {
+        let db = AletheiaDB::new().expect("Failed to create database");
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .expect("create A");
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .expect("create B");
+        let c = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "C").build(),
+            )
+            .expect("create C");
+        db.create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+            .expect("create KNOWS edge");
+        db.create_edge(b, c, "FOLLOWS", PropertyMapBuilder::new().build())
+            .expect("create FOLLOWS edge");
+        (db, a.as_u64(), b.as_u64(), c.as_u64())
+    }
+
+    #[test]
+    fn select_edges_where_type_filters_by_label() {
+        // `WHERE type = 'KNOWS'` resolves the edge's LABEL (a struct field), not
+        // a `type` property (which no edge carries). Before the review fix this
+        // silently returned 0 rows; now it returns exactly the KNOWS edge.
+        let (db, _a, _b, _c) = setup_typed_edges_db();
+        let query = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'").expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 1, "only the KNOWS edge matches type = 'KNOWS'");
+        assert!(
+            rows[0].entity.as_edge().unwrap().has_label_str("KNOWS"),
+            "the surviving edge must be the KNOWS edge"
+        );
+    }
+
+    #[test]
+    fn select_edges_where_source_filters_by_endpoint() {
+        // `WHERE source = <id>` resolves the source NodeId struct field.
+        let (db, a, _b, _c) = setup_typed_edges_db();
+        let query = parse_sql(&format!("SELECT * FROM edges WHERE source = {a}")).expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 1, "only the edge out of node A matches");
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().source.as_u64(),
+            a,
+            "surviving edge must originate at node A"
+        );
+    }
+
+    #[test]
+    fn select_edges_where_target_filters_by_endpoint() {
+        // `WHERE target = <id>` resolves the target NodeId struct field.
+        let (db, _a, _b, c) = setup_typed_edges_db();
+        let query = parse_sql(&format!("SELECT * FROM edges WHERE target = {c}")).expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 1, "only the edge into node C matches");
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().target.as_u64(),
+            c,
+            "surviving edge must point at node C"
+        );
+    }
+
+    #[test]
+    fn select_edges_order_by_type_sorts_by_label() {
+        // `ORDER BY type ASC` sorts by the edge label lexicographically:
+        // FOLLOWS before KNOWS. Before the fix this was a no-op (null key).
+        let (db, _a, _b, _c) = setup_typed_edges_db();
+        let query = parse_sql("SELECT * FROM edges ORDER BY type ASC").expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+sort should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0].entity.as_edge().unwrap().has_label_str("FOLLOWS"),
+            "FOLLOWS sorts before KNOWS ascending"
+        );
+        assert!(
+            rows[1].entity.as_edge().unwrap().has_label_str("KNOWS"),
+            "KNOWS sorts after FOLLOWS ascending"
+        );
+    }
+
+    #[test]
+    fn select_edges_order_by_source_sorts_by_endpoint_id() {
+        // `ORDER BY source ASC` sorts by the source NodeId. Node A was created
+        // before B, so A's id < B's id; the A-rooted (KNOWS) edge comes first.
+        let (db, a, b, _c) = setup_typed_edges_db();
+        assert!(a < b, "node A created first must have the smaller id");
+        let query = parse_sql("SELECT * FROM edges ORDER BY source ASC").expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+sort should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().source.as_u64(),
+            a,
+            "the edge out of the lower-id node A sorts first"
+        );
+        assert_eq!(
+            rows[1].entity.as_edge().unwrap().source.as_u64(),
+            b,
+            "the edge out of node B sorts second"
+        );
+    }
+
+    #[test]
+    fn select_edges_order_by_target_sorts_by_endpoint_id() {
+        // `ORDER BY target DESC` sorts by the target NodeId descending: the edge
+        // into node C (highest id) comes first.
+        let (db, _a, b, c) = setup_typed_edges_db();
+        let query = parse_sql("SELECT * FROM edges ORDER BY target DESC").expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+sort should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().target.as_u64(),
+            c,
+            "highest target id (C) sorts first descending"
+        );
+        assert_eq!(
+            rows[1].entity.as_edge().unwrap().target.as_u64(),
+            b,
+            "node B target sorts second descending"
+        );
+    }
+  
     #[test]
     fn select_edges_collect_structured_edges() {
         // Issue #3626: the edge-shaped structured projection. `SELECT * FROM edges`

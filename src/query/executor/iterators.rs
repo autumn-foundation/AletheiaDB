@@ -14,7 +14,7 @@ use tracing;
 use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::property::PropertyValue;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::core::{EdgeId, NodeId, Timestamp};
@@ -1786,6 +1786,14 @@ pub struct FilterIterator {
     /// Cached: does the predicate tree contain any provenance leaf? Computed
     /// once so `next()` avoids resolving provenance for property-only filters.
     needs_provenance: bool,
+    /// When `true`, property leaves are evaluated against an EDGE row's own
+    /// properties (real edge-property `WHERE`, Issue #3622) instead of the
+    /// single-entity pass-through. Set only by the executor when the filter's
+    /// input subtree is rooted at an `EdgeScan` (the SQL `FROM edges` lane),
+    /// where every bare property leaf unambiguously refers to the edge. Defaults
+    /// to `false`, preserving the AQL/Cypher pass-through semantics pinned by
+    /// `edge_non_provenance_leaf_is_pass_through`.
+    edge_mode: bool,
 }
 
 impl FilterIterator {
@@ -1803,6 +1811,7 @@ impl FilterIterator {
             predicate,
             historical: None,
             needs_provenance,
+            edge_mode: false,
         }
     }
 
@@ -1820,7 +1829,22 @@ impl FilterIterator {
             predicate,
             historical: Some(historical),
             needs_provenance,
+            edge_mode: false,
         }
+    }
+
+    /// Enable real edge-property evaluation (Issue #3622): when the row is an
+    /// edge, property leaves are matched against the edge's own properties
+    /// instead of the AQL/Cypher single-entity pass-through.
+    ///
+    /// The executor sets this only for a filter whose input stream is rooted at
+    /// an `EdgeScan` (the SQL `FROM edges` lane), where the stream is pure edges
+    /// and every bare property leaf unambiguously refers to the edge. Node and
+    /// null row handling are unchanged.
+    #[must_use]
+    pub fn evaluate_edge_properties(mut self, enabled: bool) -> Self {
+        self.edge_mode = enabled;
+        self
     }
 
     /// Returns `true` if the predicate tree contains any provenance leaf.
@@ -1908,18 +1932,24 @@ impl FilterIterator {
         match predicate {
             Predicate::True => true,
             Predicate::False => false,
-            Predicate::Eq { key, value } => self.evaluate_eq(node, key, value),
-            Predicate::Ne { key, value } => self.evaluate_ne(node, key, value),
-            Predicate::Gt { key, value } => self.evaluate_gt(node, key, value),
-            Predicate::Lt { key, value } => self.evaluate_lt(node, key, value),
-            Predicate::Gte { key, value } => self.evaluate_gte(node, key, value),
-            Predicate::Lte { key, value } => self.evaluate_lte(node, key, value),
+            Predicate::Eq { key, value } => self.evaluate_eq(&node.properties, key, value),
+            Predicate::Ne { key, value } => self.evaluate_ne(&node.properties, key, value),
+            Predicate::Gt { key, value } => self.evaluate_gt(&node.properties, key, value),
+            Predicate::Lt { key, value } => self.evaluate_lt(&node.properties, key, value),
+            Predicate::Gte { key, value } => self.evaluate_gte(&node.properties, key, value),
+            Predicate::Lte { key, value } => self.evaluate_lte(&node.properties, key, value),
             Predicate::Exists(key) => node.properties.get(key).is_some(),
             Predicate::NotExists(key) => node.properties.get(key).is_none(),
-            Predicate::Contains { key, substring } => self.evaluate_contains(node, key, substring),
-            Predicate::StartsWith { key, prefix } => self.evaluate_starts_with(node, key, prefix),
-            Predicate::EndsWith { key, suffix } => self.evaluate_ends_with(node, key, suffix),
-            Predicate::In { key, values } => self.evaluate_in(node, key, values),
+            Predicate::Contains { key, substring } => {
+                self.evaluate_contains(&node.properties, key, substring)
+            }
+            Predicate::StartsWith { key, prefix } => {
+                self.evaluate_starts_with(&node.properties, key, prefix)
+            }
+            Predicate::EndsWith { key, suffix } => {
+                self.evaluate_ends_with(&node.properties, key, suffix)
+            }
+            Predicate::In { key, values } => self.evaluate_in(&node.properties, key, values),
             // Resolve provenance lazily so a cheaper conjunct that already
             // rejected the row short-circuits before any historical read.
             Predicate::Provenance(p) => {
@@ -1968,74 +1998,228 @@ impl FilterIterator {
         }
     }
 
-    fn evaluate_eq(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_eq(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_eq(prop, value)
     }
 
-    fn evaluate_ne(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_ne(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return true; // Non-existent != anything
         };
         !self.compare_eq(prop, value)
     }
 
-    fn evaluate_gt(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_gt(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_gt(prop, value)
     }
 
-    fn evaluate_lt(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_lt(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_lt(prop, value)
     }
 
-    fn evaluate_gte(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_gte(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_gte(prop, value)
     }
 
-    fn evaluate_lte(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_lte(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_lte(prop, value)
     }
 
-    fn evaluate_contains(&self, node: &Node, key: &str, substring: &str) -> bool {
-        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+    fn evaluate_contains(&self, props: &PropertyMap, key: &str, substring: &str) -> bool {
+        let Some(PropertyValue::String(s)) = props.get(key) else {
             return false;
         };
         s.contains(substring)
     }
 
-    fn evaluate_starts_with(&self, node: &Node, key: &str, prefix: &str) -> bool {
-        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+    fn evaluate_starts_with(&self, props: &PropertyMap, key: &str, prefix: &str) -> bool {
+        let Some(PropertyValue::String(s)) = props.get(key) else {
             return false;
         };
         s.starts_with(prefix)
     }
 
-    fn evaluate_ends_with(&self, node: &Node, key: &str, suffix: &str) -> bool {
-        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+    fn evaluate_ends_with(&self, props: &PropertyMap, key: &str, suffix: &str) -> bool {
+        let Some(PropertyValue::String(s)) = props.get(key) else {
             return false;
         };
         s.ends_with(suffix)
     }
 
-    fn evaluate_in(&self, node: &Node, key: &str, values: &[PredicateValue]) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_in(&self, props: &PropertyMap, key: &str, values: &[PredicateValue]) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         values.iter().any(|v| self.compare_eq(prop, v))
+    }
+
+    /// Evaluate the property/structural leaves of a predicate against a bare
+    /// [`PropertyMap`], shared by the node and edge (Issue #3622) paths. Returns
+    /// `Some(bool)` for a property/structural leaf, `None` for a leaf that needs
+    /// entity context (provenance) or a logical combinator, which the caller
+    /// handles with the appropriate entity-aware resolver.
+    fn evaluate_property_leaf(&self, predicate: &Predicate, props: &PropertyMap) -> Option<bool> {
+        match predicate {
+            Predicate::True => Some(true),
+            Predicate::False => Some(false),
+            Predicate::Eq { key, value } => Some(self.evaluate_eq(props, key, value)),
+            Predicate::Ne { key, value } => Some(self.evaluate_ne(props, key, value)),
+            Predicate::Gt { key, value } => Some(self.evaluate_gt(props, key, value)),
+            Predicate::Lt { key, value } => Some(self.evaluate_lt(props, key, value)),
+            Predicate::Gte { key, value } => Some(self.evaluate_gte(props, key, value)),
+            Predicate::Lte { key, value } => Some(self.evaluate_lte(props, key, value)),
+            Predicate::Exists(key) => Some(props.get(key).is_some()),
+            Predicate::NotExists(key) => Some(props.get(key).is_none()),
+            Predicate::Contains { key, substring } => {
+                Some(self.evaluate_contains(props, key, substring))
+            }
+            Predicate::StartsWith { key, prefix } => {
+                Some(self.evaluate_starts_with(props, key, prefix))
+            }
+            Predicate::EndsWith { key, suffix } => {
+                Some(self.evaluate_ends_with(props, key, suffix))
+            }
+            Predicate::In { key, values } => Some(self.evaluate_in(props, key, values)),
+            // Provenance / logical combinators need entity context.
+            Predicate::Provenance(_) | Predicate::And(_) | Predicate::Or(_) | Predicate::Not(_) => {
+                None
+            }
+        }
+    }
+
+    /// Evaluate the full predicate tree against an EDGE row, matching reserved
+    /// structural fields against the edge struct (Issue #3622 review fix),
+    /// property leaves against the edge's own properties (Issue #3622), and
+    /// provenance leaves against the edge's provenance bundle. Used only in
+    /// `edge_mode` (the SQL `FROM edges` lane); the AQL/Cypher pass-through path
+    /// stays in [`evaluate_edge_predicate`](Self::evaluate_edge_predicate).
+    ///
+    /// Edge WHERE follows **openCypher / node semantics**, NOT SQL three-valued
+    /// (UNKNOWN) logic: an `Eq` on an absent property is `false` (excludes the
+    /// row) while a `Ne` on an absent property is `true` (keeps the row), exactly
+    /// as [`evaluate_predicate`](Self::evaluate_predicate) treats node rows.
+    fn evaluate_edge_full(
+        &self,
+        predicate: &Predicate,
+        edge: &crate::core::graph::Edge,
+        prov_cache: &RefCell<Option<Option<Provenance>>>,
+    ) -> bool {
+        // Reserved structural fields (`type`/`label`/`source`/`target`/`id`) live
+        // on the edge STRUCT, not in `properties`, so resolve them there first
+        // (Issue #3622 review fix); otherwise `WHERE type = 'KNOWS'` etc. would
+        // silently match nothing.
+        if let Some(result) = self.evaluate_edge_structural_leaf(predicate, edge) {
+            return result;
+        }
+        if let Some(result) = self.evaluate_property_leaf(predicate, &edge.properties) {
+            return result;
+        }
+        match predicate {
+            Predicate::Provenance(p) => {
+                Self::eval_provenance_leaf(p, prov_cache, || self.resolve_edge_provenance(edge))
+            }
+            Predicate::And(preds) => preds
+                .iter()
+                .all(|p| self.evaluate_edge_full(p, edge, prov_cache)),
+            Predicate::Or(preds) => preds
+                .iter()
+                .any(|p| self.evaluate_edge_full(p, edge, prov_cache)),
+            Predicate::Not(pred) => !self.evaluate_edge_full(pred, edge, prov_cache),
+            // Every property/structural leaf is resolved above; only provenance
+            // leaves and logical combinators reach this match, and all four are
+            // handled explicitly. A future `Predicate` variant that is neither
+            // must be routed deliberately rather than silently passing through.
+            Predicate::True
+            | Predicate::False
+            | Predicate::Eq { .. }
+            | Predicate::Ne { .. }
+            | Predicate::Gt { .. }
+            | Predicate::Lt { .. }
+            | Predicate::Gte { .. }
+            | Predicate::Lte { .. }
+            | Predicate::Exists(_)
+            | Predicate::NotExists(_)
+            | Predicate::Contains { .. }
+            | Predicate::StartsWith { .. }
+            | Predicate::EndsWith { .. }
+            | Predicate::In { .. } => {
+                unreachable!("property/structural leaves are resolved before this match")
+            }
+        }
+    }
+
+    /// Evaluate a single predicate leaf that references a reserved *structural*
+    /// edge field (Issue #3622 review fix). Returns `Some(bool)` when `predicate`
+    /// is a keyed leaf whose key is a reserved structural field (resolving it
+    /// against the edge's struct via [`edge_structural_value`]), and `None`
+    /// otherwise (not a keyed leaf, or a genuine user-property key -- both of
+    /// which the caller resolves against `edge.properties`).
+    ///
+    /// Structural fields always exist, so the openCypher three-valued
+    /// asymmetries around missing keys never fire here; the operator semantics
+    /// (`Eq`/`Ne`/comparisons/`In`/string ops/`Exists`) mirror the property path.
+    fn evaluate_edge_structural_leaf(
+        &self,
+        predicate: &Predicate,
+        edge: &crate::core::graph::Edge,
+    ) -> Option<bool> {
+        let key = match predicate {
+            Predicate::Eq { key, .. }
+            | Predicate::Ne { key, .. }
+            | Predicate::Gt { key, .. }
+            | Predicate::Lt { key, .. }
+            | Predicate::Gte { key, .. }
+            | Predicate::Lte { key, .. }
+            | Predicate::Exists(key)
+            | Predicate::NotExists(key)
+            | Predicate::Contains { key, .. }
+            | Predicate::StartsWith { key, .. }
+            | Predicate::EndsWith { key, .. }
+            | Predicate::In { key, .. } => key.as_str(),
+            _ => return None,
+        };
+        let value = edge_structural_value(edge, key)?;
+        Some(match predicate {
+            Predicate::Eq { value: v, .. } => self.compare_eq(&value, v),
+            Predicate::Ne { value: v, .. } => !self.compare_eq(&value, v),
+            Predicate::Gt { value: v, .. } => self.compare_gt(&value, v),
+            Predicate::Lt { value: v, .. } => self.compare_lt(&value, v),
+            Predicate::Gte { value: v, .. } => self.compare_gte(&value, v),
+            Predicate::Lte { value: v, .. } => self.compare_lte(&value, v),
+            // A structural field is always present.
+            Predicate::Exists(_) => true,
+            Predicate::NotExists(_) => false,
+            Predicate::Contains { substring, .. } => match &value {
+                PropertyValue::String(s) => s.contains(substring.as_str()),
+                _ => false,
+            },
+            Predicate::StartsWith { prefix, .. } => match &value {
+                PropertyValue::String(s) => s.starts_with(prefix.as_str()),
+                _ => false,
+            },
+            Predicate::EndsWith { suffix, .. } => match &value {
+                PropertyValue::String(s) => s.ends_with(suffix.as_str()),
+                _ => false,
+            },
+            Predicate::In { values, .. } => values.iter().any(|v| self.compare_eq(&value, v)),
+            // `key` was bound above only for the keyed-leaf arms.
+            _ => unreachable!("key resolved above implies a keyed leaf predicate"),
+        })
     }
 
     fn compare_eq(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
@@ -2160,6 +2344,20 @@ impl ResultIterator for FilterIterator {
                         // evaluated with null semantics (comparisons are
                         // not-true, IS NULL is true).
                         if self.evaluate_null(&self.predicate) {
+                            return Some(Ok(row));
+                        }
+                        // Filter didn't pass, continue to next
+                    } else if self.edge_mode && row.entity.as_edge().is_some() {
+                        // Real edge-property evaluation (Issue #3622, SQL `FROM
+                        // edges` lane): the stream is pure edges, so every
+                        // property leaf refers to the edge's own properties.
+                        // Provenance leaves resolve against the edge's bundle.
+                        let edge = row
+                            .entity
+                            .as_edge()
+                            .expect("as_edge checked in the branch guard");
+                        let prov_cache: RefCell<Option<Option<Provenance>>> = RefCell::new(None);
+                        if self.evaluate_edge_full(&self.predicate, edge, &prov_cache) {
                             return Some(Ok(row));
                         }
                         // Filter didn't pass, continue to next
@@ -4011,6 +4209,29 @@ fn row_value<'a>(row: &'a QueryRow, key: &str) -> Option<&'a PropertyValue> {
         .and_then(|cols| cols.iter().find(|(k, _)| k == key).map(|(_, v)| v))
 }
 
+/// Resolve a reserved *structural* edge field to a synthetic [`PropertyValue`]
+/// for edge-property WHERE / ORDER BY evaluation (Issue #3622).
+///
+/// Returns `None` for any key that is not a reserved structural field, so a
+/// genuine user property falls through to the edge's `properties` map. Resolving
+/// these reserved names against `properties` (where they never live) would
+/// silently yield null and mis-evaluate every predicate/sort key on them -- the
+/// exact silent-wrong-result the pre-#3622 rejection guarded against.
+///
+/// - `type` / `label` -> the edge's interned type string (compared / sorted as a
+///   `String`).
+/// - `source` / `target` -> the endpoint `NodeId` as its integer id.
+/// - `id` -> the edge's own `EdgeId` as its integer id.
+fn edge_structural_value(edge: &crate::core::graph::Edge, key: &str) -> Option<PropertyValue> {
+    match key {
+        "type" | "label" => GLOBAL_INTERNER.resolve_with(edge.label, |s| PropertyValue::from(s)),
+        "source" => Some(PropertyValue::Int(edge.source.as_u64() as i64)),
+        "target" => Some(PropertyValue::Int(edge.target.as_u64() as i64)),
+        "id" => Some(PropertyValue::Int(edge.id.as_u64() as i64)),
+        _ => None,
+    }
+}
+
 /// `ORDER BY` iterator: buffers the entire input and stably sorts it by one or
 /// more keys in precedence order (first key primary), then streams the result.
 ///
@@ -4029,6 +4250,12 @@ pub struct SortIterator {
     /// no provenance sort key is present (the common case), so an ordinary
     /// property/score sort never touches historical storage.
     historical: Option<Arc<RwLock<HistoricalStorage>>>,
+    /// When `true`, a [`SortKey::Property`] on an EDGE row reads the edge's own
+    /// properties (real edge-property `ORDER BY`, Issue #3622) instead of
+    /// resolving to null. Set only by the executor when the sort's input subtree
+    /// is rooted at an `EdgeScan` (the SQL `FROM edges` lane). Defaults to
+    /// `false`, preserving the node-only sort-key extraction for AQL/Cypher.
+    edge_mode: bool,
 }
 
 impl SortIterator {
@@ -4044,7 +4271,46 @@ impl SortIterator {
             output: Vec::new().into_iter(),
             drained: false,
             historical: None,
+            edge_mode: false,
         }
+    }
+
+    /// Enable real edge-property ordering (Issue #3622): a [`SortKey::Property`]
+    /// on an edge row reads the edge's own properties instead of resolving to
+    /// null. The executor sets this only for a sort whose input stream is rooted
+    /// at an `EdgeScan` (the SQL `FROM edges` lane). Node-row and aggregate
+    /// column ordering are unchanged.
+    #[must_use]
+    pub fn order_by_edge_properties(mut self, enabled: bool) -> Self {
+        self.edge_mode = enabled;
+        self
+    }
+
+    /// Resolve the ordering value for a property key on a single row, honoring
+    /// edge-property mode (Issue #3622): a node row (or aggregate column) uses
+    /// the shared [`row_value`] lookup; an edge row in `edge_mode` reads its own
+    /// properties, with the reserved structural fields
+    /// (`type`/`label`/`source`/`target`/`id`) resolved against the edge struct
+    /// (review fix) -- otherwise `ORDER BY type` would sort by a null key on
+    /// every row. Structural values are synthesized owned, hence the [`Cow`].
+    fn property_sort_value<'a>(
+        &self,
+        row: &'a QueryRow,
+        prop: &str,
+    ) -> Option<std::borrow::Cow<'a, PropertyValue>> {
+        use std::borrow::Cow;
+        if let Some(v) = row_value(row, prop) {
+            return Some(Cow::Borrowed(v));
+        }
+        if self.edge_mode
+            && let Some(edge) = row.entity.as_edge()
+        {
+            if let Some(v) = edge_structural_value(edge, prop) {
+                return Some(Cow::Owned(v));
+            }
+            return edge.properties.get(prop).map(Cow::Borrowed);
+        }
+        None
     }
 
     /// Create a sort iterator with access to historical storage so a
@@ -4061,6 +4327,7 @@ impl SortIterator {
             output: Vec::new().into_iter(),
             drained: false,
             historical: Some(historical),
+            edge_mode: false,
         }
     }
 
@@ -4196,7 +4463,9 @@ impl SortIterator {
         use std::cmp::Ordering;
         match key {
             SortKey::Property(prop) => {
-                Self::cmp_optional(row_value(a, prop), row_value(b, prop), descending)
+                let av = self.property_sort_value(a, prop);
+                let bv = self.property_sort_value(b, prop);
+                Self::cmp_optional(av.as_deref(), bv.as_deref(), descending)
             }
             // Fallback on-the-fly resolution (Issue #3354). The hot path routes
             // provenance keys through `cmp_decorated` (resolve once per row), so
@@ -4592,6 +4861,625 @@ mod tests {
             vec![1],
             "non-provenance leaf passes through; only the provenance clause filters edges"
         );
+    }
+
+    // ============ Edge-property WHERE / ORDER BY (Issue #3622) =============
+
+    /// Build a bare current-state edge carrying a single integer `since`
+    /// property. No historical version is registered (edge-property evaluation
+    /// does not read historical storage), so this is cheap.
+    fn edge_with_since(edge_id: u64, since: i64) -> crate::core::graph::Edge {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().insert("since", since).build();
+        crate::core::graph::Edge::new(
+            crate::core::id::EdgeId::new(edge_id).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(edge_id).unwrap(),
+        )
+    }
+
+    /// Feed edge rows through a `FilterIterator` in edge-property mode
+    /// (Issue #3622) and return the surviving edge ids (input order preserved).
+    fn filter_edge_ids_edge_mode(
+        edges: Vec<crate::core::graph::Edge>,
+        predicate: Predicate,
+    ) -> Vec<u64> {
+        let rows: Vec<Result<QueryRow>> = edges
+            .into_iter()
+            .map(|e| Ok(QueryRow::from_entity(EntityResult::Edge(e))))
+            .collect();
+        let input = Box::new(MockIterator::from_results(rows));
+        let mut filter = FilterIterator::new(input, predicate).evaluate_edge_properties(true);
+        let mut ids = Vec::new();
+        while let Some(row) = filter.next() {
+            if let EntityResult::Edge(e) = row.unwrap().entity {
+                ids.push(e.id.as_u64());
+            }
+        }
+        ids
+    }
+
+    /// Sort edge rows by `keys` in edge-property mode (Issue #3622) and return
+    /// the resulting edge ids in output order.
+    fn sort_edge_ids_edge_mode(
+        edges: Vec<crate::core::graph::Edge>,
+        keys: Vec<(SortKey, bool)>,
+    ) -> Vec<u64> {
+        let rows: Vec<Result<QueryRow>> = edges
+            .into_iter()
+            .map(|e| Ok(QueryRow::from_entity(EntityResult::Edge(e))))
+            .collect();
+        let input = Box::new(MockIterator::from_results(rows));
+        let mut sort = SortIterator::new(input, keys).order_by_edge_properties(true);
+        let mut ids = Vec::new();
+        while let Some(row) = sort.next() {
+            if let EntityResult::Edge(e) = row.unwrap().entity {
+                ids.push(e.id.as_u64());
+            }
+        }
+        ids
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_property_eq() {
+        // In edge-property mode a bare `Eq` leaf is evaluated against the edge's
+        // own properties: `since = 2021` keeps only edge 2.
+        let edges = vec![edge_with_since(1, 2020), edge_with_since(2, 2021)];
+        let predicate = Predicate::Eq {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2021),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_property_range() {
+        // A comparison leaf also evaluates: `since > 2020` keeps only edge 2.
+        let edges = vec![edge_with_since(1, 2020), edge_with_since(2, 2021)];
+        let predicate = Predicate::Gt {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_absent_property_excludes_all() {
+        // `Eq` on a property no edge carries excludes every edge (absent != any).
+        let edges = vec![edge_with_since(1, 2020), edge_with_since(2, 2021)];
+        let predicate = Predicate::Eq {
+            key: "missing".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, predicate),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn default_mode_filter_passes_edge_property_leaf_through() {
+        // Regression guard for the AQL/Cypher contract: WITHOUT edge mode a bare
+        // property leaf on an edge row still passes through (mirrors the pinned
+        // `edge_non_provenance_leaf_is_pass_through`), so both edges survive.
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let predicate = Predicate::Eq {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2021),
+        };
+        let kept = filter_edge_ids(
+            &historical,
+            vec![edge_with_since(1, 2020), edge_with_since(2, 2021)],
+            predicate,
+        );
+        assert_eq!(
+            kept,
+            vec![1, 2],
+            "default (non-edge) mode passes property leaves through on edge rows"
+        );
+    }
+
+    #[test]
+    fn edge_mode_sort_orders_by_edge_property_desc() {
+        // Edge rows are sorted by their own `since` property, descending.
+        let edges = vec![
+            edge_with_since(1, 2020),
+            edge_with_since(2, 2022),
+            edge_with_since(3, 2021),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), true)];
+        // 2022 (id 2), 2021 (id 3), 2020 (id 1).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn edge_mode_sort_orders_by_edge_property_asc() {
+        let edges = vec![
+            edge_with_since(1, 2020),
+            edge_with_since(2, 2022),
+            edge_with_since(3, 2021),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), false)];
+        // 2020 (id 1), 2021 (id 3), 2022 (id 2).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn edge_mode_sort_absent_property_places_nulls_last_asc() {
+        // An edge missing the sort key sorts as null: last for ascending order.
+        let edges = vec![
+            edge_with_since(1, 2021),
+            edge_with_no_props(2),
+            edge_with_since(3, 2020),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), false)];
+        // 2020 (id 3), 2021 (id 1), then the null-key edge (id 2) last.
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn default_mode_sort_leaves_edge_property_unsorted() {
+        // Regression guard: WITHOUT edge mode a property sort key on edge rows
+        // resolves to null for every row, so input order is preserved (stable
+        // sort) -- the pre-#3622 node-only behavior.
+        let edges = vec![
+            edge_with_since(3, 2020),
+            edge_with_since(1, 2022),
+            edge_with_since(2, 2021),
+        ];
+        let rows: Vec<Result<QueryRow>> = edges
+            .into_iter()
+            .map(|e| Ok(QueryRow::from_entity(EntityResult::Edge(e))))
+            .collect();
+        let input = Box::new(MockIterator::from_results(rows));
+        let keys = vec![(SortKey::Property("since".to_string()), true)];
+        let mut sort = SortIterator::new(input, keys); // edge_mode defaults false
+        let mut ids = Vec::new();
+        while let Some(row) = sort.next() {
+            if let EntityResult::Edge(e) = row.unwrap().entity {
+                ids.push(e.id.as_u64());
+            }
+        }
+        assert_eq!(
+            ids,
+            vec![3, 1, 2],
+            "default mode leaves edge rows in input order (property key is null)"
+        );
+    }
+
+    /// A bare current-state edge with no properties (for null-placement tests).
+    fn edge_with_no_props(edge_id: u64) -> crate::core::graph::Edge {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        crate::core::graph::Edge::new(
+            crate::core::id::EdgeId::new(edge_id).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(edge_id).unwrap(),
+        )
+    }
+
+    /// Build a bare current-state edge with an explicit label, source, and
+    /// target and no user properties -- for structural-field (`type`/`source`/
+    /// `target`/`id`) WHERE / ORDER BY tests (Issue #3622 review fix).
+    fn edge_typed(edge_id: u64, label: &str, source: u64, target: u64) -> crate::core::graph::Edge {
+        let label = GLOBAL_INTERNER.intern(label).unwrap();
+        crate::core::graph::Edge::new(
+            crate::core::id::EdgeId::new(edge_id).unwrap(),
+            label,
+            NodeId::new(source).unwrap(),
+            NodeId::new(target).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(edge_id).unwrap(),
+        )
+    }
+
+    /// Build a bare current-state edge carrying a single STRING property.
+    fn edge_with_str(edge_id: u64, key: &str, value: &str) -> crate::core::graph::Edge {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().insert(key, value).build();
+        crate::core::graph::Edge::new(
+            crate::core::id::EdgeId::new(edge_id).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(edge_id).unwrap(),
+        )
+    }
+
+    // ---- Reserved STRUCTURAL fields (type/label/source/target/id) -----------
+    // These live on the Edge struct, NOT in `properties`; edge_mode must resolve
+    // them there (Issue #3622 review fix) or every predicate/sort key on them is
+    // silently wrong.
+
+    #[test]
+    fn edge_mode_filter_matches_edge_type() {
+        // `WHERE type = 'KNOWS'` resolves the edge's LABEL, not a `type` property
+        // (which no edge has). Only the KNOWS edge (id 1) survives.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 10, 20),
+            edge_typed(2, "FOLLOWS", 30, 40),
+        ];
+        let predicate = Predicate::Eq {
+            key: "type".to_string(),
+            value: PredicateValue::String("KNOWS".to_string()),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![1]);
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_label_alias() {
+        // `label` is an accepted alias for the edge type.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 10, 20),
+            edge_typed(2, "FOLLOWS", 30, 40),
+        ];
+        let predicate = Predicate::Eq {
+            key: "label".to_string(),
+            value: PredicateValue::String("FOLLOWS".to_string()),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_source_and_target() {
+        // `source`/`target` resolve the endpoint NodeIds as integers.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 10, 20),
+            edge_typed(2, "KNOWS", 11, 20),
+            edge_typed(3, "KNOWS", 10, 21),
+        ];
+        let by_source = Predicate::Eq {
+            key: "source".to_string(),
+            value: PredicateValue::Int(10),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges.clone(), by_source),
+            vec![1, 3],
+            "source = 10 keeps the two edges out of node 10"
+        );
+        let by_target = Predicate::Eq {
+            key: "target".to_string(),
+            value: PredicateValue::Int(20),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, by_target),
+            vec![1, 2],
+            "target = 20 keeps the two edges into node 20"
+        );
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_id() {
+        // `id` resolves the edge's own EdgeId.
+        let edges = vec![edge_typed(7, "KNOWS", 1, 2), edge_typed(9, "KNOWS", 1, 2)];
+        let predicate = Predicate::Eq {
+            key: "id".to_string(),
+            value: PredicateValue::Int(9),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![9]);
+    }
+
+    #[test]
+    fn edge_mode_filter_source_range() {
+        // Comparison operators work on structural integer fields too.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 5, 2),
+            edge_typed(2, "KNOWS", 15, 2),
+            edge_typed(3, "KNOWS", 25, 2),
+        ];
+        let predicate = Predicate::Gt {
+            key: "source".to_string(),
+            value: PredicateValue::Int(10),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2, 3]);
+    }
+
+    #[test]
+    fn edge_mode_sort_by_type_source_target() {
+        // ORDER BY a structural field sorts by the resolved struct value, not a
+        // null key. `type` sorts lexicographically; `source`/`target` numerically.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 30, 5),
+            edge_typed(2, "FOLLOWS", 10, 5),
+            edge_typed(3, "LIKES", 20, 5),
+        ];
+        let by_type = vec![(SortKey::Property("type".to_string()), false)];
+        // FOLLOWS < KNOWS < LIKES.
+        assert_eq!(
+            sort_edge_ids_edge_mode(edges.clone(), by_type),
+            vec![2, 1, 3]
+        );
+        let by_source = vec![(SortKey::Property("source".to_string()), false)];
+        // 10 (id 2) < 20 (id 3) < 30 (id 1).
+        assert_eq!(sort_edge_ids_edge_mode(edges, by_source), vec![2, 3, 1]);
+    }
+
+    // ---- Recursive combinators (AND / OR / NOT) in edge_mode ----------------
+
+    #[test]
+    fn edge_mode_filter_and_combinator() {
+        // `since > 2019 AND since < 2022` keeps only the middle edge (2021).
+        let edges = vec![
+            edge_with_since(1, 2018),
+            edge_with_since(2, 2021),
+            edge_with_since(3, 2023),
+        ];
+        let predicate = Predicate::And(vec![
+            Predicate::Gt {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2019),
+            },
+            Predicate::Lt {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2022),
+            },
+        ]);
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_or_combinator() {
+        // `since = 2018 OR since = 2023` keeps the two extremes.
+        let edges = vec![
+            edge_with_since(1, 2018),
+            edge_with_since(2, 2021),
+            edge_with_since(3, 2023),
+        ];
+        let predicate = Predicate::Or(vec![
+            Predicate::Eq {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2018),
+            },
+            Predicate::Eq {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2023),
+            },
+        ]);
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![1, 3]);
+    }
+
+    #[test]
+    fn edge_mode_filter_not_combinator() {
+        // `NOT (since = 2021)` drops only the 2021 edge.
+        let edges = vec![
+            edge_with_since(1, 2018),
+            edge_with_since(2, 2021),
+            edge_with_since(3, 2023),
+        ];
+        let predicate = Predicate::Not(Box::new(Predicate::Eq {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2021),
+        }));
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![1, 3]);
+    }
+
+    #[test]
+    fn edge_mode_filter_mixes_structural_and_property() {
+        // A combinator mixing a structural field and a user property.
+        let mut e1 = edge_typed(1, "KNOWS", 10, 2);
+        e1.properties = PropertyMapBuilder::new().insert("since", 2020).build();
+        let mut e2 = edge_typed(2, "FOLLOWS", 10, 2);
+        e2.properties = PropertyMapBuilder::new().insert("since", 2020).build();
+        let predicate = Predicate::And(vec![
+            Predicate::Eq {
+                key: "type".to_string(),
+                value: PredicateValue::String("KNOWS".to_string()),
+            },
+            Predicate::Eq {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2020),
+            },
+        ]);
+        assert_eq!(filter_edge_ids_edge_mode(vec![e1, e2], predicate), vec![1]);
+    }
+
+    // ---- String edge properties: equality, LIKE family, ordering ------------
+
+    #[test]
+    fn edge_mode_filter_string_equality() {
+        let edges = vec![
+            edge_with_str(1, "role", "admin"),
+            edge_with_str(2, "role", "member"),
+        ];
+        let predicate = Predicate::Eq {
+            key: "role".to_string(),
+            value: PredicateValue::String("member".to_string()),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_string_like_family() {
+        let edges = vec![
+            edge_with_str(1, "role", "administrator"),
+            edge_with_str(2, "role", "moderator"),
+            edge_with_str(3, "role", "member"),
+        ];
+        let contains = Predicate::Contains {
+            key: "role".to_string(),
+            substring: "era".to_string(),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges.clone(), contains),
+            vec![2],
+            "only 'moderator' contains 'era'"
+        );
+        let starts = Predicate::StartsWith {
+            key: "role".to_string(),
+            prefix: "m".to_string(),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges.clone(), starts),
+            vec![2, 3],
+            "'moderator' and 'member' start with 'm'"
+        );
+        let ends = Predicate::EndsWith {
+            key: "role".to_string(),
+            suffix: "ator".to_string(),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, ends),
+            vec![1, 2],
+            "'administrator' and 'moderator' end with 'ator'"
+        );
+    }
+
+    #[test]
+    fn edge_mode_sort_string_lexicographic() {
+        let edges = vec![
+            edge_with_str(1, "role", "member"),
+            edge_with_str(2, "role", "admin"),
+            edge_with_str(3, "role", "owner"),
+        ];
+        let keys = vec![(SortKey::Property("role".to_string()), false)];
+        // admin (2) < member (1) < owner (3).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![2, 1, 3]);
+    }
+
+    // ---- Null placement (DESC) ---------------------------------------------
+
+    #[test]
+    fn edge_mode_sort_absent_property_places_nulls_first_desc() {
+        // DESC: a missing sort key (null) orders FIRST (complements the ASC
+        // nulls-last case).
+        let edges = vec![
+            edge_with_since(1, 2021),
+            edge_with_no_props(2),
+            edge_with_since(3, 2020),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), true)];
+        // null edge (id 2) first, then 2021 (id 1), then 2020 (id 3).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![2, 1, 3]);
+    }
+
+    // ---- Multi-key ORDER BY + tie stability ---------------------------------
+
+    #[test]
+    fn edge_mode_sort_multi_key_with_tie_stability() {
+        // Order by `since` ASC, then `id`... but `id` here is a genuine property
+        // to keep the test independent of structural resolution; ties on `since`
+        // retain input order (stable sort).
+        let mk = |edge_id: u64, since: i64| {
+            let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+            let props = PropertyMapBuilder::new()
+                .insert("since", since)
+                .insert("rank", (edge_id as i64) % 2) // 1,0,1,0 -> secondary key
+                .build();
+            crate::core::graph::Edge::new(
+                crate::core::id::EdgeId::new(edge_id).unwrap(),
+                label,
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                props,
+                VersionId::new(edge_id).unwrap(),
+            )
+        };
+        // Two edges share since=2020; primary sorts them together, secondary
+        // `rank` ASC orders rank 0 before rank 1.
+        let edges = vec![mk(1, 2020), mk(2, 2020), mk(3, 2019)];
+        let keys = vec![
+            (SortKey::Property("since".to_string()), false),
+            (SortKey::Property("rank".to_string()), false),
+        ];
+        // since: 2019 (id3) first; then the 2020 pair ordered by rank: id2(rank0),id1(rank1).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn edge_mode_sort_ties_retain_input_order() {
+        // All equal keys -> stable sort preserves input order.
+        let edges = vec![
+            edge_with_since(5, 2020),
+            edge_with_since(3, 2020),
+            edge_with_since(8, 2020),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), false)];
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![5, 3, 8]);
+    }
+
+    // ---- Operator coverage: Ne / Gte / Lte / Lt / Exists --------------------
+
+    #[test]
+    fn edge_mode_filter_ne_gte_lte_lt() {
+        let edges = vec![
+            edge_with_since(1, 2019),
+            edge_with_since(2, 2020),
+            edge_with_since(3, 2021),
+        ];
+        let ne = Predicate::Ne {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges.clone(), ne), vec![1, 3]);
+        let gte = Predicate::Gte {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges.clone(), gte), vec![2, 3]);
+        let lte = Predicate::Lte {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges.clone(), lte), vec![1, 2]);
+        let lt = Predicate::Lt {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, lt), vec![1]);
+    }
+
+    #[test]
+    fn edge_mode_filter_exists() {
+        let edges = vec![edge_with_since(1, 2020), edge_with_no_props(2)];
+        let predicate = Predicate::Exists("since".to_string());
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, predicate),
+            vec![1],
+            "only the edge carrying `since` exists"
+        );
+    }
+
+    #[test]
+    fn edge_mode_filter_ne_on_missing_property_returns_row() {
+        // openCypher three-valued asymmetry: `Ne` on an ABSENT edge property
+        // returns the row (unlike `Eq`, which excludes it). Edge WHERE follows
+        // openCypher/node semantics here, NOT SQL three-valued UNKNOWN.
+        let edges = vec![edge_with_since(1, 2020), edge_with_no_props(2)];
+        let predicate = Predicate::Ne {
+            key: "missing".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, predicate),
+            vec![1, 2],
+            "Ne on a property no edge carries returns every edge (present != absent)"
+        );
+    }
+
+    // ---- Empty edge stream through edge_mode Filter and Sort ----------------
+
+    #[test]
+    fn edge_mode_filter_empty_stream_is_empty() {
+        let predicate = Predicate::Eq {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(Vec::new(), predicate),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn edge_mode_sort_empty_stream_is_empty() {
+        let keys = vec![(SortKey::Property("since".to_string()), false)];
+        assert_eq!(sort_edge_ids_edge_mode(Vec::new(), keys), Vec::<u64>::new());
     }
 
     // ==================== EmptyIterator Tests ====================
