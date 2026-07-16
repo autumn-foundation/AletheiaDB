@@ -21,7 +21,11 @@ autumn-web = { version = "0.5.0", default-features = false, features = ["maud", 
 # (`ApiResponse`, `node_to_query_json`, `AletheiaHttpError`), the constant-time
 # `AuthStore`/`AccessClass`/`Role` RBAC model, and the MCP typed node-read
 # request/response methods (`AletheiaMcpServer::get_node`/`list_nodes`/`count_nodes`).
-aletheiadb = { path = "../..", features = ["http-server", "mcp-server"] }
+# `observability` exposes the internal `MetricsRecorder` / `METRICS` atomic
+# mirror + `MetricsSnapshot` that the Prometheus `/metrics` exposition endpoint
+# (Issue #3624) renders. It only pulls in `dep:tracing` (already brought in by
+# `http-server`), so it adds no new heavy dependency to the graph.
+aletheiadb = { path = "../..", features = ["http-server", "mcp-server", "observability"] }
 axum = { version = "0.8" }
 tower-http = { version = "0.6", features = ["set-header"] }
 serde = { version = "1.0", features = ["derive"] }

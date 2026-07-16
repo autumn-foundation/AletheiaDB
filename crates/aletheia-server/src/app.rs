@@ -14,6 +14,7 @@
 use crate::constraints_lineage_audit_tools;
 use crate::edge_tools;
 use crate::http_routes;
+use crate::metrics_exposition;
 use crate::node_tools;
 use crate::schema_batch_tools;
 use crate::security::{self, SecurityConfig};
@@ -68,6 +69,7 @@ pub fn try_build_server_testapp(
     let app = TestApp::new()
         .routes(routes![
             http_routes::health_check,
+            metrics_exposition::metrics,
             http_routes::create_key,
             http_routes::list_keys,
             http_routes::revoke_key,

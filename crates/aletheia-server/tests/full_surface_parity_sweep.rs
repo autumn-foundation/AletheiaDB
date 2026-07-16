@@ -249,6 +249,76 @@ async fn all_five_http_routes_are_served() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// (3b) The Prometheus /metrics exposition route (Issue #3624) is served, on the
+//      metrics access class, and is an HTTP-ROUTE-ONLY surface — deliberately
+//      NOT registered as an MCP tool (it does not appear in the tools/list
+//      catalog and is absent from the inventory's mcp.tools[] set).
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn metrics_route_is_served_and_is_not_an_mcp_tool() {
+    let (db, store) = fixture();
+    // Mint a metrics-ONLY-role credential before the store is moved into the app.
+    // `Role::Metrics` permits ONLY `AccessClass::Metrics` (see `Role::allows`), so
+    // a 200 for this token is a genuine BEHAVIORAL proof that `/metrics` is on
+    // exactly that class: had the route been Read/Write/Admin, this same token
+    // would 403. (A 403-for-a-denied-role check is impossible for the metrics
+    // class — every role permits it — so the metrics-role 200 is the
+    // discriminating signal.)
+    let (_principal, metrics_key) = store
+        .create_key("sweep-metrics", Role::Metrics)
+        .expect("mint metrics-role key");
+
+    // Required mode: the RBAC class gate is live, so the metrics-role 200 below is
+    // a real access-class assertion rather than an anonymous pass-through.
+    let client = build_server_client(db, store, AuthMode::Required);
+
+    // (a) Routed (not the autumn no-route 404), admits the metrics-role token
+    //     (→ class == Metrics), and serves the Prometheus text content type.
+    let resp = client
+        .get("/metrics")
+        .header("authorization", &format!("Bearer {}", &*metrics_key))
+        .send()
+        .await;
+    assert_ne!(
+        resp.status.as_u16(),
+        404,
+        "GET /metrics must be routed (got the no-route 404)"
+    );
+    assert_eq!(
+        resp.status.as_u16(),
+        200,
+        "a metrics-role credential must get 200 on /metrics — proving the route is on AccessClass::Metrics"
+    );
+    assert_eq!(
+        resp.header("content-type"),
+        Some(aletheia_server::metrics_exposition::PROMETHEUS_CONTENT_TYPE),
+        "GET /metrics must serve the Prometheus text format content type"
+    );
+
+    // (b) HTTP-route-only: /metrics is NOT an MCP tool. Neither a `metrics` nor a
+    //     `get_metrics` name may appear in the live tools/list catalog...
+    let live = live_mcp_catalog(&client).await;
+    assert!(
+        !live.contains("metrics") && !live.contains("get_metrics"),
+        "the /metrics HTTP route must not be exposed as an MCP tool"
+    );
+
+    // ...nor in the inventory's mcp.tools[] set (the tool source of truth).
+    let doc = inventory();
+    let inv_tools: BTreeSet<String> = doc["mcp"]["tools"]
+        .as_array()
+        .expect("mcp.tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_string())
+        .collect();
+    assert!(
+        !inv_tools.contains("metrics") && !inv_tools.contains("get_metrics"),
+        "the /metrics HTTP route must not be listed among the MCP tools"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // (4) /openapi.json is served and covers the MCP-projection routes for the
 //     tools — one representative route from every ported cluster.
 // ════════════════════════════════════════════════════════════════════════════
