@@ -128,7 +128,7 @@ pub struct FlushCoordinatorConfig {
     ///
     /// When set, entries are encrypted (4-byte length-prefixed) under the
     /// keyring's CURRENT generation and fresh segments use the keyversioned
-    /// (v15) header stamping that generation's `key_version`; a full-MEK
+    /// (v16) header stamping that generation's `key_version`; a full-MEK
     /// rotation advances the current generation so subsequent segments are
     /// written under the new DEK while legacy/old-DEK segments still replay
     /// under the retained old generation. When `None`, segments use the
@@ -412,7 +412,7 @@ impl FlushCoordinator {
     ///
     /// Returns `None` when the file cannot be read, is shorter than a full
     /// header, or does not start with the WAL magic bytes. For a keyversioned
-    /// (v15) segment the second element carries the stamped `key_version`; every
+    /// (v16) segment the second element carries the stamped `key_version`; every
     /// legacy (5-byte header) segment yields `None` there.
     fn read_segment_header_id(path: &Path) -> Option<(u8, Option<u32>)> {
         let mut header = [0u8; WAL_KEYVERSIONED_HEADER_SIZE];
@@ -436,7 +436,7 @@ impl FlushCoordinator {
 
     /// The (version, key_version) a freshly created segment is stamped with,
     /// derived from the configured WAL keyring's CURRENT generation (Issue
-    /// #3617). Encrypted → keyversioned (v15) header stamping the current
+    /// #3617). Encrypted → keyversioned (v16) header stamping the current
     /// generation's `key_version`; plaintext → the string-label (v13) header.
     ///
     /// Reading the keyring here (rather than caching a version) is what lets a
@@ -472,7 +472,7 @@ impl FlushCoordinator {
         }
 
         // New segments use the string-label payload format (Issue #3506). For an
-        // ENCRYPTED WAL they are additionally wrapped in the keyversioned (v15)
+        // ENCRYPTED WAL they are additionally wrapped in the keyversioned (v16)
         // container (Issue #3617), whose 9-byte header stamps the WAL DEK
         // generation (`key_version`) the frames are encrypted under, so a
         // full-MEK rotation can advance the write generation while legacy/old-DEK
@@ -548,7 +548,7 @@ impl FlushCoordinator {
                     e
                 )))
             })?;
-            // Keyversioned (v15) segments carry the 4-byte key_version (LE) after
+            // Keyversioned (v16) segments carry the 4-byte key_version (LE) after
             // the version byte (Issue #3617). Only the integer version is
             // written — never any key material.
             if let Some(kv) = write_key_version {
@@ -1152,7 +1152,7 @@ impl FlushCoordinator {
         Ok(removed)
     }
 
-    /// Whether EVERY on-disk `.log` segment is a keyversioned (v15) segment
+    /// Whether EVERY on-disk `.log` segment is a keyversioned (v16) segment
     /// stamped with `key_version` (Issue #3617).
     ///
     /// The rotation driver's "old generation fully retired" signal: it returns

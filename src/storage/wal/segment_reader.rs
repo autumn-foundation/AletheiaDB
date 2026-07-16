@@ -212,7 +212,7 @@ const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_STRING_LABELS;
 ///
 /// Header layout (little-endian):
 /// ```text
-///   [magic "GWAL":4][format version:1 = 15][key_version:u32 LE:4][frames…]
+///   [magic "GWAL":4][format version:1 = 16][key_version:u32 LE:4][frames…]
 /// ```
 /// (Legacy encrypted/plaintext segments keep the 5-byte header with no
 /// `key_version`.) The decrypted entry payload uses the CURRENT plaintext layout
@@ -221,16 +221,45 @@ const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_STRING_LABELS;
 /// new appends under a new DEK while legacy segments still replay under the old
 /// one. An older binary rejects this version cleanly ("Unsupported WAL version")
 /// rather than misparsing the extended header.
-pub(crate) const WAL_VERSION_ENCRYPTED_KEYVERSIONED: u8 = WAL_VERSION_MAX + 1;
+///
+/// # Version-byte parity invariant
+///
+/// Encrypted WAL versions are EVEN by contract (2,4,…,14) and plaintext ones
+/// ODD (1,3,…,13); the encrypted-segment recovery tests assert every encrypted
+/// segment's version byte is even. `WAL_VERSION_MAX + 1` (15) is ODD, so this
+/// keyversioned *encrypted* container uses `WAL_VERSION_MAX + 2` (= 16, even)
+/// to preserve that invariant. Version 15 was never written to disk (this
+/// container is unreleased), so it stays an unused reserved gap between
+/// `WAL_VERSION_MAX` (14) and this value — a v15 segment is correctly rejected
+/// as an unsupported/unknown version.
+pub(crate) const WAL_VERSION_ENCRYPTED_KEYVERSIONED: u8 = WAL_VERSION_MAX + 2;
 
 /// Maximum supported WAL version (inclusive), including the variable-length
-/// `KEYVERSIONED` container (Issue #3617). The `ver > _` reject guards use this
-/// bound so a v15 segment parses instead of being rejected as unsupported.
+/// `KEYVERSIONED` container (Issue #3617). Used only in the "max supported"
+/// diagnostic on the unsupported-version reject; the actual accept/reject
+/// decision is [`is_supported_segment_version`], which additionally rejects the
+/// v15 gap between `WAL_VERSION_MAX` (14) and the keyversioned container (16).
 const WAL_VERSION_KEYVERSIONED_MAX: u8 = WAL_VERSION_ENCRYPTED_KEYVERSIONED;
 
 /// Number of extra header bytes a [`WAL_VERSION_ENCRYPTED_KEYVERSIONED`] segment
 /// carries beyond the 5-byte legacy header: the 4-byte `key_version` (u32 LE).
 pub(crate) const WAL_KEYVERSION_FIELD_SIZE: usize = 4;
+
+/// Returns `true` if `ver` is a WAL segment format version this build can
+/// decode.
+///
+/// Supported versions are the contiguous fixed-header families
+/// `1..=WAL_VERSION_MAX` (14) plus the variable-header keyversioned container
+/// [`WAL_VERSION_ENCRYPTED_KEYVERSIONED`] (16). Renumbering the keyversioned
+/// container from 15 to 16 — to preserve the encrypted-versions-are-EVEN parity
+/// invariant (Issue #3617) — leaves **15 an unused reserved gap** with no
+/// defined on-disk format; a v15 segment is therefore rejected as unsupported,
+/// exactly like any version above the max. (No writer ever emits v15, so this
+/// only guards against corruption or a forward-incompatible file.)
+#[inline]
+fn is_supported_segment_version(ver: u8) -> bool {
+    ver <= WAL_VERSION_MAX || ver == WAL_VERSION_ENCRYPTED_KEYVERSIONED
+}
 
 /// Returns `true` if `version` denotes an encrypted segment (the original
 /// encrypted format or one of its provenance/framing-carrying successors).
@@ -321,9 +350,9 @@ pub(crate) const WAL_KEYVERSIONED_HEADER_SIZE: usize = WAL_HEADER_SIZE + WAL_KEY
 ///
 /// Returns `(header_len, key_version)` — the number of leading header bytes
 /// before the first entry frame, and the stamped `key_version` for a
-/// [`WAL_VERSION_ENCRYPTED_KEYVERSIONED`] (v15) segment (`None` for every legacy
+/// [`WAL_VERSION_ENCRYPTED_KEYVERSIONED`] (v16) segment (`None` for every legacy
 /// 5-byte header). `buffer` must already have passed the magic + version-bound
-/// checks. Errors only when a v15 header is truncated before its 4-byte
+/// checks. Errors only when a v16 header is truncated before its 4-byte
 /// `key_version`.
 fn decode_header_layout(version: u8, buffer: &[u8]) -> Result<(usize, Option<u32>)> {
     if version == WAL_VERSION_ENCRYPTED_KEYVERSIONED {
@@ -718,7 +747,7 @@ fn max_lsn_in_segment(
         && buffer[0..4] == WAL_MAGIC
     {
         let ver = buffer[4];
-        if ver > WAL_VERSION_KEYVERSIONED_MAX {
+        if !is_supported_segment_version(ver) {
             log_scan_warning(&format!(
                 "Skipping WAL segment {:?} with unsupported version {} (max {}) during LSN seeding scan",
                 path, ver, WAL_VERSION_KEYVERSIONED_MAX
@@ -1018,14 +1047,14 @@ fn read_segment_with_cipher_tolerant(
     let capacity_hint = (buffer.len() / 128).max(1);
     let mut entries = Vec::with_capacity(capacity_hint);
 
-    // Detect WAL format version and header layout (Issue #3617: a v15
+    // Detect WAL format version and header layout (Issue #3617: a v16
     // KEYVERSIONED segment carries a 9-byte header with a trailing key_version;
     // all legacy families use the 5-byte header).
     let (version, mut offset, key_version) =
         if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
             // Version 1+ format: has magic header
             let ver = buffer[4];
-            if ver > WAL_VERSION_KEYVERSIONED_MAX {
+            if !is_supported_segment_version(ver) {
                 return Err(StorageError::CorruptedData(format!(
                     "Unsupported WAL version: {} (max supported: {})",
                     ver, WAL_VERSION_KEYVERSIONED_MAX
@@ -1034,7 +1063,7 @@ fn read_segment_with_cipher_tolerant(
             }
             let (off, kv) = match decode_header_layout(ver, buffer) {
                 Ok(layout) => layout,
-                // A keyversioned (v15) header truncated mid-`key_version` (5..9
+                // A keyversioned (v16) header truncated mid-`key_version` (5..9
                 // bytes present) on the FINAL segment, under torn-tail tolerance,
                 // is a crash-torn empty tail — not a hard error. This mirrors the
                 // #3433 torn-tail contract already applied to a torn trailing
@@ -2896,7 +2925,7 @@ mod tests {
         );
     }
 
-    // ---- Issue #3617: keyversioned (v15) segments & dual-generation replay ----
+    // ---- Issue #3617: keyversioned (v16) segments & dual-generation replay ----
 
     use crate::encryption::wal_encryption::WalKeyring;
 
@@ -2908,7 +2937,7 @@ mod tests {
         Arc::new(crate::encryption::Aes256GcmCipher::new(&key))
     }
 
-    /// Write a keyversioned (v15) 9-byte header: magic + version + key_version(LE).
+    /// Write a keyversioned (v16) 9-byte header: magic + version + key_version(LE).
     fn write_keyversioned_header(path: &Path, key_version: u32) {
         use std::io::Write;
         let mut file = File::create(path).unwrap();
@@ -2920,11 +2949,11 @@ mod tests {
     }
 
     #[test]
-    fn keyversioned_v15_segment_roundtrips_via_keyring() {
+    fn keyversioned_v16_segment_roundtrips_via_keyring() {
         let dir = TempDir::new().unwrap();
         let new_dek = aes_cipher_new();
         let path = dir.path().join("0.log");
-        // v15 segment stamped key_version=2, frames encrypted under the new DEK.
+        // v16 segment stamped key_version=2, frames encrypted under the new DEK.
         write_keyversioned_header(&path, 2);
         append_bytes(&path, &encrypted_frame(5, &new_dek));
         append_bytes(&path, &encrypted_frame(7, &new_dek));
@@ -2934,7 +2963,7 @@ mod tests {
         keyring.add_generation(2, Arc::clone(&new_dek));
 
         let entries = read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), true)
-            .expect("v15 keyversioned segment must decrypt under its generation");
+            .expect("v16 keyversioned segment must decrypt under its generation");
         let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
         assert_eq!(lsns, vec![5, 7]);
         // The 9-byte header offset must be honored: labels decode correctly.
@@ -2950,28 +2979,28 @@ mod tests {
         }
     }
 
-    /// NIT #3617-PR2: a keyversioned (v15) header truncated mid-`key_version`
+    /// NIT #3617-PR2: a keyversioned (v16) header truncated mid-`key_version`
     /// (5..9 bytes present) on the FINAL segment must be tolerated as an empty
     /// torn tail under the #3433 contract — not hard-error the whole recovery
     /// via `decode_header_layout`'s `?` before torn-tail tolerance applies. With
     /// tolerance disabled it still hard-errors (strict policy).
     #[test]
-    fn torn_v15_header_on_final_segment_is_tolerated_as_empty_tail() {
+    fn torn_v16_header_on_final_segment_is_tolerated_as_empty_tail() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("0.log");
-        // magic + version(15) + only 2 of the 4 key_version bytes = 7-byte torn header.
+        // magic + version(16) + only 2 of the 4 key_version bytes = 7-byte torn header.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&WAL_MAGIC);
         bytes.push(WAL_VERSION_ENCRYPTED_KEYVERSIONED);
         bytes.extend_from_slice(&[0u8, 0u8]); // partial key_version (torn)
         std::fs::write(&path, &bytes).unwrap();
-        assert_eq!(bytes.len(), 7, "a 5..9-byte v15 header is a torn header");
+        assert_eq!(bytes.len(), 7, "a 5..9-byte v16 header is a torn header");
 
         let keyring = WalKeyring::single(aes_cipher());
 
         // Tolerance ON (final segment): the torn header yields an empty tail.
         let entries = read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), true)
-            .expect("a torn v15 header on the final segment must be tolerated, not hard-error");
+            .expect("a torn v16 header on the final segment must be tolerated, not hard-error");
         assert!(
             entries.is_empty(),
             "there are no decodable frames without a full 9-byte header"
@@ -2980,7 +3009,7 @@ mod tests {
         // Tolerance OFF: the same torn header still hard-errors.
         assert!(
             read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), false).is_err(),
-            "a torn v15 header must still hard-error when torn-tail tolerance is disabled"
+            "a torn v16 header must still hard-error when torn-tail tolerance is disabled"
         );
     }
 
@@ -3019,7 +3048,7 @@ mod tests {
         append_bytes(&seg0, &encrypted_frame(1, &old_dek));
         append_bytes(&seg0, &encrypted_frame(2, &old_dek));
 
-        // 1.log: keyversioned v15 (key_version=2) under the NEW DEK.
+        // 1.log: keyversioned v16 (key_version=2) under the NEW DEK.
         let seg1 = dir.path().join("1.log");
         write_keyversioned_header(&seg1, 2);
         append_bytes(&seg1, &encrypted_frame(3, &new_dek));
@@ -3051,7 +3080,7 @@ mod tests {
         keyring.add_generation(2, aes_cipher()); // same old key, not new_dek
         assert!(
             read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), false).is_err(),
-            "a v15 segment decrypted with the wrong generation key must fail loudly"
+            "a v16 segment decrypted with the wrong generation key must fail loudly"
         );
     }
 
@@ -3097,10 +3126,46 @@ mod tests {
     }
 
     #[test]
+    fn v15_reserved_gap_version_is_rejected() {
+        // Issue #3617: renumbering the keyversioned container from 15 to 16
+        // (encrypted versions are EVEN by contract) leaves 15 an unused reserved
+        // gap with no defined on-disk format. A segment stamped v15 — never
+        // written by any writer — must be rejected as unsupported, not silently
+        // parsed as a legacy 5-byte-header plaintext segment.
+        assert_eq!(
+            WAL_VERSION_ENCRYPTED_KEYVERSIONED, 16,
+            "keyversioned container must be even (16), not odd (15)"
+        );
+        assert!(
+            !is_supported_segment_version(15),
+            "v15 is a reserved gap and must not be a supported version"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("0.log");
+        {
+            use std::io::Write;
+            let mut file = File::create(&path).unwrap();
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[15u8]).unwrap(); // the reserved gap version
+            file.write_all(&[0u8; 32]).unwrap();
+            file.sync_all().unwrap();
+        }
+        let keyring = WalKeyring::single(aes_cipher());
+        let err = read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), true)
+            .expect_err("a v15 reserved-gap segment must be rejected");
+        assert!(
+            err.to_string().contains("Unsupported WAL version"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
     fn keyversioned_truncated_header_is_rejected_under_strict_policy() {
-        // NIT #3617-PR2: a torn v15 header on the FINAL segment is now TOLERATED
+        // NIT #3617-PR2: a torn v16 header on the FINAL segment is now TOLERATED
         // under the #3433 torn-tail contract (see
-        // `torn_v15_header_on_final_segment_is_tolerated_as_empty_tail`). This
+        // `torn_v16_header_on_final_segment_is_tolerated_as_empty_tail`). This
         // test pins the complementary STRICT case: with torn-tail tolerance
         // DISABLED, the same truncated header still hard-errors.
         let dir = TempDir::new().unwrap();

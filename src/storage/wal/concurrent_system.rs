@@ -938,7 +938,7 @@ mod tests {
         let wal = ConcurrentWalSystem::new(encrypted_sync_config(dir.path(), Arc::clone(&old_dek)))
             .unwrap();
 
-        // Write a couple entries under the OLD generation (v15, key_version 1).
+        // Write a couple entries under the OLD generation (v16, key_version 1).
         wal.append(create_test_operation(1)).unwrap();
         wal.append(create_test_operation(2)).unwrap();
 
