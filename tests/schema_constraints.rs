@@ -601,6 +601,13 @@ fn bulk_import_enforces_constraints() {
     let mut importer = db.import();
     let result = importer.nodes_from_jsonl(&jsonl, mapping);
     assert!(result.is_err(), "import should fail on the violating row");
+
+    // FIX-6: both rows share one chunk/transaction, so in-chunk atomicity means
+    // the VALID row must also not persist — zero writes take effect.
+    assert!(
+        db.get_nodes_by_label("Person").is_empty(),
+        "a rejected import chunk must leave zero Person nodes (in-chunk atomicity)"
+    );
 }
 
 // --- 15. vector-with-dimension ---------------------------------------------
@@ -685,4 +692,99 @@ fn corrupt_sidecar_is_quarantined_and_db_opens() {
     )
     .unwrap();
     assert!(!sidecar.exists(), "corrupt sidecar should be renamed aside");
+}
+
+// --- 18. FIX-1: concurrent enable persists ALL constraints to disk ---------
+
+#[test]
+#[serial]
+fn concurrent_enable_persists_all_constraints() {
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    const N: usize = 8;
+
+    {
+        let db = Arc::new(AletheiaDB::open(dir.path()).unwrap());
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let db = Arc::clone(&db);
+            handles.push(std::thread::spawn(move || {
+                let label = format!("Label{i}");
+                db.schema_constraint(EntityKind::Node, &label)
+                    .require_typed("id", DeclaredType::Integer)
+                    .enable()
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // In-memory: all N present.
+        assert_eq!(db.list_schema_constraints().len(), N);
+    }
+
+    // Reopen the DB: the on-disk sidecar must carry ALL N constraints. Without
+    // the DDL mutex the enable/drop read-modify-write races and the last file
+    // write silently drops the other labels — this reload is where that bug
+    // would manifest.
+    let reopened = AletheiaDB::open(dir.path()).unwrap();
+    let listed = reopened.list_schema_constraints();
+    assert_eq!(
+        listed.len(),
+        N,
+        "all {N} concurrently-enabled constraints must survive restart, got {}",
+        listed.len()
+    );
+    for i in 0..N {
+        let label = format!("Label{i}");
+        assert!(
+            listed.iter().any(|c| c.label == label),
+            "missing {label} on disk after restart"
+        );
+    }
+}
+
+// --- 19. FIX-4: mixed per-key nullability in one chain ----------------------
+
+#[test]
+#[serial]
+fn mixed_per_key_nullability() {
+    let db = AletheiaDB::new().unwrap();
+    db.schema_constraint(EntityKind::Node, "Person")
+        .typed("nickname", DeclaredType::String) // nullable (builder default)
+        .typed_nullable("email", DeclaredType::String, false) // non-nullable
+        .enable()
+        .unwrap();
+
+    // Present explicit Null on the nullable key is accepted.
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("nickname", PropertyValue::Null)
+            .build(),
+    )
+    .unwrap();
+
+    // Present explicit Null on the non-nullable key is rejected.
+    let err = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("email", PropertyValue::Null)
+                .build(),
+        )
+        .unwrap_err();
+    assert!(is_missing_key(&err), "got {err:?}");
+
+    // A conforming write (typed string on both, or omitting the optional keys)
+    // still succeeds.
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("nickname", "Al")
+            .insert("email", "al@example.com")
+            .build(),
+    )
+    .unwrap();
 }

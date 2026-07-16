@@ -188,6 +188,33 @@ Schema constraints are also folded into the `.albk` backup payload, so a
 > This asymmetry is intentional for this change and tracked as a uniqueness
 > follow-up.
 
+## Semantics notes & caveats
+
+- **`DeclaredType::Temporal` ≡ "any `i64`".** Temporal values are stored as
+  microseconds-since-epoch integers, so `Temporal` matches any
+  `PropertyValue::Int`. There is **no** timestamp-range or plausibility
+  validation — a `Temporal`-declared key accepts any integer.
+- **Int/Float strictness — no numeric coercion.** An `Int` value does **not**
+  satisfy a `Float`-declared key, and a `Float` does **not** satisfy an
+  `Integer`-declared key. Declare the type the values actually carry.
+- **Per-key nullability (FIX-4).** `.nullable(bool)` sets a builder-wide default
+  for optional keys; `.typed_nullable(key, ty, nullable)` overrides it for one
+  key, so a single chain can mix nullable and non-nullable keys. A present
+  explicit `Null` on a non-nullable key violates the constraint
+  (`MissingRequiredKey`); on a nullable key it is accepted.
+- **`schema_as_of(past)` returns the CURRENT declared constraint set.**
+  Constraints are current-state metadata, **not** bi-temporally versioned: a
+  point-in-time schema read still reports today's declared constraints.
+- **Durability rides on index persistence (`persistence.enabled`).** The sidecar
+  is written only when persistence is enabled. With WAL durability but
+  persistence disabled, schema constraints are in-memory only and do not survive
+  restart (uniqueness constraints, being WAL-backed, would still survive).
+- **Each buffered write is validated independently.** A single transaction that
+  transiently violates a constraint and then repairs it still **aborts on the
+  first violating op** — every persisted version must conform, so intermediate
+  buffered states are not "netted out".
+- **`Array` / `SparseVector` are not declarable types in v1** (a follow-up).
+
 ## Not in this change (follow-ups)
 
 - MCP/CLI tools to declare/drop/list schema constraints (Lane 1).

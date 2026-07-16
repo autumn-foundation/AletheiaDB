@@ -67,31 +67,50 @@ pub(crate) fn load_sidecar(path: &Path, registry: &ConstraintRegistry) {
     if !path.exists() {
         return;
     }
+
+    // Quarantine the file aside (preserved for diagnosis) and start with no
+    // schema constraints — a bad sidecar must never brick startup. Shared by
+    // the decode-error and incompatible-version paths (FIX-3).
+    let quarantine_aside = |reason: &str| {
+        let quarantine = path.with_extension(format!(
+            "dat.corrupt-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::rename(path, &quarantine);
+        #[cfg(feature = "observability")]
+        tracing::warn!(
+            "schema-constraint sidecar at {} was unusable ({reason}); quarantined to {} and starting with no schema constraints",
+            path.display(),
+            quarantine.display()
+        );
+        #[cfg(not(feature = "observability"))]
+        let _ = reason;
+    };
+
     match crate::storage::index_persistence::common::load_encoded_with_crc::<SchemaConstraintSidecar>(
         path,
         MAX_SIDECAR_BYTES,
         "schema constraints",
     ) {
         Ok(sidecar) => {
+            // Validate the format version before importing (FIX-3): a
+            // future/unknown version may encode a shape this build would
+            // misinterpret, so quarantine it and start empty rather than
+            // silently importing a possibly-misread set.
+            if sidecar.version != SIDECAR_VERSION {
+                quarantine_aside(&format!(
+                    "incompatible sidecar version {} (supported {})",
+                    sidecar.version, SIDECAR_VERSION
+                ));
+                return;
+            }
             registry.import_schema_constraints(&sidecar.constraints);
         }
         Err(_e) => {
-            // Quarantine the bad file so it is preserved for diagnosis but does
-            // not block a clean startup.
-            let quarantine = path.with_extension(format!(
-                "dat.corrupt-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_micros())
-                    .unwrap_or(0)
-            ));
-            let _ = std::fs::rename(path, &quarantine);
-            #[cfg(feature = "observability")]
-            tracing::warn!(
-                "schema-constraint sidecar at {} was corrupt ({_e}); quarantined to {} and starting with no schema constraints",
-                path.display(),
-                quarantine.display()
-            );
+            quarantine_aside(&format!("decode failed: {_e}"));
         }
     }
 }
@@ -132,6 +151,11 @@ struct PropertySpec {
     property: String,
     declared_type: Option<DeclaredType>,
     required: bool,
+    /// Per-key nullability override (Issue #3378 FIX-4). `None` inherits the
+    /// builder-wide `default_nullable`; `Some(b)` pins this key's nullability
+    /// regardless of the default, so one key can be nullable and another
+    /// non-nullable in the same chain.
+    nullable: Option<bool>,
 }
 
 /// Builder for declaring and enabling property-type / required-key schema
@@ -181,6 +205,7 @@ impl<'a> SchemaConstraintBuilder<'a> {
             property: property.into(),
             declared_type: None,
             required: true,
+            nullable: None,
         });
         self
     }
@@ -191,6 +216,7 @@ impl<'a> SchemaConstraintBuilder<'a> {
             property: property.into(),
             declared_type: Some(ty),
             required: true,
+            nullable: None,
         });
         self
     }
@@ -201,13 +227,37 @@ impl<'a> SchemaConstraintBuilder<'a> {
             property: property.into(),
             declared_type: Some(ty),
             required: false,
+            nullable: None,
+        });
+        self
+    }
+
+    /// Constrain `property` to the given type when present (optional key) with
+    /// an explicit per-key nullability (Issue #3378 FIX-4), overriding the
+    /// builder-wide [`nullable`](Self::nullable) default for THIS key only.
+    /// `nullable == false` means a present explicit `Null` violates the
+    /// constraint; `true` permits it. Lets one key be nullable and another
+    /// non-nullable in the same chain.
+    pub fn typed_nullable(
+        mut self,
+        property: impl Into<String>,
+        ty: DeclaredType,
+        nullable: bool,
+    ) -> Self {
+        self.specs.push(PropertySpec {
+            property: property.into(),
+            declared_type: Some(ty),
+            required: false,
+            nullable: Some(nullable),
         });
         self
     }
 
     /// Set the builder-wide default for whether an explicit `Null` value is
     /// permitted on optional keys (default `true`). `false` means a present
-    /// `Null` violates the constraint.
+    /// `Null` violates the constraint. A per-key
+    /// [`typed_nullable`](Self::typed_nullable) override takes precedence over
+    /// this default for that key.
     pub fn nullable(mut self, nullable: bool) -> Self {
         self.default_nullable = nullable;
         self
@@ -264,6 +314,12 @@ impl AletheiaDB {
             Some(id) => id,
             None => return Ok(false), // never declared — nothing to do
         };
+
+        // Serialize the whole check→persist→drop read-modify-write against
+        // concurrent enable/drop so the sidecar file and the in-memory registry
+        // stay consistent (Issue #3378 FIX-1). Leaf lock; released on return.
+        let _ddl = self.constraint_registry.lock_schema_ddl();
+
         if self
             .constraint_registry
             .schema_constraints_for(kind, label_id)
@@ -307,17 +363,19 @@ impl AletheiaDB {
             let prop_id = GLOBAL_INTERNER
                 .intern(&spec.property)
                 .record_error_metric()?;
+            // Per-key nullability override (FIX-4), else the builder-wide default.
+            let nullable = spec.nullable.unwrap_or(default_nullable);
             constraints.push(PropertyConstraint {
                 property: prop_id,
                 declared_type: spec.declared_type,
                 required: spec.required,
-                nullable: default_nullable,
+                nullable,
             });
             descriptors.push(PropertyConstraintDescriptor {
                 property: spec.property.clone(),
                 declared_type: spec.declared_type,
                 required: spec.required,
-                nullable: default_nullable,
+                nullable,
             });
         }
 
@@ -337,6 +395,14 @@ impl AletheiaDB {
             }
             .into());
         }
+
+        // Serialize the export→persist→declare read-modify-write against
+        // concurrent enable/drop (Issue #3378 FIX-1): without this, two enables
+        // on different labels each export the (pre-other) set, then the second
+        // sidecar write clobbers the first label from disk (in-memory stays
+        // correct, but the constraint vanishes on restart). Leaf lock; held
+        // across the whole critical section below and released on return.
+        let _ddl = self.constraint_registry.lock_schema_ddl();
 
         // Persist the new descriptor set first (durable before active), then
         // update the registry so an in-flight write observes it.
@@ -436,4 +502,66 @@ fn collect_sample_ids(violations: &[ConformanceViolation]) -> Vec<u64> {
         }
     }
     seen.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FIX-3: a sidecar whose `version` is not [`SIDECAR_VERSION`] must be
+    /// quarantined aside (not silently imported) and the registry left empty.
+    #[test]
+    fn future_version_sidecar_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = sidecar_path(dir.path());
+
+        // Write a well-formed sidecar (valid bitcode + CRC) that merely claims
+        // a newer format version than this build supports.
+        let future = SchemaConstraintSidecar {
+            version: SIDECAR_VERSION + 1,
+            constraints: Vec::new(),
+        };
+        crate::storage::index_persistence::common::save_encoded_with_crc(&future, &path).unwrap();
+        assert!(path.exists());
+
+        let registry = ConstraintRegistry::new();
+        load_sidecar(&path, &registry);
+
+        // Quarantined aside (renamed), registry left empty — no misread import.
+        assert!(
+            !path.exists(),
+            "future-version sidecar must be renamed aside, not left in place"
+        );
+        assert!(registry.export_schema_constraints().is_empty());
+    }
+
+    /// A current-version sidecar round-trips normally through the same path.
+    #[test]
+    fn current_version_sidecar_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = sidecar_path(dir.path());
+
+        let sidecar = SchemaConstraintSidecar {
+            version: SIDECAR_VERSION,
+            constraints: vec![SchemaConstraintDescriptor {
+                entity_kind: "node".to_string(),
+                label: "Person".to_string(),
+                properties: vec![PropertyConstraintDescriptor {
+                    property: "name".to_string(),
+                    declared_type: None,
+                    required: true,
+                    nullable: true,
+                }],
+            }],
+        };
+        crate::storage::index_persistence::common::save_encoded_with_crc(&sidecar, &path).unwrap();
+
+        let registry = ConstraintRegistry::new();
+        load_sidecar(&path, &registry);
+
+        assert!(path.exists(), "a valid current-version sidecar is not moved");
+        let listed = registry.export_schema_constraints();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label, "Person");
+    }
 }

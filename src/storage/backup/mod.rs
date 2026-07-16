@@ -1373,6 +1373,59 @@ mod tests {
         assert_eq!(entry.next_version, None);
     }
 
+    // -----------------------------------------------------------------------
+    // Version-4 (pre-schema-constraint, Issue #3378) backup compatibility
+    // -----------------------------------------------------------------------
+
+    /// Encode a version-4 artifact byte-for-byte the way a pre-#3378 AletheiaDB
+    /// would have: `[MAGIC][version=4][zstd(bitcode(BackupPayloadV4))]`.
+    fn encode_artifact_v4(payload: &BackupPayloadV4) -> Vec<u8> {
+        let encoded = bitcode::encode(payload);
+        let compressed = zstd::encode_all(encoded.as_slice(), 3).unwrap();
+        let mut out = Vec::with_capacity(6 + compressed.len());
+        out.extend_from_slice(&BACKUP_MAGIC);
+        out.extend_from_slice(&4u16.to_le_bytes());
+        out.extend_from_slice(&compressed);
+        out
+    }
+
+    /// A version-4 (Issue #3387 era, pre-#3378) artifact -- the immediately
+    /// prior backup format this PR bumps -- must restore with
+    /// `schema_constraints` defaulting to empty (the field the v4 shape lacks).
+    #[test]
+    fn read_artifact_accepts_legacy_v4_format() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy_v4.albk");
+
+        // The v4 shape uses the LIVE temporal/interner/graph structs (unchanged
+        // since v4), so reuse the current empty payload's members.
+        let empty = empty_payload();
+        let payload = BackupPayloadV4 {
+            created_at_micros: 55,
+            source_lsn: 11,
+            current_node_count: 0,
+            current_edge_count: 0,
+            node_version_count: 0,
+            edge_version_count: 0,
+            interner: empty.interner,
+            graph: empty.graph,
+            temporal: empty.temporal,
+        };
+
+        std::fs::write(&path, encode_artifact_v4(&payload)).unwrap();
+
+        let restored = read_artifact(&path).unwrap();
+
+        assert_eq!(restored.source_lsn, 11);
+        assert_eq!(restored.created_at_micros, 55);
+        // The pre-#3378 artifact carries no schema constraints; the upgrade
+        // From impl defaults them to empty.
+        assert!(
+            restored.schema_constraints.is_empty(),
+            "v4 artifact must restore with empty schema constraints"
+        );
+    }
+
     /// A version-2 header whose payload does not decode as the frozen
     /// `BackupPayloadV2` shape is a decode error, not a silent fallback.
     #[test]

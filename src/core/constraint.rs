@@ -276,6 +276,65 @@ impl Drop for ReservationGuard {
     }
 }
 
+/// Outcome of checking one property value against one [`PropertyConstraint`].
+///
+/// Shared by the write-path validator ([`ConstraintRegistry::check_entity`])
+/// and the enable-time scan ([`ConstraintRegistry::evaluate_conformance`]) so
+/// both compute an identical category for every value (Issue #3378 FIX-5).
+enum PropertyCheck {
+    /// The value conforms to this constraint.
+    Ok,
+    /// The value is missing/absent for a required key, or an explicit `Null`
+    /// on a non-nullable key. `reason` is the canonical human-readable string
+    /// used in conformance reports; both sub-cases are the Missing category
+    /// and both surface as `MissingRequiredKey` on the write path.
+    Missing {
+        /// Canonical reason string (`"missing required key"` or
+        /// `"null value not permitted"`).
+        reason: &'static str,
+    },
+    /// A present, non-null value whose type does not match the declared type.
+    TypeMismatch {
+        /// The declared type's token.
+        expected: &'static str,
+        /// The actual value's type token.
+        actual: &'static str,
+    },
+}
+
+/// The single per-constraint predicate shared by both validators (Issue #3378
+/// FIX-5). Classifying every `(constraint, value)` here removes the risk of the
+/// write path and the enable-time scan drifting on null/required/type
+/// semantics.
+fn check_property(c: &PropertyConstraint, value: Option<&PropertyValue>) -> PropertyCheck {
+    let is_null = matches!(value, Some(PropertyValue::Null));
+    let present_nonnull = value.is_some() && !is_null;
+
+    if c.required && !present_nonnull {
+        return PropertyCheck::Missing {
+            reason: "missing required key",
+        };
+    }
+    if is_null {
+        if !c.nullable {
+            return PropertyCheck::Missing {
+                reason: "null value not permitted",
+            };
+        }
+        return PropertyCheck::Ok;
+    }
+    // Present, non-null value: enforce the declared type if any.
+    if let (Some(dt), Some(v)) = (c.declared_type, value)
+        && !dt.matches(v)
+    {
+        return PropertyCheck::TypeMismatch {
+            expected: dt.type_name(),
+            actual: v.type_name(),
+        };
+    }
+    PropertyCheck::Ok
+}
+
 /// Central registry for uniqueness constraints.
 ///
 /// Thread-safe via DashMap; designed for concurrent read/write access.
@@ -295,6 +354,17 @@ pub struct ConstraintRegistry {
     /// schemaless. `Arc<Vec<..>>` so the hot write-path check clones a cheap
     /// pointer rather than the constraint vector.
     schema_constraints: DashMap<(EntityKind, InternedString), Arc<Vec<PropertyConstraint>>>,
+    /// Serializes schema-constraint DDL (Issue #3378): the whole
+    /// export→persist-sidecar→declare/drop read-modify-write in
+    /// `enable_schema_constraints` / `drop_schema_constraint` runs under this
+    /// lock so two concurrent DDL calls on different labels cannot race the
+    /// sidecar file (last-write-wins silently dropping the other label from
+    /// disk). A **leaf** lock: acquired only around that critical section and
+    /// never held across any other AletheiaDB synchronization primitive, so it
+    /// introduces no lock-order risk. `()` payload — it guards the external
+    /// side effect (the sidecar file + the in-memory map staying consistent),
+    /// not shared data of its own.
+    schema_ddl_lock: parking_lot::Mutex<()>,
 }
 
 impl ConstraintRegistry {
@@ -304,7 +374,18 @@ impl ConstraintRegistry {
             declarations: DashMap::new(),
             reservation_index: DashMap::new(),
             schema_constraints: DashMap::new(),
+            schema_ddl_lock: parking_lot::Mutex::new(()),
         }
+    }
+
+    /// Acquire the schema-constraint DDL lock (Issue #3378). Callers hold the
+    /// returned guard across the entire export→persist→declare/drop critical
+    /// section in `enable`/`drop` so the on-disk sidecar and the in-memory
+    /// registry stay consistent under concurrent DDL. Leaf lock — see the
+    /// field docs.
+    #[must_use = "hold the guard across the whole DDL critical section"]
+    pub fn lock_schema_ddl(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.schema_ddl_lock.lock()
     }
 
     /// Returns `true` if there is an active constraint for `(label, property)`.
@@ -584,6 +665,12 @@ impl ConstraintRegistry {
     ///   `MissingRequiredKey` (null is not permitted).
     /// - `declared_type`: a present, non-null value whose type does not match
     ///   yields `TypeViolation`. `Null`/absent values skip the type check.
+    ///
+    /// The write path ([`Self::check_entity`]) and the enable-time scan
+    /// ([`Self::evaluate_conformance`]) share one per-constraint predicate
+    /// ([`check_property`]) so a value's category (missing / null-not-permitted
+    /// / type-mismatch) is guaranteed identical in both paths (Issue #3378
+    /// FIX-5) — no risk of the two validators drifting.
     pub fn check_entity(
         &self,
         kind: EntityKind,
@@ -599,30 +686,22 @@ impl ConstraintRegistry {
         let mut missing_keys: Vec<String> = Vec::new();
         for c in constraints.iter() {
             let value = properties.get_by_interned_key(&c.property);
-            let is_null = matches!(value, Some(PropertyValue::Null));
-            let present_nonnull = value.is_some() && !is_null;
-
-            if c.required && !present_nonnull {
-                missing_keys.push(prop_str(c.property));
-                continue;
-            }
-            if is_null {
-                if !c.nullable {
-                    missing_keys.push(prop_str(c.property));
+            match check_property(c, value) {
+                // Both "missing required key" and "null value not permitted"
+                // are the Missing category and surface as MissingRequiredKey on
+                // the write path (unchanged behavior); the shared predicate
+                // guarantees the category matches the enable-time report.
+                PropertyCheck::Missing { .. } => missing_keys.push(prop_str(c.property)),
+                PropertyCheck::TypeMismatch { expected, actual } => {
+                    return Err(ConstraintError::TypeViolation {
+                        entity_kind: kind.as_str().to_string(),
+                        label: label_str(),
+                        property: prop_str(c.property),
+                        expected_type: expected,
+                        actual_type: actual,
+                    });
                 }
-                continue;
-            }
-            // Present, non-null value: enforce the declared type if any.
-            if let (Some(dt), Some(v)) = (c.declared_type, value)
-                && !dt.matches(v)
-            {
-                return Err(ConstraintError::TypeViolation {
-                    entity_kind: kind.as_str().to_string(),
-                    label: label_str(),
-                    property: prop_str(c.property),
-                    expected_type: dt.type_name(),
-                    actual_type: v.type_name(),
-                });
+                PropertyCheck::Ok => {}
             }
         }
 
@@ -639,36 +718,25 @@ impl ConstraintRegistry {
     /// Evaluate one entity's property map against `constraints`, returning a
     /// list of `(property, reason)` violations (used to build a
     /// [`ConformanceReport`] on enable). Unlike [`Self::check_entity`], this
-    /// collects *all* violations rather than short-circuiting.
+    /// collects *all* violations rather than short-circuiting. Shares the
+    /// per-constraint predicate [`check_property`] with the write path so the
+    /// two never disagree on a value's category (Issue #3378 FIX-5).
     pub fn evaluate_conformance(
         constraints: &[PropertyConstraint],
         properties: &PropertyMap,
     ) -> Vec<(Option<String>, String)> {
         let mut out = Vec::new();
         for c in constraints {
-            let prop = GLOBAL_INTERNER.resolve_or_else(c.property, String::new);
             let value = properties.get_by_interned_key(&c.property);
-            let is_null = matches!(value, Some(PropertyValue::Null));
-            let present_nonnull = value.is_some() && !is_null;
-
-            if c.required && !present_nonnull {
-                out.push((Some(prop.clone()), "missing required key".to_string()));
-                continue;
-            }
-            if is_null {
-                if !c.nullable {
-                    out.push((Some(prop.clone()), "null value not permitted".to_string()));
+            let reason = match check_property(c, value) {
+                PropertyCheck::Ok => continue,
+                PropertyCheck::Missing { reason } => reason.to_string(),
+                PropertyCheck::TypeMismatch { expected, actual } => {
+                    format!("expected type {expected}, got {actual}")
                 }
-                continue;
-            }
-            if let (Some(dt), Some(v)) = (c.declared_type, value)
-                && !dt.matches(v)
-            {
-                out.push((
-                    Some(prop.clone()),
-                    format!("expected type {}, got {}", dt.type_name(), v.type_name()),
-                ));
-            }
+            };
+            let prop = GLOBAL_INTERNER.resolve_or_else(c.property, String::new);
+            out.push((Some(prop), reason));
         }
         out
     }
