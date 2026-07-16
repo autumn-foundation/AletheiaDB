@@ -14,6 +14,7 @@
 use crate::constraints_lineage_audit_tools;
 use crate::edge_tools;
 use crate::http_routes;
+use crate::metrics_exposition;
 use crate::node_tools;
 use crate::schema_batch_tools;
 use crate::security::{self, SecurityConfig};
@@ -68,6 +69,7 @@ pub fn try_build_server_testapp(
     let app = TestApp::new()
         .routes(routes![
             http_routes::health_check,
+            metrics_exposition::metrics,
             http_routes::create_key,
             http_routes::list_keys,
             http_routes::revoke_key,
@@ -79,6 +81,8 @@ pub fn try_build_server_testapp(
             node_tools::delete_node,
             node_tools::delete_node_cascade,
             node_tools::retract_node,
+            node_tools::create_node_with_embedding,
+            node_tools::update_node_embedding,
             node_tools::find_nodes_at_time,
             edge_tools::get_edge,
             edge_tools::list_edges,
@@ -105,6 +109,9 @@ pub fn try_build_server_testapp(
             vector_query_tools::hybrid_query,
             vector_query_tools::query,
             vector_query_tools::list_vector_indexes,
+            vector_query_tools::embed_query,
+            vector_query_tools::embed_text,
+            vector_query_tools::semantic_search,
             schema_batch_tools::get_schema,
             schema_batch_tools::temporal_extent,
             schema_batch_tools::database_stats,

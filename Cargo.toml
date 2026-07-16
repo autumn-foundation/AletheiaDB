@@ -488,6 +488,14 @@ harness = false
 path = "benches/schema_constraints.rs"
 required-features = []
 
+# Temporal aggregation windows (Issue #3363): 12-window monthly aggregation
+# over ~1,000 historical versions, targeting < 50ms end-to-end.
+[[bench]]
+name = "temporal_window"
+harness = false
+path = "benches/temporal_window.rs"
+required-features = []
+
 # OpenTelemetry tracing overhead gate (Issue #3376): disabled vs enabled.
 [[bench]]
 name = "otel_overhead"
@@ -515,6 +523,13 @@ required-features = []
 name = "historical_storage"
 harness = false
 path = "benches/historical_storage.rs"
+required-features = []
+
+# Named snapshots / reproducible reads (Issue #3370)
+[[bench]]
+name = "snapshot_pin"
+harness = false
+path = "benches/snapshot_pin.rs"
 required-features = []
 
 # High-level API - includes transaction overhead and API layer
@@ -600,6 +615,12 @@ required-features = []
 name = "changefeed"
 harness = false
 path = "benches/changefeed.rs"
+required-features = []
+
+[[bench]]
+name = "changefeed_subscribe"
+harness = false
+path = "benches/changefeed_subscribe.rs"
 required-features = []
 
 [[bench]]

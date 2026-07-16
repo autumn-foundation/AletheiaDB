@@ -604,6 +604,120 @@ mod encrypted {
         walk(indexes_dir, version).expect("no AEIX-headed index file found to tamper")
     }
 
+    /// Corrupt the encrypted BODY of the named `AEIX`-headed index file under
+    /// `indexes_dir` while leaving its 10-byte plaintext header (magic, format,
+    /// algorithm, `key_version`) byte-for-byte intact: flip the final byte (the
+    /// AES-GCM tag), guaranteeing the AEAD auth check fails on decrypt even
+    /// though header classification still passes. Returns the tampered path.
+    fn corrupt_index_body_named(indexes_dir: &Path, file_name: &str) -> std::path::PathBuf {
+        fn walk(dir: &Path, file_name: &str) -> Option<std::path::PathBuf> {
+            for e in std::fs::read_dir(dir).ok()?.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if let Some(hit) = walk(&p, file_name) {
+                        return Some(hit);
+                    }
+                    continue;
+                }
+                if p.file_name().and_then(|n| n.to_str()) != Some(file_name) {
+                    continue;
+                }
+                let mut bytes = match std::fs::read(&p) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                // Header intact (>=10 bytes, AEIX magic); flip the last body byte.
+                if bytes.len() > 10 && &bytes[..4] == b"AEIX" {
+                    let last = bytes.len() - 1;
+                    bytes[last] ^= 0xFF;
+                    std::fs::write(&p, &bytes).unwrap();
+                    return Some(p);
+                }
+            }
+            None
+        }
+        walk(indexes_dir, file_name).expect("named AEIX-headed index file not found to corrupt")
+    }
+
+    /// Author a TOML config for the fixture's data dir/key but with index
+    /// persistence `load_on_startup = false`, so a corrupted index BODY does not
+    /// fail the `open()` (the index files are not force-loaded) — the exact
+    /// window in which header-only classification would false-PASS (Issue #3618).
+    fn no_load_toml(f: &EncryptedFixture) -> std::path::PathBuf {
+        let root = f.toml_path.parent().unwrap();
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(root.join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_delay_ms: 5,
+                        max_batch_size: 64,
+                    })
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: root.join("data"),
+                load_on_startup: false,
+                ..Default::default()
+            })
+            .encryption(EncryptionConfig::file_based(&f.key_path))
+            .build();
+        let toml_path = root.join("no-load.toml");
+        config.to_toml_file(&toml_path).unwrap();
+        toml_path
+    }
+
+    #[test]
+    fn encryption_verify_same_version_undecryptable_body_fails() {
+        // Issue #3618: the false-PASS the old header-only classifier could not
+        // catch. Corrupt one index file's BODY (AES-GCM tag) while leaving its
+        // AEIX header/key_version intact, and open with load_on_startup=false so
+        // the corrupted body is NOT force-loaded at open(). Under the OLD code
+        // path, header classification finds version 1 held by the keyring and
+        // `encryption verify` would PASS. The #3618 decrypt probe attempts a real
+        // body decrypt, the AEAD auth tag fails, and verify now FAILS instead.
+        //
+        // Why corruption, not a fully-wrong configured KEY, is the constructible
+        // end-to-end probe trigger: WAL and index share one MEK, so a wrong
+        // configured key aborts at open_db() during WAL replay BEFORE the index
+        // probe ever runs — it cannot be reached via the CLI. Corrupting one index
+        // body (header intact, load_on_startup=false so it is not force-loaded at
+        // open) is the only way to drive the probe to a FAIL end-to-end. The
+        // body-level wrong-key path is covered by the multi-generation unit test
+        // (verify_decryptable_catches_wrong_key_in_one_of_multiple_generations).
+        let f = make_encrypted_db();
+        let indexes_dir = f.toml_path.parent().unwrap().join("data").join("indexes");
+        // Corrupt the manifest body (always probed by verify_decryptable).
+        let tampered = corrupt_index_body_named(&indexes_dir, "manifest.idx");
+        assert!(tampered.exists(), "the manifest should have been corrupted");
+
+        let toml = no_load_toml(&f);
+        let r = run_with(
+            &["encryption", "verify"],
+            &[("ALETHEIADB_CONFIG", toml.display().to_string())],
+        );
+        assert_ne!(
+            r.code, 0,
+            "verify with an undecryptable index body must FAIL; stdout={:?} stderr={:?}",
+            r.stdout, r.stderr
+        );
+        let c = r.combined_lower();
+        assert!(c.contains("failed"), "verify must report FAILED; got={c:?}");
+        assert!(
+            !c.contains("verify: pass"),
+            "verify must NOT false-PASS on an undecryptable body; got={c:?}"
+        );
+        // The probe's FAIL wording: wrong key / corruption, does not decrypt.
+        assert!(
+            c.contains("does not decrypt") || c.contains("wrong key") || c.contains("corruption"),
+            "failure should name the undecryptable body; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        // No key bytes leak on stdout or stderr.
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
     #[test]
     fn encryption_verify_foreign_key_version_index_file_fails() {
         // Re-stamp one persisted index file's AEIX header with a key version the

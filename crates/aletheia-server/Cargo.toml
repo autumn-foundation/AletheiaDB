@@ -12,6 +12,16 @@ publish = false
 [lints.rust]
 missing_docs = "warn"
 
+[features]
+# Forwarding feature so this crate's tests can `cfg` on whether the Cypher
+# engine is compiled into the linked `aletheiadb` rlib. The Code Coverage CI
+# job builds `-p aletheiadb -p aletheia-server --features ...,cypher`; declaring
+# `cypher` here lets that flag also apply to this package (enabling
+# `aletheiadb/cypher`) and keeps `#[cfg(feature = "cypher")]` in the test tree a
+# recognized cfg (no `unexpected_cfgs` warning under `-D warnings`). Omitting it
+# reproduces the default (Cypher off) build exactly.
+cypher = ["aletheiadb/cypher"]
+
 [dependencies]
 # autumn-web 0.5.0 — UNRENAMED so its proc-macros' hard-coded `::autumn_web`
 # paths resolve (see docs/spikes/autumn-web-migration-spike.md §1). `mcp`
@@ -21,7 +31,11 @@ autumn-web = { version = "0.5.0", default-features = false, features = ["maud", 
 # (`ApiResponse`, `node_to_query_json`, `AletheiaHttpError`), the constant-time
 # `AuthStore`/`AccessClass`/`Role` RBAC model, and the MCP typed node-read
 # request/response methods (`AletheiaMcpServer::get_node`/`list_nodes`/`count_nodes`).
-aletheiadb = { path = "../..", features = ["http-server", "mcp-server"] }
+# `observability` exposes the internal `MetricsRecorder` / `METRICS` atomic
+# mirror + `MetricsSnapshot` that the Prometheus `/metrics` exposition endpoint
+# (Issue #3624) renders. It only pulls in `dep:tracing` (already brought in by
+# `http-server`), so it adds no new heavy dependency to the graph.
+aletheiadb = { path = "../..", features = ["http-server", "mcp-server", "observability"] }
 axum = { version = "0.8" }
 tower-http = { version = "0.6", features = ["set-header"] }
 serde = { version = "1.0", features = ["derive"] }

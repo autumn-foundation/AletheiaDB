@@ -108,6 +108,7 @@ pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("traverse", AccessClass::Read),
     ("get_node_history", AccessClass::Read),
     ("find_similar", AccessClass::Read),
+    ("semantic_search", AccessClass::Read),
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
@@ -147,6 +148,7 @@ pub const ALL_DISPATCH_ROUTED: &[(&str, AccessClass)] = &[
     ("traverse", AccessClass::Read),
     ("get_node_history", AccessClass::Read),
     ("find_similar", AccessClass::Read),
+    ("semantic_search", AccessClass::Read),
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
@@ -199,6 +201,48 @@ pub(crate) fn insert_budget(
     }
 }
 
+/// Deserialize the Issue #3353 `priority_properties` parameter from a **single**
+/// query-string value — a comma-separated list, e.g.
+/// `?priority_properties=name,title` (OpenAPI form / `explode=false` array
+/// serialization).
+///
+/// axum/autumn `Query` deserialization runs through `serde_urlencoded`, which
+/// **cannot** deserialize a `Vec<T>` from any URL encoding. Declaring the field
+/// as a bare `Option<Vec<String>>` therefore made it latent-dead on every GET
+/// read: a client sending `?priority_properties=name,title` got HTTP 400
+/// (`invalid type: string …, expected a sequence`). This helper reads the value
+/// as an `Option<String>` (which `serde_urlencoded` *can* do) and splits it on
+/// `,`, trimming each entry and dropping empties. The parsed `Vec` keeps the
+/// existing `Option<Vec<String>>` field type, so [`insert_budget`] and the
+/// `src/mcp/budget.rs` contract are unchanged.
+///
+/// Tolerant by design: an entirely empty input (absent, `""`, or `,,`) yields
+/// `None` — chosen so it is equivalent to the parameter never being sent —
+/// rather than `Some(vec![])`. A malformed comma string thus never errors (no
+/// 400); only a value that is not a string at all produces the standard serde
+/// error. The POST-body reads (`find_nodes_at_time` / `find_similar` /
+/// `hybrid_query` / `query`) deserialize from a JSON body where a real array is
+/// representable, so they keep the plain `Vec` and do **not** use this helper.
+pub(crate) fn de_priority_properties<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.and_then(|s| {
+        let items: Vec<String> = s
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect();
+        // All-empty input (`""`, `,,`, whitespace-only) → None: equivalent to
+        // the parameter being absent, never `Some(vec![])`.
+        if items.is_empty() { None } else { Some(items) }
+    }))
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Edge reads: get_edge / list_edges / count_edges / get_outgoing_edges /
 // get_incoming_edges — all [`ReadClass`], #3220 vector elision default +
@@ -228,6 +272,13 @@ pub struct GetEdgeQuery {
     /// #3353: byte-exact response cap.
     pub max_response_bytes: Option<u64>,
     /// #3353: property keys to protect first as the response degrades.
+    /// Comma-separated on the HTTP query surface (OpenAPI form / `explode=false`
+    /// array), e.g. `?priority_properties=name,title`; entries are trimmed and
+    /// empties dropped. See [`de_priority_properties`].
+    #[serde(
+        default,
+        deserialize_with = "crate::edge_tools::de_priority_properties"
+    )]
     pub priority_properties: Option<Vec<String>>,
 }
 
@@ -276,6 +327,13 @@ pub struct ListEdgesQuery {
     /// #3353: byte-exact response cap.
     pub max_response_bytes: Option<u64>,
     /// #3353: property keys to protect first as the response degrades.
+    /// Comma-separated on the HTTP query surface (OpenAPI form / `explode=false`
+    /// array), e.g. `?priority_properties=name,title`; entries are trimmed and
+    /// empties dropped. See [`de_priority_properties`].
+    #[serde(
+        default,
+        deserialize_with = "crate::edge_tools::de_priority_properties"
+    )]
     pub priority_properties: Option<Vec<String>>,
 }
 
@@ -351,6 +409,13 @@ pub struct AdjacencyQuery {
     /// #3353: byte-exact response cap.
     pub max_response_bytes: Option<u64>,
     /// #3353: property keys to protect first as the response degrades.
+    /// Comma-separated on the HTTP query surface (OpenAPI form / `explode=false`
+    /// array), e.g. `?priority_properties=name,title`; entries are trimmed and
+    /// empties dropped. See [`de_priority_properties`].
+    #[serde(
+        default,
+        deserialize_with = "crate::edge_tools::de_priority_properties"
+    )]
     pub priority_properties: Option<Vec<String>>,
     /// #3360: request a snapshot-anchored cursor on the first page.
     pub use_cursor: Option<bool>,

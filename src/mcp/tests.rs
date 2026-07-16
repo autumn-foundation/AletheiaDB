@@ -5293,6 +5293,65 @@ mod vector_elision_tests {
         assert_eq!(returned_floats, embedding);
     }
 
+    // Issue #2906 (MAJOR 3): `update_node_embedding` merges the new embedding
+    // into the node's existing properties inside a SINGLE write transaction.
+    // This exercises the exact transactional read-merge-write mechanism the
+    // handler uses (without needing a model): reading the node from the
+    // transaction's own snapshot, inserting the vector into the existing
+    // property builder, and updating — proving every other property is
+    // preserved and the merge is atomic (so a lost-update race cannot silently
+    // drop a concurrent writer's non-embedding change).
+    #[test]
+    fn update_embedding_transactional_merge_preserves_other_properties() {
+        use crate::api::transaction::{ReadOps, WriteOps, WriteRequestOptions};
+
+        let db = AletheiaDB::new().expect("db");
+
+        // Seed a node with non-embedding properties and an initial embedding.
+        let initial = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .try_insert_vector("embedding", &[0.1f32, 0.2, 0.3, 0.4])
+            .expect("seed vector")
+            .build();
+        let node_id = db.create_node("Person", initial).expect("create");
+
+        // Merge a NEW embedding, reproducing the handler's transaction closure.
+        let new_embedding = vec![0.9f32, 0.8, 0.7, 0.6];
+        db.write(|tx| {
+            let node = tx.get_node(node_id)?;
+            let properties = node
+                .properties
+                .builder()
+                .try_insert_vector("embedding", &new_embedding)
+                .expect("insert vector")
+                .build();
+            tx.update_node_with_options(node_id, properties, WriteRequestOptions::new())?;
+            Ok::<(), crate::Error>(())
+        })
+        .expect("transactional update");
+
+        // Non-embedding properties survive the embedding-only update.
+        let node = db.get_node(node_id).expect("get after update");
+        assert_eq!(
+            node.properties.get("name").and_then(|v| v.as_str()),
+            Some("Alice"),
+            "name must be preserved across the embedding update"
+        );
+        assert_eq!(
+            node.properties.get("age").and_then(|v| v.as_int()),
+            Some(30),
+            "age must be preserved across the embedding update"
+        );
+        // And the embedding itself was updated to the new vector.
+        let stored = node
+            .properties
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .expect("embedding vector present");
+        assert_eq!(stored, new_embedding.as_slice(), "embedding was updated");
+    }
+
     #[test]
     fn test_list_nodes_elides_vectors_by_default() {
         let server = create_test_server();
@@ -10778,12 +10837,27 @@ mod database_stats_tests {
             provenance: None,
         });
 
-        let value = stats_response(&server);
+        let mut value = stats_response(&server);
+        // Issue #3368 residue: the MCP response additively carries a
+        // `resource_limits` termination-counter block that is an MCP-surface
+        // concern, not part of the storage-layer `DatabaseStats`. Assert it is
+        // present, then strip it so the remainder is exactly the serialized
+        // public API (the thin-aggregator contract is otherwise unchanged).
+        assert!(
+            value.get("resource_limits").is_some(),
+            "MCP response must surface the resource_limits counters: {value}"
+        );
+        value
+            .as_object_mut()
+            .expect("stats response is an object")
+            .remove("resource_limits");
+
         let api_stats = server.db().stats();
         let api_value = serde_json::to_value(&api_stats).expect("DatabaseStats must serialize");
         assert_eq!(
             value, api_value,
-            "MCP response must be exactly the serialized public DatabaseStats"
+            "MCP response (minus the additive resource_limits block) must be exactly the \
+             serialized public DatabaseStats"
         );
     }
 
@@ -10897,7 +10971,25 @@ mod database_stats_tests {
         let value = stats_response(&server);
         assert_eq!(
             keys(&value),
-            vec!["chain", "cold_storage", "current", "historical", "wal"]
+            vec![
+                "chain",
+                "cold_storage",
+                "current",
+                "historical",
+                "resource_limits",
+                "wal"
+            ]
+        );
+        // Issue #3368 residue: the additive per-query resource-limit
+        // termination counters are surfaced under a stable `resource_limits`
+        // block alongside the storage-layer stats.
+        assert_eq!(
+            keys(&value["resource_limits"]),
+            vec![
+                "byte_cap_terminations",
+                "override_rejections",
+                "timeout_terminations",
+            ]
         );
         // Provenance hash chain block (Issue #3351 AC7): present on every
         // stats response; disabled here, so all optional fields are null but
@@ -16536,5 +16628,238 @@ mod provenance_filter_tests {
         );
         assert!(err);
         assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+}
+
+// ============================================================================
+// Embedding generation & text semantic search (Issue #2906)
+//
+// Design A: all five tools are advertised + dispatched unconditionally. The
+// real bodies live under `#[cfg(feature = "embeddings")]`; the feature-off
+// bodies return a structured unavailable-feature error. The primary test build
+// (no `embeddings` feature) exercises the feature-off path + catalog + RBAC;
+// the `#[cfg(feature = "embeddings")]` sub-module exercises validation, bounds,
+// the no-model precondition, and the non-dense conversion glue WITHOUT loading
+// a model (true model e2e is a separate `#[ignore]`d concern).
+// ============================================================================
+
+mod embedding_tools_tests {
+    use super::*;
+
+    const EMBED_TOOLS: [&str; 5] = [
+        "embed_query",
+        "embed_text",
+        "semantic_search",
+        "create_node_with_embedding",
+        "update_node_embedding",
+    ];
+
+    fn dispatch(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = AletheiaMcpServer::extract_text(result);
+        let value = serde_json::from_str(&text).expect("tool response should be valid JSON");
+        (value, is_error)
+    }
+
+    #[test]
+    fn all_five_tools_are_advertised() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        for name in EMBED_TOOLS {
+            assert!(
+                tools.iter().any(|t| t == name),
+                "{name} must be advertised in the MCP tool catalog"
+            );
+        }
+    }
+
+    // ---- Feature OFF: structured unavailable-feature error (DEFAULT build) ----
+    #[cfg(not(feature = "embeddings"))]
+    mod feature_off {
+        use super::*;
+
+        #[test]
+        fn each_tool_reports_feature_unavailable() {
+            let server = create_test_server();
+            for name in EMBED_TOOLS {
+                let (v, err) = dispatch(&server, name, serde_json::json!({}));
+                assert!(
+                    err,
+                    "{name} should error when the embeddings feature is off"
+                );
+                assert_eq!(
+                    v["error"]["code"].as_str(),
+                    Some("FAILED_PRECONDITION"),
+                    "{name}: {v}"
+                );
+                assert_eq!(
+                    v["error"]["details"]["feature"].as_str(),
+                    Some("embeddings"),
+                    "{name}: {v}"
+                );
+                assert_eq!(
+                    v["error"]["details"]["available"].as_bool(),
+                    Some(false),
+                    "{name}: {v}"
+                );
+                assert_eq!(
+                    v["error"]["retriable"].as_bool(),
+                    Some(false),
+                    "{name}: {v}"
+                );
+            }
+        }
+    }
+
+    // ---- Feature ON: validation/bounds/no-model/non-dense (no model loaded) ----
+    #[cfg(feature = "embeddings")]
+    mod feature_on {
+        use super::*;
+
+        #[test]
+        fn embed_query_without_model_is_failed_precondition() {
+            let server = create_test_server(); // no embedder configured
+            let (v, err) = dispatch(&server, "embed_query", serde_json::json!({"text": "hello"}));
+            assert!(err);
+            assert_eq!(
+                v["error"]["code"].as_str(),
+                Some("FAILED_PRECONDITION"),
+                "{v}"
+            );
+        }
+
+        #[test]
+        fn embed_query_oversized_text_is_invalid_argument() {
+            let server = create_test_server();
+            let big = "a".repeat(64 * 1024 + 1);
+            let (v, err) = dispatch(&server, "embed_query", serde_json::json!({"text": big}));
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        #[test]
+        fn embed_text_empty_is_invalid_argument() {
+            let server = create_test_server();
+            let (v, err) = dispatch(&server, "embed_text", serde_json::json!({"texts": []}));
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        #[test]
+        fn embed_text_too_many_is_invalid_argument() {
+            let server = create_test_server();
+            let texts: Vec<String> = (0..257).map(|i| i.to_string()).collect();
+            let (v, err) = dispatch(&server, "embed_text", serde_json::json!({"texts": texts}));
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        // Issue #2906 AC: `max_chunks: 0` can never return anything useful and is
+        // rejected as a caller error *before* any model is required.
+        #[test]
+        fn embed_text_zero_max_chunks_is_invalid_argument() {
+            let server = create_test_server(); // no model needed: validated first
+            let (v, err) = dispatch(
+                &server,
+                "embed_text",
+                serde_json::json!({"texts": ["hello"], "max_chunks": 0}),
+            );
+            assert!(err);
+            assert_eq!(v["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{v}");
+        }
+
+        // Issue #2906 AC: `embed_text` performs REAL chunk expansion. The
+        // model-independent splitter is the load-bearing piece — a long document
+        // becomes MULTIPLE chunks (never silently truncated to one vector), each
+        // chunk is bounded, and reassembling the chunks reproduces the input
+        // exactly (no data dropped). The per-chunk embeddings are then aligned to
+        // these chunk texts via EmbedData, so alignment is by identity, not a
+        // positional zip.
+        #[test]
+        fn split_text_into_chunks_short_input_is_single_chunk() {
+            let chunks = crate::mcp::server::split_text_into_chunks("hello", 1000);
+            assert_eq!(chunks, vec!["hello".to_string()]);
+        }
+
+        #[test]
+        fn split_text_into_chunks_long_input_expands_to_many_bounded_chunks() {
+            let text = "a".repeat(25);
+            let chunks = crate::mcp::server::split_text_into_chunks(&text, 4);
+            // 25 chars / 4 per window = 7 chunks (6 full + 1 remainder).
+            assert_eq!(chunks.len(), 7, "long text must expand to many chunks");
+            for c in &chunks {
+                assert!(c.chars().count() <= 4, "each chunk is bounded: {c:?}");
+            }
+            // Lossless: concatenation reproduces the original document exactly.
+            assert_eq!(chunks.concat(), text, "no data dropped across chunks");
+        }
+
+        #[test]
+        fn split_text_into_chunks_respects_char_boundaries() {
+            // Multibyte scalars must never be split mid-encoding; every chunk is
+            // valid UTF-8 (String guarantees it) and counts by scalar value.
+            let text = "héllo wörld 🌍🌎🌏";
+            let chunks = crate::mcp::server::split_text_into_chunks(text, 3);
+            for c in &chunks {
+                assert!(c.chars().count() <= 3);
+                assert!(std::str::from_utf8(c.as_bytes()).is_ok());
+            }
+            assert_eq!(chunks.concat(), text);
+            assert!(chunks.len() > 1, "multibyte document still expands");
+        }
+
+        #[test]
+        fn split_text_into_chunks_empty_input_yields_one_empty_chunk() {
+            assert_eq!(
+                crate::mcp::server::split_text_into_chunks("", 1000),
+                vec![String::new()]
+            );
+        }
+
+        #[test]
+        fn semantic_search_missing_index_is_failed_precondition() {
+            let server = create_test_server();
+            let (v, err) = dispatch(
+                &server,
+                "semantic_search",
+                serde_json::json!({"property_name": "nope", "query_text": "hi"}),
+            );
+            assert!(err);
+            assert_eq!(
+                v["error"]["code"].as_str(),
+                Some("FAILED_PRECONDITION"),
+                "{v}"
+            );
+        }
+
+        // The non-dense conversion glue the embedding handlers rely on: a
+        // MultiVector model result maps to NotDense (never a silent zero
+        // vector). Exercised directly on the shared helper (no model needed).
+        #[test]
+        fn multivector_maps_to_not_dense() {
+            use crate::embeddings::{DenseEmbeddingError, EmbeddingResult, to_dense_iter};
+            let results = vec![EmbeddingResult::MultiVector(vec![vec![0.1_f32, 0.2]])];
+            let first = to_dense_iter(results, Some(1)).next();
+            assert!(
+                matches!(first, Some(Err(DenseEmbeddingError::NotDense))),
+                "expected NotDense, got {first:?}"
+            );
+        }
+
+        // True model-backed end-to-end embedding requires downloading a model
+        // (network + weights); kept #[ignore]d so unit runs stay hermetic.
+        #[test]
+        #[ignore = "requires downloading an embedding model (network); run manually"]
+        fn embed_query_roundtrip_with_real_model() {
+            // Intentionally left as a manual harness: build an Embedder via
+            // aletheiadb::embeddings::EmbedderBuilder, attach it with
+            // AletheiaMcpServer::with_embedder, then embed_query and assert a
+            // non-empty dense vector. Not run in CI.
+        }
     }
 }

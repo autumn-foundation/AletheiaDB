@@ -26,6 +26,7 @@
 //! to the physical wall clock, bridging the gap between machines and human expectations.
 
 pub mod changefeed;
+pub mod changefeed_subscription;
 pub mod constraint;
 pub mod error;
 pub mod graph;
@@ -44,6 +45,9 @@ pub mod vector;
 
 // Re-export commonly used types for convenience
 pub use changefeed::{ChangeFeedPage, ChangeFeedQuery, ChangeRecord, ChangeType, EntityKind};
+pub use changefeed_subscription::{
+    ChangeFilter, ChangefeedBroadcaster, ChangefeedConfig, RecvError, Subscription,
+};
 pub use error::{Error, Result, StorageError, TemporalError};
 pub use graph::{Edge, Node, NodeHeader};
 pub use id::{EdgeId, EntityId, IdGenerator, NodeId, VersionId};

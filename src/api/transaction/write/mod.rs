@@ -123,6 +123,13 @@ pub struct WriteTransaction {
     /// and excluded from the pre-lock snapshot-isolation conflict check. Empty
     /// for transactions that use no conditional writes (zero overhead).
     pub(crate) cas_preconditions: Vec<cas::CasPrecondition>,
+
+    /// Push-changefeed broadcaster (Issue #3375). `None` for transactions created
+    /// without the DB-layer wiring (legacy / low-level tests): such commits emit no
+    /// changefeed events. When present, the committed change set is broadcast to
+    /// matching subscribers AFTER the commit is durable, applied, and visible — outside
+    /// every write-path lock (the broadcaster's lock is a leaf).
+    pub(crate) changefeed: Option<Arc<crate::core::changefeed_subscription::ChangefeedBroadcaster>>,
 }
 
 impl WriteTransaction {
@@ -262,6 +269,7 @@ impl WriteTransaction {
             constraint_registry: None,
             in_flight: None,
             cas_preconditions: Vec::new(),
+            changefeed: None,
         }
     }
 
@@ -279,6 +287,17 @@ impl WriteTransaction {
     /// persistence to avoid lost writes across a crash.
     pub(crate) fn with_in_flight_tracker(mut self, tracker: Arc<InFlightLsns>) -> Self {
         self.in_flight = Some(tracker);
+        self
+    }
+
+    /// Attach the parent database's push-changefeed broadcaster (Issue #3375, called by
+    /// the DB layer). When set, a successful commit broadcasts its committed change set to
+    /// matching subscribers after the write is durable, applied, and visible.
+    pub(crate) fn with_changefeed(
+        mut self,
+        broadcaster: Arc<crate::core::changefeed_subscription::ChangefeedBroadcaster>,
+    ) -> Self {
+        self.changefeed = Some(broadcaster);
         self
     }
 
@@ -451,6 +470,16 @@ impl WriteTransaction {
         // guaranteed present in any current+historical snapshot.
         let mut in_flight_guard: Option<in_flight::InFlightGuard> = None;
 
+        // Issue #3375 (ordered emit, HIGH review fix): the push-changefeed emit ticket.
+        // Reserved UNDER the `current_timestamp` lock below (right after the commit timestamp
+        // is assigned) so its sequence totally orders commits by commit timestamp; consumed on
+        // the success path by `EmitTicket::submit`. Declared in the OUTER scope so that if the
+        // commit aborts/`?`-returns after reservation but before submit (a WAL failure, or the
+        // Issue #3416 commit-time write-skew re-check in `apply_changes`), dropping this
+        // `Option` releases an empty slot for the reserved seq — the sequencer never stalls on
+        // a reserved-but-never-submitted sequence.
+        let mut emit_ticket: Option<crate::core::changefeed_subscription::EmitTicket> = None;
+
         // Acquire commit timestamp and perform mode-aware WAL flush.
         //
         // CRITICAL: We must hold the timestamp lock until WAL logging is complete
@@ -575,6 +604,19 @@ impl WriteTransaction {
             // Persist observation only after we successfully advanced the frontier.
             *previous_observed_at = observed_at;
             drop(previous_observed_at);
+
+            // Issue #3375 (ordered emit): reserve the push-changefeed emit ticket HERE, while
+            // the `current_timestamp` lock is still held and monotonic ordering is guaranteed,
+            // so the ticket's sequence == this commit's timestamp order == ChangeCursor order.
+            // Gated on `has_subscribers()` so the zero-subscriber fast path stays a single
+            // atomic load with no sequencer work (no reservation, no ticket). The reservation
+            // itself is a lock-free `fetch_add`, so taking it under `current_timestamp` does
+            // not violate the write-path lock order.
+            if let Some(broadcaster) = &self.changefeed
+                && broadcaster.has_subscribers()
+            {
+                emit_ticket = Some(broadcaster.reserve_emit_ticket());
+            }
 
             #[cfg(feature = "observability")]
             let wal_start = std::time::Instant::now();
@@ -731,6 +773,40 @@ impl WriteTransaction {
         // Mark as committed
         self.state = TxState::Committed;
 
+        // Issue #3375: broadcast this transaction's committed change set to push-changefeed
+        // subscribers. This runs on the committed path only (never for an aborted/rolled-back
+        // transaction, which returns early before reaching here), and strictly AFTER the write
+        // is durable (WAL fsynced), applied (current + historical), and visible
+        // (`register_commit`). No write-path lock is held: the records are built via a fresh,
+        // short `historical.read()` (a leaf acquisition — nothing later in the lock order is
+        // held) whose guard is dropped before submitting.
+        //
+        // HIGH review fix (ordered emit): we consume the ticket reserved under the
+        // `current_timestamp` lock. `submit` releases records to subscriber buffers in strict
+        // reserved-sequence (== commit-timestamp == ChangeCursor) order, so per-subscriber
+        // delivery is cursor-ascending even when concurrent commits finish their record-build
+        // out of order — the precondition that makes `last_delivered` a zero-loss resume
+        // high-water-mark. A slow subscriber cannot back-pressure this writer. We submit even
+        // an empty record set so the reserved sequence is released and never stalls the
+        // sequencer.
+        if let Some(ticket) = emit_ticket.take() {
+            let (node_vids, edge_vids) =
+                self.committed_changefeed_version_ids(&closing_version_ids);
+            let mut records: Vec<crate::core::changefeed::ChangeRecord> =
+                if node_vids.is_empty() && edge_vids.is_empty() {
+                    Vec::new()
+                } else {
+                    let hist = self.historical.read();
+                    hist.collect_committed_changes(&node_vids, &edge_vids)
+                        .into_iter()
+                        .map(|raw| raw.into_record())
+                        .collect()
+                };
+            // Deterministic #3216 total order (tx-time, kind, entity, version).
+            records.sort_by_key(|r| r.cursor());
+            ticket.submit(records);
+        }
+
         #[cfg(feature = "observability")]
         {
             let total_commit_us = commit_start.elapsed().as_micros() as u64;
@@ -784,6 +860,51 @@ impl WriteTransaction {
             ids.push(VersionId::new_unchecked(self.version_id_gen.next()?));
         }
         Ok(ids)
+    }
+
+    /// Collect the node and edge version ids this transaction just committed, split by
+    /// kind, for the push-changefeed broadcast (Issue #3375).
+    ///
+    /// Create/update ops carry their own `version_id`; delete/retract ops draw their
+    /// closing (tombstone) `version_id` from `closing_version_ids` in buffer order — the
+    /// exact order [`pregenerate_closing_version_ids`](Self::pregenerate_closing_version_ids)
+    /// generated them and [`apply::apply_changes`] consumed them. Iterating the buffer in
+    /// order and advancing a cursor into `closing_version_ids` for each delete/retract keeps
+    /// the pairing correct.
+    fn committed_changefeed_version_ids(
+        &self,
+        closing_version_ids: &[VersionId],
+    ) -> (Vec<VersionId>, Vec<VersionId>) {
+        use super::BufferedWrite as BW;
+        let mut node_vids = Vec::new();
+        let mut edge_vids = Vec::new();
+        let mut closing_cursor = 0usize;
+        let mut next_closing = || {
+            let id = closing_version_ids.get(closing_cursor).copied();
+            closing_cursor += 1;
+            id
+        };
+        for op in self.buffer.operations() {
+            match op {
+                BW::CreateNode { version_id, .. } | BW::UpdateNode { version_id, .. } => {
+                    node_vids.push(*version_id);
+                }
+                BW::CreateEdge { version_id, .. } | BW::UpdateEdge { version_id, .. } => {
+                    edge_vids.push(*version_id);
+                }
+                BW::DeleteNode { .. } | BW::RetractNode { .. } => {
+                    if let Some(id) = next_closing() {
+                        node_vids.push(id);
+                    }
+                }
+                BW::DeleteEdge { .. } | BW::RetractEdge { .. } => {
+                    if let Some(id) = next_closing() {
+                        edge_vids.push(id);
+                    }
+                }
+            }
+        }
+        (node_vids, edge_vids)
     }
 
     /// Rollback the transaction.
@@ -1562,6 +1683,20 @@ impl WriteOps for WriteTransaction {
 
             // Build the final merged property map
             let merged_properties = builder.build();
+
+            // A PATCH may drop or downgrade a vector (e.g. overwrite the
+            // embedding key with a scalar, or remove it): mark the buffer so
+            // the temporal vector index snapshots on commit if EITHER the
+            // existing node or the merged map carries a vector. `WriteBuffer::add`
+            // only inspects the merged map, so without this a vector-removing
+            // PATCH leaves `has_vector_operations` false and no snapshot fires,
+            // leaking the phantom as-of-now (Issue #3621). Mirrors
+            // `buffer_node_replace`.
+            if !self.buffer.has_vector_operations()
+                && (node.properties.contains_vector() || merged_properties.contains_vector())
+            {
+                self.buffer.mark_has_vector_operations();
+            }
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;

@@ -195,6 +195,24 @@ impl Parser {
             query = query.with_temporal(t);
         }
 
+        // Parse an optional temporal aggregation window clause (Issue #3363).
+        // When present it is self-contained (it carries its own aggregate
+        // `RETURN`), so no further read clauses are parsed and the query must
+        // end after it.
+        if self.check_kw("WINDOW") {
+            let window = self.parse_window_clause()?;
+            query = query.with_window(window);
+            if !self.is_at_end() {
+                return Err(self.error(
+                    "Unexpected tokens after WINDOW ... RETURN (WHERE/ORDER/SKIP/LIMIT \
+                     are not supported with a temporal aggregation window)"
+                        .to_string(),
+                    Some("end of query".to_string()),
+                ));
+            }
+            return Ok(query);
+        }
+
         // Parse optional RANK BY SIMILARITY clause
         if let Some(rank) = self.parse_rank_clause()? {
             query = query.with_rank(rank);
@@ -291,6 +309,125 @@ impl Parser {
         let end = self.parse_timestamp()?;
 
         Ok(TemporalClause::Between { start, end })
+    }
+
+    // =========================================================
+    // Temporal Aggregation Window Clause (Issue #3363)
+    // =========================================================
+
+    /// Parse a temporal aggregation window clause.
+    ///
+    /// # Grammar
+    /// ```text
+    /// window_clause ::= "WINDOW" integer unit
+    ///                   "OVER" "VALID_TIME" "FROM" timestamp "TO" timestamp
+    ///                   ("AS" "OF" "SYSTEM_TIME" timestamp)?
+    ///                   "RETURN" window_agg ("," window_agg)*
+    /// unit          ::= identifier   (minute|hour|day|week|month|quarter|year, +s)
+    /// window_agg    ::= func "(" agg_arg ")" ("AS" identifier)?
+    /// func          ::= "COUNT" | identifier   (SUM|AVG|MIN|MAX|CHANGES)
+    /// agg_arg       ::= "*" | identifier ("." identifier)?
+    /// ```
+    fn parse_window_clause(&mut self) -> Result<WindowClause, ParseError> {
+        self.expect_kw("WINDOW")?;
+
+        // <count> <unit>
+        let count = match self.current() {
+            Some(Token::IntegerLiteral(n)) => {
+                let n = *n;
+                self.advance();
+                n
+            }
+            _ => {
+                return Err(self.error(
+                    "Expected an integer window size after WINDOW".to_string(),
+                    Some("integer".to_string()),
+                ));
+            }
+        };
+        let unit = self.parse_identifier().map_err(|_| {
+            self.error(
+                "Expected a window unit (e.g. day, week, month) after the window size".to_string(),
+                Some("unit".to_string()),
+            )
+        })?;
+
+        // OVER VALID_TIME FROM <ts> TO <ts>
+        self.expect_kw("OVER")?;
+        self.expect_kw("VALID_TIME")?;
+        self.expect_kw("FROM")?;
+        let range_start = self.parse_timestamp()?;
+        self.expect(&Token::To)?;
+        let range_end = self.parse_timestamp()?;
+
+        // Optional AS OF SYSTEM_TIME <ts>
+        let as_of_system_time = if self.check(&Token::As) {
+            self.advance(); // AS
+            self.expect(&Token::Of)?;
+            self.expect_kw("SYSTEM_TIME")?;
+            Some(self.parse_timestamp()?)
+        } else {
+            None
+        };
+
+        // RETURN <agg> [, <agg>]*
+        self.expect(&Token::Return)?;
+        let mut aggregates = vec![self.parse_window_agg_item()?];
+        while self.check(&Token::Comma) {
+            self.advance();
+            aggregates.push(self.parse_window_agg_item()?);
+        }
+
+        Ok(WindowClause {
+            count,
+            unit,
+            range_start,
+            range_end,
+            as_of_system_time,
+            aggregates,
+        })
+    }
+
+    /// Parse one `func(arg) [AS alias]` window aggregate item.
+    fn parse_window_agg_item(&mut self) -> Result<WindowReturnItem, ParseError> {
+        // Function name: COUNT is a reserved token; the rest are identifiers.
+        let func = if self.check(&Token::Count) {
+            self.advance();
+            "COUNT".to_string()
+        } else {
+            self.parse_identifier().map_err(|_| {
+                self.error(
+                    "Expected an aggregate function name (COUNT/SUM/AVG/MIN/MAX/CHANGES)"
+                        .to_string(),
+                    Some("aggregate function".to_string()),
+                )
+            })?
+        };
+
+        self.expect(&Token::LeftParen)?;
+        let arg = if self.check(&Token::Star) {
+            self.advance();
+            WindowAggArg::Star
+        } else {
+            let var = self.parse_identifier()?;
+            if self.check(&Token::Dot) {
+                self.advance();
+                let key = self.parse_identifier()?;
+                WindowAggArg::Property { var, key }
+            } else {
+                WindowAggArg::Entity { var }
+            }
+        };
+        self.expect(&Token::RightParen)?;
+
+        let alias = if self.check(&Token::As) {
+            self.advance();
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
+
+        Ok(WindowReturnItem { func, arg, alias })
     }
 
     fn parse_timestamp(&mut self) -> Result<TimestampLiteral, ParseError> {
@@ -1466,6 +1603,32 @@ impl Parser {
             position: self.position,
             expected,
             found: self.current().cloned(),
+        }
+    }
+
+    // =========================================================
+    // Contextual keyword helpers (Issue #3363)
+    //
+    // The temporal aggregation window clause introduces several words
+    // (`WINDOW`, `OVER`, `VALID_TIME`, `SYSTEM_TIME`, `FROM`) that are matched
+    // *contextually* against `Token::Identifier` rather than being reserved in
+    // the lexer, so existing queries whose labels/variables happen to use those
+    // words keep parsing unchanged.
+    // =========================================================
+
+    /// True if the current token is an identifier equal (case-insensitively) to
+    /// `kw`.
+    fn check_kw(&self, kw: &str) -> bool {
+        matches!(self.current(), Some(Token::Identifier(s)) if s.eq_ignore_ascii_case(kw))
+    }
+
+    /// Consume a contextual keyword, or error.
+    fn expect_kw(&mut self, kw: &str) -> Result<(), ParseError> {
+        if self.check_kw(kw) {
+            self.advance();
+            Ok(())
+        } else {
+            Err(self.error(format!("Expected `{}`", kw), Some(kw.to_uppercase())))
         }
     }
 }

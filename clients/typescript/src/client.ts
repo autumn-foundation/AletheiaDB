@@ -1,17 +1,16 @@
 /**
  * The AletheiaDB TypeScript client.
  *
- * Wraps the 34 merged autumn-server REST routes (node/edge/traverse/temporal +
- * admin/health) as typed methods. Endpoints that are not yet merged server-side
- * (find_similar, hybrid_query, query, enable_vector_index, list_vector_indexes,
- * get_schema, database_stats, temporal_extent, apply_batch, lineage_upstream,
- * lineage_downstream) are provided as typed stubs that throw
- * {@link NotImplementedError}.
+ * Wraps the autumn-server REST routes (node/edge/traverse/temporal +
+ * admin/health) as typed methods, including the vector / query / schema / stats
+ * / batch / lineage tools (find_similar, hybrid_query, query,
+ * enable_vector_index, list_vector_indexes, get_schema, database_stats,
+ * temporal_extent, apply_batch, lineage_upstream, lineage_downstream) that are
+ * now live on the autumn surface.
  *
  * @packageDocumentation
  */
 
-import { NotImplementedError } from './errors.js';
 import type { ClientOptions, RequestSpec } from './http.js';
 import { Transport, unwrapData } from './http.js';
 import type { TimeInput } from './time.js';
@@ -62,6 +61,24 @@ import type {
   UpdateNodeRequest,
   LineageRef,
   Provenance,
+  FindSimilarRequest,
+  FindSimilarResponse,
+  EnableVectorIndexRequest,
+  EnableVectorIndexResponse,
+  ListVectorIndexesResponse,
+  HybridQueryRequest,
+  HybridQueryResponse,
+  QueryRequest,
+  QueryResponse,
+  GetSchemaOptions,
+  SchemaResponse,
+  DatabaseStats,
+  TemporalExtentOptions,
+  TemporalExtentResponse,
+  ApplyBatchRequest,
+  ApplyBatchResponse,
+  LineageQueryRequest,
+  LineageResponse,
 } from './types.js';
 
 /** Coordinates for {@link AletheiaClient.asOf}. At least one dimension is set. */
@@ -551,64 +568,172 @@ export class AletheiaClient {
   }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // Not-yet-merged endpoints — typed stubs (throw NotImplementedError).
-  // TODO(#3369-followup): wire when PR5–PR8 land (vector/hybrid/query/schema/
-  // stats/batch/lineage REST routes).
+  // Vector search
   // ───────────────────────────────────────────────────────────────────────────
 
-  /** STUB: `find_similar` (vector k-NN). Not merged server-side yet. */
-  findSimilar(): Promise<never> {
-    return stub('find_similar');
+  /** `POST /find_similar` — k-NN over a property's embeddings (#3220 elision, #3353 budget). */
+  findSimilar(req: FindSimilarRequest): Promise<FindSimilarResponse> {
+    return this.transport.request<FindSimilarResponse>({
+      method: 'POST',
+      path: '/find_similar',
+      body: {
+        property_name: req.propertyName,
+        embedding: req.embedding,
+        k: req.k,
+        offset: req.offset,
+        include_vectors: req.includeVectors,
+        ...budgetBody(req),
+      },
+    });
   }
 
-  /** STUB: `hybrid_query` (graph + vector + temporal). Not merged server-side yet. */
-  hybridQuery(): Promise<never> {
-    return stub('hybrid_query');
+  /** `POST /vector/indexes` — enable HNSW vector indexing on a node property. */
+  enableVectorIndex(req: EnableVectorIndexRequest): Promise<EnableVectorIndexResponse> {
+    return this.transport.request<EnableVectorIndexResponse>({
+      method: 'POST',
+      path: '/vector/indexes',
+      body: {
+        property_name: req.propertyName,
+        dimensions: req.dimensions,
+        distance_metric: req.distanceMetric,
+      },
+    });
   }
 
-  /** STUB: `query` (read-only Cypher/AQL). Not merged server-side yet. */
-  query(): Promise<never> {
-    return stub('query');
+  /** `GET /vector/indexes` — list active vector indexes and their configuration. */
+  listVectorIndexes(): Promise<ListVectorIndexesResponse> {
+    return this.transport.request<ListVectorIndexesResponse>({
+      method: 'GET',
+      path: '/vector/indexes',
+    });
   }
 
-  /** STUB: `enable_vector_index`. Not merged server-side yet. */
-  enableVectorIndex(): Promise<never> {
-    return stub('enable_vector_index');
+  // ───────────────────────────────────────────────────────────────────────────
+  // Hybrid query (graph + vector + temporal)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** `POST /hybrid_query` — graph traversal + vector similarity + temporal filtering in one call. */
+  hybridQuery(req: HybridQueryRequest = {}): Promise<HybridQueryResponse> {
+    return this.transport.request<HybridQueryResponse>({
+      method: 'POST',
+      path: '/hybrid_query',
+      body: {
+        start_node_id: req.startNodeId,
+        traverse_edge: req.traverseEdge,
+        traverse_depth: req.traverseDepth,
+        vector_property: req.vectorProperty,
+        query_embedding: req.queryEmbedding,
+        top_k: req.topK,
+        valid_time: optTime(req.validTime),
+        transaction_time: optTime(req.transactionTime),
+        filter_label: req.filterLabel,
+        limit: req.limit,
+        include_vectors: req.includeVectors,
+        ...budgetBody(req),
+      },
+    });
   }
 
-  /** STUB: `list_vector_indexes`. Not merged server-side yet. */
-  listVectorIndexes(): Promise<never> {
-    return stub('list_vector_indexes');
+  // ───────────────────────────────────────────────────────────────────────────
+  // Read-only declarative query (Cypher / AQL)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** `POST /query` — execute a single read-only Cypher/AQL statement (#3353 budget). */
+  query(req: QueryRequest): Promise<QueryResponse> {
+    return this.transport.request<QueryResponse>({
+      method: 'POST',
+      path: '/query',
+      body: {
+        language: req.language,
+        query: req.query,
+        params: req.params,
+        limit: req.limit,
+        limits: req.limits,
+        ...budgetBody(req),
+      },
+    });
   }
 
-  /** STUB: `get_schema` (labels/types/property keys with counts). Not merged yet. */
-  getSchema(): Promise<never> {
-    return stub('get_schema');
+  // ───────────────────────────────────────────────────────────────────────────
+  // Schema / stats / temporal extent
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * `GET /schema` — node labels, edge types, and property keys with counts
+   * (optional bi-temporal via `asOf*`).
+   *
+   * Only the scalar token/byte budget is sent — `priority_properties` is an
+   * array the `GET` query-string extractor cannot decode (see
+   * {@link budgetQuery} / {@link GetSchemaOptions}).
+   */
+  getSchema(opts: GetSchemaOptions = {}): Promise<SchemaResponse> {
+    return this.transport.request<SchemaResponse>({
+      method: 'GET',
+      path: '/schema',
+      query: {
+        as_of_valid_time: optTime(opts.asOfValidTime),
+        as_of_transaction_time: optTime(opts.asOfTransactionTime),
+        ...budgetQuery(opts),
+      },
+    });
   }
 
-  /** STUB: `database_stats` (holistic snapshot). Not merged server-side yet. */
-  databaseStats(): Promise<never> {
-    return stub('database_stats');
+  /**
+   * `GET /database_stats` — a holistic bi-temporal snapshot (no arguments).
+   *
+   * Requires the **metrics** (or **admin**) role: a reader/writer-only key is
+   * rejected with `PERMISSION_DENIED` (`database_stats` is classified
+   * `MetricsClass`, not `ReadClass`).
+   */
+  databaseStats(): Promise<DatabaseStats> {
+    return this.transport.request<DatabaseStats>({
+      method: 'GET',
+      path: '/database_stats',
+    });
   }
 
-  /** STUB: `temporal_extent` (queryable bi-temporal extent). Not merged yet. */
-  temporalExtent(): Promise<never> {
-    return stub('temporal_extent');
+  /** `GET /temporal_extent` — the dataset's queryable bi-temporal extent (optional `byLabel`). */
+  temporalExtent(opts: TemporalExtentOptions = {}): Promise<TemporalExtentResponse> {
+    return this.transport.request<TemporalExtentResponse>({
+      method: 'GET',
+      path: '/temporal_extent',
+      query: { by_label: opts.byLabel },
+    });
   }
 
-  /** STUB: `apply_batch` (atomic multi-write batch). Not merged server-side yet. */
-  applyBatch(): Promise<never> {
-    return stub('apply_batch');
+  // ───────────────────────────────────────────────────────────────────────────
+  // Atomic multi-write batch (#3231)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** `POST /batch` — apply an ordered batch of write operations atomically (all-or-nothing). */
+  applyBatch(req: ApplyBatchRequest): Promise<ApplyBatchResponse> {
+    return this.transport.request<ApplyBatchResponse>({
+      method: 'POST',
+      path: '/batch',
+      body: { operations: req.operations },
+    });
   }
 
-  /** STUB: `lineage_upstream` (derivation closure). Not merged server-side yet. */
-  lineageUpstream(): Promise<never> {
-    return stub('lineage_upstream');
+  // ───────────────────────────────────────────────────────────────────────────
+  // Derivation lineage (#3371)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** `POST /lineage/upstream` — the transitive evidence chain: what a fact was derived from. */
+  lineageUpstream(req: LineageQueryRequest): Promise<LineageResponse> {
+    return this.transport.request<LineageResponse>({
+      method: 'POST',
+      path: '/lineage/upstream',
+      body: lineageQueryToWire(req),
+    });
   }
 
-  /** STUB: `lineage_downstream` (derivation blast radius). Not merged yet. */
-  lineageDownstream(): Promise<never> {
-    return stub('lineage_downstream');
+  /** `POST /lineage/downstream` — the transitive blast radius: what has been derived from a fact. */
+  lineageDownstream(req: LineageQueryRequest): Promise<LineageResponse> {
+    return this.transport.request<LineageResponse>({
+      method: 'POST',
+      path: '/lineage/downstream',
+      body: lineageQueryToWire(req),
+    });
   }
 }
 
@@ -626,16 +751,32 @@ function reqTime(t: TimeInput): string {
   return toWireTime(t);
 }
 
-/** Build the #3353 budget query fragment (query-string form). */
+/**
+ * Build the #3353 budget query fragment (query-string form) — **scalar params
+ * only**.
+ *
+ * `priority_properties` is deliberately NOT emitted on GET reads. The autumn
+ * GET routes decode the query string with `axum::extract::Query`, i.e.
+ * `serde_urlencoded` 0.7.1, whose value deserializer forwards `deserialize_seq`
+ * to `deserialize_any` and visits a plain string
+ * (`serde_urlencoded-0.7.1/src/de.rs:234-249`, the `Part` deserializer). A
+ * `Vec<String>` field therefore cannot be produced from **any** query encoding
+ * — a repeated key, a comma-joined single key, anything — every form is a
+ * `serde` type error and the extractor returns 400. Emitting it here would turn
+ * every budgeted GET read into a hard 400. The scalar `max_response_tokens` /
+ * `max_response_bytes` (`u64`) parse fine.
+ *
+ * Array budgeting (`priorityProperties`) is honored only on the POST-body reads
+ * (`findNodesAtTime`, `findSimilar`, `hybridQuery`), whose JSON body is parsed
+ * by `serde_json` — see {@link budgetBody}.
+ */
 function budgetQuery(opts: {
   maxResponseTokens?: number;
   maxResponseBytes?: number;
-  priorityProperties?: string[];
-}): Record<string, string | number | string[] | undefined> {
+}): Record<string, number | undefined> {
   return {
     max_response_tokens: opts.maxResponseTokens,
     max_response_bytes: opts.maxResponseBytes,
-    priority_properties: opts.priorityProperties,
   };
 }
 
@@ -666,14 +807,19 @@ function adjacencyQuery(
   };
 }
 
-/** Throw the standard {@link NotImplementedError} for an un-merged endpoint. */
-function stub(tool: string): Promise<never> {
-  return Promise.reject(
-    new NotImplementedError(
-      `${tool} is not wrapped yet: its REST route is not merged server-side. ` +
-        `Tracking in the #3369 follow-up (PR5–PR8). See COMPATIBILITY.md.`,
-    ),
-  );
+/** Build the wire body shared by {@link AletheiaClient.lineageUpstream} / `lineageDownstream`. */
+function lineageQueryToWire(
+  req: LineageQueryRequest,
+): Record<string, string | number | undefined> {
+  return {
+    entity_kind: req.entityKind,
+    id: req.id,
+    version: req.version,
+    max_depth: req.maxDepth,
+    limit: req.limit,
+    offset: req.offset,
+    as_of_transaction_time: optTime(req.asOfTransactionTime),
+  };
 }
 
 export type { RequestSpec };

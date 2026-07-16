@@ -11,9 +11,13 @@
 //! `find_similar` / `hybrid_query`, #3353 budget shaping (results never
 //! dropped/reordered — only per-result payloads degrade), the `query` tool's
 //! structured-error-kind preservation (`parse_error`, `read_only_violation`,
-//! cursor → `unsupported_construct`, and `language_unavailable` — the `cypher`
-//! feature is NOT compiled into this crate, so `language:"cypher"` is
-//! unavailable), and the shared `DISPATCH_ROUTED_READ_TOOLS` pin.
+//! cursor → `unsupported_construct`, and — depending on the build — either
+//! `language_unavailable` (the default build, `cypher` off, so `language:"cypher"`
+//! is unavailable) or successful Cypher execution (the Code Coverage build, which
+//! compiles `cypher` in). The two mutually-exclusive `#[cfg]`-gated tests
+//! `query_cypher_language_unavailable_when_feature_off` /
+//! `query_cypher_executes_when_feature_on` cover both cases. Plus the shared
+//! `DISPATCH_ROUTED_READ_TOOLS` pin.
 
 use std::sync::Arc;
 
@@ -497,12 +501,16 @@ async fn query_cursor_request_is_unsupported_construct() {
     .await;
 }
 
+#[cfg(not(feature = "cypher"))]
 #[tokio::test]
 async fn query_cypher_language_unavailable_when_feature_off() {
-    // The `cypher` feature is NOT compiled into the aletheia-server crate (its
-    // `aletheiadb` dep enables only `http-server` + `mcp-server` + defaults), so
+    // The default build does NOT compile the `cypher` feature into the linked
+    // `aletheiadb` rlib (this crate's dep enables only `http-server` +
+    // `mcp-server` + defaults, and no `--features cypher` is passed), so
     // `language:"cypher"` returns `language_unavailable`. Both the autumn handler
     // and the legacy reference run in this same compiled crate, so parity holds.
+    // The Code Coverage CI job compiles `cypher` in; the symmetric companion
+    // `query_cypher_executes_when_feature_on` covers that build.
     let fx = fixture();
     let client = build_server_client(fx.db.clone(), fx.store.clone(), AuthMode::Required);
     let server = mcp_server(&fx.db);
@@ -513,6 +521,57 @@ async fn query_cypher_language_unavailable_when_feature_off() {
         "language_unavailable",
     )
     .await;
+}
+
+/// Companion to `query_cypher_language_unavailable_when_feature_off`: when the
+/// `cypher` feature IS compiled in (the Code Coverage CI build passes
+/// `--features ...,cypher`, enabling `aletheiadb/cypher` through this crate's
+/// forwarding feature), the same `language:"cypher"` query no longer reports
+/// `language_unavailable` — it executes and returns the Person rows. Byte-parity
+/// with the legacy dispatch still holds (both run in this compiled crate).
+#[cfg(feature = "cypher")]
+#[tokio::test]
+async fn query_cypher_executes_when_feature_on() {
+    let fx = fixture();
+    let client = build_server_client(fx.db.clone(), fx.store.clone(), AuthMode::Required);
+    let server = mcp_server(&fx.db);
+    let args = json!({ "language": "cypher", "query": "MATCH (n:Person) RETURN n" });
+
+    let (status, autumn) = post(&client, "/query", &args, Some(READER_TOKEN)).await;
+    assert_eq!(
+        status, 200,
+        "cypher query returns 200 with a result body: {autumn}"
+    );
+    // With cypher compiled in the query EXECUTES: no structured error at all
+    // (the old `language_unavailable` contract is inverted).
+    assert!(
+        autumn.get("error").is_none(),
+        "cypher query must not report an error when the feature is on: {autumn}"
+    );
+    // Byte-parity vs the legacy dispatch reference over the same compiled crate.
+    let legacy: Value = serde_json::from_str(&server.dispatch_tool_json("query", args.clone()))
+        .expect("legacy query json");
+    assert_eq!(
+        normalize(autumn.clone()),
+        normalize(legacy),
+        "cypher-on query parity: {args}"
+    );
+    // The fixture has four Person nodes (Alice, Bob, Carol, Dave); `MATCH
+    // (n:Person) RETURN n` returns all four with a `Person`-labeled entity each.
+    assert_eq!(autumn["language"], "cypher", "echoed language: {autumn}");
+    assert_eq!(
+        autumn["row_count"].as_u64(),
+        Some(4),
+        "all four Person nodes returned: {autumn}"
+    );
+    let rows = autumn["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 4, "four rows: {autumn}");
+    for row in rows {
+        assert_eq!(
+            row["entity"]["label"], "Person",
+            "each row is a Person entity: {row}"
+        );
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

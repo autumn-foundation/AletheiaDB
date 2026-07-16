@@ -195,6 +195,68 @@ const DEFAULT_VECTOR_K: usize = 10;
 /// Default transaction time placeholder string.
 const TRANSACTION_TIME_NOW: &str = "now";
 
+/// Maximum UTF-8 byte length of a single text input accepted by the embedding
+/// tools (Issue #2906). Bounds per-request embedding work and memory so an
+/// oversized input is rejected with `INVALID_ARGUMENT` before any model runs.
+///
+/// Only referenced by the feature-on embedding handlers; gated so the
+/// feature-off build (whose handlers return the unavailable-feature error
+/// without validating) does not carry a dead constant.
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_TEXT_BYTES: usize = 64 * 1024;
+
+/// Maximum number of text strings accepted by `embed_text` in one call
+/// (Issue #2906).
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_TEXTS: usize = 256;
+
+/// Maximum number of per-chunk embeddings `embed_text` returns in one call
+/// (Issue #2906). Also the ceiling `max_chunks` is clamped to.
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_CHUNKS: usize = 512;
+
+/// Character window size used to chunk-expand each `embed_text` input document
+/// before embedding (Issue #2906). A long document is split into contiguous
+/// windows of at most this many Unicode scalar values, so it yields MULTIPLE
+/// aligned embeddings instead of being silently truncated to a single vector.
+/// Matches `embed_anything`'s default document chunk size.
+#[cfg(feature = "embeddings")]
+const EMBED_CHUNK_SIZE_CHARS: usize = 1000;
+
+/// Split `text` into contiguous character windows of at most `chunk_size_chars`
+/// Unicode scalar values each (Issue #2906 chunk expansion).
+///
+/// A deterministic, model-independent splitter so a long `embed_text` input
+/// document expands into MULTIPLE chunks (each subsequently embedded and
+/// aligned to its own [`EmbedData`](crate::embeddings::EmbedData)) rather than
+/// being silently truncated to a single vector. Splits on Unicode scalar
+/// boundaries, so every chunk is valid UTF-8. Empty input yields a single empty
+/// chunk (callers validate non-empty input upstream). `chunk_size_chars` must
+/// be non-zero.
+#[cfg(feature = "embeddings")]
+pub(crate) fn split_text_into_chunks(text: &str, chunk_size_chars: usize) -> Vec<String> {
+    debug_assert!(chunk_size_chars > 0, "chunk size must be non-zero");
+    let chunk_size_chars = chunk_size_chars.max(1);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0usize;
+    for ch in text.chars() {
+        current.push(ch);
+        count += 1;
+        if count == chunk_size_chars {
+            chunks.push(std::mem::take(&mut current));
+            count = 0;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 /// Default maximum number of operations accepted by a single `apply_batch`
 /// call (Issue #3231). Deliberately far below the core transaction buffer's
 /// own DoS cap (`WriteBuffer::DEFAULT_MAX_OPERATIONS` = 50,000), so the MCP
@@ -248,6 +310,16 @@ pub struct AletheiaMcpServer {
     /// occupying capacity. Shared across clones so the cloned server used for
     /// the race sees the same live count.
     in_flight_queries: Arc<AtomicUsize>,
+    /// Optional embedding-model handle (Issue #2906). Present only when the
+    /// `embeddings` feature is compiled AND a model has been configured via
+    /// [`with_embedder`](Self::with_embedder). `None` -> the embedding tools
+    /// (`embed_query`, `embed_text`, `semantic_search`,
+    /// `create_node_with_embedding`, `update_node_embedding`) return
+    /// `FAILED_PRECONDITION` ("no embedding model configured"). The tools are
+    /// advertised unconditionally (Design A); when the feature is *not*
+    /// compiled they return a structured unavailable-feature error instead.
+    #[cfg(feature = "embeddings")]
+    embedder: Option<Arc<crate::embeddings::Embedder>>,
 }
 
 /// RAII slot in the bounded in-flight-query pool (Issue #3368). Decrements the
@@ -319,7 +391,27 @@ impl AletheiaMcpServer {
             query_limits: Arc::new(QueryLimitsConfig::default()),
             limit_counters: Arc::new(LimitCounters::default()),
             in_flight_queries: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "embeddings")]
+            embedder: None,
         }
+    }
+
+    /// Configure the embedding-model handle used by the embedding tools
+    /// (Issue #2906).
+    ///
+    /// The embedding tools are advertised unconditionally, but they only
+    /// produce embeddings once a model is configured here; until then they
+    /// return `FAILED_PRECONDITION`. A model is deliberately NOT built
+    /// implicitly (e.g. from an env var) inside [`new`](Self::new) /
+    /// [`with_auth`](Self::with_auth) because loading a model can download
+    /// weights and block — unacceptable for the many embedded/test callers of
+    /// those constructors. Serving deployments call this explicitly after
+    /// building the [`Embedder`](crate::embeddings::Embedder).
+    #[cfg(feature = "embeddings")]
+    #[must_use = "with_embedder returns a new server; discarding it drops the configured model"]
+    pub fn with_embedder(mut self, embedder: Arc<crate::embeddings::Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Override the per-query resource limits for the `query` tool (Issue
@@ -426,6 +518,8 @@ impl AletheiaMcpServer {
             query_limits: Arc::new(QueryLimitsConfig::default()),
             limit_counters: Arc::new(LimitCounters::default()),
             in_flight_queries: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "embeddings")]
+            embedder: None,
         }
     }
 
@@ -556,6 +650,39 @@ impl AletheiaMcpServer {
     /// Returns the updated node object.
     pub fn update_node(&self, req: UpdateNodeRequest) -> String {
         Self::extract_text(self.handle_update_node(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Generate a single dense embedding from text (Issue #2906).
+    ///
+    /// Returns the tool's JSON response as a string. When the `embeddings`
+    /// feature is not compiled (or no model is configured) this returns the
+    /// structured unavailable/precondition error rather than an embedding.
+    pub fn embed_query(&self, req: EmbedQueryRequest) -> String {
+        Self::extract_text(self.handle_embed_query(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Generate per-chunk dense embeddings for multiple texts (Issue #2906).
+    pub fn embed_text(&self, req: EmbedTextRequest) -> String {
+        Self::extract_text(self.handle_embed_text(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Create a node whose embedding is generated from text (Issue #2906).
+    pub fn create_node_with_embedding(&self, req: CreateNodeWithEmbeddingRequest) -> String {
+        Self::extract_text(self.handle_create_node_with_embedding(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Regenerate a node's embedding property from text, preserving all other
+    /// properties (Issue #2906).
+    pub fn update_node_embedding(&self, req: UpdateNodeEmbeddingRequest) -> String {
+        Self::extract_text(self.handle_update_node_embedding(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -3983,6 +4110,589 @@ impl AletheiaMcpServer {
         }
     }
 
+    // ========================================================================
+    // Embedding generation & text semantic search (Issue #2906)
+    //
+    // Design A: all five tools are advertised and dispatched unconditionally.
+    // The real work lives under `#[cfg(feature = "embeddings")]`; under
+    // `#[cfg(not(feature = "embeddings"))]` each handler returns a structured
+    // unavailable-feature error (mirroring how `handle_query` returns
+    // `language_unavailable` when the `cypher` feature is off), so the tool
+    // inventory is a single flat count regardless of feature selection.
+    // ========================================================================
+
+    /// Structured error returned by the embedding tools when the `embeddings`
+    /// feature was not compiled into this build (Design A, Issue #2906).
+    #[cfg(not(feature = "embeddings"))]
+    fn embeddings_unavailable(&self) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                "Embedding generation is unavailable: this server was built without the \
+                 `embeddings` feature. Rebuild with `--features embeddings` (and configure a \
+                 model) to use embed_query, embed_text, semantic_search, \
+                 create_node_with_embedding, and update_node_embedding.",
+            )
+            .details(json!({ "feature": "embeddings", "available": false })),
+        )
+    }
+
+    /// Run an embedding future to completion on the ambient multi-threaded
+    /// Tokio runtime, bridging the synchronous MCP dispatch path to the async
+    /// `embed_anything` API (Issue #2906).
+    ///
+    /// Returns `Err(CallToolResult)` — a structured `UNAVAILABLE` — instead of
+    /// panicking when there is no current runtime or the runtime is
+    /// single-threaded. `tokio::task::block_in_place` (which lets us block the
+    /// current worker on the embedding future without stalling the whole
+    /// runtime) is only legal on a **multi-thread** runtime worker; it panics on
+    /// a current-thread runtime. That is exactly why the current-thread flavor
+    /// is pre-checked here and short-circuited to `UNAVAILABLE` rather than
+    /// allowed to reach `block_in_place`. The `aletheia-mcp` binary and
+    /// `aletheia-server` both run on a multi-thread runtime, so the happy path
+    /// always applies there.
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn block_on_embedding<F>(&self, fut: F) -> std::result::Result<F::Output, CallToolResult>
+    where
+        F: std::future::Future,
+    {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                Ok(tokio::task::block_in_place(move || handle.block_on(fut)))
+            }
+            _ => Err(self.error_result(McpError::new(
+                McpErrorCode::Unavailable,
+                "No multi-threaded async runtime is available to run embedding generation. \
+                 Serve the MCP/HTTP surface on a multi-threaded Tokio runtime.",
+            ))),
+        }
+    }
+
+    /// The configured embedder, or a structured `FAILED_PRECONDITION` result
+    /// when none has been set (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn require_embedder(
+        &self,
+    ) -> std::result::Result<Arc<crate::embeddings::Embedder>, CallToolResult> {
+        self.embedder.as_ref().map(Arc::clone).ok_or_else(|| {
+            self.failed_precondition(
+                "No embedding model is configured on this server. Configure one via \
+                 AletheiaMcpServer::with_embedder (or the server's embedding-model option) \
+                 before using the embedding tools.",
+            )
+        })
+    }
+
+    /// Embed a single string into one dense vector (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_embed_query(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EmbedQueryRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let text = req.text;
+        let embedded = match self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[text.as_str()], embedder.as_ref(), None).await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("embed_query: embedding generation failed: {e}");
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    "embedding generation failed",
+                ));
+            }
+        };
+        match crate::embeddings::embed_data_to_dense_iter(data, Some(1)).next() {
+            Some(Ok(dense)) => {
+                let dim = dense.embedding.len();
+                self.success_json(json!({ "embedding": dense.embedding, "dim": dim }))
+            }
+            Some(Err(e)) => self.failed_precondition(&format!(
+                "Configured embedding model produced an unsupported (non-dense) result: {e}"
+            )),
+            None => self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                "Embedding model returned no result",
+            )),
+        }
+    }
+
+    /// Embed multiple texts with real chunk expansion (Issue #2906): each input
+    /// document is split into contiguous character windows
+    /// ([`split_text_into_chunks`]) and every chunk is embedded independently
+    /// via [`process_chunks`](crate::embeddings::process_chunks), so a long
+    /// document produces MULTIPLE embeddings rather than one truncated vector.
+    /// Results are aligned to their source chunk through
+    /// [`EmbedData`](crate::embeddings::EmbedData) (`.text`/`.metadata`), never
+    /// a positional zip; `metadata` carries the originating `source_index` and
+    /// `chunk_index`. `max_chunks` is a hard cap on the returned embeddings; the
+    /// response sets `truncated: true` when the cap trims the expansion. A
+    /// `max_chunks` of `0` is rejected as INVALID_ARGUMENT.
+    #[cfg(feature = "embeddings")]
+    fn handle_embed_text(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EmbedTextRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.texts.is_empty() {
+            return self.invalid_argument("texts must contain at least one string");
+        }
+        if req.texts.len() > MAX_EMBED_TEXTS {
+            return self.invalid_argument(&format!(
+                "texts exceeds the maximum of {} entries (got {})",
+                MAX_EMBED_TEXTS,
+                req.texts.len()
+            ));
+        }
+        if let Some(oversized) = req.texts.iter().find(|t| t.len() > MAX_EMBED_TEXT_BYTES) {
+            return self.invalid_argument(&format!(
+                "a text entry exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                oversized.len()
+            ));
+        }
+        // A zero cap is a caller error: it can never return anything useful.
+        if req.max_chunks == Some(0) {
+            return self.invalid_argument("max_chunks must be greater than zero");
+        }
+        let chunk_cap = req
+            .max_chunks
+            .map_or(MAX_EMBED_CHUNKS, |m| m.min(MAX_EMBED_CHUNKS));
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        // Chunk-expand each input document into contiguous character windows,
+        // preserving source alignment via metadata (never a positional zip).
+        // Each chunk is embedded independently and re-aligned to its own
+        // `EmbedData` below, so a long document yields MULTIPLE embeddings
+        // instead of being silently truncated to one vector (Issue #2906 AC).
+        let mut chunk_texts: Vec<String> = Vec::new();
+        let mut chunk_meta: Vec<Option<std::collections::HashMap<String, String>>> = Vec::new();
+        for (source_index, text) in req.texts.iter().enumerate() {
+            for (chunk_index, chunk) in split_text_into_chunks(text, EMBED_CHUNK_SIZE_CHARS)
+                .into_iter()
+                .enumerate()
+            {
+                let mut meta = std::collections::HashMap::new();
+                meta.insert("source_index".to_string(), source_index.to_string());
+                meta.insert("chunk_index".to_string(), chunk_index.to_string());
+                chunk_texts.push(chunk);
+                chunk_meta.push(Some(meta));
+            }
+        }
+        // Honor `max_chunks` as a hard cap on the returned embeddings, and
+        // disclose when the cap trimmed the expansion.
+        let truncated = chunk_texts.len() > chunk_cap;
+        if truncated {
+            chunk_texts.truncate(chunk_cap);
+            chunk_meta.truncate(chunk_cap);
+        }
+
+        let embedded = match self.block_on_embedding(async move {
+            crate::embeddings::process_chunks(&chunk_texts, &chunk_meta, &embedder, None, None)
+                .await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("embed_text: embedding generation failed: {e}");
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    "embedding generation failed",
+                ));
+            }
+        };
+
+        // `process_chunks` returns a fresh `Arc<Vec<EmbedData>>` (refcount 1),
+        // so `try_unwrap` recovers the owned vector without cloning.
+        let data = Arc::try_unwrap(data).unwrap_or_else(|arc| arc.as_ref().clone());
+        let mut chunks = Vec::new();
+        for item in crate::embeddings::embed_data_to_dense_iter(data, None) {
+            match item {
+                Ok(dense) => {
+                    let dim = dense.embedding.len();
+                    chunks.push(json!({
+                        "text": dense.text,
+                        "metadata": dense.metadata,
+                        "embedding": dense.embedding,
+                        "dim": dim,
+                    }));
+                }
+                Err(e) => {
+                    return self.failed_precondition(&format!(
+                        "Configured embedding model produced an unsupported (non-dense) result: {e}"
+                    ));
+                }
+            }
+        }
+        let count = chunks.len();
+        self.success_json(json!({ "chunks": chunks, "count": count, "truncated": truncated }))
+    }
+
+    /// Embed `query_text` and reuse the exact `find_similar` path so the
+    /// response envelope is byte-identical (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_semantic_search(&self, args: serde_json::Value) -> CallToolResult {
+        let req: SemanticSearchRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.query_text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "query_text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.query_text.len()
+            ));
+        }
+        // Validate the target index up front (cheap, no model needed) so a
+        // missing index is a clear FAILED_PRECONDITION even before embedding.
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let query_text = req.query_text;
+        let embedded = match self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[query_text.as_str()], embedder.as_ref(), None).await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("semantic_search: embedding generation failed: {e}");
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    "embedding generation failed",
+                ));
+            }
+        };
+        let embedding =
+            match crate::embeddings::to_dense_iter(data.into_iter().map(|d| d.embedding), Some(1))
+                .next()
+            {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => {
+                    return self.failed_precondition(&format!(
+                        "Configured embedding model produced an unsupported (non-dense) result: {e}"
+                    ));
+                }
+                None => {
+                    return self.error_result(McpError::new(
+                        McpErrorCode::Internal,
+                        "Embedding model returned no result",
+                    ));
+                }
+            };
+        // Dimension mismatch is a caller-fault INVALID_ARGUMENT.
+        if let Err(e) = self.validate_embedding_dimensions(&embedding, &req.property_name) {
+            return self.invalid_argument(&e);
+        }
+
+        // Delegate to the exact find_similar handler with a rebuilt request so
+        // the success envelope (results/score/temporal/#3220 elision/#3226
+        // pagination) is byte-identical.
+        let mut find_args = serde_json::Map::new();
+        find_args.insert("property_name".to_string(), json!(req.property_name));
+        find_args.insert("embedding".to_string(), json!(embedding));
+        if let Some(k) = req.k {
+            find_args.insert("k".to_string(), json!(k));
+        }
+        if let Some(offset) = req.offset {
+            find_args.insert("offset".to_string(), json!(offset));
+        }
+        if let Some(include_vectors) = req.include_vectors {
+            find_args.insert("include_vectors".to_string(), json!(include_vectors));
+        }
+        self.handle_find_similar(serde_json::Value::Object(find_args))
+    }
+
+    /// Embed `text` and store it as a vector property on a new node, reusing
+    /// the standard `create_node_with_options` write path (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_create_node_with_embedding(&self, args: serde_json::Value) -> CallToolResult {
+        let req: CreateNodeWithEmbeddingRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+        let provenance = match self.parse_opt_provenance(req.provenance) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        let embedding = match self.embed_one(&req.text, embedder) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        // Build the property map (non-embedding props) then attach the
+        // generated vector under `embedding_property`.
+        let base = match &req.properties {
+            Some(p) => match self.json_to_property_map(p) {
+                Ok(map) => map,
+                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+            },
+            None => PropertyMap::default(),
+        };
+        let properties = match base
+            .builder()
+            .try_insert_vector(&req.embedding_property, &embedding)
+        {
+            Ok(b) => b.build(),
+            Err(e) => {
+                return self.invalid_argument(&format!("Invalid embedding property: {}", e));
+            }
+        };
+
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
+
+        match self
+            .db
+            .create_node_with_options(&req.label, properties, options)
+        {
+            Ok(node_id) => match self.db.get_node(node_id) {
+                Ok(node) => {
+                    let now = time::now();
+                    // Write path returns the full vector it just wrote.
+                    let response = self.node_to_response(&node, true, now);
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
+                }
+                Err(e) => self.db_error(e),
+            },
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Embed `text` and update ONLY the embedding property of an existing node,
+    /// preserving all other properties (Issue #2906).
+    ///
+    /// The embedding is generated FIRST (a slow, network/CPU-bound step holding
+    /// no snapshot or lock), then the read-merge-write runs inside a SINGLE
+    /// [`write`](crate::db::AletheiaDB::write) transaction: `update_node`
+    /// replaces every property, so the existing properties are re-read from the
+    /// transaction's own snapshot and merged before overriding the embedding.
+    /// Doing the read and the write in one transaction closes the lost-update
+    /// race — a concurrent writer that commits in the window is caught by
+    /// commit-time conflict detection instead of being silently overwritten.
+    #[cfg(feature = "embeddings")]
+    fn handle_update_node_embedding(&self, args: serde_json::Value) -> CallToolResult {
+        let req: UpdateNodeEmbeddingRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        // Embed FIRST (slow, network/CPU-bound), holding no snapshot or lock,
+        // so the transaction window below stays as short as possible.
+        let embedding = match self.embed_one(&req.text, embedder) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        // Stamp the authenticated principal (if any) onto the version.
+        let provenance = match self.parse_opt_provenance(None) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        // Read + merge + write inside ONE transaction so the merge sees the
+        // transaction's own snapshot and commit-time conflict detection guards
+        // against a concurrent writer being silently lost (Issue #2906 fix).
+        let embedding_property = req.embedding_property;
+
+        /// Local error type bridging the property-builder failure (a caller
+        /// fault) and storage errors through the `db.write` closure.
+        enum UpdateEmbeddingError {
+            Db(crate::core::error::Error),
+            Vector(String),
+        }
+        impl From<crate::core::error::Error> for UpdateEmbeddingError {
+            fn from(e: crate::core::error::Error) -> Self {
+                UpdateEmbeddingError::Db(e)
+            }
+        }
+
+        let write_result = self.db.write(|tx| {
+            use crate::api::transaction::ReadOps;
+            let node = tx.get_node(node_id)?;
+            let properties = node
+                .properties
+                .builder()
+                .try_insert_vector(&embedding_property, &embedding)
+                .map_err(|e| {
+                    UpdateEmbeddingError::Vector(format!("Invalid embedding property: {e}"))
+                })?
+                .build();
+
+            let mut options = crate::api::transaction::WriteRequestOptions::new();
+            if let Some(valid_from) = valid_from {
+                options = options.with_valid_from(valid_from);
+            }
+            if let Some(provenance) = provenance {
+                options = options.with_provenance(provenance);
+            }
+            tx.update_node_with_options(node_id, properties, options)?;
+            Ok::<(), UpdateEmbeddingError>(())
+        });
+
+        match write_result {
+            Ok(()) => match self.db.get_node(node_id) {
+                Ok(node) => {
+                    let now = time::now();
+                    // Write path returns the full vector it just wrote.
+                    let response = self.node_to_response(&node, true, now);
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
+                }
+                Err(e) => self.db_error(e),
+            },
+            Err(UpdateEmbeddingError::Vector(msg)) => self.invalid_argument(&msg),
+            Err(UpdateEmbeddingError::Db(e)) => self.db_error(e),
+        }
+    }
+
+    /// Embed one text into a single dense vector, mapping upstream/non-dense
+    /// failures to structured error results (Issue #2906 shared helper).
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn embed_one(
+        &self,
+        text: &str,
+        embedder: Arc<crate::embeddings::Embedder>,
+    ) -> std::result::Result<Vec<f32>, CallToolResult> {
+        let owned = text.to_string();
+        let embedded = self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[owned.as_str()], embedder.as_ref(), None).await
+        })?;
+        let data = embedded.map_err(|e| {
+            // Do not leak upstream provider/model/path detail to the caller.
+            eprintln!("embed_one: embedding generation failed: {e}");
+            self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                "embedding generation failed",
+            ))
+        })?;
+        match crate::embeddings::to_dense_iter(data.into_iter().map(|d| d.embedding), Some(1))
+            .next()
+        {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => Err(self.failed_precondition(&format!(
+                "Configured embedding model produced an unsupported (non-dense) result: {e}"
+            ))),
+            None => Err(self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                "Embedding model returned no result",
+            ))),
+        }
+    }
+
+    // Feature-off variants: return the structured unavailable-feature error.
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_embed_query(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_embed_text(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_semantic_search(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_create_node_with_embedding(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_update_node_embedding(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
     fn handle_enable_vector_index(&self, args: serde_json::Value) -> CallToolResult {
         let req: EnableVectorIndexRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -5158,7 +5868,26 @@ impl AletheiaMcpServer {
         };
 
         match serde_json::to_value(self.db.stats()) {
-            Ok(value) => self.success_json(value),
+            Ok(mut value) => {
+                // Surface the Issue #3368 over-limit termination counters
+                // alongside the storage-layer stats. Additive: the
+                // `DatabaseStats` struct and storage layer are untouched; these
+                // are MCP-surface atomics folded in here. Row-cap breaches are
+                // NOT terminations (they self-disclose via `truncated`/
+                // `has_more`), so there is deliberately no row counter.
+                if let Some(obj) = value.as_object_mut() {
+                    let snap = self.limit_counters.snapshot();
+                    obj.insert(
+                        "resource_limits".to_string(),
+                        json!({
+                            "timeout_terminations": snap.wall_clock_timeout,
+                            "byte_cap_terminations": snap.result_bytes,
+                            "override_rejections": snap.override_rejected,
+                        }),
+                    );
+                }
+                self.success_json(value)
+            }
             Err(e) => self.error_result(McpError::new(
                 McpErrorCode::Internal,
                 format!("Failed to serialize database stats: {}", e),
@@ -6338,14 +7067,18 @@ impl AletheiaMcpServer {
                     // handle can emit a concrete offset-based resume call
                     // (Issue #3353 F1/F5).
                     let orig_args = args.clone();
-                    let result = self.dispatch_read_tool(name, args);
+                    // Resource limits (#3368) run first — the byte cap short-
+                    // circuits an oversized response to an error before the
+                    // #3353 budget shaper sees it — so a within-cap response is
+                    // what gets shaped to the caller's token budget.
+                    let result = self.dispatch_read_tool_limited(name, args);
                     return self.apply_budget(name, result, &budget_req, &orig_args);
                 }
                 Ok(None) => {}
                 Err(err) => return self.error_result(err),
             }
         }
-        self.dispatch_read_tool(name, args)
+        self.dispatch_read_tool_limited(name, args)
     }
 
     /// Apply the parsed token budget to a handler's result. Errors pass through
@@ -6420,6 +7153,11 @@ impl AletheiaMcpServer {
             "get_incoming_edges" => self.handle_get_incoming_edges(args),
             "traverse" => self.handle_traverse(args),
             "find_similar" => self.handle_find_similar(args),
+            "embed_query" => self.handle_embed_query(args),
+            "embed_text" => self.handle_embed_text(args),
+            "semantic_search" => self.handle_semantic_search(args),
+            "create_node_with_embedding" => self.handle_create_node_with_embedding(args),
+            "update_node_embedding" => self.handle_update_node_embedding(args),
             "enable_vector_index" => self.handle_enable_vector_index(args),
             "list_vector_indexes" => self.handle_list_vector_indexes(args),
             "enable_unique_constraint" => self.handle_enable_unique_constraint(args),
@@ -6452,6 +7190,173 @@ impl AletheiaMcpServer {
             ),
         }
     }
+
+    /// Dispatch a read tool under the per-query resource limits (Issue #3368
+    /// residue): the wall-clock timeout and the result-byte cap, reusing the
+    /// exact machinery the `query` tool self-enforces (the timeout thread-race,
+    /// the bounded in-flight-worker DoS guard, and the structured
+    /// `RESOURCE_EXHAUSTED` error builders + termination counters).
+    ///
+    /// Tools not in [`RESOURCE_LIMITED_READ_TOOLS`] — including `query`, which
+    /// self-enforces inline — pass straight through to
+    /// [`dispatch_read_tool`](Self::dispatch_read_tool) unchanged. For the
+    /// covered tools this resolves the server-default effective limits (no
+    /// per-call override in v1):
+    ///
+    /// - **Timeout.** The zero-overhead inline path (no thread spawn, no clone,
+    ///   no in-flight guard) applies **only when the effective timeout is `0`**
+    ///   — i.e. the `disabled()` config. Under the *default* config the
+    ///   effective timeout is 30_000 ms (not 0), so each covered call takes the
+    ///   timeout-race worker path (reserve an in-flight slot — rejected
+    ///   `UNAVAILABLE` at the cap — then race the handler against the deadline
+    ///   on a detached worker, exactly like the `query` tool): a `TimedOut`
+    ///   outcome maps to the retriable `RESOURCE_EXHAUSTED` timeout error, a
+    ///   `WorkerDied` (panic) outcome to the non-retriable INTERNAL error. The
+    ///   response bytes are unchanged versus a bare `dispatch_read_tool`, but
+    ///   the per-call worker spawn is real overhead on hot-path reads
+    ///   (including cheap `get_node_at_time` / `get_edge_at_time`); a
+    ///   quantifying micro-benchmark is a deferred (Lane-2) follow-up.
+    /// - **Byte cap.** A *non-error* response is then held to the effective
+    ///   response-byte cap post-hoc (see
+    ///   [`enforce_result_byte_cap`](Self::enforce_result_byte_cap)); errors
+    ///   pass through untouched.
+    ///
+    /// Ordering (Issue #3360 / #3353): the cursor page is resolved inside the
+    /// handler, the resource byte cap is applied here, and the #3353 token
+    /// budget shaper (in [`dispatch_tool`](Self::dispatch_tool)) then runs
+    /// *after* on the within-cap response — never before the cap.
+    fn dispatch_read_tool_limited(&self, name: &str, args: serde_json::Value) -> CallToolResult {
+        if !is_resource_limited_read_tool(name) {
+            return self.dispatch_read_tool(name, args);
+        }
+
+        // No per-call override for these tools in v1, so `effective(None)` is
+        // infallible (an override is the only thing that can be rejected). Fall
+        // back defensively to "unlimited" rather than `unwrap`, keeping the
+        // production path panic-free per the coding standards.
+        let eff = self
+            .query_limits
+            .effective(None)
+            .unwrap_or_else(|_| EffectiveQueryLimits::unlimited());
+        let cap = eff.max_response_bytes;
+
+        let result = if eff.timeout_ms == 0 {
+            // Inline (unlimited-timeout) fast path: no worker thread, no guard,
+            // no clone — zero overhead over a bare `dispatch_read_tool` call.
+            self.dispatch_read_tool(name, args)
+        } else {
+            let in_flight_cap = self.query_limits.max_in_flight_queries;
+            let guard = match self.try_acquire_in_flight(in_flight_cap) {
+                Some(guard) => guard,
+                None => return self.in_flight_capacity_error(name, in_flight_cap),
+            };
+            let server = self.clone();
+            let tool = name.to_string();
+            match self.race_deadline(eff.timeout_ms, guard, move || {
+                server.dispatch_read_tool(&tool, args)
+            }) {
+                RaceOutcome::Completed(result) => result,
+                RaceOutcome::TimedOut => {
+                    return self.read_tool_timeout_error(name, eff.timeout_ms);
+                }
+                RaceOutcome::WorkerDied => return self.worker_died_error(name),
+            }
+        };
+
+        self.enforce_result_byte_cap(name, result, cap)
+    }
+
+    /// Enforce the result-byte cap on a resource-limited read tool's response
+    /// (Issue #3368 residue), post-hoc.
+    ///
+    /// A `cap` of `0` (unlimited) and any error response pass straight through.
+    /// Otherwise, if the serialized response text exceeds `cap`, the response is
+    /// replaced with the structured non-retriable `RESOURCE_EXHAUSTED`
+    /// result-byte error (which also records the termination counter); a
+    /// within-cap response is returned unchanged. The single text content item
+    /// each read handler produces *is* the serialized JSON response, so its
+    /// byte length is the response size — measured in place without consuming
+    /// the result, so a within-cap response is returned byte-for-byte identical.
+    fn enforce_result_byte_cap(
+        &self,
+        name: &str,
+        result: CallToolResult,
+        cap: usize,
+    ) -> CallToolResult {
+        if cap == 0 || result.is_error.unwrap_or(false) {
+            return result;
+        }
+        let len = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.len()))
+            .unwrap_or(0);
+        if len > cap {
+            return self.read_tool_byte_cap_error(name, len, cap);
+        }
+        result
+    }
+
+    /// Tool-agnostic wall-clock-timeout error for the six wrapped read tools
+    /// (Issue #3368 residue).
+    ///
+    /// Unlike the `query` tool's
+    /// [`wall_clock_timeout_error`](Self::wall_clock_timeout_error) — whose
+    /// `kind: "runtime_error"` and `language` fields are meaningful for a query
+    /// *language* — these tools are not a query language and expose no per-call
+    /// `limits` override in v1. Reusing the query builder would emit a
+    /// semantically wrong `language: "<toolname>"`, a spurious `kind`, and
+    /// remediation telling the caller to raise `limits.timeout_ms`, which they
+    /// cannot set. This emitter instead produces the neutral #3234 envelope
+    /// (`{error:{code,message,retriable,details}}` — no `kind`, no `language`)
+    /// with tool-neutral remediation. Records the `WallClockTimeout`
+    /// termination exactly once; retriable, since these tools are read-only so
+    /// a narrower retry is always sound.
+    fn read_tool_timeout_error(&self, name: &str, timeout_ms: u64) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::WallClockTimeout);
+        self.error_result(
+            McpError::new(
+                McpErrorCode::ResourceExhausted,
+                format!(
+                    "Tool '{name}' exceeded the wall-clock timeout of {timeout_ms} ms; narrow \
+                     the request (smaller depth/limit/time window) and retry."
+                ),
+            )
+            .retriable(true)
+            .details(json!({
+                "dimension": LimitDimension::WallClockTimeout.as_str(),
+                "limit": timeout_ms,
+            })),
+        )
+    }
+
+    /// Tool-agnostic result-byte-cap error for the six wrapped read tools
+    /// (Issue #3368 residue). The neutral #3234 counterpart to the `query`
+    /// tool's [`result_bytes_error`](Self::result_bytes_error): no `kind`, no
+    /// `language`, and no unactionable `limits.max_response_bytes` advice (these
+    /// tools have no per-call override). Records the `ResultBytes` termination
+    /// exactly once; non-retriable — the same request yields the same oversized
+    /// response, so the caller must narrow it.
+    fn read_tool_byte_cap_error(&self, name: &str, consumed: usize, cap: usize) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::ResultBytes);
+        self.error_result(
+            McpError::new(
+                McpErrorCode::ResourceExhausted,
+                format!(
+                    "Tool '{name}' response of {consumed} bytes exceeded the {cap}-byte cap; \
+                     narrow the request (smaller depth/limit/k) and retry."
+                ),
+            )
+            .retriable(false)
+            .details(json!({
+                "dimension": LimitDimension::ResultBytes.as_str(),
+                "limit": cap,
+                "consumed": consumed,
+            })),
+        )
+    }
 }
 
 /// The read tools that honor the Issue #3353 token budget (`max_response_tokens`
@@ -6467,6 +7372,7 @@ pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
     "get_incoming_edges",
     "traverse",
     "find_similar",
+    "semantic_search",
     "hybrid_query",
     "query",
     "find_nodes_at_time",
@@ -6477,6 +7383,37 @@ pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
 /// Does this tool honor the token budget parameters (Issue #3353)?
 pub(crate) fn is_budgetable_read_tool(name: &str) -> bool {
     BUDGETABLE_READ_TOOLS.contains(&name)
+}
+
+/// The read tools whose responses are governed by the per-query resource
+/// limits (Issue #3368 residue): the wall-clock timeout and the result-byte
+/// cap. The `query` tool self-enforces the same limits inline (see
+/// [`AletheiaMcpServer::handle_query`]) and is deliberately *not* listed here,
+/// so it is never double-wrapped. Kept as a single source of truth so the
+/// dispatch wrapper and any future schema/documentation path cannot drift.
+///
+/// v1 scope (Lane-2 follow-ups deferred): these tools honor only the server
+/// **defaults** — there is no per-call `limits` override for them (unlike the
+/// `query` tool), no memory-budget dimension, and no engine-level cooperative
+/// cancellation; the timed computation runs to completion on a detached worker
+/// and its result is discarded on timeout (identical to the `query` tool's
+/// non-cancellable race). The byte cap is enforced **post-hoc** on the fully
+/// serialized response (the `query` tool's incremental row-by-row guard is not
+/// reused here); a within-cap response is then optionally shaped by the #3353
+/// token budget.
+pub(crate) const RESOURCE_LIMITED_READ_TOOLS: &[&str] = &[
+    "traverse",
+    "hybrid_query",
+    "find_similar",
+    "get_node_at_time",
+    "get_edge_at_time",
+    "find_nodes_at_time",
+];
+
+/// Does this tool have its response governed by the per-query resource limits
+/// (Issue #3368 residue)?
+pub(crate) fn is_resource_limited_read_tool(name: &str) -> bool {
+    RESOURCE_LIMITED_READ_TOOLS.contains(&name)
 }
 
 /// Read tools that honor the Issue #3348 provenance filter parameters
@@ -6845,6 +7782,62 @@ fn tool_definitions() -> Vec<Tool> {
                      `{type, dim, elided:true}` descriptor) to protect LLM context; pass \
                      `include_vectors: true` to receive the full float arrays.",
             make_input_schema::<FindSimilarRequest>(),
+        ),
+        Tool::new(
+            "embed_query",
+            "Generate a single dense embedding vector from a text string using the server's \
+                     configured embedding model (Issue #2906). Returns `{embedding, dim}`. Use it \
+                     to build a query vector for find_similar, or as a general text-to-vector \
+                     utility. Requires the server to be built with the `embeddings` feature and to \
+                     have a model configured; otherwise returns a structured \
+                     FAILED_PRECONDITION error. Input size is bounded.",
+            make_input_schema::<EmbedQueryRequest>(),
+        ),
+        Tool::new(
+            "embed_text",
+            "Generate dense embeddings for multiple texts with real chunk expansion (Issue \
+                     #2906): each input document is split into contiguous character windows and \
+                     every chunk is embedded independently, so a long document yields MULTIPLE \
+                     embeddings instead of one truncated vector. Returns per-chunk results \
+                     `{text, metadata, embedding, dim}` aligned to their source chunk via the \
+                     model's own chunk output (never a positional zip); `metadata` carries the \
+                     originating `source_index` and `chunk_index`. An optional `max_chunks` caps \
+                     the returned embeddings (a value of 0 is rejected as INVALID_ARGUMENT); the \
+                     response sets `truncated: true` when the cap trims the expansion. Requires \
+                     the `embeddings` feature and a configured model; otherwise returns a \
+                     structured FAILED_PRECONDITION error. Input count and size are bounded.",
+            make_input_schema::<EmbedTextRequest>(),
+        ),
+        Tool::new(
+            "semantic_search",
+            "Text semantic search (Issue #2906): embed `query_text` with the server's \
+                     configured model, then run the exact find_similar k-NN path against the vector \
+                     index on `property_name`, so the response envelope is identical to \
+                     find_similar (results, score, temporal block, #3220 vector elision, #3226 \
+                     pagination). Refuses with FAILED_PRECONDITION if the index/property does not \
+                     exist, INVALID_ARGUMENT on an embedding-dimension mismatch. Requires the \
+                     `embeddings` feature and a configured model.",
+            make_input_schema::<SemanticSearchRequest>(),
+        ),
+        Tool::new(
+            "create_node_with_embedding",
+            "Create a node whose embedding is generated from `text` (Issue #2906): embed the \
+                     text with the server's configured model and store the vector under \
+                     `embedding_property` (alongside any other `properties`), compatible with \
+                     enable_vector_index / find_similar / semantic_search. Supports optional \
+                     `valid_time` and `provenance`. Requires the `embeddings` feature and a \
+                     configured model.",
+            make_input_schema::<CreateNodeWithEmbeddingRequest>(),
+        ),
+        Tool::new(
+            "update_node_embedding",
+            "Regenerate a node's embedding from `text` and update ONLY the embedding property \
+                     (Issue #2906). Because update_node replaces all properties, this first reads \
+                     the node and MERGES its existing properties, then overrides `embedding_property` \
+                     with the freshly generated vector — every other property is preserved. \
+                     Supports optional `valid_time`. Requires the `embeddings` feature and a \
+                     configured model.",
+            make_input_schema::<UpdateNodeEmbeddingRequest>(),
         ),
         Tool::new(
             "enable_vector_index",
@@ -8101,6 +9094,246 @@ mod server_unit_tests {
         assert!(
             cols.contains(&"a".to_string()) && cols.contains(&"b".to_string()),
             "columns must name the bound variables: {val}"
+        );
+    }
+
+    // ===================================================================
+    // Per-query resource limits extended to the read tools (Issue #3368
+    // residue): wall-clock timeout + result-byte cap on
+    // traverse/hybrid_query/find_similar/get_node_at_time/get_edge_at_time/
+    // find_nodes_at_time, plus the `database_stats.resource_limits` counters.
+    // These drive the full `dispatch_tool` seam (auth -> #3368 wrapper ->
+    // #3353 budget), so they exercise the wrapper end to end.
+    // ===================================================================
+
+    use crate::core::property::PropertyMap;
+
+    /// Seed a star graph: one root with `leaves` outgoing `LINK` edges to
+    /// leaf nodes. Returns the root's id. A wide star makes a single-hop
+    /// traverse do real (multi-node) work, so a 1 ms wall-clock timeout races
+    /// against a computation that reliably overruns it.
+    fn seed_star(db: &Arc<AletheiaDB>, leaves: usize) -> u64 {
+        let root = db.create_node("Root", PropertyMap::new()).expect("root");
+        for _ in 0..leaves {
+            let leaf = db.create_node("Leaf", PropertyMap::new()).expect("leaf");
+            db.create_edge(root, leaf, "LINK", PropertyMap::new())
+                .expect("edge");
+        }
+        root.as_u64()
+    }
+
+    fn parse(result: CallToolResult) -> serde_json::Value {
+        serde_json::from_str(&AletheiaMcpServer::extract_text(result)).expect("json response")
+    }
+
+    /// The wrapper covers exactly the six residue read tools and never the
+    /// self-enforcing `query` tool.
+    #[test]
+    fn resource_limited_read_tools_membership() {
+        for t in [
+            "traverse",
+            "hybrid_query",
+            "find_similar",
+            "get_node_at_time",
+            "get_edge_at_time",
+            "find_nodes_at_time",
+        ] {
+            assert!(
+                super::is_resource_limited_read_tool(t),
+                "{t} must be covered"
+            );
+        }
+        // `query` self-enforces inline; it must NOT be double-wrapped.
+        assert!(!super::is_resource_limited_read_tool("query"));
+        assert!(!super::is_resource_limited_read_tool("get_node"));
+        assert!(!super::is_resource_limited_read_tool("database_stats"));
+    }
+
+    /// A pathological `traverse` under a 1 ms wall-clock timeout is terminated
+    /// with a retriable RESOURCE_EXHAUSTED whose `details.dimension` is
+    /// `wall_clock_timeout`, and the timeout counter is bumped exactly once.
+    #[test]
+    fn traverse_wall_clock_timeout_is_resource_exhausted() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        // Enough leaves that a single-hop traverse + serialization dwarfs 1 ms.
+        let root = seed_star(&db, 3_000);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 1,
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 10_000,
+            }),
+        );
+        assert_eq!(result.is_error, Some(true), "expected a timeout error");
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(true), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout"),
+            "{val}"
+        );
+        // Tool-agnostic envelope (Issue #3368 residue): NO query-tool `kind` /
+        // `language` fields (a wrapped read tool is not a query language), and
+        // no unactionable `limits.timeout_ms` remediation (these tools have no
+        // per-call override).
+        assert!(err.get("kind").is_none(), "no kind field: {val}");
+        assert!(err.get("language").is_none(), "no language field: {val}");
+        let msg = err["message"].as_str().unwrap_or_default();
+        assert!(
+            !msg.contains("limits.timeout_ms"),
+            "message must not reference limits.timeout_ms: {val}"
+        );
+        assert!(
+            msg.contains("traverse"),
+            "message must name the tool: {val}"
+        );
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 1);
+    }
+
+    /// A `traverse` response that exceeds the result-byte cap fails closed with
+    /// a non-retriable RESOURCE_EXHAUSTED / `result_bytes` error whose
+    /// `details.consumed` exceeds the cap, bumping the byte-cap counter. Uses
+    /// the inline (unlimited-timeout) path so only the post-hoc byte cap is
+    /// under test.
+    #[test]
+    fn traverse_result_byte_cap_fails_closed() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 0,          // inline path (no timeout race)
+            default_max_response_bytes: 64, // tiny cap the response exceeds
+            max_response_bytes: 0,          // no ceiling to interfere
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().result_bytes, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 100,
+            }),
+        );
+        assert_eq!(result.is_error, Some(true), "expected a byte-cap error");
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(false), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("result_bytes"),
+            "{val}"
+        );
+        assert_eq!(err["details"]["limit"].as_u64(), Some(64), "{val}");
+        assert!(
+            err["details"]["consumed"].as_u64().unwrap_or(0) > 64,
+            "consumed must exceed the cap: {val}"
+        );
+        // Tool-agnostic envelope (Issue #3368 residue): NO query-tool `kind` /
+        // `language` fields, and no unactionable `limits.max_response_bytes`
+        // remediation.
+        assert!(err.get("kind").is_none(), "no kind field: {val}");
+        assert!(err.get("language").is_none(), "no language field: {val}");
+        let msg = err["message"].as_str().unwrap_or_default();
+        assert!(
+            !msg.contains("limits.max_response_bytes"),
+            "message must not reference limits.max_response_bytes: {val}"
+        );
+        assert!(
+            msg.contains("traverse"),
+            "message must name the tool: {val}"
+        );
+        assert_eq!(server.limit_termination_counts().result_bytes, 1);
+    }
+
+    /// A large-but-within-limits result is a success that self-discloses
+    /// incompleteness via `has_more`/`next_offset` (row-cap breaches are the
+    /// tool's own `limit`, NOT a resource-limit termination): no counter moves.
+    #[test]
+    fn row_limited_result_is_success_and_uncounted() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        // Default limits (generous timeout + byte cap) over the seeded db.
+        let server = AletheiaMcpServer::new(db);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 1, // fewer than the 5 leaves -> a partial page
+            }),
+        );
+        assert_ne!(result.is_error, Some(true), "row limit is not an error");
+        let val = parse(result);
+        assert_eq!(val["count"].as_u64(), Some(1), "{val}");
+        assert_eq!(val["has_more"].as_bool(), Some(true), "{val}");
+        assert!(val.get("next_offset").is_some(), "{val}");
+        let counts = server.limit_termination_counts();
+        assert_eq!(counts.wall_clock_timeout, 0);
+        assert_eq!(counts.result_bytes, 0);
+    }
+
+    /// `database_stats` surfaces the over-limit termination counters under an
+    /// additive `resource_limits` block: zero on a fresh server, and reflecting
+    /// forced terminations afterwards.
+    #[test]
+    fn database_stats_surfaces_resource_limit_counters() {
+        let server = make_server();
+
+        // Fresh: block present, all zero.
+        let val = parse(server.dispatch_tool("database_stats", serde_json::json!({})));
+        let rl = &val["resource_limits"];
+        assert_eq!(rl["timeout_terminations"].as_u64(), Some(0), "{val}");
+        assert_eq!(rl["byte_cap_terminations"].as_u64(), Some(0), "{val}");
+        assert_eq!(rl["override_rejections"].as_u64(), Some(0), "{val}");
+
+        // Force one of each termination through the shared counters (the exact
+        // tool-agnostic builders the wrapper invokes on TimedOut / over-cap).
+        let _ = server.read_tool_timeout_error("traverse", 1);
+        let _ = server.read_tool_byte_cap_error("traverse", 4096, 64);
+
+        let val = parse(server.dispatch_tool("database_stats", serde_json::json!({})));
+        let rl = &val["resource_limits"];
+        assert_eq!(rl["timeout_terminations"].as_u64(), Some(1), "{val}");
+        assert_eq!(rl["byte_cap_terminations"].as_u64(), Some(1), "{val}");
+    }
+
+    /// Fast path: with limits disabled (unlimited timeout + no byte cap) the
+    /// wrapper runs the handler inline and returns a response byte-for-byte
+    /// identical to the unwrapped `dispatch_read_tool` — no behavior change.
+    #[test]
+    fn zero_timeout_fast_path_is_identical_to_unwrapped() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 4);
+        let server =
+            AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig::disabled());
+        let args = serde_json::json!({
+            "start_node_id": root,
+            "edge_label": "LINK",
+            "depth": 1,
+            "limit": 100,
+        });
+
+        let wrapped =
+            AletheiaMcpServer::extract_text(server.dispatch_tool("traverse", args.clone()));
+        let bare = AletheiaMcpServer::extract_text(server.dispatch_read_tool("traverse", args));
+        assert_eq!(
+            wrapped, bare,
+            "the disabled-limits fast path must not alter the response"
         );
     }
 }

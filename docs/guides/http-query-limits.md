@@ -270,7 +270,7 @@ Honest breakdown of #3368 across lanes:
 | Request body-size (input memory) | ✅ | n/a | ✅ | Covered previously (#3424) |
 | Engine-level cancellation of in-flight CPU work | — | — | — | **Deferred** → query-executor lane |
 | Query **memory budget** | — | — | — | **Deferred** → query-executor lane |
-| Same limits on the **MCP** surface | — | — | — | **Deferred** → MCP lane |
+| Same limits on the **MCP** surface | ✅ | partial | partial | **Covered (MCP lane)** — the `query` tool (full defaults/override/ceiling) plus six read tools (`traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time`; timeout + byte cap, server defaults only, byte cap post-hoc — Issue #3368 residue). See [docs/guides/mcp-query-tool.md](mcp-query-tool.md#extended-to-the-read-tools-issue-3368-residue) |
 | Rust-API builder ergonomics for limits | partial | — | — | Config type is public; a fluent builder is a follow-up |
 
 The HTTP timeout is a response-deadline bound, not a compute bound — see

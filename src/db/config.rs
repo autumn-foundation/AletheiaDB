@@ -477,6 +477,13 @@ impl AletheiaDB {
             let enable_cold_storage = config.historical.enable_cold_storage;
             let cold_storage_path = config.historical.cold_storage_path.clone();
 
+            // Named-snapshot registry (Issue #3370): durable sidecar at
+            // `{data_dir}/snapshots.json` when index persistence is enabled,
+            // in-memory-only otherwise. Loaded here so pins survive restart.
+            let snapshots = Arc::new(crate::db::snapshot::SnapshotRegistry::open(
+                crate::db::snapshot::registry_path_for(&config.persistence),
+            )?);
+
             let mut db = AletheiaDB {
                 current: Arc::new(CurrentStorage::new()),
                 historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
@@ -508,6 +515,10 @@ impl AletheiaDB {
                     None
                 },
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
+                changefeed: Arc::new(
+                    crate::core::changefeed_subscription::ChangefeedBroadcaster::new(),
+                ),
+                snapshots,
                 chain: None,
                 _tempdir: None,
             };
@@ -896,6 +907,11 @@ impl AletheiaDB {
                 // constraints are in-memory only (ephemeral `new()` path).
                 schema_constraint_path: None,
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
+                changefeed: Arc::new(
+                    crate::core::changefeed_subscription::ChangefeedBroadcaster::new(),
+                ),
+                // Ephemeral (no index persistence): in-memory-only registry.
+                snapshots: Arc::new(crate::db::snapshot::SnapshotRegistry::in_memory()),
                 chain: None,
                 _tempdir: None,
             };
