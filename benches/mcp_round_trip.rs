@@ -1087,6 +1087,17 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
             }
         ),
         s!(
+            "temporal__await_changes",
+            "await_changes",
+            "temporal",
+            "typical",
+            false,
+            // timeout_ms:0 makes recv_timeout return instantly (Ok(empty)) so the
+            // long-poll never blocks the bench; with no concurrent writes this
+            // resolves as timed_out:true with an empty changes array.
+            |_| json!({"timeout_ms": 0})
+        ),
+        s!(
             "temporal__temporal_extent",
             "temporal_extent",
             "temporal",

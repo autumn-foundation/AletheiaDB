@@ -95,6 +95,8 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("get_edge_at_time", AccessClass::Read),
     ("find_nodes_at_time", AccessClass::Read),
     ("list_changes", AccessClass::Read),
+    // Push-changefeed long-poll — read-only (Issue #3375).
+    ("await_changes", AccessClass::Read),
     ("get_node_at_valid_time", AccessClass::Read),
     ("get_node_at_transaction_time", AccessClass::Read),
     ("get_node_history", AccessClass::Read),

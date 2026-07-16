@@ -319,6 +319,7 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | **Embeddings** | `embed_query`, `embed_text`, `semantic_search`, `create_node_with_embedding`, `update_node_embedding` (generate embeddings from text and run text-based semantic search; require the `embeddings` feature + a configured model, else return a structured unavailable/precondition error — see [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md#mcp-embedding-tools)) |
 | **Semantic** | `semantic_path`, `concept_analogy`, `concept_mean`, `find_duplicate_candidates`, `semantic_horizon`, `context_aspects` (read-only analysis over the stable `semantic-search` cohort; gated on the `semantic-search` feature — return `FAILED_PRECONDITION` with `required_feature` when absent; see [docs/guides/mcp-semantic-search-tools.md](docs/guides/mcp-semantic-search-tools.md)) |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
+| **Changefeed** | `list_changes` (pull: what changed in a tx-time window), `await_changes` (push long-poll: block for the next committed changes; see below) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
@@ -967,8 +968,7 @@ declaration tools and AQL/Cypher DDL (#560) are follow-ups.
 Push counterpart to the #3216 `list_changes` pull feed: `AletheiaDB::subscribe_changes(filter)`
 returns a `Subscription` whose bounded buffer fills with matching `ChangeRecord`s as
 transactions commit — no polling. `poll()` drains non-blocking; `recv_timeout(dur)` is a
-sync `Mutex`+`Condvar` long-poll (no async dep — the primitive an SSE / MCP `await_changes`
-layer will wrap; **that HTTP/MCP surface is a coordinated Lane 1 follow-up**). A `ChangeFilter`
+sync `Mutex`+`Condvar` long-poll (no async dep). A `ChangeFilter`
 selects by node label / edge type / change type (unset dimension = match-all on that axis;
 setting only labels excludes edges and vice-versa; `change_types` is a kind-independent AND).
 The broadcast runs in the commit path **after** the write is durable + applied + visible and
@@ -983,6 +983,25 @@ the last event drained); duplicates on resume dedup by that stable cursor
 (defaults: 128 subscriptions, 1024-event buffer); exceeding the subscription cap fails
 `subscribe_changes` with `CapacityExceeded`. Dropping a `Subscription` deregisters it. v1 is
 in-memory (no WAL change). See [docs/guides/reacting-to-change.md](docs/guides/reacting-to-change.md).
+
+**MCP `await_changes` long-poll + HTTP SSE stream (changefeed surface):** the
+`await_changes` MCP tool (read-class) wraps this primitive as a **stateless**
+per-call subscribe→catch-up→block long-poll: it subscribes (capturing the
+frontier so nothing is lost between catch-up and blocking), optionally catches
+up from a prior `from_token` via `list_changes` (returning immediately if any
+change already exists), else blocks up to `timeout_ms` (default 25000, hard cap
+60000) for the next matching commit. Response:
+`{changes:[…list_changes shape…], count, resume_token, timed_out, has_more}`.
+Error mappings (#3234): a lagged subscription → retriable `RESOURCE_EXHAUSTED`
+with `details.resume_token` (resume losslessly via `list_changes`); a
+subscribe-cap breach → retriable `UNAVAILABLE`; a malformed `from_token` →
+`INVALID_ARGUMENT`. It is deliberately **excluded** from the #3368 per-read
+timeout, #3353 token-budget, and #3360 cursor wrappers (a long-poll is expected
+to block). The HTTP surface adds `POST /changes/await` (the tool projection) and
+a **route-only** `GET /changes/stream` Server-Sent Events stream (read-class,
+NOT an MCP tool — like `GET /metrics`): one `data:` frame per committed change,
+a terminal `event: lagged` frame carrying the resume token on overflow. Filter
+via `?node_labels=…&edge_types=…&change_types=…` (comma-separated).
 ### Named Snapshots — Reproducible Reads (Issue #3370)
 
 Pins a human-readable name to a bi-temporal coordinate

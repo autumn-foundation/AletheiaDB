@@ -103,6 +103,7 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `get_edge_at_time` | read |
 | `find_nodes_at_time` | read |
 | `list_changes` | read |
+| `await_changes` | read |
 | `get_node_at_valid_time` | read |
 | `get_node_at_transaction_time` | read |
 | `get_node_history` | read |
@@ -157,6 +158,14 @@ The HTTP credential is per-request (`Authorization: Bearer <key>` or
 | `POST /admin/keys` (create key) | admin |
 | `GET /admin/keys` (list keys, masked) | admin |
 | `POST /admin/keys/revoke` | admin |
+| `GET /changes/stream` (SSE changefeed stream) | read |
+| `POST /changes/await` (`await_changes` long-poll) | read |
+
+Note: `GET /changes/stream` is a **route-only** Server-Sent Events surface
+(Issue #3375) — it is served over HTTP + OpenAPI but is deliberately **not** an
+MCP tool (like `GET /metrics`). Its long-poll MCP projection is the
+`await_changes` tool (also served at `POST /changes/await`). Both are `read`
+class.
 
 ## Framework endpoints outside this matrix (HTTP)
 

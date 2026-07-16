@@ -45,8 +45,8 @@ pub use server::AletheiaMcpServer;
 
 // Re-export tool request/response types for testing (alphabetically sorted)
 pub use tools::{
-    CountEdgesRequest, CountNodesRequest, CreateEdgeRequest, CreateNodeRequest,
-    CreateNodeWithEmbeddingRequest, DatabaseStatsRequest, DeleteEdgeRequest,
+    AwaitChangesRequest, CountEdgesRequest, CountNodesRequest, CreateEdgeRequest,
+    CreateNodeRequest, CreateNodeWithEmbeddingRequest, DatabaseStatsRequest, DeleteEdgeRequest,
     DeleteNodeCascadeRequest, DeleteNodeRequest, EmbedQueryRequest, EmbedTextRequest,
     EnableUniqueConstraintRequest, EnableVectorIndexRequest, FindNodesAtTimeRequest,
     FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeHistoryRequest, GetEdgeRequest,

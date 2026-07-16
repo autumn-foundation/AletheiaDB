@@ -143,9 +143,11 @@ use rmcp::{
 use serde_json::json;
 
 use crate::api::transaction::WriteOps;
+use crate::core::changefeed::ChangeCursor;
+use crate::core::changefeed_subscription::{ChangeFilter, RecvError};
 use crate::core::temporal::time;
 use crate::core::{
-    ChangeFeedQuery, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
+    ChangeFeedQuery, ChangeType, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
     PropertyValue, Provenance, ProvenanceFilter, Timestamp, VersionId,
 };
 use crate::db::AletheiaDB;
@@ -1095,6 +1097,26 @@ impl AletheiaMcpServer {
     /// without already knowing any entity IDs.
     pub fn list_changes(&self, req: ListChangesRequest) -> String {
         Self::extract_text(self.handle_list_changes(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Long-poll for the next committed changes (the push changefeed's blocking
+    /// surface, Issue #3375).
+    ///
+    /// Stateless per call: subscribe to the push feed, optionally catch up from a
+    /// prior `from_token` via [`list_changes`](Self::list_changes), and otherwise
+    /// block up to `timeout_ms` (default 25000, hard cap 60000) for the next
+    /// matching commit. A timeout returns an empty `changes` array with
+    /// `timed_out: true` and a `resume_token` to poll again; a lagged
+    /// subscription returns a retriable `RESOURCE_EXHAUSTED` carrying the
+    /// `resume_token` to resume losslessly via `list_changes`.
+    ///
+    /// This tool is deliberately excluded from the #3368 per-read timeout /
+    /// #3353 token-budget / #3360 cursor wrappers — a long-poll is expected to
+    /// block, so those cross-cutting read features would truncate or abort it.
+    pub fn await_changes(&self, req: AwaitChangesRequest) -> String {
+        Self::extract_text(self.handle_await_changes(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -5501,24 +5523,7 @@ impl AletheiaMcpServer {
                 let changes: Vec<serde_json::Value> = page
                     .changes
                     .iter()
-                    .map(|record| {
-                        json!({
-                            "entity_id": record.entity_id,
-                            "version_id": record.version_id,
-                            "kind": record.kind.as_str(),
-                            "change_type": record.change_type.as_str(),
-                            "label": record.label,
-                            "transaction_time": time::to_iso8601(record.transaction_time()),
-                            "transaction_time_range": {
-                                "start": time::to_iso8601(record.transaction_time_range.start()),
-                                "end": time::to_iso8601(record.transaction_time_range.end()),
-                            },
-                            "valid_time_range": {
-                                "start": time::to_iso8601(record.valid_time_range.start()),
-                                "end": time::to_iso8601(record.valid_time_range.end()),
-                            },
-                        })
-                    })
+                    .map(Self::changefeed_change_json)
                     .collect();
 
                 self.success_json(json!({
@@ -5528,6 +5533,199 @@ impl AletheiaMcpServer {
                 }))
             }
             Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Serialize a single [`ChangeRecord`](crate::core::ChangeRecord) into the
+    /// changefeed row JSON shared by `list_changes` and `await_changes`, so both
+    /// surfaces emit a byte-identical change shape (Issue #3375).
+    fn changefeed_change_json(record: &crate::core::ChangeRecord) -> serde_json::Value {
+        json!({
+            "entity_id": record.entity_id,
+            "version_id": record.version_id,
+            "kind": record.kind.as_str(),
+            "change_type": record.change_type.as_str(),
+            "label": record.label,
+            "transaction_time": time::to_iso8601(record.transaction_time()),
+            "transaction_time_range": {
+                "start": time::to_iso8601(record.transaction_time_range.start()),
+                "end": time::to_iso8601(record.transaction_time_range.end()),
+            },
+            "valid_time_range": {
+                "start": time::to_iso8601(record.valid_time_range.start()),
+                "end": time::to_iso8601(record.valid_time_range.end()),
+            },
+        })
+    }
+
+    /// Build the `await_changes` success envelope from a set of changes plus the
+    /// resume/timeout/has-more signals.
+    fn await_changes_success(
+        &self,
+        changes: &[crate::core::ChangeRecord],
+        resume_token: Option<String>,
+        timed_out: bool,
+        has_more: bool,
+    ) -> CallToolResult {
+        let rows: Vec<serde_json::Value> =
+            changes.iter().map(Self::changefeed_change_json).collect();
+        self.success_json(json!({
+            "changes": rows,
+            "count": changes.len(),
+            "resume_token": resume_token,
+            "timed_out": timed_out,
+            "has_more": has_more,
+        }))
+    }
+
+    /// Parse the request's `change_types` strings into [`ChangeType`]s, returning
+    /// the offending token's error message for any unrecognized value (the
+    /// caller wraps it in a structured `INVALID_ARGUMENT`). Returns a small `Err`
+    /// (`String`) rather than a `CallToolResult` to keep the `Result` compact.
+    fn parse_change_types(raw: &[String]) -> Result<Vec<ChangeType>, String> {
+        raw.iter()
+            .map(|s| match s.as_str() {
+                "created" => Ok(ChangeType::Created),
+                "modified" => Ok(ChangeType::Modified),
+                "deleted" => Ok(ChangeType::Deleted),
+                other => Err(format!(
+                    "Invalid change_type '{other}': expected one of created, modified, deleted"
+                )),
+            })
+            .collect()
+    }
+
+    /// Long-poll for the next committed changes (the push changefeed's blocking
+    /// surface, Issue #3375).
+    ///
+    /// Stateless per call: subscribe (capturing the committed frontier so no
+    /// change between catch-up and blocking is lost), optionally catch up from a
+    /// prior `from_token` via `list_changes` (returning immediately if any change
+    /// already exists), otherwise block up to the clamped `timeout_ms`. Error
+    /// mappings (Issue #3234): a lagged subscription → retriable
+    /// `RESOURCE_EXHAUSTED` with `details.resume_token`; a subscribe cap breach →
+    /// retriable `UNAVAILABLE`; a malformed `from_token` → `INVALID_ARGUMENT`.
+    fn handle_await_changes(&self, args: serde_json::Value) -> CallToolResult {
+        let req: AwaitChangesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Build the change filter (label/type/change-type dimensions).
+        let mut filter = ChangeFilter::all();
+        if let Some(labels) = &req.node_labels {
+            filter = filter.with_node_labels(labels.iter().cloned());
+        }
+        if let Some(types) = &req.edge_types {
+            filter = filter.with_edge_types(types.iter().cloned());
+        }
+        if let Some(change_types) = &req.change_types {
+            let parsed = match Self::parse_change_types(change_types) {
+                Ok(v) => v,
+                Err(msg) => return self.invalid_argument(&msg),
+            };
+            filter = filter.with_change_types(parsed);
+        }
+
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .clamp(1, MAX_RESULT_LIMIT);
+
+        // Subscribe FIRST so the frontier is captured before the catch-up read:
+        // any change committed after this point is buffered in the subscription,
+        // so the catch-up→block handoff is gap-free.
+        let sub = match self.db.subscribe_changes(filter) {
+            Ok(s) => s,
+            Err(e) => {
+                // A subscribe cap breach is transient (another consumer may
+                // disconnect): override the default FAILED_PRECONDITION with a
+                // retriable UNAVAILABLE carrying the capacity metadata.
+                if let crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::CapacityExceeded {
+                        resource,
+                        current,
+                        limit,
+                    },
+                ) = &e
+                {
+                    return self.error_result(
+                        McpError::new(McpErrorCode::Unavailable, e.to_string())
+                            .retriable(true)
+                            .details(json!({
+                                "resource": resource,
+                                "current": current,
+                                "limit": limit,
+                            })),
+                    );
+                }
+                return self.db_error(e);
+            }
+        };
+
+        // Catch-up path: if the caller has a resume token, pull everything
+        // committed strictly after it via the durable `list_changes` feed and
+        // return immediately when anything is available.
+        if let Some(token) = req.from_token.as_deref() {
+            let decoded = match ChangeCursor::decode(token) {
+                Ok(c) => c,
+                Err(_) => {
+                    return self
+                        .invalid_argument("Invalid from_token: malformed continuation token");
+                }
+            };
+            let query = ChangeFeedQuery {
+                tx_from: Timestamp::from(decoded.tx_wallclock),
+                tx_to: time::now(),
+                valid_from: None,
+                valid_to: None,
+                label: None,
+                limit,
+                cursor: Some(token.to_string()),
+            };
+            match self.db.list_changes(&query) {
+                Ok(page) if !page.changes.is_empty() => {
+                    let resume = page.changes.last().map(|r| r.cursor().encode());
+                    return self.await_changes_success(
+                        &page.changes,
+                        resume,
+                        false,
+                        page.next_cursor.is_some(),
+                    );
+                }
+                Ok(_) => { /* nothing buffered yet — fall through to block */ }
+                Err(e) => return self.db_error(e),
+            }
+        }
+
+        // Block for the next change up to the clamped timeout (default 25s, hard
+        // cap 60s). `recv_timeout(0)` returns instantly (Ok(empty)).
+        let timeout_ms = req.timeout_ms.unwrap_or(25_000).min(60_000);
+        match sub.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+            Ok(recs) if !recs.is_empty() => {
+                let resume = recs.last().map(|r| r.cursor().encode());
+                self.await_changes_success(&recs, resume, false, false)
+            }
+            Ok(_) => {
+                // Timed out with nothing buffered: an honest empty result plus a
+                // resume anchor (the subscribe-time baseline if nothing drained).
+                self.await_changes_success(&[], sub.resume_token(), true, false)
+            }
+            Err(RecvError::Lagged { resume_token }) => {
+                let details = match &resume_token {
+                    Some(tok) => json!({ "reason": "changefeed_lagged", "resume_token": tok }),
+                    None => json!({ "reason": "changefeed_lagged" }),
+                };
+                self.error_result(
+                    McpError::new(
+                        McpErrorCode::ResourceExhausted,
+                        "The changefeed subscription lagged and was disconnected; resume \
+                         losslessly by calling list_changes with the provided resume_token.",
+                    )
+                    .retriable(true)
+                    .details(details),
+                )
+            }
         }
     }
 
@@ -7577,6 +7775,7 @@ impl AletheiaMcpServer {
             "get_edge_at_time" => self.handle_get_edge_at_time(args),
             "find_nodes_at_time" => self.handle_find_nodes_at_time(args),
             "list_changes" => self.handle_list_changes(args),
+            "await_changes" => self.handle_await_changes(args),
             "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
             "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
             "get_node_history" => self.handle_get_node_history(args),
@@ -8325,6 +8524,11 @@ fn tool_definitions() -> Vec<Tool> {
             "list_changes",
             "List graph-wide changes (node & edge versions) committed in a transaction-time window, with optional valid-time and label filters and stable cursor pagination. Discover what changed without knowing entity IDs.",
             make_input_schema::<ListChangesRequest>(),
+        ),
+        Tool::new(
+            "await_changes",
+            "Long-poll for the next committed changes matching an optional node-label / edge-type / change-type filter. Blocks up to timeout_ms (default 25000, max 60000); resume losslessly by passing the prior resume_token back as from_token. The streaming counterpart to list_changes.",
+            make_input_schema::<AwaitChangesRequest>(),
         ),
         Tool::new(
             "get_node_at_valid_time",

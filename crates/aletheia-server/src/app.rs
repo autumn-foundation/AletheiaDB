@@ -11,6 +11,7 @@
 //! (`routes`/`openapi`/`mount_mcp`/`secure_mcp`/`state_initializer`), so Lane B
 //! can lift this into a `run_server` with minimal change.
 
+use crate::changefeed_stream;
 use crate::constraints_lineage_audit_tools;
 use crate::edge_tools;
 use crate::http_routes;
@@ -99,6 +100,8 @@ pub fn try_build_server_testapp(
             traverse_temporal_tools::get_node_at_time,
             traverse_temporal_tools::get_edge_at_time,
             traverse_temporal_tools::list_changes,
+            changefeed_stream::await_changes,
+            changefeed_stream::changes_stream,
             traverse_temporal_tools::get_node_at_valid_time,
             traverse_temporal_tools::get_node_at_transaction_time,
             traverse_temporal_tools::diff_node_versions,
