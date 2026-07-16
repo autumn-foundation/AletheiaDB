@@ -176,18 +176,20 @@ use crate::core::temporal::{TimeRange, Timestamp, time};
 use crate::index::vector::DistanceMetric;
 
 use super::ast::{
-    ComparisonOp, DepthSpec, EmbeddingRef, Expression, NodePattern, NodeRef, OrderClause, Pattern,
-    PatternElement, PredicateExpr, PropertyValue, QueryAst, RelationshipDirection,
-    RelationshipPattern, ReturnClause, SourceClause, TemporalClause, TimestampLiteral,
-    WindowClause, WindowReturnItem,
+    AlignClause, AlignMode as AstAlignMode, ComparisonOp, DepthSpec, EmbeddingRef, Expression,
+    NodePattern, NodeRef, OrderClause, Pattern, PatternElement, PredicateExpr, PropertyValue,
+    QueryAst, RelationshipDirection, RelationshipPattern, ReturnClause, SourceClause,
+    TemporalClause, TimestampLiteral, WindowClause, WindowReturnItem,
 };
 use super::builder::Query;
 use super::ir::{
-    Predicate, PredicateValue, ProvenanceCmp, ProvenanceField, ProvenanceOperand,
-    ProvenancePredicate, ProvenanceProjection, ProvenanceProjectionItem, QueryOp, SortKey,
-    TemporalWindowSpec, TraversalDepth, WindowAggFunc, WindowAggregateSpec,
+    AlignNodeSource, AlignOutputItem, AlignParticipant, Predicate, PredicateValue, ProvenanceCmp,
+    ProvenanceField, ProvenanceOperand, ProvenancePredicate, ProvenanceProjection,
+    ProvenanceProjectionItem, QueryOp, SortKey, TemporalAlignSpec, TemporalWindowSpec,
+    TraversalDepth, WindowAggFunc, WindowAggregateSpec,
 };
 use super::plan::{QueryHints, TemporalContext};
+use super::temporal_join::AlignMode as JoinAlignMode;
 use super::temporal_window::{self, WindowError, WindowGranularity, WindowUnit};
 
 /// Map a provenance accessor function name to its [`ProvenanceField`]
@@ -606,6 +608,20 @@ impl AstConverter {
             });
         }
 
+        // 2c. Temporal join / align (Issue #3379). Also a self-contained
+        //     terminal op: it consumes the matched-participant stream and emits
+        //     per-alignment-coordinate rows. The parser rejects trailing
+        //     read clauses after ALIGN ... RETURN.
+        if let Some(ref align) = ast.align {
+            let spec = self.convert_align_clause(align, &ast.source)?;
+            ops.push(QueryOp::TemporalAlign(spec));
+            return Ok(Query {
+                ops,
+                temporal_context,
+                hints,
+            });
+        }
+
         // 3. Convert WHERE clause to filter operations
         if let Some(ref where_clause) = ast.where_clause {
             self.convert_where_clause(where_clause, &mut ops)?;
@@ -770,6 +786,190 @@ impl AstConverter {
             return None;
         };
         node.variable.clone()
+    }
+
+    /// Validate and lower a raw AST [`AlignClause`] into a resolved
+    /// [`TemporalAlignSpec`] (Issue #3379).
+    ///
+    /// v1 supports a single MATCH pattern that is either one bound node, or a
+    /// single-hop `(a)-[:R]->(b)` traversal (both directions). All caller-fault
+    /// failures are structured [`QueryError`]s (unsupported pattern, unknown
+    /// return/driver variable, unparseable/empty range).
+    fn convert_align_clause(
+        &self,
+        align: &AlignClause,
+        source: &SourceClause,
+    ) -> Result<TemporalAlignSpec> {
+        // Build the participant plan from the (supported) pattern shape.
+        let mut participants = Self::align_participants(source)?;
+        let index_of =
+            |var: &str| -> Option<usize> { participants.iter().position(|p| p.var == var) };
+
+        // Resolve range boundaries (reusing the RFC 3339 / micros boundary
+        // parser) and validate the range is non-empty.
+        let range_start_micros = self.window_timestamp_micros(&align.range_start)?;
+        let range_end_micros = self.window_timestamp_micros(&align.range_end)?;
+        if range_end_micros <= range_start_micros {
+            return Err(Error::Query(QueryError::InvalidParameter {
+                parameter: "temporal join range".to_string(),
+                reason: "the valid-time range end must be strictly after the start".to_string(),
+            }));
+        }
+
+        let as_of_system_time = match &align.as_of_system_time {
+            Some(ts) => Timestamp::from(self.window_timestamp_micros(ts)?),
+            None => time::now(),
+        };
+
+        // Resolve mode + driver.
+        let (mode, driver_index) = match align.mode {
+            AstAlignMode::Events => {
+                let driver = align.driver.as_deref().ok_or_else(|| {
+                    Error::Query(QueryError::InvalidParameter {
+                        parameter: "align driver".to_string(),
+                        reason: "event-aligned ALIGN requires DRIVER <var>".to_string(),
+                    })
+                })?;
+                let idx = index_of(driver).ok_or_else(|| {
+                    Error::Query(QueryError::InvalidParameter {
+                        parameter: "align driver".to_string(),
+                        reason: format!(
+                            "driver variable '{driver}' is not a bound participant in the pattern"
+                        ),
+                    })
+                })?;
+                (JoinAlignMode::Events, idx)
+            }
+            AstAlignMode::Overlap => (JoinAlignMode::Overlap, 0),
+        };
+
+        // Resolve the RETURN items against the participants.
+        if align.items.is_empty() {
+            return Err(Error::Query(QueryError::InvalidParameter {
+                parameter: "align return".to_string(),
+                reason: "ALIGN requires at least one RETURN item".to_string(),
+            }));
+        }
+        let output_items = align
+            .items
+            .iter()
+            .map(|item| {
+                let participant_index = index_of(&item.var).ok_or_else(|| {
+                    Error::Query(QueryError::InvalidParameter {
+                        parameter: "align return".to_string(),
+                        reason: format!(
+                            "RETURN references variable '{}' but it is not a bound participant \
+                             in the pattern",
+                            item.var
+                        ),
+                    })
+                })?;
+                let output_name = item.alias.clone().unwrap_or_else(|| match &item.key {
+                    Some(key) => format!("{}.{}", item.var, key),
+                    None => item.var.clone(),
+                });
+                Ok(AlignOutputItem {
+                    participant_index,
+                    key: item.key.clone(),
+                    output_name,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // The event-aligned driver must be **present at its own event** by
+        // definition, so it is ungated by construction: if the user names the
+        // FAR node of a traversal as DRIVER, the connecting edge would
+        // otherwise gate the driver and null the driver's OWN column at a
+        // change-point where the edge is not valid — contradicting the
+        // invariant (Issue #3379 review finding). Removing the driver's gate
+        // makes its events fire with the driver present regardless of the
+        // connecting edge's validity. (Done after `index_of` is no longer
+        // borrowed.)
+        if mode == JoinAlignMode::Events {
+            participants[driver_index].edge_gate_path_index = None;
+        }
+
+        Ok(TemporalAlignSpec {
+            mode,
+            driver_index,
+            range_start_micros,
+            range_end_micros,
+            as_of_system_time,
+            participants,
+            output_items,
+        })
+    }
+
+    /// Build the participant extraction plan from a MATCH source, enforcing the
+    /// v1 supported pattern shapes (one bound node, or a single-hop traversal).
+    fn align_participants(source: &SourceClause) -> Result<Vec<AlignParticipant>> {
+        let unsupported = || {
+            Error::Query(QueryError::UnsupportedFeature {
+                feature: "temporal joins require a single MATCH pattern that is either one bound \
+                          node (e.g. MATCH (v:Label)) or a single-hop traversal (e.g. \
+                          MATCH (a)-[:R]->(b)); multi-hop, variable-length, and comma-separated \
+                          patterns are not supported (v1)"
+                    .to_string(),
+            })
+        };
+
+        let SourceClause::Match(patterns) = source else {
+            return Err(unsupported());
+        };
+        let [pattern] = patterns.as_slice() else {
+            return Err(unsupported());
+        };
+
+        // Collect nodes (in order) and reject variable-length relationships.
+        let mut nodes: Vec<&NodePattern> = Vec::new();
+        let mut rel_count = 0usize;
+        for element in &pattern.elements {
+            match element {
+                PatternElement::Node(node) => nodes.push(node),
+                PatternElement::Relationship(rel) => {
+                    if rel.depth.is_some() {
+                        return Err(unsupported());
+                    }
+                    rel_count += 1;
+                }
+            }
+        }
+
+        // v1: exactly one node (no rel) or exactly two nodes (one rel).
+        match (nodes.len(), rel_count) {
+            (1, 0) => {}
+            (2, 1) => {}
+            _ => return Err(unsupported()),
+        }
+
+        let num_nodes = nodes.len();
+        let mut participants = Vec::with_capacity(num_nodes);
+        for (k, node) in nodes.iter().enumerate() {
+            let var = node.variable.clone().ok_or_else(|| {
+                Error::Query(QueryError::InvalidParameter {
+                    parameter: "align pattern".to_string(),
+                    reason: "every node in a temporal-join pattern must be named \
+                             (e.g. (a)-[:R]->(b))"
+                        .to_string(),
+                })
+            })?;
+            // The last node of the traversal is the row's primary entity; earlier
+            // nodes live at even path indices (node position k -> path[2k]).
+            let node_source = if k + 1 == num_nodes {
+                AlignNodeSource::Entity
+            } else {
+                AlignNodeSource::PathIndex(2 * k)
+            };
+            // A non-anchor node is reached via the relationship immediately
+            // before it (path[2k-1]); its validity gates the participant.
+            let edge_gate_path_index = if k == 0 { None } else { Some(2 * k - 1) };
+            participants.push(AlignParticipant {
+                var,
+                node_source,
+                edge_gate_path_index,
+            });
+        }
+        Ok(participants)
     }
 
     /// Validate and lower a raw AST [`WindowClause`] into a resolved

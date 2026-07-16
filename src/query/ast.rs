@@ -32,6 +32,11 @@ pub struct QueryAst {
     /// computes per-window aggregates; the window clause carries its own
     /// aggregate `RETURN` list, so `return_clause` is unused.
     pub window: Option<WindowClause>,
+    /// Temporal join / align clause (Issue #3379). When present, the query
+    /// aligns the matched entities at matching valid-time coordinates over a
+    /// range; the align clause carries its own `RETURN` list, so
+    /// `return_clause` is unused.
+    pub align: Option<AlignClause>,
 }
 
 impl QueryAst {
@@ -47,6 +52,7 @@ impl QueryAst {
             skip: None,
             limit: None,
             window: None,
+            align: None,
         }
     }
 
@@ -103,6 +109,13 @@ impl QueryAst {
     #[must_use]
     pub fn with_window(mut self, window: WindowClause) -> Self {
         self.window = Some(window);
+        self
+    }
+
+    /// Add a temporal join / align clause to the query.
+    #[must_use]
+    pub fn with_align(mut self, align: AlignClause) -> Self {
+        self.align = Some(align);
         self
     }
 
@@ -197,6 +210,63 @@ pub enum WindowAggArg {
         /// The property key.
         key: String,
     },
+}
+
+/// A temporal join / align clause (Issue #3379).
+///
+/// Syntax:
+/// ```text
+/// ALIGN EVENTS DRIVER <var>                 -- event-aligned (ASOF analog)
+///   OVER VALID_TIME FROM <ts> TO <ts>
+///   [ AS OF SYSTEM_TIME <ts> ]
+///   RETURN <item> [AS alias] [, ...]
+///
+/// ALIGN OVERLAP                             -- interval-overlap
+///   OVER VALID_TIME FROM <ts> TO <ts> [ AS OF SYSTEM_TIME <ts> ]
+///   RETURN <item> [, ...]
+/// ```
+///
+/// The mode and return-item variables are validated in the converter, where a
+/// bad reference or unsupported pattern maps to a structured
+/// [`crate::core::error::QueryError`] the MCP `query` tool surfaces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignClause {
+    /// The alignment mode.
+    pub mode: AlignMode,
+    /// The driving-entity variable (event-aligned mode only; `None` for
+    /// interval-overlap).
+    pub driver: Option<String>,
+    /// Inclusive start of the valid-time range.
+    pub range_start: TimestampLiteral,
+    /// Exclusive end of the valid-time range.
+    pub range_end: TimestampLiteral,
+    /// Optional `AS OF SYSTEM_TIME` transaction-time coordinate (default: now).
+    pub as_of_system_time: Option<TimestampLiteral>,
+    /// The aligned `RETURN` items.
+    pub items: Vec<AlignReturnItem>,
+}
+
+/// The temporal-join alignment mode (Issue #3379).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignMode {
+    /// `EVENTS` — event-aligned (ASOF): sample participants at each driver
+    /// change-point.
+    Events,
+    /// `OVERLAP` — interval-overlap: piecewise sub-intervals where states
+    /// co-held.
+    Overlap,
+}
+
+/// One item in an align `RETURN` list (Issue #3379): a bound variable, or one
+/// of its properties, with an optional output alias.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignReturnItem {
+    /// The matched variable name.
+    pub var: String,
+    /// The property key, or `None` to return the entity id.
+    pub key: Option<String>,
+    /// Optional output-column alias (`AS foo`).
+    pub alias: Option<String>,
 }
 
 /// A timestamp literal (string or integer).

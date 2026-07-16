@@ -537,6 +537,18 @@ impl QueryExecutor {
                     ))
                 }
 
+                PhysicalOp::TemporalAlign { input, spec } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    // Historical storage is required to reconstruct each matched
+                    // participant's valid-time history (and gating edge validity)
+                    // at the alignment coordinates (Issue #3379).
+                    Box::new(iterators::TemporalJoinIterator::new(
+                        input_iter,
+                        spec.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
                 PhysicalOp::Distinct { input } => {
                     let input_iter = self.build_op(input, profile, child_depth)?;
                     Box::new(iterators::DistinctIterator::new(input_iter))

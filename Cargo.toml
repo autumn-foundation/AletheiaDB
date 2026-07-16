@@ -496,6 +496,14 @@ harness = false
 path = "benches/temporal_window.rs"
 required-features = []
 
+# Temporal joins (Issue #3379): event-aligned join over ~100 alignment instants
+# across 2 entities, targeting < 50ms p99 end-to-end.
+[[bench]]
+name = "temporal_join"
+harness = false
+path = "benches/temporal_join.rs"
+required-features = []
+
 # OpenTelemetry tracing overhead gate (Issue #3376): disabled vs enabled.
 [[bench]]
 name = "otel_overhead"

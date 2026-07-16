@@ -217,6 +217,15 @@ pub enum QueryOp {
     /// recorded as of `as_of_system_time` (the transaction-time dimension).
     TemporalWindowAggregate(TemporalWindowSpec),
 
+    /// Temporal join / align (Issue #3379).
+    ///
+    /// A terminal operation that consumes the upstream matched-entity stream and
+    /// aligns the bound participants at matching **valid-time** coordinates over
+    /// `[range_start, range_end)`, in either event-aligned or interval-overlap
+    /// mode, emitting one computed-column row per alignment coordinate. Reads
+    /// history at the belief recorded as of `as_of_system_time`.
+    TemporalAlign(TemporalAlignSpec),
+
     /// Collect unique values
     Distinct,
 
@@ -357,6 +366,64 @@ pub enum WindowAggArg {
     Star,
     /// A property key `v.key`.
     Property(String),
+}
+
+/// The fully-resolved plan for a [`QueryOp::TemporalAlign`] (Issue #3379).
+/// Produced by the converter after validating the raw AST align clause (mode,
+/// pattern shape, driver/return variables, timestamp boundaries).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemporalAlignSpec {
+    /// The alignment mode.
+    pub mode: crate::query::temporal_join::AlignMode,
+    /// Index into `participants` of the driving entity (event-aligned mode).
+    /// Ignored for interval-overlap.
+    pub driver_index: usize,
+    /// Inclusive start of the valid-time range (microseconds since epoch).
+    pub range_start_micros: i64,
+    /// Exclusive end of the valid-time range (microseconds since epoch).
+    pub range_end_micros: i64,
+    /// Transaction-time coordinate the history is read as-of.
+    pub as_of_system_time: Timestamp,
+    /// The participants, in declaration order (their index is referenced by
+    /// `driver_index` and each [`AlignOutputItem`]).
+    pub participants: Vec<AlignParticipant>,
+    /// The aligned output items, in `RETURN` order.
+    pub output_items: Vec<AlignOutputItem>,
+}
+
+/// One participant in a temporal join (Issue #3379): a bound variable, how to
+/// extract its node id from each matched row, and an optional gating edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlignParticipant {
+    /// The bound variable name.
+    pub var: String,
+    /// Where the participant's node id is read from in the matched row.
+    pub node_source: AlignNodeSource,
+    /// The path index of the connecting edge that gates this participant's
+    /// presence (its validity must contain the alignment instant), or `None`
+    /// for an ungated participant (the pattern anchor / a single bound node).
+    pub edge_gate_path_index: Option<usize>,
+}
+
+/// How a participant's node id is located within a matched [`QueryRow`]
+/// (Issue #3379).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignNodeSource {
+    /// The row's primary `entity` (the far/final node of the traversal).
+    Entity,
+    /// The node at this index in the row's `path` (`path[0]` is the anchor).
+    PathIndex(usize),
+}
+
+/// One resolved align output item (Issue #3379).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlignOutputItem {
+    /// Index into [`TemporalAlignSpec::participants`] of the referenced variable.
+    pub participant_index: usize,
+    /// The property key to read, or `None` to return the entity id.
+    pub key: Option<String>,
+    /// The output column name (alias if given, else a rendered default).
+    pub output_name: String,
 }
 
 /// A grouping key in a [`QueryOp::Aggregate`] (a non-aggregate projection
