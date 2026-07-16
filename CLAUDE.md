@@ -316,6 +316,7 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | **Batch** | `apply_batch` (ordered multi-op write batch committing all-or-nothing in one transaction; edge ops may reference batch-created nodes via `$alias`/`$<index>` local refs; see below) |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
+| **Embeddings** | `embed_query`, `embed_text`, `semantic_search`, `create_node_with_embedding`, `update_node_embedding` (generate embeddings from text and run text-based semantic search; require the `embeddings` feature + a configured model, else return a structured unavailable/precondition error — see [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md#mcp-embedding-tools)) |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
@@ -510,10 +511,11 @@ temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
 `get_node_history`), which have no `include_vectors` flag and always return
 full vectors.
 
-**Token-budget-aware responses (Issue #3353)**: the thirteen budgetable read
+**Token-budget-aware responses (Issue #3353)**: the fourteen budgetable read
 tools — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
 `get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
-`hybrid_query`, `query`, `find_nodes_at_time`, `get_node_history`, `get_schema`
+`semantic_search`, `hybrid_query`, `query`, `find_nodes_at_time`,
+`get_node_history`, `get_schema`
 (the single source of truth is `BUDGETABLE_READ_TOOLS`; not *every* read tool —
 e.g. `get_node_at_time`, `get_edge_history`, `diff_node_versions`,
 `temporal_extent`, `database_stats`, `count_nodes` are out of scope) — accept an
@@ -891,6 +893,42 @@ the last event drained); duplicates on resume dedup by that stable cursor
 (defaults: 128 subscriptions, 1024-event buffer); exceeding the subscription cap fails
 `subscribe_changes` with `CapacityExceeded`. Dropping a `Subscription` deregisters it. v1 is
 in-memory (no WAL change). See [docs/guides/reacting-to-change.md](docs/guides/reacting-to-change.md).
+### Named Snapshots — Reproducible Reads (Issue #3370)
+
+Pins a human-readable name to a bi-temporal coordinate
+`(valid_time, transaction_time)`; reads through the resulting handle resolve
+via the deterministic historical (`*_at_time`) path, so the same handle returns
+**identical results regardless of later writes**. A snapshot is a **coordinate,
+not a held resource**: it pins no storage and adds no lasting write-path
+overhead (the registry is off the data write path). Creation takes the
+commit-clock lock just long enough to copy one `Timestamp` (nanosecond-scale,
+not literally zero); a snapshot created racing an in-flight commit inherits the
+engine's standard committed-but-not-yet-applied visibility window (same caveat
+as #3225/#3236). **Rust API:** `create_snapshot(name, description)` defaults
+**valid-time = wallclock `time::now()`** (the engine's "now" convention, so
+facts actually valid at creation are not dropped) and **transaction-time = the
+commit frontier under `current_timestamp`** (race-free monotonic, so post-pin
+commits are invisible and pre-pin commits visible) / `create_snapshot_at(name,
+vt, tt, description)` (explicit/backdated, not extent-checked) /
+`snapshot(name) -> Snapshot` / `get_snapshot` / `list_snapshots` (stable order:
+created_at, then name) / `delete_snapshot`. The `Snapshot<'_>` handle pins
+`get_node`/`get_edge`/`find_nodes`/`find_nodes_by_property`, adjacency
+(`get_outgoing_edges`/`get_incoming_edges`), and a pre-pinned `query()` builder
+(traversal at the pin). Errors reuse the #3234 codes (dup name → `CONFLICT`,
+missing → `NOT_FOUND` with the name). Durably persisted (atomic
+temp+rename+fsync, coordinates as the **full HLC** `{wallclock, logical}` so a
+same-microsecond supersession pin resolves correctly after restart; sidecar
+`version: 2`, a legacy `version: 1` bare-i64 file still loads as logical 0)
+**inside** the persistence dir at `{persistence.data_dir}/snapshots.json`
+(`{data_dir}/indexes/snapshots.json` under the durable config) when index
+persistence is enabled — survives restart; in-memory-only for ephemeral
+`AletheiaDB::new()`. A corrupt/unparseable sidecar does **not** brick startup
+(unlike the auth key store): it is quarantined aside (`*.corrupt`) and startup
+proceeds with an empty registry. Caveats mirror `temporal_extent` (#3238) /
+point-in-time reads: cold-tier/truncation eviction can make a pinned version
+unreadable, and pinning "now" excludes future-valid facts. MCP exposure and an
+`AS OF SNAPSHOT <name>` query DDL are a coordinated follow-up (this wave is
+Rust-API-only). See [docs/guides/snapshot-pin.md](docs/guides/snapshot-pin.md).
 
 ### Feature Flags: Stable vs Experimental
 

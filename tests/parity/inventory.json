@@ -1,10 +1,10 @@
 {
-  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 42 — have only their name + access class pinned via the golden set. Live drift detection of the full 46-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
+  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 47 — have only their name + access class pinned via the golden set. Live drift detection of the full 51-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
   "generated_for": "framework port parity harness",
   "totals": {
     "http_routes": 5,
-    "mcp_tools": 46,
-    "mcp_budgetable_read_tools": 13
+    "mcp_tools": 51,
+    "mcp_budgetable_read_tools": 14
   },
   "http": {
     "surface_files": ["src/http/mod.rs", "src/http/server.rs", "src/http/handlers.rs", "src/http/admin.rs", "src/http/auth.rs", "src/http/error.rs", "src/http/config.rs"],
@@ -120,8 +120,8 @@
       "pinned_by": "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable"
     },
     "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable (external mirror — internal-consistency only)",
-    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 46 pairs — the authoritative drift detector)",
-    "budgetable_read_tools": ["get_node", "list_nodes", "get_edge", "list_edges", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "hybrid_query", "query", "find_nodes_at_time", "get_node_history", "get_schema"],
+    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 51 pairs — the authoritative drift detector)",
+    "budgetable_read_tools": ["get_node", "list_nodes", "get_edge", "list_edges", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "semantic_search", "hybrid_query", "query", "find_nodes_at_time", "get_node_history", "get_schema"],
     "provenance_filterable_read_tools": {
       "$comment": "Issue #3348: read tools that accept the optional additive provenance filter params (provenance_source, provenance_sources, min_confidence, include_unattributed). Purely additive — omitting all four is byte-identical to prior behavior, so this does NOT change the tool name/class golden. Source of truth: PROVENANCE_FILTERABLE_TOOLS in src/mcp/server.rs. Behavior pinned by src/mcp/tests.rs::provenance_filter_tests.",
       "tools": ["get_node", "list_nodes", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "hybrid_query"],
@@ -148,9 +148,14 @@
       {"name": "get_incoming_edges", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "traverse", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"]},
       {"name": "find_similar", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "embed_query", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
+      {"name": "embed_text", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
+      {"name": "semantic_search", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
       {"name": "enable_vector_index", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "list_vector_indexes", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "enable_unique_constraint", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "create_node_with_embedding", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
+      {"name": "update_node_embedding", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
       {"name": "list_unique_constraints", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "get_node_at_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "get_edge_at_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
@@ -182,8 +187,8 @@
       "area": "MCP advertised-tool dispatch sweep",
       "status": "partially closed",
       "why": "tool_definitions()/list_tools_for_test()/dispatch_tool are pub(crate); the rmcp ServerHandler list_tools/call_tool entry is not reachable from an external test crate (rmcp is not a dev-dependency and is not re-exported). Per house rules we do not add pub to production code.",
-      "closed_part": "Full 46-name/class DRIFT DETECTION is now closed: the in-crate golden src/mcp/auth_tests.rs::live_tool_inventory_matches_golden reads the live registry and fails on any tool added/removed/renamed/reclassified. The external tests/parity_mcp.rs::tool_inventory_golden_is_stable mirrors that constant cross-crate.",
-      "remaining_gap": "What stays external-unreachable is per-tool RUNTIME BEHAVIOR for the 42 non-behavior-tested tools: only the 4 behavior-pinned tools (get_node, create_node, create_edge, traverse) have black-box runtime assertions in tests/parity_mcp.rs; the other 42 are name/class-pinned only. Their dispatch/error-on-invalid-args behavior remains enforced in-crate.",
+      "closed_part": "Full 51-name/class DRIFT DETECTION is now closed: the in-crate golden src/mcp/auth_tests.rs::live_tool_inventory_matches_golden reads the live registry and fails on any tool added/removed/renamed/reclassified. The external tests/parity_mcp.rs::tool_inventory_golden_is_stable mirrors that constant cross-crate.",
+      "remaining_gap": "What stays external-unreachable is per-tool RUNTIME BEHAVIOR for the 47 non-behavior-tested tools: only the 4 behavior-pinned tools (get_node, create_node, create_edge, traverse) have black-box runtime assertions in tests/parity_mcp.rs; the other 47 are name/class-pinned only. Their dispatch/error-on-invalid-args behavior remains enforced in-crate.",
       "referenced_test": "src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments (~line 9257); src/mcp/auth_tests.rs::live_tool_inventory_matches_golden"
     },
     {

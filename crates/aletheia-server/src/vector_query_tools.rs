@@ -76,7 +76,7 @@ use crate::security::resource_limits::{check_byte_cap_of, run_with_timeout};
 use crate::security::{Authorized, ReadClass, ServerSecurityState};
 use crate::state::ServerState;
 use aletheiadb::http::AletheiaHttpError;
-use aletheiadb::mcp::ListVectorIndexesRequest;
+use aletheiadb::mcp::{EmbedQueryRequest, EmbedTextRequest, ListVectorIndexesRequest};
 use autumn_web::prelude::{Json, get, post};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -417,4 +417,120 @@ pub async fn query(
 pub async fn list_vector_indexes(_auth: Authorized<ReadClass>, state: ServerState) -> Json<Value> {
     let server = state.mcp_server();
     tool_json(server.list_vector_indexes(ListVectorIndexesRequest {}))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// embed_query / embed_text — [`ReadClass`], NOT budgetable, NOT cursorable.
+// Forward through the typed per-tool method on the SHARED server (so a
+// configured embedder is used), inline (like list_vector_indexes). Issue #2906.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// `embed_query` — generate a single dense embedding vector from a text string
+/// using the server's configured embedding model. [`ReadClass`]; not budgetable,
+/// not cursorable. HTTP + MCP tool (Issue #2906). Returns a structured
+/// FAILED_PRECONDITION (or unavailable-feature) payload when no model is
+/// configured / the `embeddings` feature is not compiled.
+#[post("/embed/query")]
+#[api_doc(
+    description = "Generate a single dense embedding vector from a text string",
+    mcp
+)]
+pub async fn embed_query(
+    _auth: Authorized<ReadClass>,
+    state: ServerState,
+    Json(req): Json<EmbedQueryRequest>,
+) -> Json<Value> {
+    let server = state.mcp_server();
+    tool_json(server.embed_query(req))
+}
+
+/// `embed_text` — generate per-chunk dense embeddings for multiple texts,
+/// aligned to their source chunks, honoring an optional `max_chunks` cap.
+/// [`ReadClass`]; not budgetable, not cursorable. HTTP + MCP tool (Issue #2906).
+#[post("/embed/text")]
+#[api_doc(
+    description = "Generate per-chunk dense embeddings for multiple texts",
+    mcp
+)]
+pub async fn embed_text(
+    _auth: Authorized<ReadClass>,
+    state: ServerState,
+    Json(req): Json<EmbedTextRequest>,
+) -> Json<Value> {
+    let server = state.mcp_server();
+    tool_json(server.embed_text(req))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// semantic_search — [`ReadClass`], budgetable (#3353), NOT cursorable, slow
+// (embed + k-NN). Same wiring as find_similar; forwards raw args through
+// dispatch_tool_json so the token budget applies. Issue #2906.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Request body for [`semantic_search`] — an **all-optional** mirror of the
+/// legacy `SemanticSearchRequest` plus the #3353 token budget. `property_name`
+/// and `query_text` are logically required (enforced at dispatch); keeping every
+/// field optional restores a named, per-operation `/openapi.json` schema.
+#[derive(Debug, Default, Deserialize)]
+pub struct SemanticSearchBody {
+    /// The property holding the indexed embedding (logically required).
+    pub property_name: Option<String>,
+    /// The query text to embed and search with (logically required).
+    pub query_text: Option<String>,
+    /// Number of similar results to return (default 10).
+    pub k: Option<usize>,
+    /// Number of results to skip (offset pagination, #3226).
+    pub offset: Option<usize>,
+    /// Return full embedding arrays instead of the elided descriptor (#3220).
+    pub include_vectors: Option<bool>,
+    /// Optional model identifier (reserved; server uses its configured model).
+    pub model: Option<String>,
+    /// #3353: cap the response at roughly this many tokens (utf8_bytes / 4).
+    pub max_response_tokens: Option<u64>,
+    /// #3353: byte-exact response cap.
+    pub max_response_bytes: Option<u64>,
+    /// #3353: property keys to protect first as the response degrades.
+    pub priority_properties: Option<Vec<String>>,
+}
+
+/// `semantic_search` — embed `query_text` with the server's configured model and
+/// run the exact find_similar k-NN path against the vector index on
+/// `property_name`, so the response envelope is identical to find_similar.
+/// [`ReadClass`]; budgetable (#3353), not cursorable. HTTP + MCP tool (#2906).
+///
+/// Same wiring as [`find_similar`]: forwards raw arguments through
+/// `dispatch_tool_json` (budget applies) under the B4 resource-limits guard.
+#[post("/semantic_search")]
+#[api_doc(
+    description = "Embed a query text and run vector similarity search against a property's index",
+    mcp
+)]
+pub async fn semantic_search(
+    _auth: Authorized<ReadClass>,
+    security: ServerSecurityState,
+    state: ServerState,
+    Json(opts): Json<SemanticSearchBody>,
+) -> Result<Json<Value>, AletheiaHttpError> {
+    let mut args = Map::new();
+    insert_opt(
+        &mut args,
+        "property_name",
+        opts.property_name.map(Value::from),
+    );
+    insert_opt(&mut args, "query_text", opts.query_text.map(Value::from));
+    insert_opt(&mut args, "k", opts.k.map(Value::from));
+    insert_opt(&mut args, "offset", opts.offset.map(Value::from));
+    insert_opt(
+        &mut args,
+        "include_vectors",
+        opts.include_vectors.map(Value::from),
+    );
+    insert_opt(&mut args, "model", opts.model.map(Value::from));
+    insert_budget(
+        &mut args,
+        opts.max_response_tokens,
+        opts.max_response_bytes,
+        opts.priority_properties,
+    );
+    dispatch_slow_read(&security, &state, "semantic_search", Value::Object(args)).await
 }

@@ -50,6 +50,8 @@ pub mod rotation;
 pub mod schema;
 /// Unified vector similarity query builder.
 pub mod similarity_query;
+/// Named snapshots for reproducible reads (Issue #3370).
+pub mod snapshot;
 /// Database-wide statistics snapshot (Issue #3222).
 pub mod stats;
 /// Temporal query operations.
@@ -72,6 +74,7 @@ pub use ops::NodesAtTime;
 pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
+pub use snapshot::{NamedSnapshot, Snapshot};
 pub use stats::{
     ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
     HistoricalDepthStats, TierAccessStats, WalStateStats,
@@ -226,6 +229,15 @@ pub struct AletheiaDB {
     /// losslessly from its last cursor. Its internal locks are leaves (never held while
     /// acquiring a write-path primitive).
     pub(crate) changefeed: Arc<crate::core::changefeed_subscription::ChangefeedBroadcaster>,
+    /// Named-snapshot registry for reproducible reads (Issue #3370).
+    ///
+    /// Maps a human-readable name to a pinned bi-temporal coordinate. Entirely
+    /// off the data write path (creating a snapshot never touches
+    /// current/historical storage, the WAL, or `current_timestamp`), so it
+    /// adds zero overhead to `create_node`/`create_edge`. Durably persisted to
+    /// a `{data_dir}/snapshots.json` sidecar when index persistence is enabled;
+    /// in-memory-only for ephemeral databases. See [`crate::db::snapshot`].
+    pub(crate) snapshots: Arc<snapshot::SnapshotRegistry>,
     /// Opt-in tamper-evident provenance hash chain (Issue #3351).
     ///
     /// `None` unless `config.chain.enabled`. When present, each committed
