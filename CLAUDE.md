@@ -410,9 +410,12 @@ serializable `DatabaseStats`; every field is an O(1)/cached counter read
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#database-stats-and-storage-tier-health-database_stats).
 
 **Per-query resource limits (Issue #3368)**: the wall-clock-timeout and
-result-byte-cap enforcement that guards the `query` tool now also governs six
+result-byte-cap enforcement that guards the `query` tool now also governs the
 read tools — `traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`,
-`get_edge_at_time`, `find_nodes_at_time` — wrapped at the dispatch seam
+`get_edge_at_time`, `find_nodes_at_time`, plus the six #2907 semantic-search
+analysis tools (`semantic_path`, `concept_analogy`, `concept_mean`,
+`find_duplicate_candidates`, `semantic_horizon`, `context_aspects`) enrolled for
+uniform coverage — wrapped at the dispatch seam
 (`RESOURCE_LIMITED_READ_TOOLS`), reusing the `query` tool's timeout thread-race
 and bounded in-flight-worker DoS guard. A breach returns `RESOURCE_EXHAUSTED`
 with `details.dimension` (`wall_clock_timeout`, retriable; `result_bytes`,
@@ -430,14 +433,14 @@ on a timeout-race worker (thread-spawn + mpsc + in-flight-CAS, exactly like the
 `query` tool) — response-identical but not free. The per-call worker-spawn cost
 on hot-path reads (including cheap `get_node_at_time`/`get_edge_at_time`) has a
 quantifying micro-benchmark deferred to Lane-2. The `max_in_flight_queries` cap
-(default 64) is a **single shared pool** across the `query` tool and these six
+(default 64) is a **single shared pool** across the `query` tool and these
 wrapped read tools, so a flood of slow calls to one can make the others return
 `UNAVAILABLE` (bounded, retriable); a per-class sub-budget is a Lane-2
 follow-up. `database_stats` additively surfaces a
 `resource_limits` block (`timeout_terminations`, `byte_cap_terminations`,
 `override_rejections`) from process-lifetime atomic counters (the
 `DatabaseStats` struct/storage layer are untouched; row-cap breaches are **not**
-counted — they self-disclose via `truncated`/`has_more`). **v1 scope for the six
+counted — they self-disclose via `truncated`/`has_more`). **v1 scope for these
 read tools:** server defaults only (no per-call `limits` override), **post-hoc**
 byte cap (the response is fully serialized then rejected if over cap). **Deferred
 to Lane-2:** memory-budget dimension, true engine-level cancellation, Rust

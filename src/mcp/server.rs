@@ -7827,6 +7827,17 @@ pub(crate) const RESOURCE_LIMITED_READ_TOOLS: &[&str] = &[
     "get_node_at_time",
     "get_edge_at_time",
     "find_nodes_at_time",
+    // Semantic-search analysis tools (Issue #2907): read-only, potentially slow
+    // graph+vector scans. They carry their own per-operation bounds, but enroll
+    // here for the uniform wall-clock-timeout + result-byte-cap coverage every
+    // other slow read gets (Issue #3368). At the default 30s timeout their
+    // responses are unchanged.
+    "semantic_path",
+    "concept_analogy",
+    "concept_mean",
+    "find_duplicate_candidates",
+    "semantic_horizon",
+    "context_aspects",
 ];
 
 /// Does this tool have its response governed by the per-query resource limits
@@ -9602,8 +9613,9 @@ mod server_unit_tests {
         serde_json::from_str(&AletheiaMcpServer::extract_text(result)).expect("json response")
     }
 
-    /// The wrapper covers exactly the six residue read tools and never the
-    /// self-enforcing `query` tool.
+    /// The wrapper covers the residue read tools plus the enrolled #2907
+    /// semantic-search analysis tools, and never the self-enforcing `query`
+    /// tool.
     #[test]
     fn resource_limited_read_tools_membership() {
         for t in [
@@ -9613,6 +9625,13 @@ mod server_unit_tests {
             "get_node_at_time",
             "get_edge_at_time",
             "find_nodes_at_time",
+            // Issue #2907 semantic-search tools enrolled for uniform coverage.
+            "semantic_path",
+            "concept_analogy",
+            "concept_mean",
+            "find_duplicate_candidates",
+            "semantic_horizon",
+            "context_aspects",
         ] {
             assert!(
                 super::is_resource_limited_read_tool(t),
