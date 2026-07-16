@@ -85,6 +85,11 @@ impl AletheiaDB {
             .unwrap_or_default()
             .as_micros() as i64;
 
+        // Capture declared schema constraints (Issue #3378) so they survive the
+        // backup→restore round-trip. (Uniqueness constraints, #3218, are WAL-
+        // persisted and are still NOT included in .albk — a known residue.)
+        let schema_constraints = self.constraint_registry.export_schema_constraints();
+
         let payload = build_payload(
             current_snapshot,
             historical_snapshot,
@@ -92,6 +97,7 @@ impl AletheiaDB {
             cold_edge_versions,
             source_lsn,
             created_at_micros,
+            schema_constraints,
         )
         .map_err(Error::Backup)?;
 
@@ -130,6 +136,14 @@ impl AletheiaDB {
             tempfile::TempDir::new().map_err(|e| Error::Backup(BackupError::Io(e.to_string())))?;
 
         materialize_to_dir(&payload, tmp.path()).map_err(Error::Backup)?;
+
+        // Restore schema constraints (Issue #3378) by writing the sidecar into
+        // the data dir (parent of the reopen WAL dir = tmp root), so the
+        // reopen below loads them through the normal startup sidecar path.
+        crate::db::schema_constraint::persist_descriptors_to_dir(
+            tmp.path(),
+            &payload.schema_constraints,
+        )?;
 
         // Use an isolated WAL dir inside the temp dir to avoid cross-test contamination
         // from the default "aletheiadb/wal" path.
@@ -176,6 +190,14 @@ impl AletheiaDB {
 
         let payload = read_artifact(path).map_err(Error::Backup)?;
         materialize_to_dir(&payload, &index_root).map_err(Error::Backup)?;
+
+        // Restore schema constraints (Issue #3378): the durable reopen derives
+        // its data dir as the parent of its WAL dir (`data_dir/wal` → `data_dir`),
+        // so the sidecar must land at `data_dir`, not the index root.
+        crate::db::schema_constraint::persist_descriptors_to_dir(
+            data_dir,
+            &payload.schema_constraints,
+        )?;
 
         // Reopen through the canonical durable config so the layout written above
         // is exactly the layout `open`/`open_from_env` will read on restart.

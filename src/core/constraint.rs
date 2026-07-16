@@ -3,13 +3,165 @@
 //! Lives in `core` so that both `storage::recovery` (WAL replay) and `db` (API surface)
 //! can import it without creating circular module dependencies.
 
+use crate::core::changefeed::EntityKind;
 use crate::core::error::{ConstraintError, Result};
 use crate::core::id::NodeId;
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::{PropertyMap, PropertyValue};
+use bitcode::{Decode, Encode};
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Maximum number of sample offending entity ids retained per conformance
+/// violation (keeps `NonConformingOnEnable` reports bounded on large graphs).
+pub const MAX_CONFORMANCE_SAMPLE_IDS: usize = 16;
+
+/// A declared property type for a schema constraint (Issue #3378).
+///
+/// Maps each declarable type to the concrete [`PropertyValue`] variant it
+/// accepts. Note there is no dedicated temporal `PropertyValue`: AletheiaDB
+/// stores temporal/timestamp property values as microseconds-since-epoch
+/// [`PropertyValue::Int`] (see [`crate::core::temporal`]), so
+/// [`DeclaredType::Temporal`] matches `Int`. This is documented here and in
+/// `docs/guides/schema-constraints.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum DeclaredType {
+    /// UTF-8 string values ([`PropertyValue::String`]).
+    String,
+    /// 64-bit signed integer values ([`PropertyValue::Int`]).
+    Integer,
+    /// 64-bit floating point values ([`PropertyValue::Float`]).
+    Float,
+    /// Boolean values ([`PropertyValue::Bool`]).
+    Boolean,
+    /// Temporal values, stored as microseconds-since-epoch integers
+    /// ([`PropertyValue::Int`]).
+    Temporal,
+    /// Byte-array values ([`PropertyValue::Bytes`]).
+    Bytes,
+    /// Dense embedding vectors ([`PropertyValue::Vector`]). When `dim` is
+    /// `Some(d)`, the vector's length must equal exactly `d`.
+    Vector {
+        /// Required vector dimension, or `None` to accept any dimension.
+        dim: Option<usize>,
+    },
+}
+
+impl DeclaredType {
+    /// Stable token for this declared type, aligned with
+    /// [`PropertyValue::type_name`] where a 1:1 mapping exists.
+    pub const fn type_name(&self) -> &'static str {
+        match self {
+            DeclaredType::String => "string",
+            DeclaredType::Integer => "int",
+            DeclaredType::Float => "float",
+            DeclaredType::Boolean => "bool",
+            DeclaredType::Temporal => "temporal",
+            DeclaredType::Bytes => "bytes",
+            DeclaredType::Vector { .. } => "vector",
+        }
+    }
+
+    /// Returns `true` if `value` conforms to this declared type.
+    ///
+    /// `Null` never matches any declared type here — null/absence handling is
+    /// done by the required/nullable logic in
+    /// [`ConstraintRegistry::check_entity`], not by the type matcher.
+    pub fn matches(&self, value: &PropertyValue) -> bool {
+        match self {
+            DeclaredType::String => matches!(value, PropertyValue::String(_)),
+            DeclaredType::Integer => matches!(value, PropertyValue::Int(_)),
+            DeclaredType::Float => matches!(value, PropertyValue::Float(_)),
+            DeclaredType::Boolean => matches!(value, PropertyValue::Bool(_)),
+            // Temporal values are stored as micros-since-epoch integers.
+            DeclaredType::Temporal => matches!(value, PropertyValue::Int(_)),
+            DeclaredType::Bytes => matches!(value, PropertyValue::Bytes(_)),
+            DeclaredType::Vector { dim } => match value {
+                PropertyValue::Vector(v) => dim.is_none_or(|d| v.len() == d),
+                _ => false,
+            },
+        }
+    }
+}
+
+/// A single property-level schema constraint held in the registry (interned).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyConstraint {
+    /// The interned property key this constraint applies to.
+    pub property: InternedString,
+    /// The declared type the value must have, or `None` to accept any type.
+    pub declared_type: Option<DeclaredType>,
+    /// If `true`, the key must be present with a non-null value.
+    pub required: bool,
+    /// If `false`, an explicitly-`Null` value violates the constraint.
+    pub nullable: bool,
+}
+
+/// A serializable, string-keyed descriptor for one property constraint.
+///
+/// Used as the public shape returned by
+/// [`crate::db::AletheiaDB::list_schema_constraints`] / embedded in
+/// `get_schema`, and as the on-disk record for the constraint sidecar and the
+/// `.albk` backup payload (interned ids are not stable across restarts, so the
+/// durable form carries resolved strings).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PropertyConstraintDescriptor {
+    /// The property key name.
+    pub property: String,
+    /// The declared type, or `None` for any type.
+    pub declared_type: Option<DeclaredType>,
+    /// Whether the key must be present with a non-null value.
+    pub required: bool,
+    /// Whether an explicit `Null` value is permitted.
+    pub nullable: bool,
+}
+
+/// A serializable descriptor for all constraints declared on one
+/// `(entity_kind, label)` pair.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SchemaConstraintDescriptor {
+    /// `"node"` or `"edge"`.
+    pub entity_kind: String,
+    /// The node label or edge type the constraints are scoped to.
+    pub label: String,
+    /// The per-property constraints.
+    pub properties: Vec<PropertyConstraintDescriptor>,
+}
+
+/// One aggregated violation in a [`ConformanceReport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConformanceViolation {
+    /// `"node"` or `"edge"`.
+    pub entity_kind: String,
+    /// The label/type scanned.
+    pub label: String,
+    /// The offending property key, or `None` when not property-specific.
+    pub property: Option<String>,
+    /// Human-readable reason (e.g. `"missing required key"`, `"expected int, got string"`).
+    pub reason: String,
+    /// A bounded sample of offending entity ids (up to
+    /// [`MAX_CONFORMANCE_SAMPLE_IDS`]).
+    pub sample_ids: Vec<u64>,
+}
+
+/// Report produced by declaring schema constraints on a (possibly populated)
+/// label: whether the current state conforms, how many entities were checked,
+/// how many failed, and the aggregated violations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConformanceReport {
+    /// `true` iff every checked entity conforms.
+    pub conforms: bool,
+    /// Number of current-state entities checked.
+    pub total_checked: usize,
+    /// Number of non-conforming entities.
+    pub total_non_conforming: usize,
+    /// Aggregated per-(property, reason) violations.
+    pub violations: Vec<ConformanceViolation>,
+}
 
 /// Canonical hashable + equatable key derived from a `PropertyValue`.
 ///
@@ -124,6 +276,65 @@ impl Drop for ReservationGuard {
     }
 }
 
+/// Outcome of checking one property value against one [`PropertyConstraint`].
+///
+/// Shared by the write-path validator ([`ConstraintRegistry::check_entity`])
+/// and the enable-time scan ([`ConstraintRegistry::evaluate_conformance`]) so
+/// both compute an identical category for every value (Issue #3378 FIX-5).
+enum PropertyCheck {
+    /// The value conforms to this constraint.
+    Ok,
+    /// The value is missing/absent for a required key, or an explicit `Null`
+    /// on a non-nullable key. `reason` is the canonical human-readable string
+    /// used in conformance reports; both sub-cases are the Missing category
+    /// and both surface as `MissingRequiredKey` on the write path.
+    Missing {
+        /// Canonical reason string (`"missing required key"` or
+        /// `"null value not permitted"`).
+        reason: &'static str,
+    },
+    /// A present, non-null value whose type does not match the declared type.
+    TypeMismatch {
+        /// The declared type's token.
+        expected: &'static str,
+        /// The actual value's type token.
+        actual: &'static str,
+    },
+}
+
+/// The single per-constraint predicate shared by both validators (Issue #3378
+/// FIX-5). Classifying every `(constraint, value)` here removes the risk of the
+/// write path and the enable-time scan drifting on null/required/type
+/// semantics.
+fn check_property(c: &PropertyConstraint, value: Option<&PropertyValue>) -> PropertyCheck {
+    let is_null = matches!(value, Some(PropertyValue::Null));
+    let present_nonnull = value.is_some() && !is_null;
+
+    if c.required && !present_nonnull {
+        return PropertyCheck::Missing {
+            reason: "missing required key",
+        };
+    }
+    if is_null {
+        if !c.nullable {
+            return PropertyCheck::Missing {
+                reason: "null value not permitted",
+            };
+        }
+        return PropertyCheck::Ok;
+    }
+    // Present, non-null value: enforce the declared type if any.
+    if let (Some(dt), Some(v)) = (c.declared_type, value)
+        && !dt.matches(v)
+    {
+        return PropertyCheck::TypeMismatch {
+            expected: dt.type_name(),
+            actual: v.type_name(),
+        };
+    }
+    PropertyCheck::Ok
+}
+
 /// Central registry for uniqueness constraints.
 ///
 /// Thread-safe via DashMap; designed for concurrent read/write access.
@@ -138,6 +349,22 @@ pub struct ConstraintRegistry {
     declarations: DashMap<(InternedString, InternedString), ()>,
     /// Currently-valid reservation index: ReservationKey → owning NodeId.
     pub(crate) reservation_index: DashMap<ReservationKey, NodeId>,
+    /// Property type / required-key schema constraints (Issue #3378), keyed by
+    /// `(entity_kind, label_id)`. Opt-in: a label with no entry is fully
+    /// schemaless. `Arc<Vec<..>>` so the hot write-path check clones a cheap
+    /// pointer rather than the constraint vector.
+    schema_constraints: DashMap<(EntityKind, InternedString), Arc<Vec<PropertyConstraint>>>,
+    /// Serializes schema-constraint DDL (Issue #3378): the whole
+    /// export→persist-sidecar→declare/drop read-modify-write in
+    /// `enable_schema_constraints` / `drop_schema_constraint` runs under this
+    /// lock so two concurrent DDL calls on different labels cannot race the
+    /// sidecar file (last-write-wins silently dropping the other label from
+    /// disk). A **leaf** lock: acquired only around that critical section and
+    /// never held across any other AletheiaDB synchronization primitive, so it
+    /// introduces no lock-order risk. `()` payload — it guards the external
+    /// side effect (the sidecar file + the in-memory map staying consistent),
+    /// not shared data of its own.
+    schema_ddl_lock: parking_lot::Mutex<()>,
 }
 
 impl ConstraintRegistry {
@@ -146,7 +373,19 @@ impl ConstraintRegistry {
         Self {
             declarations: DashMap::new(),
             reservation_index: DashMap::new(),
+            schema_constraints: DashMap::new(),
+            schema_ddl_lock: parking_lot::Mutex::new(()),
         }
+    }
+
+    /// Acquire the schema-constraint DDL lock (Issue #3378). Callers hold the
+    /// returned guard across the entire export→persist→declare/drop critical
+    /// section in `enable`/`drop` so the on-disk sidecar and the in-memory
+    /// registry stay consistent under concurrent DDL. Leaf lock — see the
+    /// field docs.
+    #[must_use = "hold the guard across the whole DDL critical section"]
+    pub fn lock_schema_ddl(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.schema_ddl_lock.lock()
     }
 
     /// Returns `true` if there is an active constraint for `(label, property)`.
@@ -374,6 +613,201 @@ impl ConstraintRegistry {
         }
 
         Ok(guard)
+    }
+
+    // ========================================================================
+    // Schema constraints (property type + required-key), Issue #3378
+    // ========================================================================
+
+    /// Returns `true` if no schema constraints are declared (used to skip the
+    /// write-path check with zero overhead when the feature is unused).
+    #[inline]
+    pub fn schema_constraints_empty(&self) -> bool {
+        self.schema_constraints.is_empty()
+    }
+
+    /// Declare (or replace) the schema constraints for `(kind, label)`.
+    pub fn declare_schema_constraints(
+        &self,
+        kind: EntityKind,
+        label: InternedString,
+        constraints: Vec<PropertyConstraint>,
+    ) {
+        self.schema_constraints
+            .insert((kind, label), Arc::new(constraints));
+    }
+
+    /// Drop the schema constraints for `(kind, label)`. Returns `true` if an
+    /// entry was removed.
+    pub fn drop_schema_constraints(&self, kind: EntityKind, label: InternedString) -> bool {
+        self.schema_constraints.remove(&(kind, label)).is_some()
+    }
+
+    /// Fetch the schema constraints declared for `(kind, label)`, if any.
+    pub fn schema_constraints_for(
+        &self,
+        kind: EntityKind,
+        label: InternedString,
+    ) -> Option<Arc<Vec<PropertyConstraint>>> {
+        self.schema_constraints
+            .get(&(kind, label))
+            .map(|e| Arc::clone(e.value()))
+    }
+
+    /// Validate one entity's effective property map against the declared
+    /// schema constraints for `(kind, label)`. Returns `Ok(())` when no
+    /// constraints are declared (schemaless) or the map conforms.
+    ///
+    /// Semantics (see `docs/guides/schema-constraints.md`):
+    /// - `required`: the key must be present with a non-null value; a missing
+    ///   or `Null` value yields `MissingRequiredKey`.
+    /// - `nullable == false`: an explicitly-`Null` value yields
+    ///   `MissingRequiredKey` (null is not permitted).
+    /// - `declared_type`: a present, non-null value whose type does not match
+    ///   yields `TypeViolation`. `Null`/absent values skip the type check.
+    ///
+    /// The write path ([`Self::check_entity`]) and the enable-time scan
+    /// ([`Self::evaluate_conformance`]) share one per-constraint predicate
+    /// ([`check_property`]) so a value's category (missing / null-not-permitted
+    /// / type-mismatch) is guaranteed identical in both paths (Issue #3378
+    /// FIX-5) — no risk of the two validators drifting.
+    pub fn check_entity(
+        &self,
+        kind: EntityKind,
+        label: InternedString,
+        properties: &PropertyMap,
+    ) -> std::result::Result<(), ConstraintError> {
+        let Some(constraints) = self.schema_constraints_for(kind, label) else {
+            return Ok(());
+        };
+        let label_str = || GLOBAL_INTERNER.resolve_or_else(label, String::new);
+        let prop_str = |p: InternedString| GLOBAL_INTERNER.resolve_or_else(p, String::new);
+
+        let mut missing_keys: Vec<String> = Vec::new();
+        for c in constraints.iter() {
+            let value = properties.get_by_interned_key(&c.property);
+            match check_property(c, value) {
+                // Both "missing required key" and "null value not permitted"
+                // are the Missing category and surface as MissingRequiredKey on
+                // the write path (unchanged behavior); the shared predicate
+                // guarantees the category matches the enable-time report.
+                PropertyCheck::Missing { .. } => missing_keys.push(prop_str(c.property)),
+                PropertyCheck::TypeMismatch { expected, actual } => {
+                    return Err(ConstraintError::TypeViolation {
+                        entity_kind: kind.as_str().to_string(),
+                        label: label_str(),
+                        property: prop_str(c.property),
+                        expected_type: expected,
+                        actual_type: actual,
+                    });
+                }
+                PropertyCheck::Ok => {}
+            }
+        }
+
+        if !missing_keys.is_empty() {
+            return Err(ConstraintError::MissingRequiredKey {
+                entity_kind: kind.as_str().to_string(),
+                label: label_str(),
+                missing_keys,
+            });
+        }
+        Ok(())
+    }
+
+    /// Evaluate one entity's property map against `constraints`, returning a
+    /// list of `(property, reason)` violations (used to build a
+    /// [`ConformanceReport`] on enable). Unlike [`Self::check_entity`], this
+    /// collects *all* violations rather than short-circuiting. Shares the
+    /// per-constraint predicate [`check_property`] with the write path so the
+    /// two never disagree on a value's category (Issue #3378 FIX-5).
+    pub fn evaluate_conformance(
+        constraints: &[PropertyConstraint],
+        properties: &PropertyMap,
+    ) -> Vec<(Option<String>, String)> {
+        let mut out = Vec::new();
+        for c in constraints {
+            let value = properties.get_by_interned_key(&c.property);
+            let reason = match check_property(c, value) {
+                PropertyCheck::Ok => continue,
+                PropertyCheck::Missing { reason } => reason.to_string(),
+                PropertyCheck::TypeMismatch { expected, actual } => {
+                    format!("expected type {expected}, got {actual}")
+                }
+            };
+            let prop = GLOBAL_INTERNER.resolve_or_else(c.property, String::new);
+            out.push((Some(prop), reason));
+        }
+        out
+    }
+
+    /// Export all declared schema constraints as serializable, string-keyed
+    /// descriptors (for the sidecar, the `.albk` backup, and the public list
+    /// API). Deterministically sorted by (entity_kind, label).
+    pub fn export_schema_constraints(&self) -> Vec<SchemaConstraintDescriptor> {
+        let mut out: Vec<SchemaConstraintDescriptor> = self
+            .schema_constraints
+            .iter()
+            .filter_map(|entry| {
+                let (kind, label_id) = *entry.key();
+                let label = GLOBAL_INTERNER.resolve_with(label_id, |s| s.to_string())?;
+                let properties = entry
+                    .value()
+                    .iter()
+                    .filter_map(|c| {
+                        let property =
+                            GLOBAL_INTERNER.resolve_with(c.property, |s| s.to_string())?;
+                        Some(PropertyConstraintDescriptor {
+                            property,
+                            declared_type: c.declared_type,
+                            required: c.required,
+                            nullable: c.nullable,
+                        })
+                    })
+                    .collect();
+                Some(SchemaConstraintDescriptor {
+                    entity_kind: kind.as_str().to_string(),
+                    label,
+                    properties,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.entity_kind
+                .cmp(&b.entity_kind)
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        out
+    }
+
+    /// Import schema constraints from serializable descriptors (re-interning
+    /// labels/properties), replacing any existing schema-constraint state.
+    /// Used by the sidecar / backup load path.
+    pub fn import_schema_constraints(&self, descriptors: &[SchemaConstraintDescriptor]) {
+        self.schema_constraints.clear();
+        for d in descriptors {
+            let kind = if d.entity_kind == "edge" {
+                EntityKind::Edge
+            } else {
+                EntityKind::Node
+            };
+            let Ok(label_id) = GLOBAL_INTERNER.intern(&d.label) else {
+                continue;
+            };
+            let mut constraints = Vec::with_capacity(d.properties.len());
+            for p in &d.properties {
+                if let Ok(prop_id) = GLOBAL_INTERNER.intern(&p.property) {
+                    constraints.push(PropertyConstraint {
+                        property: prop_id,
+                        declared_type: p.declared_type,
+                        required: p.required,
+                        nullable: p.nullable,
+                    });
+                }
+            }
+            self.schema_constraints
+                .insert((kind, label_id), Arc::new(constraints));
+        }
     }
 }
 

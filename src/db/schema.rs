@@ -7,6 +7,8 @@
 //! [`AletheiaDB::schema`] for the current-state summary and
 //! [`AletheiaDB::schema_as_of`] for the bi-temporal variant.
 
+use crate::core::changefeed::EntityKind;
+use crate::core::constraint::{ConstraintRegistry, PropertyConstraintDescriptor};
 use crate::core::error::Result;
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::PropertyMap;
@@ -38,8 +40,15 @@ pub struct LabelSchema {
     pub label: String,
     /// Number of nodes with this label.
     pub count: usize,
-    /// Union of property keys observed on nodes with this label, sorted.
+    /// Union of property keys **observed** on nodes with this label, sorted.
+    /// This is a discovered set — distinct from `declared_constraints`, which
+    /// reports keys with a *declared* schema constraint (Issue #3378). A key
+    /// can be declared but not yet observed, or observed but not declared.
     pub property_keys: Vec<String>,
+    /// Schema constraints **declared** on this label (Issue #3378), empty when
+    /// the label is schemaless. Lets a caller distinguish declared keys from
+    /// merely-observed ones.
+    pub declared_constraints: Vec<PropertyConstraintDescriptor>,
 }
 
 /// Schema summary for a single edge/relationship type.
@@ -49,8 +58,11 @@ pub struct EdgeTypeSchema {
     pub edge_type: String,
     /// Number of edges with this type.
     pub count: usize,
-    /// Union of property keys observed on edges of this type, sorted.
+    /// Union of property keys **observed** on edges of this type, sorted.
     pub property_keys: Vec<String>,
+    /// Schema constraints **declared** on this edge type (Issue #3378), empty
+    /// when schemaless.
+    pub declared_constraints: Vec<PropertyConstraintDescriptor>,
 }
 
 /// A structured summary of the graph's shape: distinct node labels and
@@ -142,7 +154,13 @@ impl AletheiaDB {
         self.current
             .visit_edges(|edge| edge_acc.record(edge.label, &edge.properties));
 
-        Ok(build_schema(node_acc, edge_acc, false, None))
+        Ok(build_schema(
+            node_acc,
+            edge_acc,
+            false,
+            None,
+            &self.constraint_registry,
+        ))
     }
 
     /// Discover the graph's schema as it existed at a specific bi-temporal
@@ -213,7 +231,32 @@ impl AletheiaDB {
                 valid_time,
                 transaction_time,
             }),
+            &self.constraint_registry,
         ))
+    }
+}
+
+/// Resolve the declared schema constraints for `(kind, label)` into public
+/// descriptors, or an empty vec when the label is schemaless (Issue #3378).
+fn declared_for(
+    registry: &ConstraintRegistry,
+    kind: EntityKind,
+    label: InternedString,
+) -> Vec<PropertyConstraintDescriptor> {
+    match registry.schema_constraints_for(kind, label) {
+        None => Vec::new(),
+        Some(constraints) => constraints
+            .iter()
+            .filter_map(|c| {
+                let property = GLOBAL_INTERNER.resolve_with(c.property, |s| s.to_string())?;
+                Some(PropertyConstraintDescriptor {
+                    property,
+                    declared_type: c.declared_type,
+                    required: c.required,
+                    nullable: c.nullable,
+                })
+            })
+            .collect(),
     }
 }
 
@@ -243,6 +286,7 @@ fn build_schema(
     edge_acc: Accumulator,
     sampled: bool,
     as_of: Option<SchemaInstant>,
+    registry: &ConstraintRegistry,
 ) -> GraphSchema {
     let mut total_nodes = 0;
     let mut node_labels: Vec<LabelSchema> = node_acc
@@ -256,6 +300,7 @@ fn build_schema(
                 label: resolve_label(label),
                 count,
                 property_keys,
+                declared_constraints: declared_for(registry, EntityKind::Node, label),
             }
         })
         .collect();
@@ -273,6 +318,7 @@ fn build_schema(
                 edge_type: resolve_label(edge_type),
                 count,
                 property_keys,
+                declared_constraints: declared_for(registry, EntityKind::Edge, edge_type),
             }
         })
         .collect();
