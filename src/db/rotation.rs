@@ -703,7 +703,14 @@ impl AletheiaDB {
             .encryption_config
             .clone()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
-        resume_pending_rotation(&manager, &enc_cfg, Some(&self.wal))
+        // Live-db resume: the index state is already loaded, so drive the WAL
+        // layer with a REAL persist-before-retire closure (mirrors the forward
+        // path). This keeps the resume lossless here too — the old no-op persist
+        // could strand un-checkpointed writes on this path as well (Issue #3617
+        // PR2). The startup path instead passes `None` and defers via
+        // `finalize_resumed_wal_rotation`.
+        let persist = || self.persist_indexes();
+        resume_pending_rotation(&manager, &enc_cfg, Some(&self.wal), Some(&persist))
     }
 
     fn run_rotation(
@@ -1317,6 +1324,7 @@ pub fn resume_pending_rotation(
     manager: &Arc<IndexPersistenceManager>,
     enc_cfg: &EncryptionConfig,
     wal: Option<&ConcurrentWalSystem>,
+    wal_persist: Option<&dyn Fn() -> Result<()>>,
 ) -> Result<Option<RotationReport>> {
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(None);
@@ -1341,19 +1349,42 @@ pub fn resume_pending_rotation(
     // WAL layer (Issue #3617 PR2): when the ledger records the WAL as in flight
     // and a WAL system is available, add BOTH generations to its keyring — so a
     // half-rotated directory (old-DEK + new-DEK segments) replays correctly on
-    // this open — and drive the layer to completion idempotently. Resume does
-    // NOT re-checkpoint (indexes are not loaded yet at startup): the forward
-    // driver checkpointed BEFORE writing the ledger, so every old-DEK segment is
-    // already captured durably and can be retired unconditionally.
+    // this open — and drive the layer to completion idempotently.
+    //
+    // Retirement (physically deleting the old-generation segments) is only safe
+    // once every write those segments hold is durable in the index snapshot. The
+    // `wal_persist` argument selects HOW that guarantee is met:
+    //
+    // * `Some(persist)` — LIVE-db resume (`resume_pending_index_rotation`): the
+    //   index state is already loaded, so we persist-then-retire INLINE, exactly
+    //   like the forward `rotate_wal_layer` path (seal → persist → retire).
+    //
+    // * `None` — STARTUP resume (`db::config`): indexes are NOT loaded yet (index
+    //   load + WAL replay run AFTER this pass), so a persist here would snapshot
+    //   EMPTY state and retiring the old-generation segments would strand every
+    //   write in `[checkpoint, seal)` that lives only in the in-RAM replay buffer
+    //   until the async checkpoint — a second crash would lose it (DEFECT
+    //   #3617-PR2 resume-path double-crash window). We therefore DEFER the
+    //   roll+retire+ledger-clear to `finalize_resumed_wal_rotation`, run after
+    //   replay + a SYNCHRONOUS `persist_indexes()`. Both WAL generations are
+    //   already installed here (and by `install_pending_wal_generations` before
+    //   the replay read), so replay decrypts every segment regardless of
+    //   generation; the ledger stays PENDING for the finalize pass.
     let wal_pending = matches!(ledger.wal, LayerStatus::Pending);
     // DEFECT #3617-PR2: track whether the WAL layer actually finished retiring so
     // the final `clear_rotation_state` below is GATED on real completion (never
     // clears the ledger while an old-generation segment survives).
     let mut wal_incomplete = false;
+    // DEFECT #3617-PR2 (resume-path double-crash): set when the startup path
+    // defers WAL retirement to `finalize_resumed_wal_rotation`; the ledger MUST
+    // NOT be cleared here while an un-snapshotted old-generation segment survives.
+    let mut wal_finalize_deferred = false;
     if wal_pending
         && let Some(wal) = wal
         && let Some(wal_keyring) = wal.wal_keyring()
     {
+        // Always install BOTH generations so a half-rotated directory replays
+        // correctly regardless of which mode drives retirement.
         let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
             .map_err(rotation_err)?;
         let new_wal_cipher: Arc<dyn Cipher> =
@@ -1361,14 +1392,24 @@ pub fn resume_pending_rotation(
         // The startup keyring is `single(old_wal_dek)`; adding the new generation
         // makes both live (legacy/old-kv → old, new-kv → new).
         wal_keyring.add_generation(ledger.new_version, Arc::clone(&new_wal_cipher));
-        // Resume cannot re-checkpoint (indexes are not loaded yet at startup):
-        // the startup replay read has already captured every on-disk segment
-        // BEFORE this retire runs, so the no-op persist is safe here.
-        roll_and_retire_wal(wal, new_wal_cipher, ledger.new_version, || Ok(()))?;
-        if wal.all_segments_use_key_version(ledger.new_version) {
-            mark_wal_complete(manager)?;
-        } else {
-            wal_incomplete = true;
+        match wal_persist {
+            Some(persist) => {
+                // Live-db resume: persist-before-retire is lossless (mirrors the
+                // forward path — the seal runs first, then `persist` captures any
+                // post-checkpoint write now sealed into an old-gen segment, then
+                // the retire deletes segments whose data is already snapshotted).
+                roll_and_retire_wal(wal, new_wal_cipher, ledger.new_version, persist)?;
+                if wal.all_segments_use_key_version(ledger.new_version) {
+                    mark_wal_complete(manager)?;
+                } else {
+                    wal_incomplete = true;
+                }
+            }
+            None => {
+                // Startup resume: defer roll+retire+ledger-clear to
+                // `finalize_resumed_wal_rotation` (after replay + sync persist).
+                wal_finalize_deferred = true;
+            }
         }
     }
 
@@ -1413,11 +1454,21 @@ pub fn resume_pending_rotation(
                 }
                 .into());
             }
-            clear_rotation_state(manager);
-            logger.log(&AuditEvent::RotationCompleted {
-                new_version: ledger.new_version,
-                duration_ms: started.elapsed().as_millis() as u64,
-            });
+            // DEFECT #3617-PR2 (resume-path double-crash): when the startup path
+            // deferred WAL retirement, the ledger MUST stay PENDING until
+            // `finalize_resumed_wal_rotation` has synchronously snapshotted the
+            // replayed state and retired the old-generation segments. Clearing it
+            // here (before the deferred retire) would re-open the very data-loss
+            // window this fix closes. The index re-encrypt + `complete()` above
+            // are durable and idempotent, so leaving the ledger for the finalize
+            // pass is safe and re-entrant across another crash.
+            if !wal_finalize_deferred {
+                clear_rotation_state(manager);
+                logger.log(&AuditEvent::RotationCompleted {
+                    new_version: ledger.new_version,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                });
+            }
             RotationReport {
                 old_version,
                 new_version: ledger.new_version,
@@ -1450,6 +1501,85 @@ pub fn resume_pending_rotation(
     };
 
     Ok(Some(report))
+}
+
+/// Phase 2 of a startup-resumed WAL key rotation (Issue #3617 PR2): retire the
+/// old-generation WAL segments and clear the ledger, AFTER the startup replay has
+/// been captured by a synchronous persist.
+///
+/// This closes the resume-path double-crash data-loss window. On the startup
+/// path [`resume_pending_rotation`] (called with `wal_persist = None`) installs
+/// both WAL generations but does NOT retire — because at that point the index
+/// state is not loaded, so a persist would snapshot empty state and retiring the
+/// old-generation segments would strand the `[checkpoint, seal)` writes that live
+/// only in the in-RAM replay buffer. Once `db::config` has loaded the snapshot
+/// and replayed the WAL into current state, it calls this function, which:
+///
+/// 1. re-installs the new WAL generation (idempotent),
+/// 2. force-rolls under the new DEK, runs `persist` (a SYNCHRONOUS
+///    `persist_indexes()` capturing the now-replayed state) AFTER the seal and
+///    BEFORE the retire — reusing the forward-path `roll_and_retire_wal`
+///    ordering verbatim — then retires the sealed old-generation segments, and
+/// 3. once no old-generation segment remains, marks the WAL layer complete and
+///    clears the ledger.
+///
+/// So no old-generation WAL segment is ever deleted until its entries are durable
+/// in the index snapshot — on BOTH the forward and resume paths.
+///
+/// A no-op (returns `Ok(())`) when no ledger is present, the WAL layer is not
+/// `Pending`, or the WAL is unencrypted — so `db::config` can call it
+/// unconditionally on the encrypted-persistent startup path. Completion-gated
+/// exactly like the forward path: if a stale old-generation segment cannot be
+/// retired, the ledger is left PENDING and an error is surfaced so a later resume
+/// finishes it (never reports success while a stranded old-DEK tail survives).
+///
+/// # Errors
+///
+/// Returns an error if the recorded new key source cannot be sourced, the persist
+/// fails, the roll/retire fails, or a stale old-generation segment survives
+/// retirement (ledger left pending).
+pub fn finalize_resumed_wal_rotation(
+    manager: &Arc<IndexPersistenceManager>,
+    enc_cfg: &EncryptionConfig,
+    wal: &ConcurrentWalSystem,
+    persist: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let Some(ledger) = read_rotation_state(manager)? else {
+        return Ok(());
+    };
+    if !matches!(ledger.wal, LayerStatus::Pending) {
+        return Ok(());
+    }
+    let Some(wal_keyring) = wal.wal_keyring() else {
+        return Ok(());
+    };
+
+    // Re-derive + re-install the new WAL generation (idempotent: it was already
+    // installed by `resume_pending_rotation` / `install_pending_wal_generations`).
+    let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
+        .map_err(rotation_err)?;
+    let new_wal_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_wal_dek));
+    wal_keyring.add_generation(ledger.new_version, Arc::clone(&new_wal_cipher));
+
+    // Seal → persist (captures the replayed `[checkpoint, seal)` writes into the
+    // durable index snapshot) → retire. Identical ordering to the forward path.
+    roll_and_retire_wal(wal, new_wal_cipher, ledger.new_version, persist)?;
+
+    // Completion-gated: only mark complete + clear once every old-generation
+    // segment is gone; otherwise leave the ledger PENDING for a later resume.
+    if !wal.all_segments_use_key_version(ledger.new_version) {
+        return Err(StorageError::InconsistentState {
+            reason:
+                "WAL key rotation resume-finalize incomplete: old-generation segment(s) remain \
+                     after retirement. Ledger left pending for a later resume; do NOT drop the old \
+                     key until it completes."
+                    .to_string(),
+        }
+        .into());
+    }
+    mark_wal_complete(manager)?;
+    clear_rotation_state(manager);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1846,7 +1976,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("a pending rotation should resume");
         assert_eq!(report.new_version, 2);
@@ -2204,7 +2334,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let err = resume_pending_rotation(&manager, &enc_cfg, None).unwrap_err();
+        let err = resume_pending_rotation(&manager, &enc_cfg, None, None).unwrap_err();
         assert!(
             err.to_string().contains("corrupt"),
             "corrupt breadcrumb must abort startup, got: {err}"
@@ -2212,7 +2342,7 @@ mod tests {
         // And an ABSENT breadcrumb is a clean no-op (distinguish absent vs corrupt).
         std::fs::remove_file(data_dir.join("rotation.state")).unwrap();
         assert!(
-            resume_pending_rotation(&manager, &enc_cfg, None)
+            resume_pending_rotation(&manager, &enc_cfg, None, None)
                 .unwrap()
                 .is_none()
         );
@@ -2292,7 +2422,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("a pending cancel should resume");
         assert_eq!(report.new_version, 1, "cancel rolls back to the old key");
@@ -2767,7 +2897,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("a pending rotation should resume from the v2 ledger");
         assert_eq!(report.new_version, 2);
@@ -2877,7 +3007,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("a pending rotation should resume");
         assert_eq!(report.new_version, 2);
@@ -2968,7 +3098,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("an index=Complete ledger should still resume to verify+clear");
         assert_eq!(report.new_version, 2);
@@ -3046,7 +3176,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let err = resume_pending_rotation(&resume_mgr, &enc_cfg, None).expect_err(
+        let err = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None).expect_err(
             "a ledger claiming index=Complete over unmigrated old-key files MUST fail closed",
         );
         // The verify_complete() fail-closed path (OldKeyFilesRemain /
@@ -3235,6 +3365,134 @@ mod tests {
              pre-roll WAL LSN {wal_lsn_before_roll}, else a retired segment holds \
              un-snapshotted acknowledged writes (crash-consistency data-loss window)"
         );
+    }
+
+    /// DEFECT #3617-PR2 (resume-path double-crash data-loss window): on the
+    /// forward path `rotate_wal_layer` persists the index snapshot AFTER the roll
+    /// and BEFORE retiring the old-generation segments, so a retired segment never
+    /// holds an un-snapshotted write. The RESUME (startup) path used to retire the
+    /// old-generation segments with a NO-OP persist while the durable index
+    /// manifest still sat at the pre-rotation checkpoint LSN — any write
+    /// acknowledged between that checkpoint and the seal then lived ONLY in the
+    /// in-RAM replay buffer (applied to current state) and in an on-disk segment
+    /// that resume immediately deleted. A SECOND crash before the async
+    /// background checkpoint therefore lost it: on the next open the snapshot is
+    /// still at the checkpoint LSN and the segment holding the write is gone.
+    ///
+    /// The fix defers the resume-path retire+ledger-clear until after the startup
+    /// replay has been captured by a SYNCHRONOUS `persist_indexes()`, so no
+    /// old-generation WAL segment is deleted until its entries are durable in the
+    /// index snapshot. This test builds the crash-A on-disk state (a
+    /// post-checkpoint write living only in an old-generation segment, PENDING
+    /// ledger), runs the resume/open path, and asserts BOTH the crux manifest-LSN
+    /// invariant (the durable manifest must cover the pre-retire write) AND that
+    /// the write survives a SECOND crash with no async checkpoint in between.
+    #[test]
+    fn resume_path_persists_before_retiring_survives_second_crash() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        // ── Crash A: a forward WAL rotation crashed between the seal and the
+        // post-roll persist. On disk: the seeded graph is durable in the index
+        // snapshot at checkpoint LSN L_c; a post-checkpoint write ("Carol") lives
+        // ONLY in the (old-generation) active WAL segment at an LSN above L_c; the
+        // ledger is PENDING with the WAL in scope.
+        //
+        // The crash is simulated with `std::mem::forget` so the db's `Drop`
+        // (which signals the background persistence thread to run a FINAL
+        // shutdown persist_all_indexes) never runs — exactly like a `SIGKILL`.
+        // A clean drop here would durably snapshot Carol and mask the bug. ──
+        let carol_wal_lsn;
+        let checkpoint_lsn;
+        {
+            let db = build_db(root, &old_key);
+            seed(&db); // persists indexes — the PRE-rotation checkpoint at L_c
+            let manager = db.persistence_manager.clone().unwrap();
+            checkpoint_lsn = manager.load_manifest_and_strings().unwrap().lsn;
+
+            // Post-checkpoint write: acknowledged AFTER the checkpoint, so its LSN
+            // is above L_c and it lives only in the old-DEK active WAL segment (not
+            // in the durable snapshot). GroupCommit durability makes it durable in
+            // the WAL before `create_node` returns.
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+            )
+            .unwrap();
+            carol_wal_lsn = db.wal.current_lsn().0;
+            assert!(
+                carol_wal_lsn > checkpoint_lsn,
+                "precondition: Carol's write (wal LSN {carol_wal_lsn}) is above the checkpoint \
+                 manifest LSN ({checkpoint_lsn})"
+            );
+
+            // Plant the PENDING ledger (WAL in scope): a rotation is in flight.
+            super::write_ledger(
+                &manager,
+                &super::RotationLedger::forward_scope(
+                    2,
+                    KeyProviderConfig::File {
+                        path: new_key.clone(),
+                    },
+                    true, // WAL in scope
+                ),
+            )
+            .unwrap();
+            assert!(root.join("data").join("rotation.state").exists());
+            // On-disk index snapshot is still at the pre-rotation checkpoint.
+            assert_eq!(
+                manager.load_manifest_and_strings().unwrap().lsn,
+                checkpoint_lsn,
+                "precondition: Carol is NOT yet in the durable index snapshot"
+            );
+            std::mem::forget(db); // crash A — skip the clean-shutdown final persist
+        }
+
+        // ── Reopen 1 (crash-A recovery): the startup resume path runs. Read the
+        // durable manifest IMMEDIATELY, then crash again (`mem::forget`) so no
+        // async/shutdown checkpoint captures Carol after resume. The crux
+        // invariant: by the time resume has retired any old-generation segment,
+        // the durable manifest LSN must already cover Carol. The old
+        // no-op-persist resume left the manifest stuck at L_c, so a second crash
+        // here lost Carol. ──
+        let manifest_lsn_after_resume;
+        {
+            let db = build_db(root, &old_key);
+            let manager = db.persistence_manager.clone().unwrap();
+            manifest_lsn_after_resume = manager.load_manifest_and_strings().unwrap().lsn;
+            assert_eq!(
+                db.node_count(),
+                3,
+                "Alice, Bob, Carol all present in RAM after resume+replay"
+            );
+            assert!(
+                manifest_lsn_after_resume >= carol_wal_lsn,
+                "resume must snapshot every pre-retire write into the durable manifest BEFORE \
+                 retiring its old-generation segment: manifest LSN {manifest_lsn_after_resume} \
+                 must cover Carol's WAL LSN {carol_wal_lsn} (checkpoint was {checkpoint_lsn}), \
+                 else a retired segment held un-snapshotted acknowledged writes and a second \
+                 crash before the async checkpoint loses them (resume-path data-loss window)"
+            );
+            std::mem::forget(db); // crash B — no async/shutdown checkpoint runs
+        }
+
+        // ── Reopen 2 (crash-B recovery, now under the NEW key — the rotation
+        // completed during reopen 1): with no async/shutdown checkpoint between
+        // reopen 1 and here, Carol survives ONLY if reopen 1 durably snapshotted
+        // her before retiring her old-generation segment. ──
+        {
+            let db = build_db(root, &new_key);
+            assert_eq!(
+                db.node_count(),
+                3,
+                "Carol survives the second crash — reopen 1 durably snapshotted her before \
+                 retiring her old-generation WAL segment"
+            );
+        }
     }
 
     /// DEFECT #3617-PR2 (dual-generation startup install): a half-rotated WAL —
