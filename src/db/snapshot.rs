@@ -66,6 +66,7 @@ use crate::db::ops::NodesAtTime;
 use crate::query::QueryBuilder;
 use crate::query::builder::state::Initial;
 use parking_lot::RwLock;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -80,6 +81,10 @@ use std::path::PathBuf;
 /// microsecond) must not collapse onto its same-microsecond neighbor on reload.
 /// The [`ts_hlc`] deserializer still accepts the legacy bare-integer form
 /// (reconstructing it as logical 0), so v1 files load without a hard failure.
+///
+/// Only referenced by the serde-gated persistence path; the in-memory registry
+/// needs no on-disk format version.
+#[cfg(feature = "serde")]
 const PERSIST_FORMAT_VERSION: u32 = 2;
 
 /// serde adapter: (de)serialize a [`Timestamp`] (an HLC `HybridTimestamp`)
@@ -95,6 +100,10 @@ const PERSIST_FORMAT_VERSION: u32 = 2;
 ///
 /// The deserializer is tolerant of the **legacy** v1 shape — a bare integer is
 /// accepted and reconstructed with logical `0` — so an old sidecar still loads.
+///
+/// Only compiled when the `serde` feature is enabled (persistence is a no-op
+/// otherwise); the snapshot registry itself works in-memory regardless.
+#[cfg(feature = "serde")]
 mod ts_hlc {
     use super::Timestamp;
     use crate::core::hlc::HybridTimestamp;
@@ -159,16 +168,20 @@ mod ts_hlc {
 /// This value is immutable and cheaply cloneable. It records the pin's name,
 /// the `(valid_time, transaction_time)` coordinate reads resolve at, when the
 /// snapshot was created, and an optional human description.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct NamedSnapshot {
     name: String,
-    #[serde(with = "ts_hlc")]
+    #[cfg_attr(feature = "serde", serde(with = "ts_hlc"))]
     valid_time: Timestamp,
-    #[serde(with = "ts_hlc")]
+    #[cfg_attr(feature = "serde", serde(with = "ts_hlc"))]
     transaction_time: Timestamp,
-    #[serde(with = "ts_hlc")]
+    #[cfg_attr(feature = "serde", serde(with = "ts_hlc"))]
     created_at: Timestamp,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     description: Option<String>,
 }
 
@@ -211,6 +224,10 @@ impl NamedSnapshot {
 }
 
 /// The on-disk registry envelope (versioned, mirrors the auth key store).
+///
+/// Only compiled with the `serde` feature; without it the registry is
+/// in-memory-only and never (de)serialized.
+#[cfg(feature = "serde")]
 #[derive(Serialize, Deserialize)]
 struct PersistedRegistry {
     version: u32,
@@ -273,6 +290,10 @@ impl SnapshotRegistry {
             persist_path: path.clone(),
             save_lock: parking_lot::Mutex::new(()),
         };
+        // Loading the sidecar requires serde; without it the registry is
+        // in-memory-only (persistence is compiled out) and `path` is retained
+        // solely so a later save is a clean no-op.
+        #[cfg(feature = "serde")]
         if let Some(path) = path {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => match serde_json::from_str::<PersistedRegistry>(&contents) {
@@ -421,6 +442,25 @@ impl SnapshotRegistry {
             return Ok(());
         };
 
+        // Durable persistence requires serde. Without it the registry is
+        // in-memory-only: nothing is written (the sidecar path is still tracked
+        // so behavior is otherwise identical).
+        #[cfg(not(feature = "serde"))]
+        {
+            let _ = path;
+            return Ok(());
+        }
+
+        #[cfg(feature = "serde")]
+        {
+            self.save_serialized(path)
+        }
+    }
+
+    /// Serialize the registry to `path` (temp file + rename + parent fsync).
+    /// Split out so the serde-gated body lives in one place.
+    #[cfg(feature = "serde")]
+    fn save_serialized(&self, path: &std::path::Path) -> Result<()> {
         let mut snapshots: Vec<NamedSnapshot> = self.entries.read().values().cloned().collect();
         snapshots.sort_by(|a, b| {
             a.created_at
@@ -465,6 +505,9 @@ impl SnapshotRegistry {
 /// Emit a warning about the snapshot registry under either logging
 /// configuration, matching the crate's `observability`-gated logging style
 /// (mirrors `log_scan_warning` in `src/storage/wal/segment_reader.rs`).
+///
+/// Only used by the serde-gated sidecar load path.
+#[cfg(feature = "serde")]
 fn log_registry_warning(message: &str) {
     #[cfg(feature = "observability")]
     tracing::warn!("{}", message);
@@ -478,6 +521,9 @@ fn log_registry_warning(message: &str) {
 /// bad file is the interesting one). Failure to quarantine is itself logged but
 /// never fatal: the in-memory registry is already empty, and a later `save()`
 /// overwrites the file atomically.
+///
+/// Only used by the serde-gated sidecar load path.
+#[cfg(feature = "serde")]
 fn quarantine_corrupt_registry(path: &std::path::Path) {
     let mut corrupt = path.as_os_str().to_owned();
     corrupt.push(".corrupt");
@@ -861,6 +907,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn named_snapshot_serde_round_trips_full_hlc() {
         use crate::core::hlc::HybridTimestamp;
@@ -887,6 +934,7 @@ mod tests {
         assert_eq!(back.transaction_time().logical(), 3);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn ts_hlc_reconstructs_exact_wallclock_and_logical() {
         use crate::core::hlc::HybridTimestamp;
@@ -901,6 +949,7 @@ mod tests {
         assert_eq!(back.0.logical(), 42);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn ts_hlc_accepts_legacy_bare_integer_as_logical_zero() {
         // A legacy v1 sidecar stored bare-integer micros. The tolerant
@@ -921,6 +970,7 @@ mod tests {
         assert_eq!(s.transaction_time.logical(), 0);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn open_quarantines_corrupt_sidecar_and_starts_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -943,6 +993,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn open_quarantines_future_version_and_starts_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -977,6 +1028,7 @@ mod tests {
     // shares the parse-failure quarantine path, which the corrupt-sidecar and
     // future-version tests already cover.
 
+    #[cfg(feature = "serde")]
     #[test]
     fn insert_rolls_back_on_save_failure() {
         // Point the sidecar at a path whose parent is a *file*, so directory
