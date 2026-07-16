@@ -1684,6 +1684,20 @@ impl WriteOps for WriteTransaction {
             // Build the final merged property map
             let merged_properties = builder.build();
 
+            // A PATCH may drop or downgrade a vector (e.g. overwrite the
+            // embedding key with a scalar, or remove it): mark the buffer so
+            // the temporal vector index snapshots on commit if EITHER the
+            // existing node or the merged map carries a vector. `WriteBuffer::add`
+            // only inspects the merged map, so without this a vector-removing
+            // PATCH leaves `has_vector_operations` false and no snapshot fires,
+            // leaking the phantom as-of-now (Issue #3621). Mirrors
+            // `buffer_node_replace`.
+            if !self.buffer.has_vector_operations()
+                && (node.properties.contains_vector() || merged_properties.contains_vector())
+            {
+                self.buffer.mark_has_vector_operations();
+            }
+
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
             let valid_from = options.valid_from.unwrap_or(timestamp);
