@@ -1032,7 +1032,21 @@ fn read_segment_with_cipher_tolerant(
                 ))
                 .into());
             }
-            let (off, kv) = decode_header_layout(ver, buffer)?;
+            let (off, kv) = match decode_header_layout(ver, buffer) {
+                Ok(layout) => layout,
+                // A keyversioned (v15) header truncated mid-`key_version` (5..9
+                // bytes present) on the FINAL segment, under torn-tail tolerance,
+                // is a crash-torn empty tail — not a hard error. This mirrors the
+                // #3433 torn-tail contract already applied to a torn trailing
+                // ENTRY: without the full 9-byte header there are no decodable
+                // frames, so keep nothing and stop cleanly rather than aborting
+                // recovery on the whole segment.
+                Err(e) if tolerate_torn_tail => {
+                    log_torn_tail_warning(path, WAL_HEADER_SIZE, &e);
+                    return Ok(Vec::new());
+                }
+                Err(e) => return Err(e),
+            };
             (ver, off, kv)
         } else if !buffer.is_empty() {
             // Invalid format: no magic header
@@ -2936,6 +2950,40 @@ mod tests {
         }
     }
 
+    /// NIT #3617-PR2: a keyversioned (v15) header truncated mid-`key_version`
+    /// (5..9 bytes present) on the FINAL segment must be tolerated as an empty
+    /// torn tail under the #3433 contract — not hard-error the whole recovery
+    /// via `decode_header_layout`'s `?` before torn-tail tolerance applies. With
+    /// tolerance disabled it still hard-errors (strict policy).
+    #[test]
+    fn torn_v15_header_on_final_segment_is_tolerated_as_empty_tail() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("0.log");
+        // magic + version(15) + only 2 of the 4 key_version bytes = 7-byte torn header.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&WAL_MAGIC);
+        bytes.push(WAL_VERSION_ENCRYPTED_KEYVERSIONED);
+        bytes.extend_from_slice(&[0u8, 0u8]); // partial key_version (torn)
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(bytes.len(), 7, "a 5..9-byte v15 header is a torn header");
+
+        let keyring = WalKeyring::single(aes_cipher());
+
+        // Tolerance ON (final segment): the torn header yields an empty tail.
+        let entries = read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), true)
+            .expect("a torn v15 header on the final segment must be tolerated, not hard-error");
+        assert!(
+            entries.is_empty(),
+            "there are no decodable frames without a full 9-byte header"
+        );
+
+        // Tolerance OFF: the same torn header still hard-errors.
+        assert!(
+            read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), false).is_err(),
+            "a torn v15 header must still hard-error when torn-tail tolerance is disabled"
+        );
+    }
+
     #[test]
     fn legacy_v14_segment_replays_under_keyring_old_generation() {
         let dir = TempDir::new().unwrap();
@@ -3049,7 +3097,12 @@ mod tests {
     }
 
     #[test]
-    fn keyversioned_truncated_header_is_rejected() {
+    fn keyversioned_truncated_header_is_rejected_under_strict_policy() {
+        // NIT #3617-PR2: a torn v15 header on the FINAL segment is now TOLERATED
+        // under the #3433 torn-tail contract (see
+        // `torn_v15_header_on_final_segment_is_tolerated_as_empty_tail`). This
+        // test pins the complementary STRICT case: with torn-tail tolerance
+        // DISABLED, the same truncated header still hard-errors.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("0.log");
         {
@@ -3064,8 +3117,9 @@ mod tests {
         }
         let keyring = WalKeyring::single(aes_cipher());
         assert!(
-            read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), true).is_err(),
-            "a keyversioned header truncated before its key_version must be rejected"
+            read_entries_from_dir_with_keyring(dir.path(), LSN(1), Some(&keyring), false).is_err(),
+            "a keyversioned header truncated before its key_version must be rejected when \
+             torn-tail tolerance is disabled"
         );
     }
 

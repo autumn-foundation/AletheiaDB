@@ -1120,9 +1120,32 @@ impl FlushCoordinator {
                     // Unreadable/empty header: leave it (defensive).
                     _ => false,
                 };
-                if is_old_generation && std::fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                    let _ = std::fs::remove_file(self.segment_meta_path(segment_id));
+                if is_old_generation {
+                    // DEFECT #3617-PR2: a `remove_file` failure MUST propagate, not
+                    // be swallowed. Swallowing it let the rotation driver report
+                    // success (and clear the ledger) while a stranded old-DEK
+                    // segment remained on disk — after the operator dropped the old
+                    // MEK it could no longer be decrypted, wedging startup and
+                    // leaving the DB permanently unopenable. A NotFound race (the
+                    // file was already removed) is benign and treated as removed;
+                    // any other error propagates so the caller leaves the ledger
+                    // pending for a later resume.
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            removed += 1;
+                            let _ = std::fs::remove_file(self.segment_meta_path(segment_id));
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // Already gone (benign race): treat as retired.
+                            let _ = std::fs::remove_file(self.segment_meta_path(segment_id));
+                        }
+                        Err(e) => {
+                            return Err(StorageError::IoError(format!(
+                                "Failed to retire old-generation WAL segment {path:?}: {e}"
+                            ))
+                            .into());
+                        }
+                    }
                 }
             }
         }
@@ -2347,5 +2370,59 @@ mod tests {
         // max() would be 50.
         let min_lsn = coordinator.get_min_lsn();
         assert_eq!(min_lsn, Some(LSN(10)));
+    }
+
+    /// DEFECT #3617-PR2: a real `remove_file` failure during old-generation
+    /// retirement MUST propagate, not be swallowed. Previously a swallowed error
+    /// let the rotation driver report success (and clear the ledger) while a
+    /// stranded old-DEK segment remained on disk — after the old MEK was dropped
+    /// it could no longer be decrypted, wedging startup permanently.
+    #[cfg(unix)]
+    #[test]
+    fn retire_old_generation_propagates_remove_file_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The read-only-directory injection below relies on DAC permission
+        // checks, which the root user bypasses (unlink still succeeds for uid 0).
+        // Skip under root — the same propagation is exercised end-to-end under any
+        // uid by the rotation-level completion-gating test
+        // (`incomplete_wal_retirement_leaves_ledger_pending_and_no_success`).
+        // SAFETY: `geteuid` is an always-safe libc call with no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path();
+
+        // Coordinator over an (initially empty) dir — no active segment is created
+        // eagerly, so no file collides with our planted old-generation segment.
+        let config = FlushCoordinatorConfig::new(wal_dir);
+        let coordinator = FlushCoordinator::new(config).unwrap();
+        // Make the active id high, so id 0 below is treated as OLD (id < active).
+        coordinator.current_segment_id.store(5, Ordering::Relaxed);
+
+        // Plant a legacy (old-generation) segment header at id 0.
+        let mut hdr = Vec::new();
+        hdr.extend_from_slice(&WAL_MAGIC);
+        hdr.push(WAL_VERSION_STRING_LABELS); // legacy header (no key_version)
+        std::fs::write(wal_dir.join("000000.log"), &hdr).unwrap();
+
+        // Make the directory read-only so `remove_file` fails with PermissionDenied
+        // (removal needs write permission on the parent directory, not the file).
+        let original = std::fs::metadata(wal_dir).unwrap().permissions();
+        let mut ro = original.clone();
+        ro.set_mode(0o500);
+        std::fs::set_permissions(wal_dir, ro).unwrap();
+
+        let result = coordinator.retire_old_generation_segments(2);
+
+        // Restore permissions BEFORE asserting so tempdir cleanup succeeds.
+        std::fs::set_permissions(wal_dir, original).unwrap();
+
+        assert!(
+            result.is_err(),
+            "a real remove_file failure must propagate as Err, not be swallowed"
+        );
     }
 }

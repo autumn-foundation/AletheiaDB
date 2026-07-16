@@ -419,6 +419,21 @@ impl AletheiaDB {
             // used as a targeted fallback below only when a cipher is
             // configured, preserving the #3420/#3430 encrypted seed exactly.
             //
+            // Issue #3617 PR2 (crash-consistency): if a WAL rotation ledger is
+            // PENDING, install BOTH the old and new WAL key generations into the
+            // keyring BEFORE the replay read, so a half-rotated WAL (old-DEK +
+            // new-DEK segments both on disk) decrypts regardless of generation.
+            // Without this the read below fails on new-DEK frames before
+            // `resume_pending_rotation` (further down) can install the new
+            // generation. Additive: a no-op when no rotation is pending.
+            if config.encryption.enabled && config.persistence.enabled {
+                crate::db::rotation::install_pending_wal_generations(
+                    &wal,
+                    &config.encryption,
+                    &config.persistence.data_dir,
+                )?;
+            }
+
             // Held (as `mut`, consumed by whichever replay branch runs) across
             // index load so no later pass re-reads the segment directory.
             let mut startup_wal_entries = wal.read_from(crate::storage::wal::LSN::initial())?;

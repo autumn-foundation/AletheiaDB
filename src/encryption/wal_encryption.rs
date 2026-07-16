@@ -159,6 +159,12 @@ impl WalKeyring {
 
     /// Whether a generation with `key_version` is currently held (a `match_any`
     /// single keyring holds every version).
+    ///
+    /// Test-only for now (Issue #3617 PR2): no production path consults it —
+    /// segment dispatch goes through [`cipher_for_segment`](Self::cipher_for_segment).
+    /// `#[cfg(test)]`-gated rather than removed so PR3 can re-expose it if a
+    /// production caller lands.
+    #[cfg(test)]
     pub fn has_version(&self, key_version: u32) -> bool {
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         inner.match_any
