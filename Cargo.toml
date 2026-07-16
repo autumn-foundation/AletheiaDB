@@ -518,6 +518,13 @@ harness = false
 path = "benches/historical_storage.rs"
 required-features = []
 
+# Named snapshots / reproducible reads (Issue #3370)
+[[bench]]
+name = "snapshot_pin"
+harness = false
+path = "benches/snapshot_pin.rs"
+required-features = []
+
 # High-level API - includes transaction overhead and API layer
 [[bench]]
 name = "aletheiadb"
@@ -601,6 +608,12 @@ required-features = []
 name = "changefeed"
 harness = false
 path = "benches/changefeed.rs"
+required-features = []
+
+[[bench]]
+name = "changefeed_subscribe"
+harness = false
+path = "benches/changefeed_subscribe.rs"
 required-features = []
 
 [[bench]]

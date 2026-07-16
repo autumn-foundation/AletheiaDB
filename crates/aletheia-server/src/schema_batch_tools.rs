@@ -111,6 +111,13 @@ pub struct GetSchemaQuery {
     /// #3353: byte-exact response cap.
     pub max_response_bytes: Option<u64>,
     /// #3353: property keys to protect first as the response degrades.
+    /// Comma-separated on the HTTP query surface (OpenAPI form / `explode=false`
+    /// array), e.g. `?priority_properties=name,title`; entries are trimmed and
+    /// empties dropped. See [`crate::edge_tools::de_priority_properties`].
+    #[serde(
+        default,
+        deserialize_with = "crate::edge_tools::de_priority_properties"
+    )]
     pub priority_properties: Option<Vec<String>>,
 }
 

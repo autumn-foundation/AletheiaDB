@@ -16,9 +16,10 @@ The SDK targets the **HTTP surface** described by `tests/parity/inventory.json` 
 
 | SDK version | Server HTTP surface | Notes |
 |-------------|---------------------|-------|
-| `0.1.x` | autumn-server node/edge/traverse/temporal + admin/health routes (Issue #3524 PR1–PR4) | 34 merged routes wrapped; vector/hybrid/query/schema/stats/batch/lineage are typed stubs (`NotImplementedError`). |
+| `0.1.x` | autumn-server node/edge/traverse/temporal + admin/health routes (Issue #3524 PR1–PR4) | 34 routes wrapped; vector/hybrid/query/schema/stats/batch/lineage were typed stubs (`NotImplementedError`). |
+| `0.2.x` | full autumn-server surface — all 46 tools, including vector/hybrid/`query`/schema/stats/batch/lineage (Issue #3627) | Every stub graduated to a real typed call. `NotImplementedError` is retained (exported) but no longer thrown. HTTP error bodies use the unified nested envelope (Issue #3629). |
 
-As the remaining routes merge (vector, hybrid, `query`, schema, stats, batch, lineage), each stub graduates to a real typed call in a **MINOR** release, and this table gains a row naming the server capability/version it requires.
+The remaining routes have merged: `findSimilar`, `hybridQuery`, `query`, `enableVectorIndex`, `listVectorIndexes`, `getSchema`, `databaseStats`, `temporalExtent`, `applyBatch`, `lineageUpstream`, and `lineageDownstream` are now real typed calls.
 
 ## How breaking HTTP changes propagate
 

@@ -124,10 +124,11 @@ pub use config::{
 };
 pub use core::temporal::time;
 pub use core::{
-    BiTemporalInterval, ChangeFeedPage, ChangeFeedQuery, ChangeRecord, ChangeType, Edge, EdgeId,
-    EntityId, EntityKind, GLOBAL_INTERNER, InternedString, Node, NodeHeader, NodeId, PropertyKey,
-    PropertyMap, PropertyMapBuilder, PropertyValue, Provenance, StringInterner, TimeRange,
-    Timestamp, VersionId,
+    BiTemporalInterval, ChangeFeedPage, ChangeFeedQuery, ChangeFilter, ChangeRecord, ChangeType,
+    ChangefeedBroadcaster, ChangefeedConfig, Edge, EdgeId, EntityId, EntityKind, GLOBAL_INTERNER,
+    InternedString, Node, NodeHeader, NodeId, PropertyKey, PropertyMap, PropertyMapBuilder,
+    PropertyValue, Provenance, RecvError, StringInterner, Subscription, TimeRange, Timestamp,
+    VersionId,
 };
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};

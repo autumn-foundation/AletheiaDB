@@ -6269,7 +6269,26 @@ impl AletheiaMcpServer {
         };
 
         match serde_json::to_value(self.db.stats()) {
-            Ok(value) => self.success_json(value),
+            Ok(mut value) => {
+                // Surface the Issue #3368 over-limit termination counters
+                // alongside the storage-layer stats. Additive: the
+                // `DatabaseStats` struct and storage layer are untouched; these
+                // are MCP-surface atomics folded in here. Row-cap breaches are
+                // NOT terminations (they self-disclose via `truncated`/
+                // `has_more`), so there is deliberately no row counter.
+                if let Some(obj) = value.as_object_mut() {
+                    let snap = self.limit_counters.snapshot();
+                    obj.insert(
+                        "resource_limits".to_string(),
+                        json!({
+                            "timeout_terminations": snap.wall_clock_timeout,
+                            "byte_cap_terminations": snap.result_bytes,
+                            "override_rejections": snap.override_rejected,
+                        }),
+                    );
+                }
+                self.success_json(value)
+            }
             Err(e) => self.error_result(McpError::new(
                 McpErrorCode::Internal,
                 format!("Failed to serialize database stats: {}", e),
@@ -7449,14 +7468,18 @@ impl AletheiaMcpServer {
                     // handle can emit a concrete offset-based resume call
                     // (Issue #3353 F1/F5).
                     let orig_args = args.clone();
-                    let result = self.dispatch_read_tool(name, args);
+                    // Resource limits (#3368) run first — the byte cap short-
+                    // circuits an oversized response to an error before the
+                    // #3353 budget shaper sees it — so a within-cap response is
+                    // what gets shaped to the caller's token budget.
+                    let result = self.dispatch_read_tool_limited(name, args);
                     return self.apply_budget(name, result, &budget_req, &orig_args);
                 }
                 Ok(None) => {}
                 Err(err) => return self.error_result(err),
             }
         }
-        self.dispatch_read_tool(name, args)
+        self.dispatch_read_tool_limited(name, args)
     }
 
     /// Apply the parsed token budget to a handler's result. Errors pass through
@@ -7578,6 +7601,173 @@ impl AletheiaMcpServer {
             ),
         }
     }
+
+    /// Dispatch a read tool under the per-query resource limits (Issue #3368
+    /// residue): the wall-clock timeout and the result-byte cap, reusing the
+    /// exact machinery the `query` tool self-enforces (the timeout thread-race,
+    /// the bounded in-flight-worker DoS guard, and the structured
+    /// `RESOURCE_EXHAUSTED` error builders + termination counters).
+    ///
+    /// Tools not in [`RESOURCE_LIMITED_READ_TOOLS`] — including `query`, which
+    /// self-enforces inline — pass straight through to
+    /// [`dispatch_read_tool`](Self::dispatch_read_tool) unchanged. For the
+    /// covered tools this resolves the server-default effective limits (no
+    /// per-call override in v1):
+    ///
+    /// - **Timeout.** The zero-overhead inline path (no thread spawn, no clone,
+    ///   no in-flight guard) applies **only when the effective timeout is `0`**
+    ///   — i.e. the `disabled()` config. Under the *default* config the
+    ///   effective timeout is 30_000 ms (not 0), so each covered call takes the
+    ///   timeout-race worker path (reserve an in-flight slot — rejected
+    ///   `UNAVAILABLE` at the cap — then race the handler against the deadline
+    ///   on a detached worker, exactly like the `query` tool): a `TimedOut`
+    ///   outcome maps to the retriable `RESOURCE_EXHAUSTED` timeout error, a
+    ///   `WorkerDied` (panic) outcome to the non-retriable INTERNAL error. The
+    ///   response bytes are unchanged versus a bare `dispatch_read_tool`, but
+    ///   the per-call worker spawn is real overhead on hot-path reads
+    ///   (including cheap `get_node_at_time` / `get_edge_at_time`); a
+    ///   quantifying micro-benchmark is a deferred (Lane-2) follow-up.
+    /// - **Byte cap.** A *non-error* response is then held to the effective
+    ///   response-byte cap post-hoc (see
+    ///   [`enforce_result_byte_cap`](Self::enforce_result_byte_cap)); errors
+    ///   pass through untouched.
+    ///
+    /// Ordering (Issue #3360 / #3353): the cursor page is resolved inside the
+    /// handler, the resource byte cap is applied here, and the #3353 token
+    /// budget shaper (in [`dispatch_tool`](Self::dispatch_tool)) then runs
+    /// *after* on the within-cap response — never before the cap.
+    fn dispatch_read_tool_limited(&self, name: &str, args: serde_json::Value) -> CallToolResult {
+        if !is_resource_limited_read_tool(name) {
+            return self.dispatch_read_tool(name, args);
+        }
+
+        // No per-call override for these tools in v1, so `effective(None)` is
+        // infallible (an override is the only thing that can be rejected). Fall
+        // back defensively to "unlimited" rather than `unwrap`, keeping the
+        // production path panic-free per the coding standards.
+        let eff = self
+            .query_limits
+            .effective(None)
+            .unwrap_or_else(|_| EffectiveQueryLimits::unlimited());
+        let cap = eff.max_response_bytes;
+
+        let result = if eff.timeout_ms == 0 {
+            // Inline (unlimited-timeout) fast path: no worker thread, no guard,
+            // no clone — zero overhead over a bare `dispatch_read_tool` call.
+            self.dispatch_read_tool(name, args)
+        } else {
+            let in_flight_cap = self.query_limits.max_in_flight_queries;
+            let guard = match self.try_acquire_in_flight(in_flight_cap) {
+                Some(guard) => guard,
+                None => return self.in_flight_capacity_error(name, in_flight_cap),
+            };
+            let server = self.clone();
+            let tool = name.to_string();
+            match self.race_deadline(eff.timeout_ms, guard, move || {
+                server.dispatch_read_tool(&tool, args)
+            }) {
+                RaceOutcome::Completed(result) => result,
+                RaceOutcome::TimedOut => {
+                    return self.read_tool_timeout_error(name, eff.timeout_ms);
+                }
+                RaceOutcome::WorkerDied => return self.worker_died_error(name),
+            }
+        };
+
+        self.enforce_result_byte_cap(name, result, cap)
+    }
+
+    /// Enforce the result-byte cap on a resource-limited read tool's response
+    /// (Issue #3368 residue), post-hoc.
+    ///
+    /// A `cap` of `0` (unlimited) and any error response pass straight through.
+    /// Otherwise, if the serialized response text exceeds `cap`, the response is
+    /// replaced with the structured non-retriable `RESOURCE_EXHAUSTED`
+    /// result-byte error (which also records the termination counter); a
+    /// within-cap response is returned unchanged. The single text content item
+    /// each read handler produces *is* the serialized JSON response, so its
+    /// byte length is the response size — measured in place without consuming
+    /// the result, so a within-cap response is returned byte-for-byte identical.
+    fn enforce_result_byte_cap(
+        &self,
+        name: &str,
+        result: CallToolResult,
+        cap: usize,
+    ) -> CallToolResult {
+        if cap == 0 || result.is_error.unwrap_or(false) {
+            return result;
+        }
+        let len = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.len()))
+            .unwrap_or(0);
+        if len > cap {
+            return self.read_tool_byte_cap_error(name, len, cap);
+        }
+        result
+    }
+
+    /// Tool-agnostic wall-clock-timeout error for the six wrapped read tools
+    /// (Issue #3368 residue).
+    ///
+    /// Unlike the `query` tool's
+    /// [`wall_clock_timeout_error`](Self::wall_clock_timeout_error) — whose
+    /// `kind: "runtime_error"` and `language` fields are meaningful for a query
+    /// *language* — these tools are not a query language and expose no per-call
+    /// `limits` override in v1. Reusing the query builder would emit a
+    /// semantically wrong `language: "<toolname>"`, a spurious `kind`, and
+    /// remediation telling the caller to raise `limits.timeout_ms`, which they
+    /// cannot set. This emitter instead produces the neutral #3234 envelope
+    /// (`{error:{code,message,retriable,details}}` — no `kind`, no `language`)
+    /// with tool-neutral remediation. Records the `WallClockTimeout`
+    /// termination exactly once; retriable, since these tools are read-only so
+    /// a narrower retry is always sound.
+    fn read_tool_timeout_error(&self, name: &str, timeout_ms: u64) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::WallClockTimeout);
+        self.error_result(
+            McpError::new(
+                McpErrorCode::ResourceExhausted,
+                format!(
+                    "Tool '{name}' exceeded the wall-clock timeout of {timeout_ms} ms; narrow \
+                     the request (smaller depth/limit/time window) and retry."
+                ),
+            )
+            .retriable(true)
+            .details(json!({
+                "dimension": LimitDimension::WallClockTimeout.as_str(),
+                "limit": timeout_ms,
+            })),
+        )
+    }
+
+    /// Tool-agnostic result-byte-cap error for the six wrapped read tools
+    /// (Issue #3368 residue). The neutral #3234 counterpart to the `query`
+    /// tool's [`result_bytes_error`](Self::result_bytes_error): no `kind`, no
+    /// `language`, and no unactionable `limits.max_response_bytes` advice (these
+    /// tools have no per-call override). Records the `ResultBytes` termination
+    /// exactly once; non-retriable — the same request yields the same oversized
+    /// response, so the caller must narrow it.
+    fn read_tool_byte_cap_error(&self, name: &str, consumed: usize, cap: usize) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::ResultBytes);
+        self.error_result(
+            McpError::new(
+                McpErrorCode::ResourceExhausted,
+                format!(
+                    "Tool '{name}' response of {consumed} bytes exceeded the {cap}-byte cap; \
+                     narrow the request (smaller depth/limit/k) and retry."
+                ),
+            )
+            .retriable(false)
+            .details(json!({
+                "dimension": LimitDimension::ResultBytes.as_str(),
+                "limit": cap,
+                "consumed": consumed,
+            })),
+        )
+    }
 }
 
 /// The read tools that honor the Issue #3353 token budget (`max_response_tokens`
@@ -7612,6 +7802,37 @@ pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
 /// Does this tool honor the token budget parameters (Issue #3353)?
 pub(crate) fn is_budgetable_read_tool(name: &str) -> bool {
     BUDGETABLE_READ_TOOLS.contains(&name)
+}
+
+/// The read tools whose responses are governed by the per-query resource
+/// limits (Issue #3368 residue): the wall-clock timeout and the result-byte
+/// cap. The `query` tool self-enforces the same limits inline (see
+/// [`AletheiaMcpServer::handle_query`]) and is deliberately *not* listed here,
+/// so it is never double-wrapped. Kept as a single source of truth so the
+/// dispatch wrapper and any future schema/documentation path cannot drift.
+///
+/// v1 scope (Lane-2 follow-ups deferred): these tools honor only the server
+/// **defaults** — there is no per-call `limits` override for them (unlike the
+/// `query` tool), no memory-budget dimension, and no engine-level cooperative
+/// cancellation; the timed computation runs to completion on a detached worker
+/// and its result is discarded on timeout (identical to the `query` tool's
+/// non-cancellable race). The byte cap is enforced **post-hoc** on the fully
+/// serialized response (the `query` tool's incremental row-by-row guard is not
+/// reused here); a within-cap response is then optionally shaped by the #3353
+/// token budget.
+pub(crate) const RESOURCE_LIMITED_READ_TOOLS: &[&str] = &[
+    "traverse",
+    "hybrid_query",
+    "find_similar",
+    "get_node_at_time",
+    "get_edge_at_time",
+    "find_nodes_at_time",
+];
+
+/// Does this tool have its response governed by the per-query resource limits
+/// (Issue #3368 residue)?
+pub(crate) fn is_resource_limited_read_tool(name: &str) -> bool {
+    RESOURCE_LIMITED_READ_TOOLS.contains(&name)
 }
 
 /// Read tools that honor the Issue #3348 provenance filter parameters
@@ -9349,6 +9570,246 @@ mod server_unit_tests {
         assert!(
             cols.contains(&"a".to_string()) && cols.contains(&"b".to_string()),
             "columns must name the bound variables: {val}"
+        );
+    }
+
+    // ===================================================================
+    // Per-query resource limits extended to the read tools (Issue #3368
+    // residue): wall-clock timeout + result-byte cap on
+    // traverse/hybrid_query/find_similar/get_node_at_time/get_edge_at_time/
+    // find_nodes_at_time, plus the `database_stats.resource_limits` counters.
+    // These drive the full `dispatch_tool` seam (auth -> #3368 wrapper ->
+    // #3353 budget), so they exercise the wrapper end to end.
+    // ===================================================================
+
+    use crate::core::property::PropertyMap;
+
+    /// Seed a star graph: one root with `leaves` outgoing `LINK` edges to
+    /// leaf nodes. Returns the root's id. A wide star makes a single-hop
+    /// traverse do real (multi-node) work, so a 1 ms wall-clock timeout races
+    /// against a computation that reliably overruns it.
+    fn seed_star(db: &Arc<AletheiaDB>, leaves: usize) -> u64 {
+        let root = db.create_node("Root", PropertyMap::new()).expect("root");
+        for _ in 0..leaves {
+            let leaf = db.create_node("Leaf", PropertyMap::new()).expect("leaf");
+            db.create_edge(root, leaf, "LINK", PropertyMap::new())
+                .expect("edge");
+        }
+        root.as_u64()
+    }
+
+    fn parse(result: CallToolResult) -> serde_json::Value {
+        serde_json::from_str(&AletheiaMcpServer::extract_text(result)).expect("json response")
+    }
+
+    /// The wrapper covers exactly the six residue read tools and never the
+    /// self-enforcing `query` tool.
+    #[test]
+    fn resource_limited_read_tools_membership() {
+        for t in [
+            "traverse",
+            "hybrid_query",
+            "find_similar",
+            "get_node_at_time",
+            "get_edge_at_time",
+            "find_nodes_at_time",
+        ] {
+            assert!(
+                super::is_resource_limited_read_tool(t),
+                "{t} must be covered"
+            );
+        }
+        // `query` self-enforces inline; it must NOT be double-wrapped.
+        assert!(!super::is_resource_limited_read_tool("query"));
+        assert!(!super::is_resource_limited_read_tool("get_node"));
+        assert!(!super::is_resource_limited_read_tool("database_stats"));
+    }
+
+    /// A pathological `traverse` under a 1 ms wall-clock timeout is terminated
+    /// with a retriable RESOURCE_EXHAUSTED whose `details.dimension` is
+    /// `wall_clock_timeout`, and the timeout counter is bumped exactly once.
+    #[test]
+    fn traverse_wall_clock_timeout_is_resource_exhausted() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        // Enough leaves that a single-hop traverse + serialization dwarfs 1 ms.
+        let root = seed_star(&db, 3_000);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 1,
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 10_000,
+            }),
+        );
+        assert_eq!(result.is_error, Some(true), "expected a timeout error");
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(true), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout"),
+            "{val}"
+        );
+        // Tool-agnostic envelope (Issue #3368 residue): NO query-tool `kind` /
+        // `language` fields (a wrapped read tool is not a query language), and
+        // no unactionable `limits.timeout_ms` remediation (these tools have no
+        // per-call override).
+        assert!(err.get("kind").is_none(), "no kind field: {val}");
+        assert!(err.get("language").is_none(), "no language field: {val}");
+        let msg = err["message"].as_str().unwrap_or_default();
+        assert!(
+            !msg.contains("limits.timeout_ms"),
+            "message must not reference limits.timeout_ms: {val}"
+        );
+        assert!(
+            msg.contains("traverse"),
+            "message must name the tool: {val}"
+        );
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 1);
+    }
+
+    /// A `traverse` response that exceeds the result-byte cap fails closed with
+    /// a non-retriable RESOURCE_EXHAUSTED / `result_bytes` error whose
+    /// `details.consumed` exceeds the cap, bumping the byte-cap counter. Uses
+    /// the inline (unlimited-timeout) path so only the post-hoc byte cap is
+    /// under test.
+    #[test]
+    fn traverse_result_byte_cap_fails_closed() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 0,          // inline path (no timeout race)
+            default_max_response_bytes: 64, // tiny cap the response exceeds
+            max_response_bytes: 0,          // no ceiling to interfere
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().result_bytes, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 100,
+            }),
+        );
+        assert_eq!(result.is_error, Some(true), "expected a byte-cap error");
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(false), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("result_bytes"),
+            "{val}"
+        );
+        assert_eq!(err["details"]["limit"].as_u64(), Some(64), "{val}");
+        assert!(
+            err["details"]["consumed"].as_u64().unwrap_or(0) > 64,
+            "consumed must exceed the cap: {val}"
+        );
+        // Tool-agnostic envelope (Issue #3368 residue): NO query-tool `kind` /
+        // `language` fields, and no unactionable `limits.max_response_bytes`
+        // remediation.
+        assert!(err.get("kind").is_none(), "no kind field: {val}");
+        assert!(err.get("language").is_none(), "no language field: {val}");
+        let msg = err["message"].as_str().unwrap_or_default();
+        assert!(
+            !msg.contains("limits.max_response_bytes"),
+            "message must not reference limits.max_response_bytes: {val}"
+        );
+        assert!(
+            msg.contains("traverse"),
+            "message must name the tool: {val}"
+        );
+        assert_eq!(server.limit_termination_counts().result_bytes, 1);
+    }
+
+    /// A large-but-within-limits result is a success that self-discloses
+    /// incompleteness via `has_more`/`next_offset` (row-cap breaches are the
+    /// tool's own `limit`, NOT a resource-limit termination): no counter moves.
+    #[test]
+    fn row_limited_result_is_success_and_uncounted() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        // Default limits (generous timeout + byte cap) over the seeded db.
+        let server = AletheiaMcpServer::new(db);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 1, // fewer than the 5 leaves -> a partial page
+            }),
+        );
+        assert_ne!(result.is_error, Some(true), "row limit is not an error");
+        let val = parse(result);
+        assert_eq!(val["count"].as_u64(), Some(1), "{val}");
+        assert_eq!(val["has_more"].as_bool(), Some(true), "{val}");
+        assert!(val.get("next_offset").is_some(), "{val}");
+        let counts = server.limit_termination_counts();
+        assert_eq!(counts.wall_clock_timeout, 0);
+        assert_eq!(counts.result_bytes, 0);
+    }
+
+    /// `database_stats` surfaces the over-limit termination counters under an
+    /// additive `resource_limits` block: zero on a fresh server, and reflecting
+    /// forced terminations afterwards.
+    #[test]
+    fn database_stats_surfaces_resource_limit_counters() {
+        let server = make_server();
+
+        // Fresh: block present, all zero.
+        let val = parse(server.dispatch_tool("database_stats", serde_json::json!({})));
+        let rl = &val["resource_limits"];
+        assert_eq!(rl["timeout_terminations"].as_u64(), Some(0), "{val}");
+        assert_eq!(rl["byte_cap_terminations"].as_u64(), Some(0), "{val}");
+        assert_eq!(rl["override_rejections"].as_u64(), Some(0), "{val}");
+
+        // Force one of each termination through the shared counters (the exact
+        // tool-agnostic builders the wrapper invokes on TimedOut / over-cap).
+        let _ = server.read_tool_timeout_error("traverse", 1);
+        let _ = server.read_tool_byte_cap_error("traverse", 4096, 64);
+
+        let val = parse(server.dispatch_tool("database_stats", serde_json::json!({})));
+        let rl = &val["resource_limits"];
+        assert_eq!(rl["timeout_terminations"].as_u64(), Some(1), "{val}");
+        assert_eq!(rl["byte_cap_terminations"].as_u64(), Some(1), "{val}");
+    }
+
+    /// Fast path: with limits disabled (unlimited timeout + no byte cap) the
+    /// wrapper runs the handler inline and returns a response byte-for-byte
+    /// identical to the unwrapped `dispatch_read_tool` — no behavior change.
+    #[test]
+    fn zero_timeout_fast_path_is_identical_to_unwrapped() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 4);
+        let server =
+            AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig::disabled());
+        let args = serde_json::json!({
+            "start_node_id": root,
+            "edge_label": "LINK",
+            "depth": 1,
+            "limit": 100,
+        });
+
+        let wrapped =
+            AletheiaMcpServer::extract_text(server.dispatch_tool("traverse", args.clone()));
+        let bare = AletheiaMcpServer::extract_text(server.dispatch_read_tool("traverse", args));
+        assert_eq!(
+            wrapped, bare,
+            "the disabled-limits fast path must not alter the response"
         );
     }
 }

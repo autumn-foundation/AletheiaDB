@@ -107,6 +107,25 @@ impl ChangeRecord {
     pub fn transaction_time(&self) -> Timestamp {
         self.transaction_time_range.start()
     }
+
+    /// The stable total-order [`ChangeCursor`] identifying this record.
+    ///
+    /// This is the dedup / resume key for the push changefeed (Issue #3375): two
+    /// records are the same committed fact iff their cursors are equal, and a
+    /// consumer resumes a pull with `list_changes(cursor = last_delivered.cursor())`.
+    /// Derived from the record's own fields so it always agrees with what the
+    /// #3216 scan would have produced for the same version.
+    #[inline]
+    pub(crate) fn cursor(&self) -> ChangeCursor {
+        let start = self.transaction_time_range.start();
+        ChangeCursor {
+            tx_wallclock: start.wallclock(),
+            tx_logical: start.logical(),
+            kind_ord: self.kind.ord(),
+            entity_id: self.entity_id,
+            version_id: self.version_id,
+        }
+    }
 }
 
 /// Total-order sort key used for deterministic ordering and cursor pagination.
@@ -136,6 +155,26 @@ impl ChangeCursor {
             self.tx_wallclock, self.tx_logical, self.kind_ord, self.entity_id, self.version_id
         );
         crate::core::hex::encode(raw.as_bytes())
+    }
+
+    /// Encode a **baseline resume anchor** positioned strictly after every version committed
+    /// at or before `frontier` (Issue #3375 review F4).
+    ///
+    /// Uses `frontier`'s `(wallclock, logical)` with maximal kind/entity/version tiebreakers,
+    /// so a `list_changes` resume from this token (strict `> cursor`) returns exactly the
+    /// changes committed *after* `frontier` — i.e. everything a subscriber that captured
+    /// `frontier` at subscribe time could have missed, and nothing it should not re-see.
+    /// Because every future commit gets a strictly greater HLC timestamp, no future event is
+    /// ever excluded by this anchor.
+    pub(crate) fn baseline_after(frontier: Timestamp) -> String {
+        ChangeCursor {
+            tx_wallclock: frontier.wallclock(),
+            tx_logical: frontier.logical(),
+            kind_ord: u8::MAX,
+            entity_id: u64::MAX,
+            version_id: u64::MAX,
+        }
+        .encode()
     }
 
     /// Decode an opaque continuation token produced by [`ChangeCursor::encode`].

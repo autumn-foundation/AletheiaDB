@@ -10837,12 +10837,27 @@ mod database_stats_tests {
             provenance: None,
         });
 
-        let value = stats_response(&server);
+        let mut value = stats_response(&server);
+        // Issue #3368 residue: the MCP response additively carries a
+        // `resource_limits` termination-counter block that is an MCP-surface
+        // concern, not part of the storage-layer `DatabaseStats`. Assert it is
+        // present, then strip it so the remainder is exactly the serialized
+        // public API (the thin-aggregator contract is otherwise unchanged).
+        assert!(
+            value.get("resource_limits").is_some(),
+            "MCP response must surface the resource_limits counters: {value}"
+        );
+        value
+            .as_object_mut()
+            .expect("stats response is an object")
+            .remove("resource_limits");
+
         let api_stats = server.db().stats();
         let api_value = serde_json::to_value(&api_stats).expect("DatabaseStats must serialize");
         assert_eq!(
             value, api_value,
-            "MCP response must be exactly the serialized public DatabaseStats"
+            "MCP response (minus the additive resource_limits block) must be exactly the \
+             serialized public DatabaseStats"
         );
     }
 
@@ -10956,7 +10971,25 @@ mod database_stats_tests {
         let value = stats_response(&server);
         assert_eq!(
             keys(&value),
-            vec!["chain", "cold_storage", "current", "historical", "wal"]
+            vec![
+                "chain",
+                "cold_storage",
+                "current",
+                "historical",
+                "resource_limits",
+                "wal"
+            ]
+        );
+        // Issue #3368 residue: the additive per-query resource-limit
+        // termination counters are surfaced under a stable `resource_limits`
+        // block alongside the storage-layer stats.
+        assert_eq!(
+            keys(&value["resource_limits"]),
+            vec![
+                "byte_cap_terminations",
+                "override_rejections",
+                "timeout_terminations",
+            ]
         );
         // Provenance hash chain block (Issue #3351 AC7): present on every
         // stats response; disabled here, so all optional fields are null but

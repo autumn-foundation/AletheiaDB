@@ -409,6 +409,42 @@ serializable `DatabaseStats`; every field is an O(1)/cached counter read
 (no version scans; see Issue #212), so it is safe to call frequently. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#database-stats-and-storage-tier-health-database_stats).
 
+**Per-query resource limits (Issue #3368)**: the wall-clock-timeout and
+result-byte-cap enforcement that guards the `query` tool now also governs six
+read tools — `traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`,
+`get_edge_at_time`, `find_nodes_at_time` — wrapped at the dispatch seam
+(`RESOURCE_LIMITED_READ_TOOLS`), reusing the `query` tool's timeout thread-race
+and bounded in-flight-worker DoS guard. A breach returns `RESOURCE_EXHAUSTED`
+with `details.dimension` (`wall_clock_timeout`, retriable; `result_bytes`,
+non-retriable) — but via **tool-agnostic** emitters that produce the plain
+#3234 envelope (`{error:{code,message,retriable,details}}`); unlike the `query`
+tool's builders these carry **no** `kind` and **no** `language` field (a
+wrapped read tool is not a query language) and their remediation is
+tool-neutral (no `limits.timeout_ms`/`limits.max_response_bytes` advice, since
+these tools have no per-call `limits` override in v1). Ordering is cursor
+(#3360) → resource cap → token budget (#3353). **Overhead:** the output is
+unchanged under the default config, but the zero-overhead inline path applies
+**only** when the effective timeout is `0` (the `disabled()` config); under the
+*default* config the effective timeout is 30_000 ms, so each covered call runs
+on a timeout-race worker (thread-spawn + mpsc + in-flight-CAS, exactly like the
+`query` tool) — response-identical but not free. The per-call worker-spawn cost
+on hot-path reads (including cheap `get_node_at_time`/`get_edge_at_time`) has a
+quantifying micro-benchmark deferred to Lane-2. The `max_in_flight_queries` cap
+(default 64) is a **single shared pool** across the `query` tool and these six
+wrapped read tools, so a flood of slow calls to one can make the others return
+`UNAVAILABLE` (bounded, retriable); a per-class sub-budget is a Lane-2
+follow-up. `database_stats` additively surfaces a
+`resource_limits` block (`timeout_terminations`, `byte_cap_terminations`,
+`override_rejections`) from process-lifetime atomic counters (the
+`DatabaseStats` struct/storage layer are untouched; row-cap breaches are **not**
+counted — they self-disclose via `truncated`/`has_more`). **v1 scope for the six
+read tools:** server defaults only (no per-call `limits` override), **post-hoc**
+byte cap (the response is fully serialized then rejected if over cap). **Deferred
+to Lane-2:** memory-budget dimension, true engine-level cancellation, Rust
+builder API, benchmark-gated fast-path proof, concurrency soak, HTTP in-flight
+parity, incremental byte-cap for these tools. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#extended-to-the-read-tools-issue-3368-residue).
+
 **Valid-time writes (Issue #3221)**: `create_node`, `create_edge`,
 `update_node`, `update_edge`, `delete_node`, and `delete_edge` accept an
 optional `valid_time` (ISO 8601 / RFC 3339 or microseconds since epoch) so a
@@ -874,6 +910,64 @@ dangling ref, `INVALID_ARGUMENT` for self/cycle, `FAILED_PRECONDITION` for
 already-recorded), all non-retriable. Durable persistence of lineage is a
 #3413 follow-up; the #3427 attribution caveat applies. See
 [docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
+
+### Changefeed Subscriptions (Issue #3375)
+
+Push counterpart to the #3216 `list_changes` pull feed: `AletheiaDB::subscribe_changes(filter)`
+returns a `Subscription` whose bounded buffer fills with matching `ChangeRecord`s as
+transactions commit — no polling. `poll()` drains non-blocking; `recv_timeout(dur)` is a
+sync `Mutex`+`Condvar` long-poll (no async dep — the primitive an SSE / MCP `await_changes`
+layer will wrap; **that HTTP/MCP surface is a coordinated Lane 1 follow-up**). A `ChangeFilter`
+selects by node label / edge type / change type (unset dimension = match-all on that axis;
+setting only labels excludes edges and vice-versa; `change_types` is a kind-independent AND).
+The broadcast runs in the commit path **after** the write is durable + applied + visible and
+**outside every write-path lock** (the broadcaster's locks are leaves; records are built via a
+targeted O(txn-size) `historical.read()` of just that transaction's versions, so they are
+byte-identical to `list_changes`). Delivery is **best-effort at-least-once**; the durable
+ground truth is `list_changes`. A lagged (bounded-buffer overflow → disconnected, never
+back-pressures the writer), reconnecting, or crash-surviving consumer resumes with **zero
+loss** by pulling `list_changes` from its last `resume_token` (the encoded `ChangeCursor` of
+the last event drained); duplicates on resume dedup by that stable cursor
+`(tx_time, kind, entity_id, version_id)`. Caps are configurable via `set_changefeed_config`
+(defaults: 128 subscriptions, 1024-event buffer); exceeding the subscription cap fails
+`subscribe_changes` with `CapacityExceeded`. Dropping a `Subscription` deregisters it. v1 is
+in-memory (no WAL change). See [docs/guides/reacting-to-change.md](docs/guides/reacting-to-change.md).
+### Named Snapshots — Reproducible Reads (Issue #3370)
+
+Pins a human-readable name to a bi-temporal coordinate
+`(valid_time, transaction_time)`; reads through the resulting handle resolve
+via the deterministic historical (`*_at_time`) path, so the same handle returns
+**identical results regardless of later writes**. A snapshot is a **coordinate,
+not a held resource**: it pins no storage and adds no lasting write-path
+overhead (the registry is off the data write path). Creation takes the
+commit-clock lock just long enough to copy one `Timestamp` (nanosecond-scale,
+not literally zero); a snapshot created racing an in-flight commit inherits the
+engine's standard committed-but-not-yet-applied visibility window (same caveat
+as #3225/#3236). **Rust API:** `create_snapshot(name, description)` defaults
+**valid-time = wallclock `time::now()`** (the engine's "now" convention, so
+facts actually valid at creation are not dropped) and **transaction-time = the
+commit frontier under `current_timestamp`** (race-free monotonic, so post-pin
+commits are invisible and pre-pin commits visible) / `create_snapshot_at(name,
+vt, tt, description)` (explicit/backdated, not extent-checked) /
+`snapshot(name) -> Snapshot` / `get_snapshot` / `list_snapshots` (stable order:
+created_at, then name) / `delete_snapshot`. The `Snapshot<'_>` handle pins
+`get_node`/`get_edge`/`find_nodes`/`find_nodes_by_property`, adjacency
+(`get_outgoing_edges`/`get_incoming_edges`), and a pre-pinned `query()` builder
+(traversal at the pin). Errors reuse the #3234 codes (dup name → `CONFLICT`,
+missing → `NOT_FOUND` with the name). Durably persisted (atomic
+temp+rename+fsync, coordinates as the **full HLC** `{wallclock, logical}` so a
+same-microsecond supersession pin resolves correctly after restart; sidecar
+`version: 2`, a legacy `version: 1` bare-i64 file still loads as logical 0)
+**inside** the persistence dir at `{persistence.data_dir}/snapshots.json`
+(`{data_dir}/indexes/snapshots.json` under the durable config) when index
+persistence is enabled — survives restart; in-memory-only for ephemeral
+`AletheiaDB::new()`. A corrupt/unparseable sidecar does **not** brick startup
+(unlike the auth key store): it is quarantined aside (`*.corrupt`) and startup
+proceeds with an empty registry. Caveats mirror `temporal_extent` (#3238) /
+point-in-time reads: cold-tier/truncation eviction can make a pinned version
+unreadable, and pinning "now" excludes future-valid facts. MCP exposure and an
+`AS OF SNAPSHOT <name>` query DDL are a coordinated follow-up (this wave is
+Rust-API-only). See [docs/guides/snapshot-pin.md](docs/guides/snapshot-pin.md).
 
 ### Feature Flags: Stable vs Experimental
 

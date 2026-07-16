@@ -26,6 +26,8 @@ pub mod backup;
 pub mod chain;
 /// A `VersionSource` over historical storage for the provenance chain.
 pub(crate) mod chain_source;
+/// Push-changefeed subscription API (Issue #3375).
+pub mod changefeed_sub;
 /// Configuration and initialization.
 pub mod config;
 /// Uniqueness constraint builder.
@@ -48,6 +50,8 @@ pub mod rotation;
 pub mod schema;
 /// Unified vector similarity query builder.
 pub mod similarity_query;
+/// Named snapshots for reproducible reads (Issue #3370).
+pub mod snapshot;
 /// Database-wide statistics snapshot (Issue #3222).
 pub mod stats;
 /// Temporal query operations.
@@ -70,6 +74,7 @@ pub use ops::NodesAtTime;
 pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
+pub use snapshot::{NamedSnapshot, Snapshot};
 pub use stats::{
     ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
     HistoricalDepthStats, TierAccessStats, WalStateStats,
@@ -214,6 +219,25 @@ pub struct AletheiaDB {
     /// in-memory (does not survive restart) to keep the WAL format untouched
     /// (Issue #3413); see [`crate::core::lineage`].
     pub(crate) lineage: Arc<crate::core::lineage::LineageStore>,
+    /// Push-changefeed broadcaster (Issue #3375).
+    ///
+    /// Fan-out hub for [`AletheiaDB::subscribe_changes`]. Each committed write transaction
+    /// broadcasts its change set (byte-identical to what `list_changes` would return for
+    /// that window) to matching subscribers, after the write is durable + applied + visible
+    /// and outside every write-path lock. Best-effort at-least-once: the durable ground
+    /// truth is `list_changes`, and a lagged/reconnecting/crash-surviving consumer resumes
+    /// losslessly from its last cursor. Its internal locks are leaves (never held while
+    /// acquiring a write-path primitive).
+    pub(crate) changefeed: Arc<crate::core::changefeed_subscription::ChangefeedBroadcaster>,
+    /// Named-snapshot registry for reproducible reads (Issue #3370).
+    ///
+    /// Maps a human-readable name to a pinned bi-temporal coordinate. Entirely
+    /// off the data write path (creating a snapshot never touches
+    /// current/historical storage, the WAL, or `current_timestamp`), so it
+    /// adds zero overhead to `create_node`/`create_edge`. Durably persisted to
+    /// a `{data_dir}/snapshots.json` sidecar when index persistence is enabled;
+    /// in-memory-only for ephemeral databases. See [`crate::db::snapshot`].
+    pub(crate) snapshots: Arc<snapshot::SnapshotRegistry>,
     /// Opt-in tamper-evident provenance hash chain (Issue #3351).
     ///
     /// `None` unless `config.chain.enabled`. When present, each committed
