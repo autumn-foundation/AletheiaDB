@@ -194,13 +194,13 @@ Usage:\n\
                   without reading or printing key material. Alias: keys info.\n\
                   Not configured is reported informationally (exit 0).\n\
   keys verify   — Verify the named key file loads and is valid (health check).\n\
-  keys rotate   — Rotate the index-encryption key (Issue #488). Start a rotation\n\
-                  with --new-key/--new-env-var, or --status/--resume/--cancel an\n\
-                  in-flight one. Requires an encrypted, index-persistent database\n\
-                  (open via ALETHEIADB_CONFIG). NOTE: index-only rotation refuses\n\
-                  safely while any other layer (WAL/cold/checkpoint) is encrypted\n\
-                  under the same key — the normal uniform-MEK case; full-MEK\n\
-                  all-layer rotation is a follow-up.\n\
+  keys rotate   — Rotate the master encryption key (Issue #3617). Start a\n\
+                  rotation with --new-key/--new-env-var, or --status/--resume/\n\
+                  --cancel an in-flight one. Requires an encrypted, index-\n\
+                  persistent database (open via ALETHEIADB_CONFIG). Re-keys EVERY\n\
+                  encrypted-at-rest layer — index, checkpoint, WAL, and cold\n\
+                  storage — so a subsequent key-provider switch is safe. A crash\n\
+                  mid-rotation resumes automatically on the next open.\n\
 \nEncryption at rest (Issue #490):\n\
   encryption status  — Per-layer (WAL/index/checkpoints/cold) encryption status.\n\
   encryption verify  — Prove the configured cipher actually decrypts the database\n\
@@ -603,13 +603,13 @@ fn keys_verify(args: &[String]) -> Result<(), String> {
 /// `ALETHEIADB_DATA_DIR`); rotation requires an encrypted, index-persistent
 /// database. Key bytes are NEVER printed.
 ///
-/// ## Cross-layer refusal is expected on a normally-encrypted database
+/// ## Full-MEK, all-layer rotation (Issue #3617)
 ///
-/// The engine performs an *index-only* rotation and refuses (safely) when any
-/// other at-rest layer (WAL / cold / checkpoint) is encrypted under the same
-/// master key. AletheiaDB's config encrypts uniformly, so a normally-opened
-/// encrypted database has an encrypted WAL and `--new-key` will correctly
-/// refuse. Full-MEK (all-layer) rotation is a documented follow-up.
+/// The engine re-keys EVERY encrypted-at-rest layer under the master key —
+/// index, checkpoint, WAL, and cold storage — so a uniformly-encrypted database
+/// rotates fully and a subsequent key-provider switch is safe. A crash
+/// mid-rotation resumes automatically on the next open (each layer's pass is
+/// idempotent / cursor-resumable).
 fn keys_rotate(args: &[String]) -> Result<(), String> {
     let status = args.iter().any(|a| a == "--status");
     let resume = args.iter().any(|a| a == "--resume");

@@ -68,6 +68,7 @@ use crate::storage::index_persistence::reencrypt::DecryptProbeReport;
 use crate::storage::index_persistence::{
     IndexKeyRotation, IndexPersistenceManager, RotationError, RotationProgress, RotationStatus,
 };
+use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 
 /// Summary of a completed index key rotation.
@@ -174,6 +175,16 @@ fn derive_wal_dek(
         .map_err(|e| RotationError::KeyProvider(e.to_string()))
 }
 
+/// Derive the cold-storage DEK for a MEK using the shared HKDF context (Issue
+/// #3617 PR3).
+fn derive_cold_dek(
+    mek: Zeroizing<[u8; 32]>,
+) -> std::result::Result<Zeroizing<[u8; 32]>, RotationError> {
+    KeyDerivation::new(mek)
+        .derive_cold_dek()
+        .map_err(|e| RotationError::KeyProvider(e.to_string()))
+}
+
 /// Force-roll the WAL under the new DEK and retire the old-generation segments
 /// (Issue #3617). Shared by the forward driver and crash-resume.
 ///
@@ -234,6 +245,20 @@ fn mark_wal_complete(manager: &IndexPersistenceManager) -> Result<()> {
         && ledger.wal != LayerStatus::Complete
     {
         ledger.wal = LayerStatus::Complete;
+        write_ledger(manager, &ledger)?;
+    }
+    Ok(())
+}
+
+/// Rewrite the durable ledger flipping `layer.cold=complete` (Issue #3617 PR3),
+/// preserving every other field. A no-op when no ledger is present. Keeps the
+/// #488 P0.2 ordering: the completion is fsync'd before the old cold generation
+/// is retired / the ledger is cleared.
+fn mark_cold_complete(manager: &IndexPersistenceManager) -> Result<()> {
+    if let Some(mut ledger) = read_rotation_state(manager)?
+        && ledger.cold != LayerStatus::Complete
+    {
+        ledger.cold = LayerStatus::Complete;
         write_ledger(manager, &ledger)?;
     }
     Ok(())
@@ -572,20 +597,18 @@ impl AletheiaDB {
     /// is the sole encrypted surface — the only case an index-only key rotation
     /// is safe. Never exposes ciphers or key material.
     fn conflicting_encrypted_layers(&self) -> Vec<&'static str> {
-        let mut layers = Vec::new();
-        // WAL is now rotatable by the full-MEK driver (Issue #3617 PR2): a
-        // checkpoint → force-roll under the new WAL DEK → truncate of the old
-        // segments re-keys it with no bulk rewrite, so it is no longer a
-        // cross-layer conflict.
+        // Full-MEK rotation now covers every encrypted-at-rest layer (Issue
+        // #3617): the index/checkpoint tree (PR1), the WAL (PR2, checkpoint →
+        // force-roll under the new WAL DEK → truncate the old segments), and the
+        // cold/redb tier (PR3, transactional bulk re-encrypt of every stored
+        // value). None of them is a cross-layer conflict any more, so a uniformly
+        // encrypted database rotates fully and this returns empty.
         //
-        // Cold storage is NOT yet covered (PR3): when a tiered/cold store is
-        // configured and encryption is enabled, its files are under the cold DEK
-        // from the same MEK, so an index+WAL rotation would still strand them —
-        // keep refusing until the cold re-keyer lands.
-        if self.encryption_manager.is_some() && self.historical.read().has_tiered_storage() {
-            layers.push("cold_storage");
-        }
-        layers
+        // Retained as the extension point the P0.1 guard consults: a FUTURE
+        // encrypted-at-rest layer with no rotation support MUST push its name here
+        // (and be re-encrypted by the driver) rather than silently stranding its
+        // bytes under the old MEK after a provider switch.
+        Vec::new()
     }
 
     /// Prerequisite check shared by status and rotate: index persistence must be
@@ -710,7 +733,18 @@ impl AletheiaDB {
         // PR2). The startup path instead passes `None` and defers via
         // `finalize_resumed_wal_rotation`.
         let persist = || self.persist_indexes();
-        resume_pending_rotation(&manager, &enc_cfg, Some(&self.wal), Some(&persist))
+        let report = resume_pending_rotation(&manager, &enc_cfg, Some(&self.wal), Some(&persist))?;
+        // Cold layer (Issue #3617 PR3): on the LIVE resume path the cold store is
+        // already wired, so finish any pending cold rotation here (idempotent —
+        // resumes from the redb cursor / skips already-wrapped values) and clear
+        // the ledger. `resume_pending_rotation` deferred the clear while cold was
+        // `Pending`. A no-op when cold is not in flight.
+        if report.is_some()
+            && let Some(tiered) = self.historical.read().tiered_storage_arc()
+        {
+            finalize_resumed_cold_rotation(&manager, &enc_cfg, tiered.cold_storage())?;
+        }
+        Ok(report)
     }
 
     fn run_rotation(
@@ -767,6 +801,11 @@ impl AletheiaDB {
         // resume drives it; `write_ledger` fsyncs the file and its parent dir,
         // and only once it returns does the driver flip any keyring.
         let wal_in_scope = self.wal.is_encrypted();
+        // Cold storage is in scope (Issue #3617 PR3) when encryption is
+        // configured and a tiered/cold store is present — its values are under
+        // the cold DEK from the same MEK and must be bulk re-encrypted.
+        let cold_in_scope =
+            self.encryption_manager.is_some() && self.historical.read().has_tiered_storage();
 
         // WAL-rotation invariant (Issue #3617): checkpoint BEFORE the ledger is
         // written. `persist_indexes` captures every committed entry into the
@@ -782,7 +821,12 @@ impl AletheiaDB {
 
         write_ledger(
             manager,
-            &RotationLedger::forward_scope(new_version, new_key_source.clone(), wal_in_scope),
+            &RotationLedger::forward_scope(
+                new_version,
+                new_key_source.clone(),
+                wal_in_scope,
+                cold_in_scope,
+            ),
         )?;
         self.emit_rotation_audit(&AuditEvent::RotationStarted {
             old_version,
@@ -804,6 +848,20 @@ impl AletheiaDB {
                 .map(|lc| Arc::clone(&lc.new))
                 .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
             self.rotate_wal_layer(manager, wal_new_cipher, new_version)?;
+        }
+
+        // Cold layer (Issue #3617 PR3): transactional bulk re-encrypt of every
+        // stored value from the old cold DEK to the new one. Runs after WAL; the
+        // cold DEK is domain-separated (`"cold"` HKDF context) so there is no
+        // cross-layer dependency. Completes #3617 — after this every
+        // encrypted-at-rest byte decrypts under the new MEK's DEKs.
+        if cold_in_scope {
+            let cold_new_cipher = layer_ciphers
+                .iter()
+                .find(|lc| lc.layer == RotationLayer::Cold)
+                .map(|lc| Arc::clone(&lc.new))
+                .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
+            self.rotate_cold_layer(manager, cold_new_cipher, new_version)?;
         }
 
         clear_rotation_state(manager);
@@ -882,6 +940,47 @@ impl AletheiaDB {
             .into());
         }
         mark_wal_complete(manager)?;
+        Ok(())
+    }
+
+    /// Re-key the cold (redb) layer to `new_cold_cipher` (Issue #3617 PR3) by a
+    /// transactional bulk re-encrypt of every stored value.
+    ///
+    /// Sequence:
+    /// 1. **Reach the cold store** through `historical.tiered_storage_arc()`, then
+    ///    DROP the `historical` guard — the redb write transactions self-serialize,
+    ///    so no AletheiaDB primitive is held across the (potentially long) pass,
+    ///    honoring the CLAUDE.md lock order (cold sits under `historical`).
+    /// 2. **Install** the new cold DEK as generation `new_key_version`, keeping the
+    ///    old generation live so a half-rotated store still reads old-generation
+    ///    values under the `ACV1` wrapper dispatch.
+    /// 3. **Bulk re-encrypt** every `node_versions`/`edge_versions` value to the
+    ///    new generation, in redb-atomic batches, resumable via a durable redb
+    ///    cursor; `flushed_lsn`/`temporal_extent` are never touched.
+    /// 4. **Retire** the old generation (every value is now wrapped at the new
+    ///    version), so the old cold DEK can be dropped after a provider switch.
+    /// 5. **Complete** — flip `layer.cold=complete` in the durable ledger.
+    ///
+    /// A no-op when no cold store is configured or the cold store is unencrypted.
+    fn rotate_cold_layer(
+        &self,
+        manager: &IndexPersistenceManager,
+        new_cold_cipher: Arc<dyn Cipher>,
+        new_key_version: u32,
+    ) -> Result<()> {
+        // Grab the cold-store handle under a brief `historical` read lock, then
+        // drop the guard: the bulk pass runs WITHOUT holding `historical`.
+        let Some(tiered) = self.historical.read().tiered_storage_arc() else {
+            return Ok(());
+        };
+        let cold = tiered.cold_storage();
+        if !cold.is_encrypted() {
+            return Ok(());
+        }
+        cold.install_cold_generation(new_key_version, new_cold_cipher)?;
+        cold.reencrypt_cold_values(new_key_version)?;
+        cold.retire_cold_generations(new_key_version)?;
+        mark_cold_complete(manager)?;
         Ok(())
     }
 }
@@ -988,23 +1087,32 @@ impl RotationLedger {
         }
     }
 
-    /// The PR2 cross-layer plan (Issue #3617): index + checkpoint always
+    /// The full-MEK cross-layer plan (Issue #3617): index + checkpoint always
     /// re-key through the index engine; the WAL is `Pending` when it is
-    /// encrypted (the full-MEK driver re-keys it), else `Skipped`; cold remains
-    /// out of scope (`Skipped`) until PR3.
-    fn forward_scope(new_version: u32, new_source: KeyProviderConfig, wal_in_scope: bool) -> Self {
+    /// encrypted (the full-MEK driver force-rolls it), else `Skipped`; cold is
+    /// `Pending` when a tiered/cold store is encrypted (PR3 bulk re-encrypts it),
+    /// else `Skipped`.
+    fn forward_scope(
+        new_version: u32,
+        new_source: KeyProviderConfig,
+        wal_in_scope: bool,
+        cold_in_scope: bool,
+    ) -> Self {
+        let scope = |in_scope: bool| {
+            if in_scope {
+                LayerStatus::Pending
+            } else {
+                LayerStatus::Skipped
+            }
+        };
         Self {
             direction: RotationDirection::Forward,
             new_version,
             new_source,
             index: LayerStatus::Pending,
             checkpoint: LayerStatus::Pending,
-            wal: if wal_in_scope {
-                LayerStatus::Pending
-            } else {
-                LayerStatus::Skipped
-            },
-            cold: LayerStatus::Skipped,
+            wal: scope(wal_in_scope),
+            cold: scope(cold_in_scope),
         }
     }
 }
@@ -1427,6 +1535,13 @@ pub fn resume_pending_rotation(
     //   the replay read), so replay decrypts every segment regardless of
     //   generation; the ledger stays PENDING for the finalize pass.
     let wal_pending = matches!(ledger.wal, LayerStatus::Pending);
+    // Cold layer (Issue #3617 PR3): the cold store is NOT reachable here (on the
+    // startup path it is constructed AFTER this pass; a free function has no `self`
+    // to reach it). When cold is `Pending` the ledger MUST survive this pass so
+    // the cold re-encrypt + final clear run in `finalize_resumed_cold_rotation`
+    // once the cold store exists. Both the live and startup resume paths honor
+    // this by gating the clear below on `!cold_pending`.
+    let cold_pending = matches!(ledger.cold, LayerStatus::Pending);
     // DEFECT #3617-PR2: track whether the WAL layer actually finished retiring so
     // the final `clear_rotation_state` below is GATED on real completion (never
     // clears the ledger while an old-generation segment survives).
@@ -1518,7 +1633,7 @@ pub fn resume_pending_rotation(
             // window this fix closes. The index re-encrypt + `complete()` above
             // are durable and idempotent, so leaving the ledger for the finalize
             // pass is safe and re-entrant across another crash.
-            if !wal_finalize_deferred {
+            if !wal_finalize_deferred && !cold_pending {
                 clear_rotation_state(manager);
                 logger.log(&AuditEvent::RotationCompleted {
                     new_version: ledger.new_version,
@@ -1634,6 +1749,89 @@ pub fn finalize_resumed_wal_rotation(
         .into());
     }
     mark_wal_complete(manager)?;
+    // Issue #3617 PR3: if the cold layer is still `Pending`, LEAVE the ledger for
+    // `finalize_resumed_cold_rotation` (which runs after the cold store is built)
+    // to complete cold and clear it. Clearing here would drop the ledger while
+    // cold values are still half-rotated, wedging a provider switch.
+    if !matches!(ledger.cold, LayerStatus::Pending) {
+        clear_rotation_state(manager);
+    }
+    Ok(())
+}
+
+/// Finalize a startup-resumed COLD (redb) key rotation (Issue #3617 PR3),
+/// completing the transactional bulk re-encrypt and clearing the ledger.
+///
+/// The cold store is constructed on the durable `open()` path AFTER
+/// [`resume_pending_rotation`] and [`finalize_resumed_wal_rotation`] have run
+/// (index + WAL are re-keyed before the cold tier is wired), so cold is the LAST
+/// layer to settle and this function performs the final ledger clear. It is
+/// idempotent and resumable:
+///
+/// 1. re-derive + install the new cold DEK generation (the old generation is
+///    already the cold store's provisioned single generation);
+/// 2. run [`RedbColdStorage::reencrypt_cold_values`], which resumes from the
+///    durable redb cursor and skips any value already wrapped at the target
+///    version — so a crash mid-batch resumes with no double-encrypt;
+/// 3. retire the old cold generation, mark `layer.cold=complete`, and clear the
+///    ledger (every layer has now settled).
+///
+/// A no-op (`Ok(())`) when no ledger is present, the cold layer is not `Pending`,
+/// or the cold store is unencrypted — so `db::config` can call it unconditionally
+/// on the encrypted-persistent startup path.
+///
+/// # Crash caveat: resume under the OLD key, THEN switch (inherited from PR2)
+///
+/// This is the inherent "resume under old key, then switch" contract of a
+/// full-MEK rotation, structurally identical to PR2's WAL resume contract
+/// (`install_pending_wal_generations`). While a rotation is `Pending`, the
+/// **old** MEK must remain available to finish it: the cold store is opened at
+/// its provisioned OLD generation, and the still-half-rotated `ACV1@base`
+/// (old-DEK) values are decrypted with that old cold DEK during the resumed bulk
+/// pass. If instead the operator reopens under the **new** key alone while a
+/// rotation crashed mid-cold-pass, the surviving old-DEK values can no longer be
+/// decrypted — the read is a **loud** AEAD authentication failure, so `open()`
+/// returns `Err` and the DB is unopenable rather than silently returning wrong
+/// data. Recovery is straightforward and lossless: reopen once under the OLD key
+/// so this resume completes (re-wrapping every value at the new generation and
+/// clearing the ledger), after which the new key alone reads everything. The
+/// fault is therefore availability-only and fully recoverable, never integrity
+/// loss.
+///
+/// # Errors
+///
+/// Returns an error if the recorded new key source cannot be sourced or the bulk
+/// re-encrypt pass fails (a genuine wrong/absent key surfaces loudly; the ledger
+/// is left `Pending` for a later resume).
+pub fn finalize_resumed_cold_rotation(
+    manager: &Arc<IndexPersistenceManager>,
+    enc_cfg: &EncryptionConfig,
+    cold: &RedbColdStorage,
+) -> Result<()> {
+    let Some(ledger) = read_rotation_state(manager)? else {
+        return Ok(());
+    };
+    if !matches!(ledger.cold, LayerStatus::Pending) {
+        return Ok(());
+    }
+    if !cold.is_encrypted() {
+        return Ok(());
+    }
+
+    // Re-derive + install the new cold generation (idempotent: a re-run replaces
+    // the same-version generation). The old generation is the cold store's
+    // provisioned single generation, still live for reading old-DEK values.
+    let new_cold_dek = derive_cold_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
+        .map_err(rotation_err)?;
+    let new_cold_cipher: Arc<dyn Cipher> =
+        Arc::from(create_cipher(enc_cfg.algorithm, &new_cold_dek));
+    cold.install_cold_generation(ledger.new_version, new_cold_cipher)?;
+
+    // Resume the bulk re-encrypt from the redb cursor (skips already-wrapped
+    // values), retire the old generation, then complete + clear the ledger.
+    cold.reencrypt_cold_values(ledger.new_version)?;
+    cold.retire_cold_generations(ledger.new_version)?;
+    mark_cold_complete(manager)?;
     clear_rotation_state(manager);
     Ok(())
 }
@@ -1672,6 +1870,40 @@ mod tests {
                 load_on_startup: true,
                 ..Default::default()
             })
+            .encryption(EncryptionConfig::file_based(key_file))
+            .build();
+        AletheiaDB::with_unified_config(config).unwrap()
+    }
+
+    /// Build a fully-encrypted DB WITH an encrypted cold (redb) tier (Issue
+    /// #3617 PR3): WAL + index + cold all under the same MEK. This is the
+    /// configuration a full-MEK rotation must cover end to end.
+    fn build_db_with_cold(root: &Path, key_file: &Path) -> AletheiaDB {
+        use crate::config::HistoricalConfigBuilder;
+        use std::time::Duration;
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(root.join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_delay_ms: 5,
+                        max_batch_size: 64,
+                    })
+                    .build(),
+            )
+            .persistence(crate::storage::index_persistence::PersistenceConfig {
+                enabled: true,
+                data_dir: root.join("data"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(root.join("cold.redb"))
+                    .migration_age_threshold(Duration::from_secs(3600))
+                    .build(),
+            )
             .encryption(EncryptionConfig::file_based(key_file))
             .build();
         AletheiaDB::with_unified_config(config).unwrap()
@@ -2102,13 +2334,12 @@ mod tests {
     }
 
     #[test]
-    fn rotate_still_refuses_when_cold_storage_encrypted() {
-        // Issue #3617 PR2: cold storage is NOT yet covered (PR3). A DB with
-        // encrypted cold storage must STILL refuse — an index+WAL rotation would
-        // strand the cold values under the old MEK.
-        use crate::config::HistoricalConfigBuilder;
-        use std::time::Duration;
-
+    fn rotate_reencrypts_cold() {
+        // Issue #3617 PR3 (completes the issue): a fully-encrypted DB with an
+        // ENCRYPTED COLD tier (WAL + index + cold under the same MEK) now ROTATES
+        // fully — the driver bulk re-encrypts every cold value to the new cold
+        // DEK, so a subsequent provider switch is safe. This flips the former
+        // cross-layer refusal.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let old_key = root.join("old.key");
@@ -2116,51 +2347,99 @@ mod tests {
         crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
         crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
 
-        let config = AletheiaDBConfig::builder()
-            .wal(
-                WalConfigBuilder::new()
-                    .wal_dir(root.join("wal"))
-                    .durability_mode(DurabilityMode::GroupCommit {
-                        max_delay_ms: 5,
-                        max_batch_size: 64,
-                    })
-                    .build(),
-            )
-            .persistence(crate::storage::index_persistence::PersistenceConfig {
-                enabled: true,
-                data_dir: root.join("data"),
-                load_on_startup: true,
-                ..Default::default()
-            })
-            .historical(
-                HistoricalConfigBuilder::new()
-                    .enable_cold_storage(true)
-                    .cold_storage_path(root.join("cold.redb"))
-                    .migration_age_threshold(Duration::from_secs(3600))
-                    .build(),
-            )
-            .encryption(EncryptionConfig::file_based(&old_key))
-            .build();
-        let db = AletheiaDB::with_unified_config(config).unwrap();
-        seed(&db);
-        assert!(db.wal.is_encrypted());
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::version::{EntityVersion, NodeVersion};
 
-        let conflicting = db.conflicting_encrypted_layers();
-        assert!(
-            conflicting.contains(&"cold_storage"),
-            "cold storage must still be a conflict until PR3, got: {conflicting:?}"
-        );
-        let err = db
-            .rotate_index_keys(KeyProviderConfig::File {
-                path: new_key.clone(),
-            })
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("other encrypted-at-rest layers") && msg.contains("cold_storage"),
-            "expected cross-layer refusal naming cold_storage, got: {msg}"
-        );
-        assert!(!root.join("data").join("rotation.state").exists());
+        // A cold value to prove the bulk pass actually re-encrypts stored data
+        // (seeded nodes live in the hot tier; migration is age-gated). Written
+        // directly to the cold store so it is present as `ACV1@1` before rotation.
+        let cold_vid = crate::core::id::VersionId::new(9001).unwrap();
+        let (alice, bob) = {
+            let db = build_db_with_cold(root, &old_key);
+            let ids = seed(&db);
+            assert!(db.wal.is_encrypted(), "precondition: WAL is encrypted");
+
+            // Seed one cold-tier value directly.
+            let cold_node = NodeVersion::new_anchor(
+                cold_vid,
+                crate::core::NodeId::new(500).unwrap(),
+                crate::core::temporal::BiTemporalInterval::current(1234.into()),
+                GLOBAL_INTERNER.intern("Person").unwrap(),
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+            );
+            {
+                let tiered = db
+                    .historical
+                    .read()
+                    .tiered_storage_arc()
+                    .expect("cold tier configured");
+                let cold = tiered.cold_storage();
+                assert!(cold.is_encrypted(), "precondition: cold tier is encrypted");
+                cold.store_node_version(&cold_node).unwrap();
+                assert_eq!(
+                    cold.current_cold_key_version(),
+                    Some(1),
+                    "cold values start at generation 1"
+                );
+            }
+
+            // The cross-layer guard no longer refuses — cold is rotatable.
+            assert!(
+                db.conflicting_encrypted_layers().is_empty(),
+                "cold storage is now rotatable → no cross-layer conflict"
+            );
+
+            let flushed_before = {
+                let tiered = db.historical.read().tiered_storage_arc().unwrap();
+                tiered.cold_storage().get_flushed_lsn().unwrap()
+            };
+
+            let report = db
+                .rotate_index_keys(KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .expect("full-MEK rotation (index+WAL+cold) must succeed");
+            assert_eq!(report.new_version, 2);
+            assert!(!root.join("data").join("rotation.state").exists());
+
+            // The cold layer was bulk re-encrypted to the new generation.
+            {
+                let tiered = db.historical.read().tiered_storage_arc().unwrap();
+                let cold = tiered.cold_storage();
+                assert_eq!(
+                    cold.cold_value_format_version().unwrap(),
+                    Some(2),
+                    "cold values must be re-wrapped at the new generation"
+                );
+                // The value still decodes (now under the new cold DEK).
+                let loaded = cold
+                    .get_node_version(cold_vid)
+                    .unwrap()
+                    .expect("cold value survives rotation");
+                assert_eq!(loaded.version_id(), cold_vid);
+                // flushed_lsn (plaintext metadata) is untouched by the pass.
+                assert_eq!(cold.get_flushed_lsn().unwrap(), flushed_before);
+            }
+            ids
+        };
+
+        // Provider switch: reopen under the NEW key ONLY — WAL replays, index +
+        // cold values all decrypt under the new MEK's DEKs.
+        {
+            let db = build_db_with_cold(root, &new_key);
+            assert_eq!(db.node_count(), 2, "graph recovers under the new key");
+            assert_eq!(db.edge_count(), 1);
+            db.get_node(alice)
+                .expect("alice recovers under the new key");
+            db.get_node(bob).expect("bob recovers under the new key");
+            let tiered = db.historical.read().tiered_storage_arc().unwrap();
+            let cold = tiered.cold_storage();
+            let loaded = cold
+                .get_node_version(cold_vid)
+                .unwrap()
+                .expect("cold value decrypts under the new key alone");
+            assert_eq!(loaded.version_id(), cold_vid);
+        }
     }
 
     /// Crash right after the rotation ledger was fsync'd but before any layer
@@ -2192,7 +2471,8 @@ mod tests {
                     KeyProviderConfig::File {
                         path: new_key.clone(),
                     },
-                    true, // WAL in scope
+                    true,  // WAL in scope
+                    false, // cold not in scope
                 ),
             )
             .unwrap();
@@ -2366,6 +2646,7 @@ mod tests {
                         path: new_key.clone(),
                     },
                     true,
+                    false, // cold not in scope
                 ),
             )
             .unwrap();
@@ -3708,7 +3989,8 @@ mod tests {
                     KeyProviderConfig::File {
                         path: new_key.clone(),
                     },
-                    true, // WAL in scope
+                    true,  // WAL in scope
+                    false, // cold not in scope
                 ),
             )
             .unwrap();
@@ -3832,6 +4114,7 @@ mod tests {
                         path: new_key.clone(),
                     },
                     true,
+                    false, // cold not in scope
                 ),
             )
             .unwrap();
