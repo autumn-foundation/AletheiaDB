@@ -53,9 +53,13 @@ pub const BACKUP_MAGIC: [u8; 4] = *b"ALBK";
 ///   (transaction-time closure) and `prev_version`/`next_version` (version
 ///   chain links).
 ///
+/// - **4 -> 5** (Issue #3378): the payload gained `schema_constraints`
+///   (declared property-type / required-key constraints).
+///
 /// Older artifacts are still restorable -- see [`BackupPayloadV1`],
-/// [`BackupPayloadV2`], [`BackupPayloadV3`] and `read_artifact`.
-pub const BACKUP_FORMAT_VERSION: u16 = 4;
+/// [`BackupPayloadV2`], [`BackupPayloadV3`], [`BackupPayloadV4`] and
+/// `read_artifact`.
+pub const BACKUP_FORMAT_VERSION: u16 = 5;
 
 /// Maximum allowed decompressed payload size (5 GiB).
 ///
@@ -197,6 +201,11 @@ pub(crate) struct BackupPayload {
     pub graph: GraphIndexData,
     /// Complete temporal version history.
     pub temporal: TemporalIndexData,
+    /// Declared property-type / required-key schema constraints (Issue #3378).
+    /// Empty for a schemaless database. Restored through the normal startup
+    /// sidecar-load path. (Uniqueness constraints, Issue #3218, are persisted
+    /// via the WAL and are still NOT captured here — a known residue.)
+    pub schema_constraints: Vec<crate::core::constraint::SchemaConstraintDescriptor>,
 }
 
 /// Pre-provenance (Issue #3224) `BackupPayload` shape, i.e. `BACKUP_FORMAT_VERSION == 1`.
@@ -238,6 +247,7 @@ impl From<BackupPayloadV1> for BackupPayload {
             interner: v1.interner,
             graph: v1.graph,
             temporal: v1.temporal.into(),
+            schema_constraints: Vec::new(),
         }
     }
 }
@@ -288,6 +298,7 @@ impl From<BackupPayloadV2> for BackupPayload {
             interner: v2.interner,
             graph: v2.graph,
             temporal: v2.temporal.into(),
+            schema_constraints: Vec::new(),
         }
     }
 }
@@ -340,6 +351,53 @@ impl From<BackupPayloadV3> for BackupPayload {
             interner: v3.interner,
             graph: v3.graph,
             temporal: v3.temporal.into(),
+            schema_constraints: Vec::new(),
+        }
+    }
+}
+
+/// Pre-schema-constraint (Issue #3378) `BackupPayload` shape, i.e.
+/// `BACKUP_FORMAT_VERSION == 4`.
+///
+/// Identical to [`BackupPayload`] but without the `schema_constraints` field
+/// (it uses the LIVE `TemporalIndexData`, unchanged since v4). Kept only so
+/// `read_artifact` can restore version-4 artifacts; the `From` impl defaults
+/// the schema constraints to empty.
+#[derive(Debug, Clone, Encode, Decode)]
+pub(crate) struct BackupPayloadV4 {
+    /// Unix timestamp (microseconds) when the backup was created.
+    pub created_at_micros: i64,
+    /// WAL LSN at which the consistent snapshot was taken.
+    pub source_lsn: u64,
+    /// Number of current nodes.
+    pub current_node_count: u64,
+    /// Number of current edges.
+    pub current_edge_count: u64,
+    /// Number of node versions (hot + cold).
+    pub node_version_count: u64,
+    /// Number of edge versions (hot + cold).
+    pub edge_version_count: u64,
+    /// String interner state.
+    pub interner: StringInternerData,
+    /// Current graph state (nodes and edges).
+    pub graph: GraphIndexData,
+    /// Complete temporal version history.
+    pub temporal: TemporalIndexData,
+}
+
+impl From<BackupPayloadV4> for BackupPayload {
+    fn from(v4: BackupPayloadV4) -> Self {
+        BackupPayload {
+            created_at_micros: v4.created_at_micros,
+            source_lsn: v4.source_lsn,
+            current_node_count: v4.current_node_count,
+            current_edge_count: v4.current_edge_count,
+            node_version_count: v4.node_version_count,
+            edge_version_count: v4.edge_version_count,
+            interner: v4.interner,
+            graph: v4.graph,
+            temporal: v4.temporal,
+            schema_constraints: Vec::new(),
         }
     }
 }
@@ -619,6 +677,12 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
             })?;
             Ok(legacy.into())
         }
+        4 => {
+            let legacy: BackupPayloadV4 = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(legacy.into())
+        }
         v if v == BACKUP_FORMAT_VERSION => {
             let payload: BackupPayload = bitcode::decode(&decoded_bytes).map_err(|e| {
                 BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
@@ -710,6 +774,7 @@ pub(crate) fn materialize_to_dir(
 /// The caller must hold a read lock on `HistoricalStorage` long enough to call
 /// `create_snapshot`, then release it before calling this function (cold I/O
 /// should not be done while holding the historical lock).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_payload(
     current_snapshot: CurrentStorageSnapshot,
     historical_snapshot: HistoricalStorageSnapshot,
@@ -717,6 +782,7 @@ pub(crate) fn build_payload(
     cold_edge_versions: Vec<crate::core::version::EdgeVersion>,
     source_lsn: u64,
     created_at_micros: i64,
+    schema_constraints: Vec<crate::core::constraint::SchemaConstraintDescriptor>,
 ) -> Result<BackupPayload, BackupError> {
     let current_node_count = current_snapshot.node_count() as u64;
     let current_edge_count = current_snapshot.edge_count() as u64;
@@ -739,6 +805,7 @@ pub(crate) fn build_payload(
         interner,
         graph,
         temporal,
+        schema_constraints,
     })
 }
 
@@ -936,6 +1003,7 @@ mod tests {
                 edge_versions: vec![],
                 edge_anchors: vec![],
             },
+            schema_constraints: vec![],
         }
     }
 

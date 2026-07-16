@@ -481,6 +481,13 @@ harness = false
 path = "benches/performance_targets.rs"
 required-features = []
 
+# Schema-constraint write-path overhead gate (Issue #3378).
+[[bench]]
+name = "schema_constraints"
+harness = false
+path = "benches/schema_constraints.rs"
+required-features = []
+
 # OpenTelemetry tracing overhead gate (Issue #3376): disabled vs enabled.
 [[bench]]
 name = "otel_overhead"

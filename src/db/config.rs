@@ -502,6 +502,11 @@ impl AletheiaDB {
                 encryption_manager: encryption_manager.clone(),
                 encryption_config: encryption_config_stored,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
+                schema_constraint_path: if config.persistence.enabled {
+                    Some(crate::db::schema_constraint::sidecar_path(&chain_data_dir))
+                } else {
+                    None
+                },
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 chain: None,
                 _tempdir: None,
@@ -808,6 +813,17 @@ impl AletheiaDB {
                 db.chain = Some(chain);
             }
 
+            // Schema constraints (Issue #3378): load the durable sidecar LAST —
+            // after WAL replay + index load have fully restored the string
+            // interner — so the label/property strings re-intern to the same
+            // ids that live writes use (loading earlier would key constraints by
+            // pre-restore interner ids that no longer match). Tolerant load
+            // (missing = empty; corrupt = warn + quarantine + empty) so a bad
+            // sidecar never bricks startup. Ephemeral databases have no path.
+            if let Some(ref path) = db.schema_constraint_path {
+                crate::db::schema_constraint::load_sidecar(path, &db.constraint_registry);
+            }
+
             Ok(db)
         })();
         result.record_error_metric()
@@ -876,6 +892,9 @@ impl AletheiaDB {
                 encryption_manager: None,
                 encryption_config: None,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
+                // `with_full_config` has no index-persistence data dir; schema
+                // constraints are in-memory only (ephemeral `new()` path).
+                schema_constraint_path: None,
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 chain: None,
                 _tempdir: None,

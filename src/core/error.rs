@@ -898,6 +898,61 @@ pub enum ConstraintError {
         /// The type name that is not supported.
         type_name: String,
     },
+    /// A create/update write violates a declared property-type schema
+    /// constraint (Issue #3378): the value's type does not match the declared
+    /// type for `label.property`.
+    #[error(
+        "Type constraint violation on {entity_kind} {label}.{property}: expected {expected_type}, got {actual_type}"
+    )]
+    TypeViolation {
+        /// `"node"` or `"edge"`.
+        entity_kind: String,
+        /// The node label or edge type.
+        label: String,
+        /// The offending property key.
+        property: String,
+        /// The declared (expected) type token. Always a stable `&'static str`
+        /// (from `DeclaredType::type_name`); kept static so this variant stays
+        /// small and does not bloat the crate `Error` (clippy `result_large_err`).
+        expected_type: &'static str,
+        /// The actual value's type token (from `PropertyValue::type_name`).
+        actual_type: &'static str,
+    },
+    /// A create/update write is missing one or more required keys declared by a
+    /// schema constraint (Issue #3378). A key present with a `Null` value counts
+    /// as missing when the constraint is `required` or non-`nullable`.
+    #[error(
+        "Missing required key(s) on {entity_kind} {label}: {}",
+        missing_keys.join(", ")
+    )]
+    MissingRequiredKey {
+        /// `"node"` or `"edge"`.
+        entity_kind: String,
+        /// The node label or edge type.
+        label: String,
+        /// The required keys that were absent or null.
+        missing_keys: Vec<String>,
+    },
+    /// Enabling schema constraints failed because current-state entities do not
+    /// conform (Issue #3378). Carries a machine-readable report: aggregated
+    /// violations, the non-conforming count, and a bounded id sample. Nothing
+    /// is declared when this is returned.
+    #[error(
+        "Cannot enable schema constraints on {entity_kind} {label}: {total_non_conforming} non-conforming entit{} (e.g. ids {sample_ids:?})",
+        if *total_non_conforming == 1 { "y" } else { "ies" }
+    )]
+    NonConformingOnEnable {
+        /// `"node"` or `"edge"`.
+        entity_kind: String,
+        /// The node label or edge type.
+        label: String,
+        /// Aggregated per-(property, reason) violations.
+        violations: Vec<crate::core::constraint::ConformanceViolation>,
+        /// Total number of non-conforming entities.
+        total_non_conforming: usize,
+        /// A bounded sample of non-conforming entity ids.
+        sample_ids: Vec<u64>,
+    },
 }
 
 /// Errors related to vector operations and validation.

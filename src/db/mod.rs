@@ -46,6 +46,8 @@ pub mod query;
 pub mod rotation;
 /// Graph schema discovery (labels, edge types, property keys).
 pub mod schema;
+
+pub mod schema_constraint;
 /// Unified vector similarity query builder.
 pub mod similarity_query;
 /// Database-wide statistics snapshot (Issue #3222).
@@ -203,8 +205,15 @@ pub struct AletheiaDB {
     /// Issue #488: re-sourcing the current MEK to guard against rotating to the
     /// same key). `None` when encryption is disabled.
     pub(crate) encryption_config: Option<crate::encryption::config::EncryptionConfig>,
-    /// Uniqueness constraint registry (declarations + reservation index).
+    /// Uniqueness constraint registry (declarations + reservation index) plus
+    /// property-type / required-key schema constraints (Issue #3378).
     pub(crate) constraint_registry: Arc<crate::core::constraint::ConstraintRegistry>,
+    /// On-disk path for the schema-constraint sidecar (Issue #3378), or `None`
+    /// for an ephemeral (in-memory) database. When `Some`, declaring/dropping
+    /// schema constraints atomically rewrites this file, and it is loaded at
+    /// startup. Lives under the data dir (the parent of the WAL dir), mirroring
+    /// the provenance-chain sidecar's placement.
+    pub(crate) schema_constraint_path: Option<std::path::PathBuf>,
     /// Fact-to-fact derivation lineage index (Issue #3371).
     ///
     /// Records that a fact version was derived from a set of source fact
