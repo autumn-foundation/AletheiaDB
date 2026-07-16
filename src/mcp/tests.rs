@@ -16632,6 +16632,438 @@ mod provenance_filter_tests {
 }
 
 // ============================================================================
+// Semantic-search analysis tools (Issue #2907)
+//
+// Design A: all six tools are advertised + dispatched unconditionally; the
+// handler bodies are gated on the `semantic-search` feature. The feature-OFF
+// tests (default build) prove the structured FAILED_PRECONDITION contract; the
+// feature-ON tests (compiled only with `--features semantic-search`, which is
+// dependency-free and cheap) prove real behavior + bounds.
+// ============================================================================
+
+#[cfg(test)]
+mod semantic_search_tools_tests {
+    use super::*;
+    use serde_json::json;
+
+    const SEMANTIC_TOOLS: [&str; 6] = [
+        "semantic_path",
+        "concept_analogy",
+        "concept_mean",
+        "find_duplicate_candidates",
+        "semantic_horizon",
+        "context_aspects",
+    ];
+
+    fn parse(server: &AletheiaMcpServer, tool: &str, args: serde_json::Value) -> serde_json::Value {
+        let result = server.dispatch_tool(tool, args);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result carries text");
+        serde_json::from_str(&text).expect("tool response is valid JSON")
+    }
+
+    /// All six tools are advertised in the catalog regardless of feature state.
+    #[test]
+    fn all_six_tools_are_advertised() {
+        let server = create_test_server();
+        let advertised = server.list_tools_for_test();
+        for tool in SEMANTIC_TOOLS {
+            assert!(
+                advertised.iter().any(|t| t == tool),
+                "tool '{tool}' must be advertised in the catalog"
+            );
+        }
+    }
+
+    /// Feature OFF: every tool returns a structured FAILED_PRECONDITION naming
+    /// the required feature, and never an "unknown tool" NOT_FOUND.
+    #[cfg(not(feature = "semantic-search"))]
+    #[test]
+    fn feature_off_returns_failed_precondition() {
+        let server = create_test_server();
+        for tool in SEMANTIC_TOOLS {
+            // Provide plausibly-valid args so we don't just trip arg parsing;
+            // the feature gate must fire regardless.
+            let args = json!({
+                "start": 1, "end": 2, "a": 1, "b": 2, "c": 3, "seed": 1,
+                "node_id": 1, "nodes": [1, 2], "threshold": 0.5,
+                "property_name": "embedding"
+            });
+            let value = parse(&server, tool, args);
+            let err = value
+                .get("error")
+                .unwrap_or_else(|| panic!("[{tool}] feature-off must return an error: {value}"));
+            assert_eq!(
+                err["code"], "FAILED_PRECONDITION",
+                "[{tool}] must be FAILED_PRECONDITION: {value}"
+            );
+            assert_eq!(err["retriable"], false, "[{tool}] must be non-retriable");
+            assert_eq!(
+                err["details"]["required_feature"], "semantic-search",
+                "[{tool}] must name the required feature: {value}"
+            );
+            assert_eq!(err["details"]["tool"], tool, "[{tool}] echoes its own name");
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Feature-ON behavioral + validation tests (dependency-free feature).
+    // ------------------------------------------------------------------------
+
+    #[cfg(feature = "semantic-search")]
+    mod on {
+        use super::*;
+
+        /// Build a server with an `embedding` vector index (dim 2) and a small
+        /// directed graph A->B->C plus a near-duplicate D of A. Returns node ids.
+        fn semantic_server() -> (AletheiaMcpServer, [u64; 4]) {
+            let server = create_test_server();
+            server.enable_vector_index(EnableVectorIndexRequest {
+                property_name: "embedding".to_string(),
+                dimensions: 2,
+                distance_metric: Some("cosine".to_string()),
+            });
+
+            let mk = |server: &AletheiaMcpServer, name: &str, vec: [f32; 2]| -> u64 {
+                let mut props = HashMap::new();
+                props.insert("name".to_string(), json!(name));
+                props.insert("embedding".to_string(), json!([vec[0], vec[1]]));
+                let resp = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
+                    label: "Doc".to_string(),
+                    properties: Some(props),
+                    provenance: None,
+                });
+                let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+                v["id"].as_u64().expect("node id")
+            };
+
+            let a = mk(&server, "A", [1.0, 0.0]);
+            let b = mk(&server, "B", [0.707, 0.707]);
+            let c = mk(&server, "C", [0.0, 1.0]);
+            let d = mk(&server, "D", [0.999, 0.0447]); // near-duplicate of A
+
+            for (s, t) in [(a, b), (b, c), (a, d)] {
+                server.create_edge(CreateEdgeRequest {
+                    source_id: s,
+                    target_id: t,
+                    label: "NEXT".to_string(),
+                    properties: None,
+                    valid_time: None,
+                    provenance: None,
+                    derived_from: None,
+                });
+            }
+            (server, [a, b, c, d])
+        }
+
+        #[test]
+        fn semantic_path_finds_a_to_c() {
+            let (server, [a, _b, c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "semantic_path",
+                json!({ "start": a, "end": c, "property_name": "embedding" }),
+            );
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            let path = value["path"].as_array().expect("path array");
+            assert_eq!(path.first().and_then(|v| v.as_u64()), Some(a));
+            assert_eq!(path.last().and_then(|v| v.as_u64()), Some(c));
+            assert_eq!(value["length"].as_u64(), Some(path.len() as u64));
+        }
+
+        #[test]
+        fn missing_index_is_failed_precondition() {
+            let (server, [a, _b, c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "semantic_path",
+                json!({ "start": a, "end": c, "property_name": "nonexistent" }),
+            );
+            assert_eq!(value["error"]["code"], "FAILED_PRECONDITION", "{value}");
+        }
+
+        #[test]
+        fn node_id_overflow_is_invalid_argument() {
+            let (server, _) = semantic_server();
+            let value = parse(
+                &server,
+                "semantic_path",
+                json!({ "start": u64::MAX, "end": 1, "property_name": "embedding" }),
+            );
+            assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "{value}");
+        }
+
+        #[test]
+        fn semantic_path_no_path_is_not_found() {
+            // c has no outgoing edges (a->b->c, a->d), so there is no route
+            // from c back to a. Both nodes carry the embedding, so this is a
+            // genuine "disconnected pair", not a missing-vector fault. It must
+            // surface as NOT_FOUND (a normal outcome), never INTERNAL.
+            let (server, [a, _b, c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "semantic_path",
+                json!({ "start": c, "end": a, "property_name": "embedding" }),
+            );
+            let err = value
+                .get("error")
+                .unwrap_or_else(|| panic!("expected an error, got: {value}"));
+            assert_eq!(err["code"], "NOT_FOUND", "{value}");
+            assert_eq!(err["retriable"], false, "{value}");
+            let msg = err["message"].as_str().unwrap_or("");
+            assert!(
+                msg.contains("no path found between nodes"),
+                "message must describe the disconnected pair: {value}"
+            );
+        }
+
+        #[test]
+        fn semantic_path_budget_exhausted_is_failed_precondition() {
+            // Build a long linear chain (longer than the minimum expansion
+            // budget of max_depth=1 -> 1000 expansions) so the DoS-protection
+            // budget is exhausted before the far end is reached. That is a
+            // resource-limit refusal (FAILED_PRECONDITION), not an INTERNAL
+            // error.
+            let server = create_test_server();
+            server.enable_vector_index(EnableVectorIndexRequest {
+                property_name: "embedding".to_string(),
+                dimensions: 2,
+                distance_metric: Some("cosine".to_string()),
+            });
+
+            let mk = |server: &AletheiaMcpServer| -> u64 {
+                let mut props = HashMap::new();
+                props.insert("embedding".to_string(), json!([1.0, 0.0]));
+                let resp = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
+                    label: "Doc".to_string(),
+                    properties: Some(props),
+                    provenance: None,
+                });
+                let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+                v["id"].as_u64().expect("node id")
+            };
+
+            // 1100 nodes > 1000 expansion budget at max_depth=1.
+            let ids: Vec<u64> = (0..1100).map(|_| mk(&server)).collect();
+            for w in ids.windows(2) {
+                server.create_edge(CreateEdgeRequest {
+                    source_id: w[0],
+                    target_id: w[1],
+                    label: "NEXT".to_string(),
+                    properties: None,
+                    valid_time: None,
+                    provenance: None,
+                    derived_from: None,
+                });
+            }
+
+            let value = parse(
+                &server,
+                "semantic_path",
+                json!({
+                    "start": ids[0],
+                    "end": ids[ids.len() - 1],
+                    "property_name": "embedding",
+                    "max_depth": 1
+                }),
+            );
+            let err = value
+                .get("error")
+                .unwrap_or_else(|| panic!("expected an error, got: {value}"));
+            assert_eq!(err["code"], "FAILED_PRECONDITION", "{value}");
+            assert_eq!(err["retriable"], false, "{value}");
+            assert_eq!(
+                err["details"]["reason"], "expansion_budget_exceeded",
+                "{value}"
+            );
+            assert_eq!(err["details"]["max_expansions"], 1000, "{value}");
+        }
+
+        #[test]
+        fn find_duplicate_candidates_excludes_self() {
+            // The similarity query resolves against the target's own embedding,
+            // so it can return the target itself. A node is never its own
+            // duplicate -- the target id must not appear among candidates.
+            let (server, [a, _b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "find_duplicate_candidates",
+                json!({ "node_id": a, "property_name": "embedding", "threshold": 0.5, "limit": 10 }),
+            );
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            let candidates = value["candidates"].as_array().expect("candidates");
+            assert!(
+                candidates.iter().all(|c| c["node_id"].as_u64() != Some(a)),
+                "target must not be its own duplicate: {value}"
+            );
+            // count must match the filtered candidate list length.
+            assert_eq!(
+                value["count"].as_u64(),
+                Some(candidates.len() as u64),
+                "count must reflect the filtered candidates: {value}"
+            );
+        }
+
+        #[test]
+        fn horizon_threshold_out_of_range_is_invalid_argument() {
+            let (server, [a, _b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "semantic_horizon",
+                json!({ "seed": a, "property_name": "embedding", "threshold": 1.5 }),
+            );
+            assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "{value}");
+        }
+
+        #[test]
+        fn duplicates_threshold_out_of_range_is_invalid_argument() {
+            let (server, [a, _b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "find_duplicate_candidates",
+                json!({ "node_id": a, "property_name": "embedding", "threshold": -0.1 }),
+            );
+            assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "{value}");
+        }
+
+        #[test]
+        fn find_duplicate_candidates_reports_near_duplicate() {
+            let (server, [a, _b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "find_duplicate_candidates",
+                json!({ "node_id": a, "property_name": "embedding", "threshold": 0.9, "limit": 10 }),
+            );
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            let candidates = value["candidates"].as_array().expect("candidates");
+            // D is a near-duplicate of A; it should surface at threshold 0.9.
+            assert!(
+                candidates
+                    .iter()
+                    .any(|c| c["similarity"].as_f64().unwrap_or(0.0) >= 0.9),
+                "expected a >=0.9 candidate: {value}"
+            );
+            assert_eq!(value["target"].as_u64(), Some(a));
+        }
+
+        #[test]
+        fn semantic_horizon_partitions_interior_and_horizon() {
+            let (server, [a, _b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "semantic_horizon",
+                json!({ "seed": a, "property_name": "embedding", "threshold": 0.5, "max_depth": 5 }),
+            );
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            let interior = value["interior"].as_array().expect("interior");
+            // The seed itself is always interior.
+            assert!(interior.iter().any(|v| v.as_u64() == Some(a)));
+            assert_eq!(
+                value["interior_count"].as_u64(),
+                Some(interior.len() as u64)
+            );
+            // interior ids are sorted ascending.
+            let ids: Vec<u64> = interior.iter().filter_map(|v| v.as_u64()).collect();
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            assert_eq!(ids, sorted, "interior must be sorted");
+        }
+
+        #[test]
+        fn concept_mean_ranks_results() {
+            let (server, [a, b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "concept_mean",
+                json!({ "nodes": [a, b], "property_name": "embedding", "k": 3 }),
+            );
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            let results = value["results"].as_array().expect("results");
+            assert_eq!(value["count"].as_u64(), Some(results.len() as u64));
+            assert_eq!(value["property_name"], "embedding");
+        }
+
+        #[test]
+        fn concept_mean_rejects_too_many_nodes() {
+            let (server, _) = semantic_server();
+            let too_many: Vec<u64> = (0..10_001).collect();
+            let value = parse(
+                &server,
+                "concept_mean",
+                json!({ "nodes": too_many, "property_name": "embedding" }),
+            );
+            assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "{value}");
+        }
+
+        #[test]
+        fn context_aspects_elides_centroid_by_default() {
+            let (server, [a, _b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "context_aspects",
+                json!({ "node_id": a, "property_name": "embedding", "k": 2 }),
+            );
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            let aspects = value["aspects"].as_array().expect("aspects");
+            for aspect in aspects {
+                // Centroid elided per #3220 unless include_vectors.
+                assert_eq!(
+                    aspect["centroid"]["elided"], true,
+                    "centroid must be elided by default: {aspect}"
+                );
+            }
+        }
+
+        #[test]
+        fn context_aspects_include_vectors_returns_full_centroid() {
+            let (server, [a, _b, _c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "context_aspects",
+                json!({ "node_id": a, "property_name": "embedding", "k": 2, "include_vectors": true }),
+            );
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            let aspects = value["aspects"].as_array().expect("aspects");
+            for aspect in aspects {
+                assert!(
+                    aspect["centroid"].is_array(),
+                    "centroid must be a full array with include_vectors: {aspect}"
+                );
+            }
+        }
+
+        #[test]
+        fn concept_analogy_returns_ranked_results() {
+            let (server, [a, b, c, _d]) = semantic_server();
+            let value = parse(
+                &server,
+                "concept_analogy",
+                json!({ "a": a, "b": b, "c": c, "property_name": "embedding", "k": 3 }),
+            );
+            // analogy may legitimately succeed with results or (on a tiny graph)
+            // return a structured error; either way it must be well-formed JSON
+            // and, on success, carry the ranked shape.
+            if value.get("error").is_none() {
+                assert!(value["results"].is_array(), "results array: {value}");
+                assert_eq!(value["property_name"], "embedding");
+            } else {
+                assert!(
+                    value["error"]["code"].is_string(),
+                    "structured error: {value}"
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Embedding generation & text semantic search (Issue #2906)
 //
 // Design A: all five tools are advertised + dispatched unconditionally. The

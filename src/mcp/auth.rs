@@ -82,6 +82,13 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("embed_query", AccessClass::Read),
     ("embed_text", AccessClass::Read),
     ("semantic_search", AccessClass::Read),
+    // Semantic-search analysis tools (Issue #2907) — read-only.
+    ("semantic_path", AccessClass::Read),
+    ("concept_analogy", AccessClass::Read),
+    ("concept_mean", AccessClass::Read),
+    ("find_duplicate_candidates", AccessClass::Read),
+    ("semantic_horizon", AccessClass::Read),
+    ("context_aspects", AccessClass::Read),
     ("list_vector_indexes", AccessClass::Read),
     ("list_unique_constraints", AccessClass::Read),
     ("get_node_at_time", AccessClass::Read),

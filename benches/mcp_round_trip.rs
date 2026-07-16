@@ -1284,6 +1284,84 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
                 move |_| json!({"entity_type": "node", "entity_id": id})
             }
         ),
+        // ---- Semantic-search analysis tools (Issue #2907) ----
+        // These are advertised on every build, but the PR-smoke bench compiles
+        // WITHOUT the `semantic-search` feature, so each returns the structured
+        // FAILED_PRECONDITION unavailable-feature response. The round-trip
+        // harness treats a tool-level (isError) response as a valid round-trip
+        // (only a JSON-RPC transport error trips `sample_response_ok`), so these
+        // are present purely to satisfy registry-completeness (AC2); they are
+        // non-gated and assert no success.
+        s!(
+            "semantic__semantic_path",
+            "semantic_path",
+            "vector",
+            "typical",
+            false,
+            {
+                let start = f.person_id;
+                let end = f.hub_id;
+                move |_| json!({"start": start, "end": end, "property_name": "embedding"})
+            }
+        ),
+        s!(
+            "semantic__concept_analogy",
+            "concept_analogy",
+            "vector",
+            "typical",
+            false,
+            {
+                let a = f.person_id;
+                let b = f.hub_id;
+                let c = f.update_node_id;
+                move |_| json!({"a": a, "b": b, "c": c, "property_name": "embedding", "k": 10})
+            }
+        ),
+        s!(
+            "semantic__concept_mean",
+            "concept_mean",
+            "vector",
+            "typical",
+            false,
+            {
+                let a = f.person_id;
+                let b = f.hub_id;
+                move |_| json!({"nodes": [a, b], "property_name": "embedding", "k": 10})
+            }
+        ),
+        s!(
+            "semantic__find_duplicate_candidates",
+            "find_duplicate_candidates",
+            "vector",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"node_id": id, "property_name": "embedding", "threshold": 0.9, "limit": 10})
+            }
+        ),
+        s!(
+            "semantic__semantic_horizon",
+            "semantic_horizon",
+            "vector",
+            "typical",
+            false,
+            {
+                let seed = f.person_id;
+                move |_| json!({"seed": seed, "property_name": "embedding", "threshold": 0.5, "max_depth": 3})
+            }
+        ),
+        s!(
+            "semantic__context_aspects",
+            "context_aspects",
+            "vector",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"node_id": id, "property_name": "embedding", "k": 3})
+            }
+        ),
         // ---- Embedding generation & text semantic search (Issue #2906) ----
         // These tools require a configured embedder / the `embeddings` feature.
         // The smoke build has neither, so each round-trip returns a structured

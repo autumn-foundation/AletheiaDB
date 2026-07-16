@@ -189,6 +189,14 @@ const MAX_PAGINATION_OFFSET: usize = 10_000;
 /// Maximum k for vector similarity search.
 const MAX_VECTOR_K: usize = 1000;
 
+/// Node-expansion budget per unit of `max_depth` for the `semantic_path` tool
+/// (Issue #2907). The unbounded A* search is a DoS risk on large/adversarial
+/// graphs when the endpoints are attacker-controlled; the MCP surface therefore
+/// derives a bounded expansion budget (`max_depth * this`, both clamped) and
+/// aborts the search once it is exhausted.
+#[cfg(feature = "semantic-search")]
+const SEMANTIC_PATH_EXPANSIONS_PER_DEPTH: usize = 1_000;
+
 /// Default k for vector similarity search.
 const DEFAULT_VECTOR_K: usize = 10;
 
@@ -3991,6 +3999,399 @@ impl AletheiaMcpServer {
         self.success_json(serde_json::Value::Object(obj))
     }
 
+    // ========================================================================
+    // Semantic-search analysis tools (Issue #2907)
+    //
+    // Advertised unconditionally (Design A). The real handler bodies live under
+    // `#[cfg(feature = "semantic-search")]`; a `#[cfg(not(...))]` twin returns
+    // the structured `semantic_search_unavailable` FAILED_PRECONDITION so a
+    // caller on a build without the feature gets an actionable error rather than
+    // an "unknown tool".
+    // ========================================================================
+
+    /// Structured `FAILED_PRECONDITION` returned by every semantic-search tool
+    /// when the `semantic-search` feature is not compiled into this build
+    /// (Issue #2907). Mirrors the cypher `language_unavailable` pattern.
+    #[cfg(not(feature = "semantic-search"))]
+    fn semantic_search_unavailable(&self, tool: &str) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                format!(
+                    "Tool '{tool}' requires the `semantic-search` feature, which is not compiled \
+                     into this build. Rebuild AletheiaDB with `--features semantic-search` to \
+                     enable it."
+                ),
+            )
+            .details(json!({
+                "tool": tool,
+                "required_feature": "semantic-search",
+            })),
+        )
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_semantic_path(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("semantic_path")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_semantic_path(&self, args: serde_json::Value) -> CallToolResult {
+        let req: SemanticPathRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let start = match NodeId::new(req.start) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let end = match NodeId::new(req.end) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        // Clamp depth and derive a bounded expansion budget (DoS protection —
+        // the plain A* search is unbounded).
+        let max_depth = req
+            .max_depth
+            .unwrap_or(MAX_TRAVERSAL_DEPTH)
+            .clamp(1, MAX_TRAVERSAL_DEPTH);
+        let max_expansions = max_depth.saturating_mul(SEMANTIC_PATH_EXPANSIONS_PER_DEPTH);
+
+        let navigator =
+            crate::semantic_search::semantic_navigator::SemanticNavigator::new(&self.db);
+        use crate::semantic_search::semantic_navigator::PathSearchOutcome;
+        match navigator.find_path_bounded(start, end, &req.property_name, max_expansions) {
+            Ok(PathSearchOutcome::Found(path)) => {
+                let ids: Vec<u64> = path.iter().map(|n| n.as_u64()).collect();
+                self.success_json(json!({
+                    "path": ids,
+                    "length": path.len(),
+                    "start": req.start,
+                    "end": req.end,
+                    "property_name": req.property_name,
+                }))
+            }
+            // A genuinely disconnected pair is a NORMAL outcome, not a server
+            // bug: report NOT_FOUND (non-retriable) rather than INTERNAL, so an
+            // LLM treats it as "no such route" instead of escalating.
+            Ok(PathSearchOutcome::NoPath) => self.error_result(McpError::new(
+                McpErrorCode::NotFound,
+                format!(
+                    "no path found between nodes {} and {} within max_depth {}",
+                    req.start, req.end, max_depth
+                ),
+            )),
+            // The DoS-protection expansion budget was exhausted before a path
+            // was found. This is a resource-limit refusal (FAILED_PRECONDITION,
+            // matching StorageError::CapacityExceeded's classification), not an
+            // internal error: the caller can lower max_depth or pick closer
+            // endpoints and retry a smaller search.
+            Ok(PathSearchOutcome::BudgetExhausted { max_expansions }) => self.error_result(
+                McpError::new(
+                    McpErrorCode::FailedPrecondition,
+                    format!(
+                        "semantic path search hit its expansion budget of {max_expansions} \
+                             node expansions before finding a path; lower max_depth or choose \
+                             closer endpoints"
+                    ),
+                )
+                .details(json!({
+                    "reason": "expansion_budget_exceeded",
+                    "max_expansions": max_expansions,
+                })),
+            ),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_concept_analogy(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("concept_analogy")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_concept_analogy(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ConceptAnalogyRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let a = match NodeId::new(req.a) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let b = match NodeId::new(req.b) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let c = match NodeId::new(req.c) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let algebra = crate::semantic_search::concept_algebra::ConceptAlgebra::new(&self.db)
+            .with_property(&req.property_name);
+        match algebra.analogy(a, b, c, k) {
+            Ok(results) => self.success_json(Self::rank_response(&results, &req.property_name)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_concept_mean(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("concept_mean")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_concept_mean(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ConceptMeanRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.nodes.len() > MAX_RESULT_LIMIT {
+            return self.invalid_argument(&format!(
+                "Too many nodes ({}); at most {} are accepted.",
+                req.nodes.len(),
+                MAX_RESULT_LIMIT
+            ));
+        }
+        let mut nodes = Vec::with_capacity(req.nodes.len());
+        for raw in &req.nodes {
+            match NodeId::new(*raw) {
+                Ok(id) => nodes.push(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            }
+        }
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let algebra = crate::semantic_search::concept_algebra::ConceptAlgebra::new(&self.db)
+            .with_property(&req.property_name);
+        match algebra.mean(&nodes, k) {
+            Ok(results) => self.success_json(Self::rank_response(&results, &req.property_name)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_find_duplicate_candidates(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("find_duplicate_candidates")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_find_duplicate_candidates(&self, args: serde_json::Value) -> CallToolResult {
+        let req: FindDuplicateCandidatesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        // v1: the underlying SimilarityQuery has no property selector, so the
+        // search resolves against the node's own indexed embedding. We still
+        // validate that a vector index exists for `property_name` so a caller
+        // gets a clear precondition error rather than a silent surprise.
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let threshold = req.threshold.unwrap_or(0.9);
+        if !(0.0..=1.0).contains(&threshold) {
+            return self
+                .invalid_argument(&format!("threshold must be in [0, 1] (got {threshold})."));
+        }
+        let limit = req.limit.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let detector = crate::semantic_search::highlander::HighlanderDetector::new(&self.db);
+        match detector.find_duplicates(node_id, threshold, limit) {
+            Ok(results) => {
+                // The underlying similarity query resolves against the target's
+                // own embedding, so it can return the target itself (similarity
+                // ~= 1.0). A node is never its own duplicate — filter it out.
+                let candidates: Vec<serde_json::Value> = results
+                    .iter()
+                    .filter(|(id, _)| *id != node_id)
+                    .map(|(id, sim)| json!({ "node_id": id.as_u64(), "similarity": sim }))
+                    .collect();
+                let count = candidates.len();
+                self.success_json(json!({
+                    "candidates": candidates,
+                    "count": count,
+                    "threshold": threshold,
+                    "target": req.node_id,
+                }))
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_semantic_horizon(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("semantic_horizon")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_semantic_horizon(&self, args: serde_json::Value) -> CallToolResult {
+        let req: SemanticHorizonRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let seed = match NodeId::new(req.seed) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        if !(0.0..=1.0).contains(&req.threshold) {
+            return self.invalid_argument(&format!(
+                "threshold must be in [0, 1] (got {}).",
+                req.threshold
+            ));
+        }
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let max_depth = req
+            .max_depth
+            .unwrap_or(MAX_TRAVERSAL_DEPTH)
+            .clamp(1, MAX_TRAVERSAL_DEPTH);
+        let engine = crate::semantic_search::horizon::HorizonEngine::new(&self.db);
+        match engine.map_horizon(seed, &req.property_name, req.threshold, max_depth) {
+            Ok(result) => {
+                let mut interior: Vec<u64> = result.interior.iter().map(|n| n.as_u64()).collect();
+                interior.sort_unstable();
+                let mut horizon: Vec<u64> = result.horizon.iter().map(|n| n.as_u64()).collect();
+                horizon.sort_unstable();
+                self.success_json(json!({
+                    "seed": req.seed,
+                    "threshold": req.threshold,
+                    "max_depth": max_depth,
+                    "interior_count": interior.len(),
+                    "horizon_count": horizon.len(),
+                    "interior": interior,
+                    "horizon": horizon,
+                }))
+            }
+            // The visited-node DoS cap (a resource-limit refusal) surfaces as a
+            // FAILED_PRECONDITION naming the cap, not an INTERNAL error, so a
+            // caller knows to narrow the query (lower max_depth / raise
+            // threshold) rather than escalate a server bug.
+            Err(crate::core::error::Error::Storage(
+                crate::core::error::StorageError::CapacityExceeded { limit, .. },
+            )) => self.error_result(
+                McpError::new(
+                    McpErrorCode::FailedPrecondition,
+                    format!(
+                        "semantic horizon search hit its visited-node cap of {limit} nodes; \
+                         narrow the query by lowering max_depth or raising threshold"
+                    ),
+                )
+                .details(json!({
+                    "reason": "visit_cap_exceeded",
+                    "max_visited_nodes": limit,
+                })),
+            ),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_context_aspects(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("context_aspects")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_context_aspects(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ContextAspectsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let chameleon = crate::semantic_search::chameleon::Chameleon::new(&self.db);
+        match chameleon.analyze_context(node_id, &req.property_name, k) {
+            Ok(aspects) => {
+                let aspects_json: Vec<serde_json::Value> = aspects
+                    .iter()
+                    .map(|aspect| {
+                        // Sort exemplars by ascending node id for deterministic,
+                        // reproducible LLM-facing output (Chameleon clustering
+                        // order is not guaranteed stable). Mirrors the sorted
+                        // interior/horizon sets in semantic_horizon.
+                        let mut exemplars: Vec<u64> =
+                            aspect.exemplars.iter().map(|n| n.as_u64()).collect();
+                        exemplars.sort_unstable();
+                        // Elide the centroid vector by default (#3220).
+                        let centroid = if include_vectors {
+                            json!(aspect.centroid)
+                        } else {
+                            json!({
+                                "type": "vector",
+                                "dim": aspect.centroid.len(),
+                                "elided": true,
+                            })
+                        };
+                        json!({
+                            "weight": aspect.weight,
+                            "exemplars": exemplars,
+                            "centroid": centroid,
+                        })
+                    })
+                    .collect();
+                self.success_json(json!({
+                    "node_id": req.node_id,
+                    "count": aspects_json.len(),
+                    "aspects": aspects_json,
+                }))
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Shared response shape for the ranked concept-algebra tools
+    /// (`concept_analogy`, `concept_mean`): `{results:[{node_id, score}], count,
+    /// property_name}`.
+    #[cfg(feature = "semantic-search")]
+    fn rank_response(results: &[(NodeId, f32)], property_name: &str) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(id, score)| json!({ "node_id": id.as_u64(), "score": score }))
+            .collect();
+        json!({
+            "results": entries,
+            "count": results.len(),
+            "property_name": property_name,
+        })
+    }
+
     fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
         // Issue #3348: parse the optional provenance filter before consuming args.
         let prov_filter = match self.parse_provenance_filter(&args) {
@@ -7153,11 +7554,21 @@ impl AletheiaMcpServer {
             "get_incoming_edges" => self.handle_get_incoming_edges(args),
             "traverse" => self.handle_traverse(args),
             "find_similar" => self.handle_find_similar(args),
+            // Embedding generation & text semantic search (Issue #2906).
             "embed_query" => self.handle_embed_query(args),
             "embed_text" => self.handle_embed_text(args),
             "semantic_search" => self.handle_semantic_search(args),
             "create_node_with_embedding" => self.handle_create_node_with_embedding(args),
             "update_node_embedding" => self.handle_update_node_embedding(args),
+            // Semantic-search analysis tools (Issue #2907). Advertised and
+            // dispatched unconditionally (Design A); the handler bodies gate on
+            // the `semantic-search` feature.
+            "semantic_path" => self.handle_semantic_path(args),
+            "concept_analogy" => self.handle_concept_analogy(args),
+            "concept_mean" => self.handle_concept_mean(args),
+            "find_duplicate_candidates" => self.handle_find_duplicate_candidates(args),
+            "semantic_horizon" => self.handle_semantic_horizon(args),
+            "context_aspects" => self.handle_context_aspects(args),
             "enable_vector_index" => self.handle_enable_vector_index(args),
             "list_vector_indexes" => self.handle_list_vector_indexes(args),
             "enable_unique_constraint" => self.handle_enable_unique_constraint(args),
@@ -7378,6 +7789,14 @@ pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
     "find_nodes_at_time",
     "get_node_history",
     "get_schema",
+    // Semantic-search analysis tools (Issue #2907) — all read-only and
+    // potentially large, so budgetable.
+    "semantic_path",
+    "concept_analogy",
+    "concept_mean",
+    "find_duplicate_candidates",
+    "semantic_horizon",
+    "context_aspects",
 ];
 
 /// Does this tool honor the token budget parameters (Issue #3353)?
@@ -7408,6 +7827,17 @@ pub(crate) const RESOURCE_LIMITED_READ_TOOLS: &[&str] = &[
     "get_node_at_time",
     "get_edge_at_time",
     "find_nodes_at_time",
+    // Semantic-search analysis tools (Issue #2907): read-only, potentially slow
+    // graph+vector scans. They carry their own per-operation bounds, but enroll
+    // here for the uniform wall-clock-timeout + result-byte-cap coverage every
+    // other slow read gets (Issue #3368). At the default 30s timeout their
+    // responses are unchanged.
+    "semantic_path",
+    "concept_analogy",
+    "concept_mean",
+    "find_duplicate_candidates",
+    "semantic_horizon",
+    "context_aspects",
 ];
 
 /// Does this tool have its response governed by the per-query resource limits
@@ -8091,6 +8521,63 @@ fn tool_definitions() -> Vec<Tool> {
              of stored history (earliest/latest timestamps) use temporal_extent; \
              for per-label breakdowns use get_schema.",
             make_input_schema::<DatabaseStatsRequest>(),
+        ),
+        // ── Semantic-search analysis tools (Issue #2907) ──────────────────
+        Tool::new(
+            "semantic_path",
+            "Find a path between two nodes guided by vector similarity (A* over the \
+             `semantic-search` cohort's Semantic Navigator). Returns the node-id path plus its \
+             length. Requires a vector index on `property_name`; both endpoints must carry that \
+             embedding. The search is bounded (a node-expansion budget derived from `max_depth`, \
+             clamped to 20) so it is safe on large graphs. Requires the `semantic-search` \
+             feature; otherwise returns a FAILED_PRECONDITION.",
+            make_input_schema::<SemanticPathRequest>(),
+        ),
+        Tool::new(
+            "concept_analogy",
+            "Solve a vector analogy `a : b :: c : ?` over node embeddings (Concept Algebra): \
+             returns the top-k nodes nearest `b - a + c`, each with a similarity score. Requires \
+             a vector index on `property_name`. Requires the `semantic-search` feature; otherwise \
+             returns a FAILED_PRECONDITION.",
+            make_input_schema::<ConceptAnalogyRequest>(),
+        ),
+        Tool::new(
+            "concept_mean",
+            "Rank the top-k nodes nearest the centroid (mean embedding) of a set of nodes \
+             (Concept Algebra). Useful for 'find things like this whole group'. Requires a vector \
+             index on `property_name`; the node set is capped. Requires the `semantic-search` \
+             feature; otherwise returns a FAILED_PRECONDITION.",
+            make_input_schema::<ConceptMeanRequest>(),
+        ),
+        Tool::new(
+            "find_duplicate_candidates",
+            "Find near-duplicate candidates for a node by embedding similarity (Highlander \
+             entity-resolution detector): returns candidates at or above `threshold`, each with a \
+             similarity score. v1 note: the search uses the node's own indexed embedding; \
+             `property_name` selects the vector index whose existence is validated, not an \
+             arbitrary property vector. Requires the `semantic-search` feature; otherwise returns \
+             a FAILED_PRECONDITION.",
+            make_input_schema::<FindDuplicateCandidatesRequest>(),
+        ),
+        Tool::new(
+            "semantic_horizon",
+            "Map a node's semantic event horizon (Horizon engine): starting from `seed`, expand \
+             through neighbours whose similarity is at or above `threshold` (the interior); the \
+             first neighbours to fall below form the horizon (boundary). Returns sorted interior \
+             and horizon node-id sets with counts. `threshold` must be in [0, 1]; `max_depth` is \
+             clamped to 20. Requires a vector index on `property_name` and the `semantic-search` \
+             feature; otherwise returns a FAILED_PRECONDITION.",
+            make_input_schema::<SemanticHorizonRequest>(),
+        ),
+        Tool::new(
+            "context_aspects",
+            "Decompose a node's neighbourhood into distinct semantic aspects (Chameleon): each \
+             aspect carries a weight, representative exemplar node ids, and a centroid vector \
+             (elided by default per #3220 — pass `include_vectors: true` for the full array). \
+             Useful for disentangling multi-faceted context. Requires a vector index on \
+             `property_name` and the `semantic-search` feature; otherwise returns a \
+             FAILED_PRECONDITION.",
+            make_input_schema::<ContextAspectsRequest>(),
         ),
         Tool::new(
             "verify_chain",
@@ -9126,8 +9613,9 @@ mod server_unit_tests {
         serde_json::from_str(&AletheiaMcpServer::extract_text(result)).expect("json response")
     }
 
-    /// The wrapper covers exactly the six residue read tools and never the
-    /// self-enforcing `query` tool.
+    /// The wrapper covers the residue read tools plus the enrolled #2907
+    /// semantic-search analysis tools, and never the self-enforcing `query`
+    /// tool.
     #[test]
     fn resource_limited_read_tools_membership() {
         for t in [
@@ -9137,6 +9625,13 @@ mod server_unit_tests {
             "get_node_at_time",
             "get_edge_at_time",
             "find_nodes_at_time",
+            // Issue #2907 semantic-search tools enrolled for uniform coverage.
+            "semantic_path",
+            "concept_analogy",
+            "concept_mean",
+            "find_duplicate_candidates",
+            "semantic_horizon",
+            "context_aspects",
         ] {
             assert!(
                 super::is_resource_limited_read_tool(t),
