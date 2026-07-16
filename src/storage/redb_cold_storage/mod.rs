@@ -99,12 +99,14 @@ const COLD_ROTATION_CURSOR_KEY: &str = "cold_rotation";
 /// resolves any residual legacy/wrapped ambiguity.
 const COLD_VALUE_FORMAT_KEY: &str = "cold_value_format";
 
-/// Batch size for the transactional bulk re-encrypt pass (Issue #3617 PR3): the
-/// number of `(key, value)` pairs rewritten per redb write transaction. Bounds
-/// per-transaction memory and work; the pass is resumable at batch granularity
-/// via [`COLD_ROTATION_CURSOR_KEY`], so a larger value trades a longer
-/// crash-replay window for fewer commits. 4096 keeps each transaction's
-/// materialized slice small while amortizing commit cost.
+/// Default batch size for the transactional bulk re-encrypt pass (Issue #3617
+/// PR3): the number of `(key, value)` pairs rewritten per redb write
+/// transaction. Bounds per-transaction memory and work; the pass is resumable
+/// at batch granularity via [`COLD_ROTATION_CURSOR_KEY`], so a larger value
+/// trades a longer crash-replay window for fewer commits. 4096 keeps each
+/// transaction's materialized slice small while amortizing commit cost. Runtime
+/// tunable via [`RedbConfig::reencrypt_batch_size`] /
+/// [`RedbConfig::with_reencrypt_batch_size`]; this const is the unset default.
 const COLD_REENCRYPT_BATCH_SIZE: usize = 4096;
 
 /// Layout-version tag for the hand-rolled [`COLD_ROTATION_CURSOR_KEY`] /
@@ -195,6 +197,11 @@ pub struct ColdReencryptStats {
     /// Values skipped because they were already wrapped at the target version
     /// (idempotent re-run / stale cursor).
     pub values_skipped: usize,
+    /// Number of redb write transactions committed across the whole pass, one
+    /// per non-empty batch (bounded by the configurable
+    /// [`RedbConfig::reencrypt_batch_size`]). Lets callers/tests observe that a
+    /// small batch cap was honored (a multi-batch pass reports `> 1`).
+    pub batches_committed: usize,
 }
 
 /// Layout version tag for the persisted extent record. Records with an
@@ -708,6 +715,17 @@ pub struct RedbConfig {
 
     /// Cache size in bytes for Redb (0 = use default).
     pub cache_size_bytes: usize,
+
+    /// Number of `(key, value)` pairs re-encrypted per redb write transaction
+    /// during a cold-tier key-rotation bulk re-encrypt pass (Issue #3617 PR3).
+    ///
+    /// Defaults to [`COLD_REENCRYPT_BATCH_SIZE`] (4096). A larger value trades a
+    /// longer crash-replay window and more per-transaction memory for fewer
+    /// commits; a smaller value yields more granular resume and lower memory at
+    /// the cost of more commits. A value of `0` makes no progress, so it is
+    /// floored to `1` at both the [`RedbConfig::with_reencrypt_batch_size`]
+    /// setter and the read site.
+    pub reencrypt_batch_size: usize,
 }
 
 impl Default for RedbConfig {
@@ -716,6 +734,7 @@ impl Default for RedbConfig {
             compression: CompressionAlgorithm::Zstd,
             enable_checksums: true,
             cache_size_bytes: 0,
+            reencrypt_batch_size: COLD_REENCRYPT_BATCH_SIZE,
         }
     }
 }
@@ -783,6 +802,31 @@ impl RedbConfig {
     /// ```
     pub fn cache_size_bytes(mut self, size: usize) -> Self {
         self.cache_size_bytes = size;
+        self
+    }
+
+    /// Set the cold-tier rotation re-encrypt batch size: the number of
+    /// `(key, value)` pairs re-encrypted per redb write transaction during a
+    /// bulk key-rotation pass (Issue #3617 PR3).
+    ///
+    /// A larger value amortizes commit cost (fewer, larger transactions) at the
+    /// price of longer write-transaction holds, more per-transaction memory, and
+    /// a longer crash-replay window; a smaller value resumes at finer
+    /// granularity and uses less memory but commits more often. `0` would make
+    /// no forward progress, so it is floored to `1`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::storage::redb_cold_storage::RedbConfig;
+    ///
+    /// let config = RedbConfig::new().with_reencrypt_batch_size(1024);
+    /// // A 0 is clamped up to a minimum of 1 so the pass always advances.
+    /// let clamped = RedbConfig::new().with_reencrypt_batch_size(0);
+    /// assert_eq!(clamped.reencrypt_batch_size, 1);
+    /// ```
+    pub fn with_reencrypt_batch_size(mut self, size: usize) -> Self {
+        self.reencrypt_batch_size = size.max(1);
         self
     }
 
@@ -1664,6 +1708,10 @@ impl RedbColdStorage {
     ) -> Result<()> {
         use std::ops::Bound;
         let table_def = table_kind.table();
+        // Configurable per-transaction batch size (Issue #3617 PR3). Floored to
+        // 1 so a misconfigured 0 (e.g. via a direct/serde-deserialized field
+        // write that bypasses `with_reencrypt_batch_size`) still makes progress.
+        let batch_size = self.config.reencrypt_batch_size.max(1);
         loop {
             let write_txn = self
                 .db
@@ -1688,8 +1736,8 @@ impl RedbColdStorage {
                     let range = table
                         .range::<u64>((lower, Bound::Unbounded))
                         .map_err(map_storage_error("Failed to range cold table"))?;
-                    let mut v = Vec::with_capacity(COLD_REENCRYPT_BATCH_SIZE);
-                    for entry in range.take(COLD_REENCRYPT_BATCH_SIZE) {
+                    let mut v = Vec::with_capacity(batch_size);
+                    for entry in range.take(batch_size) {
                         let (k, val) =
                             entry.map_err(map_storage_error("Failed to read cold entry"))?;
                         v.push((k.value(), val.value().to_vec()));
@@ -1754,9 +1802,10 @@ impl RedbColdStorage {
             write_txn
                 .commit()
                 .map_err(map_commit_error("Failed to commit cold rotation batch"))?;
+            stats.batches_committed += 1;
 
             resume_after = last_key;
-            if batch_len < COLD_REENCRYPT_BATCH_SIZE {
+            if batch_len < batch_size {
                 // Fewer than a full batch means the table is exhausted.
                 break;
             }

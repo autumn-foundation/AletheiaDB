@@ -258,6 +258,36 @@ PersistenceConfig {
 }
 ```
 
+### Cold Storage (Redb) Configuration
+
+The optional on-disk cold tier (`RedbColdStorage`, configured via `RedbConfig`)
+holds unlimited bi-temporal history. It is constructed directly rather than
+through the unified config (see the tiered-storage guide).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `compression` | CompressionAlgorithm | Zstd | Compression algorithm for stored values |
+| `enable_checksums` | bool | true | Application-level CRC32 checksums on compressed payloads (on top of Redb's own) |
+| `cache_size_bytes` | usize | 0 | Redb internal cache size in bytes (0 = Redb default) |
+| `reencrypt_batch_size` | usize | 4096 | Cold-tier rotation re-encrypt batch size: `(key, value)` pairs re-encrypted per redb write transaction during a key-rotation bulk pass (Issue #3617 PR3) |
+
+**`reencrypt_batch_size` trade-off:** the bulk re-encrypt pass that rewraps
+every cold value under a rotated key runs in bounded, cursor-resumable
+transactions of this many values each. A **larger** value amortizes commit cost
+(fewer, larger transactions → faster) at the price of longer write-transaction
+holds, more per-transaction memory, and a longer crash-replay window; a
+**smaller** value resumes at finer granularity and uses less memory but commits
+more often. A value of `0` would make no forward progress, so it is floored to
+`1` (both at the `RedbConfig::with_reencrypt_batch_size` setter and the read
+site). This is a **runtime knob only** — it does not affect the on-disk format.
+
+```rust
+use aletheiadb::storage::redb_cold_storage::RedbConfig;
+
+// Smaller batches: lower memory + finer-grained rotation resume.
+let config = RedbConfig::new().with_reencrypt_batch_size(512);
+```
+
 ## Configuration Presets
 
 ### Development (Default)

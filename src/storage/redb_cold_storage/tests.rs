@@ -2660,6 +2660,114 @@ fn reencrypt_is_idempotent_over_already_wrapped_values() {
 }
 
 #[test]
+fn reencrypt_honors_configurable_batch_size() {
+    // Issue #3617 PR3: the per-transaction re-encrypt batch size is a runtime
+    // knob (`RedbConfig::reencrypt_batch_size`). Configure a SMALL cap (2), seed
+    // MORE values than the cap (5 nodes), and assert the pass (a) re-wraps every
+    // value under the new DEK and (b) actually spanned MULTIPLE bounded batches
+    // (batches_committed > 1), proving the small cap is honored, not ignored.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("small_batch.redb");
+    let c1 = cipher_with_byte(0x77);
+    let c2 = cipher_with_byte(0x88);
+
+    let config = RedbConfig::new().with_reencrypt_batch_size(2);
+    assert_eq!(config.reencrypt_batch_size, 2);
+    let storage = RedbColdStorage::new(&db_path, config)
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+
+    let nodes: Vec<NodeVersion> = (1..=5).map(create_test_node_version).collect();
+    for n in &nodes {
+        storage.store_node_version(n).unwrap();
+    }
+
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+
+    // (a) every value re-wrapped at the new generation.
+    assert_eq!(stats.values_rewrapped, 5, "all 5 nodes re-wrapped");
+    assert_eq!(stats.values_skipped, 0);
+    for k in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, 2, "node {k} must be re-wrapped at generation 2");
+    }
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(2));
+
+    // (b) the small cap of 2 over 5 values forced ceil(5/2) = 3 committed
+    // batches (2 + 2 + 1), so the cap was honored, not ignored.
+    assert_eq!(
+        stats.batches_committed, 3,
+        "a batch cap of 2 over 5 values must span 3 bounded transactions"
+    );
+
+    // Every value still decrypts under the new cold DEK.
+    storage.retire_cold_generations(2).unwrap();
+    for n in &nodes {
+        let loaded = storage.get_node_version(n.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), n.version_id());
+    }
+}
+
+#[test]
+fn reencrypt_default_batch_size_is_single_transaction() {
+    // Default (unset) behavior is unchanged: with the 4096 default a 5-value
+    // pass commits in exactly ONE batch — the guarantee that omitting the knob
+    // reproduces prior behavior.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("default_batch.redb");
+    let c1 = cipher_with_byte(0x99);
+    let c2 = cipher_with_byte(0xAA);
+
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+    assert_eq!(RedbConfig::new().reencrypt_batch_size, 4096);
+
+    for n in (1..=5).map(create_test_node_version) {
+        storage.store_node_version(&n).unwrap();
+    }
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(stats.values_rewrapped, 5);
+    assert_eq!(
+        stats.batches_committed, 1,
+        "the 4096 default re-wraps 5 values in a single transaction"
+    );
+}
+
+#[test]
+fn reencrypt_zero_batch_size_is_floored_to_one() {
+    // A 0 batch size would make no forward progress; the setter (and the read
+    // site) floor it to 1. The pass must still complete, spanning one batch per
+    // value (5 values -> 5 committed batches).
+    let cfg = RedbConfig::new().with_reencrypt_batch_size(0);
+    assert_eq!(cfg.reencrypt_batch_size, 1, "0 is clamped up to 1");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("zero_batch.redb");
+    let c1 = cipher_with_byte(0xBB);
+    let c2 = cipher_with_byte(0xCC);
+    let storage = RedbColdStorage::new(&db_path, cfg)
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+    for n in (1..=5).map(create_test_node_version) {
+        storage.store_node_version(&n).unwrap();
+    }
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(stats.values_rewrapped, 5);
+    assert_eq!(
+        stats.batches_committed, 5,
+        "a floored batch size of 1 commits once per value"
+    );
+    for k in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, 2);
+    }
+}
+
+#[test]
 fn mixed_legacy_and_wrapped_values_read_during_rotation() {
     // During an interrupted rotation the store holds a mix: some legacy (bare,
     // old DEK) values and some ACV1@2 (new DEK) values. A two-generation keyring
