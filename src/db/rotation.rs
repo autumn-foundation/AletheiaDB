@@ -64,6 +64,8 @@ use crate::encryption::factory::Algorithm;
 use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::KeyDerivation;
 use crate::storage::index_persistence::common::{ENC_INDEX_KEY_VERSION_V1, IndexKeyring};
+use crate::storage::index_persistence::common::ENC_INDEX_KEY_VERSION_V1;
+use crate::storage::index_persistence::reencrypt::DecryptProbeReport;
 use crate::storage::index_persistence::{
     IndexKeyRotation, IndexPersistenceManager, RotationError, RotationProgress, RotationStatus,
 };
@@ -363,6 +365,45 @@ impl AletheiaDB {
             cipher,
         );
         engine.status().map_err(rotation_err)
+    }
+
+    /// Actively probe that persisted index bodies decrypt under the live keyring
+    /// (Issue #3618).
+    ///
+    /// [`index_rotation_status`](Self::index_rotation_status) classifies files by
+    /// their `AEIX` header `key_version` only, which false-PASSes when a wrong key
+    /// shares the same version number. This probe AEAD-decrypts representative
+    /// index bodies (the manifest plus one file per distinct key generation) and
+    /// reports which authenticated, so `encryption verify` fails on wrong key
+    /// material or a corrupted body rather than trusting the header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if index persistence or encryption is not configured, or
+    /// if the index directory cannot be read. A body that does not decrypt is
+    /// NOT an error here — it is recorded in
+    /// [`DecryptProbeReport::decrypt_failed`] for the caller to act on.
+    pub fn verify_index_decryptable(&self) -> Result<DecryptProbeReport> {
+        let manager = self.require_rotation_prereqs()?;
+        let keyring = manager
+            .keyring()
+            .cloned()
+            .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
+        let cipher = keyring
+            .current_cipher()
+            .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
+        let version = keyring.current_version();
+        // The probe only reads/decrypts bodies; a single-generation engine
+        // (mirroring index_rotation_status) suffices.
+        let engine = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring,
+            version,
+            cipher.clone(),
+            version,
+            cipher,
+        );
+        engine.verify_decryptable().map_err(rotation_err)
     }
 
     /// Rotate the index-encryption key to a new key source, re-encrypting every

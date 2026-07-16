@@ -171,6 +171,85 @@ PropertyMapBuilder::new()
 
 All existing graph/vector/temporal APIs continue to operate on stored vectors. Embedding generation is now an application concern, not a database subsystem.
 
+## MCP embedding tools
+
+The MCP server (feature `mcp-server`) exposes five embedding-backed tools (Issue
+#2906) so an LLM/agent can turn text into vectors and run **text** semantic
+search without pre-computing embeddings client-side. All five are advertised
+unconditionally; they only produce embeddings when the server is **built with the
+`embeddings` feature AND configured with a model**
+(`AletheiaMcpServer::with_embedder`). Without the feature they return a structured
+`FAILED_PRECONDITION` unavailable-feature error; with the feature but no model
+configured they return `FAILED_PRECONDITION` ("no embedding model configured").
+
+| Tool | Class | Input | Returns |
+|------|-------|-------|---------|
+| `embed_query` | read | `{text, model?}` | `{embedding, dim}` |
+| `embed_text` | read | `{texts[], model?, max_chunks?}` | `{chunks:[{text, metadata, embedding, dim}], count, truncated}` |
+| `semantic_search` | read | `{property_name, query_text, k?, offset?, include_vectors?, model?}` | the exact `find_similar` envelope |
+| `create_node_with_embedding` | write | `{label, text, embedding_property, properties?, valid_time?, provenance?}` | the created node |
+| `update_node_embedding` | write | `{node_id, text, embedding_property, valid_time?}` | the updated node |
+
+Notes:
+
+- `semantic_search` embeds `query_text` and reuses the **exact** `find_similar`
+  path, so its response is byte-identical to `find_similar` (ranked `results` +
+  `score`, `temporal` block, vector elision, offset pagination, token budget). It
+  refuses with `FAILED_PRECONDITION` when no vector index exists for
+  `property_name`, and `INVALID_ARGUMENT` on an embedding-dimension mismatch.
+- `embed_text` performs **real chunk expansion**: each input document is split
+  into contiguous character windows (`process_chunks` under the hood, not a
+  single whole-document `embed_query`), so a long document yields **multiple**
+  per-chunk embeddings instead of one silently-truncated vector. Every chunk's
+  embedding is aligned to its source chunk text via `EmbedData` (never a
+  positional zip); each chunk's `metadata` carries the originating `source_index`
+  and `chunk_index`. `max_chunks` is a **hard cap** on the total returned
+  embeddings — when it trims the expansion the response sets `truncated: true`;
+  `max_chunks: 0` is rejected as `INVALID_ARGUMENT`.
+- `update_node_embedding` **preserves** every other property, and does so
+  **race-free**: it embeds first (holding no snapshot or lock), then performs the
+  read-merge-write inside a **single** write transaction (because `update_node`
+  replaces all properties, it re-reads the node from the transaction's own
+  snapshot and merges the existing properties before overriding only
+  `embedding_property`). A concurrent writer that commits in the window is caught
+  by commit-time conflict detection instead of being silently lost.
+- Inputs are bounded (per-text byte cap, text-count cap, chunk cap); over-cap
+  inputs are rejected with `INVALID_ARGUMENT`.
+- The `model` field is reserved/advisory in v1 — the server always uses its
+  configured model.
+
+### Local workflow (Codex / Claude, no cloud keys)
+
+Configure the server with a **local** Hugging Face model (no API keys), then let
+an agent ingest text and search it end-to-end:
+
+```rust,ignore
+use std::sync::Arc;
+use aletheiadb::AletheiaDB;
+use aletheiadb::embeddings::EmbedderBuilder;
+use aletheiadb::mcp::AletheiaMcpServer;
+
+let embedder = Arc::new(
+    EmbedderBuilder::new()
+        .model_architecture("bert")
+        .model_id(Some("sentence-transformers/all-MiniLM-L6-v2"))
+        .from_pretrained_hf()?,
+);
+let db = Arc::new(AletheiaDB::new()?);
+let server = AletheiaMcpServer::new(db).with_embedder(embedder);
+// server.serve_stdio().await?;  // or serve over HTTP
+```
+
+Agent tool sequence:
+
+1. `enable_vector_index` — `{property_name:"embedding", dimensions:384, distance_metric:"cosine"}`.
+2. `create_node_with_embedding` — `{label:"Document", text:"Rust is a systems language", embedding_property:"embedding", properties:{title:"Intro"}}` (repeat per document; the embedding is generated and indexed automatically).
+3. `semantic_search` — `{property_name:"embedding", query_text:"memory-safe programming", k:5}` returns the closest documents, ranked, in the `find_similar` envelope.
+
+`embed_query` / `embed_text` are also available as standalone text→vector
+utilities (e.g. to build a query vector to pass to `find_similar` directly).
+Keep credentials out of tool arguments — model configuration is a server concern.
+
 ## Migration
 
 Removed AletheiaDB-owned APIs:

@@ -207,6 +207,16 @@ pub enum QueryOp {
         aggregates: Vec<AggregateSpec>,
     },
 
+    /// Temporal aggregation window (Issue #3363).
+    ///
+    /// A terminal operation that consumes the upstream matched-entity stream,
+    /// buckets each entity's **valid-time** history into fixed tumbling windows
+    /// over `[range_start, range_end)`, and emits one output row per window
+    /// carrying the window's `window_start`/`window_end` (RFC 3339 columns)
+    /// followed by each per-window aggregate. Reads history at the belief
+    /// recorded as of `as_of_system_time` (the transaction-time dimension).
+    TemporalWindowAggregate(TemporalWindowSpec),
+
     /// Collect unique values
     Distinct,
 
@@ -292,6 +302,61 @@ impl ScoreThreshold {
             ScoreComparison::Le => score <= self.value,
         }
     }
+}
+
+/// The fully-resolved plan for a [`QueryOp::TemporalWindowAggregate`]
+/// (Issue #3363). Produced by the converter after validating the raw AST window
+/// clause (unit word, aggregate functions, timestamp boundaries).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemporalWindowSpec {
+    /// The window granularity (count + unit).
+    pub granularity: crate::query::temporal_window::WindowGranularity,
+    /// Inclusive start of the valid-time range (microseconds since epoch).
+    pub range_start_micros: i64,
+    /// Exclusive end of the valid-time range (microseconds since epoch).
+    pub range_end_micros: i64,
+    /// Transaction-time coordinate the history is read as-of.
+    pub as_of_system_time: Timestamp,
+    /// The per-window aggregates to compute, in `RETURN` order.
+    pub aggregates: Vec<WindowAggregateSpec>,
+}
+
+/// A single resolved window aggregate (Issue #3363).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowAggregateSpec {
+    /// The aggregate function.
+    pub func: WindowAggFunc,
+    /// The aggregate argument.
+    pub arg: WindowAggArg,
+    /// The output column name (alias if given, else a rendered default).
+    pub output_name: String,
+}
+
+/// A temporal-window aggregate function (Issue #3363).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAggFunc {
+    /// Count of samples/entities present in the window.
+    Count,
+    /// Sum of numeric samples at window start.
+    Sum,
+    /// Mean of numeric samples at window start.
+    Avg,
+    /// Minimum numeric sample at window start.
+    Min,
+    /// Maximum numeric sample at window start.
+    Max,
+    /// Number of entity/property versions whose valid interval starts in the
+    /// window.
+    Changes,
+}
+
+/// The argument to a temporal-window aggregate (Issue #3363).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowAggArg {
+    /// `*` — the matched entity itself (no property).
+    Star,
+    /// A property key `v.key`.
+    Property(String),
 }
 
 /// A grouping key in a [`QueryOp::Aggregate`] (a non-aggregate projection
