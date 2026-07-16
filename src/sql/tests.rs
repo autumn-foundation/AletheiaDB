@@ -1214,8 +1214,12 @@ mod phase3_graph {
         // Edge-property WHERE is now evaluated for real (Issue #3622): the
         // converter lowers it to a `Filter` op over the edge scan (the executor
         // runs the filter in edge-property mode for the `EdgeScan`-rooted
-        // stream), instead of rejecting it.
-        let query = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'")
+        // stream), instead of rejecting it. Uses a genuine edge property
+        // (`since`) rather than the reserved structural `type` so the assertion
+        // is about lowering a real edge-property predicate; runtime evaluation of
+        // both property and structural predicates is covered by execution tests
+        // in `tests/sql_integration.rs`.
+        let query = parse_sql("SELECT * FROM edges WHERE since = 2020")
             .expect("edge-property WHERE should lower to a Filter op");
         assert!(
             query

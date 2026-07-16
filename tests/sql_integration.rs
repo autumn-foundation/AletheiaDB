@@ -888,6 +888,171 @@ mod select_edges {
         );
         assert_eq!(rows.len(), 2);
     }
+
+    // -------------------------------------------------------------------------
+    // Reserved STRUCTURAL fields: type / source / target (Issue #3622 review
+    // fix). These live on the Edge STRUCT, not in `properties`, so before the
+    // fix `WHERE type = 'KNOWS'`, `WHERE source = <id>`, and `ORDER BY type`
+    // silently returned zero rows / no-op sorts. These runtime tests assert the
+    // now-correct end-to-end behavior.
+    // -------------------------------------------------------------------------
+
+    /// A fixture with two DISTINCT edge types between distinct endpoints so that
+    /// `type`, `source`, and `target` each partition the two-edge set uniquely.
+    /// Returns the database and the three node ids (a, b, c). Edges: a-KNOWS->b,
+    /// b-FOLLOWS->c.
+    fn setup_typed_edges_db() -> (AletheiaDB, u64, u64, u64) {
+        let db = AletheiaDB::new().expect("Failed to create database");
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .expect("create A");
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .expect("create B");
+        let c = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "C").build(),
+            )
+            .expect("create C");
+        db.create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+            .expect("create KNOWS edge");
+        db.create_edge(b, c, "FOLLOWS", PropertyMapBuilder::new().build())
+            .expect("create FOLLOWS edge");
+        (db, a.as_u64(), b.as_u64(), c.as_u64())
+    }
+
+    #[test]
+    fn select_edges_where_type_filters_by_label() {
+        // `WHERE type = 'KNOWS'` resolves the edge's LABEL (a struct field), not
+        // a `type` property (which no edge carries). Before the review fix this
+        // silently returned 0 rows; now it returns exactly the KNOWS edge.
+        let (db, _a, _b, _c) = setup_typed_edges_db();
+        let query = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'").expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 1, "only the KNOWS edge matches type = 'KNOWS'");
+        assert!(
+            rows[0].entity.as_edge().unwrap().has_label_str("KNOWS"),
+            "the surviving edge must be the KNOWS edge"
+        );
+    }
+
+    #[test]
+    fn select_edges_where_source_filters_by_endpoint() {
+        // `WHERE source = <id>` resolves the source NodeId struct field.
+        let (db, a, _b, _c) = setup_typed_edges_db();
+        let query = parse_sql(&format!("SELECT * FROM edges WHERE source = {a}")).expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 1, "only the edge out of node A matches");
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().source.as_u64(),
+            a,
+            "surviving edge must originate at node A"
+        );
+    }
+
+    #[test]
+    fn select_edges_where_target_filters_by_endpoint() {
+        // `WHERE target = <id>` resolves the target NodeId struct field.
+        let (db, _a, _b, c) = setup_typed_edges_db();
+        let query = parse_sql(&format!("SELECT * FROM edges WHERE target = {c}")).expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+filter should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 1, "only the edge into node C matches");
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().target.as_u64(),
+            c,
+            "surviving edge must point at node C"
+        );
+    }
+
+    #[test]
+    fn select_edges_order_by_type_sorts_by_label() {
+        // `ORDER BY type ASC` sorts by the edge label lexicographically:
+        // FOLLOWS before KNOWS. Before the fix this was a no-op (null key).
+        let (db, _a, _b, _c) = setup_typed_edges_db();
+        let query = parse_sql("SELECT * FROM edges ORDER BY type ASC").expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+sort should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0].entity.as_edge().unwrap().has_label_str("FOLLOWS"),
+            "FOLLOWS sorts before KNOWS ascending"
+        );
+        assert!(
+            rows[1].entity.as_edge().unwrap().has_label_str("KNOWS"),
+            "KNOWS sorts after FOLLOWS ascending"
+        );
+    }
+
+    #[test]
+    fn select_edges_order_by_source_sorts_by_endpoint_id() {
+        // `ORDER BY source ASC` sorts by the source NodeId. Node A was created
+        // before B, so A's id < B's id; the A-rooted (KNOWS) edge comes first.
+        let (db, a, b, _c) = setup_typed_edges_db();
+        assert!(a < b, "node A created first must have the smaller id");
+        let query = parse_sql("SELECT * FROM edges ORDER BY source ASC").expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+sort should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().source.as_u64(),
+            a,
+            "the edge out of the lower-id node A sorts first"
+        );
+        assert_eq!(
+            rows[1].entity.as_edge().unwrap().source.as_u64(),
+            b,
+            "the edge out of node B sorts second"
+        );
+    }
+
+    #[test]
+    fn select_edges_order_by_target_sorts_by_endpoint_id() {
+        // `ORDER BY target DESC` sorts by the target NodeId descending: the edge
+        // into node C (highest id) comes first.
+        let (db, _a, b, c) = setup_typed_edges_db();
+        let query = parse_sql("SELECT * FROM edges ORDER BY target DESC").expect("parse");
+        let rows = db
+            .execute_query(query)
+            .expect("Edge scan+sort should execute")
+            .collect_all()
+            .expect("collect");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].entity.as_edge().unwrap().target.as_u64(),
+            c,
+            "highest target id (C) sorts first descending"
+        );
+        assert_eq!(
+            rows[1].entity.as_edge().unwrap().target.as_u64(),
+            b,
+            "node B target sorts second descending"
+        );
+    }
 }
 
 // =============================================================================

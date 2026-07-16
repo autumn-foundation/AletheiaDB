@@ -1171,6 +1171,154 @@ mod tests {
         assert!(!subtree_yields_edges(&filter_over_nodes));
     }
 
+    /// Planner-invariant guard (Issue #3622 review fix): every `Filter`/`Sort`
+    /// node in the physical plan for a SQL `FROM edges WHERE ... ORDER BY ...`
+    /// query must root an `EdgeScan` stream (through only row-preserving unary
+    /// ops), so `edge_mode` engages and edge properties are actually evaluated.
+    ///
+    /// If a future optimization inserts a non-whitelisted physical op between a
+    /// `Filter`/`Sort` and its rooting `EdgeScan`, `subtree_yields_edges` would
+    /// return `false`, `edge_mode` would silently turn off, and the lane would
+    /// return ALL edges (pass-through) instead of the filtered/sorted set. This
+    /// test fails LOUDLY in CI rather than letting that regress silently.
+    #[cfg(feature = "sql")]
+    #[test]
+    fn sql_edge_plan_filter_sort_subtrees_stay_edge_typed() {
+        use crate::query::planner::{QueryPlanner, Statistics};
+        use crate::sql::parse_sql;
+
+        // Walk the plan, asserting Filter/Sort subtrees are edge-typed and
+        // counting them so the assertion is not vacuous.
+        fn walk(op: &PhysicalOp, filters: &mut usize, sorts: &mut usize) {
+            match op {
+                PhysicalOp::Filter { input, .. } => {
+                    *filters += 1;
+                    assert!(
+                        subtree_yields_edges(input),
+                        "Filter over SQL `FROM edges` must root an edge stream; \
+                         a non-whitelisted op broke the invariant: {input:?}"
+                    );
+                }
+                PhysicalOp::Sort { input, .. } => {
+                    *sorts += 1;
+                    assert!(
+                        subtree_yields_edges(input),
+                        "Sort over SQL `FROM edges` must root an edge stream; \
+                         a non-whitelisted op broke the invariant: {input:?}"
+                    );
+                }
+                _ => {}
+            }
+            match op {
+                PhysicalOp::Filter { input, .. }
+                | PhysicalOp::Sort { input, .. }
+                | PhysicalOp::Limit { input, .. }
+                | PhysicalOp::Project { input, .. }
+                | PhysicalOp::Distinct { input, .. }
+                | PhysicalOp::VectorRerank { input, .. } => walk(input, filters, sorts),
+                _ => {}
+            }
+        }
+
+        let query = parse_sql("SELECT * FROM edges WHERE since > 2020 ORDER BY since DESC LIMIT 5")
+            .expect("parse edge SQL");
+        let planner = QueryPlanner::new(
+            Arc::new(Statistics::default()),
+            Arc::new(CurrentStorage::new()),
+        );
+        let plan = planner.plan(query).expect("plan edge SQL");
+
+        let (mut filters, mut sorts) = (0usize, 0usize);
+        walk(&plan.root, &mut filters, &mut sorts);
+        assert!(
+            filters >= 1 && sorts >= 1,
+            "the edge WHERE+ORDER BY plan must contain a Filter and a Sort \
+             (found {filters} filters, {sorts} sorts) -- otherwise the guard is vacuous"
+        );
+    }
+
+    /// AQL/Cypher edge-touching regression (Issue #3622 review fix): an AQL
+    /// traversal over `KNOWS` edges (a) returns the correct target nodes AND
+    /// (b) never lowers to `QueryOp::ScanEdges` -- the ONLY logical op that
+    /// becomes the physical `EdgeScan` that `subtree_yields_edges` keys
+    /// `edge_mode` on. So `edge_mode` can never engage for AQL/Cypher and
+    /// behavior is identical to trunk. This is the executable end-to-end
+    /// counterpart to the synthetic `subtree_yields_edges` unit assertion.
+    #[test]
+    fn aql_edge_traversal_never_enters_edge_mode() {
+        use crate::core::property::PropertyValue;
+        use crate::query::ir::QueryOp;
+        use crate::query::parse_query;
+
+        let db = crate::AletheiaDB::new().expect("create db");
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .expect("alice");
+        let bob = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .expect("bob");
+        let carol = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+            )
+            .expect("carol");
+        db.create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020).build(),
+        )
+        .expect("edge alice->bob");
+        db.create_edge(
+            bob,
+            carol,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2021).build(),
+        )
+        .expect("edge bob->carol");
+
+        let query =
+            parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b").expect("parse AQL");
+        // (b) No `ScanEdges` => the physical plan has no `EdgeScan` => `edge_mode`
+        // stays off. If AQL/Cypher ever started sharing the SQL edge scan, this
+        // fails loudly before any silent semantic drift.
+        assert!(
+            !query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. })),
+            "AQL traversal must not emit ScanEdges (would wrongly enable edge_mode)"
+        );
+
+        // (a) Correct target nodes end-to-end (Alice->Bob, Bob->Carol).
+        let rows = db
+            .execute_query(query)
+            .expect("execute AQL")
+            .collect_all()
+            .expect("collect rows");
+        let mut names: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.entity.as_node())
+            .filter_map(|n| match n.get_property("name") {
+                Some(PropertyValue::String(s)) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Bob".to_string(), "Carol".to_string()],
+            "AQL KNOWS traversal must return the correct target nodes (trunk behavior)"
+        );
+    }
+
     #[test]
     fn test_execute_temporal_node_lookup() {
         let (current, historical, alice, _bob) = create_test_storage_with_data();
