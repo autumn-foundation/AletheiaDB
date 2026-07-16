@@ -8215,14 +8215,14 @@ mod mutations {
         assert_eq!(db.edge_count(), 3);
     }
 
-    /// #18 Second finding: a MERGE whose pattern matches MORE THAN ONE committed
-    /// entity is rejected (the single-binding-per-row executor cannot expand
-    /// rows), with a structured error and NO partial write.
+    /// #18 (Issue #3623) A MERGE whose pattern matches MORE THAN ONE committed
+    /// entity now binds ALL matches (openCypher whole-pattern MATCH semantics)
+    /// and applies `ON MATCH SET` to every one -- no create, no rejection.
     #[test]
-    fn merge_multi_match_is_rejected_no_partial_write() {
+    fn merge_multi_match_binds_all_and_sets_each() {
         let db = AletheiaDB::new().unwrap();
         // Two Persons named 'Dup': a bare `MERGE (n:Person {name:'Dup'})` matches
-        // both, which cannot be expressed as a single row.
+        // both and fans into two rows.
         for _ in 0..2 {
             db.create_node(
                 "Person",
@@ -8231,16 +8231,104 @@ mod mutations {
             .unwrap();
         }
         let before = db.node_count();
-        assert_query_error(
+        run(
             &db,
             "MERGE (n:Person {name: 'Dup'}) ON MATCH SET n.touched = 1",
         );
-        assert_eq!(db.node_count(), before, "no partial write on multi-match");
-        assert_eq!(
-            int_prop_node(&db, "Person", "Dup", "touched"),
-            None,
-            "ON MATCH SET must not have applied to either match"
-        );
+        assert_eq!(db.node_count(), before, "no create on multi-match");
+        // ON MATCH SET applied to BOTH matched nodes.
+        for id in db.scan_nodes_by_label("Person") {
+            let node = db.get_node(id).unwrap();
+            assert_eq!(
+                node.get_property("touched"),
+                Some(&PropertyValue::Int(1)),
+                "ON MATCH SET must apply to every matched node"
+            );
+        }
+    }
+
+    /// #18b (Issue #3623) A multi-match MERGE with RETURN fans into one row per
+    /// matched entity.
+    #[test]
+    fn merge_multi_match_returns_row_per_match() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..3 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let rows = run(&db, "MERGE (n:Person {name: 'Dup'}) RETURN n");
+        assert_eq!(rows.len(), 3, "one RETURN row per matched entity");
+        for row in &rows {
+            assert_eq!(str_prop(&row.entity, "name").unwrap(), "Dup");
+        }
+    }
+
+    /// #18c (Issue #3623) A bare multi-match MERGE (no ON MATCH SET) records NO
+    /// new versions -- it is a pure match -- and creates nothing.
+    #[test]
+    fn merge_multi_match_bare_records_no_versions() {
+        let db = AletheiaDB::new().unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            ids.push(
+                db.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Dup").build(),
+                )
+                .unwrap(),
+            );
+        }
+        let before: Vec<usize> = ids
+            .iter()
+            .map(|id| db.get_node_history(*id).unwrap().version_count())
+            .collect();
+        let before_count = db.node_count();
+        let rows = run(&db, "MERGE (n:Person {name: 'Dup'}) RETURN n");
+        assert_eq!(rows.len(), 2, "one row per match");
+        assert_eq!(db.node_count(), before_count, "no create");
+        for (id, was) in ids.iter().zip(before) {
+            assert_eq!(
+                db.get_node_history(*id).unwrap().version_count(),
+                was,
+                "a bare match must record no new version"
+            );
+        }
+    }
+
+    /// #18d (Issue #3623) A clause AFTER a multi-match MERGE runs per fanned row:
+    /// `SET n.x = 1` must apply to EVERY matched node (composition correctness).
+    #[test]
+    fn merge_multi_match_composes_with_following_clause() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        run(&db, "MERGE (n:Person {name: 'Dup'}) SET n.x = 1");
+        for id in db.scan_nodes_by_label("Person") {
+            assert_eq!(
+                db.get_node(id).unwrap().get_property("x"),
+                Some(&PropertyValue::Int(1)),
+                "a SET after a multi-match MERGE must apply to every fanned row"
+            );
+        }
+    }
+
+    /// #18e (Issue #3623) The create branch still yields exactly ONE row / ONE
+    /// node when no committed match exists (no accidental fan-out).
+    #[test]
+    fn merge_no_match_creates_exactly_one_row() {
+        let db = AletheiaDB::new().unwrap();
+        let rows = run(&db, "MERGE (n:City {name: 'NYC'}) RETURN n");
+        assert_eq!(rows.len(), 1, "create branch yields exactly one row");
+        assert_eq!(db.scan_nodes_by_label("City").count(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "NYC");
     }
 
     /// #19 A pre-bound variable re-matched by the MERGE candidate scan exercises
