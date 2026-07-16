@@ -256,7 +256,8 @@ impl AletheiaDB {
                 Arc::clone(&self.version_id_gen),
             )
             .with_constraint_registry(Arc::clone(&self.constraint_registry))
-            .with_in_flight_tracker(Arc::clone(&self.in_flight)))
+            .with_in_flight_tracker(Arc::clone(&self.in_flight))
+            .with_changefeed(Arc::clone(&self.changefeed)))
         })();
         result.record_error_metric()
     }
@@ -501,7 +502,8 @@ impl AletheiaDB {
                 durability,
             )
             .with_constraint_registry(Arc::clone(&self.constraint_registry))
-            .with_in_flight_tracker(Arc::clone(&self.in_flight)))
+            .with_in_flight_tracker(Arc::clone(&self.in_flight))
+            .with_changefeed(Arc::clone(&self.changefeed)))
         })();
         result.record_error_metric()
     }

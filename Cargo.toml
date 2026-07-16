@@ -611,6 +611,12 @@ path = "benches/changefeed.rs"
 required-features = []
 
 [[bench]]
+name = "changefeed_subscribe"
+harness = false
+path = "benches/changefeed_subscribe.rs"
+required-features = []
+
+[[bench]]
 name = "temporal_vector"
 harness = false
 path = "benches/temporal_vector.rs"
