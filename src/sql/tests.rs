@@ -1210,31 +1210,49 @@ mod phase3_graph {
     }
 
     #[test]
-    fn test_parse_select_from_edges_with_filter_is_rejected() {
-        // An edge-property WHERE would be silently ignored (SQL can only emit
-        // property predicates, which the FilterIterator passes through on edge
-        // rows), so the converter rejects it rather than returning all edges.
-        let err = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'")
-            .expect_err("edge-property WHERE must be rejected");
-        assert!(matches!(err, SqlError::UnsupportedFeature(_)));
-        let msg = err.to_string();
+    fn test_parse_select_from_edges_with_filter_is_lowered() {
+        // Edge-property WHERE is now evaluated for real (Issue #3622): the
+        // converter lowers it to a `Filter` op over the edge scan (the executor
+        // runs the filter in edge-property mode for the `EdgeScan`-rooted
+        // stream), instead of rejecting it.
+        let query = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'")
+            .expect("edge-property WHERE should lower to a Filter op");
         assert!(
-            msg.contains("filtering `FROM edges`"),
-            "unexpected error message: {msg}"
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. })),
+            "query should still scan edges"
+        );
+        assert!(
+            query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))),
+            "edge-property WHERE should be lowered to a Filter op"
         );
     }
 
     #[test]
-    fn test_parse_select_from_edges_with_property_order_by_is_rejected() {
-        // Symmetric to the WHERE rejection: an edge-property ORDER BY would
-        // silently no-op (the Sort iterator reads keys from nodes only).
-        let err = parse_sql("SELECT * FROM edges ORDER BY weight DESC")
-            .expect_err("edge-property ORDER BY must be rejected");
-        assert!(matches!(err, SqlError::UnsupportedFeature(_)));
-        let msg = err.to_string();
+    fn test_parse_select_from_edges_with_property_order_by_is_lowered() {
+        // Symmetric to the WHERE case: an edge-property ORDER BY lowers to a
+        // property Sort op (the executor sorts edge rows by their own properties
+        // for the `EdgeScan`-rooted stream), instead of being rejected.
+        let query = parse_sql("SELECT * FROM edges ORDER BY weight DESC")
+            .expect("edge-property ORDER BY should lower to a Sort op");
         assert!(
-            msg.contains("ordering `FROM edges`"),
-            "unexpected error message: {msg}"
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. })),
+            "query should still scan edges"
+        );
+        assert!(
+            query.ops.iter().any(|op| matches!(
+                op,
+                QueryOp::Sort {
+                    key: SortKey::Property(k),
+                    descending: true,
+                } if k == "weight"
+            )),
+            "edge-property ORDER BY should lower to a property Sort op"
         );
     }
 
