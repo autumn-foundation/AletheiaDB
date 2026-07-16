@@ -411,13 +411,27 @@ serializable `DatabaseStats`; every field is an O(1)/cached counter read
 result-byte-cap enforcement that guards the `query` tool now also governs six
 read tools — `traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`,
 `get_edge_at_time`, `find_nodes_at_time` — wrapped at the dispatch seam
-(`RESOURCE_LIMITED_READ_TOOLS`), reusing the `query` tool's timeout thread-race,
-bounded in-flight-worker DoS guard, and structured error builders. A breach
-returns `RESOURCE_EXHAUSTED` with `details.dimension`
-(`wall_clock_timeout`, retriable; `result_bytes`, non-retriable), exactly as
-the `query` tool. Ordering is cursor (#3360) → resource cap → token budget
-(#3353); the effective-`0`-timeout fast path runs inline with zero overhead, so
-the default config is behavior-identical. `database_stats` additively surfaces a
+(`RESOURCE_LIMITED_READ_TOOLS`), reusing the `query` tool's timeout thread-race
+and bounded in-flight-worker DoS guard. A breach returns `RESOURCE_EXHAUSTED`
+with `details.dimension` (`wall_clock_timeout`, retriable; `result_bytes`,
+non-retriable) — but via **tool-agnostic** emitters that produce the plain
+#3234 envelope (`{error:{code,message,retriable,details}}`); unlike the `query`
+tool's builders these carry **no** `kind` and **no** `language` field (a
+wrapped read tool is not a query language) and their remediation is
+tool-neutral (no `limits.timeout_ms`/`limits.max_response_bytes` advice, since
+these tools have no per-call `limits` override in v1). Ordering is cursor
+(#3360) → resource cap → token budget (#3353). **Overhead:** the output is
+unchanged under the default config, but the zero-overhead inline path applies
+**only** when the effective timeout is `0` (the `disabled()` config); under the
+*default* config the effective timeout is 30_000 ms, so each covered call runs
+on a timeout-race worker (thread-spawn + mpsc + in-flight-CAS, exactly like the
+`query` tool) — response-identical but not free. The per-call worker-spawn cost
+on hot-path reads (including cheap `get_node_at_time`/`get_edge_at_time`) has a
+quantifying micro-benchmark deferred to Lane-2. The `max_in_flight_queries` cap
+(default 64) is a **single shared pool** across the `query` tool and these six
+wrapped read tools, so a flood of slow calls to one can make the others return
+`UNAVAILABLE` (bounded, retriable); a per-class sub-budget is a Lane-2
+follow-up. `database_stats` additively surfaces a
 `resource_limits` block (`timeout_terminations`, `byte_cap_terminations`,
 `override_rejections`) from process-lifetime atomic counters (the
 `DatabaseStats` struct/storage layer are untouched; row-cap breaches are **not**

@@ -883,13 +883,23 @@ tool remains an `unsupported_construct` (#3360).
 The same wall-clock-timeout and result-byte-cap enforcement now also governs six
 non-`query` read tools: **`traverse`**, **`hybrid_query`**, **`find_similar`**,
 **`get_node_at_time`**, **`get_edge_at_time`**, and **`find_nodes_at_time`**. A
-covered tool is wrapped at the dispatch seam and reuses the exact `query`-tool
+covered tool is wrapped at the dispatch seam and reuses the `query`-tool
 machinery — the timeout thread-race, the bounded in-flight-worker DoS guard, and
-the structured `RESOURCE_EXHAUSTED` error builders + termination counters — so a
-runaway multi-hop traversal or a huge similarity page fails predictably rather
-than starving neighbors. The two breach `code`s, `retriable` flags, and
-`details.dimension` (`wall_clock_timeout` / `result_bytes`) are identical to the
-`query` tool's (see "What each breach returns" above).
+the shared termination counters — so a runaway multi-hop traversal or a huge
+similarity page fails predictably rather than starving neighbors. The two breach
+`code`s (`RESOURCE_EXHAUSTED`), `retriable` flags (`wall_clock_timeout` → `true`,
+`result_bytes` → `false`), and `details.dimension` match the `query` tool's.
+
+**The error envelope is tool-agnostic, however.** These six tools are not a
+query language, so — unlike the `query` tool's builders — the wrapped emitters
+produce the plain #3234 envelope
+(`{"error":{"code","message","retriable","details"}}`) with **no** `kind` field
+and **no** `language` field, and their remediation is tool-neutral: it never
+tells the caller to raise `limits.timeout_ms` / `limits.max_response_bytes`
+(these tools have no per-call `limits` override in v1), only to narrow the
+request (smaller depth/limit/`top_k`/time window) and retry. The `query` tool
+keeps its own `kind:"runtime_error"` / `language` envelope, which is correct for
+a query language.
 
 Ordering is `cursor (#3360) → resource cap (#3368) → token budget (#3353)`: the
 handler resolves its cursor page, the response-byte cap is applied, and a
@@ -910,10 +920,22 @@ there is deliberately no row-termination counter.
 - **Non-cancellable timeout.** As with the `query` tool, the timed computation
   runs to completion on a detached worker and is discarded on timeout; true
   engine-level cooperative cancellation is out of scope (Lane-2).
-- **Fast path unchanged.** When the effective timeout is `0` (unlimited) the
-  handler runs inline with zero overhead (no thread, no clone, no guard), so
-  under the default/disabled config the response is byte-for-byte identical to
-  the unwrapped handler.
+- **Zero-overhead only when limits are disabled — not under the default
+  config.** The inline fast path (no thread, no clone, no guard) runs **only when
+  the effective timeout is `0`**, i.e. the `disabled()` config. Under the
+  *default* config the effective timeout is 30_000 ms (not `0`), so each covered
+  call takes the timeout-race worker path (thread-spawn + mpsc + in-flight-CAS,
+  exactly like the `query` tool). The **response/output is unchanged** under the
+  default config, but it is **not** zero-overhead — there is a per-call worker
+  spawn on every covered read, including cheap `get_node_at_time` /
+  `get_edge_at_time`. A micro-benchmark quantifying that hot-path overhead is a
+  deferred (Lane-2) follow-up.
+- **Shared in-flight pool.** The `max_in_flight_queries` cap (default 64) is a
+  **single shared pool** across the `query` tool and these six wrapped read
+  tools. A flood of slow calls to any one of them can push the others to their
+  shared cap and make them return the retriable, bounded `UNAVAILABLE`
+  (`details.max_in_flight_queries`); a per-class sub-budget is a Lane-2
+  follow-up.
 
 ### Coverage matrix
 
