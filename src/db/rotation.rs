@@ -1780,6 +1780,24 @@ pub fn finalize_resumed_wal_rotation(
 /// or the cold store is unencrypted — so `db::config` can call it unconditionally
 /// on the encrypted-persistent startup path.
 ///
+/// # Crash caveat: resume under the OLD key, THEN switch (inherited from PR2)
+///
+/// This is the inherent "resume under old key, then switch" contract of a
+/// full-MEK rotation, structurally identical to PR2's WAL resume contract
+/// (`install_pending_wal_generations`). While a rotation is `Pending`, the
+/// **old** MEK must remain available to finish it: the cold store is opened at
+/// its provisioned OLD generation, and the still-half-rotated `ACV1@base`
+/// (old-DEK) values are decrypted with that old cold DEK during the resumed bulk
+/// pass. If instead the operator reopens under the **new** key alone while a
+/// rotation crashed mid-cold-pass, the surviving old-DEK values can no longer be
+/// decrypted — the read is a **loud** AEAD authentication failure, so `open()`
+/// returns `Err` and the DB is unopenable rather than silently returning wrong
+/// data. Recovery is straightforward and lossless: reopen once under the OLD key
+/// so this resume completes (re-wrapping every value at the new generation and
+/// clearing the ledger), after which the new key alone reads everything. The
+/// fault is therefore availability-only and fully recoverable, never integrity
+/// loss.
+///
 /// # Errors
 ///
 /// Returns an error if the recorded new key source cannot be sourced or the bulk

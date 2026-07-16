@@ -2714,6 +2714,224 @@ fn mixed_legacy_and_wrapped_values_read_during_rotation() {
     );
 }
 
+#[test]
+fn bulk_reencrypt_upgrades_all_legacy_table() {
+    // Pre-#3617 on-disk state: values are BARE compress-then-encrypt with NO
+    // ACV1 wrapper. Every existing bulk test seeds ACV1@1 via `store_*`, so the
+    // legacy(unwrapped) -> wrapped upgrade THROUGH the bulk pass is otherwise
+    // uncovered. A full-MEK rotation must upgrade every such legacy value to
+    // ACV1@new and re-key it (counted as re-wrapped, never skipped).
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("legacy_bulk.redb");
+    let c1 = cipher_with_byte(0x11);
+    let c2 = cipher_with_byte(0x22);
+
+    // Two-generation keyring: legacy (bare) values decrypt under the OLDEST
+    // generation (gen 1 = c1); the bulk pass re-encrypts every value to gen 2.
+    let ring = ColdKeyring::single(Arc::clone(&c1));
+    ring.add_generation(2, Arc::clone(&c2));
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cold_keyring(ring);
+
+    // Seed 3 node + 2 edge LEGACY bare values (no ACV1 wrapper), exactly as the
+    // pre-#3617 store wrote them: compress, encrypt under the old DEK, insert raw.
+    for id in 1..=3u64 {
+        let n = create_test_node_version(id);
+        let bare = c1
+            .encrypt(&storage.compress(&encode_node_version(&n)).unwrap(), &[])
+            .unwrap();
+        insert_raw(&storage, NODE_VERSIONS_TABLE, id, &bare);
+    }
+    for id in 10..=11u64 {
+        let e = create_test_edge_version(id);
+        let bare = c1
+            .encrypt(&storage.compress(&encode_edge_version(&e)).unwrap(), &[])
+            .unwrap();
+        insert_raw(&storage, EDGE_VERSIONS_TABLE, id, &bare);
+    }
+
+    // Bulk re-encrypt: every legacy value is upgraded to ACV1@2 (re-wrapped),
+    // none skipped (nothing was already at the target generation).
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(
+        stats.values_rewrapped, 5,
+        "3 legacy nodes + 2 legacy edges must all be upgraded through the bulk pass"
+    );
+    assert_eq!(
+        stats.values_skipped, 0,
+        "no legacy value was already ACV1@2, so none may be skipped"
+    );
+
+    // Every value is now ACV1@2 (upgraded from bare legacy) and the marker is set.
+    for id in 1..=3u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, id)).unwrap();
+        assert_eq!(kv, 2, "legacy node {id} must upgrade to ACV1@2");
+    }
+    for id in 10..=11u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, EDGE_VERSIONS_TABLE, id)).unwrap();
+        assert_eq!(kv, 2, "legacy edge {id} must upgrade to ACV1@2");
+    }
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(2));
+
+    // Retire the old generation, then confirm every upgraded value decrypts under
+    // the NEW cold DEK alone — proving the legacy bytes were truly re-keyed.
+    storage.retire_cold_generations(2).unwrap();
+    for id in 1..=3u64 {
+        let n = create_test_node_version(id);
+        assert_eq!(
+            storage.get_node_version(n.id).unwrap().unwrap().id,
+            n.id,
+            "upgraded node {id} must decrypt under the new DEK"
+        );
+    }
+    for id in 10..=11u64 {
+        let e = create_test_edge_version(id);
+        assert_eq!(
+            storage.get_edge_version(e.id).unwrap().unwrap().id,
+            e.id,
+            "upgraded edge {id} must decrypt under the new DEK"
+        );
+    }
+}
+
+#[test]
+fn crafted_acv1_prefixed_legacy_value_fails_loudly() {
+    // Finding 1(d): a legacy bare ciphertext whose leading bytes happen to
+    // collide with the `ACV1` magic + a held key-version (a ~2^-32 event under a
+    // single-generation `match_any` keyring, where `has_version` short-circuits
+    // `true` so ONLY the 4-byte magic discriminates) is MISCLASSIFIED as wrapped.
+    // This MUST surface as a LOUD AEAD authentication failure (a read
+    // availability fault) — never a panic, and never silent wrong data.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("crafted.redb");
+    let cipher = test_cipher();
+
+    // Single-generation (match_any) keyring: `has_version` returns true for EVERY
+    // version, so the trailing u32 adds no discrimination on read.
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+
+    // A genuine legacy bare ciphertext for node 1, whose leading 8 bytes we then
+    // FORCE to collide with `ACV1` + held version 1. This simulates the ~2^-32
+    // event where a real ciphertext prefix equals the wrapper header: the first 8
+    // bytes are truly part of the ciphertext, so treating them as a wrapper strips
+    // real ciphertext bytes and the AEAD tag can no longer authenticate.
+    let version = create_test_node_version(1);
+    let mut crafted = cipher
+        .encrypt(
+            &storage.compress(&encode_node_version(&version)).unwrap(),
+            &[],
+        )
+        .unwrap();
+    assert!(
+        crafted.len() >= 8,
+        "an AEAD ciphertext is always at least the wrapper length"
+    );
+    crafted[0..4].copy_from_slice(b"ACV1"); // COLD_VALUE_MAGIC
+    crafted[4..8].copy_from_slice(&1u32.to_le_bytes()); // a held key-version
+    insert_raw(&storage, NODE_VERSIONS_TABLE, 1, &crafted);
+
+    // parse_cold_wrapper now (mis)reads it as ACV1@1; has_version(1) short-circuits
+    // true under match_any, so it is decrypted as wrapped and the 8-byte-stripped
+    // slice is fed to `decrypt` -> AEAD auth fails -> Err (loud, availability-only).
+    let result = storage.get_node_version(version.id);
+    assert!(
+        result.is_err(),
+        "a crafted ACV1-colliding legacy value must fail loudly (AEAD auth), \
+         never return silent wrong data (finding 1(d): loud, availability-only)"
+    );
+}
+
+#[test]
+fn cold_rotation_resumes_after_real_reopen() {
+    // Genuine cross-process-style resume: partially rotate + plant a DURABLE
+    // cursor, DROP the redb + storage handle (closing the on-disk file), then
+    // reopen a FRESH `RedbColdStorage` from the same path and resume. The cursor
+    // must be read from durable redb metadata (not in-process state), the pass
+    // must continue from it with no double-encrypt, and every value must end
+    // ACV1@2 decrypting under the new DEK.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("reopen_resume.redb");
+    let c1 = cipher_with_byte(0xA1);
+    let c2 = cipher_with_byte(0xB2);
+
+    // Handle A: store 5 nodes (ACV1@1), manually rewrap the 1..=3 prefix to
+    // ACV1@2 + plant the resume cursor at (Node, key=3), then DROP the handle.
+    let node1_before;
+    {
+        let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(Arc::clone(&c1));
+        for id in 1..=5u64 {
+            storage
+                .store_node_version(&create_test_node_version(id))
+                .unwrap();
+        }
+        storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+        for id in 1..=3u64 {
+            let raw = raw_value(&storage, NODE_VERSIONS_TABLE, id);
+            let compressed = storage.decrypt_if_needed(&raw).unwrap();
+            let ct2 = c2.encrypt(&compressed, &[]).unwrap();
+            insert_raw(&storage, NODE_VERSIONS_TABLE, id, &wrap_cold_value(2, &ct2));
+        }
+        let cursor = ColdRotationCursor {
+            target_version: 2,
+            table: ColdTableKind::Node,
+            last_completed_key: 3,
+        };
+        insert_raw_metadata(&storage, COLD_ROTATION_CURSOR_KEY, &cursor.to_bytes());
+        node1_before = raw_value(&storage, NODE_VERSIONS_TABLE, 1);
+    } // drop handle A: closes the redb file so the reopen is genuinely from disk
+
+    // Handle B: reopen FRESH from disk with a 2-generation keyring, then resume.
+    let ring = ColdKeyring::single(Arc::clone(&c1));
+    ring.add_generation(2, Arc::clone(&c2));
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cold_keyring(ring);
+
+    // The durable cursor is read from redb metadata by the freshly-opened handle.
+    assert_eq!(
+        storage
+            .read_cold_rotation_cursor()
+            .unwrap()
+            .map(|c| c.last_completed_key),
+        Some(3),
+        "reopened handle must read the durable resume cursor from disk"
+    );
+
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(
+        stats.values_rewrapped, 2,
+        "only nodes 4,5 remain past the durable cursor"
+    );
+
+    // No double-encrypt of the already-done prefix after reopen.
+    assert_eq!(
+        raw_value(&storage, NODE_VERSIONS_TABLE, 1),
+        node1_before,
+        "a value past the durable cursor must not be re-encrypted after a real reopen"
+    );
+    for id in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, id)).unwrap();
+        assert_eq!(kv, 2, "every node must end ACV1@2");
+    }
+    assert!(
+        storage.read_cold_rotation_cursor().unwrap().is_none(),
+        "cursor cleared on completion"
+    );
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(2));
+
+    // Every value decrypts under the new DEK alone.
+    storage.retire_cold_generations(2).unwrap();
+    for id in 1..=5u64 {
+        let v = create_test_node_version(id);
+        assert_eq!(storage.get_node_version(v.id).unwrap().unwrap().id, v.id);
+    }
+}
+
 // ========================================================================
 // Version-counter seeding at open (Issue #3222 review follow-up)
 // ========================================================================

@@ -1036,15 +1036,6 @@ impl RedbColdStorage {
         self
     }
 
-    /// Access the cold key ring, if encryption is configured (Issue #3617 PR3).
-    ///
-    /// The rotation driver reaches through this to install the new generation and
-    /// retire the old one; a clone shares the same interior-mutable state, so the
-    /// change is observed by every read/write crypto site immediately.
-    pub fn cold_keyring(&self) -> Option<&ColdKeyring> {
-        self.keyring.as_ref()
-    }
-
     /// Whether the cold store encrypts values at rest.
     pub fn is_encrypted(&self) -> bool {
         self.keyring.is_some()

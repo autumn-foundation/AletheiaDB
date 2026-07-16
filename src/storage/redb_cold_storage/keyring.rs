@@ -25,16 +25,39 @@
 //!
 //! Read dispatch ([`parse_cold_wrapper`] in front of decrypt): a value is
 //! treated as wrapped ONLY IF it begins with `ACV1` **and** the following `u32`
-//! names a generation the live keyring holds; otherwise it is treated as a
-//! legacy bare ciphertext and decrypted under the oldest (pre-rotation) cold
-//! generation. This double check makes a false positive astronomically
-//! unlikely: a genuine legacy ciphertext would have to begin with the exact
-//! 4-byte magic (~2⁻³²) AND have its next 4 bytes equal a small, currently-held
-//! key-version (~2⁻³² for the tiny set of live versions) — a combined ~2⁻⁶⁴
-//! event, and even then it fails LOUDLY as an AEAD authentication error (the
-//! wrong slice is fed to `decrypt`), never as silent wrong data. The same
-//! 4-byte-magic collision argument is used one layer down by
-//! [`COLD_RECORD_MAGIC_V2`](super) for the in-record provenance tag.
+//! names a generation the live keyring holds ([`has_version`](ColdKeyring::has_version));
+//! otherwise it is treated as a legacy bare ciphertext and decrypted under the
+//! oldest (pre-rotation) cold generation.
+//!
+//! ## False-positive probability (be precise: it depends on the keyring mode)
+//!
+//! How much the second check (the held-version test) actually discriminates
+//! depends on whether the keyring is in `match_any` or strict mode — and the
+//! common case is the *weaker* one:
+//!
+//! * **Single-generation `match_any` keyring** — the never-rotated steady state,
+//!   and the post-provider-switch state after a completed rotation (the operator
+//!   reopens under the new key alone). Here [`has_version`](ColdKeyring::has_version)
+//!   **short-circuits `true` for every `key_version`**, so the held-version test
+//!   adds **no** discrimination: a legacy bare ciphertext is misclassified as
+//!   wrapped as soon as its first 4 bytes happen to equal the `ACV1` magic —
+//!   probability **~2⁻³²** (NOT 2⁻⁶⁴). The trailing `u32` is irrelevant to the
+//!   classification in this mode.
+//! * **Strict (mid-rotation, 2-generation) keyring** — only here does the
+//!   held-version test bite: the leading 4 bytes must equal `ACV1` (~2⁻³²) AND
+//!   the next 4 bytes must equal one of the tiny set of currently-held key
+//!   versions (~2⁻³²), a combined **~2⁻⁶⁴** event. The 2⁻⁶⁴ figure applies to
+//!   this mode ONLY.
+//!
+//! Crucially, in **either** mode a misclassification is a **loud AEAD
+//! authentication failure** — the wrong byte slice is fed to `decrypt`, the tag
+//! check fails, and the read returns an `Err` (a read *availability* fault). It
+//! is **NEVER** silent wrong data or integrity loss: a corrupted/misparsed value
+//! cannot forge a valid AEAD tag, so no plaintext is ever returned for it. The
+//! ~2⁻³² event therefore costs *availability of that one value* (recoverable by
+//! reopening under the correct key), not correctness. The same 4-byte-magic
+//! collision argument is used one layer down by [`COLD_RECORD_MAGIC_V2`](super)
+//! for the in-record provenance tag.
 //!
 //! No key material is ever written into the wrapper (a `key_version` integer
 //! only), logged, or rendered by `Debug`.
