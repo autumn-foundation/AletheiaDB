@@ -5634,8 +5634,11 @@ impl AletheiaMcpServer {
 
         // Subscribe FIRST so the frontier is captured before the catch-up read:
         // any change committed after this point is buffered in the subscription,
-        // so the catch-up→block handoff is gap-free.
-        let sub = match self.db.subscribe_changes(filter) {
+        // so the catch-up→block handoff is gap-free. Clone the filter into the
+        // subscription so the handler retains a copy to post-filter the catch-up
+        // page with (the blocking leg is filtered by the subscription itself, so
+        // the catch-up leg must apply the SAME predicate — Fix 1).
+        let sub = match self.db.subscribe_changes(filter.clone()) {
             Ok(s) => s,
             Err(e) => {
                 // A subscribe cap breach is transient (another consumer may
@@ -5684,10 +5687,27 @@ impl AletheiaMcpServer {
                 cursor: Some(token.to_string()),
             };
             match self.db.list_changes(&query) {
+                // The window scanned rows: post-filter them with the SAME
+                // ChangeFilter the blocking leg's subscription applies, so a
+                // filtered subscription's resume path never returns
+                // non-matching changes (Fix 1). The resume token is the last
+                // SCANNED cursor (page.next_cursor, or the last scanned row's
+                // cursor when the scan reached the window's end) — NOT the last
+                // matching row — so a page that filters down to nothing still
+                // advances the caller past every scanned row (no re-scan/stall).
                 Ok(page) if !page.changes.is_empty() => {
-                    let resume = page.changes.last().map(|r| r.cursor().encode());
+                    let filtered: Vec<crate::core::ChangeRecord> = page
+                        .changes
+                        .iter()
+                        .filter(|r| filter.matches(r))
+                        .cloned()
+                        .collect();
+                    let resume = page
+                        .next_cursor
+                        .clone()
+                        .or_else(|| page.changes.last().map(|r| r.cursor().encode()));
                     return self.await_changes_success(
-                        &page.changes,
+                        &filtered,
                         resume,
                         false,
                         page.next_cursor.is_some(),
@@ -5701,7 +5721,23 @@ impl AletheiaMcpServer {
         // Block for the next change up to the clamped timeout (default 25s, hard
         // cap 60s). `recv_timeout(0)` returns instantly (Ok(empty)).
         let timeout_ms = req.timeout_ms.unwrap_or(25_000).min(60_000);
-        match sub.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        // SAFETY/why: `recv_timeout` parks this worker for up to 60s. On a
+        // multi-thread Tokio runtime (the `aletheia-mcp` binary and
+        // `aletheia-server`), run it inside `block_in_place` so Tokio can spin
+        // up a replacement worker — otherwise one native-stdio long-poll would
+        // stall the whole async `call_tool` dispatch loop. On a current-thread
+        // runtime or with no runtime at all (embedded/programmatic callers),
+        // `block_in_place` would panic, so call `recv_timeout` inline as before.
+        // Mirrors the `block_on_embedding` runtime guard; only this blocking
+        // call needs the bridge (subscribe/list_changes are fast).
+        let recv_result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| sub.recv_timeout(timeout))
+            }
+            _ => sub.recv_timeout(timeout),
+        };
+        match recv_result {
             Ok(recs) if !recs.is_empty() => {
                 let resume = recs.last().map(|r| r.cursor().encode());
                 self.await_changes_success(&recs, resume, false, false)
