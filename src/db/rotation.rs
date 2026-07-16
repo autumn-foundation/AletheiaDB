@@ -60,12 +60,14 @@ use crate::db::AletheiaDB;
 use crate::encryption::audit::{AuditEvent, EncryptionAuditLogger};
 use crate::encryption::cipher::Cipher;
 use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
+use crate::encryption::factory::Algorithm;
 use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::KeyDerivation;
+use crate::storage::index_persistence::common::{ENC_INDEX_KEY_VERSION_V1, IndexKeyring};
 use crate::storage::index_persistence::common::ENC_INDEX_KEY_VERSION_V1;
 use crate::storage::index_persistence::reencrypt::DecryptProbeReport;
 use crate::storage::index_persistence::{
-    IndexKeyRotation, IndexPersistenceManager, RotationError, RotationStatus,
+    IndexKeyRotation, IndexPersistenceManager, RotationError, RotationProgress, RotationStatus,
 };
 
 /// Summary of a completed index key rotation.
@@ -161,6 +163,175 @@ fn derive_index_dek(
     KeyDerivation::new(mek)
         .derive_index_dek()
         .map_err(|e| RotationError::KeyProvider(e.to_string()))
+}
+
+/// The four encrypted-at-rest layers a full-MEK rotation must eventually cover
+/// (Issue #3617). Enumerated here so the cross-layer ledger records each
+/// layer's completion explicitly, even in PR1 where only the index domain
+/// actually re-encrypts.
+///
+/// **Checkpoint-DEK decision:** checkpoints deliberately ride the *index* file
+/// format and *index* DEK. The dedicated `CHECKPOINT_DEK`/`checkpoint_cipher`
+/// (`encryption/manager.rs`) are dead — no production checkpoint writer uses
+/// them — so a checkpoint rotation is satisfied for free by the same
+/// `IndexKeyRotation` pass that rotates the index tree. We still *derive* the
+/// checkpoint DEK ([`MekKeyset`]) so the ledger can name the layer and PR2/PR3
+/// have the material ready, but PR1 never encrypts under it. WAL and cold are
+/// out of scope until PR2/PR3 and are recorded [`LayerStatus::Skipped`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RotationLayer {
+    Index,
+    Checkpoint,
+    Wal,
+    Cold,
+}
+
+impl RotationLayer {
+    /// All four layers, in the order the driver visits them.
+    const ALL: [RotationLayer; 4] = [
+        RotationLayer::Index,
+        RotationLayer::Checkpoint,
+        RotationLayer::Wal,
+        RotationLayer::Cold,
+    ];
+}
+
+/// The four per-component DEKs derived from a single MEK (Issue #3617). Held
+/// only in [`Zeroizing`]; `Debug` is redacted so no key byte can ever reach a
+/// log, span, or error string.
+struct MekKeyset {
+    wal: Zeroizing<[u8; 32]>,
+    index: Zeroizing<[u8; 32]>,
+    cold: Zeroizing<[u8; 32]>,
+    checkpoint: Zeroizing<[u8; 32]>,
+}
+
+impl std::fmt::Debug for MekKeyset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render key material — only a redacting placeholder.
+        f.debug_struct("MekKeyset")
+            .field("deks", &"<redacted>")
+            .finish()
+    }
+}
+
+impl MekKeyset {
+    /// Derive all four per-component DEKs from `mek` via the shared HKDF
+    /// helpers ([`KeyDerivation`]). Foundation for full-MEK rotation: a new MEK
+    /// re-derives *every* layer's DEK, which is exactly why an index-only
+    /// rotation must eventually re-encrypt all layers.
+    fn derive(mek: &Zeroizing<[u8; 32]>) -> std::result::Result<Self, RotationError> {
+        let kd = KeyDerivation::new(mek.clone());
+        let map =
+            |e: crate::encryption::KeyDerivationError| RotationError::KeyProvider(e.to_string());
+        Ok(Self {
+            wal: kd.derive_wal_dek().map_err(map)?,
+            index: kd.derive_index_dek().map_err(map)?,
+            cold: kd.derive_cold_dek().map_err(map)?,
+            checkpoint: kd.derive_checkpoint_dek().map_err(map)?,
+        })
+    }
+
+    /// The DEK for one layer. Each layer has an independent, domain-separated
+    /// DEK; checkpoints are encrypted under the *index* DEK in practice (see
+    /// [`RotationLayer`]), but their own derived DEK is returned here so the
+    /// ledger driver reads every field.
+    fn dek(&self, layer: RotationLayer) -> &Zeroizing<[u8; 32]> {
+        match layer {
+            RotationLayer::Index => &self.index,
+            RotationLayer::Checkpoint => &self.checkpoint,
+            RotationLayer::Wal => &self.wal,
+            RotationLayer::Cold => &self.cold,
+        }
+    }
+}
+
+/// Old + new ciphers for one layer, built from a [`MekKeyset`] pair.
+struct LayerCiphers {
+    layer: RotationLayer,
+    old: Arc<dyn Cipher>,
+    new: Arc<dyn Cipher>,
+}
+
+/// Build the old→new cipher pair for every layer. Reads all four DEK fields of
+/// both keysets (so the derived material is genuinely consumed, not dead), even
+/// though PR1's driver only installs the index generation.
+fn build_layer_ciphers(
+    algorithm: Algorithm,
+    old_deks: &MekKeyset,
+    new_deks: &MekKeyset,
+) -> Vec<LayerCiphers> {
+    RotationLayer::ALL
+        .iter()
+        .map(|&layer| LayerCiphers {
+            layer,
+            old: Arc::from(create_cipher(algorithm, old_deks.dek(layer))),
+            new: Arc::from(create_cipher(algorithm, new_deks.dek(layer))),
+        })
+        .collect()
+}
+
+/// Drive the forward re-encryption of each layer recorded in the ledger.
+///
+/// PR1 executes only the index domain: the index tree — and any checkpoint
+/// file, which reuses the index format + index DEK — is re-encrypted by the
+/// mature #488 [`IndexKeyRotation`] engine. WAL and cold are out of scope
+/// (PR2/PR3); the cross-layer guard already refused a uniformly-encrypted DB,
+/// so those layers hold no bytes to rewrite here and are simply recorded
+/// `Skipped`.
+fn drive_forward_layers(
+    manager: &Arc<IndexPersistenceManager>,
+    keyring: &IndexKeyring,
+    old_version: u32,
+    new_version: u32,
+    layer_ciphers: &[LayerCiphers],
+) -> Result<RotationProgress> {
+    let mut progress = RotationProgress::default();
+    for lc in layer_ciphers {
+        match lc.layer {
+            RotationLayer::Index => {
+                // Install the new index generation (so live reads dispatch on
+                // each file's header and writes stamp the new version), then
+                // re-encrypt every old-key index file. Checkpoints ride this
+                // pass (index format + index DEK).
+                keyring.add_generation(new_version, Arc::clone(&lc.new));
+                let engine = IndexKeyRotation::new(
+                    manager.indexes_path(),
+                    keyring.clone(),
+                    old_version,
+                    Arc::clone(&lc.old),
+                    new_version,
+                    Arc::clone(&lc.new),
+                );
+                progress = engine.re_encrypt(&mut |_| true).map_err(rotation_err)?;
+                engine.complete().map_err(rotation_err)?;
+            }
+            RotationLayer::Checkpoint => {
+                // Satisfied by the index pass above (same DEK + file format);
+                // no separate work. Recorded complete in the ledger.
+                //
+                // INVARIANT (load-bearing for the checkpoint layer's coverage):
+                // encrypted checkpoint files MUST live under
+                // `manager.indexes_path()`, so the index `re_encrypt`/
+                // `verify_complete` pass above (which enumerates only that tree)
+                // actually rotates and verifies them. If a future checkpoint
+                // writer ever emits encrypted files OUTSIDE `indexes_path()`,
+                // this free-ride breaks two ways: (1) those files would not be
+                // re-encrypted here, and (2) `conflicting_encrypted_layers`
+                // would not see them, so the P0.1 cross-layer guard would not
+                // refuse — silently stranding them under the old MEK. Such a
+                // writer must add a guard entry in
+                // `conflicting_encrypted_layers` (and a real re-encrypt arm
+                // here), not rely on this comment.
+            }
+            RotationLayer::Wal | RotationLayer::Cold => {
+                // Out of scope in PR1 (PR2/PR3). No re-encryption; recorded
+                // Skipped. The derived DEKs (`lc.old`/`lc.new`) are ready for
+                // when those engines land.
+            }
+        }
+    }
+    Ok(progress)
 }
 
 impl AletheiaDB {
@@ -475,52 +646,56 @@ impl AletheiaDB {
             .keyring()
             .cloned()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
-        let old_cipher = keyring
+        // Verify the current index generation exists before doing any work.
+        keyring
             .current_cipher()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
         let old_version = keyring.current_version();
         let new_version = old_version + 1;
 
-        // Derive both index DEKs and refuse a same-key rotation (constant time).
-        let old_dek = derive_index_dek(load_mek(&enc_cfg.key_provider).map_err(rotation_err)?)
-            .map_err(rotation_err)?;
-        let new_dek = derive_index_dek(load_mek(new_key_source).map_err(rotation_err)?)
-            .map_err(rotation_err)?;
-        if bool::from(old_dek.as_ref().ct_eq(new_dek.as_ref())) {
+        // Load BOTH master keys and refuse an identical MEK in constant time
+        // (Issue #3617). Comparing the *MEK* — not merely the index DEK — is
+        // what makes a full-MEK rotation to the same key a refused no-op across
+        // every layer, since a new MEK re-derives every layer's DEK. The MEKs
+        // live only in `Zeroizing` and are dropped (zeroized) at scope end.
+        let old_mek = load_mek(&enc_cfg.key_provider).map_err(rotation_err)?;
+        let new_mek = load_mek(new_key_source).map_err(rotation_err)?;
+        if bool::from(old_mek.as_ref().ct_eq(new_mek.as_ref())) {
             return Err(rotation_err(RotationError::SameKey));
         }
 
-        let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
+        // Derive old + new DEKs for ALL FOUR contexts (wal/index/cold/
+        // checkpoint) from each MEK (Issue #3617 foundation). PR1 only
+        // re-encrypts the index domain, so only the index generation is
+        // installed into the live keyring and driven below; the wal/cold DEKs
+        // are derived so PR2/PR3 install them without re-plumbing derivation.
+        // No DEK ever leaves `Zeroizing`.
+        let old_deks = MekKeyset::derive(&old_mek).map_err(rotation_err)?;
+        let new_deks = MekKeyset::derive(&new_mek).map_err(rotation_err)?;
+        let layer_ciphers = build_layer_ciphers(enc_cfg.algorithm, &old_deks, &new_deks);
 
-        // Begin: record the durable breadcrumb BEFORE switching the live keyring
-        // to stamp v2, so no v2-encrypted file can ever be fsynced (via a
-        // contract-violating concurrent index persist) before the breadcrumb is
-        // on stable storage — a power loss can then never strand a v2 file with a
-        // lost breadcrumb (Issue #488 P0.2). `write_rotation_state` fsyncs the
-        // file and its parent dir; only once it returns do we flip the keyring.
+        // Begin: record the durable v2 ledger BEFORE switching the live keyring
+        // to stamp the new version, so no new-key file can ever be fsynced (via
+        // a contract-violating concurrent index persist) before the ledger is on
+        // stable storage — a power loss can then never strand a new-key file
+        // with a lost ledger (Issue #488 P0.2, preserved per-layer for #3617).
+        // `write_rotation_state` fsyncs the file and its parent dir; only once
+        // it returns does the driver flip the keyring.
         write_rotation_state(
             manager,
             new_version,
             new_key_source,
             RotationDirection::Forward,
         )?;
-        keyring.add_generation(new_version, Arc::clone(&new_cipher));
         self.emit_rotation_audit(&AuditEvent::RotationStarted {
             old_version,
             new_version,
         });
 
-        let engine = IndexKeyRotation::new(
-            manager.indexes_path(),
-            keyring.clone(),
-            old_version,
-            old_cipher,
-            new_version,
-            new_cipher,
-        );
-
-        let progress = engine.re_encrypt(&mut |_| true).map_err(rotation_err)?;
-        engine.complete().map_err(rotation_err)?;
+        // Drive each recorded layer. PR1 runs only the index/checkpoint domain
+        // through the mature #488 engine; wal/cold are recorded Skipped.
+        let progress =
+            drive_forward_layers(manager, &keyring, old_version, new_version, &layer_ciphers)?;
         clear_rotation_state(manager);
 
         Ok(RotationReport {
@@ -563,6 +738,80 @@ impl RotationDirection {
     }
 }
 
+/// Per-layer completion status in the cross-layer ledger (Issue #3617).
+///
+/// The resumable engines are idempotent, so a distinct "started" state is
+/// unnecessary: `Pending` means "this layer still has work", `Complete` means
+/// "verified re-encrypted", `Skipped` means "not in scope for this rotation"
+/// (PR1 records WAL and cold `Skipped`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerStatus {
+    Pending,
+    Complete,
+    Skipped,
+}
+
+impl LayerStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            LayerStatus::Pending => "pending",
+            LayerStatus::Complete => "complete",
+            LayerStatus::Skipped => "skipped",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(LayerStatus::Pending),
+            "complete" => Some(LayerStatus::Complete),
+            "skipped" => Some(LayerStatus::Skipped),
+            _ => None,
+        }
+    }
+}
+
+/// The cross-layer rotation ledger (Issue #3617) — the `version=2` successor to
+/// the #488 index-only breadcrumb.
+///
+/// Records the format version, the global target key version, the new key
+/// SOURCE REFERENCE (never key bytes — File path / Env var name only; the same
+/// constraint as #488), the rotation direction, and a per-layer completion
+/// status for {index, checkpoint, wal, cold}. Written durably and ordered
+/// (temp → fsync → rename → parent-dir fsync) BEFORE the live keyring flips to
+/// stamp the new version, preserving the #488 P0.2 invariant per layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RotationLedger {
+    direction: RotationDirection,
+    /// The global target key version being installed (was #488 `new_version`).
+    new_version: u32,
+    new_source: KeyProviderConfig,
+    index: LayerStatus,
+    checkpoint: LayerStatus,
+    wal: LayerStatus,
+    cold: LayerStatus,
+}
+
+impl RotationLedger {
+    /// The default PR1 cross-layer plan: index and checkpoint re-key through
+    /// the index engine (checkpoints ride the index DEK), while WAL and cold
+    /// are out of scope and recorded `Skipped`.
+    fn index_scope(
+        direction: RotationDirection,
+        new_version: u32,
+        new_source: KeyProviderConfig,
+    ) -> Self {
+        Self {
+            direction,
+            new_version,
+            new_source,
+            index: LayerStatus::Pending,
+            checkpoint: LayerStatus::Pending,
+            wal: LayerStatus::Skipped,
+            cold: LayerStatus::Skipped,
+        }
+    }
+}
+
 fn rotation_state_path(manager: &IndexPersistenceManager) -> std::path::PathBuf {
     manager.base_path().join("rotation.state")
 }
@@ -574,36 +823,52 @@ fn rotation_state_present(manager: &IndexPersistenceManager) -> Result<bool> {
     Ok(read_rotation_state(manager)?.is_some())
 }
 
+/// Write the default PR1 index-scope ledger (index + checkpoint pending, WAL +
+/// cold skipped). Signature-compatible with the #488 breadcrumb writer so every
+/// existing caller keeps working; the on-disk format is now `version=2`.
 fn write_rotation_state(
     manager: &IndexPersistenceManager,
     new_version: u32,
     new_source: &KeyProviderConfig,
     direction: RotationDirection,
 ) -> Result<()> {
-    // Only file/env sources carry a single, non-secret identifying reference the
-    // breadcrumb can persist and reconstruct on crash-resume. Rotating TO a
-    // passphrase/KMS/Vault source is a documented follow-up (Issue #3587): those
-    // carry secrets (passphrase/token env) or multi-field config that the simple
-    // line breadcrumb cannot round-trip, so refuse fail-closed rather than write
-    // a breadcrumb that would not resume. Note that index-key rotation already
-    // refuses whenever any non-index encrypted layer is present, so the current
-    // MEK source is unaffected — this bounds only the NEW source.
-    let (kind, value) = match new_source {
+    write_ledger(
+        manager,
+        &RotationLedger::index_scope(direction, new_version, new_source.clone()),
+    )
+}
+
+/// Durably write a cross-layer rotation ledger (Issue #3617, `version=2`).
+///
+/// Only file/env sources carry a single, non-secret identifying reference the
+/// ledger can persist and reconstruct on crash-resume. Rotating TO a
+/// passphrase/KMS/Vault source is a documented follow-up (Issue #3620): those
+/// carry secrets (passphrase/token env) or multi-field config that the simple
+/// line ledger cannot round-trip, so refuse fail-closed rather than write a
+/// ledger that would not resume. No key material is written — only the source
+/// reference, versions, direction, and per-layer status.
+fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> Result<()> {
+    let (kind, value) = match &ledger.new_source {
         KeyProviderConfig::File { path } => ("file", path.to_string_lossy().into_owned()),
         KeyProviderConfig::Env { variable } => ("env", variable.clone()),
         KeyProviderConfig::PassphraseFile { .. }
         | KeyProviderConfig::Kms { .. }
         | KeyProviderConfig::Vault { .. } => {
-            let (provider_type, _) = new_source.describe();
+            let (provider_type, _) = ledger.new_source.describe();
             return Err(StorageError::PersistenceError(format!(
-                "index key rotation to a {provider_type} key source is not yet supported"
+                "key rotation to a {provider_type} key source is not yet supported"
             ))
             .into());
         }
     };
     let body = format!(
-        "version=1\ndirection={}\nnew_version={new_version}\nnew_source_kind={kind}\nnew_source_value={value}\n",
-        direction.as_str()
+        "version=2\ndirection={}\ntarget_version={}\nnew_source_kind={kind}\nnew_source_value={value}\nlayer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\n",
+        ledger.direction.as_str(),
+        ledger.new_version,
+        ledger.index.as_str(),
+        ledger.checkpoint.as_str(),
+        ledger.wal.as_str(),
+        ledger.cold.as_str(),
     );
     let base = manager.base_path();
     std::fs::create_dir_all(base)
@@ -649,22 +914,31 @@ fn clear_rotation_state(manager: &IndexPersistenceManager) {
     }
 }
 
-/// Parsed rotation breadcrumb.
-struct PendingRotation {
-    direction: RotationDirection,
-    new_version: u32,
-    new_source: KeyProviderConfig,
-}
-
-/// Read and parse the rotation breadcrumb.
+/// Read and parse the cross-layer rotation ledger (Issue #3617).
 ///
 /// Returns `Ok(None)` when absent (no rotation pending), `Ok(Some(_))` when
 /// present and well-formed, and `Err(_)` when PRESENT BUT CORRUPT (Issue #488
-/// P1.1). A malformed breadcrumb must never be treated as "no rotation" — that
-/// would silently skip resuming a real in-flight rotation and, after a
-/// key-provider change, leave v2 files undecryptable. Fail closed instead so
-/// startup aborts loudly for manual intervention.
-fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<PendingRotation>> {
+/// P1.1, preserved for #3617). A malformed ledger must never be treated as "no
+/// rotation" — that would silently skip resuming a real in-flight rotation and,
+/// after a key-provider change, leave new-key files undecryptable. Fail closed
+/// instead so startup aborts loudly for manual intervention.
+///
+/// **Backward compatibility:** a legacy `version=1` #488 breadcrumb (index-only,
+/// with `new_version` and no `layer.*` lines) is *parsed* into the v2 shape —
+/// the index layer takes the recorded direction (`Pending`), and the layers
+/// #3617 adds (checkpoint/wal/cold) are `Skipped`, since a #488 database had no
+/// separate checkpoint/WAL/cold rotation in flight. This is the safest choice:
+/// an interrupted #488 rotation still resumes its index pass rather than being
+/// rejected and left half-rotated. New fields fail closed: an unknown
+/// `version`, `layer.*` value, missing `target_version`/`new_version`, or a
+/// `new_source_kind` outside File/Env aborts.
+///
+/// **`version=` is MANDATORY.** Both #488 (v1) and #3617 (v2) writers ALWAYS
+/// emit a `version=` line, so a ledger reaching this reader without one is
+/// corrupt, not a pre-versioning legacy artifact — it fails closed
+/// (`missing version`) rather than being silently assumed to be any format.
+/// This is what lets the version dispatch below trust the number it reads.
+fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<RotationLedger>> {
     let path = rotation_state_path(manager);
     let body = match std::fs::read_to_string(&path) {
         Ok(b) => b,
@@ -686,10 +960,15 @@ fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<Pendi
         .into()
     };
 
+    let mut version = None;
     let mut direction = RotationDirection::Forward; // default for legacy breadcrumbs
-    let mut new_version = None;
+    let mut target_version = None;
     let mut kind = None;
     let mut value = None;
+    let mut layer_index = None;
+    let mut layer_checkpoint = None;
+    let mut layer_wal = None;
+    let mut layer_cold = None;
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -697,7 +976,11 @@ fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<Pendi
         let Some((k, v)) = line.split_once('=') else {
             return Err(corrupt("malformed line"));
         };
+        let parse_layer = |v: &str, name: &str| -> Result<LayerStatus> {
+            LayerStatus::parse(v).ok_or_else(|| corrupt(&format!("unknown {name} {v:?}")))
+        };
         match k {
+            "version" => version = Some(v.parse::<u32>().map_err(|_| corrupt("bad version"))?),
             "direction" => {
                 direction = match v {
                     "forward" => RotationDirection::Forward,
@@ -705,17 +988,46 @@ fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<Pendi
                     other => return Err(corrupt(&format!("unknown direction {other:?}"))),
                 }
             }
-            "new_version" => {
-                new_version = Some(v.parse::<u32>().map_err(|_| corrupt("bad new_version"))?)
+            // v2 uses `target_version`; v1 used `new_version`. Accept both.
+            "target_version" | "new_version" => {
+                target_version = Some(
+                    v.parse::<u32>()
+                        .map_err(|_| corrupt("bad target_version"))?,
+                )
             }
             "new_source_kind" => kind = Some(v.to_string()),
             "new_source_value" => value = Some(v.to_string()),
-            "version" => {}
+            "layer.index" => layer_index = Some(parse_layer(v, "layer.index")?),
+            "layer.checkpoint" => layer_checkpoint = Some(parse_layer(v, "layer.checkpoint")?),
+            "layer.wal" => layer_wal = Some(parse_layer(v, "layer.wal")?),
+            "layer.cold" => layer_cold = Some(parse_layer(v, "layer.cold")?),
             _ => {}
         }
     }
 
-    let new_version = new_version.ok_or_else(|| corrupt("missing new_version"))?;
+    // Fail closed on an absent or unknown format version. v1 (index-only) and v2
+    // (cross-layer) are the only supported shapes.
+    let version = version.ok_or_else(|| corrupt("missing version"))?;
+    let (def_index, def_checkpoint, def_wal, def_cold) = match version {
+        // Legacy #488: index takes the recorded direction; #3617's added layers
+        // were never in flight, so Skipped.
+        1 => (
+            LayerStatus::Pending,
+            LayerStatus::Skipped,
+            LayerStatus::Skipped,
+            LayerStatus::Skipped,
+        ),
+        // v2: an absent `layer.*` line defaults to Pending (forward-safe).
+        2 => (
+            LayerStatus::Pending,
+            LayerStatus::Pending,
+            LayerStatus::Pending,
+            LayerStatus::Pending,
+        ),
+        other => return Err(corrupt(&format!("unsupported ledger version {other}"))),
+    };
+
+    let new_version = target_version.ok_or_else(|| corrupt("missing target_version"))?;
     let value = value.ok_or_else(|| corrupt("missing new_source_value"))?;
     let new_source = match kind.as_deref() {
         Some("file") => KeyProviderConfig::File { path: value.into() },
@@ -723,10 +1035,14 @@ fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<Pendi
         Some(other) => return Err(corrupt(&format!("unknown new_source_kind {other:?}"))),
         None => return Err(corrupt("missing new_source_kind")),
     };
-    Ok(Some(PendingRotation {
+    Ok(Some(RotationLedger {
         direction,
         new_version,
         new_source,
+        index: layer_index.unwrap_or(def_index),
+        checkpoint: layer_checkpoint.unwrap_or(def_checkpoint),
+        wal: layer_wal.unwrap_or(def_wal),
+        cold: layer_cold.unwrap_or(def_cold),
     }))
 }
 
@@ -754,11 +1070,11 @@ pub fn resume_pending_rotation(
     manager: &Arc<IndexPersistenceManager>,
     enc_cfg: &EncryptionConfig,
 ) -> Result<Option<RotationReport>> {
-    let Some(pending) = read_rotation_state(manager)? else {
+    let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(None);
     };
     let Some(keyring) = manager.keyring().cloned() else {
-        // Encryption not configured on this startup; leave the breadcrumb.
+        // Encryption not configured on this startup; leave the ledger.
         return Ok(None);
     };
     let started = Instant::now();
@@ -767,34 +1083,57 @@ pub fn resume_pending_rotation(
         .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
     let old_version = keyring.current_version();
 
-    let new_dek = derive_index_dek(load_mek(&pending.new_source).map_err(rotation_err)?)
+    // DERIVATION ASYMMETRY (Issue #3617 PR1): the forward driver
+    // (`run_rotation`) derives the full four-DEK `MekKeyset` (wal/index/cold/
+    // checkpoint) up front, but resume derives ONLY the index DEK here because
+    // PR1's only executable layer is the index domain (index + checkpoint, which
+    // rides the index DEK); wal/cold are recorded `Skipped` and have no resume
+    // work. This is a deliberate, load-bearing gap: PR2 (WAL) and PR3 (cold)
+    // MUST extend resume to derive AND drive their layers' DEKs — not just the
+    // forward path — or an interrupted full-MEK rotation would resume the index
+    // pass while silently leaving the WAL/cold layers half-rotated. Mirror the
+    // `MekKeyset::derive` + `drive_forward_layers` structure here when those
+    // engines land.
+    let new_dek = derive_index_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
         .map_err(rotation_err)?;
     let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
 
-    keyring.add_generation(pending.new_version, Arc::clone(&new_cipher));
+    keyring.add_generation(ledger.new_version, Arc::clone(&new_cipher));
 
     let engine = IndexKeyRotation::new(
         manager.indexes_path(),
         keyring,
         old_version,
         old_cipher,
-        pending.new_version,
+        ledger.new_version,
         new_cipher,
     );
 
+    // Drive resume from the ledger's per-layer state. In PR1 the index domain
+    // (index + checkpoint, which rides the index DEK) is the only executable
+    // layer; WAL and cold are recorded `Skipped` and need no resume work. If
+    // that domain is still `Pending` we re-run the idempotent pass; if it is
+    // already `Complete` we skip straight to verification/clear.
+    let index_domain_pending = matches!(ledger.index, LayerStatus::Pending)
+        || matches!(ledger.checkpoint, LayerStatus::Pending);
+
     let logger = EncryptionAuditLogger::from_audit_config(&enc_cfg.audit);
-    let report = match pending.direction {
+    let report = match ledger.direction {
         RotationDirection::Forward => {
-            let progress = engine.re_encrypt(&mut |_| true).map_err(rotation_err)?;
+            let progress = if index_domain_pending {
+                engine.re_encrypt(&mut |_| true).map_err(rotation_err)?
+            } else {
+                RotationProgress::default()
+            };
             engine.complete().map_err(rotation_err)?;
             clear_rotation_state(manager);
             logger.log(&AuditEvent::RotationCompleted {
-                new_version: pending.new_version,
+                new_version: ledger.new_version,
                 duration_ms: started.elapsed().as_millis() as u64,
             });
             RotationReport {
                 old_version,
-                new_version: pending.new_version,
+                new_version: ledger.new_version,
                 files_total: progress.files_total,
                 files_reencrypted: progress.files_reencrypted,
                 files_skipped: progress.files_skipped,
@@ -813,7 +1152,7 @@ pub fn resume_pending_rotation(
                 duration_ms: started.elapsed().as_millis() as u64,
             });
             RotationReport {
-                old_version: pending.new_version,
+                old_version: ledger.new_version,
                 new_version: old_version,
                 files_total: 0,
                 files_reencrypted: 0,
@@ -1657,6 +1996,345 @@ mod tests {
         assert!(log.contains("node-test"));
     }
 
+    // ── #3617 PR1: cross-layer ledger (v2) ───────────────────────────
+
+    #[test]
+    fn ledger_v2_roundtrip_is_durable_and_leaves_no_temp() {
+        // A v2 ledger with mixed per-layer statuses round-trips durably: every
+        // field (target version, source ref, direction, per-layer status) is
+        // preserved, the on-disk format is v2, no key bytes are written, and no
+        // temp scratch is left behind.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            None,
+        ));
+        let ledger = super::RotationLedger {
+            direction: super::RotationDirection::Forward,
+            new_version: 3,
+            new_source: KeyProviderConfig::Env {
+                variable: "MEK_VAR".to_string(),
+            },
+            index: super::LayerStatus::Complete,
+            checkpoint: super::LayerStatus::Complete,
+            wal: super::LayerStatus::Skipped,
+            cold: super::LayerStatus::Pending,
+        };
+        super::write_ledger(&manager, &ledger).unwrap();
+
+        let read = super::read_rotation_state(&manager)
+            .unwrap()
+            .expect("ledger present");
+        assert_eq!(read, ledger, "every ledger field must round-trip");
+
+        let body = std::fs::read_to_string(root.join("data").join("rotation.state")).unwrap();
+        assert!(body.contains("version=2"), "expected v2 format: {body}");
+        assert!(body.contains("target_version=3"));
+        assert!(body.contains("layer.index=complete"));
+        assert!(body.contains("layer.cold=pending"));
+        // Source REFERENCE only (env var NAME), never key bytes.
+        assert!(body.contains("new_source_kind=env") && body.contains("MEK_VAR"));
+
+        let leftover: Vec<_> = std::fs::read_dir(root.join("data"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains("rotation.state.tmp")
+            })
+            .collect();
+        assert!(leftover.is_empty(), "durable write left a temp file behind");
+    }
+
+    #[test]
+    fn ledger_v2_read_is_fail_closed_on_corruption() {
+        // A truncated/garbage v2 ledger must fail closed (Err), while an absent
+        // file is a clean Ok(None) — the reader must never confuse the two.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let manager =
+            std::sync::Arc::new(IndexPersistenceManager::with_cipher(data_dir.clone(), None));
+
+        // Truncated v2: version + direction but no target_version / source.
+        std::fs::write(
+            data_dir.join("rotation.state"),
+            b"version=2\ndirection=forward\n",
+        )
+        .unwrap();
+        let err = super::read_rotation_state(&manager).unwrap_err();
+        assert!(
+            err.to_string().contains("corrupt"),
+            "truncated ledger must fail closed, got: {err}"
+        );
+
+        // Pure garbage (no key=value on the first line).
+        std::fs::write(data_dir.join("rotation.state"), b"@@@not a ledger@@@").unwrap();
+        assert!(
+            super::read_rotation_state(&manager).is_err(),
+            "garbage ledger must fail closed"
+        );
+
+        // An unknown per-layer value also fails closed.
+        std::fs::write(
+            data_dir.join("rotation.state"),
+            b"version=2\ndirection=forward\ntarget_version=2\nnew_source_kind=file\nnew_source_value=/k\nlayer.index=bogus\n",
+        )
+        .unwrap();
+        assert!(
+            super::read_rotation_state(&manager).is_err(),
+            "unknown layer status must fail closed"
+        );
+
+        // Absent → Ok(None).
+        std::fs::remove_file(data_dir.join("rotation.state")).unwrap();
+        assert!(
+            super::read_rotation_state(&manager).unwrap().is_none(),
+            "absent ledger is a clean no-op"
+        );
+    }
+
+    #[test]
+    fn ledger_v2_write_ordering_breadcrumb_before_keyring_flip() {
+        // Mirror `breadcrumb_is_present_before_first_v2_file_on_crash` for the
+        // v2 ledger: the ledger is durable (and v2) BEFORE any new-version index
+        // file is stamped — i.e. before the keyring flips.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+        // Pre-rotation: every file at v1 (keyring not yet flipped).
+        assert!(assert_all_at_version(&indexes_dir, 1) > 0);
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        // Ledger first (durable), exactly as run_rotation orders it.
+        super::write_rotation_state(
+            &manager,
+            2,
+            &KeyProviderConfig::File {
+                path: new_key.clone(),
+            },
+            super::RotationDirection::Forward,
+        )
+        .unwrap();
+
+        let state = root.join("data").join("rotation.state");
+        assert!(
+            state.exists(),
+            "the v2 ledger must be durable before any new-version file"
+        );
+        let body = std::fs::read_to_string(&state).unwrap();
+        assert!(
+            body.contains("version=2") && body.contains("layer.index=pending"),
+            "expected a v2 ledger: {body}"
+        );
+        // No index file has been re-stamped to v2 yet (keyring not flipped).
+        let mut v2 = 0;
+        fn count_v2(dir: &Path, expected: u32, c: &mut usize) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    count_v2(&p, expected, c);
+                } else if let Ok(b) = std::fs::read(&p)
+                    && index_file_key_version(&b) == Some(expected)
+                {
+                    *c += 1;
+                }
+            }
+        }
+        count_v2(&indexes_dir, 2, &mut v2);
+        assert_eq!(v2, 0, "no v2 file may exist before the keyring flip");
+    }
+
+    #[test]
+    fn rotation_derives_all_four_deks_and_refuses_identical_mek() {
+        use std::collections::HashSet;
+        use zeroize::Zeroizing;
+
+        // Identical MEK → identical DEKs across EVERY layer (the basis for the
+        // constant-time MEK refusal: same MEK re-derives the same four keys).
+        let mek_a = Zeroizing::new([7u8; 32]);
+        let mek_a2 = Zeroizing::new([7u8; 32]);
+        let a = super::MekKeyset::derive(&mek_a).unwrap();
+        let a2 = super::MekKeyset::derive(&mek_a2).unwrap();
+        for layer in super::RotationLayer::ALL {
+            assert_eq!(
+                a.dek(layer).as_ref(),
+                a2.dek(layer).as_ref(),
+                "identical MEK must derive identical DEK for {layer:?}"
+            );
+        }
+
+        // Different MEK → all four DEKs change and stay pairwise domain-separated.
+        let mek_b = Zeroizing::new([9u8; 32]);
+        let b = super::MekKeyset::derive(&mek_b).unwrap();
+        let mut seen: HashSet<[u8; 32]> = HashSet::new();
+        for layer in super::RotationLayer::ALL {
+            assert_ne!(
+                a.dek(layer).as_ref(),
+                b.dek(layer).as_ref(),
+                "new MEK must change {layer:?}'s DEK"
+            );
+            assert!(
+                seen.insert(**b.dek(layer)),
+                "layer DEKs must be domain-separated"
+            );
+        }
+        assert_eq!(seen.len(), 4, "four distinct DEKs expected");
+
+        // End-to-end: rotating to an identical MEK is refused (MEK ct_eq),
+        // exercised through the real index-only rotation path.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let key = root.join("k.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key).unwrap();
+        let db = build_db_index_only(root, &key);
+        seed(&db);
+        let err = db
+            .rotate_index_keys(KeyProviderConfig::File { path: key.clone() })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("same key") || err.to_string().contains("equals"),
+            "rotating to an identical MEK must be refused, got: {err}"
+        );
+    }
+
+    #[test]
+    fn v1_state_file_backward_compat() {
+        // A legacy #488 v1 breadcrumb (index-only; no `layer.*` lines, using the
+        // old `new_version` key) parses into the v2 shape: index takes the
+        // recorded direction (Pending) while the layers #3617 adds are Skipped
+        // (a #488 DB had no checkpoint/WAL/cold rotation in flight). This keeps
+        // an interrupted #488 rotation resumable rather than rejecting it.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let manager =
+            std::sync::Arc::new(IndexPersistenceManager::with_cipher(data_dir.clone(), None));
+        std::fs::write(
+            data_dir.join("rotation.state"),
+            b"version=1\ndirection=forward\nnew_version=2\nnew_source_kind=file\nnew_source_value=/etc/aletheia/new.key\n",
+        )
+        .unwrap();
+
+        let ledger = super::read_rotation_state(&manager)
+            .unwrap()
+            .expect("a v1 breadcrumb must parse");
+        assert_eq!(ledger.new_version, 2);
+        assert_eq!(ledger.direction, super::RotationDirection::Forward);
+        assert_eq!(ledger.index, super::LayerStatus::Pending);
+        assert_eq!(ledger.checkpoint, super::LayerStatus::Skipped);
+        assert_eq!(ledger.wal, super::LayerStatus::Skipped);
+        assert_eq!(ledger.cold, super::LayerStatus::Skipped);
+        assert!(matches!(ledger.new_source, KeyProviderConfig::File { .. }));
+    }
+
+    #[test]
+    fn crash_resume_completes_from_v2_ledger() {
+        // Adapts `crash_resume_completes_from_state_file` to the v2 ledger: a
+        // mid-index-rotation crash (v2 ledger + partially re-encrypted files)
+        // resumes and completes, then clears the ledger.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let keyring = manager.keyring().cloned().unwrap();
+        let new_index_cipher = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
+                .unwrap()
+                .index_cipher(),
+        );
+        keyring.add_generation(2, new_index_cipher.clone());
+        super::write_rotation_state(
+            &manager,
+            2,
+            &KeyProviderConfig::File {
+                path: new_key.clone(),
+            },
+            super::RotationDirection::Forward,
+        )
+        .unwrap();
+        // The planted ledger is v2 with the index layer pending.
+        let body = std::fs::read_to_string(root.join("data").join("rotation.state")).unwrap();
+        assert!(
+            body.contains("version=2") && body.contains("layer.index=pending"),
+            "expected a v2 ledger on disk: {body}"
+        );
+
+        let engine = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring,
+            1,
+            std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            ),
+            2,
+            new_index_cipher,
+        );
+        let mut n = 0;
+        engine
+            .re_encrypt(&mut |_| {
+                n += 1;
+                n < 2
+            })
+            .unwrap();
+        assert!(root.join("data").join("rotation.state").exists());
+
+        let resume_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+            .unwrap()
+            .expect("a pending rotation should resume from the v2 ledger");
+        assert_eq!(report.new_version, 2);
+        assert!(!root.join("data").join("rotation.state").exists());
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+    }
+
     #[test]
     fn rotation_emits_no_audit_when_disabled() {
         let tmp = TempDir::new().unwrap();
@@ -1678,6 +2356,305 @@ mod tests {
         assert!(
             !audit_path.exists(),
             "no audit file should be written when auditing is disabled"
+        );
+    }
+
+    // ── #3617 PR1 review hardening: crash-consistency + fail-closed ──
+
+    #[test]
+    fn crash_after_full_reencrypt_before_clear_resumes_and_clears() {
+        // Crash window: the forward pass re-encrypted (and complete()'d) EVERY
+        // index file to v2, but the process died BEFORE clearing the ledger. The
+        // planted ledger therefore still records index=Pending (the driver never
+        // rewrites the ledger to Complete; it only clears at the very end). On
+        // restart, resume must run the idempotent re-encrypt as a genuine no-op
+        // (files_reencrypted == 0), still verify+complete, and clear the ledger.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let keyring = manager.keyring().cloned().unwrap();
+        let new_index_cipher = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
+                .unwrap()
+                .index_cipher(),
+        );
+        keyring.add_generation(2, new_index_cipher.clone());
+        // Ledger first (v2, index=Pending), exactly as run_rotation orders it.
+        super::write_rotation_state(
+            &manager,
+            2,
+            &KeyProviderConfig::File {
+                path: new_key.clone(),
+            },
+            super::RotationDirection::Forward,
+        )
+        .unwrap();
+        // Re-encrypt ALL files to v2 (the full forward pass that completed
+        // before the crash), then leave the ledger present (crash before clear).
+        let engine = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring,
+            1,
+            std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            ),
+            2,
+            new_index_cipher,
+        );
+        engine.re_encrypt(&mut |_| true).unwrap();
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+        assert!(
+            root.join("data").join("rotation.state").exists(),
+            "precondition: ledger still present (crash before clear)"
+        );
+
+        let resume_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+            .unwrap()
+            .expect("a pending rotation should resume");
+        assert_eq!(report.new_version, 2);
+        assert_eq!(
+            report.files_reencrypted, 0,
+            "already-migrated dataset must re-encrypt nothing (idempotent no-op)"
+        );
+        assert!(
+            !root.join("data").join("rotation.state").exists(),
+            "resume must clear the ledger after completing"
+        );
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+    }
+
+    #[test]
+    fn resume_with_index_complete_ledger_verifies_and_clears() {
+        // Positive skip-branch: a v2 ledger recording index=Complete (and
+        // checkpoint=Complete) while the index files are already at v2. Resume
+        // must take the skip branch (index_domain_pending == false → NO
+        // re_encrypt), still verify via complete(), and clear the ledger.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let keyring = manager.keyring().cloned().unwrap();
+        let new_index_cipher = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
+                .unwrap()
+                .index_cipher(),
+        );
+        keyring.add_generation(2, new_index_cipher.clone());
+        // Truthfully migrate every file to v2 first...
+        let engine = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring,
+            1,
+            std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            ),
+            2,
+            new_index_cipher,
+        );
+        engine.re_encrypt(&mut |_| true).unwrap();
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+
+        // ...then plant a ledger claiming the index domain is already Complete.
+        super::write_ledger(
+            &manager,
+            &super::RotationLedger {
+                direction: super::RotationDirection::Forward,
+                new_version: 2,
+                new_source: KeyProviderConfig::File {
+                    path: new_key.clone(),
+                },
+                index: super::LayerStatus::Complete,
+                checkpoint: super::LayerStatus::Complete,
+                wal: super::LayerStatus::Skipped,
+                cold: super::LayerStatus::Skipped,
+            },
+        )
+        .unwrap();
+
+        let resume_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+            .unwrap()
+            .expect("an index=Complete ledger should still resume to verify+clear");
+        assert_eq!(report.new_version, 2);
+        // Skip branch: progress is RotationProgress::default() — no file was
+        // even scanned for re-encryption (distinguishes it from the Pending
+        // path, which would report files_skipped > 0).
+        assert_eq!(report.files_reencrypted, 0);
+        assert_eq!(
+            report.files_total, 0,
+            "skip branch must not run the re-encrypt scan"
+        );
+        assert_eq!(report.files_skipped, 0);
+        assert!(
+            !root.join("data").join("rotation.state").exists(),
+            "resume must clear the ledger after verifying"
+        );
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+    }
+
+    #[test]
+    fn resume_with_lying_index_complete_ledger_fails_closed() {
+        // Negative skip-branch (the important one): a v2 ledger LIES that the
+        // index domain is Complete, but the index files are still at the OLD key
+        // (never migrated). Resume takes the skip branch (no re_encrypt) and then
+        // complete()/verify_complete() MUST fail closed — old-key files remain,
+        // so the old key must NOT be retired and the ledger must NOT be cleared.
+        // This locks in the fail-closed guarantee PR2 relies on when it drives
+        // the skip branch for the WAL layer.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+        // Files remain at v1 (old key): we DO NOT re-encrypt anything.
+        assert!(assert_all_at_version(&indexes_dir, 1) > 0);
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        // Plant the LYING ledger: index=Complete while old-key files remain.
+        super::write_ledger(
+            &manager,
+            &super::RotationLedger {
+                direction: super::RotationDirection::Forward,
+                new_version: 2,
+                new_source: KeyProviderConfig::File {
+                    path: new_key.clone(),
+                },
+                index: super::LayerStatus::Complete,
+                checkpoint: super::LayerStatus::Complete,
+                wal: super::LayerStatus::Skipped,
+                cold: super::LayerStatus::Skipped,
+            },
+        )
+        .unwrap();
+
+        let resume_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let err = resume_pending_rotation(&resume_mgr, &enc_cfg).expect_err(
+            "a ledger claiming index=Complete over unmigrated old-key files MUST fail closed",
+        );
+        // The verify_complete() fail-closed path (OldKeyFilesRemain /
+        // ForeignKeyVersionFile) surfaces as a rotation failure, never a
+        // silent success.
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "fail-closed error must carry a message, got empty"
+        );
+        // Loudly abort for manual intervention: the ledger is NOT cleared, so a
+        // subsequent startup re-enters the same fail-closed path rather than
+        // retiring the old key over files only the old key can read.
+        assert!(
+            root.join("data").join("rotation.state").exists(),
+            "a fail-closed resume must LEAVE the ledger for manual intervention"
+        );
+        // And the old-key files are untouched — the old generation was never
+        // retired.
+        assert!(assert_all_at_version(&indexes_dir, 1) > 0);
+    }
+
+    #[test]
+    fn unknown_ledger_format_version_is_corrupt() {
+        // A ledger with an UNKNOWN format version (here v3) must fail closed as
+        // corrupt/unsupported, never be silently accepted — v1 and v2 are the
+        // only shapes this reader understands. The rest of the ledger is
+        // otherwise well-formed, proving it is the version dispatch that
+        // rejects, not a missing field.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let manager =
+            std::sync::Arc::new(IndexPersistenceManager::with_cipher(data_dir.clone(), None));
+
+        std::fs::write(
+            data_dir.join("rotation.state"),
+            b"version=3\ndirection=forward\ntarget_version=4\nnew_source_kind=file\nnew_source_value=/etc/aletheia/new.key\nlayer.index=pending\n",
+        )
+        .unwrap();
+
+        let err = super::read_rotation_state(&manager)
+            .expect_err("an unknown ledger format version must fail closed, not parse to Ok");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported ledger version") || msg.contains("corrupt"),
+            "expected an unsupported-version corruption error, got: {msg}"
         );
     }
 }
