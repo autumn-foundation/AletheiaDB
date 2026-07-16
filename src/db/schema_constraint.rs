@@ -559,7 +559,10 @@ mod tests {
         let registry = ConstraintRegistry::new();
         load_sidecar(&path, &registry);
 
-        assert!(path.exists(), "a valid current-version sidecar is not moved");
+        assert!(
+            path.exists(),
+            "a valid current-version sidecar is not moved"
+        );
         let listed = registry.export_schema_constraints();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].label, "Person");
