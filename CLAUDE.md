@@ -407,6 +407,28 @@ serializable `DatabaseStats`; every field is an O(1)/cached counter read
 (no version scans; see Issue #212), so it is safe to call frequently. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#database-stats-and-storage-tier-health-database_stats).
 
+**Per-query resource limits (Issue #3368)**: the wall-clock-timeout and
+result-byte-cap enforcement that guards the `query` tool now also governs six
+read tools — `traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`,
+`get_edge_at_time`, `find_nodes_at_time` — wrapped at the dispatch seam
+(`RESOURCE_LIMITED_READ_TOOLS`), reusing the `query` tool's timeout thread-race,
+bounded in-flight-worker DoS guard, and structured error builders. A breach
+returns `RESOURCE_EXHAUSTED` with `details.dimension`
+(`wall_clock_timeout`, retriable; `result_bytes`, non-retriable), exactly as
+the `query` tool. Ordering is cursor (#3360) → resource cap → token budget
+(#3353); the effective-`0`-timeout fast path runs inline with zero overhead, so
+the default config is behavior-identical. `database_stats` additively surfaces a
+`resource_limits` block (`timeout_terminations`, `byte_cap_terminations`,
+`override_rejections`) from process-lifetime atomic counters (the
+`DatabaseStats` struct/storage layer are untouched; row-cap breaches are **not**
+counted — they self-disclose via `truncated`/`has_more`). **v1 scope for the six
+read tools:** server defaults only (no per-call `limits` override), **post-hoc**
+byte cap (the response is fully serialized then rejected if over cap). **Deferred
+to Lane-2:** memory-budget dimension, true engine-level cancellation, Rust
+builder API, benchmark-gated fast-path proof, concurrency soak, HTTP in-flight
+parity, incremental byte-cap for these tools. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#extended-to-the-read-tools-issue-3368-residue).
+
 **Valid-time writes (Issue #3221)**: `create_node`, `create_edge`,
 `update_node`, `update_edge`, `delete_node`, and `delete_edge` accept an
 optional `valid_time` (ISO 8601 / RFC 3339 or microseconds since epoch) so a
