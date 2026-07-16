@@ -961,14 +961,23 @@ impl QueryResults {
             (false, false, false);
         let mut edge_count = 0usize;
         for row in &rows {
-            has_any_scores = has_any_scores || row.score.is_some();
-            has_any_versions = has_any_versions || row.timestamp.is_some();
+            // Only edge/edge-id rows may flip the score/version gates: this projection is
+            // edge-only, so a node row that happens to carry a score/timestamp in a
+            // hypothetical mixed stream must not turn the edge result's `scores`/`versions`
+            // into an all-default-padded `Some`. (EdgeScan yields homogeneous edge rows, so
+            // this is an honesty guard, not a reachable correctness bug.)
             match row.entity {
                 EntityResult::Edge(_) => {
                     has_any_full_edges = true;
                     edge_count += 1;
+                    has_any_scores = has_any_scores || row.score.is_some();
+                    has_any_versions = has_any_versions || row.timestamp.is_some();
                 }
-                EntityResult::EdgeId(_) => edge_count += 1,
+                EntityResult::EdgeId(_) => {
+                    edge_count += 1;
+                    has_any_scores = has_any_scores || row.score.is_some();
+                    has_any_versions = has_any_versions || row.timestamp.is_some();
+                }
                 _ => {}
             }
         }
@@ -1161,6 +1170,34 @@ impl EdgeQueryResult {
             ),
             _ => None,
         }
+    }
+
+    /// Get edges zipped with their similarity scores (if available), mirroring
+    /// [`QueryResult::nodes_with_scores`]. `Some` iff at least one collected edge row carried
+    /// a score.
+    #[must_use]
+    pub fn edges_with_scores(&self) -> Option<Vec<(EdgeId, f32)>> {
+        self.scores.as_ref().map(|scores| {
+            self.edges
+                .iter()
+                .zip(scores.iter())
+                .map(|(edge, score)| (*edge, *score))
+                .collect()
+        })
+    }
+
+    /// Get edges zipped with their version IDs (if available), mirroring
+    /// [`QueryResult::nodes_with_versions`]. `Some` iff at least one collected edge row carried
+    /// a timestamp.
+    #[must_use]
+    pub fn edges_with_versions(&self) -> Option<Vec<(EdgeId, VersionId)>> {
+        self.versions.as_ref().map(|versions| {
+            self.edges
+                .iter()
+                .zip(versions.iter())
+                .map(|(edge, version)| (*edge, *version))
+                .collect()
+        })
     }
 }
 
@@ -2108,6 +2145,209 @@ mod tests {
         let r = EdgeQueryResult::default();
         assert!(r.is_empty());
         assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn test_collect_structured_edges_bare_id_pads_scores_and_versions() {
+        // A bare `EdgeId` row following a full edge that carries a score and a timestamp
+        // must pad the score/version vectors so both stay parallel to `edges` (length 2).
+        let rows = vec![
+            QueryRow::with_score(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)), 0.9)
+                .at_time(100.into()),
+            QueryRow::from_entity(EntityResult::EdgeId(EdgeId::new(11).unwrap())),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        assert_eq!(structured.len(), 2);
+
+        let scores = structured.scores.expect("scores present");
+        assert_eq!(scores, vec![0.9, 0.0], "index-1 padded, aligned to edges");
+
+        let versions = structured.versions.expect("versions present");
+        assert_eq!(
+            versions,
+            vec![VersionId::new(100).unwrap(), VersionId::new(0).unwrap()],
+            "index-1 padded with VersionId(0), aligned to edges"
+        );
+    }
+
+    #[test]
+    fn test_collect_structured_edges_partial_score_and_timestamp_pads() {
+        // Two full edge rows where ONLY the first carries a score and ONLY the first a
+        // timestamp: the second row is padded (default score 0.0, VersionId(0)) so both
+        // vectors stay aligned to `edges`.
+        let rows = vec![
+            QueryRow::with_score(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)), 0.9)
+                .at_time(100.into()),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(11, 2, 3, "KNOWS", 2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        assert_eq!(structured.len(), 2);
+
+        let scores = structured.scores.expect("scores present");
+        assert_eq!(scores, vec![0.9, 0.0], "index-1 padded default score");
+
+        let versions = structured.versions.expect("versions present");
+        assert_eq!(
+            versions,
+            vec![VersionId::new(100).unwrap(), VersionId::new(0).unwrap()],
+            "index-1 padded default version"
+        );
+    }
+
+    #[test]
+    fn test_collect_structured_edges_negative_timestamp_clamped() {
+        // A negative wallclock is clamped to VersionId(0) (reachable via From<i64>).
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)))
+                .at_time((-5i64).into()),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        let versions = structured.versions.expect("versions present");
+        assert_eq!(versions[0], VersionId::new(0).unwrap());
+    }
+
+    #[test]
+    fn test_collect_structured_edges_large_timestamp_boundary() {
+        // Mirrors the node path's `test_collect_structured_with_invalid_timestamp`:
+        // i64::MAX - 1000 as u64 is still < MAX_VALID_ID, so the conversion succeeds.
+        // The `InvalidParameter` (MAX_VALID_ID) arm is therefore provably unreachable
+        // through the safe `Timestamp` type -- a corrupted/out-of-range wallclock is the
+        // only way to trip it -- consistent with the node path.
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)))
+                .at_time((i64::MAX - 1000).into()),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let result = results.collect_structured_edges();
+        assert!(result.is_ok());
+        let versions = result.unwrap().versions.expect("versions present");
+        assert_eq!(
+            versions[0],
+            VersionId::new((i64::MAX - 1000) as u64).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_collect_edges_empty_stream() {
+        let rows: Vec<QueryRow> = vec![];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let edges = results.collect_edges().unwrap();
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn test_collect_edges_drops_bare_edge_ids() {
+        // `collect_edges` matches only `EntityResult::Edge` and silently drops bare
+        // `EdgeId` rows -- a real behavior contrast with `collect_structured_edges`, which
+        // keeps them (populating `edges`). Assert both halves of the contrast.
+        let make_rows = || {
+            vec![
+                QueryRow::from_entity(EntityResult::EdgeId(EdgeId::new(10).unwrap())),
+                QueryRow::from_entity(EntityResult::EdgeId(EdgeId::new(11).unwrap())),
+            ]
+        };
+
+        let dropped = QueryResults::new(Box::new(MockIterator::new(make_rows())))
+            .collect_edges()
+            .unwrap();
+        assert!(dropped.is_empty(), "collect_edges drops bare EdgeId rows");
+
+        let kept = QueryResults::new(Box::new(MockIterator::new(make_rows())))
+            .collect_structured_edges()
+            .unwrap();
+        assert_eq!(kept.len(), 2, "collect_structured_edges keeps EdgeId rows");
+    }
+
+    #[test]
+    fn test_edge_query_result_edges_with_scores() {
+        let rows = vec![
+            QueryRow::with_score(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)), 0.9),
+            QueryRow::with_score(EntityResult::Edge(edge_with(11, 2, 3, "KNOWS", 2)), 0.8),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        let pairs = structured.edges_with_scores().expect("scores available");
+        assert_eq!(
+            pairs,
+            vec![
+                (EdgeId::new(10).unwrap(), 0.9),
+                (EdgeId::new(11).unwrap(), 0.8),
+            ]
+        );
+
+        // No scores -> None (mirrors nodes_with_scores).
+        let no_scores =
+            QueryResults::new(Box::new(MockIterator::new(vec![QueryRow::from_entity(
+                EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)),
+            )])))
+            .collect_structured_edges()
+            .unwrap();
+        assert!(no_scores.edges_with_scores().is_none());
+    }
+
+    #[test]
+    fn test_edge_query_result_edges_with_versions() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)))
+                .at_time(100.into()),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(11, 2, 3, "KNOWS", 2)))
+                .at_time(200.into()),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        let pairs = structured
+            .edges_with_versions()
+            .expect("versions available");
+        assert_eq!(
+            pairs,
+            vec![
+                (EdgeId::new(10).unwrap(), VersionId::new(100).unwrap()),
+                (EdgeId::new(11).unwrap(), VersionId::new(200).unwrap()),
+            ]
+        );
+
+        // No timestamps -> None (mirrors nodes_with_versions).
+        let no_versions =
+            QueryResults::new(Box::new(MockIterator::new(vec![QueryRow::from_entity(
+                EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1)),
+            )])))
+            .collect_structured_edges()
+            .unwrap();
+        assert!(no_versions.edges_with_versions().is_none());
+    }
+
+    #[test]
+    fn test_collect_structured_edges_node_score_does_not_flip_gate() {
+        // Honesty guard (finding 7): a node row carrying a score/timestamp in a mixed
+        // stream must NOT turn the edge result's `scores`/`versions` into all-default `Some`.
+        // Only edge/edge-id rows may flip the gate. (Unreachable in practice -- EdgeScan is
+        // homogeneous -- but proves the two-pass gate is edge-only.)
+        let rows = vec![
+            QueryRow::with_score(EntityResult::Node(test_node(1)), 0.7).at_time(999.into()),
+            QueryRow::from_entity(EntityResult::Edge(edge_with(10, 1, 2, "KNOWS", 1))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured_edges().unwrap();
+        assert_eq!(structured.len(), 1, "only the edge row survives");
+        assert!(
+            structured.scores.is_none(),
+            "node-only score must not gate edge scores on"
+        );
+        assert!(
+            structured.versions.is_none(),
+            "node-only timestamp must not gate edge versions on"
+        );
     }
 
     #[test]
