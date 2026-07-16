@@ -100,14 +100,34 @@ difference between one `< 30ms` response and 100+ sequential calls.
   time; it defaults to *now* and is independently pinnable with
   `AS OF SYSTEM_TIME <ts>` on the clause. A correction recorded **after** the pin
   never rewrites the pinned analytics (later corrections do not change the past).
-  Same-`valid_from` corrections keep the latest belief `≤` the pin.
+  *v1 pinning scope:* the pin is exact for **same-`valid_from` corrections** — a
+  restatement of a fact's value at an already-recorded `valid_from`, recorded
+  after the pin, is correctly excluded. It is **not** a full as-of-transaction-time
+  snapshot across the whole valid axis: a participant's believed timeline is
+  reconstructed from every version with `transaction_from ≤ pin` (mirroring the
+  `#3363` window reconstruction), so a distinct-`valid_from` fact whose
+  transaction interval was later closed is still included. Full
+  transaction-interval-`contains` scoping is a tracked follow-up (it is
+  deliberately *not* used here because, under the append-only supersession model
+  where a superseded version keeps its valid interval open, it would drop
+  genuinely-held earlier history).
 - **Edge validity is honored at each instant.** When a participant is bound via a
   relationship, that edge's validity gates the pairing: at an instant where the
   edge is not valid, the participant is treated as absent (its columns are `null`
   in event mode; the sub-interval is dropped in overlap mode).
+- **Valid-time closure is honored.** A participant whose covering version's valid
+  interval has **closed** — a retraction (`#3230`), a delete, or a valid-time gap
+  before a later version — is treated as **absent** from the close instant onward,
+  symmetric with the edge-gate path: its columns are `null` in event mode and the
+  sub-interval ends (or is dropped) in overlap mode. A retracted or deleted
+  participant is *not* presumed present forever.
 - **Absent participants.** A participant with no state at/before the alignment
   instant (e.g. an order placed before the customer existed) yields `null`
   columns in event mode and drops the sub-interval in overlap mode.
+- **Event-aligned driver.** The driver is **always present at its own event** by
+  construction — it is ungated even when it is the far node of a traversal
+  (`ALIGN EVENTS DRIVER <far-node>`), so a driver event never emits a row with
+  the driver's own column `null`.
 
 ## Composition and access
 
@@ -125,12 +145,18 @@ difference between one `< 30ms` response and 100+ sequential calls.
   single-hop traversal (`MATCH (a)-[:R]->(b)`, both directions). Multi-hop,
   variable-length, and comma-separated patterns return a structured
   `UnsupportedFeature` error. Every node in the pattern must be named.
-- **Fully retracted / deleted edges cannot be re-bound by a `MATCH`.** Like
-  `#3225` AS OF traversal, candidate edges are enumerated from the *current*
-  adjacency index, so an edge whose validity is entirely in the past (retracted)
-  is not found by the pattern — anchor the binding with an outer `AS OF` at a
-  point where the edge still held (both dimensions, per `#3225`). The gating math
-  itself handles closed intervals; only candidate discovery is current-state.
+- **Fully retracted / deleted edges (and nodes) cannot be re-bound by a
+  `MATCH`.** Like `#3225` AS OF traversal, candidate entities are enumerated from
+  the *current* adjacency / label index, so an edge or node whose validity is
+  entirely in the past (retracted / deleted) is not found by the pattern — anchor
+  the binding with an outer `AS OF` at a point where it still held (both
+  dimensions, per `#3225`). This is a **candidate-discovery** limitation only:
+  once an entity *is* bound, the alignment fully honors **closed valid intervals**
+  on both the participant node timeline (a mid-range retraction / delete / gap
+  makes it absent from the close instant) and the gating edge — so a participant
+  that is retracted *within* the range while still bindable is correctly nulled
+  (event mode) or ends its co-hold sub-interval (overlap mode) at the retraction
+  instant.
 - **Range cap.** A range that would generate more than `MAX_ALIGN_INSTANTS`
   (100,000) alignment instants / boundaries is rejected with a structured
   `InvalidParameter` error.

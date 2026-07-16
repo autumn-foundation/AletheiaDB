@@ -46,12 +46,20 @@ pub enum AlignMode {
 }
 
 /// One believed change-point in an entity's valid-time timeline: the entity's
-/// reconstructed state (`properties`) holds from `valid_from` until the next
-/// change-point (or forever, for the last one).
+/// reconstructed state (`properties`) holds over the half-open valid interval
+/// `[valid_from, valid_to)`. `valid_to == i64::MAX` marks an open (never
+/// retracted / deleted) interval that holds until the next change-point (or
+/// forever, for the last one); a finite `valid_to` marks a **closed** interval
+/// (a retraction #3230, a delete tombstone, or a gap) after which the entity is
+/// **absent** — the covering version stops contributing at `valid_to`.
 #[derive(Debug, Clone)]
 pub struct ChangePoint {
     /// Valid-time interval start, microseconds since epoch.
     pub valid_from: i64,
+    /// Valid-time interval end (exclusive), microseconds since epoch;
+    /// `i64::MAX` for an open interval. The entity is absent at/after this
+    /// instant unless a later change-point re-establishes it.
+    pub valid_to: i64,
     /// The version's reconstructed properties at this change-point.
     pub properties: PropertyMap,
 }
@@ -75,12 +83,24 @@ impl Timeline {
         Timeline { changes }
     }
 
-    /// Index of the most recent change-point at or before `instant`
-    /// (`valid_from <= instant`), or `None` if the entity did not yet exist.
+    /// Index of the version covering `instant`: the most recent change-point at
+    /// or before `instant` (`valid_from <= instant`), **provided that
+    /// change-point's valid interval still covers `instant`** (`instant <
+    /// valid_to`). Returns `None` if the entity did not yet exist, or its
+    /// covering version's valid interval has closed (a retraction / delete /
+    /// valid-time gap): a closed or deleted node is **absent**, not present
+    /// forever (Issue #3379 correctness — symmetric with the edge-gate path).
     #[must_use]
     pub fn sample_index_at(&self, instant: i64) -> Option<usize> {
         // changes is ascending; find the last one with valid_from <= instant.
-        self.changes.iter().rposition(|c| c.valid_from <= instant)
+        let idx = self.changes.iter().rposition(|c| c.valid_from <= instant)?;
+        // Honor the covering version's closed valid_to: at/after it the entity
+        // is absent (retraction #3230 / delete / gap before the next version).
+        if instant >= self.changes[idx].valid_to {
+            None
+        } else {
+            Some(idx)
+        }
     }
 }
 
@@ -189,6 +209,37 @@ pub enum AlignError {
     TooManyInstants(usize),
 }
 
+/// Map an [`AlignError`] to the structured [`crate::core::error::Error`] the
+/// executor/MCP surface renders (an `InvalidParameter` / `UnsupportedFeature`
+/// [`crate::core::error::QueryError`]), mirroring the converter's
+/// `window_error_to_query_error`. Produces a human-readable sentence rather
+/// than a `Debug`-formatted enum (so the `TooManyInstants` cap names the
+/// [`MAX_ALIGN_INSTANTS`] limit instead of surfacing `TooManyInstants(100001)`).
+#[must_use]
+pub(crate) fn align_error_to_query_error(err: AlignError) -> crate::core::error::Error {
+    use crate::core::error::{Error, QueryError};
+    let reason = match err {
+        AlignError::EmptyRange => {
+            "the valid-time range end must be strictly after the start".to_string()
+        }
+        AlignError::NoParticipants => {
+            "a temporal join requires at least one participant entity".to_string()
+        }
+        AlignError::DriverOutOfRange => {
+            "the event-aligned driver is not a bound participant in the pattern".to_string()
+        }
+        AlignError::TooManyInstants(n) => format!(
+            "the valid-time range and entity volatility would generate {n} alignment \
+             instants / boundaries, exceeding the limit of {MAX_ALIGN_INSTANTS}; narrow the \
+             range or reduce the number of participants"
+        ),
+    };
+    Error::Query(QueryError::InvalidParameter {
+        parameter: "temporal join".to_string(),
+        reason,
+    })
+}
+
 /// Event-aligned join (Issue #3379, [`AlignMode::Events`]).
 ///
 /// Emits one row per distinct driver change-point instant `T` with
@@ -256,29 +307,47 @@ pub fn align_overlap(
         return Err(AlignError::EmptyRange);
     }
 
-    // Boundary set: `from`, every participant change-point in [from, to), and
-    // every gating-edge interval boundary in (from, to). A BTreeSet keeps them
-    // sorted and unique.
+    // Boundary set: `from`, every participant change-point boundary in the
+    // range (both `valid_from` — an appearance / value change — and a *closed*
+    // `valid_to` — a retraction / delete / gap where the entity becomes
+    // absent, Issue #3379), and every gating-edge interval boundary in
+    // (from, to). A BTreeSet keeps them sorted and unique. The cap is checked
+    // inside the inner loops so the boundary count is tightly bounded (matches
+    // `align_events`).
     let mut boundaries: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     boundaries.insert(from);
     for p in participants {
         for cp in &p.timeline.changes {
             if cp.valid_from >= from && cp.valid_from < to {
                 boundaries.insert(cp.valid_from);
+                if boundaries.len() > MAX_ALIGN_INSTANTS {
+                    return Err(AlignError::TooManyInstants(boundaries.len()));
+                }
+            }
+            // A closed valid_to ends the entity's presence: split the tiling
+            // there so the sub-interval after it is dropped (absent).
+            if cp.valid_to > from && cp.valid_to < to {
+                boundaries.insert(cp.valid_to);
+                if boundaries.len() > MAX_ALIGN_INSTANTS {
+                    return Err(AlignError::TooManyInstants(boundaries.len()));
+                }
             }
         }
         if let Some(gate) = &p.gate {
             for (s, e) in &gate.intervals {
                 if *s > from && *s < to {
                     boundaries.insert(*s);
+                    if boundaries.len() > MAX_ALIGN_INSTANTS {
+                        return Err(AlignError::TooManyInstants(boundaries.len()));
+                    }
                 }
                 if *e > from && *e < to {
                     boundaries.insert(*e);
+                    if boundaries.len() > MAX_ALIGN_INSTANTS {
+                        return Err(AlignError::TooManyInstants(boundaries.len()));
+                    }
                 }
             }
-        }
-        if boundaries.len() > MAX_ALIGN_INSTANTS {
-            return Err(AlignError::TooManyInstants(boundaries.len()));
         }
     }
 
@@ -312,12 +381,29 @@ mod tests {
         parse_boundary_micros(rfc).unwrap()
     }
 
-    /// Build a timeline of `(valid_from_rfc, tier_int)` change-points.
+    /// Build a timeline of `(valid_from_rfc, tier_int)` change-points, each with
+    /// an open (`i64::MAX`) valid interval — the common "never retracted" case.
     fn timeline(points: &[(&str, i64)]) -> Timeline {
         let changes = points
             .iter()
             .map(|(vf, tier)| ChangePoint {
                 valid_from: t(vf),
+                valid_to: i64::MAX,
+                properties: PropertyMapBuilder::new().insert("v", *tier).build(),
+            })
+            .collect();
+        Timeline::from_changes(changes)
+    }
+
+    /// Build a timeline of `(valid_from_rfc, valid_to_rfc_or_none, tier_int)`
+    /// change-points, so a closed (retracted / deleted / gapped) valid interval
+    /// can be expressed. `None` for the end means open (`i64::MAX`).
+    fn timeline_closed(points: &[(&str, Option<&str>, i64)]) -> Timeline {
+        let changes = points
+            .iter()
+            .map(|(vf, vt, tier)| ChangePoint {
+                valid_from: t(vf),
+                valid_to: vt.map_or(i64::MAX, t),
                 properties: PropertyMapBuilder::new().insert("v", *tier).build(),
             })
             .collect();
@@ -567,15 +653,157 @@ mod tests {
             changes: vec![
                 ChangePoint {
                     valid_from: t("2024-03-01"),
+                    valid_to: i64::MAX,
                     properties: PropertyMapBuilder::new().insert("v", 1).build(),
                 },
                 ChangePoint {
                     valid_from: t("2024-03-01"),
+                    valid_to: i64::MAX,
                     properties: PropertyMapBuilder::new().insert("v", 2).build(),
                 },
             ],
         });
         let rows = align_events(&[driver], 0, t("2024-01-01"), t("2024-12-01")).unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn sample_index_absent_at_or_after_closed_valid_to() {
+        // A single closed change-point: present in [Jan, Mar), absent from Mar.
+        let tl = timeline_closed(&[("2024-01-01", Some("2024-03-01"), 1)]);
+        assert_eq!(tl.sample_index_at(t("2023-12-31")), None); // before it existed
+        assert_eq!(tl.sample_index_at(t("2024-01-01")), Some(0)); // at valid_from
+        assert_eq!(tl.sample_index_at(t("2024-02-15")), Some(0)); // interior
+        assert_eq!(tl.sample_index_at(t("2024-03-01")), None); // exactly valid_to (excluded)
+        assert_eq!(tl.sample_index_at(t("2024-06-01")), None); // after retraction
+    }
+
+    #[test]
+    fn sample_index_absent_across_a_valid_time_gap() {
+        // Present [Jan, Mar), gap [Mar, Jun), present again [Jun, ..).
+        let tl = timeline_closed(&[
+            ("2024-01-01", Some("2024-03-01"), 1),
+            ("2024-06-01", None, 2),
+        ]);
+        assert_eq!(v_at_tl(&tl, tl.sample_index_at(t("2024-02-01"))), Some(1)); // first interval
+        assert_eq!(tl.sample_index_at(t("2024-04-15")), None); // in the gap -> absent
+        assert_eq!(v_at_tl(&tl, tl.sample_index_at(t("2024-07-01"))), Some(2)); // re-established
+    }
+
+    #[test]
+    fn events_participant_nulled_after_retraction() {
+        // Driver has an event before AND after the participant is retracted at
+        // Jun; the participant's column is null at the post-retraction event.
+        let driver = Participant::ungated(timeline(&[("2024-03-01", 10), ("2024-09-01", 20)]));
+        let participant =
+            Participant::ungated(timeline_closed(&[("2024-01-01", Some("2024-06-01"), 7)]));
+        let parts = vec![driver, participant];
+        let rows = align_events(&parts, 0, t("2024-01-01"), t("2025-01-01")).unwrap();
+        assert_eq!(rows.len(), 2);
+        // Mar event: participant still present (before Jun retraction).
+        assert_eq!(v_at(&parts[1], rows[0].sample_index[1]), Some(7));
+        // Sep event: participant retracted -> absent (None -> null column).
+        assert_eq!(rows[1].sample_index[1], None);
+    }
+
+    #[test]
+    fn overlap_co_hold_ends_at_participant_retraction() {
+        // Product held all range; supplier retracted at Jun -> the co-hold
+        // sub-interval must END at Jun, not run to the range end.
+        let product = Participant::ungated(timeline(&[("2024-01-01", 100)]));
+        let supplier =
+            Participant::ungated(timeline_closed(&[("2024-01-01", Some("2024-06-01"), 5)]));
+        let parts = vec![product, supplier];
+        let rows = align_overlap(&parts, t("2024-01-01"), t("2024-12-01")).unwrap();
+        // Exactly one co-hold sub-interval: [Jan, Jun); [Jun, Dec) is dropped
+        // because the supplier is absent after its retraction.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].coordinate,
+            AlignCoordinate::Interval {
+                from: t("2024-01-01"),
+                to: t("2024-06-01")
+            }
+        );
+        assert_eq!(v_at(&parts[0], rows[0].sample_index[0]), Some(100));
+        assert_eq!(v_at(&parts[1], rows[0].sample_index[1]), Some(5));
+    }
+
+    #[test]
+    fn errors_zero_width_range_is_empty_range_both_modes() {
+        // from == to: an exact zero-width range is empty for both modes.
+        let p = Participant::ungated(timeline(&[("2024-01-01", 1)]));
+        let one = std::slice::from_ref(&p);
+        assert_eq!(
+            align_events(one, 0, t("2024-01-01"), t("2024-01-01")),
+            Err(AlignError::EmptyRange)
+        );
+        assert_eq!(
+            align_overlap(one, t("2024-01-01"), t("2024-01-01")),
+            Err(AlignError::EmptyRange)
+        );
+    }
+
+    #[test]
+    fn errors_overlap_inverted_range_is_empty_range() {
+        // to < from: an inverted range is empty for overlap mode too (events
+        // is already covered in `errors_empty_range_and_no_participants_...`).
+        let p = Participant::ungated(timeline(&[("2024-01-01", 1)]));
+        let one = std::slice::from_ref(&p);
+        assert_eq!(
+            align_overlap(one, t("2024-02-01"), t("2024-01-01")),
+            Err(AlignError::EmptyRange)
+        );
+    }
+
+    #[test]
+    fn errors_too_many_instants_both_modes_and_maps_to_invalid_parameter() {
+        use crate::core::error::{Error, QueryError};
+        // Build a driver/participant with > MAX_ALIGN_INSTANTS distinct
+        // change-points (one microsecond apart) so both modes trip the cap.
+        let changes: Vec<ChangePoint> = (0..=(MAX_ALIGN_INSTANTS as i64 + 1))
+            .map(|i| ChangePoint {
+                valid_from: i,
+                valid_to: i64::MAX,
+                properties: PropertyMapBuilder::new().insert("v", i).build(),
+            })
+            .collect();
+        let p = Participant::ungated(Timeline::from_changes(changes));
+        let one = std::slice::from_ref(&p);
+        let from = 0;
+        let to = MAX_ALIGN_INSTANTS as i64 + 5;
+        assert_eq!(
+            align_events(one, 0, from, to),
+            Err(AlignError::TooManyInstants(MAX_ALIGN_INSTANTS + 1))
+        );
+        assert!(matches!(
+            align_overlap(one, from, to),
+            Err(AlignError::TooManyInstants(_))
+        ));
+        // The cap surfaces as a structured InvalidParameter, not a Debug dump.
+        let mapped =
+            align_error_to_query_error(AlignError::TooManyInstants(MAX_ALIGN_INSTANTS + 1));
+        match mapped {
+            Error::Query(QueryError::InvalidParameter { reason, .. }) => {
+                assert!(
+                    reason.contains(&MAX_ALIGN_INSTANTS.to_string()),
+                    "reason should name the limit, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("TooManyInstants"),
+                    "reason should be a human sentence, not a Debug dump: {reason}"
+                );
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
+
+    /// Read the `v` int at a raw timeline index (for closed-timeline tests).
+    fn v_at_tl(tl: &Timeline, idx: Option<usize>) -> Option<i64> {
+        let i = idx?;
+        match tl.changes[i].properties.get("v") {
+            Some(crate::core::property::PropertyValue::Int(n)) => Some(*n),
+            _ => None,
+        }
     }
 }

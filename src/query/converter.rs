@@ -801,7 +801,7 @@ impl AstConverter {
         source: &SourceClause,
     ) -> Result<TemporalAlignSpec> {
         // Build the participant plan from the (supported) pattern shape.
-        let participants = Self::align_participants(source)?;
+        let mut participants = Self::align_participants(source)?;
         let index_of =
             |var: &str| -> Option<usize> { participants.iter().position(|p| p.var == var) };
 
@@ -875,6 +875,19 @@ impl AstConverter {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+
+        // The event-aligned driver must be **present at its own event** by
+        // definition, so it is ungated by construction: if the user names the
+        // FAR node of a traversal as DRIVER, the connecting edge would
+        // otherwise gate the driver and null the driver's OWN column at a
+        // change-point where the edge is not valid — contradicting the
+        // invariant (Issue #3379 review finding). Removing the driver's gate
+        // makes its events fire with the driver present regardless of the
+        // connecting edge's validity. (Done after `index_of` is no longer
+        // borrowed.)
+        if mode == JoinAlignMode::Events {
+            participants[driver_index].edge_gate_path_index = None;
+        }
 
         Ok(TemporalAlignSpec {
             mode,

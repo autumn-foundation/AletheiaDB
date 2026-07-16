@@ -3642,72 +3642,102 @@ impl TemporalJoinIterator {
 
     /// Reconstruct a node's believed valid-time timeline as of `as_of`: every
     /// version recorded by `as_of` (`transaction_from <= as_of`) contributes a
-    /// change-point at its `valid_from`; same-`valid_from` corrections keep the
-    /// latest belief (mirrors the #3363 believed-version reconstruction).
+    /// change-point over its half-open valid interval `[valid_from, valid_to)`;
+    /// same-`valid_from` corrections keep the latest belief (mirrors the #3363
+    /// believed-version reconstruction). A retraction (#3230) / delete closes
+    /// the covering version's `valid_to`, so the entity becomes **absent** at/
+    /// after it rather than presumed present forever (Issue #3379 correctness,
+    /// symmetric with the edge-gate path).
+    ///
+    /// A genuinely missing node (`NodeNotFound`) yields an **empty** timeline
+    /// (a legitimate "absent" — the participant is simply null everywhere); any
+    /// **other** storage error is a real failure and is propagated so it can
+    /// surface as a structured `QueryError` rather than being silently read as
+    /// "not found" (Issue #3379 review finding).
     fn node_timeline(
         hist: &HistoricalStorage,
         node_id: NodeId,
         as_of: Timestamp,
-    ) -> crate::query::temporal_join::Timeline {
+    ) -> Result<crate::query::temporal_join::Timeline> {
+        use crate::core::error::{Error, StorageError};
         use crate::query::temporal_join::{ChangePoint, Timeline};
+        let h = match hist.get_node_history(node_id) {
+            Ok(h) => h,
+            Err(Error::Storage(StorageError::NodeNotFound(_))) => {
+                return Ok(Timeline::default());
+            }
+            Err(e) => return Err(e),
+        };
+        // valid_from -> (latest believed tx_from, properties, valid_to).
         let mut by_vf: std::collections::HashMap<
             i64,
-            (Timestamp, crate::core::property::PropertyMap),
+            (Timestamp, crate::core::property::PropertyMap, i64),
         > = std::collections::HashMap::new();
-        if let Ok(h) = hist.get_node_history(node_id) {
-            for ver in h.versions {
-                let tx_from = ver.temporal.transaction_time().start();
-                if tx_from > as_of {
-                    continue;
-                }
-                let vf = ver.temporal.valid_time().start().wallclock();
-                match by_vf.get(&vf) {
-                    Some((existing_tx, _)) if *existing_tx >= tx_from => {}
-                    _ => {
-                        by_vf.insert(vf, (tx_from, ver.properties));
-                    }
+        for ver in h.versions {
+            let tx_from = ver.temporal.transaction_time().start();
+            if tx_from > as_of {
+                continue;
+            }
+            let vf = ver.temporal.valid_time().start().wallclock();
+            let vt = ver.temporal.valid_time().end().wallclock();
+            match by_vf.get(&vf) {
+                Some((existing_tx, _, _)) if *existing_tx >= tx_from => {}
+                _ => {
+                    by_vf.insert(vf, (tx_from, ver.properties, vt));
                 }
             }
         }
         let changes = by_vf
             .into_iter()
-            .map(|(valid_from, (_, properties))| ChangePoint {
+            .map(|(valid_from, (_, properties, valid_to))| ChangePoint {
                 valid_from,
+                valid_to,
                 properties,
             })
             .collect();
-        Timeline::from_changes(changes)
+        Ok(Timeline::from_changes(changes))
     }
 
     /// Reconstruct an edge's believed presence intervals as of `as_of`: each
     /// believed version contributes its half-open valid interval
     /// `[valid_from, valid_to)` (an open interval ends at `i64::MAX`).
+    ///
+    /// As with [`node_timeline`](Self::node_timeline), a missing edge
+    /// (`EdgeNotFound`) yields **empty** presence intervals (a gate that is
+    /// never open); any other storage error is propagated (Issue #3379 review
+    /// finding — do not conflate a genuine error with not-found).
     fn edge_presence(
         hist: &HistoricalStorage,
         edge_id: EdgeId,
         as_of: Timestamp,
-    ) -> crate::query::temporal_join::PresenceIntervals {
+    ) -> Result<crate::query::temporal_join::PresenceIntervals> {
+        use crate::core::error::{Error, StorageError};
         use crate::query::temporal_join::PresenceIntervals;
+        let h = match hist.get_edge_history(edge_id) {
+            Ok(h) => h,
+            Err(Error::Storage(StorageError::EdgeNotFound(_))) => {
+                return Ok(PresenceIntervals::default());
+            }
+            Err(e) => return Err(e),
+        };
         let mut by_vf: std::collections::HashMap<i64, (Timestamp, i64)> =
             std::collections::HashMap::new();
-        if let Ok(h) = hist.get_edge_history(edge_id) {
-            for ver in h.versions {
-                let tx_from = ver.temporal.transaction_time().start();
-                if tx_from > as_of {
-                    continue;
-                }
-                let vf = ver.temporal.valid_time().start().wallclock();
-                let vt = ver.temporal.valid_time().end().wallclock();
-                match by_vf.get(&vf) {
-                    Some((existing_tx, _)) if *existing_tx >= tx_from => {}
-                    _ => {
-                        by_vf.insert(vf, (tx_from, vt));
-                    }
+        for ver in h.versions {
+            let tx_from = ver.temporal.transaction_time().start();
+            if tx_from > as_of {
+                continue;
+            }
+            let vf = ver.temporal.valid_time().start().wallclock();
+            let vt = ver.temporal.valid_time().end().wallclock();
+            match by_vf.get(&vf) {
+                Some((existing_tx, _)) if *existing_tx >= tx_from => {}
+                _ => {
+                    by_vf.insert(vf, (tx_from, vt));
                 }
             }
         }
         let intervals = by_vf.into_iter().map(|(vf, (_, vt))| (vf, vt)).collect();
-        PresenceIntervals { intervals }
+        Ok(PresenceIntervals { intervals })
     }
 
     fn drain(&mut self) -> Result<()> {
@@ -3715,7 +3745,7 @@ impl TemporalJoinIterator {
             self, AlignCoordinate, AlignMode, Participant, PresenceIntervals,
         };
 
-        let mut input = match self.input.take() {
+        let input = match self.input.take() {
             Some(i) => i,
             None => return Ok(()),
         };
@@ -3723,34 +3753,65 @@ impl TemporalJoinIterator {
         let as_of = self.spec.as_of_system_time;
         let from = self.spec.range_start_micros;
         let to = self.spec.range_end_micros;
-        let mut rows: Vec<QueryRow> = Vec::new();
 
-        let hist = self.historical.read();
-        while let Some(row) = input.next() {
-            let row = row?;
-
-            // Resolve each participant's node id + gating edge for this row.
-            // A participant whose node id cannot be located in the row is
-            // skipped for the whole matched row (the pattern shape guarantees
-            // it, but we defend against a null/optional binding).
-            let mut node_ids: Vec<NodeId> = Vec::with_capacity(self.spec.participants.len());
-            let mut participants: Vec<Participant> =
-                Vec::with_capacity(self.spec.participants.len());
-            let mut incomplete = false;
-            for p in &self.spec.participants {
-                let Some(nid) = Self::participant_node_id(&row, p.node_source) else {
-                    incomplete = true;
-                    break;
-                };
-                node_ids.push(nid);
-                let timeline = Self::node_timeline(&hist, nid, as_of);
-                let gate: Option<PresenceIntervals> = p.edge_gate_path_index.and_then(|idx| {
-                    Self::gate_edge_id(&row, idx).map(|eid| Self::edge_presence(&hist, eid, as_of))
-                });
-                participants.push(Participant { timeline, gate });
+        // Phase 1: fully drain the upstream matched-participant stream into a
+        // Vec of per-row resolved (node id + gating edge id) tuples, THEN drop
+        // the input iterator, all BEFORE acquiring the `historical` read guard.
+        // Holding a parking_lot read guard across `input.next()` risks a
+        // recursive-read deadlock (an upstream iterator may itself take the
+        // same lock) and starves writers; mirror the #3363 sibling which drains
+        // first (Issue #3379 review finding — BLOCKER). A row whose participant
+        // node id cannot be located is skipped whole (defensive against a
+        // null/optional binding; the pattern shape normally guarantees it).
+        struct ResolvedParticipant {
+            node_id: NodeId,
+            gate_edge_id: Option<EdgeId>,
+        }
+        let mut resolved_rows: Vec<Vec<ResolvedParticipant>> = Vec::new();
+        {
+            let mut input = input;
+            while let Some(row) = input.next() {
+                let row = row?;
+                let mut resolved: Vec<ResolvedParticipant> =
+                    Vec::with_capacity(self.spec.participants.len());
+                let mut incomplete = false;
+                for p in &self.spec.participants {
+                    let Some(nid) = Self::participant_node_id(&row, p.node_source) else {
+                        incomplete = true;
+                        break;
+                    };
+                    let gate_edge_id = p
+                        .edge_gate_path_index
+                        .and_then(|idx| Self::gate_edge_id(&row, idx));
+                    resolved.push(ResolvedParticipant {
+                        node_id: nid,
+                        gate_edge_id,
+                    });
+                }
+                if !incomplete {
+                    resolved_rows.push(resolved);
+                }
             }
-            if incomplete {
-                continue;
+        }
+
+        // Phase 2: acquire the `historical` read guard in a scoped block and
+        // reconstruct each participant's believed timeline / gating-edge
+        // presence, run the storage-free alignment, and materialize rows. No
+        // `input.next()` runs while this guard is held.
+        let mut rows: Vec<QueryRow> = Vec::new();
+        let hist = self.historical.read();
+        for resolved in &resolved_rows {
+            let mut node_ids: Vec<NodeId> = Vec::with_capacity(resolved.len());
+            let mut participants: Vec<Participant> = Vec::with_capacity(resolved.len());
+            for (p, r) in self.spec.participants.iter().zip(resolved) {
+                node_ids.push(r.node_id);
+                let timeline = Self::node_timeline(&hist, r.node_id, as_of)?;
+                let gate: Option<PresenceIntervals> = match (p.edge_gate_path_index, r.gate_edge_id)
+                {
+                    (Some(_), Some(eid)) => Some(Self::edge_presence(&hist, eid, as_of)?),
+                    _ => None,
+                };
+                participants.push(Participant { timeline, gate });
             }
 
             // Run the storage-free alignment for the requested mode.
@@ -3760,12 +3821,7 @@ impl TemporalJoinIterator {
                 }
                 AlignMode::Overlap => temporal_join::align_overlap(&participants, from, to),
             }
-            .map_err(|e| {
-                crate::core::error::Error::Query(crate::core::error::QueryError::InvalidParameter {
-                    parameter: "temporal join".to_string(),
-                    reason: format!("{e:?}"),
-                })
-            })?;
+            .map_err(temporal_join::align_error_to_query_error)?;
 
             // Materialize each aligned coordinate into a computed-column row.
             for arow in aligned {

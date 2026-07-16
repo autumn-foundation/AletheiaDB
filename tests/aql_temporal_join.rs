@@ -234,12 +234,22 @@ fn overlap_two_entities_hand_computed() {
 // validity (here, "appears in March") is honored at each alignment instant, so
 // no sub-interval before the edge existed is emitted.
 //
-// (The symmetric "edge disappears" half is covered by the pure-core unit test
-// `overlap_edge_appears_and_disappears_mid_range`: a *fully* retracted edge is
-// removed from the current adjacency index, so — like #3225 AS OF traversal,
-// which enumerates candidates from current state — it can no longer be bound
-// by a MATCH; the gating math itself handles closed intervals. This is a
-// documented v1 limitation.)
+// (The symmetric "edge disappears" half — and, identically, a *participant
+// node* whose valid interval is closed mid-range by a retraction (#3230) or
+// delete — is covered by the pure-core unit tests
+// (`overlap_edge_appears_and_disappears_mid_range`,
+// `overlap_co_hold_ends_at_participant_retraction`,
+// `events_participant_nulled_after_retraction`,
+// `sample_index_absent_at_or_after_closed_valid_to`). A *fully* retracted /
+// deleted edge OR node is removed from the current adjacency / label index, so
+// — like #3225 AS OF traversal, which enumerates candidates from current state
+// — it can no longer be bound by a MATCH (verified: retract / future-retract /
+// detach all drop the entity from binding, and update-after-retract is
+// rejected, so no bindable closed-interval participant can be constructed
+// through the public API). The alignment math itself fully honors the closed
+// interval once an entity is bound; only candidate discovery is current-state.
+// This is a documented v1 limitation, so the closed-interval semantics are
+// unit-tested rather than e2e.)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -416,4 +426,118 @@ fn errors_are_structured() {
          OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' \
          RETURN a.price",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Review finding: DRIVER as the FAR node of a traversal. The driver must be
+// present at its own event even though it is reached via the connecting edge —
+// the driver is ungated by construction, so its own column is never null at its
+// event (the edge validity does not gate the driver itself).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn events_driver_is_far_node_never_nulls_its_own_column() {
+    let db = AletheiaDB::new().expect("db");
+    // Anchor (product) and far node (supplier); DRIVER is the far node.
+    let product = create_node_vt(&db, "Product", "price", 100, ts("2024-01-01T00:00:00Z"));
+    let supplier = create_node_vt(&db, "Supplier", "rating", 5, ts("2024-02-01T00:00:00Z"));
+    update_node_vt(&db, supplier, "rating", 4, ts("2024-08-01T00:00:00Z"));
+    // Edge appears only in March (valid [Mar, now), still current/bindable). At
+    // the supplier's FEB event the edge is not yet valid: if the driver were
+    // gated by it, the driver's OWN `rating` column would be null there.
+    create_edge_vt(
+        &db,
+        product,
+        supplier,
+        "SUPPLIED_BY",
+        ts("2024-03-01T00:00:00Z"),
+    );
+
+    let result = rows(
+        &db,
+        "MATCH (p:Product)-[:SUPPLIED_BY]->(s:Supplier) \
+         ALIGN EVENTS DRIVER s \
+         OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2025-01-01T00:00:00Z' \
+         RETURN s.rating AS rating",
+    );
+
+    // Two supplier (driver) events: Feb (rating 5) and Aug (rating 4). The
+    // driver's own `rating` column must be populated at BOTH — crucially at Feb,
+    // where the connecting edge is not yet valid. Before the fix the far-node
+    // driver was gated by that edge and this column was null.
+    assert_eq!(result.len(), 2, "one row per driver (supplier) event");
+    assert_eq!(
+        col_str(&result[0], "align_valid_time").as_deref(),
+        Some("2024-02-01T00:00:00.000000Z")
+    );
+    assert_eq!(
+        col_i64(&result[0], "rating"),
+        Some(5),
+        "driver present at its own Feb event despite edge not yet valid"
+    );
+    assert_eq!(
+        col_i64(&result[1], "rating"),
+        Some(4),
+        "driver present at its own Aug event"
+    );
+    assert!(
+        !is_null(&result[0], "rating") && !is_null(&result[1], "rating"),
+        "driver column must never be null at its own event"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review finding: `RETURN <bare-var>` (no property key) yields the participant's
+// node-id as an Int column under the variable's default column name.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn events_return_bare_variable_yields_node_id_column() {
+    let db = AletheiaDB::new().expect("db");
+    let order = create_node_vt(&db, "Purchase", "total", 10, ts("2024-02-01T00:00:00Z"));
+    update_node_vt(&db, order, "total", 20, ts("2024-09-01T00:00:00Z"));
+
+    let result = rows(
+        &db,
+        "MATCH (o:Purchase) \
+         ALIGN EVENTS DRIVER o \
+         OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2025-01-01T00:00:00Z' \
+         RETURN o",
+    );
+    assert_eq!(result.len(), 2);
+    // Default column name is the bare variable, and the value is the node id.
+    assert_eq!(col_i64(&result[0], "o"), Some(order.as_u64() as i64));
+    assert_eq!(col_i64(&result[1], "o"), Some(order.as_u64() as i64));
+}
+
+// ---------------------------------------------------------------------------
+// Review finding: incoming-direction pattern `(o)<-[:R]-(c)` (all other e2e
+// tests are outgoing). The join must resolve participants and gating edge for
+// the reversed arrow identically.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn events_incoming_direction_pattern() {
+    let db = AletheiaDB::new().expect("db");
+    // customer -[:PLACED]-> order, queried from the order as (o)<-[:PLACED]-(c).
+    let customer = create_node_vt(&db, "Customer", "tier", 1, ts("2024-01-01T00:00:00Z"));
+    update_node_vt(&db, customer, "tier", 2, ts("2024-06-01T00:00:00Z"));
+    let order = create_node_vt(&db, "Purchase", "total", 10, ts("2024-02-01T00:00:00Z"));
+    update_node_vt(&db, order, "total", 20, ts("2024-09-01T00:00:00Z"));
+    create_edge_vt(&db, customer, order, "PLACED", ts("2024-01-01T00:00:00Z"));
+
+    let result = rows(
+        &db,
+        "MATCH (o:Purchase)<-[:PLACED]-(c:Customer) \
+         ALIGN EVENTS DRIVER o \
+         OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2025-01-01T00:00:00Z' \
+         RETURN o.total, c.tier AS tier",
+    );
+    // Same expected alignment as the outgoing analog: Feb order -> tier 1,
+    // Sep order -> tier 2 (after the June upgrade).
+    assert_eq!(result.len(), 2);
+    assert_eq!(col_i64(&result[0], "o.total"), Some(10));
+    assert_eq!(col_i64(&result[0], "tier"), Some(1));
+    assert_eq!(col_i64(&result[1], "o.total"), Some(20));
+    assert_eq!(col_i64(&result[1], "tier"), Some(2));
 }
