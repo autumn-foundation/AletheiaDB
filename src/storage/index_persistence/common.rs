@@ -75,9 +75,18 @@ impl IndexKeyring {
         }
     }
 
-    /// A single-generation keyring pinned to an explicit `key_version` (strict
-    /// dispatch). Used by rotation tests to construct pinned/mixed keyrings.
-    #[cfg(test)]
+    /// A single-generation keyring pinned to an explicit `key_version`.
+    ///
+    /// Reads decrypt ANY header `key_version` with this one cipher (`match_any`,
+    /// byte-identical to [`Self::single`]); only the write-stamp / reported
+    /// [`current_version`](Self::current_version) is pinned to `key_version`.
+    /// This is the constructor the durable `open()` path uses to PROVISION the
+    /// keyring at the max on-disk key version (Issue #488 version-provisioning):
+    /// without it `open()` always reports `current_version == 1`, so a rotated
+    /// dataset's v2 files classify as "unknown" (a `verify` false-FAIL) and the
+    /// next rotation re-uses version 2 and wedges on the P0.3 identity check.
+    /// Callers that need strict per-version dispatch build the ring and then
+    /// [`add_generation`](Self::add_generation), which leaves `match_any`.
     pub(crate) fn single_versioned(cipher: Arc<dyn Cipher>, key_version: u32) -> Self {
         Self {
             inner: Arc::new(RwLock::new(KeyringInner {
@@ -86,7 +95,7 @@ impl IndexKeyring {
                     cipher,
                 }],
                 current_version: key_version,
-                match_any: false,
+                match_any: true,
             })),
         }
     }

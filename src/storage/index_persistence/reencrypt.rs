@@ -478,6 +478,30 @@ fn peek_key_version(path: &Path) -> Result<Option<u32>, RotationError> {
     Ok(index_file_key_version(&header[..filled]))
 }
 
+/// The maximum `key_version` stamped across the persisted index files under
+/// `indexes_dir` (Issue #488 version-provisioning).
+///
+/// Reads only file *headers* via [`peek_key_version`]; returns `None` when the
+/// directory holds no encrypted-index files (plaintext or empty). The durable
+/// `open()` path folds this with the WAL segment version to provision the index
+/// keyring's current version, so a rotated-then-reopened database reports the
+/// real version instead of a hard-coded 1.
+pub(crate) fn max_index_key_version_in_dir(
+    indexes_dir: &Path,
+) -> Result<Option<u32>, RotationError> {
+    let mut files = Vec::new();
+    if indexes_dir.exists() {
+        collect_index_files(indexes_dir, &mut files)?;
+    }
+    let mut max: Option<u32> = None;
+    for path in files {
+        if let Some(v) = peek_key_version(&path)? {
+            max = Some(max.map_or(v, |m| m.max(v)));
+        }
+    }
+    Ok(max)
+}
+
 /// A temp/scratch file the rotation engine must never treat as an index file.
 fn is_scratch_file(name: &str) -> bool {
     name.ends_with(".tmp") || name.contains(".tmp.") || name.starts_with(".aeix-usearch-tmp-")
