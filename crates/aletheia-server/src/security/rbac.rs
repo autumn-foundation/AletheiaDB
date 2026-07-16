@@ -31,7 +31,7 @@
 //!
 //! This registry is anchored on `tests/parity/inventory.json` — the inventory's
 //! `mcp.tools[].access_class` is the shared source of truth. It enumerates all
-//! 57 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
+//! 58 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
 //! checks it bidirectionally against the inventory, and
 //! `mcp_routable_tools_are_all_classified` checks the live routable set is a
 //! subset (every routable tool classified). Handlers become routable one slice
@@ -44,7 +44,7 @@ use aletheiadb::auth::{AccessClass, Role};
 /// tests derive from THIS list, so the routable-name set and the class-table
 /// set cannot silently drift into two independently-maintained lists.
 ///
-/// This registry is **inventory-anchored**: it enumerates all 57 tools from
+/// This registry is **inventory-anchored**: it enumerates all 58 tools from
 /// `tests/parity/inventory.json` (`mcp.tools[].access_class`) upfront, mirroring
 /// the legacy `src/mcp/auth.rs::TOOL_ACCESS_CLASSES` verbatim. The conformance
 /// test `registry_matches_inventory_exactly` (`tests/security_rbac.rs`) proves
@@ -84,6 +84,7 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     ("get_edge_at_time", AccessClass::Read),
     ("find_nodes_at_time", AccessClass::Read),
     ("list_changes", AccessClass::Read),
+    ("await_changes", AccessClass::Read),
     ("get_node_at_valid_time", AccessClass::Read),
     ("get_node_at_transaction_time", AccessClass::Read),
     ("get_node_history", AccessClass::Read),

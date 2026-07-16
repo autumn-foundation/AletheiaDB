@@ -1056,6 +1056,63 @@ pub struct ListChangesRequest {
     pub cursor: Option<String>,
 }
 
+/// Request to long-poll for committed changes (the push changefeed's blocking
+/// surface, Issue #3375). Read-only; the streaming counterpart to `list_changes`.
+///
+/// A single call subscribes to the push feed, optionally catches up from a prior
+/// `from_token` via `list_changes`, and otherwise blocks up to `timeout_ms` for
+/// the next matching commit. It is **stateless** across calls: resume by passing
+/// the previous response's `resume_token` back as `from_token`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct AwaitChangesRequest {
+    /// Restrict to node changes whose label is one of these (exact match).
+    #[schemars(
+        description = "Optional list of node labels to match (exact). If set, only matching node \
+                       changes are delivered; combine with edge_types to receive both kinds."
+    )]
+    pub node_labels: Option<Vec<String>>,
+
+    /// Restrict to edge changes whose type is one of these (exact match).
+    #[schemars(
+        description = "Optional list of edge types to match (exact). If set, only matching edge \
+                       changes are delivered; combine with node_labels to receive both kinds."
+    )]
+    pub edge_types: Option<Vec<String>>,
+
+    /// Restrict to these change types: "created" / "modified" / "deleted".
+    #[schemars(
+        description = "Optional list of change types to match: \"created\", \"modified\", \
+                       \"deleted\". Independent AND with the label/type filters."
+    )]
+    pub change_types: Option<Vec<String>>,
+
+    /// Opaque resume token from a prior response's `resume_token`. When set, the
+    /// call first catches up via `list_changes` and returns immediately if any
+    /// changes are already available.
+    #[schemars(
+        description = "Opaque resume token from a prior response's resume_token; catch up from \
+                       exactly after it. Omit to block for the next new change."
+    )]
+    pub from_token: Option<String>,
+
+    /// Maximum time to block for a change, in milliseconds (default 25000, hard
+    /// cap 60000).
+    #[schemars(
+        description = "Maximum time to block for a change, in milliseconds (default 25000, capped \
+                       at 60000). A call that times out returns an empty changes array with \
+                       timed_out:true and a resume_token to poll again."
+    )]
+    pub timeout_ms: Option<u64>,
+
+    /// Maximum number of changes to return in the catch-up path (default 100,
+    /// max 10000).
+    #[schemars(
+        description = "Maximum number of changes to return in the catch-up path (default 100, max \
+                       10000)."
+    )]
+    pub limit: Option<usize>,
+}
+
 /// Request to get a node at a specific valid time (independent dimension query).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct GetNodeAtValidTimeRequest {

@@ -62,6 +62,9 @@ sha2 = "0.11"
 subtle = "2.6"
 rand = "0.8"
 zeroize = "1"
+# Changefeed SSE stream (Issue #3375): `ReceiverStream` adapts the mpsc channel a
+# `spawn_blocking` recv loop feeds into the `Sse<impl Stream>` response body.
+tokio-stream = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }

@@ -1452,6 +1452,206 @@ mod temporal_tests {
 }
 
 // ============================================================================
+// await_changes (push changefeed long-poll, Issue #3375)
+// ============================================================================
+
+mod changefeed_await_tests {
+    use super::*;
+    use crate::core::changefeed::ChangeCursor;
+    use crate::core::temporal::Timestamp;
+    use std::time::Duration;
+
+    fn await_req() -> AwaitChangesRequest {
+        AwaitChangesRequest {
+            node_labels: None,
+            edge_types: None,
+            change_types: None,
+            from_token: None,
+            timeout_ms: Some(0),
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn await_changes_registered_in_tool_list() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|name| name == "await_changes"),
+            "await_changes must be registered in the tool list"
+        );
+    }
+
+    #[test]
+    fn no_write_small_timeout_times_out_with_resume_token() {
+        let server = create_test_server();
+        let mut req = await_req();
+        req.timeout_ms = Some(50); // bounded — must not hang
+        let response = server.await_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert_eq!(value["timed_out"], serde_json::json!(true));
+        assert_eq!(value["count"], serde_json::json!(0));
+        assert!(
+            value["changes"].as_array().unwrap().is_empty(),
+            "no changes on timeout"
+        );
+        // The subscribe-time baseline anchor is always present as a resume token.
+        assert!(
+            value["resume_token"].as_str().is_some(),
+            "a timed-out poll still yields a resume_token: {value}"
+        );
+        assert_eq!(value["has_more"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn catch_up_path_returns_immediately() {
+        let server = create_test_server();
+        server.db().create_node("Person", props("Alice")).unwrap();
+
+        // A baseline token positioned at the very start of time: the catch-up
+        // pull returns everything committed after it, deterministically.
+        let token = ChangeCursor::baseline_after(Timestamp::from(0));
+        let mut req = await_req();
+        req.from_token = Some(token);
+        // timeout_ms 0 — the catch-up must return without ever blocking.
+        let response = server.await_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert_eq!(value["timed_out"], serde_json::json!(false));
+        let changes = value["changes"].as_array().expect("changes array");
+        assert_eq!(changes.len(), 1, "the created Person is caught up: {value}");
+        assert_eq!(changes[0]["kind"], serde_json::json!("node"));
+        assert_eq!(changes[0]["change_type"], serde_json::json!("created"));
+        assert_eq!(changes[0]["label"], serde_json::json!("Person"));
+        assert!(value["resume_token"].as_str().is_some());
+    }
+
+    #[test]
+    fn resume_via_token_dedups_strictly_later() {
+        let server = create_test_server();
+        server.db().create_node("Person", props("Alice")).unwrap();
+
+        // First catch-up from the start yields the change + a resume token.
+        let mut first = await_req();
+        first.from_token = Some(ChangeCursor::baseline_after(Timestamp::from(0)));
+        let v1: serde_json::Value = serde_json::from_str(&server.await_changes(first)).unwrap();
+        let token = v1["resume_token"]
+            .as_str()
+            .expect("resume token")
+            .to_string();
+
+        // Resuming from that token (no new writes) returns nothing — the already
+        // delivered change is excluded by the strict `> cursor` rule, and with
+        // timeout 0 the poll does not block.
+        let mut second = await_req();
+        second.from_token = Some(token);
+        let v2: serde_json::Value = serde_json::from_str(&server.await_changes(second)).unwrap();
+        assert!(v2.get("error").is_none(), "unexpected error: {v2}");
+        assert_eq!(v2["count"], serde_json::json!(0), "no duplicate: {v2}");
+        assert_eq!(v2["timed_out"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn malformed_from_token_is_invalid_argument() {
+        let server = create_test_server();
+        let mut req = await_req();
+        req.from_token = Some("not-a-valid-token".to_string());
+        let response = server.await_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let code = value["error"]["code"].as_str().expect("error code");
+        assert_eq!(code, "INVALID_ARGUMENT", "got: {value}");
+    }
+
+    #[test]
+    fn invalid_change_type_is_invalid_argument() {
+        let server = create_test_server();
+        let mut req = await_req();
+        req.change_types = Some(vec!["created".to_string(), "bogus".to_string()]);
+        let response = server.await_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["error"]["code"].as_str(),
+            Some("INVALID_ARGUMENT"),
+            "got: {value}"
+        );
+    }
+
+    #[test]
+    fn subscribe_then_write_delivers_the_change() {
+        // A change committed CONCURRENTLY with a blocking await must be delivered
+        // — either live through recv_timeout, or (deterministically) on the next
+        // poll's resume-token catch-up. The writer is gated on the subscription
+        // being registered, so the write lands strictly after subscribe: the
+        // timed-out poll's resume_token (the subscribe-time baseline) therefore
+        // precedes the write, and a catch-up from it is guaranteed to find it.
+        // All timeouts bounded (≤ 60ms) so nothing hangs.
+        let server = create_test_server();
+        let db = server.db().clone();
+        let writer = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while db.changefeed_subscription_count() == 0 {
+                if start.elapsed() > Duration::from_millis(40) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            db.create_node("Person", props("Bob")).unwrap();
+        });
+
+        let mut req = await_req();
+        req.timeout_ms = Some(60);
+        let v1: serde_json::Value = serde_json::from_str(&server.await_changes(req)).unwrap();
+        writer.join().unwrap();
+        assert!(v1.get("error").is_none(), "unexpected error: {v1}");
+
+        // Resolve the change either from the live poll or the resume-token catch-up.
+        let changes = if v1["count"].as_u64().unwrap_or(0) >= 1 {
+            assert_eq!(v1["timed_out"], serde_json::json!(false), "got: {v1}");
+            v1["changes"].as_array().unwrap().clone()
+        } else {
+            // Live recv missed it under this scheduling; the write is after the
+            // subscribe-time baseline, so a catch-up from the poll's resume_token
+            // deterministically delivers it (timeout 0 → never blocks).
+            let token = v1["resume_token"]
+                .as_str()
+                .expect("resume token")
+                .to_string();
+            let mut req2 = await_req();
+            req2.from_token = Some(token);
+            req2.timeout_ms = Some(0);
+            let v2: serde_json::Value = serde_json::from_str(&server.await_changes(req2)).unwrap();
+            assert!(v2.get("error").is_none(), "unexpected error: {v2}");
+            v2["changes"].as_array().expect("changes array").clone()
+        };
+
+        assert_eq!(changes.len(), 1, "the committed change is delivered");
+        assert_eq!(changes[0]["label"], serde_json::json!("Person"));
+        assert_eq!(changes[0]["change_type"], serde_json::json!("created"));
+    }
+
+    #[test]
+    fn await_changes_excluded_from_resource_and_budget_wrappers() {
+        // The long-poll must NOT be wrapped by the #3368 per-read timeout or the
+        // #3353 token-budget shaper (either would truncate/abort the block).
+        assert!(
+            !crate::mcp::server::is_resource_limited_read_tool("await_changes"),
+            "await_changes must be excluded from RESOURCE_LIMITED_READ_TOOLS"
+        );
+        assert!(
+            !crate::mcp::server::is_budgetable_read_tool("await_changes"),
+            "await_changes must not be budgetable"
+        );
+    }
+
+    fn props(name: &str) -> crate::core::PropertyMap {
+        PropertyMapBuilder::new().insert("name", name).build()
+    }
+}
+
+// ============================================================================
 // Hybrid Query Tests
 // ============================================================================
 

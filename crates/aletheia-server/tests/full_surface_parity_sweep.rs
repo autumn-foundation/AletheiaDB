@@ -113,7 +113,7 @@ async fn live_mcp_catalog(client: &TestClient) -> BTreeSet<String> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (1) MCP catalog == inventory — EXACT set equality across all 57 tools.
+// (1) MCP catalog == inventory — EXACT set equality across all 58 tools.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -133,8 +133,8 @@ async fn mcp_catalog_equals_inventory_exactly() {
 
     assert_eq!(
         inv.len(),
-        57,
-        "inventory must advertise exactly 57 MCP tools"
+        58,
+        "inventory must advertise exactly 58 MCP tools"
     );
 
     // Symmetric difference, reported precisely so a drift names the culprits.
@@ -148,20 +148,20 @@ async fn mcp_catalog_equals_inventory_exactly() {
     );
     assert_eq!(
         live.len(),
-        57,
-        "the live catalog must be exactly 57 tools (got {})",
+        58,
+        "the live catalog must be exactly 58 tools (got {})",
         live.len()
     );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (2) Access-class conformance for all 57 (belt-and-suspenders full-set check;
+// (2) Access-class conformance for all 58 (belt-and-suspenders full-set check;
 //     `tests/security_rbac.rs::registry_matches_inventory_exactly` pins the
 //     static registry, this pins the *live-catalog-anchored* class per tool).
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn access_class_conformance_for_all_57() {
+async fn access_class_conformance_for_all_58() {
     let (db, store) = fixture();
     let client = build_server_client(db, store, AuthMode::Required);
     let live = live_mcp_catalog(&client).await;
@@ -315,6 +315,76 @@ async fn metrics_route_is_served_and_is_not_an_mcp_tool() {
     assert!(
         !inv_tools.contains("metrics") && !inv_tools.contains("get_metrics"),
         "the /metrics HTTP route must not be listed among the MCP tools"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// (3c) The changefeed SSE stream route (Issue #3375) is served, on the Read
+//      access class, and is an HTTP-ROUTE-ONLY surface — deliberately NOT
+//      registered as an MCP tool (it does not appear in the tools/list catalog
+//      and is absent from the inventory's mcp.tools[] set). Mirrors the /metrics
+//      served-but-not-a-tool precedent above; the `await_changes` MCP tool is the
+//      long-poll projection that IS a tool.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn changes_stream_route_is_served_and_is_not_an_mcp_tool() {
+    let (db, store) = fixture();
+    // Anonymous mode: the synthetic principal is Admin (which permits the Read
+    // class), so a non-404 status positively proves the GET /changes/stream path
+    // is routed rather than being masked by an auth rejection. A blocking SSE
+    // long-poll would never return under a real client, so we assert only that
+    // the route is present in the OpenAPI paths and NOT in the /mcp catalog —
+    // the same served-but-not-a-tool proof the /metrics test uses, without
+    // opening a live stream.
+    let client = build_server_client(db, store, AuthMode::Anonymous);
+
+    // (a) The route is documented in OpenAPI (the api_doc surface projects it),
+    //     proving it is registered/served.
+    let resp = client.get("/openapi.json").send().await;
+    assert_eq!(resp.status.as_u16(), 200, "/openapi.json must be served");
+    let spec: Value = resp.json();
+    assert!(
+        !spec["paths"]["/changes/stream"]["get"].is_null(),
+        "openapi must document GET /changes/stream (the SSE changefeed route)"
+    );
+
+    // (b) HTTP-route-only: /changes/stream is NOT an MCP tool. Neither a
+    //     `changes_stream` nor a `stream_changes` name may appear in the live
+    //     tools/list catalog...
+    let live = live_mcp_catalog(&client).await;
+    assert!(
+        !live.contains("changes_stream") && !live.contains("stream_changes"),
+        "the /changes/stream HTTP route must not be exposed as an MCP tool"
+    );
+
+    // ...and the tool that DOES exist is the long-poll `await_changes`, on the
+    // Read class — the MCP projection of the same changefeed surface.
+    assert!(
+        live.contains("await_changes"),
+        "await_changes (the long-poll MCP tool) must be routed on /mcp"
+    );
+    assert_eq!(
+        rbac::tool_access_class("await_changes"),
+        Some(AccessClass::Read),
+        "await_changes must be Read class"
+    );
+
+    // ...nor in the inventory's mcp.tools[] set (the tool source of truth).
+    let doc = inventory();
+    let inv_tools: BTreeSet<String> = doc["mcp"]["tools"]
+        .as_array()
+        .expect("mcp.tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_string())
+        .collect();
+    assert!(
+        !inv_tools.contains("changes_stream") && !inv_tools.contains("stream_changes"),
+        "the /changes/stream HTTP route must not be listed among the MCP tools"
+    );
+    assert!(
+        inv_tools.contains("await_changes"),
+        "await_changes must be listed among the MCP tools"
     );
 }
 
