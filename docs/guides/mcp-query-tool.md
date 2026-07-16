@@ -729,11 +729,11 @@ object of this shape (Issue #3234):
 | `CONSTRAINT_VIOLATION` | A declared uniqueness constraint rejected the write (`details` carries `label`, `property`, `value`, `existing_node_id`) | `false` | Use the existing entity or change the value |
 | `FAILED_PRECONDITION` | Valid request, wrong system state: vector index not enabled, node still has connected edges without `detach: true`, referenced edge endpoint missing, enabling a unique constraint over already-existing duplicate values, feature not compiled in | `false` | Change the state (enable the index, pass `detach`, create the endpoint, dedupe the data), then re-issue |
 | `CONFLICT` | Concurrency conflict: serialization failure, write-write conflict, aborted transaction | usually `true` | Retry the operation (a duplicate-ID conflict is the exception: `retriable: false`) |
-| `UNAVAILABLE` | Transient condition: engine-internal query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow), or the `query` tool at its in-flight-worker cap (Issue #3368, `details.max_in_flight_queries`) | `true` | Retry, ideally with backoff |
+| `UNAVAILABLE` | Transient condition: engine-internal query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow), or a resource-limited tool at its in-flight-worker cap (Issue #3368, `details.max_in_flight_queries`) | `true` | Retry, ideally with backoff |
 | `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
 | `UNAUTHENTICATED` | No valid session credential in `required` auth mode (Issue #3350) — missing, unknown, or revoked; deliberately indistinguishable, and returned for *every* tool including unknown tool names (no inventory leak). Never carries `details`, never echoes the credential | `false` | Supply a valid `ALETHEIADB_MCP_API_KEY` (or bootstrap key) and restart the session; retrying with the same credential cannot succeed |
 | `PERMISSION_DENIED` | Authenticated, but the principal's role does not allow the tool's access class (Issue #3350). `details` carries `required_class` and `principal_role` | `false` | Use a credential whose role allows the class (see [docs/guides/access-control-matrix.md](access-control-matrix.md)); do not retry with the same key |
-| `RESOURCE_EXHAUSTED` | A per-query resource limit was exceeded on the `query` tool (Issue #3368): the wall-clock timeout elapsed, or the result exceeded the response-byte cap. `details` carries `dimension` (`wall_clock_timeout`/`result_bytes`), `limit`, and (for byte caps) `consumed` | timeout: `true` (read-only, so a tightened retry is sound); byte cap: `false` | Narrow the query (smaller depth/`LIMIT`/time window, fewer returned properties) or raise the matching `limits.*` override (up to the operator ceiling) |
+| `RESOURCE_EXHAUSTED` | A per-query resource limit was exceeded on the `query` tool or a wrapped read tool (`traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time`) (Issue #3368): the wall-clock timeout elapsed, or the result exceeded the response-byte cap. `details` carries `dimension` (`wall_clock_timeout`/`result_bytes`), `limit`, and (for byte caps) `consumed` | timeout: `true` (read-only, so a tightened retry is sound); byte cap: `false` | Narrow the request (smaller depth/`LIMIT`/`top_k`/time window, fewer returned properties) or, on the `query` tool, raise the matching `limits.*` override (up to the operator ceiling) |
 
 Codes may be **added** over time; existing codes never change. Treat an
 unrecognized code as non-retriable. `UNAUTHENTICATED` and
@@ -878,25 +878,111 @@ limit. A response *within* the byte cap is then shaped by the caller's token
 budget along the #3353 disclosed ladder as usual. Cursor paging on the `query`
 tool remains an `unsupported_construct` (#3360).
 
+### Extended to the read tools (Issue #3368 residue)
+
+The same wall-clock-timeout and result-byte-cap enforcement now also governs six
+non-`query` read tools: **`traverse`**, **`hybrid_query`**, **`find_similar`**,
+**`get_node_at_time`**, **`get_edge_at_time`**, and **`find_nodes_at_time`**. A
+covered tool is wrapped at the dispatch seam and reuses the `query`-tool
+machinery — the timeout thread-race, the bounded in-flight-worker DoS guard, and
+the shared termination counters — so a runaway multi-hop traversal or a huge
+similarity page fails predictably rather than starving neighbors. The two breach
+`code`s (`RESOURCE_EXHAUSTED`), `retriable` flags (`wall_clock_timeout` → `true`,
+`result_bytes` → `false`), and `details.dimension` match the `query` tool's.
+
+**The error envelope is tool-agnostic, however.** These six tools are not a
+query language, so — unlike the `query` tool's builders — the wrapped emitters
+produce the plain #3234 envelope
+(`{"error":{"code","message","retriable","details"}}`) with **no** `kind` field
+and **no** `language` field, and their remediation is tool-neutral: it never
+tells the caller to raise `limits.timeout_ms` / `limits.max_response_bytes`
+(these tools have no per-call `limits` override in v1), only to narrow the
+request (smaller depth/limit/`top_k`/time window) and retry. The `query` tool
+keeps its own `kind:"runtime_error"` / `language` envelope, which is correct for
+a query language.
+
+Ordering is `cursor (#3360) → resource cap (#3368) → token budget (#3353)`: the
+handler resolves its cursor page, the response-byte cap is applied, and a
+*within-cap* response is then optionally shaped by the caller's `max_response_*`
+budget along the #3353 disclosed ladder. Row-cap overflow on these tools is the
+tool's own `limit` / `top_k` and stays a **disclosed truncation**
+(`has_more`/`truncated`/`next_offset`), never a resource-limit termination —
+there is deliberately no row-termination counter.
+
+**v1 scope for these six tools (deliberate, honest):**
+
+- **No per-call `limits` override.** They honor only the server defaults +
+  ceilings; unlike the `query` tool there is no per-request `limits` object yet.
+- **Post-hoc byte cap.** The cap is checked on the fully serialized response
+  *after* the handler returns (the `query` tool's incremental row-by-row guard is
+  not reused), so peak allocation for these tools is the full response, then
+  rejected if over cap. Incremental enforcement here is a follow-up.
+- **Non-cancellable timeout.** As with the `query` tool, the timed computation
+  runs to completion on a detached worker and is discarded on timeout; true
+  engine-level cooperative cancellation is out of scope (Lane-2).
+- **Zero-overhead only when limits are disabled — not under the default
+  config.** The inline fast path (no thread, no clone, no guard) runs **only when
+  the effective timeout is `0`**, i.e. the `disabled()` config. Under the
+  *default* config the effective timeout is 30_000 ms (not `0`), so each covered
+  call takes the timeout-race worker path (thread-spawn + mpsc + in-flight-CAS,
+  exactly like the `query` tool). The **response/output is unchanged** under the
+  default config, but it is **not** zero-overhead — there is a per-call worker
+  spawn on every covered read, including cheap `get_node_at_time` /
+  `get_edge_at_time`. A micro-benchmark quantifying that hot-path overhead is a
+  deferred (Lane-2) follow-up.
+- **Shared in-flight pool.** The `max_in_flight_queries` cap (default 64) is a
+  **single shared pool** across the `query` tool and these six wrapped read
+  tools. A flood of slow calls to any one of them can push the others to their
+  shared cap and make them return the retriable, bounded `UNAVAILABLE`
+  (`details.max_in_flight_queries`); a per-class sub-budget is a Lane-2
+  follow-up.
+
 ### Coverage matrix
 
 | Surface | Wall-clock timeout | Result-row cap | Result-byte cap | Override + operator ceiling |
 |---------|--------------------|----------------|------------------|-----------------------------|
-| MCP `query` tool | ✅ (thread-race, read-only) | ✅ truncate + disclose | ✅ fail-closed | ✅ `limits` |
+| MCP `query` tool | ✅ (thread-race, read-only) | ✅ truncate + disclose | ✅ fail-closed, incremental | ✅ `limits` |
 | HTTP `/query` | ✅ (Issue #3446) | ✅ truncate/reject | ✅ | ✅ `limits` |
-| MCP `traverse` / `hybrid_query` / `find_similar` | ⚠️ row `limit`/`top_k` caps only; timeout + byte cap are a documented follow-up | ✅ via `limit`/`top_k` | via #3353 budget | — |
-| Rust query builder | ⚠️ builder-level limit options are a documented follow-up (embedders hold the `Arc<AletheiaDB>` and can bound work directly) | — | — | — |
+| MCP `traverse` / `hybrid_query` / `find_similar` / `get_node_at_time` / `get_edge_at_time` / `find_nodes_at_time` | ✅ (thread-race, read-only) | ✅ via `limit`/`top_k` (disclosed) | ✅ fail-closed, **post-hoc** (v1) | ⚠️ server defaults only — no per-call override yet (Lane-2) |
+| Rust query builder | ⚠️ builder-level limit options are a Lane-2 follow-up (embedders hold the `Arc<AletheiaDB>` and can bound work directly) | — | — | — |
+
+**Deferred to Lane-2 (explicitly out of this residue):** the memory-budget
+dimension (spill / per-operator accounting), true engine-level cooperative
+cancellation, the Rust builder API, a benchmark-gated fast-path proof, a
+concurrency soak, HTTP in-flight parity (#3446), and incremental (vs post-hoc)
+byte-cap enforcement for the six read tools.
 
 Over-limit terminations are counted per dimension in-process
-(`AletheiaMcpServer::limit_termination_counts()`); surfacing them through
-`database_stats` needs a storage-layer counter and is a cross-lane follow-up.
-The response-byte cap is enforced **incrementally**: rows are serialized and
+(`AletheiaMcpServer::limit_termination_counts()`) **and surfaced through
+`database_stats`** under a `resource_limits` block (see below). For the `query`
+tool the response-byte cap is enforced **incrementally**: rows are serialized and
 measured as they are appended, and the response fails closed as soon as the
 running size provably exceeds the cap — so peak working memory stays ≈ the cap
 rather than materializing the full (up to the row-count ceiling) result before
 rejecting it. The row-count ceiling remains the independent bound on how many
 rows are ever built. True engine-level **memory** accounting (spill, per-operator
 budgets) is a separate query-executor follow-up.
+
+### Resource-limit counters in `database_stats`
+
+`database_stats` (no arguments) additively carries a `resource_limits` block so
+an operator or LLM can spot chronic offenders in one call:
+
+```jsonc
+{
+  // ...current / historical / cold_storage / wal / chain...
+  "resource_limits": {
+    "timeout_terminations": 3,   // responses terminated by the wall-clock timeout
+    "byte_cap_terminations": 1,  // responses rejected by the result-byte cap
+    "override_rejections": 0     // per-call `query` overrides rejected over a ceiling
+  }
+}
+```
+
+These are process-lifetime, cached atomic counters (O(1) reads; the underlying
+`DatabaseStats` struct and storage layer are untouched). They cover both the
+`query` tool and the six wrapped read tools. Row-cap breaches are **not** counted
+(they self-disclose via `truncated`/`has_more`).
 
 ## Discovering the queryable temporal extent (`temporal_extent`)
 
