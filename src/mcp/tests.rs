@@ -1581,55 +1581,174 @@ mod changefeed_await_tests {
 
     #[test]
     fn subscribe_then_write_delivers_the_change() {
-        // A change committed CONCURRENTLY with a blocking await must be delivered
-        // — either live through recv_timeout, or (deterministically) on the next
-        // poll's resume-token catch-up. The writer is gated on the subscription
-        // being registered, so the write lands strictly after subscribe: the
-        // timed-out poll's resume_token (the subscribe-time baseline) therefore
-        // precedes the write, and a catch-up from it is guaranteed to find it.
-        // All timeouts bounded (≤ 60ms) so nothing hangs.
+        // Deterministic LIVE-branch delivery (Fix 3): subscribe FIRST, commit a
+        // write (which buffers the change into the live subscription), THEN
+        // `recv_timeout` drains it immediately — exercising the live push path
+        // directly, with no from_token so no catch-up leg can mask a broken live
+        // wakeup. Bounded timeout so a regressed live path fails fast, never
+        // hangs, and is non-flaky (the write is fully committed before recv).
+        use crate::core::changefeed::ChangeType;
+        use crate::core::changefeed_subscription::ChangeFilter;
+
         let server = create_test_server();
-        let db = server.db().clone();
-        let writer = std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            while db.changefeed_subscription_count() == 0 {
-                if start.elapsed() > Duration::from_millis(40) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            db.create_node("Person", props("Bob")).unwrap();
+        let db = server.db();
+
+        // Subscribe with the same all-matching filter the tool builds by default.
+        let sub = db
+            .subscribe_changes(ChangeFilter::all())
+            .expect("subscribe");
+
+        // Commit a write strictly AFTER subscribe: it is buffered into `sub`.
+        db.create_node("Person", props("Bob")).unwrap();
+
+        // LIVE branch: recv_timeout drains the buffered change immediately — this
+        // is the live wakeup path, not a catch-up fallback nor an empty timeout.
+        let recs = sub
+            .recv_timeout(Duration::from_millis(60))
+            .expect("live recv must not lag");
+        assert!(
+            !recs.is_empty(),
+            "the committed change is delivered on the LIVE branch (not an empty timeout)"
+        );
+        assert_eq!(
+            recs.len(),
+            1,
+            "exactly the one committed change is delivered"
+        );
+        assert_eq!(recs[0].label, "Person");
+        assert_eq!(recs[0].change_type, ChangeType::Created);
+    }
+
+    #[test]
+    fn catch_up_applies_the_subscription_filter() {
+        // Fix 1 (a): a resume (catch-up) over a window of MIXED changes must
+        // return ONLY the changes matching the subscription's ChangeFilter.
+        // Previously the catch-up leg returned page.changes VERBATIM (unfiltered),
+        // so a filtered subscription's resume path leaked non-matching changes.
+        let server = create_test_server();
+
+        // Window: created (Alice) + modified (Alice) + created (Carol) +
+        // deleted (Carol) → a mix of all three change types.
+        let alice: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            label: "Person".to_string(),
+            properties: None,
+            provenance: None,
+        }))
+        .expect("create Alice");
+        let mut bumped = HashMap::new();
+        bumped.insert("age".to_string(), serde_json::json!(31));
+        server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            node_id: alice.id,
+            properties: bumped,
+            provenance: None,
+        });
+        let carol: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            label: "Person".to_string(),
+            properties: None,
+            provenance: None,
+        }))
+        .expect("create Carol");
+        server.delete_node(DeleteNodeRequest {
+            node_id: carol.id,
+            detach: None,
+            valid_time: None,
         });
 
+        // Subscribe filtered to deletes only and catch up from the start of time.
         let mut req = await_req();
-        req.timeout_ms = Some(60);
-        let v1: serde_json::Value = serde_json::from_str(&server.await_changes(req)).unwrap();
-        writer.join().unwrap();
-        assert!(v1.get("error").is_none(), "unexpected error: {v1}");
+        req.change_types = Some(vec!["deleted".to_string()]);
+        req.from_token = Some(ChangeCursor::baseline_after(Timestamp::from(0)));
+        req.timeout_ms = Some(0); // catch-up must return without blocking
+        let v: serde_json::Value = serde_json::from_str(&server.await_changes(req)).unwrap();
 
-        // Resolve the change either from the live poll or the resume-token catch-up.
-        let changes = if v1["count"].as_u64().unwrap_or(0) >= 1 {
-            assert_eq!(v1["timed_out"], serde_json::json!(false), "got: {v1}");
-            v1["changes"].as_array().unwrap().clone()
-        } else {
-            // Live recv missed it under this scheduling; the write is after the
-            // subscribe-time baseline, so a catch-up from the poll's resume_token
-            // deterministically delivers it (timeout 0 → never blocks).
-            let token = v1["resume_token"]
-                .as_str()
-                .expect("resume token")
-                .to_string();
-            let mut req2 = await_req();
-            req2.from_token = Some(token);
-            req2.timeout_ms = Some(0);
-            let v2: serde_json::Value = serde_json::from_str(&server.await_changes(req2)).unwrap();
-            assert!(v2.get("error").is_none(), "unexpected error: {v2}");
-            v2["changes"].as_array().expect("changes array").clone()
-        };
+        assert!(v.get("error").is_none(), "unexpected error: {v}");
+        assert_eq!(
+            v["timed_out"],
+            serde_json::json!(false),
+            "scanned rows: {v}"
+        );
+        let changes = v["changes"].as_array().expect("changes array");
+        assert!(
+            !changes.is_empty(),
+            "the delete matches the filter and must be returned: {v}"
+        );
+        for c in changes {
+            assert_eq!(
+                c["change_type"],
+                serde_json::json!("deleted"),
+                "only deleted changes survive the filter: {v}"
+            );
+        }
+    }
 
-        assert_eq!(changes.len(), 1, "the committed change is delivered");
-        assert_eq!(changes[0]["label"], serde_json::json!("Person"));
-        assert_eq!(changes[0]["change_type"], serde_json::json!("created"));
+    #[test]
+    fn catch_up_advances_resume_token_when_page_filters_to_empty() {
+        // Fix 1 (b): when a scanned page has rows but the filter removes them all,
+        // await_changes must STILL advance past the scanned rows (resume_token =
+        // last scanned cursor / next_cursor, has_more = next_cursor.is_some()) and
+        // return immediately — so a fully-filtered-out page makes progress instead
+        // of re-scanning the same rows or stalling into the block.
+        let server = create_test_server();
+        // Four created changes; NONE are deletes.
+        for _ in 0..4 {
+            server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            });
+        }
+
+        let mut req = await_req();
+        req.change_types = Some(vec!["deleted".to_string()]); // matches nothing here
+        req.from_token = Some(ChangeCursor::baseline_after(Timestamp::from(0)));
+        req.limit = Some(2); // bound the page → next_cursor Some, has_more true
+        req.timeout_ms = Some(0);
+        let v: serde_json::Value = serde_json::from_str(&server.await_changes(req)).unwrap();
+
+        assert!(v.get("error").is_none(), "unexpected error: {v}");
+        // The page scanned 2 rows, all filtered out: immediate empty, not a block.
+        assert_eq!(
+            v["timed_out"],
+            serde_json::json!(false),
+            "scanned rows → not a timeout: {v}"
+        );
+        assert_eq!(
+            v["count"],
+            serde_json::json!(0),
+            "all rows filtered out: {v}"
+        );
+        assert_eq!(
+            v["has_more"],
+            serde_json::json!(true),
+            "more scanned pages remain: {v}"
+        );
+        let token = v["resume_token"]
+            .as_str()
+            .expect("advanced resume token")
+            .to_string();
+
+        // Resuming from the advanced token scans the NEXT page — real progress,
+        // no re-scan of the first page and no stall.
+        let mut req2 = await_req();
+        req2.change_types = Some(vec!["deleted".to_string()]);
+        req2.from_token = Some(token);
+        req2.limit = Some(2);
+        req2.timeout_ms = Some(0);
+        let v2: serde_json::Value = serde_json::from_str(&server.await_changes(req2)).unwrap();
+        assert!(v2.get("error").is_none(), "unexpected error: {v2}");
+        assert_eq!(v2["count"], serde_json::json!(0), "still no deletes: {v2}");
+        assert!(
+            v2["resume_token"].as_str().is_some(),
+            "the resume anchor still advances: {v2}"
+        );
     }
 
     #[test]

@@ -15,8 +15,15 @@
 //!    the `await_changes` long-poll tool (`#[api_doc(mcp)]`), delegating to
 //!    [`AletheiaMcpServer::await_changes`](aletheiadb::mcp::AletheiaMcpServer::await_changes).
 //!
-//! Both are [`ReadClass`]. The blocking `recv_timeout` long-poll is driven on a
-//! `spawn_blocking` worker so it never starves the async runtime.
+//! Both are [`ReadClass`]. The runtime-protection strategy differs by surface:
+//! these **HTTP** handlers offload the blocking `recv_timeout` long-poll onto a
+//! `spawn_blocking` worker so it never starves the async runtime. The **native
+//! MCP** `await_changes` tool (invoked directly over stdio, not through this
+//! HTTP projection) instead uses a `block_in_place` runtime bridge inside
+//! `AletheiaMcpServer::await_changes` for the same protection (it has no
+//! `spawn_blocking` boundary to rely on). Note the idle SSE reap latency is
+//! bounded by [`STREAM_POLL_INTERVAL`] (~15s) after a client disconnects — an
+//! actively-delivering feed cleans up immediately when its receiver drops.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -204,8 +211,10 @@ pub async fn changes_stream(
 /// `POST /changes/await` — the MCP-over-HTTP projection of the `await_changes`
 /// long-poll tool (Issue #3375). [`ReadClass`]. HTTP + MCP tool.
 ///
-/// Delegates to [`AletheiaMcpServer::await_changes`]; the blocking long-poll is
-/// driven on a `spawn_blocking` worker so it does not starve the async runtime.
+/// Delegates to [`AletheiaMcpServer::await_changes`]. On this **HTTP** surface
+/// the blocking long-poll is driven on a `spawn_blocking` worker so it does not
+/// starve the async runtime (the native stdio MCP tool has no such boundary and
+/// uses a `block_in_place` runtime bridge internally instead).
 pub async fn await_changes_impl(state: ServerState, req: AwaitChangesRequest) -> Json<Value> {
     let server = state.mcp_server();
     let out = tokio::task::spawn_blocking(move || server.await_changes(req))
