@@ -53,6 +53,28 @@ impl IndexPersistenceManager {
         }
     }
 
+    /// Like [`Self::with_cipher`] but PROVISIONS the single-generation keyring's
+    /// write-stamp version to `key_version` (Issue #488 version-provisioning).
+    ///
+    /// The durable `open()` path resolves `key_version` from the max on-disk key
+    /// version (index-file AEIX headers folded with WAL segment headers) so a
+    /// rotated-then-reopened database reports the correct
+    /// [`current_version`](super::common::IndexKeyring::current_version) instead
+    /// of a hard-coded 1. Reads stay `match_any` (the sole cipher decrypts every
+    /// header version, byte-identical to [`Self::with_cipher`]); only the
+    /// stamped/reported version differs. Passing `None` is plaintext (no
+    /// keyring), exactly like [`Self::with_cipher`].
+    pub fn with_cipher_versioned(
+        base_path: impl Into<PathBuf>,
+        index_cipher: Option<Arc<dyn Cipher>>,
+        key_version: u32,
+    ) -> Self {
+        Self {
+            base_path: base_path.into(),
+            keyring: index_cipher.map(|c| IndexKeyring::single_versioned(c, key_version)),
+        }
+    }
+
     /// Create a new persistence manager with an explicit
     /// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
     /// Test-only: production builds the manager via [`Self::with_cipher`] and

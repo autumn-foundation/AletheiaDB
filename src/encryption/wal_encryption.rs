@@ -106,6 +106,27 @@ impl WalKeyring {
         }
     }
 
+    /// A single-generation WAL keyring pinned to an explicit `key_version`
+    /// (Issue #488 version-provisioning). Reads decrypt every segment with this
+    /// one cipher (`match_any`, byte-identical to [`Self::single`]); only the
+    /// write-stamp / reported [`current_version`](Self::current_version) is
+    /// pinned to `key_version`. The durable `open()` path builds the WAL keyring
+    /// at the max on-disk segment `key_version` so new segments stamp the real
+    /// version instead of a stale [`INITIAL_WAL_KEY_VERSION`], keeping the WAL
+    /// and index layers in lockstep after a rotate-then-reopen.
+    pub fn single_versioned(cipher: Arc<dyn Cipher>, key_version: u32) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(WalKeyringInner {
+                generations: vec![WalKeyGeneration {
+                    key_version,
+                    cipher,
+                }],
+                current_version: key_version,
+                match_any: true,
+            })),
+        }
+    }
+
     /// The current (write) cipher and the `key_version` it stamps into new
     /// segment headers, or `None` if the keyring somehow holds no generation.
     pub fn current(&self) -> Option<(Arc<dyn Cipher>, u32)> {

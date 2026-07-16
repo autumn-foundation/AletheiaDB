@@ -1251,6 +1251,62 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
     }))
 }
 
+/// Resolve the key version the index and WAL keyrings should be PROVISIONED to
+/// at `open()` (Issue #488 version-provisioning fast-follow).
+///
+/// # The bug this fixes
+///
+/// At `open()` the keyrings were built at the hard-coded base version
+/// ([`IndexKeyring::single`] → `ENC_INDEX_KEY_VERSION_V1`,
+/// [`WalKeyring::single`] → `INITIAL_WAL_KEY_VERSION`), because the
+/// post-rotation key version is never persisted where `open()` reads it (the
+/// rotation ledger is cleared on completion). After a rotate-then-cold-reopen
+/// under the new key that mis-provisioned `current_version == 1` makes
+/// `index_rotation_status` / `encryption verify` FALSE-FAIL (v2 files classify
+/// as "unknown") and wedges the *next* rotation (it recomputes `new_version =
+/// 1 + 1 = 2` and hits the P0.3 `ForeignKeyVersionFile` identity check against
+/// the existing v2 files).
+///
+/// # Precedence
+///
+/// 1. **Pending rotation ledger** — the currently CONFIGURED key still
+///    corresponds to the OLD generation (the provider switch happens only after
+///    a rotation COMPLETES), so we provision to `ledger.new_version - 1` (the
+///    old version, since `new_version = old_version + 1` by construction) and
+///    let startup [`resume_pending_rotation`] drive the keyring to the ledger
+///    target. Provisioning to the *max on-disk* here would instead be the
+///    target itself and would mis-label the configured (old) cipher as the new
+///    version, breaking resume; the ledger target is therefore the authority
+///    for the *final* `current_version` (reached via resume), not the build
+///    version. This holds for a `cancel` ledger too (old = target - 1).
+/// 2. **No pending ledger** (a completed rotation, or never rotated) — provision
+///    to the MAX stamped key version across BOTH persisted layers: index-file
+///    `AEIX` headers folded with WAL segment headers. A never-rotated database
+///    has no stamped version above the base, so this resolves to the base and
+///    reproduces prior behavior exactly.
+pub(crate) fn resolve_provisioned_key_version(
+    indexes_dir: &std::path::Path,
+    wal_dir: &std::path::Path,
+    rotation_state_dir: &std::path::Path,
+) -> Result<u32> {
+    const BASE: u32 = crate::storage::index_persistence::common::ENC_INDEX_KEY_VERSION_V1;
+
+    // 1. A pending ledger is the authority for a mid-rotation-crash state.
+    let ledger_path = rotation_state_dir.join("rotation.state");
+    if let Some(ledger) = read_rotation_state_at(&ledger_path)? {
+        return Ok(ledger.new_version.saturating_sub(1).max(BASE));
+    }
+
+    // 2. Otherwise the max stamped version across the index and WAL layers.
+    let index_v =
+        crate::storage::index_persistence::reencrypt::max_index_key_version_in_dir(indexes_dir)
+            .map_err(rotation_err)?
+            .unwrap_or(BASE);
+    let wal_v =
+        crate::storage::wal::segment_reader::max_key_version_in_dir(wal_dir).unwrap_or(BASE);
+    Ok(index_v.max(wal_v).max(BASE))
+}
+
 /// Install BOTH WAL key generations into the live WAL keyring when a rotation
 /// ledger is PENDING at startup — BEFORE the startup replay read (Issue #3617
 /// PR2 crash-consistency).
@@ -2167,6 +2223,220 @@ mod tests {
             assert_eq!(db.node_count(), 2, "graph recovers under the new key");
             assert_eq!(db.edge_count(), 1);
         }
+    }
+
+    // ── Issue #488 version-provisioning fast-follow ──────────────────────
+    //
+    // At `open()` the keyring's `current_version` was hard-coded to 1, because
+    // the post-rotation key version is never persisted where `open()` reads it
+    // (the rotation ledger is cleared on completion). These tests pin the fix:
+    // provision `current_version` from durable on-disk state so `verify` /
+    // `index_rotation_status` classify rotated files correctly and a second
+    // rotation increments from the real version instead of re-using 2.
+
+    /// Headline symptom: after a completed rotation to v2 and a genuine COLD
+    /// reopen under the new key, `index_rotation_status` must report NO unknown
+    /// files. Before the fix the reopened keyring reports `current_version = 1`,
+    /// so the v2 files classify as "unknown" (a false-FAIL of `encryption
+    /// verify`) even though they decrypt cleanly.
+    #[test]
+    fn verify_passes_after_cold_reopen_of_rotated_db() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        // Rotate a fully-encrypted DB (WAL + index) to the new key.
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+            let report = db
+                .rotate_index_keys(KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .expect("rotation must succeed");
+            assert_eq!(report.new_version, 2);
+        }
+        // All on-disk index files are now at v2.
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+
+        // Genuine COLD reopen under the NEW key only (fresh manager/keyring).
+        let db = build_db(root, &new_key);
+        let status = db
+            .index_rotation_status()
+            .expect("status probe must succeed after reopen");
+        assert_eq!(
+            status.unknown, 0,
+            "reopened keyring must classify v2 files as current, not unknown: {status:?}"
+        );
+        assert!(
+            status.is_fully_rotated(),
+            "a cold-reopened rotated DB must read as fully rotated: {status:?}"
+        );
+        // The active-decrypt probe (Issue #3618) must also pass.
+        let probe = db
+            .verify_index_decryptable()
+            .expect("decrypt probe must succeed");
+        assert!(
+            probe.decrypt_failed.is_empty(),
+            "bodies must decrypt under the reopened new key: {probe:?}"
+        );
+    }
+
+    /// A second rotation after a cold reopen must compute `new_version = 3`
+    /// (not re-use 2) and must NOT wedge on the `ForeignKeyVersionFile`
+    /// identity check against the existing v2 files. Before the fix the
+    /// reopened keyring reports `current_version = 1`, so the second rotation
+    /// recomputes `new_version = 2` and wedges.
+    #[test]
+    fn second_rotation_after_reopen_does_not_wedge() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        let newer_key = root.join("newer.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&newer_key).unwrap();
+
+        // First rotation: v1 -> v2.
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+            let report = db
+                .rotate_index_keys(KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .expect("first rotation must succeed");
+            assert_eq!(report.new_version, 2);
+        }
+
+        // Cold reopen under the new key, write, then rotate AGAIN.
+        let db = build_db(root, &new_key);
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Carol").build(),
+        )
+        .unwrap();
+        db.persist_indexes().unwrap();
+
+        let report = db
+            .rotate_index_keys(KeyProviderConfig::File {
+                path: newer_key.clone(),
+            })
+            .expect("second rotation must not wedge on ForeignKeyVersionFile");
+        assert_eq!(
+            report.old_version, 2,
+            "second rotation must see the provisioned current version 2"
+        );
+        assert_eq!(
+            report.new_version, 3,
+            "second rotation must increment to 3, not re-use 2"
+        );
+        assert!(db.index_rotation_status().unwrap().is_fully_rotated());
+    }
+
+    /// A mid-rotation crash leaves a PENDING ledger (target v2) and a mix of
+    /// on-disk versions. On reopen the resolved current version must follow the
+    /// ledger target once resume completes the rotation, and the DB must open +
+    /// resume correctly.
+    #[test]
+    fn mid_rotation_crash_reopen_provisions_from_ledger() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        // Seed + persist, then plant a durable ledger simulating a crash right
+        // after it was fsync'd (index + WAL pending, target v2).
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+            let manager = db.persistence_manager.as_ref().unwrap().clone();
+            super::write_ledger(
+                &manager,
+                &super::RotationLedger::forward_scope(
+                    2,
+                    KeyProviderConfig::File {
+                        path: new_key.clone(),
+                    },
+                    true,
+                ),
+            )
+            .unwrap();
+            assert!(root.join("data").join("rotation.state").exists());
+        }
+
+        // Reopen under the OLD key (rotation in flight): startup resume must
+        // complete the rotation and clear the ledger, and the final provisioned
+        // current version must follow the ledger target (v2).
+        {
+            let db = build_db(root, &old_key);
+            assert!(
+                !root.join("data").join("rotation.state").exists(),
+                "startup resume must complete the pending rotation"
+            );
+            assert_eq!(db.node_count(), 2, "graph intact after resume");
+            let status = db.index_rotation_status().unwrap();
+            assert_eq!(
+                status.unknown, 0,
+                "no unknown files after resume: {status:?}"
+            );
+            assert!(
+                status.is_fully_rotated(),
+                "resume must leave a uniform v2 dataset: {status:?}"
+            );
+            assert_eq!(
+                assert_all_at_version(&root.join("data").join("indexes"), 2),
+                status.at_current,
+                "all index files at ledger target v2"
+            );
+        }
+
+        // Provider switch: reopen under the NEW key only — everything decrypts,
+        // and a fresh reopen classifies as fully rotated (current version v2).
+        {
+            let db = build_db(root, &new_key);
+            assert_eq!(db.node_count(), 2, "graph recovers under the new key");
+            assert!(db.index_rotation_status().unwrap().is_fully_rotated());
+        }
+    }
+
+    /// The provisioned version is the MAX of the index-header version and the
+    /// WAL-segment version. Unit-tests the resolver directly (no pending
+    /// ledger): index files at v2, WAL segments at v1 -> resolves to 2.
+    #[test]
+    fn provisioned_version_is_max_across_index_and_wal() {
+        use crate::storage::index_persistence::common::encrypt_index_bytes_versioned;
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let data_dir = root.join("data");
+        let indexes_dir = data_dir.join("indexes");
+        let wal_dir = root.join("wal");
+        std::fs::create_dir_all(&indexes_dir).unwrap();
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        // An encrypted index file stamped at v2.
+        let key = root.join("k.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key).unwrap();
+        let cipher = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&key))
+                .unwrap()
+                .index_cipher(),
+        );
+        let body = encrypt_index_bytes_versioned(b"manifest-body", &cipher, 2).unwrap();
+        std::fs::write(indexes_dir.join("manifest.idx"), &body).unwrap();
+
+        // No WAL segments (v1 default) and no pending ledger -> resolves to the
+        // index version (2), the max across the two layers.
+        let resolved =
+            super::resolve_provisioned_key_version(&indexes_dir, &wal_dir, &data_dir).unwrap();
+        assert_eq!(resolved, 2, "resolved version must be the max (index v2)");
     }
 
     #[test]

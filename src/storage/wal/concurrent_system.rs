@@ -80,6 +80,15 @@ pub struct ConcurrentWalSystemConfig {
     /// When set, entries are encrypted before writing to disk and segments
     /// use version 2 format. Passed through to `FlushCoordinatorConfig`.
     pub wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+    /// Optional provisioned WAL key version (Issue #488 version-provisioning).
+    ///
+    /// When set alongside `wal_cipher`, the WAL keyring is built at this version
+    /// (via [`WalKeyring::single_versioned`]) instead of the hard-coded
+    /// [`INITIAL_WAL_KEY_VERSION`], so a rotate-then-reopen stamps and reports
+    /// the real on-disk version. `None` (the default) reproduces prior behavior
+    /// exactly. Ignored when `wal_cipher` is `None` (a plaintext WAL has no
+    /// keyring).
+    pub wal_key_version: Option<u32>,
     /// Recovery policy for a crash-torn trailing entry (Issue #3433).
     ///
     /// When `true` (the default), [`ConcurrentWalSystem::read_from`] tolerates
@@ -104,6 +113,7 @@ impl std::fmt::Debug for ConcurrentWalSystemConfig {
                 "wal_cipher",
                 &self.wal_cipher.as_ref().map(|c| c.algorithm_name()),
             )
+            .field("wal_key_version", &self.wal_key_version)
             .field("tolerate_torn_tail", &self.tolerate_torn_tail)
             .finish()
     }
@@ -121,6 +131,7 @@ impl Default for ConcurrentWalSystemConfig {
             durability_mode: DurabilityMode::Synchronous,
             write_buffer_size: 64 * 1024, // 64 KB
             wal_cipher: None,
+            wal_key_version: None,
             tolerate_torn_tail: true,
         }
     }
@@ -346,10 +357,20 @@ impl ConcurrentWalSystem {
         // (stamps INITIAL_WAL_KEY_VERSION, decrypts any segment); a full-MEK
         // rotation later advances it to a second generation. Plaintext WALs have
         // no keyring.
-        let wal_keyring = config
-            .wal_cipher
-            .clone()
-            .map(crate::encryption::wal_encryption::WalKeyring::single);
+        //
+        // Issue #488 version-provisioning: when the durable `open()` path
+        // resolves a provisioned key version from durable on-disk state, build
+        // the keyring at that version (still `match_any`, so mixed/legacy
+        // segments decrypt exactly as before) so new segments stamp the real
+        // version and `current_version` reports it. `None` reproduces prior
+        // behavior exactly.
+        let wal_keyring = config.wal_cipher.clone().map(|cipher| {
+            use crate::encryption::wal_encryption::WalKeyring;
+            match config.wal_key_version {
+                Some(v) => WalKeyring::single_versioned(cipher, v),
+                None => WalKeyring::single(cipher),
+            }
+        });
 
         // Create FlushCoordinator config
         let coordinator_config = FlushCoordinatorConfig {

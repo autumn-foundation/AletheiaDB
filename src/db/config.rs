@@ -391,6 +391,25 @@ impl AletheiaDB {
                 .as_ref()
                 .map(|mgr| Arc::clone(mgr.wal_cipher()));
 
+            // Issue #488 version-provisioning: derive the keyring `current_version`
+            // from durable on-disk state (index-file AEIX headers + WAL segment
+            // headers, with a pending rotation ledger as authority) so a
+            // rotate-then-cold-reopen reports the real version instead of a
+            // hard-coded 1. Only when encryption AND persistence are enabled;
+            // otherwise `None` reproduces prior behavior exactly. Computed here,
+            // before the WAL is built, so both keyrings are provisioned in
+            // lockstep. See `resolve_provisioned_key_version` for precedence.
+            let provisioned_key_version = if config.encryption.enabled && config.persistence.enabled
+            {
+                Some(crate::db::rotation::resolve_provisioned_key_version(
+                    &config.persistence.data_dir.join("indexes"),
+                    &config.wal.wal_dir,
+                    &config.persistence.data_dir,
+                )?)
+            } else {
+                None
+            };
+
             let wal_system_config = ConcurrentWalSystemConfig {
                 wal_dir: config.wal.wal_dir,
                 num_stripes: config.wal.num_stripes,
@@ -404,6 +423,7 @@ impl AletheiaDB {
                 durability_mode,
                 write_buffer_size: config.wal.write_buffer_size,
                 wal_cipher: wal_cipher.clone(),
+                wal_key_version: provisioned_key_version,
                 tolerate_torn_tail: config.wal.tolerate_torn_tail,
             };
 
@@ -471,12 +491,24 @@ impl AletheiaDB {
                 let index_cipher = encryption_manager
                     .as_ref()
                     .map(|mgr| Arc::clone(mgr.index_cipher()));
-                Some(Arc::new(
-                    crate::storage::index_persistence::IndexPersistenceManager::with_cipher(
+                // Issue #488 version-provisioning: build the index keyring at the
+                // resolved on-disk version so `index_rotation_status` /
+                // `encryption verify` classify rotated files correctly after a
+                // cold reopen and the next rotation increments from the real
+                // version. Reads stay `match_any` (identical to `with_cipher`);
+                // `None` falls back to `with_cipher` (unchanged behavior).
+                let manager = match provisioned_key_version {
+                    Some(v) => crate::storage::index_persistence::IndexPersistenceManager::with_cipher_versioned(
+                        &config.persistence.data_dir,
+                        index_cipher,
+                        v,
+                    ),
+                    None => crate::storage::index_persistence::IndexPersistenceManager::with_cipher(
                         &config.persistence.data_dir,
                         index_cipher,
                     ),
-                ))
+                };
+                Some(Arc::new(manager))
             } else {
                 None
             };
@@ -925,6 +957,7 @@ impl AletheiaDB {
                 durability_mode,
                 write_buffer_size: wal_config.write_buffer_size,
                 wal_cipher: None,
+                wal_key_version: None,
                 tolerate_torn_tail: wal_config.tolerate_torn_tail,
             };
 

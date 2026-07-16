@@ -683,6 +683,56 @@ pub fn max_lsn_in_dir(
     Ok(max)
 }
 
+/// Scan a WAL directory for the maximum stamped `key_version` across all
+/// segments (Issue #488 version-provisioning).
+///
+/// Reads only segment *headers* — never decrypts a body — so it needs no
+/// cipher and is safe to call before the keyring exists. Returns `None` when no
+/// segment carries a stamped key version: an unencrypted WAL, an empty
+/// directory, or only legacy/pre-rotation segments that predate the
+/// [`WAL_VERSION_ENCRYPTED_KEYVERSIONED`] container. The durable `open()` path
+/// folds this into the provisioned keyring version alongside the index-file
+/// header version. Per-segment I/O errors are swallowed (best-effort, like
+/// [`max_lsn_in_dir`]); a segment whose header does not carry a key version
+/// simply does not contribute.
+#[must_use]
+pub fn max_key_version_in_dir(wal_dir: &Path) -> Option<u32> {
+    let mut max: Option<u32> = None;
+    for (_, path) in sorted_segment_paths(wal_dir) {
+        if let Some(kv) = segment_key_version(&path) {
+            max = Some(max.map_or(kv, |m| m.max(kv)));
+        }
+    }
+    max
+}
+
+/// Read only a WAL segment header and return its stamped `key_version`, or
+/// `None` for a legacy/plaintext/short/undecodable header. Never reads or
+/// decrypts the segment body.
+fn segment_key_version(path: &Path) -> Option<u32> {
+    use std::io::Read;
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; WAL_KEYVERSIONED_HEADER_SIZE];
+    let mut filled = 0usize;
+    while filled < header.len() {
+        match file.read(&mut header[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+    let buffer = &header[..filled];
+    if buffer.len() < WAL_HEADER_SIZE || buffer[0..4] != WAL_MAGIC {
+        return None;
+    }
+    let version = buffer[4];
+    match decode_header_layout(version, buffer) {
+        Ok((_, key_version)) => key_version,
+        Err(_) => None,
+    }
+}
+
 /// Best-effort maximum-LSN scan of a single segment (see [`max_lsn_in_dir`]).
 ///
 /// Never fails on undecodable entry data — returns the maximum LSN of the
