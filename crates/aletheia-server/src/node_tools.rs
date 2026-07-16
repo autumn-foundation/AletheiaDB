@@ -73,8 +73,9 @@ use crate::security::{Authorized, ReadClass, ServerSecurityState, WriteClass};
 use crate::state::ServerState;
 use aletheiadb::http::AletheiaHttpError;
 use aletheiadb::mcp::{
-    AletheiaMcpServer, CountNodesRequest, CreateNodeRequest, DeleteNodeCascadeRequest,
-    DeleteNodeRequest, RetractNodeRequest, UpdateNodeRequest,
+    AletheiaMcpServer, CountNodesRequest, CreateNodeRequest, CreateNodeWithEmbeddingRequest,
+    DeleteNodeCascadeRequest, DeleteNodeRequest, RetractNodeRequest, UpdateNodeEmbeddingRequest,
+    UpdateNodeRequest,
 };
 use autumn_web::prelude::{Json, Path, Query, get, post};
 use serde::Deserialize;
@@ -351,6 +352,43 @@ pub async fn retract_node(
 ) -> Json<Value> {
     let server = AletheiaMcpServer::new(state.db_arc());
     tool_json(server.retract_node(req))
+}
+
+/// `create_node_with_embedding` — create a node whose embedding is generated
+/// from `text` using the server's configured model and stored under
+/// `embedding_property` (Issue #2906). [`WriteClass`]. HTTP + MCP tool. Forwards
+/// through the SHARED server (so a configured embedder is used); returns a
+/// structured FAILED_PRECONDITION / unavailable-feature payload when no model is
+/// configured or the `embeddings` feature is not compiled.
+#[post("/nodes/with_embedding")]
+#[api_doc(
+    description = "Create a node whose embedding is generated from text and stored as a vector property",
+    mcp
+)]
+pub async fn create_node_with_embedding(
+    _auth: Authorized<WriteClass>,
+    state: ServerState,
+    Json(req): Json<CreateNodeWithEmbeddingRequest>,
+) -> Json<Value> {
+    let server = state.mcp_server();
+    tool_json(server.create_node_with_embedding(req))
+}
+
+/// `update_node_embedding` — regenerate a node's embedding from `text` and
+/// update ONLY the embedding property, preserving all other properties (Issue
+/// #2906). [`WriteClass`]. HTTP + MCP tool. Forwards through the SHARED server.
+#[post("/nodes/update_embedding")]
+#[api_doc(
+    description = "Regenerate a node's embedding from text, updating only the embedding property",
+    mcp
+)]
+pub async fn update_node_embedding(
+    _auth: Authorized<WriteClass>,
+    state: ServerState,
+    Json(req): Json<UpdateNodeEmbeddingRequest>,
+) -> Json<Value> {
+    let server = state.mcp_server();
+    tool_json(server.update_node_embedding(req))
 }
 
 /// Request body for [`find_nodes_at_time`] — an **all-optional** mirror of the

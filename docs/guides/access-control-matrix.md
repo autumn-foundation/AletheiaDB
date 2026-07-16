@@ -88,6 +88,9 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `get_incoming_edges` | read |
 | `traverse` | read |
 | `find_similar` | read |
+| `embed_query` | read |
+| `embed_text` | read |
+| `semantic_search` | read |
 | `semantic_path` | read |
 | `concept_analogy` | read |
 | `concept_mean` | read |
@@ -130,6 +133,8 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `apply_batch` | write |
 | `enable_vector_index` | write |
 | `enable_unique_constraint` | write |
+| `create_node_with_embedding` | write |
+| `update_node_embedding` | write |
 
 <!-- mcp-tool-matrix:end -->
 

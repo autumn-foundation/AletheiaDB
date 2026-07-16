@@ -31,7 +31,7 @@
 //!
 //! This registry is anchored on `tests/parity/inventory.json` — the inventory's
 //! `mcp.tools[].access_class` is the shared source of truth. It enumerates all
-//! 52 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
+//! 57 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
 //! checks it bidirectionally against the inventory, and
 //! `mcp_routable_tools_are_all_classified` checks the live routable set is a
 //! subset (every routable tool classified). Handlers become routable one slice
@@ -44,7 +44,7 @@ use aletheiadb::auth::{AccessClass, Role};
 /// tests derive from THIS list, so the routable-name set and the class-table
 /// set cannot silently drift into two independently-maintained lists.
 ///
-/// This registry is **inventory-anchored**: it enumerates all 52 tools from
+/// This registry is **inventory-anchored**: it enumerates all 57 tools from
 /// `tests/parity/inventory.json` (`mcp.tools[].access_class`) upfront, mirroring
 /// the legacy `src/mcp/auth.rs::TOOL_ACCESS_CLASSES` verbatim. The conformance
 /// test `registry_matches_inventory_exactly` (`tests/security_rbac.rs`) proves
@@ -67,6 +67,10 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     ("get_incoming_edges", AccessClass::Read),
     ("traverse", AccessClass::Read),
     ("find_similar", AccessClass::Read),
+    // Embedding generation & text semantic search (Issue #2906) — read-only.
+    ("embed_query", AccessClass::Read),
+    ("embed_text", AccessClass::Read),
+    ("semantic_search", AccessClass::Read),
     // Semantic-search analysis tools (Issue #2907) — read-only.
     ("semantic_path", AccessClass::Read),
     ("concept_analogy", AccessClass::Read),
@@ -112,6 +116,9 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     ("apply_batch", AccessClass::Write),
     ("enable_vector_index", AccessClass::Write),
     ("enable_unique_constraint", AccessClass::Write),
+    // Embedding-backed writes (Issue #2906).
+    ("create_node_with_embedding", AccessClass::Write),
+    ("update_node_embedding", AccessClass::Write),
     // ---- Admin: none yet. Key lifecycle is served by the HTTP admin surface
     // over the shared persisted store (no Admin-class MCP tools).
 ];

@@ -21,7 +21,7 @@ use crate::core::{EdgeId, NodeId, Timestamp};
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate,
     PredicateValue, ProvenanceField, ProvenancePredicate, ProvenanceProjection, ScoreThreshold,
-    SortKey,
+    SortKey, TemporalWindowSpec, WindowAggArg, WindowAggFunc,
 };
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
@@ -3228,6 +3228,352 @@ impl AggregateIterator {
 }
 
 impl ResultIterator for AggregateIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if !self.drained {
+            self.drained = true;
+            if let Err(e) = self.drain() {
+                return Some(Err(e));
+            }
+        }
+        self.output.next().map(Ok)
+    }
+}
+
+/// One change-point in an entity's reconstructed valid-time timeline, as
+/// believed at the query's transaction-time coordinate (Issue #3363). The
+/// version's value holds from `valid_from` until the next change-point (or
+/// forever, for the last one).
+struct BelievedVersion {
+    /// Valid-time interval start, microseconds since epoch.
+    valid_from: i64,
+    /// The version's reconstructed properties.
+    properties: crate::core::property::PropertyMap,
+}
+
+/// Per-window, per-aggregate accumulator for temporal window aggregation.
+struct WindowAcc {
+    func: WindowAggFunc,
+    /// COUNT: entities/samples present; CHANGES: version-start count.
+    count: i64,
+    /// Count of numeric samples folded (value aggregates).
+    numeric_count: i64,
+    sum_i: i128,
+    sum_f: f64,
+    saw_float: bool,
+    min: Option<PropertyValue>,
+    max: Option<PropertyValue>,
+}
+
+impl WindowAcc {
+    fn new(func: WindowAggFunc) -> Self {
+        WindowAcc {
+            func,
+            count: 0,
+            numeric_count: 0,
+            sum_i: 0,
+            sum_f: 0.0,
+            saw_float: false,
+            min: None,
+            max: None,
+        }
+    }
+
+    /// Fold one numeric value sample (SUM/AVG/MIN/MAX/COUNT-of-property).
+    fn fold_value(&mut self, v: &PropertyValue) {
+        if let Some(f) = property_as_f64(v) {
+            self.numeric_count += 1;
+            self.sum_f += f;
+            match v {
+                PropertyValue::Int(i) => self.sum_i += i128::from(*i),
+                PropertyValue::Float(_) => self.saw_float = true,
+                _ => {}
+            }
+            match &self.min {
+                Some(m) if compare_property(v, m) != std::cmp::Ordering::Less => {}
+                _ => self.min = Some(v.clone()),
+            }
+            match &self.max {
+                Some(m) if compare_property(v, m) != std::cmp::Ordering::Greater => {}
+                _ => self.max = Some(v.clone()),
+            }
+        }
+    }
+
+    /// Produce the final [`PropertyValue`] for this window/aggregate. Value
+    /// aggregates over an empty/absent sample set yield `Null` (an explicit
+    /// "no data" marker per the #3363 contract); COUNT/CHANGES yield `0`.
+    fn finalize(self) -> PropertyValue {
+        match self.func {
+            WindowAggFunc::Count | WindowAggFunc::Changes => PropertyValue::Int(self.count),
+            WindowAggFunc::Sum => {
+                if self.numeric_count == 0 {
+                    PropertyValue::Null
+                } else if self.saw_float {
+                    PropertyValue::Float(self.sum_f)
+                } else {
+                    // All-integer sum; promote to float only if it overflows i64.
+                    i64::try_from(self.sum_i)
+                        .map(PropertyValue::Int)
+                        .unwrap_or(PropertyValue::Float(self.sum_f))
+                }
+            }
+            WindowAggFunc::Avg => {
+                if self.numeric_count == 0 {
+                    PropertyValue::Null
+                } else {
+                    PropertyValue::Float(self.sum_f / self.numeric_count as f64)
+                }
+            }
+            WindowAggFunc::Min => self.min.unwrap_or(PropertyValue::Null),
+            WindowAggFunc::Max => self.max.unwrap_or(PropertyValue::Null),
+        }
+    }
+}
+
+/// Temporal aggregation window iterator (Issue #3363).
+///
+/// On the first `next()` it drains the upstream matched-entity stream to a set
+/// of node ids, reconstructs each entity's valid-time history as believed at the
+/// spec's transaction-time coordinate, buckets that history into the spec's
+/// tumbling windows, and emits one computed-column [`QueryRow`] per window
+/// carrying `window_start`/`window_end` (RFC 3339) followed by each aggregate.
+/// See [`crate::query::temporal_window`] for the boundary contract and the
+/// crate guide for the sampling rules.
+pub struct TemporalWindowAggregateIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    spec: TemporalWindowSpec,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    output: std::vec::IntoIter<QueryRow>,
+    drained: bool,
+}
+
+impl TemporalWindowAggregateIterator {
+    /// Create a new temporal window aggregation iterator.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        spec: TemporalWindowSpec,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        TemporalWindowAggregateIterator {
+            input: Some(input),
+            spec,
+            historical,
+            output: Vec::new().into_iter(),
+            drained: false,
+        }
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        let mut input = match self.input.take() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+
+        // Collect distinct matched node ids, preserving discovery order. v1
+        // windows nodes only (the converter rejects edge/traversal windows).
+        let mut node_ids: Vec<NodeId> = Vec::new();
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        while let Some(row) = input.next() {
+            let row = row?;
+            if let Some(EntityId::Node(id)) = row.entity.id()
+                && seen.insert(id)
+            {
+                node_ids.push(id);
+            }
+        }
+
+        // Generate the tumbling windows (validated at convert time; re-run here
+        // to obtain the boundaries). A structured error would already have been
+        // raised during conversion, so this is effectively infallible.
+        let windows = crate::query::temporal_window::generate_windows(
+            self.spec.range_start_micros,
+            self.spec.range_end_micros,
+            self.spec.granularity,
+        )
+        .map_err(|e| {
+            crate::core::error::Error::Query(crate::core::error::QueryError::InvalidParameter {
+                parameter: "temporal window".to_string(),
+                reason: format!("{e:?}"),
+            })
+        })?;
+
+        let as_of = self.spec.as_of_system_time;
+        let naggs = self.spec.aggregates.len();
+        // accs[window_index][aggregate_index]
+        let mut accs: Vec<Vec<WindowAcc>> = windows
+            .iter()
+            .map(|_| {
+                self.spec
+                    .aggregates
+                    .iter()
+                    .map(|a| WindowAcc::new(a.func))
+                    .collect()
+            })
+            .collect();
+
+        {
+            let hist = self.historical.read();
+            for node_id in &node_ids {
+                // Reconstruct the entity's valid-time timeline as believed at
+                // the transaction-time coordinate (#3363 AC: later corrections
+                // must not rewrite past analytics). Every version *recorded by*
+                // `as_of` (`transaction_from <= as_of`) contributes a
+                // change-point at its `valid_from`; versions recorded later are
+                // invisible. Multiple versions sharing a `valid_from` are a
+                // same-instant correction, so we keep the one with the latest
+                // belief (greatest `transaction_from <= as_of`). Both value
+                // sampling and CHANGES read from this single, consistent source.
+                // Entities absent from current state (e.g. deleted) cannot be
+                // walked in v1 and are skipped (documented).
+                let believed: Vec<BelievedVersion> = match hist.get_node_history(*node_id) {
+                    Ok(h) => {
+                        let mut by_vf: std::collections::HashMap<
+                            i64,
+                            (Timestamp, crate::core::property::PropertyMap),
+                        > = std::collections::HashMap::new();
+                        for ver in h.versions {
+                            let tx_from = ver.temporal.transaction_time().start();
+                            if tx_from > as_of {
+                                continue;
+                            }
+                            let vf = ver.temporal.valid_time().start().wallclock();
+                            match by_vf.get(&vf) {
+                                Some((existing_tx, _)) if *existing_tx >= tx_from => {}
+                                _ => {
+                                    by_vf.insert(vf, (tx_from, ver.properties));
+                                }
+                            }
+                        }
+                        let mut v: Vec<BelievedVersion> = by_vf
+                            .into_iter()
+                            .map(|(valid_from, (_, properties))| BelievedVersion {
+                                valid_from,
+                                properties,
+                            })
+                            .collect();
+                        v.sort_by_key(|b| b.valid_from);
+                        v
+                    }
+                    Err(_) => continue,
+                };
+
+                for (w_idx, window) in windows.iter().enumerate() {
+                    // Value sample: the value in effect at the window start --
+                    // the change-point with the greatest `valid_from <= start`.
+                    // `None` => the entity did not yet exist at the window start.
+                    let sample = believed
+                        .iter()
+                        .rev()
+                        .find(|b| b.valid_from <= window.start_micros);
+
+                    for (a_idx, agg) in self.spec.aggregates.iter().enumerate() {
+                        let acc = &mut accs[w_idx][a_idx];
+                        match (agg.func, &agg.arg) {
+                            (WindowAggFunc::Changes, arg) => {
+                                acc.count += changes_in_window(&believed, window, arg);
+                            }
+                            (WindowAggFunc::Count, WindowAggArg::Star) => {
+                                if sample.is_some() {
+                                    acc.count += 1;
+                                }
+                            }
+                            (WindowAggFunc::Count, WindowAggArg::Property(key)) => {
+                                if let Some(v) = sample.and_then(|b| b.properties.get(key.as_str()))
+                                    && property_as_f64(v).is_some()
+                                {
+                                    acc.count += 1;
+                                }
+                            }
+                            // Value aggregates (SUM/AVG/MIN/MAX) over a property.
+                            (_, WindowAggArg::Property(key)) => {
+                                if let Some(v) = sample.and_then(|b| b.properties.get(key.as_str()))
+                                {
+                                    acc.fold_value(v);
+                                }
+                            }
+                            // SUM/AVG/MIN/MAX with a `*` argument is rejected at
+                            // convert time; nothing to fold if it slips through.
+                            (_, WindowAggArg::Star) => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit one row per window: window_start, window_end, then aggregates.
+        let mut rows = Vec::with_capacity(windows.len());
+        for (w_idx, window) in windows.iter().enumerate() {
+            let mut columns: Vec<(String, PropertyValue)> = Vec::with_capacity(2 + naggs);
+            columns.push((
+                "window_start".to_string(),
+                PropertyValue::String(Arc::from(
+                    crate::query::temporal_window::format_rfc3339(window.start_micros).as_str(),
+                )),
+            ));
+            columns.push((
+                "window_end".to_string(),
+                PropertyValue::String(Arc::from(
+                    crate::query::temporal_window::format_rfc3339(window.end_micros).as_str(),
+                )),
+            ));
+            let window_accs = std::mem::take(&mut accs[w_idx]);
+            for (agg, acc) in self.spec.aggregates.iter().zip(window_accs) {
+                columns.push((agg.output_name.clone(), acc.finalize()));
+            }
+            rows.push(QueryRow::from_columns(columns));
+        }
+        self.output = rows.into_iter();
+        Ok(())
+    }
+}
+
+/// Count the versions whose valid interval *starts* within `window`
+/// (`[start, end)`), among the believed versions, for a `CHANGES` aggregate.
+///
+/// - `CHANGES(*)` / `CHANGES(v)` counts every entity version starting in the
+///   window.
+/// - `CHANGES(v.prop)` counts only versions whose value for `prop` differs from
+///   the immediately-preceding believed version's value (a genuine property
+///   change; the first believed version counts as a change from "absent").
+fn changes_in_window(
+    believed: &[BelievedVersion],
+    window: &crate::query::temporal_window::Window,
+    arg: &WindowAggArg,
+) -> i64 {
+    let in_window = |vf: i64| vf >= window.start_micros && vf < window.end_micros;
+    match arg {
+        WindowAggArg::Star => believed.iter().filter(|b| in_window(b.valid_from)).count() as i64,
+        WindowAggArg::Property(key) => {
+            let mut count = 0i64;
+            for (i, b) in believed.iter().enumerate() {
+                if !in_window(b.valid_from) {
+                    continue;
+                }
+                let cur = b.properties.get(key.as_str());
+                let prev = if i == 0 {
+                    None
+                } else {
+                    believed[i - 1].properties.get(key.as_str())
+                };
+                if !property_values_equal(cur, prev) {
+                    count += 1;
+                }
+            }
+            count
+        }
+    }
+}
+
+/// Equality of two optional property values for property-change detection.
+fn property_values_equal(a: Option<&PropertyValue>, b: Option<&PropertyValue>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+impl ResultIterator for TemporalWindowAggregateIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         if !self.drained {
             self.drained = true;

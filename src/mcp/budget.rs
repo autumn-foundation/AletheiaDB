@@ -377,6 +377,10 @@ fn is_ranked_tool(tool: &str) -> bool {
         tool,
         "find_similar"
             | "hybrid_query"
+            // `semantic_search` reuses the exact `find_similar` k-NN path, so
+            // its ranked `results` must enjoy the same protection: never
+            // dropped or reordered to meet a token budget (Issue #2906).
+            | "semantic_search"
             // Issue #2907 semantic-search tools whose results are score-ordered
             // (or a single atomic path); their order/completeness must not be
             // silently truncated to meet a token budget.
@@ -1126,6 +1130,23 @@ mod unit_tests {
         let budget = budget_req(4, &[]);
         let err = enforce_raw_cap("hello world".repeat(10), &budget).unwrap_err();
         assert_eq!(err.code(), McpErrorCode::InvalidArgument);
+    }
+
+    /// Issue #2906: `semantic_search` reuses the `find_similar` k-NN path, so it
+    /// must be classified as a *ranked* tool — its ranked `results` are then
+    /// never dropped or reordered (never reach the counts-and-handles rung) to
+    /// meet a token budget, preserving find_similar parity.
+    #[test]
+    fn semantic_search_is_a_ranked_tool() {
+        assert!(
+            is_ranked_tool("semantic_search"),
+            "semantic_search must be ranked-protected (find_similar parity)"
+        );
+        // Regression guard for the pre-existing ranked tools.
+        assert!(is_ranked_tool("find_similar"));
+        assert!(is_ranked_tool("hybrid_query"));
+        // A non-ranked read tool stays non-ranked.
+        assert!(!is_ranked_tool("list_nodes"));
     }
 
     /// T5: the byte cap holds for multibyte/unicode payloads, and truncation

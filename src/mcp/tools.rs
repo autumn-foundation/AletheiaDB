@@ -699,6 +699,173 @@ pub struct FindSimilarRequest {
     pub include_vectors: Option<bool>,
 }
 
+// ============================================================================
+// Embedding Generation & Text Semantic Search (Issue #2906)
+// ============================================================================
+
+/// Request to embed a single text string into a dense vector (`embed_query`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct EmbedQueryRequest {
+    /// The text to embed into a single dense vector.
+    #[schemars(description = "The text to embed into a single dense embedding vector.")]
+    pub text: String,
+
+    /// Optional model identifier (reserved; the server uses its configured model).
+    #[schemars(
+        description = "Optional model identifier. Reserved for forward compatibility: v1 always \
+                       uses the model the server was configured with, so this field is currently \
+                       advisory. Omit it."
+    )]
+    pub model: Option<String>,
+}
+
+/// Request to embed multiple texts (chunk-expanded) into dense vectors
+/// (`embed_text`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct EmbedTextRequest {
+    /// The texts to embed. Each entry is chunk-expanded into one or more
+    /// per-chunk embeddings.
+    #[schemars(
+        description = "The texts to embed. Each entry is split into contiguous character-window \
+                       chunks and every chunk is embedded independently, so a long document yields \
+                       MULTIPLE per-chunk embeddings (never truncated to one). Each embedding is \
+                       aligned to its source chunk text and metadata via the model's own chunk \
+                       output (never positionally zipped); the metadata carries the originating \
+                       source_index and chunk_index."
+    )]
+    pub texts: Vec<String>,
+
+    /// Optional model identifier (reserved; the server uses its configured model).
+    #[schemars(
+        description = "Optional model identifier. Reserved for forward compatibility: v1 uses the \
+                       server-configured model (advisory). Omit it."
+    )]
+    pub model: Option<String>,
+
+    /// Optional cap on the number of returned chunk embeddings.
+    #[schemars(
+        description = "Optional hard cap on the number of returned per-chunk embeddings across all \
+                       inputs. Clamped to the server maximum. When the cap trims the chunk \
+                       expansion the response sets `truncated: true`. A value of 0 is rejected as \
+                       INVALID_ARGUMENT."
+    )]
+    pub max_chunks: Option<usize>,
+}
+
+/// Request to embed a natural-language query and run vector similarity search
+/// (`semantic_search`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SemanticSearchRequest {
+    /// The property name that holds the indexed vector embedding.
+    #[schemars(
+        description = "The property name that holds the indexed vector embedding to search \
+                       against (e.g., 'embedding'). A vector index must already be enabled for it."
+    )]
+    pub property_name: String,
+
+    /// The natural-language query text to embed and search with.
+    #[schemars(description = "The natural-language query text to embed and search with.")]
+    pub query_text: String,
+
+    /// Number of similar results to return (default 10).
+    #[schemars(description = "Number of similar results to return (default: 10).")]
+    pub k: Option<usize>,
+
+    /// Number of results to skip (offset pagination).
+    #[schemars(
+        description = "Number of results to skip (offset pagination). Pass the `next_offset` from \
+                       a prior response to fetch the next page."
+    )]
+    pub offset: Option<usize>,
+
+    /// Return full embedding arrays instead of the elided descriptor.
+    #[schemars(
+        description = "When true, return full embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false). Never affects the \
+                       similarity score."
+    )]
+    pub include_vectors: Option<bool>,
+
+    /// Optional model identifier (reserved; the server uses its configured model).
+    #[schemars(
+        description = "Optional model identifier. Reserved for forward compatibility: v1 uses the \
+                       server-configured model (advisory). Omit it."
+    )]
+    pub model: Option<String>,
+}
+
+/// Request to create a node whose embedding is generated from text
+/// (`create_node_with_embedding`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CreateNodeWithEmbeddingRequest {
+    /// The label/type of the node (e.g., "Document").
+    #[schemars(description = "The label/type of the node (e.g., 'Document').")]
+    pub label: String,
+
+    /// The text to embed and store as the node's embedding property.
+    #[schemars(description = "The text to embed and store as the node's embedding property.")]
+    pub text: String,
+
+    /// The property name under which to store the generated embedding vector.
+    #[schemars(
+        description = "The property name under which to store the generated embedding vector \
+                       (e.g., 'embedding'). Compatible with enable_vector_index / find_similar / \
+                       semantic_search."
+    )]
+    pub embedding_property: String,
+
+    /// Optional additional properties to set on the node.
+    #[schemars(
+        description = "Optional additional non-embedding properties to set on the node as \
+                       key-value pairs."
+    )]
+    pub properties: Option<HashMap<String, serde_json::Value>>,
+
+    /// Optional valid time: when this fact became true in the real world.
+    #[schemars(
+        description = "Optional valid time (ISO 8601 / RFC 3339 or microseconds since epoch). Omit \
+                       to default to the transaction time. Transaction time is always \
+                       system-assigned."
+    )]
+    pub valid_time: Option<String>,
+
+    /// Optional write-time provenance bundle.
+    #[schemars(
+        description = "Optional write-time provenance bundle (source, confidence, note, \
+                       correlation_id)."
+    )]
+    pub provenance: Option<ProvenanceRequest>,
+}
+
+/// Request to (re)generate a node's embedding property from text
+/// (`update_node_embedding`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateNodeEmbeddingRequest {
+    /// The unique identifier of the node to update.
+    #[schemars(description = "The unique identifier of the node to update.")]
+    pub node_id: u64,
+
+    /// The text to embed and store as the node's embedding property.
+    #[schemars(description = "The text to embed and store as the node's embedding property.")]
+    pub text: String,
+
+    /// The property name under which to store the regenerated embedding vector.
+    #[schemars(
+        description = "The property name under which to store the regenerated embedding vector. \
+                       All OTHER existing properties of the node are preserved (update_node \
+                       otherwise replaces every property)."
+    )]
+    pub embedding_property: String,
+
+    /// Optional valid time: when this update became true in the real world.
+    #[schemars(
+        description = "Optional valid time (ISO 8601 / RFC 3339 or microseconds since epoch). Omit \
+                       to default to the transaction time. Transaction time is always \
+                       system-assigned."
+    )]
+    pub valid_time: Option<String>,
+}
+
 /// Request to enable vector indexing on a property.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EnableVectorIndexRequest {

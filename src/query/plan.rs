@@ -308,6 +308,12 @@ pub enum UnaryOp {
         aggregates: Vec<super::ir::AggregateSpec>,
     },
 
+    /// Temporal aggregation window (Issue #3363). Mirrors
+    /// [`super::ir::QueryOp::TemporalWindowAggregate`]: buckets each upstream
+    /// entity's valid-time history into tumbling windows and emits per-window
+    /// aggregate rows.
+    TemporalWindowAggregate(super::ir::TemporalWindowSpec),
+
     /// Left-outer application of an optional sub-pattern (`OPTIONAL MATCH`).
     ///
     /// For each input row, the `steps` sub-pipeline runs seeded from that row;

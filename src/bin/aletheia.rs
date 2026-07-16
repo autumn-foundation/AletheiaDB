@@ -856,14 +856,16 @@ fn encryption_status(args: &[String]) -> Result<(), String> {
 ///   (encrypted) WAL through the configured cipher; a wrong or missing key
 ///   fails the open with an authentication error. A successful open therefore
 ///   *proves* the WAL actually AEAD-decrypts.
-/// * **Index — a header classification, NOT a body decrypt.** On success we
-///   additionally *classify* every persisted index file by reading its 10-byte
-///   `AEIX` header key-version and matching it against the live keyring
-///   (`at_current` / `at_old` / `unknown` / `plaintext`). This reads only the
-///   header bytes; it does **not** AEAD-decrypt the index bodies. A genuine
-///   index-body decrypt happens only when `persistence.load_on_startup = true`
-///   (which the durable `open()` path enables), where the load itself would
-///   fail on a bad key.
+/// * **Index — header classification AND a body decrypt probe.** On success we
+///   *classify* every persisted index file by reading its 10-byte `AEIX` header
+///   key-version and matching it against the live keyring (`at_current` /
+///   `at_old` / `unknown` / `plaintext`). Header classification alone can
+///   false-PASS when a wrong key shares the same key-version number, so we
+///   additionally run an *active* body decrypt probe (Issue #3618): the manifest
+///   body plus one representative encrypted file per distinct key generation are
+///   AEAD-decrypted through the keyring. A wrong key (or a corrupted body) fails
+///   the AEAD auth tag here even when the header matches, turning what was a
+///   false-PASS into a FAIL. No key bytes or file paths are ever printed.
 ///
 /// Operates on the ambient configuration only (`ALETHEIADB_CONFIG` /
 /// `ALETHEIADB_DATA_DIR`); it does not accept `--key-file` / `--env-var`, which
@@ -911,6 +913,22 @@ fn encryption_verify(_args: &[String]) -> Result<(), String> {
                     s.unknown
                 ));
             }
+            // Header classification alone can FALSE-PASS: a wrong key that shares
+            // the same key_version number matches the header while decrypting
+            // nothing (Issue #3618). Actively probe that index bodies AEAD-decrypt
+            // under the live keyring — a wrong key or a corrupted body fails here.
+            let probe = db
+                .verify_index_decryptable()
+                .map_err(|e| format!("encryption verify FAILED: {e}"))?;
+            if !probe.decrypt_failed.is_empty() {
+                // Report a count and a generic reason only — never a path or key
+                // material that could leak secrets.
+                return Err(format!(
+                    "encryption verify FAILED: {} index file(s) present a body that does \
+                     NOT decrypt with the configured key material (wrong key or corruption)",
+                    probe.decrypt_failed.len()
+                ));
+            }
             let stats = db.stats();
             println!("encryption verify: PASS");
             println!(
@@ -922,6 +940,10 @@ fn encryption_verify(_args: &[String]) -> Result<(), String> {
                  by AEIX header ({} plaintext)",
                 s.at_current + s.at_old,
                 s.plaintext
+            );
+            println!(
+                "  Index: {} encrypted file(s) body-decrypted with the live keyring",
+                probe.decrypted_ok
             );
         }
         Err(e) if rotation_status_not_enabled(&e) => {

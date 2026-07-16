@@ -99,6 +99,7 @@ pub mod planner;
 pub mod read_only;
 pub mod result;
 pub mod semantic_pathfinding;
+pub mod temporal_window;
 /// Query execution traits.
 pub mod traits;
 

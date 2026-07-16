@@ -78,6 +78,10 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("get_incoming_edges", AccessClass::Read),
     ("traverse", AccessClass::Read),
     ("find_similar", AccessClass::Read),
+    // Embedding generation & text semantic search (Issue #2906) — read-only.
+    ("embed_query", AccessClass::Read),
+    ("embed_text", AccessClass::Read),
+    ("semantic_search", AccessClass::Read),
     // Semantic-search analysis tools (Issue #2907) — read-only.
     ("semantic_path", AccessClass::Read),
     ("concept_analogy", AccessClass::Read),
@@ -126,6 +130,9 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("apply_batch", AccessClass::Write),
     ("enable_vector_index", AccessClass::Write),
     ("enable_unique_constraint", AccessClass::Write),
+    // Embedding-backed writes (Issue #2906).
+    ("create_node_with_embedding", AccessClass::Write),
+    ("update_node_embedding", AccessClass::Write),
     // ---- Admin: none yet. Key lifecycle is served by the HTTP admin
     // surface (Phase 1) over the shared persisted store.
 ];

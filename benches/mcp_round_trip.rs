@@ -1362,6 +1362,71 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
                 move |_| json!({"node_id": id, "property_name": "embedding", "k": 3})
             }
         ),
+        // ---- Embedding generation & text semantic search (Issue #2906) ----
+        // These tools require a configured embedder / the `embeddings` feature.
+        // The smoke build has neither, so each round-trip returns a structured
+        // FAILED_PRECONDITION (a tool-level `isError`, NOT a JSON-RPC error), which
+        // `measure_scenario` tolerates. They are present purely to satisfy the
+        // registry-completeness gate (AC2); they are not gated on latency.
+        s!(
+            "embedding__embed_query",
+            "embed_query",
+            "vector",
+            "typical",
+            false,
+            move |_| json!({"text": "benchmark embedding probe"})
+        ),
+        s!(
+            "embedding__embed_text",
+            "embed_text",
+            "vector",
+            "typical",
+            false,
+            move |_| json!({"texts": ["benchmark embedding probe"]})
+        ),
+        s!(
+            "embedding__semantic_search",
+            "semantic_search",
+            "vector",
+            "typical",
+            false,
+            {
+                move |_| json!({"property_name": "embedding", "query_text": "benchmark probe", "k": 10})
+            }
+        ),
+        s!(
+            "embedding__create_node_with_embedding",
+            "create_node_with_embedding",
+            "vector",
+            "typical",
+            false,
+            {
+                move |i| {
+                    json!({
+                        "label": "BenchEmbed",
+                        "text": format!("benchmark probe {i}"),
+                        "embedding_property": "embedding"
+                    })
+                }
+            }
+        ),
+        s!(
+            "embedding__update_node_embedding",
+            "update_node_embedding",
+            "vector",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |i| {
+                    json!({
+                        "node_id": id,
+                        "text": format!("benchmark probe {i}"),
+                        "embedding_property": "embedding"
+                    })
+                }
+            }
+        ),
     ]
 }
 
