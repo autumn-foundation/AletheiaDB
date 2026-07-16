@@ -522,7 +522,11 @@ impl AletheiaDB {
             if let Some(ref manager) = persistence_manager
                 && config.encryption.enabled
             {
-                crate::db::rotation::resume_pending_rotation(manager, &config.encryption)?;
+                crate::db::rotation::resume_pending_rotation(
+                    manager,
+                    &config.encryption,
+                    Some(&db.wal),
+                )?;
             }
 
             // Load indexes on startup if enabled

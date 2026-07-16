@@ -64,11 +64,11 @@ use crate::encryption::factory::Algorithm;
 use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::KeyDerivation;
 use crate::storage::index_persistence::common::{ENC_INDEX_KEY_VERSION_V1, IndexKeyring};
-use crate::storage::index_persistence::common::ENC_INDEX_KEY_VERSION_V1;
 use crate::storage::index_persistence::reencrypt::DecryptProbeReport;
 use crate::storage::index_persistence::{
     IndexKeyRotation, IndexPersistenceManager, RotationError, RotationProgress, RotationStatus,
 };
+use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 
 /// Summary of a completed index key rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +163,60 @@ fn derive_index_dek(
     KeyDerivation::new(mek)
         .derive_index_dek()
         .map_err(|e| RotationError::KeyProvider(e.to_string()))
+}
+
+/// Derive the WAL DEK for a MEK using the shared HKDF context (Issue #3617).
+fn derive_wal_dek(
+    mek: Zeroizing<[u8; 32]>,
+) -> std::result::Result<Zeroizing<[u8; 32]>, RotationError> {
+    KeyDerivation::new(mek)
+        .derive_wal_dek()
+        .map_err(|e| RotationError::KeyProvider(e.to_string()))
+}
+
+/// Force-roll the WAL under the new DEK and retire the old-generation segments
+/// (Issue #3617). Shared by the forward driver and crash-resume.
+///
+/// Installs `new_wal_cipher` as key generation `new_key_version` on the WAL
+/// keyring (so subsequent appends use the new DEK) via an atomic force-roll,
+/// then deletes every sealed old-DEK segment (identified by header — legacy or
+/// a different `key_version`). The caller MUST have already captured all
+/// committed data in a durable index snapshot whose manifest was persisted
+/// BEFORE the rotation ledger was written, so retiring old-DEK segments loses
+/// nothing. Idempotent: a re-run seals another fresh (already-new-generation)
+/// segment and re-retires (a no-op once the old tail is gone).
+fn roll_and_retire_wal(
+    wal: &ConcurrentWalSystem,
+    new_wal_cipher: Arc<dyn Cipher>,
+    new_key_version: u32,
+) -> Result<()> {
+    if wal.wal_keyring().is_none() {
+        return Ok(());
+    }
+    let ring = wal.wal_keyring().expect("checked above").clone();
+    let cipher = Arc::clone(&new_wal_cipher);
+    // The keyring flip runs inside the atomic seal→reopen hand-off (holding the
+    // coordinator writer mutex), so the sealed segment stays on the old DEK and
+    // the fresh segment is written under the new one.
+    wal.seal_active_segment_for_rotation(move || {
+        ring.add_generation(new_key_version, cipher);
+    })?;
+    wal.retire_old_generation_segments(new_key_version)?;
+    Ok(())
+}
+
+/// Rewrite the durable ledger flipping `layer.wal=complete` (Issue #3617),
+/// preserving every other field. A no-op when no ledger is present (already
+/// cleared). Keeps the #488 P0.2 ordering: the completion is fsync'd before the
+/// old generation is retired / the ledger is cleared.
+fn mark_wal_complete(manager: &IndexPersistenceManager) -> Result<()> {
+    if let Some(mut ledger) = read_rotation_state(manager)?
+        && ledger.wal != LayerStatus::Complete
+    {
+        ledger.wal = LayerStatus::Complete;
+        write_ledger(manager, &ledger)?;
+    }
+    Ok(())
 }
 
 /// The four encrypted-at-rest layers a full-MEK rotation must eventually cover
@@ -499,12 +553,15 @@ impl AletheiaDB {
     /// is safe. Never exposes ciphers or key material.
     fn conflicting_encrypted_layers(&self) -> Vec<&'static str> {
         let mut layers = Vec::new();
-        // WAL: encrypted under the WAL DEK derived from the same MEK.
-        if self.wal.is_encrypted() {
-            layers.push("wal");
-        }
-        // Cold storage: when a tiered/cold store is configured and encryption is
-        // enabled, its files are under the cold DEK from the same MEK.
+        // WAL is now rotatable by the full-MEK driver (Issue #3617 PR2): a
+        // checkpoint → force-roll under the new WAL DEK → truncate of the old
+        // segments re-keys it with no bulk rewrite, so it is no longer a
+        // cross-layer conflict.
+        //
+        // Cold storage is NOT yet covered (PR3): when a tiered/cold store is
+        // configured and encryption is enabled, its files are under the cold DEK
+        // from the same MEK, so an index+WAL rotation would still strand them —
+        // keep refusing until the cold re-keyer lands.
         if self.encryption_manager.is_some() && self.historical.read().has_tiered_storage() {
             layers.push("cold_storage");
         }
@@ -626,7 +683,7 @@ impl AletheiaDB {
             .encryption_config
             .clone()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
-        resume_pending_rotation(&manager, &enc_cfg)
+        resume_pending_rotation(&manager, &enc_cfg, Some(&self.wal))
     }
 
     fn run_rotation(
@@ -679,23 +736,49 @@ impl AletheiaDB {
         // a contract-violating concurrent index persist) before the ledger is on
         // stable storage — a power loss can then never strand a new-key file
         // with a lost ledger (Issue #488 P0.2, preserved per-layer for #3617).
-        // `write_rotation_state` fsyncs the file and its parent dir; only once
-        // it returns does the driver flip the keyring.
-        write_rotation_state(
+        // The WAL layer is recorded `Pending` when it is encrypted, so crash
+        // resume drives it; `write_ledger` fsyncs the file and its parent dir,
+        // and only once it returns does the driver flip any keyring.
+        let wal_in_scope = self.wal.is_encrypted();
+
+        // WAL-rotation invariant (Issue #3617): checkpoint BEFORE the ledger is
+        // written. `persist_indexes` captures every committed entry into the
+        // durable index snapshot and stamps the manifest, so once the ledger
+        // exists ("a rotation is in flight") ALL pre-rotation WAL data is already
+        // durable outside the WAL. Crash-resume can then retire the old-DEK
+        // segments unconditionally without re-checkpointing (indexes are not
+        // loaded yet at startup-resume time). Skipped for an index-only rotation,
+        // preserving that path's exact behavior.
+        if wal_in_scope {
+            self.persist_indexes()?;
+        }
+
+        write_ledger(
             manager,
-            new_version,
-            new_key_source,
-            RotationDirection::Forward,
+            &RotationLedger::forward_scope(new_version, new_key_source.clone(), wal_in_scope),
         )?;
         self.emit_rotation_audit(&AuditEvent::RotationStarted {
             old_version,
             new_version,
         });
 
-        // Drive each recorded layer. PR1 runs only the index/checkpoint domain
-        // through the mature #488 engine; wal/cold are recorded Skipped.
+        // Drive the index/checkpoint domain through the mature #488 engine.
         let progress =
             drive_forward_layers(manager, &keyring, old_version, new_version, &layer_ciphers)?;
+
+        // WAL layer (Issue #3617 PR2): re-key the WAL with no bulk rewrite —
+        // checkpoint (persist) → force-roll under the new WAL DEK → truncate the
+        // old-DEK segments. Runs after the index pass so `persist_indexes` writes
+        // fresh index files under the already-installed new index generation.
+        if wal_in_scope {
+            let wal_new_cipher = layer_ciphers
+                .iter()
+                .find(|lc| lc.layer == RotationLayer::Wal)
+                .map(|lc| Arc::clone(&lc.new))
+                .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
+            self.rotate_wal_layer(manager, wal_new_cipher, new_version)?;
+        }
+
         clear_rotation_state(manager);
 
         Ok(RotationReport {
@@ -706,6 +789,53 @@ impl AletheiaDB {
             files_skipped: progress.files_skipped,
             duration_ms: started.elapsed().as_millis() as u64,
         })
+    }
+
+    /// Re-key the WAL layer to `new_wal_cipher` (Issue #3617 PR2), with no bulk
+    /// rewrite of historical segments.
+    ///
+    /// Sequence (no cold storage — the only case the cross-layer guard allows a
+    /// rotation through today):
+    /// 1. **Checkpoint** — `persist_indexes` captures the current in-memory
+    ///    state into the durable index snapshot and stamps the manifest with the
+    ///    applied-watermark LSN, so all committed data below that LSN survives a
+    ///    WAL truncation.
+    /// 2. **Force-roll** — atomically seal the active (old-DEK) segment, advance
+    ///    the WAL keyring to the new generation, and open a fresh segment written
+    ///    under the new DEK.
+    /// 3. **Truncate** — drop every sealed old-DEK segment below the manifest
+    ///    LSN, so no old-DEK ciphertext remains and the old WAL DEK can be
+    ///    dropped after a provider switch.
+    /// 4. **Complete** — flip `layer.wal=complete` in the durable ledger, but
+    ///    only once no old-generation segment remains on disk (fail-safe: if a
+    ///    tail could not be truncated, leave it `pending` for a later pass).
+    ///
+    /// Assumes heavy writes are quiesced for its duration (the same contract as
+    /// index rotation); an append racing the roll still recovers (durability),
+    /// but full old-tail retirement assumes no post-checkpoint writes.
+    fn rotate_wal_layer(
+        &self,
+        manager: &IndexPersistenceManager,
+        new_wal_cipher: Arc<dyn Cipher>,
+        new_key_version: u32,
+    ) -> Result<()> {
+        if !self.wal.is_encrypted() {
+            return Ok(());
+        }
+        // The checkpoint (persist_indexes) already ran in `run_rotation` BEFORE
+        // the ledger was written, so the manifest already captures every
+        // committed entry — retiring the old-DEK segments here loses nothing.
+        //
+        // Force-roll under the new DEK, then retire the old-DEK segments.
+        roll_and_retire_wal(&self.wal, new_wal_cipher, new_key_version)?;
+
+        // Mark the WAL layer complete only once every old-generation segment is
+        // gone (so a completed rotation never leaves an unreadable tail after the
+        // old DEK is dropped).
+        if self.wal.all_segments_use_key_version(new_key_version) {
+            mark_wal_complete(manager)?;
+        }
+        Ok(())
     }
 }
 
@@ -807,6 +937,26 @@ impl RotationLedger {
             index: LayerStatus::Pending,
             checkpoint: LayerStatus::Pending,
             wal: LayerStatus::Skipped,
+            cold: LayerStatus::Skipped,
+        }
+    }
+
+    /// The PR2 cross-layer plan (Issue #3617): index + checkpoint always
+    /// re-key through the index engine; the WAL is `Pending` when it is
+    /// encrypted (the full-MEK driver re-keys it), else `Skipped`; cold remains
+    /// out of scope (`Skipped`) until PR3.
+    fn forward_scope(new_version: u32, new_source: KeyProviderConfig, wal_in_scope: bool) -> Self {
+        Self {
+            direction: RotationDirection::Forward,
+            new_version,
+            new_source,
+            index: LayerStatus::Pending,
+            checkpoint: LayerStatus::Pending,
+            wal: if wal_in_scope {
+                LayerStatus::Pending
+            } else {
+                LayerStatus::Skipped
+            },
             cold: LayerStatus::Skipped,
         }
     }
@@ -1069,6 +1219,7 @@ fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<Rotat
 pub fn resume_pending_rotation(
     manager: &Arc<IndexPersistenceManager>,
     enc_cfg: &EncryptionConfig,
+    wal: Option<&ConcurrentWalSystem>,
 ) -> Result<Option<RotationReport>> {
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(None);
@@ -1083,22 +1234,37 @@ pub fn resume_pending_rotation(
         .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
     let old_version = keyring.current_version();
 
-    // DERIVATION ASYMMETRY (Issue #3617 PR1): the forward driver
-    // (`run_rotation`) derives the full four-DEK `MekKeyset` (wal/index/cold/
-    // checkpoint) up front, but resume derives ONLY the index DEK here because
-    // PR1's only executable layer is the index domain (index + checkpoint, which
-    // rides the index DEK); wal/cold are recorded `Skipped` and have no resume
-    // work. This is a deliberate, load-bearing gap: PR2 (WAL) and PR3 (cold)
-    // MUST extend resume to derive AND drive their layers' DEKs — not just the
-    // forward path — or an interrupted full-MEK rotation would resume the index
-    // pass while silently leaving the WAL/cold layers half-rotated. Mirror the
-    // `MekKeyset::derive` + `drive_forward_layers` structure here when those
-    // engines land.
+    // Index DEK (index + checkpoint ride it). PR3 will add the cold DEK here.
     let new_dek = derive_index_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
         .map_err(rotation_err)?;
     let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
 
     keyring.add_generation(ledger.new_version, Arc::clone(&new_cipher));
+
+    // WAL layer (Issue #3617 PR2): when the ledger records the WAL as in flight
+    // and a WAL system is available, add BOTH generations to its keyring — so a
+    // half-rotated directory (old-DEK + new-DEK segments) replays correctly on
+    // this open — and drive the layer to completion idempotently. Resume does
+    // NOT re-checkpoint (indexes are not loaded yet at startup): the forward
+    // driver checkpointed BEFORE writing the ledger, so every old-DEK segment is
+    // already captured durably and can be retired unconditionally.
+    let wal_pending = matches!(ledger.wal, LayerStatus::Pending);
+    if wal_pending
+        && let Some(wal) = wal
+        && let Some(wal_keyring) = wal.wal_keyring()
+    {
+        let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
+            .map_err(rotation_err)?;
+        let new_wal_cipher: Arc<dyn Cipher> =
+            Arc::from(create_cipher(enc_cfg.algorithm, &new_wal_dek));
+        // The startup keyring is `single(old_wal_dek)`; adding the new generation
+        // makes both live (legacy/old-kv → old, new-kv → new).
+        wal_keyring.add_generation(ledger.new_version, Arc::clone(&new_wal_cipher));
+        roll_and_retire_wal(wal, new_wal_cipher, ledger.new_version)?;
+        if wal.all_segments_use_key_version(ledger.new_version) {
+            mark_wal_complete(manager)?;
+        }
+    }
 
     let engine = IndexKeyRotation::new(
         manager.indexes_path(),
@@ -1559,7 +1725,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
             .unwrap()
             .expect("a pending rotation should resume");
         assert_eq!(report.new_version, 2);
@@ -1570,10 +1736,11 @@ mod tests {
     // ── P0.1: cross-layer MEK-desync guard ───────────────────────────
 
     #[test]
-    fn rotate_refuses_when_wal_encrypted() {
-        // A fully-encrypted DB (WAL under the same MEK) must REFUSE an index-only
-        // rotation: rotating the index alone to a new MEK then switching the key
-        // provider would strand the WAL under the old key (catastrophic loss).
+    fn rotate_reencrypts_wal() {
+        // Issue #3617 PR2: a fully-encrypted DB WITHOUT cold storage (WAL + index
+        // under the same MEK) now ROTATES successfully — the full-MEK driver
+        // re-keys the WAL via checkpoint → force-roll → truncate, so a subsequent
+        // provider switch is safe. (This flips the former index-only refusal.)
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let old_key = root.join("old.key");
@@ -1581,10 +1748,101 @@ mod tests {
         crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
         crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
 
-        let db = build_db(root, &old_key); // WAL encrypted too
-        seed(&db);
-        assert!(db.wal.is_encrypted(), "precondition: WAL is encrypted");
+        let (alice, bob) = {
+            let db = build_db(root, &old_key); // WAL encrypted too
+            let ids = seed(&db);
+            assert!(db.wal.is_encrypted(), "precondition: WAL is encrypted");
+            assert!(
+                db.conflicting_encrypted_layers().is_empty(),
+                "no cold storage → WAL+index rotation is now allowed"
+            );
 
+            let report = db
+                .rotate_index_keys(KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .expect("WAL+index rotation without cold storage must succeed");
+            assert_eq!(report.new_version, 2);
+
+            // Data is intact in-memory immediately after rotation.
+            assert_eq!(db.node_count(), 2);
+            assert_eq!(db.edge_count(), 1);
+
+            // The rotation cleared its ledger.
+            assert!(!root.join("data").join("rotation.state").exists());
+
+            // Every remaining WAL segment is stamped with the NEW key_version;
+            // the old-DEK segments were truncated.
+            assert!(
+                db.wal.all_segments_use_key_version(2),
+                "all remaining WAL segments must carry the new key_version"
+            );
+            ids
+        };
+
+        // Reopen under the NEW key ONLY (the provider switch the whole feature
+        // exists to make safe): the WAL replays under the new DEK, index files
+        // decrypt under the new DEK, and the graph is fully recovered.
+        {
+            let db = build_db(root, &new_key);
+            assert_eq!(db.node_count(), 2, "graph must recover under the new key");
+            assert_eq!(db.edge_count(), 1);
+            // Both seeded nodes are readable (and decrypt) under the new key.
+            db.get_node(alice)
+                .expect("alice recovers under the new key");
+            db.get_node(bob).expect("bob recovers under the new key");
+        }
+    }
+
+    #[test]
+    fn rotate_still_refuses_when_cold_storage_encrypted() {
+        // Issue #3617 PR2: cold storage is NOT yet covered (PR3). A DB with
+        // encrypted cold storage must STILL refuse — an index+WAL rotation would
+        // strand the cold values under the old MEK.
+        use crate::config::HistoricalConfigBuilder;
+        use std::time::Duration;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(root.join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_delay_ms: 5,
+                        max_batch_size: 64,
+                    })
+                    .build(),
+            )
+            .persistence(crate::storage::index_persistence::PersistenceConfig {
+                enabled: true,
+                data_dir: root.join("data"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(root.join("cold.redb"))
+                    .migration_age_threshold(Duration::from_secs(3600))
+                    .build(),
+            )
+            .encryption(EncryptionConfig::file_based(&old_key))
+            .build();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
+        seed(&db);
+        assert!(db.wal.is_encrypted());
+
+        let conflicting = db.conflicting_encrypted_layers();
+        assert!(
+            conflicting.contains(&"cold_storage"),
+            "cold storage must still be a conflict until PR3, got: {conflicting:?}"
+        );
         let err = db
             .rotate_index_keys(KeyProviderConfig::File {
                 path: new_key.clone(),
@@ -1592,11 +1850,72 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("other encrypted-at-rest layers") && msg.contains("wal"),
-            "expected cross-layer refusal naming the WAL, got: {msg}"
+            msg.contains("other encrypted-at-rest layers") && msg.contains("cold_storage"),
+            "expected cross-layer refusal naming cold_storage, got: {msg}"
         );
-        // Refusal leaves NO breadcrumb behind (checked before any state write).
         assert!(!root.join("data").join("rotation.state").exists());
+    }
+
+    /// Crash right after the rotation ledger was fsync'd but before any layer
+    /// finished (design §5 step 2): the durable ledger records index + WAL
+    /// `pending`. On the next open — still under the OLD key, since the rotation
+    /// never completed — startup resume drives BOTH layers to completion (index
+    /// re-encrypted, WAL force-rolled + old segments truncated), clears the
+    /// ledger, and the graph is intact; a subsequent reopen under the NEW key
+    /// alone then succeeds (the provider switch is now safe).
+    #[test]
+    fn crash_after_ledger_resumes_wal_and_index() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        // 1. Seed an encrypted DB and persist (the manifest covers all data), then
+        //    plant a durable ledger simulating a crash right after it was written.
+        {
+            let db = build_db(root, &old_key);
+            seed(&db); // persists indexes
+            let manager = db.persistence_manager.as_ref().unwrap().clone();
+            super::write_ledger(
+                &manager,
+                &super::RotationLedger::forward_scope(
+                    2,
+                    KeyProviderConfig::File {
+                        path: new_key.clone(),
+                    },
+                    true, // WAL in scope
+                ),
+            )
+            .unwrap();
+            assert!(root.join("data").join("rotation.state").exists());
+        }
+
+        // 2. Reopen under the OLD key (rotation in flight): startup resume
+        //    completes both layers and clears the ledger.
+        {
+            let db = build_db(root, &old_key);
+            assert!(
+                !root.join("data").join("rotation.state").exists(),
+                "startup resume must complete the pending rotation and clear the ledger"
+            );
+            assert_eq!(db.node_count(), 2, "graph intact after resume");
+            assert_eq!(db.edge_count(), 1);
+            assert!(
+                db.wal.all_segments_use_key_version(2),
+                "resume must retire the old-generation WAL segments"
+            );
+            // Resume is idempotent: a second run with no ledger is a clean no-op.
+            assert!(db.resume_pending_index_rotation().unwrap().is_none());
+        }
+
+        // 3. Provider switch: reopen under the NEW key only — everything decrypts.
+        {
+            let db = build_db(root, &new_key);
+            assert_eq!(db.node_count(), 2, "graph recovers under the new key");
+            assert_eq!(db.edge_count(), 1);
+        }
     }
 
     #[test]
@@ -1764,7 +2083,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let err = resume_pending_rotation(&manager, &enc_cfg).unwrap_err();
+        let err = resume_pending_rotation(&manager, &enc_cfg, None).unwrap_err();
         assert!(
             err.to_string().contains("corrupt"),
             "corrupt breadcrumb must abort startup, got: {err}"
@@ -1772,7 +2091,7 @@ mod tests {
         // And an ABSENT breadcrumb is a clean no-op (distinguish absent vs corrupt).
         std::fs::remove_file(data_dir.join("rotation.state")).unwrap();
         assert!(
-            resume_pending_rotation(&manager, &enc_cfg)
+            resume_pending_rotation(&manager, &enc_cfg, None)
                 .unwrap()
                 .is_none()
         );
@@ -1852,7 +2171,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
             .unwrap()
             .expect("a pending cancel should resume");
         assert_eq!(report.new_version, 1, "cancel rolls back to the old key");
@@ -2327,7 +2646,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
             .unwrap()
             .expect("a pending rotation should resume from the v2 ledger");
         assert_eq!(report.new_version, 2);
@@ -2437,7 +2756,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
             .unwrap()
             .expect("a pending rotation should resume");
         assert_eq!(report.new_version, 2);
@@ -2528,7 +2847,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None)
             .unwrap()
             .expect("an index=Complete ledger should still resume to verify+clear");
         assert_eq!(report.new_version, 2);
@@ -2606,7 +2925,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let err = resume_pending_rotation(&resume_mgr, &enc_cfg).expect_err(
+        let err = resume_pending_rotation(&resume_mgr, &enc_cfg, None).expect_err(
             "a ledger claiming index=Complete over unmigrated old-key files MUST fail closed",
         );
         // The verify_complete() fail-closed path (OldKeyFilesRemain /

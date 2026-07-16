@@ -45,8 +45,10 @@ use super::ring_buffer::PendingEntry;
 use crate::core::error::{Error, Result, StorageError};
 
 use super::segment_reader::{
-    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_STRING_LABELS, WAL_VERSION_STRING_LABELS,
+    WAL_HEADER_SIZE, WAL_KEYVERSIONED_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_KEYVERSIONED,
+    WAL_VERSION_STRING_LABELS,
 };
+use crate::encryption::wal_encryption::WalKeyring;
 
 /// Metadata about a WAL segment's LSN range.
 ///
@@ -121,12 +123,17 @@ pub struct FlushCoordinatorConfig {
     pub sync_on_flush: bool,
     /// Write buffer size for segment files.
     pub write_buffer_size: usize,
-    /// Optional cipher for encrypting WAL entries before writing to disk.
+    /// Optional WAL DEK keyring for encrypting WAL entries before writing to
+    /// disk (Issue #3617).
     ///
-    /// When set, entries are encrypted with a 4-byte length prefix and
-    /// segments use version 2 format. When `None`, segments use version 1
-    /// (plaintext, backward compatible).
-    pub wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+    /// When set, entries are encrypted (4-byte length-prefixed) under the
+    /// keyring's CURRENT generation and fresh segments use the keyversioned
+    /// (v15) header stamping that generation's `key_version`; a full-MEK
+    /// rotation advances the current generation so subsequent segments are
+    /// written under the new DEK while legacy/old-DEK segments still replay
+    /// under the retained old generation. When `None`, segments use the
+    /// plaintext (v13) format (backward compatible).
+    pub wal_keyring: Option<WalKeyring>,
 }
 
 impl std::fmt::Debug for FlushCoordinatorConfig {
@@ -138,10 +145,7 @@ impl std::fmt::Debug for FlushCoordinatorConfig {
             .field("flush_interval_ms", &self.flush_interval_ms)
             .field("sync_on_flush", &self.sync_on_flush)
             .field("write_buffer_size", &self.write_buffer_size)
-            .field(
-                "wal_cipher",
-                &self.wal_cipher.as_ref().map(|c| c.algorithm_name()),
-            )
+            .field("wal_keyring", &self.wal_keyring)
             .finish()
     }
 }
@@ -155,7 +159,7 @@ impl Default for FlushCoordinatorConfig {
             flush_interval_ms: 10, // 10ms
             sync_on_flush: true,
             write_buffer_size: 64 * 1024, // 64 KB
-            wal_cipher: None,
+            wal_keyring: None,
         }
     }
 }
@@ -403,14 +407,50 @@ impl FlushCoordinator {
         SegmentMetadata::from_bytes(&bytes)
     }
 
-    /// Read the format version byte from an existing segment's header.
+    /// Read the format version byte + optional `key_version` from an existing
+    /// segment's header (Issue #3617).
     ///
     /// Returns `None` when the file cannot be read, is shorter than a full
-    /// header, or does not start with the WAL magic bytes.
-    fn read_segment_header_version(path: &Path) -> Option<u8> {
-        let mut header = [0u8; WAL_HEADER_SIZE];
-        File::open(path).ok()?.read_exact(&mut header).ok()?;
-        (header[0..4] == WAL_MAGIC).then_some(header[WAL_HEADER_SIZE - 1])
+    /// header, or does not start with the WAL magic bytes. For a keyversioned
+    /// (v15) segment the second element carries the stamped `key_version`; every
+    /// legacy (5-byte header) segment yields `None` there.
+    fn read_segment_header_id(path: &Path) -> Option<(u8, Option<u32>)> {
+        let mut header = [0u8; WAL_KEYVERSIONED_HEADER_SIZE];
+        let mut file = File::open(path).ok()?;
+        // Read at least the 5-byte legacy header; the extra 4 bytes are only
+        // meaningful (and required) for a keyversioned segment.
+        file.read_exact(&mut header[..WAL_HEADER_SIZE]).ok()?;
+        if header[0..4] != WAL_MAGIC {
+            return None;
+        }
+        let version = header[WAL_HEADER_SIZE - 1];
+        if version == WAL_VERSION_ENCRYPTED_KEYVERSIONED {
+            file.read_exact(&mut header[WAL_HEADER_SIZE..WAL_KEYVERSIONED_HEADER_SIZE])
+                .ok()?;
+            let kv = u32::from_le_bytes([header[5], header[6], header[7], header[8]]);
+            Some((version, Some(kv)))
+        } else {
+            Some((version, None))
+        }
+    }
+
+    /// The (version, key_version) a freshly created segment is stamped with,
+    /// derived from the configured WAL keyring's CURRENT generation (Issue
+    /// #3617). Encrypted → keyversioned (v15) header stamping the current
+    /// generation's `key_version`; plaintext → the string-label (v13) header.
+    ///
+    /// Reading the keyring here (rather than caching a version) is what lets a
+    /// force-roll pick up the NEW generation the moment the rotation driver
+    /// advances it — all serialized under the coordinator `writer` mutex so the
+    /// (segment header, encrypting cipher) pair is always consistent.
+    fn current_write_format(&self) -> (u8, Option<u32>) {
+        match &self.config.wal_keyring {
+            Some(keyring) => (
+                WAL_VERSION_ENCRYPTED_KEYVERSIONED,
+                Some(keyring.current_version()),
+            ),
+            None => (WAL_VERSION_STRING_LABELS, None),
+        }
     }
 
     /// Open or create the current segment file.
@@ -431,28 +471,25 @@ impl FlushCoordinator {
             return Ok(());
         }
 
-        // New segments use the string-label format (Issue #3506):
-        // WAL_VERSION_ENCRYPTED_STRING_LABELS (v14) for encrypted segments,
-        // WAL_VERSION_STRING_LABELS (v13) for plaintext. It is a strict
-        // superset of the destructive-op provenance format (Issue #3427,
-        // v11/v12) — itself a superset of the delete-version-id (Issue #3406),
-        // transaction-framing (Issue #3413), and principal-carrying provenance
-        // (Issues #3224 + #3350) formats — changing only how the
-        // node/edge/constraint LABEL is encoded: length-prefixed UTF-8 that is
-        // re-interned on read instead of a raw interner id, so labels are
-        // correct under any interner layout on replay. It keeps every prior
-        // field (framing markers, tombstone/retraction version_id, destructive
-        // provenance). The version bump signals the new label encoding so old
-        // readers reject the segment cleanly rather than mis-lengthing the
-        // variable-width label payload.
-        let write_version = if self.config.wal_cipher.is_some() {
-            WAL_VERSION_ENCRYPTED_STRING_LABELS
+        // New segments use the string-label payload format (Issue #3506). For an
+        // ENCRYPTED WAL they are additionally wrapped in the keyversioned (v15)
+        // container (Issue #3617), whose 9-byte header stamps the WAL DEK
+        // generation (`key_version`) the frames are encrypted under, so a
+        // full-MEK rotation can advance the write generation while legacy/old-DEK
+        // segments still replay under the retained old generation. Plaintext WALs
+        // keep the 5-byte v13 header. The version bump signals the new header so
+        // an older reader rejects the segment cleanly rather than misparsing it.
+        let (write_version, write_key_version) = self.current_write_format();
+        let header_size = if write_key_version.is_some() {
+            WAL_KEYVERSIONED_HEADER_SIZE
         } else {
-            WAL_VERSION_STRING_LABELS
+            WAL_HEADER_SIZE
         };
 
         // Allocate the next segment id, rolling past any existing non-empty
-        // segment whose header version differs from `write_version`.
+        // segment whose header (version AND key_version) differs from what this
+        // writer emits — appending new-format frames to an old-format segment
+        // would produce a mixed, unparseable file.
         let (segment_id, path, current_len) = loop {
             let segment_id = self.current_segment_id.fetch_add(1, Ordering::Relaxed) + 1;
             let path = self.segment_path(segment_id);
@@ -460,14 +497,14 @@ impl FlushCoordinator {
             if current_len == 0 {
                 break (segment_id, path, current_len);
             }
-            match Self::read_segment_header_version(&path) {
-                Some(version) if version == write_version => {
+            match Self::read_segment_header_id(&path) {
+                Some((version, kv)) if version == write_version && kv == write_key_version => {
                     break (segment_id, path, current_len);
                 }
                 _ => {
                     eprintln!(
-                        "WAL: not appending to existing segment {} (header version differs \
-                         from writer version {} or is unreadable); rolling to next segment",
+                        "WAL: not appending to existing segment {} (header version/key_version \
+                         differs from writer version {} or is unreadable); rolling to next segment",
                         path.display(),
                         write_version
                     );
@@ -511,8 +548,19 @@ impl FlushCoordinator {
                     e
                 )))
             })?;
+            // Keyversioned (v15) segments carry the 4-byte key_version (LE) after
+            // the version byte (Issue #3617). Only the integer version is
+            // written — never any key material.
+            if let Some(kv) = write_key_version {
+                writer.write_all(&kv.to_le_bytes()).map_err(|e| {
+                    Error::Storage(StorageError::IoError(format!(
+                        "Failed to write WAL key_version: {}",
+                        e
+                    )))
+                })?;
+            }
             self.current_segment_size
-                .store(WAL_HEADER_SIZE as u64, Ordering::Relaxed);
+                .store(header_size as u64, Ordering::Relaxed);
         } else {
             // For existing (version-matching) segments, we must initialize
             // the size correctly
@@ -539,71 +587,122 @@ impl FlushCoordinator {
     /// flush operations.
     fn maybe_rotate_segment(&self, writer_guard: &mut Option<BufWriter<File>>) -> Result<bool> {
         let current_size = self.current_segment_size.load(Ordering::Relaxed);
-
         if current_size >= self.config.segment_size as u64 {
-            let closing_segment_id = self.current_segment_id.load(Ordering::Relaxed);
+            self.seal_current(writer_guard)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
 
-            // 1. Flush current segment first.
-            // If this fails, we return error and DO NOT reset state or close the writer.
-            // This allows the next flush attempt to retry.
-            if let Some(writer) = writer_guard {
-                writer.flush().map_err(|e| {
+    /// Seal the current active segment: flush its buffer, capture and durably
+    /// write its `.meta` LSN range, fsync, drop the writer, and reset the
+    /// per-segment counters so the next [`ensure_segment_open`](Self::ensure_segment_open)
+    /// starts a fresh segment. Extracted from [`maybe_rotate_segment`](Self::maybe_rotate_segment)
+    /// so a force-roll (Issue #3617) can reuse the exact same seal/flush/meta
+    /// path without the size predicate.
+    ///
+    /// # Thread Safety
+    ///
+    /// The caller MUST hold the `writer` lock (`writer_guard`), so sealing is
+    /// atomic with respect to concurrent flushes. On any I/O error the writer is
+    /// already closed and counters reset, so the next flush opens a fresh
+    /// segment rather than smearing LSN ranges.
+    fn seal_current(&self, writer_guard: &mut Option<BufWriter<File>>) -> Result<()> {
+        let closing_segment_id = self.current_segment_id.load(Ordering::Relaxed);
+
+        // 1. Flush current segment first.
+        // If this fails, we return error and DO NOT reset state or close the writer.
+        // This allows the next flush attempt to retry.
+        if let Some(writer) = writer_guard {
+            writer.flush().map_err(|e| {
+                Error::Storage(StorageError::IoError(format!(
+                    "Failed to flush WAL segment: {}",
+                    e
+                )))
+            })?;
+        }
+
+        // 2. Capture state for metadata/cleanup before resetting
+        let min_lsn = self.current_segment_min_lsn.load(Ordering::Relaxed);
+        let max_lsn = self.current_segment_max_lsn.load(Ordering::Relaxed);
+        let entry_count = self.current_segment_entry_count.load(Ordering::Relaxed);
+
+        // 3. Close writer (drops BufWriter) - effectively "committing" to rotation
+        *writer_guard = None;
+
+        // 4. Reset size and LSN tracking for new segment immediately.
+        // We do this BEFORE sync/metadata write. This ensures that even if those subsequent
+        // steps fail, the internal state is clean for the next segment (which will be a NEW segment
+        // because writer is None). This prevents "smearing" LSN ranges.
+        self.current_segment_size.store(0, Ordering::Relaxed);
+        self.current_segment_min_lsn
+            .store(u64::MAX, Ordering::Relaxed);
+        self.current_segment_max_lsn.store(0, Ordering::Relaxed);
+        self.current_segment_entry_count.store(0, Ordering::Relaxed);
+
+        // 5. Sync before closing (using separate handle)
+        // If this fails, we return error, but state is already reset and writer closed.
+        if self.config.sync_on_flush {
+            let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref sync_file) = *sync_guard {
+                sync_file.sync_data().map_err(|e| {
                     Error::Storage(StorageError::IoError(format!(
-                        "Failed to flush WAL segment: {}",
+                        "Failed to sync WAL segment: {}",
                         e
                     )))
                 })?;
             }
-
-            // 2. Capture state for metadata/cleanup before resetting
-            let min_lsn = self.current_segment_min_lsn.load(Ordering::Relaxed);
-            let max_lsn = self.current_segment_max_lsn.load(Ordering::Relaxed);
-            let entry_count = self.current_segment_entry_count.load(Ordering::Relaxed);
-
-            // 3. Close writer (drops BufWriter) - effectively "committing" to rotation
-            *writer_guard = None;
-
-            // 4. Reset size and LSN tracking for new segment immediately.
-            // We do this BEFORE sync/metadata write. This ensures that even if those subsequent
-            // steps fail, the internal state is clean for the next segment (which will be a NEW segment
-            // because writer is None). This prevents "smearing" LSN ranges.
-            self.current_segment_size.store(0, Ordering::Relaxed);
-            self.current_segment_min_lsn
-                .store(u64::MAX, Ordering::Relaxed);
-            self.current_segment_max_lsn.store(0, Ordering::Relaxed);
-            self.current_segment_entry_count.store(0, Ordering::Relaxed);
-
-            // 5. Sync before closing (using separate handle)
-            // If this fails, we return error, but state is already reset and writer closed.
-            if self.config.sync_on_flush {
-                let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref sync_file) = *sync_guard {
-                    sync_file.sync_data().map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!(
-                            "Failed to sync WAL segment: {}",
-                            e
-                        )))
-                    })?;
-                }
-            }
-
-            // 6. Write segment metadata (ADR-0025) using captured state
-            // If this fails, we return error, but state is already reset.
-            self.write_segment_metadata(closing_segment_id, min_lsn, max_lsn, entry_count)?;
-
-            // Clear sync handle
-            {
-                let mut sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
-                *sync_guard = None;
-            }
-
-            // Clean up old segments
-            self.cleanup_old_segments()?;
-
-            return Ok(true);
         }
 
-        Ok(false)
+        // 6. Write segment metadata (ADR-0025) using captured state
+        // If this fails, we return error, but state is already reset.
+        self.write_segment_metadata(closing_segment_id, min_lsn, max_lsn, entry_count)?;
+
+        // Clear sync handle
+        {
+            let mut sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
+            *sync_guard = None;
+        }
+
+        // Clean up old segments
+        self.cleanup_old_segments()?;
+
+        Ok(())
+    }
+
+    /// Force-seal the active segment and reopen a fresh one, running `advance`
+    /// under the coordinator `writer` mutex BETWEEN the seal and the reopen
+    /// (Issue #3617 WAL key rotation).
+    ///
+    /// This is the WAL force-roll primitive. The whole seal → `advance` →
+    /// reopen sequence is one critical section holding the `writer` mutex, so it
+    /// is serialized against every concurrent [`flush`](Self::flush) (which also
+    /// reads the write cipher AND writes the segment header under the same lock).
+    /// A rotation passes an `advance` closure that flips the WAL keyring to the
+    /// new generation; because the flip happens strictly between sealing the old
+    /// segment and opening the new one, the freshly opened segment's header
+    /// (`ensure_segment_open` re-reads the keyring) and every frame written into
+    /// it use the NEW generation, while the just-sealed segment and all its
+    /// frames stay on the OLD generation — never a split.
+    ///
+    /// The reopened segment's id is `> ` the sealed segment's id, so a subsequent
+    /// [`truncate_to_lsn`](Self::truncate_to_lsn) can drop the just-sealed
+    /// (old-generation) segment. `advance` must NOT acquire any lock ordered
+    /// after `wal` (e.g. it must not trigger a cold flush) — it only mutates the
+    /// in-memory keyring.
+    pub fn seal_active_segment_and_reopen<F: FnOnce()>(&self, advance: F) -> Result<()> {
+        let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        // Ensure there IS an active segment to seal (idempotent: a no-op reopen
+        // if nothing has been written yet still advances the id so the roll
+        // boundary is well-defined).
+        self.ensure_segment_open(&mut writer_guard)?;
+        self.seal_current(&mut writer_guard)?;
+        // Flip the write generation while the old segment is sealed and no new
+        // one is open — the atomic hand-off point.
+        advance();
+        // Open the fresh segment under the (possibly advanced) current generation.
+        self.ensure_segment_open(&mut writer_guard)?;
+        Ok(())
     }
 
     /// Clean up old segments beyond retention policy.
@@ -773,6 +872,19 @@ impl FlushCoordinator {
             let mut batch_min_lsn = u64::MAX;
             let mut batch_max_lsn = 0u64;
 
+            // Resolve the CURRENT WAL DEK cipher once, under the writer lock, so
+            // every entry in this batch is encrypted under the same generation as
+            // the segment header stamped by `ensure_segment_open` above (Issue
+            // #3617). A force-roll advances the keyring's current generation only
+            // while holding this same lock, so a batch can never be split across
+            // two generations.
+            let batch_cipher = self
+                .config
+                .wal_keyring
+                .as_ref()
+                .and_then(|k| k.current())
+                .map(|(cipher, _version)| cipher);
+
             // Write all entries
             {
                 let writer = writer_guard.as_mut().ok_or_else(|| {
@@ -790,8 +902,7 @@ impl FlushCoordinator {
                     // 4-byte LE length prefix so the reader knows how many bytes
                     // each encrypted entry occupies. Without a cipher, write the
                     // raw entry data directly (no allocation, zero overhead).
-                    let write_data: Cow<'_, [u8]> = if let Some(ref cipher) = self.config.wal_cipher
-                    {
+                    let write_data: Cow<'_, [u8]> = if let Some(ref cipher) = batch_cipher {
                         let encrypted = crate::encryption::wal_encryption::encrypt_wal_payload(
                             &entry.data,
                             cipher,
@@ -964,6 +1075,91 @@ impl FlushCoordinator {
     /// Get the WAL directory.
     pub fn wal_dir(&self) -> &Path {
         &self.config.wal_dir
+    }
+
+    /// Delete every sealed old-generation WAL segment during a key rotation
+    /// (Issue #3617), identified by HEADER — a legacy header (no key_version) or
+    /// a keyversioned header whose `key_version != keep_key_version`.
+    ///
+    /// Returns the number of `.log` files removed. The active segment
+    /// (`current_segment_id`) is never removed. Unlike
+    /// [`truncate_to_lsn`](Self::truncate_to_lsn), this does NOT require a
+    /// companion `.meta` file (an un-rotated active segment closed by a prior
+    /// shutdown has none), so it can retire the pre-rotation tail that
+    /// `truncate_to_lsn` would conservatively keep.
+    ///
+    /// # Safety
+    ///
+    /// The caller MUST have already captured every old-generation entry in a
+    /// durable snapshot outside the WAL (the index manifest, persisted BEFORE
+    /// the rotation ledger was written), so deleting these segments loses
+    /// nothing. The forward driver and crash-resume both guarantee this.
+    pub fn retire_old_generation_segments(&self, keep_key_version: u32) -> Result<usize> {
+        let current_id = self.current_segment_id.load(Ordering::Relaxed);
+        let mut removed = 0usize;
+        if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "log") {
+                    continue;
+                }
+                let Some(segment_id) = path
+                    .file_stem()
+                    .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                else {
+                    continue;
+                };
+                // Never remove the active segment.
+                if segment_id >= current_id {
+                    continue;
+                }
+                let is_old_generation = match Self::read_segment_header_id(&path) {
+                    Some((WAL_VERSION_ENCRYPTED_KEYVERSIONED, Some(kv))) => kv != keep_key_version,
+                    // Legacy header (pre-#3617) = old generation.
+                    Some((_, None)) => true,
+                    // Unreadable/empty header: leave it (defensive).
+                    _ => false,
+                };
+                if is_old_generation && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                    let _ = std::fs::remove_file(self.segment_meta_path(segment_id));
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Whether EVERY on-disk `.log` segment is a keyversioned (v15) segment
+    /// stamped with `key_version` (Issue #3617).
+    ///
+    /// The rotation driver's "old generation fully retired" signal: it returns
+    /// `false` if any segment carries a legacy header (no key_version — a
+    /// pre-#3617 segment) or a different key_version (an old generation). A file
+    /// whose header cannot be read yet (a freshly created segment whose buffered
+    /// header has not been flushed to disk) is skipped, not treated as old — so
+    /// the just-opened new-generation segment never blocks completion. An empty
+    /// directory trivially satisfies the check.
+    pub fn all_segments_use_key_version(&self, key_version: u32) -> bool {
+        if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "log") {
+                    continue;
+                }
+                match Self::read_segment_header_id(&path) {
+                    // A keyversioned segment: old generation iff its version differs.
+                    Some((WAL_VERSION_ENCRYPTED_KEYVERSIONED, Some(kv))) if kv != key_version => {
+                        return false;
+                    }
+                    // A legacy header (no key_version) is a pre-rotation generation.
+                    Some((_, None)) => return false,
+                    // New-generation segment, or an unreadable/not-yet-flushed
+                    // fresh segment header — neither blocks completion.
+                    _ => {}
+                }
+            }
+        }
+        true
     }
 }
 
