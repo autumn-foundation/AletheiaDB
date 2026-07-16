@@ -179,14 +179,16 @@ use super::ast::{
     ComparisonOp, DepthSpec, EmbeddingRef, Expression, NodePattern, NodeRef, OrderClause, Pattern,
     PatternElement, PredicateExpr, PropertyValue, QueryAst, RelationshipDirection,
     RelationshipPattern, ReturnClause, SourceClause, TemporalClause, TimestampLiteral,
+    WindowClause, WindowReturnItem,
 };
 use super::builder::Query;
 use super::ir::{
     Predicate, PredicateValue, ProvenanceCmp, ProvenanceField, ProvenanceOperand,
     ProvenancePredicate, ProvenanceProjection, ProvenanceProjectionItem, QueryOp, SortKey,
-    TraversalDepth,
+    TemporalWindowSpec, TraversalDepth, WindowAggFunc, WindowAggregateSpec,
 };
 use super::plan::{QueryHints, TemporalContext};
+use super::temporal_window::{self, WindowError, WindowGranularity, WindowUnit};
 
 /// Map a provenance accessor function name to its [`ProvenanceField`]
 /// (case-insensitive), or `None` if the name is not a provenance accessor
@@ -589,6 +591,21 @@ impl AstConverter {
         // 2. Convert source clause (MATCH or vector search)
         self.convert_source(&ast.source, &mut ops)?;
 
+        // 2b. Temporal aggregation window (Issue #3363). A self-contained
+        //     terminal op: it consumes the matched-entity stream produced above
+        //     (scan + inline property filters) and emits per-window aggregate
+        //     rows. No further read clauses apply (the parser already rejects
+        //     trailing WHERE/ORDER/etc. after a WINDOW ... RETURN).
+        if let Some(ref window) = ast.window {
+            let spec = self.convert_window_clause(window, &ast.source)?;
+            ops.push(QueryOp::TemporalWindowAggregate(spec));
+            return Ok(Query {
+                ops,
+                temporal_context,
+                hints,
+            });
+        }
+
         // 3. Convert WHERE clause to filter operations
         if let Some(ref where_clause) = ast.where_clause {
             self.convert_where_clause(where_clause, &mut ops)?;
@@ -753,6 +770,222 @@ impl AstConverter {
             return None;
         };
         node.variable.clone()
+    }
+
+    /// Validate and lower a raw AST [`WindowClause`] into a resolved
+    /// [`TemporalWindowSpec`] (Issue #3363).
+    ///
+    /// All caller-fault failures are structured [`QueryError`]s (the MCP `query`
+    /// tool renders them as `invalid_params` / `unsupported_construct`), never a
+    /// panic or silent success: an unknown unit or function, a non-positive
+    /// window size, an empty/backwards range, an unparseable boundary, or an
+    /// aggregate argument referencing a variable other than the single matched
+    /// node.
+    fn convert_window_clause(
+        &self,
+        window: &WindowClause,
+        source: &SourceClause,
+    ) -> Result<TemporalWindowSpec> {
+        // The windowed entity must be the single bound MATCH node (v1: nodes
+        // only; edge-history windows are a documented follow-up).
+        let match_var = Self::sole_match_node_var(source).ok_or_else(|| {
+            Error::Query(QueryError::UnsupportedFeature {
+                feature: "temporal aggregation windows require a single bound node pattern \
+                          (e.g. MATCH (v:Label) WINDOW ...); windowing edges, traversals, or \
+                          multi-pattern matches is not supported (v1)"
+                    .to_string(),
+            })
+        })?;
+
+        // Window size must be a positive integer that fits a u32 multiplier.
+        let count = u32::try_from(window.count)
+            .ok()
+            .filter(|c| *c > 0)
+            .ok_or_else(|| {
+                Error::Query(QueryError::InvalidParameter {
+                    parameter: "window size".to_string(),
+                    reason: format!(
+                        "window size must be a positive integer, got {}",
+                        window.count
+                    ),
+                })
+            })?;
+
+        let unit = WindowUnit::parse(&window.unit).ok_or_else(|| {
+            Error::Query(QueryError::InvalidParameter {
+                parameter: "window unit".to_string(),
+                reason: format!(
+                    "unknown window unit '{}' (expected minute/hour/day/week/month/quarter/year)",
+                    window.unit
+                ),
+            })
+        })?;
+        let granularity = WindowGranularity { count, unit };
+
+        let range_start_micros = self.window_timestamp_micros(&window.range_start)?;
+        let range_end_micros = self.window_timestamp_micros(&window.range_end)?;
+
+        // Validate the range/granularity now (empty range, too many windows)
+        // so a malformed spec fails at convert time with a structured error.
+        temporal_window::generate_windows(range_start_micros, range_end_micros, granularity)
+            .map_err(Self::window_error_to_query_error)?;
+
+        let as_of_system_time = match &window.as_of_system_time {
+            Some(ts) => Timestamp::from(self.window_timestamp_micros(ts)?),
+            None => time::now(),
+        };
+
+        let aggregates = window
+            .aggregates
+            .iter()
+            .map(|item| self.convert_window_agg_item(item, &match_var))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(TemporalWindowSpec {
+            granularity,
+            range_start_micros,
+            range_end_micros,
+            as_of_system_time,
+            aggregates,
+        })
+    }
+
+    /// Resolve a window boundary [`TimestampLiteral`] to microseconds since
+    /// epoch, accepting RFC 3339 / ISO-8601 strings as well as the existing
+    /// integer/microsecond forms.
+    fn window_timestamp_micros(&self, ts: &TimestampLiteral) -> Result<i64> {
+        match ts {
+            TimestampLiteral::Integer(micros) => Ok(*micros),
+            TimestampLiteral::String(s) => {
+                temporal_window::parse_boundary_micros(s).map_err(Self::window_error_to_query_error)
+            }
+        }
+    }
+
+    /// Validate one window aggregate item, resolving its function and argument
+    /// and rejecting incompatible combinations with structured errors.
+    fn convert_window_agg_item(
+        &self,
+        item: &WindowReturnItem,
+        match_var: &str,
+    ) -> Result<WindowAggregateSpec> {
+        use crate::query::ast::WindowAggArg as AstArg;
+        use crate::query::ir::WindowAggArg as IrArg;
+
+        let func = match item.func.to_ascii_uppercase().as_str() {
+            "COUNT" => WindowAggFunc::Count,
+            "SUM" => WindowAggFunc::Sum,
+            "AVG" => WindowAggFunc::Avg,
+            "MIN" => WindowAggFunc::Min,
+            "MAX" => WindowAggFunc::Max,
+            "CHANGES" => WindowAggFunc::Changes,
+            other => {
+                return Err(Error::Query(QueryError::UnsupportedFeature {
+                    feature: format!(
+                        "temporal window aggregate function '{other}' (supported: \
+                         COUNT, SUM, AVG, MIN, MAX, CHANGES)"
+                    ),
+                }));
+            }
+        };
+
+        // Any variable named in the argument must be the single matched node.
+        let referenced_var = match &item.arg {
+            AstArg::Star => None,
+            AstArg::Entity { var } | AstArg::Property { var, .. } => Some(var.as_str()),
+        };
+        if let Some(var) = referenced_var
+            && var != match_var
+        {
+            return Err(Error::Query(QueryError::InvalidParameter {
+                parameter: "window aggregate argument".to_string(),
+                reason: format!(
+                    "aggregate references variable '{var}' but the matched entity is \
+                     '{match_var}'"
+                ),
+            }));
+        }
+
+        // Resolve the IR argument, enforcing per-function argument shapes.
+        let ir_arg = match (func, &item.arg) {
+            // Value aggregates require a numeric property argument.
+            (
+                WindowAggFunc::Sum | WindowAggFunc::Avg | WindowAggFunc::Min | WindowAggFunc::Max,
+                AstArg::Property { key, .. },
+            ) => IrArg::Property(key.clone()),
+            (
+                WindowAggFunc::Sum | WindowAggFunc::Avg | WindowAggFunc::Min | WindowAggFunc::Max,
+                _,
+            ) => {
+                return Err(Error::Query(QueryError::InvalidParameter {
+                    parameter: "window aggregate argument".to_string(),
+                    reason: format!(
+                        "{} requires a property argument (e.g. {}({}.price))",
+                        item.func.to_ascii_uppercase(),
+                        item.func.to_ascii_uppercase(),
+                        match_var
+                    ),
+                }));
+            }
+            // COUNT(*) / COUNT(v) count entities present; COUNT(v.prop) counts
+            // defined samples.
+            (WindowAggFunc::Count, AstArg::Property { key, .. }) => IrArg::Property(key.clone()),
+            (WindowAggFunc::Count, _) => IrArg::Star,
+            // CHANGES(*) / CHANGES(v) count entity versions; CHANGES(v.prop)
+            // counts genuine property changes.
+            (WindowAggFunc::Changes, AstArg::Property { key, .. }) => IrArg::Property(key.clone()),
+            (WindowAggFunc::Changes, _) => IrArg::Star,
+        };
+
+        let output_name = item
+            .alias
+            .clone()
+            .unwrap_or_else(|| Self::default_window_output_name(&item.func, &item.arg));
+
+        Ok(WindowAggregateSpec {
+            func,
+            arg: ir_arg,
+            output_name,
+        })
+    }
+
+    /// Default output column name for an unaliased window aggregate, e.g.
+    /// `avg(v.price)` or `count(*)`.
+    fn default_window_output_name(func: &str, arg: &crate::query::ast::WindowAggArg) -> String {
+        use crate::query::ast::WindowAggArg as AstArg;
+        let f = func.to_ascii_lowercase();
+        match arg {
+            AstArg::Star => format!("{f}(*)"),
+            AstArg::Entity { var } => format!("{f}({var})"),
+            AstArg::Property { var, key } => format!("{f}({var}.{key})"),
+        }
+    }
+
+    /// Map a [`WindowError`] to the structured [`QueryError`] the MCP surface
+    /// renders (`invalid_params`).
+    fn window_error_to_query_error(err: WindowError) -> Error {
+        let reason = match err {
+            WindowError::ZeroCount => "window size must be positive".to_string(),
+            WindowError::EmptyRange => {
+                "the valid-time range end must be strictly after the start".to_string()
+            }
+            WindowError::TooManyWindows(n) => format!(
+                "the window granularity and range would generate {n} windows, exceeding the \
+                 limit of {}",
+                temporal_window::MAX_WINDOWS
+            ),
+            WindowError::BadTimestamp(s) => format!(
+                "could not parse timestamp '{s}' (expected RFC 3339 / ISO-8601 or microseconds \
+                 since epoch)"
+            ),
+            WindowError::CalendarOverflow => {
+                "the window range overflowed the representable timestamp range".to_string()
+            }
+        };
+        Error::Query(QueryError::InvalidParameter {
+            parameter: "temporal window".to_string(),
+            reason,
+        })
     }
 
     fn convert_where_clause(
