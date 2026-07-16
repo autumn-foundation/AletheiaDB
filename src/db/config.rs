@@ -846,7 +846,19 @@ impl AletheiaDB {
                 let mut cold_storage = RedbColdStorage::new(&cold_storage_path, RedbConfig::new())?;
 
                 if let Some(ref enc_mgr) = encryption_manager {
-                    cold_storage = cold_storage.with_cipher(Arc::clone(enc_mgr.cold_cipher()));
+                    // Issue #3617 PR3 version-provisioning: build the cold keyring
+                    // at the provisioned key version (the max on-disk key version,
+                    // or `ledger.new_version - 1` mid-rotation) so freshly written
+                    // cold values stamp the real version and stay in lockstep with
+                    // index/WAL after a rotate-then-reopen. Reads stay `match_any`
+                    // (identical to `with_cipher`); `None` falls back to
+                    // `with_cipher` (unchanged behavior for a never-rotated DB).
+                    cold_storage = match provisioned_key_version {
+                        Some(v) => {
+                            cold_storage.with_cipher_versioned(Arc::clone(enc_mgr.cold_cipher()), v)
+                        }
+                        None => cold_storage.with_cipher(Arc::clone(enc_mgr.cold_cipher())),
+                    };
                 }
 
                 let cold_storage = Arc::new(cold_storage);
@@ -854,6 +866,22 @@ impl AletheiaDB {
                 // Create tiered storage with warm cache configuration
                 let tiered_config = TieredStorageConfig::default();
                 let tiered_storage = TieredStorage::new(tiered_config, cold_storage);
+
+                // Issue #3617 PR3: finish a startup-resumed COLD key rotation. The
+                // cold store is built here — AFTER index/WAL resume — so it is the
+                // last layer to settle; this completes the bulk re-encrypt from the
+                // durable redb cursor (idempotent, skips already-wrapped values),
+                // retires the old cold generation, and clears the rotation ledger.
+                // A no-op when no rotation is pending or cold is not in scope.
+                if let Some(ref manager) = persistence_manager
+                    && config.encryption.enabled
+                {
+                    crate::db::rotation::finalize_resumed_cold_rotation(
+                        manager,
+                        &config.encryption,
+                        tiered_storage.cold_storage(),
+                    )?;
+                }
 
                 // Merge the cold tier's persisted extent bounds into the
                 // temporal index so `temporal_extent` spans history migrated to

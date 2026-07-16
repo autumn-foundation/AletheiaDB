@@ -20,12 +20,13 @@
 //! (exit 0), re-encrypting every persisted file and bumping the key version --
 //! and that success is what these tests assert.
 //!
-//! The one at-rest layer NOT yet covered is cold storage (PR3): when a tiered
-//! cold store is configured under the same master key, an index+WAL rotation
-//! would strand the cold values, so the cross-layer guard STILL refuses and
-//! names `cold_storage`. `keys_rotate_start_with_cold_storage_refuses_cross_layer`
-//! asserts that CLI refusal end-to-end (the unit test
-//! `rotate_still_refuses_when_cold_storage_encrypted` covers the engine level).
+//! Cold storage is now covered too (Issue #3617 PR3): a tiered cold store
+//! configured under the same master key is bulk re-encrypted to the new cold
+//! DEK during the rotation, so `keys rotate` against a DB with an encrypted cold
+//! tier now SUCCEEDS. `keys_rotate_start_with_cold_storage_succeeds` asserts that
+//! end-to-end (the unit test `rotate_reencrypts_cold` covers the engine level).
+//! With all four at-rest layers (index, checkpoint, WAL, cold) rotatable, the
+//! cross-layer refusal is gone for a uniformly-encrypted database.
 
 use std::path::Path;
 use std::process::Command;
@@ -695,12 +696,12 @@ mod encrypted {
     }
 
     #[test]
-    fn keys_rotate_start_with_cold_storage_refuses_cross_layer() {
-        // Issue #3617 PR2: cold storage is NOT yet covered (PR3). A DB with an
-        // encrypted cold tier configured must STILL refuse an index+WAL rotation
-        // (it would strand the cold values under the old MEK). This is the CLI
-        // end-to-end counterpart to the engine unit test
-        // `rotate_still_refuses_when_cold_storage_encrypted`.
+    fn keys_rotate_start_with_cold_storage_succeeds() {
+        // Issue #3617 PR3 (completes the issue): a DB with an encrypted cold tier
+        // now ROTATES fully via the CLI — the driver bulk re-encrypts every cold
+        // value to the new cold DEK, so a subsequent provider switch is safe.
+        // This flips the former cross-layer refusal (CLI end-to-end counterpart to
+        // the engine unit test `rotate_reencrypts_cold`).
         let f = make_encrypted_db_with_cold();
         let new_key = f.toml_path.parent().unwrap().join("rotate-to.key");
         FileKeyProvider::generate_key_file(&new_key).unwrap();
@@ -709,15 +710,19 @@ mod encrypted {
             &["keys", "rotate", "--new-key", new_key.to_str().unwrap()],
             &cfg_env(&f),
         );
-        assert_ne!(
+        assert_eq!(
             r.code, 0,
-            "rotate with encrypted cold storage configured must still refuse; stdout={:?}",
-            r.stdout
+            "rotate with an encrypted cold tier must now succeed; stdout={:?} stderr={:?}",
+            r.stdout, r.stderr
         );
         let c = r.combined_lower();
         assert!(
-            c.contains("cold_storage"),
-            "refusal must name the conflicting cold_storage layer; got={c:?}"
+            c.contains("rotation complete"),
+            "success must print the completion headline; got={c:?}"
+        );
+        assert!(
+            !c.contains("other encrypted-at-rest layers") && !c.contains("cold_storage"),
+            "must not be the cross-layer refusal; got={c:?}"
         );
         assert!(!c.contains("panicked"), "must not panic; got={c:?}");
         assert_no_key_leak(&r, &[f.key_path.as_path(), new_key.as_path()]);

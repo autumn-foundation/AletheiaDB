@@ -68,6 +68,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 
+mod keyring;
+
+pub use keyring::ColdKeyring;
+use keyring::{parse_cold_wrapper, wrap_cold_value};
+
 // Table definitions with static lifetimes
 const NODE_VERSIONS_TABLE: redb::TableDefinition<'static, u64, &'static [u8]> =
     redb::TableDefinition::new("node_versions");
@@ -81,6 +86,116 @@ const FLUSHED_LSN_KEY: &str = "flushed_lsn";
 
 /// Metadata key for the persisted cold-tier bi-temporal extent (Issue #3389).
 const TEMPORAL_EXTENT_KEY: &str = "temporal_extent";
+
+/// Metadata key for the durable cold key-rotation resume cursor (Issue #3617
+/// PR3). Present only WHILE a bulk re-encrypt pass is in flight; advanced in the
+/// SAME redb write transaction as each batch of value rewrites (so it is atomic
+/// with them) and deleted on completion.
+const COLD_ROTATION_CURSOR_KEY: &str = "cold_rotation";
+
+/// Metadata key for the terminal cold value-format marker (Issue #3617 PR3).
+/// Written once every value is re-wrapped under the target generation: records
+/// `wrapped@{target_version}`, the whole-store flag that authoritatively
+/// resolves any residual legacy/wrapped ambiguity.
+const COLD_VALUE_FORMAT_KEY: &str = "cold_value_format";
+
+/// Batch size for the transactional bulk re-encrypt pass (Issue #3617 PR3): the
+/// number of `(key, value)` pairs rewritten per redb write transaction. Bounds
+/// per-transaction memory and work; the pass is resumable at batch granularity
+/// via [`COLD_ROTATION_CURSOR_KEY`], so a larger value trades a longer
+/// crash-replay window for fewer commits. 4096 keeps each transaction's
+/// materialized slice small while amortizing commit cost.
+const COLD_REENCRYPT_BATCH_SIZE: usize = 4096;
+
+/// Layout-version tag for the hand-rolled [`COLD_ROTATION_CURSOR_KEY`] /
+/// [`COLD_VALUE_FORMAT_KEY`] records. Records with an unrecognized tag are
+/// treated as absent (an older binary falls back to a full pass rather than
+/// misreading bytes), mirroring [`EXTENT_RECORD_VERSION`].
+const COLD_ROTATION_RECORD_VERSION: u8 = 1;
+
+/// Which value-bearing table a cold rotation cursor is pointing into. Encoded as
+/// a single discriminant byte in the durable cursor record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColdTableKind {
+    Node,
+    Edge,
+}
+
+impl ColdTableKind {
+    fn as_u8(self) -> u8 {
+        match self {
+            ColdTableKind::Node => 0,
+            ColdTableKind::Edge => 1,
+        }
+    }
+
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ColdTableKind::Node),
+            1 => Some(ColdTableKind::Edge),
+            _ => None,
+        }
+    }
+
+    fn table(self) -> redb::TableDefinition<'static, u64, &'static [u8]> {
+        match self {
+            ColdTableKind::Node => NODE_VERSIONS_TABLE,
+            ColdTableKind::Edge => EDGE_VERSIONS_TABLE,
+        }
+    }
+}
+
+/// Durable resume cursor for the cold bulk re-encrypt pass (Issue #3617 PR3).
+///
+/// Hand-rolled fixed-width bytes (no serde, so the Feature Matrix stays clean):
+/// `[version:u8][target_version:u32 LE][table:u8][last_completed_key:u64 LE]`.
+/// `last_completed_key` is the highest `VersionId` already re-wrapped in
+/// `table`; the pass resumes at `> last_completed_key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ColdRotationCursor {
+    target_version: u32,
+    table: ColdTableKind,
+    last_completed_key: u64,
+}
+
+impl ColdRotationCursor {
+    const LEN: usize = 1 + 4 + 1 + 8;
+
+    fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut out = [0u8; Self::LEN];
+        out[0] = COLD_ROTATION_RECORD_VERSION;
+        out[1..5].copy_from_slice(&self.target_version.to_le_bytes());
+        out[5] = self.table.as_u8();
+        out[6..14].copy_from_slice(&self.last_completed_key.to_le_bytes());
+        out
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::LEN || bytes[0] != COLD_ROTATION_RECORD_VERSION {
+            return None;
+        }
+        let target_version = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        let table = ColdTableKind::from_u8(bytes[5])?;
+        let last_completed_key = u64::from_le_bytes([
+            bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13],
+        ]);
+        Some(Self {
+            target_version,
+            table,
+            last_completed_key,
+        })
+    }
+}
+
+/// Statistics returned by a cold bulk re-encrypt pass (Issue #3617 PR3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColdReencryptStats {
+    /// Values re-encrypted+re-wrapped under the target generation.
+    pub values_rewrapped: usize,
+    /// Values skipped because they were already wrapped at the target version
+    /// (idempotent re-run / stale cursor).
+    pub values_skipped: usize,
+}
 
 /// Layout version tag for the persisted extent record. Records with an
 /// unrecognized version are treated as absent, so an older binary that cannot
@@ -716,8 +831,14 @@ pub struct RedbColdStorage {
     config: RedbConfig,
     /// Statistics tracker.
     stats: AtomicColdStorageStats,
-    /// Optional cipher for encrypting data at rest.
-    cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+    /// Optional cold key ring for encrypting data at rest (Issue #3617 PR3).
+    ///
+    /// `None` when encryption is disabled (values stored as bare
+    /// compressed bytes, unchanged from the unencrypted path). When present it
+    /// holds one generation in the steady state and two during a full-MEK key
+    /// rotation, so a half-rotated store reads every value under its own
+    /// generation via the `ACV1` wrapper dispatch.
+    keyring: Option<ColdKeyring>,
     /// Fault injection flag for testing.
     #[cfg(test)]
     fail_writes: AtomicBool,
@@ -822,7 +943,7 @@ impl RedbColdStorage {
             db,
             config,
             stats,
-            cipher: None,
+            keyring: None,
             #[cfg(test)]
             fail_writes: AtomicBool::new(false),
             #[cfg(test)]
@@ -882,39 +1003,160 @@ impl RedbColdStorage {
     /// # }
     /// ```
     #[must_use]
-    pub fn with_cipher(mut self, cipher: Arc<dyn crate::encryption::cipher::Cipher>) -> Self {
-        self.cipher = Some(cipher);
+    pub fn with_cipher(self, cipher: Arc<dyn crate::encryption::cipher::Cipher>) -> Self {
+        self.with_cold_keyring(ColdKeyring::single(cipher))
+    }
+
+    /// Set the encryption cipher pinned to an explicit `key_version` for at-rest
+    /// encryption (Issue #3617 PR3 version-provisioning parity).
+    ///
+    /// Reads decrypt every value with this one cipher (`match_any`, identical to
+    /// [`with_cipher`](Self::with_cipher)); only the write-stamp / reported cold
+    /// key version is pinned to `key_version`. The durable `open()` path uses this
+    /// to PROVISION the cold keyring at the same version index/WAL are provisioned
+    /// to after a rotate-then-reopen, so freshly written cold values stamp the
+    /// real version rather than a stale base.
+    #[must_use]
+    pub fn with_cipher_versioned(
+        self,
+        cipher: Arc<dyn crate::encryption::cipher::Cipher>,
+        key_version: u32,
+    ) -> Self {
+        self.with_cold_keyring(ColdKeyring::single_versioned(cipher, key_version))
+    }
+
+    /// Set the full cold key ring for at-rest encryption (Issue #3617 PR3).
+    ///
+    /// Used by the rotation driver to install a keyring already holding both the
+    /// old and new generations before a bulk re-encrypt pass. Most callers should
+    /// use [`with_cipher`](Self::with_cipher).
+    #[must_use]
+    pub fn with_cold_keyring(mut self, keyring: ColdKeyring) -> Self {
+        self.keyring = Some(keyring);
         self
     }
 
-    /// Encrypt data if a cipher is configured, otherwise return as-is.
+    /// Access the cold key ring, if encryption is configured (Issue #3617 PR3).
+    ///
+    /// The rotation driver reaches through this to install the new generation and
+    /// retire the old one; a clone shares the same interior-mutable state, so the
+    /// change is observed by every read/write crypto site immediately.
+    pub fn cold_keyring(&self) -> Option<&ColdKeyring> {
+        self.keyring.as_ref()
+    }
+
+    /// Whether the cold store encrypts values at rest.
+    pub fn is_encrypted(&self) -> bool {
+        self.keyring.is_some()
+    }
+
+    /// The `key_version` freshly written cold values are stamped with, or `None`
+    /// when encryption is disabled (Issue #3617 PR3).
+    pub fn current_cold_key_version(&self) -> Option<u32> {
+        self.keyring.as_ref().map(ColdKeyring::current_version)
+    }
+
+    /// Install a new cold DEK generation for a key rotation (Issue #3617 PR3),
+    /// keeping the existing generation(s) live so a half-rotated store still reads
+    /// old-generation values. Idempotent for an already-present version. Makes the
+    /// new generation current, so subsequent writes stamp it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store is not encrypted (no keyring to extend).
+    pub fn install_cold_generation(
+        &self,
+        key_version: u32,
+        cipher: Arc<dyn crate::encryption::cipher::Cipher>,
+    ) -> Result<()> {
+        let ring = self.keyring.as_ref().ok_or_else(|| {
+            Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
+                reason: "cold storage is not encrypted; cannot install a key generation"
+                    .to_string(),
+            })
+        })?;
+        ring.add_generation(key_version, cipher);
+        Ok(())
+    }
+
+    /// Retire every cold DEK generation except `key_version`, which becomes the
+    /// sole current generation (Issue #3617 PR3). Called after a verified full
+    /// re-encrypt pass so the old cold DEK can be dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store is not encrypted.
+    pub fn retire_cold_generations(&self, key_version: u32) -> Result<()> {
+        let ring = self.keyring.as_ref().ok_or_else(|| {
+            Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
+                reason: "cold storage is not encrypted; cannot retire key generations".to_string(),
+            })
+        })?;
+        ring.retain_only(key_version);
+        Ok(())
+    }
+
+    /// Encrypt a compressed value for storage, applying the self-describing
+    /// `ACV1` wrapper when encryption is configured (Issue #3617 PR3).
+    ///
+    /// The value is stamped with the cold keyring's CURRENT `key_version` so a
+    /// half-rotated store distinguishes old- from new-generation values on read.
+    /// A no-op (returns the input) when encryption is disabled.
     fn encrypt_if_needed(&self, data: Vec<u8>) -> Result<Vec<u8>> {
-        match self.cipher {
-            Some(ref cipher) => {
-                cipher
-                    .encrypt(&data, &[])
-                    .map_err(|e| -> crate::core::error::Error {
-                        StorageError::Encryption(format!("Cold storage encryption failed: {e}"))
-                            .into()
-                    })
+        match self.keyring {
+            Some(ref ring) => {
+                let (cipher, key_version) = ring.current().ok_or_else(|| {
+                    Into::<crate::core::error::Error>::into(StorageError::Encryption(
+                        "Cold storage keyring holds no generation".to_string(),
+                    ))
+                })?;
+                let ciphertext =
+                    cipher
+                        .encrypt(&data, &[])
+                        .map_err(|e| -> crate::core::error::Error {
+                            StorageError::Encryption(format!("Cold storage encryption failed: {e}"))
+                                .into()
+                        })?;
+                Ok(wrap_cold_value(key_version, &ciphertext))
             }
             None => Ok(data),
         }
     }
 
-    /// Decrypt data if a cipher is configured, otherwise return as-is.
+    /// Decrypt a stored value, transparently handling both `ACV1`-wrapped
+    /// (post-rotation) and legacy bare-ciphertext values (Issue #3617 PR3).
+    ///
+    /// Dispatch: a value is treated as wrapped ONLY IF it begins with the `ACV1`
+    /// magic AND names a `key_version` the keyring holds; otherwise it is a legacy
+    /// value decrypted under the oldest (pre-rotation) cold generation. See
+    /// [`keyring`](crate::storage::redb_cold_storage::keyring) for the collision
+    /// argument. A no-op (returns a copy) when encryption is disabled.
     fn decrypt_if_needed(&self, data: &[u8]) -> Result<Vec<u8>> {
-        match self.cipher {
-            Some(ref cipher) => {
-                cipher
-                    .decrypt(data, &[])
-                    .map_err(|e| -> crate::core::error::Error {
-                        StorageError::Encryption(format!("Cold storage decryption failed: {e}"))
-                            .into()
-                    })
-            }
-            None => Ok(data.to_vec()),
+        let Some(ref ring) = self.keyring else {
+            return Ok(data.to_vec());
+        };
+        // Wrapped iff ACV1 magic AND the stamped version names a held generation.
+        if let Some((key_version, ciphertext)) = parse_cold_wrapper(data)
+            && ring.has_version(key_version)
+            && let Some(cipher) = ring.cipher_for_value(Some(key_version))
+        {
+            return cipher
+                .decrypt(ciphertext, &[])
+                .map_err(|e| -> crate::core::error::Error {
+                    StorageError::Encryption(format!("Cold storage decryption failed: {e}")).into()
+                });
         }
+        // Legacy bare ciphertext → oldest (pre-rotation) / sole generation.
+        let cipher = ring.cipher_for_value(None).ok_or_else(|| {
+            Into::<crate::core::error::Error>::into(StorageError::Encryption(
+                "Cold storage keyring holds no generation".to_string(),
+            ))
+        })?;
+        cipher
+            .decrypt(data, &[])
+            .map_err(|e| -> crate::core::error::Error {
+                StorageError::Encryption(format!("Cold storage decryption failed: {e}")).into()
+            })
     }
 
     /// Get the absolute or relative path to the Redb database file.
@@ -965,19 +1207,32 @@ impl RedbColdStorage {
         EncodeFn: Fn(&V) -> Vec<u8> + Sync + Send,
     {
         let cold_config = self.config.to_cold_storage_config();
-        let cipher_ref = &self.cipher;
+        // Resolve the current cold generation ONCE up front so the parallel
+        // compression closure is `Sync` (no borrow of `self.keyring`'s lock) and
+        // every value in the batch is wrapped under the same `key_version`.
+        let cold_generation: Option<(Arc<dyn crate::encryption::cipher::Cipher>, u32)> =
+            match self.keyring {
+                Some(ref ring) => Some(ring.current().ok_or_else(|| {
+                    Into::<crate::core::error::Error>::into(StorageError::Encryption(
+                        "Cold storage keyring holds no generation".to_string(),
+                    ))
+                })?),
+                None => None,
+            };
+        let cold_generation_ref = &cold_generation;
 
-        // Helper closure: compress then optionally encrypt.
+        // Helper closure: compress then optionally encrypt+`ACV1`-wrap.
         let compress_and_encrypt = |data: &[u8]| -> Result<Vec<u8>> {
             let compressed = crate::storage::compression::compress(data, &cold_config)?;
-            match cipher_ref {
-                Some(cipher) => {
-                    cipher
-                        .encrypt(&compressed, &[])
-                        .map_err(|e| -> crate::core::error::Error {
+            match cold_generation_ref {
+                Some((cipher, key_version)) => {
+                    let ciphertext = cipher.encrypt(&compressed, &[]).map_err(
+                        |e| -> crate::core::error::Error {
                             StorageError::Encryption(format!("Cold storage encryption failed: {e}"))
                                 .into()
-                        })
+                        },
+                    )?;
+                    Ok(wrap_cold_value(*key_version, &ciphertext))
                 }
                 None => Ok(compressed),
             }
@@ -1231,6 +1486,290 @@ impl RedbColdStorage {
             .map_err(|e| -> crate::core::error::Error {
                 StorageError::io_error(format!("Failed to write temporal_extent: {}", e)).into()
             })?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Cold-tier key rotation: transactional bulk re-encrypt (Issue #3617 PR3)
+    // ========================================================================
+
+    /// Read the durable cold-rotation resume cursor, if a pass is in flight.
+    ///
+    /// `Ok(None)` when no cursor is present or its record is unrecognized (an
+    /// older binary falls back to a full pass). O(1) metadata read.
+    fn read_cold_rotation_cursor(&self) -> Result<Option<ColdRotationCursor>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+        let table = match read_txn.open_table(METADATA_TABLE) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => {
+                return Err(
+                    StorageError::io_error(format!("Failed to open metadata table: {e}")).into(),
+                );
+            }
+        };
+        match table.get(COLD_ROTATION_CURSOR_KEY) {
+            Ok(Some(value)) => Ok(ColdRotationCursor::from_bytes(value.value())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(StorageError::io_error(format!(
+                "Failed to read cold_rotation cursor: {e}"
+            ))
+            .into()),
+        }
+    }
+
+    /// The target `key_version` every cold value has been re-wrapped to, per the
+    /// durable [`COLD_VALUE_FORMAT_KEY`] marker (Issue #3617 PR3). `Ok(None)` when
+    /// the store has never completed a rotation (values may be legacy or `ACV1`
+    /// at the base version). Used by tests and the resume driver to confirm a
+    /// finished pass without re-scanning every value.
+    pub fn cold_value_format_version(&self) -> Result<Option<u32>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+        let table = match read_txn.open_table(METADATA_TABLE) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => {
+                return Err(
+                    StorageError::io_error(format!("Failed to open metadata table: {e}")).into(),
+                );
+            }
+        };
+        match table.get(COLD_VALUE_FORMAT_KEY) {
+            Ok(Some(value)) => {
+                let bytes: &[u8] = value.value();
+                if bytes.len() == 5 && bytes[0] == COLD_ROTATION_RECORD_VERSION {
+                    Ok(Some(u32::from_le_bytes([
+                        bytes[1], bytes[2], bytes[3], bytes[4],
+                    ])))
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                Err(StorageError::io_error(format!("Failed to read cold_value_format: {e}")).into())
+            }
+        }
+    }
+
+    /// Transactionally re-encrypt every stored cold value to the `target_version`
+    /// generation (Issue #3617 PR3), decrypting each under its own (old/legacy)
+    /// generation and re-encrypting under the target cold DEK, in bounded
+    /// per-transaction batches, resumable via a durable redb cursor.
+    ///
+    /// # Preconditions
+    ///
+    /// The store must be encrypted and its keyring must hold BOTH the target
+    /// generation (installed by the driver) and every source generation needed to
+    /// decrypt existing values. New appends interleaved with the pass already
+    /// stamp the current (target) generation and are simply skipped as
+    /// already-wrapped.
+    ///
+    /// # Crash-consistency
+    ///
+    /// Each batch's value rewrites and the cursor advance commit in ONE redb write
+    /// transaction, so the cursor never runs ahead of (or behind) the durable
+    /// rewrites — a crash resumes from exactly the last committed key. The `ACV1`
+    /// wrapper is the idempotency backstop: a value already wrapped at
+    /// `target_version` is skipped, so a re-run after a stale cursor never
+    /// double-encrypts. Only `node_versions`/`edge_versions` VALUES are touched;
+    /// `flushed_lsn` and `temporal_extent` (incl. the #3389 per-dimension bounds)
+    /// are never read or rewritten, so they are preserved untouched.
+    ///
+    /// On completion the durable [`COLD_VALUE_FORMAT_KEY`] marker is set to
+    /// `wrapped@target_version` and the resume cursor is deleted.
+    ///
+    /// # Errors
+    ///
+    /// * encryption is not configured, or the keyring does not hold
+    ///   `target_version`;
+    /// * a value fails to decrypt (a genuine wrong/absent key — surfaced loudly,
+    ///   never silent wrong data) or a redb transaction fails.
+    pub fn reencrypt_cold_values(&self, target_version: u32) -> Result<ColdReencryptStats> {
+        let ring = self.keyring.as_ref().ok_or_else(|| {
+            Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
+                reason: "cold storage is not encrypted; cannot rotate cold keys".to_string(),
+            })
+        })?;
+        if !ring.has_version(target_version) {
+            return Err(StorageError::InconsistentState {
+                reason: "cold keyring does not hold the target generation for rotation".to_string(),
+            }
+            .into());
+        }
+        // The cipher every value is re-encrypted UNDER (the target generation).
+        let target_cipher = ring.cipher_for_value(Some(target_version)).ok_or_else(|| {
+            Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
+                reason: "cold keyring target generation missing a cipher".to_string(),
+            })
+        })?;
+
+        let mut stats = ColdReencryptStats::default();
+
+        // Resume point: a cursor for THIS target resumes it; any other cursor
+        // (stale, from an aborted earlier rotation) is ignored and the pass
+        // restarts from the node table (idempotent — already-wrapped values are
+        // skipped). Tables are always processed Node then Edge.
+        let (start_table, start_after) = match self.read_cold_rotation_cursor()? {
+            Some(c) if c.target_version == target_version => (c.table, Some(c.last_completed_key)),
+            _ => (ColdTableKind::Node, None),
+        };
+
+        let tables = [ColdTableKind::Node, ColdTableKind::Edge];
+        let start_idx = tables.iter().position(|t| *t == start_table).unwrap_or(0);
+        for (i, &table) in tables.iter().enumerate() {
+            if i < start_idx {
+                // A table before the cursor's table is already fully processed.
+                continue;
+            }
+            let resume_after = if i == start_idx { start_after } else { None };
+            self.reencrypt_one_table(
+                table,
+                target_version,
+                &target_cipher,
+                resume_after,
+                &mut stats,
+            )?;
+        }
+
+        // Terminal marker: whole store is wrapped at the target; drop the cursor.
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+        {
+            let mut meta = write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to open metadata table"))?;
+            let mut format_bytes = [0u8; 5];
+            format_bytes[0] = COLD_ROTATION_RECORD_VERSION;
+            format_bytes[1..5].copy_from_slice(&target_version.to_le_bytes());
+            meta.insert(COLD_VALUE_FORMAT_KEY, format_bytes.as_slice())
+                .map_err(map_storage_error("Failed to write cold_value_format"))?;
+            meta.remove(COLD_ROTATION_CURSOR_KEY)
+                .map_err(map_storage_error("Failed to clear cold_rotation cursor"))?;
+        }
+        write_txn.commit().map_err(map_commit_error(
+            "Failed to commit cold rotation completion",
+        ))?;
+
+        Ok(stats)
+    }
+
+    /// Re-encrypt one value-bearing table in bounded, cursor-advancing batches.
+    fn reencrypt_one_table(
+        &self,
+        table_kind: ColdTableKind,
+        target_version: u32,
+        target_cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
+        mut resume_after: Option<u64>,
+        stats: &mut ColdReencryptStats,
+    ) -> Result<()> {
+        use std::ops::Bound;
+        let table_def = table_kind.table();
+        loop {
+            let write_txn = self
+                .db
+                .begin_write()
+                .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+            let mut last_key = resume_after;
+            let batch_len;
+            {
+                let mut table = write_txn
+                    .open_table(table_def)
+                    .map_err(map_table_error("Failed to open versions table"))?;
+
+                // Collect a bounded slice of (key, value) into owned buffers FIRST
+                // — a redb iterator borrows the table immutably and cannot be held
+                // across the `insert` calls below (which need `&mut table`).
+                let collected: Vec<(u64, Vec<u8>)> = {
+                    let lower = match resume_after {
+                        Some(k) => Bound::Excluded(k),
+                        None => Bound::Unbounded,
+                    };
+                    let range = table
+                        .range::<u64>((lower, Bound::Unbounded))
+                        .map_err(map_storage_error("Failed to range cold table"))?;
+                    let mut v = Vec::with_capacity(COLD_REENCRYPT_BATCH_SIZE);
+                    for entry in range.take(COLD_REENCRYPT_BATCH_SIZE) {
+                        let (k, val) =
+                            entry.map_err(map_storage_error("Failed to read cold entry"))?;
+                        v.push((k.value(), val.value().to_vec()));
+                    }
+                    v
+                };
+
+                batch_len = collected.len();
+                if batch_len == 0 {
+                    // Table exhausted — nothing to commit; abort the empty txn.
+                    drop(table);
+                    drop(write_txn);
+                    break;
+                }
+
+                for (key, value) in &collected {
+                    // Idempotency backstop: already wrapped at the target → skip.
+                    if let Some((kv, _)) = parse_cold_wrapper(value)
+                        && kv == target_version
+                    {
+                        stats.values_skipped += 1;
+                        last_key = Some(*key);
+                        continue;
+                    }
+                    // Decrypt under the value's own (old/legacy) generation, then
+                    // re-encrypt the SAME compressed bytes under the target DEK and
+                    // re-wrap. Value-identity-preserving: no record is decoded, so
+                    // temporal bounds cannot change.
+                    let compressed = self.decrypt_if_needed(value)?;
+                    let ciphertext = target_cipher.encrypt(&compressed, &[]).map_err(
+                        |e| -> crate::core::error::Error {
+                            StorageError::Encryption(format!(
+                                "Cold storage re-encryption failed: {e}"
+                            ))
+                            .into()
+                        },
+                    )?;
+                    let wrapped = wrap_cold_value(target_version, &ciphertext);
+                    table
+                        .insert(*key, wrapped.as_slice())
+                        .map_err(map_storage_error("Failed to rewrite cold value"))?;
+                    stats.values_rewrapped += 1;
+                    last_key = Some(*key);
+                }
+            }
+
+            // Advance the durable cursor in the SAME transaction as the rewrites,
+            // so a crash resumes from exactly the last committed key.
+            {
+                let cursor = ColdRotationCursor {
+                    target_version,
+                    table: table_kind,
+                    last_completed_key: last_key.unwrap_or(0),
+                };
+                let mut meta = write_txn
+                    .open_table(METADATA_TABLE)
+                    .map_err(map_table_error("Failed to open metadata table"))?;
+                meta.insert(COLD_ROTATION_CURSOR_KEY, cursor.to_bytes().as_slice())
+                    .map_err(map_storage_error("Failed to write cold_rotation cursor"))?;
+            }
+
+            write_txn
+                .commit()
+                .map_err(map_commit_error("Failed to commit cold rotation batch"))?;
+
+            resume_after = last_key;
+            if batch_len < COLD_REENCRYPT_BATCH_SIZE {
+                // Fewer than a full batch means the table is exhausted.
+                break;
+            }
+        }
         Ok(())
     }
 
