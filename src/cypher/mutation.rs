@@ -103,6 +103,15 @@ pub fn execute(
     // Static validation independent of the data (fails before any transaction).
     validate(write)?;
 
+    // Cap the fan-out working set (Issue #3623 review): a MERGE that matches
+    // many committed entities -- or several chained MERGEs -- multiplies the
+    // working set combinatorially (up to N^k for k MERGEs over N matches each),
+    // and every binding buffers writes in this single transaction. Bound it with
+    // the SAME configurable `max_schema_as_of_entities` limit the read matcher
+    // uses (see `match_bindings` in `multi_pattern.rs`), turning a potential OOM
+    // into an honest structured rejection. Read once, up front.
+    let binding_cap = db.historical.read().max_schema_as_of_entities();
+
     // Read phase: matched rows drive the write clauses. A statement with no
     // reading part (a bare `CREATE`) runs once against a single empty binding.
     let base_rows: Vec<Binding> = match &write.reading {
@@ -153,9 +162,21 @@ pub fn execute(
                     &mut deleted_edges,
                     &mut created_edges,
                     &mut created_nodes,
+                    binding_cap,
                 )?;
+                // Aggregate cap after each clause (Issue #3623 review): every
+                // clause is 1->1 except MERGE (which fans 1->N), so this bounds
+                // the whole working set as it grows clause-over-clause. Defense
+                // in depth alongside the mid-extend check inside the MERGE arm.
+                if rows.len() > binding_cap {
+                    return Err(fanout_cap_error(binding_cap).into());
+                }
             }
             if let Some(ret) = &write.return_clause {
+                // The RETURN order of fanned rows is intentionally left
+                // unasserted: openCypher gives no row order without ORDER BY, so
+                // the emission order of a multi-match MERGE's fan-out is not a
+                // contract (tests assert the SET of rows, not their sequence).
                 for binding in &rows {
                     return_snapshots.push(collect_return_snapshots(ret, binding)?);
                 }
@@ -293,11 +314,28 @@ fn validate_return(ret: &CypherReturn) -> std::result::Result<(), CypherError> {
 // Clause application
 // ---------------------------------------------------------------------------
 
+/// The structured rejection returned when a statement's fan-out working set
+/// exceeds the configured cap (Issue #3623 review). Mirrors the read matcher's
+/// [`match_bindings`] cap error shape (a [`CypherError::UnsupportedFeature`]
+/// keyed on the same `max_schema_as_of_entities` knob) so the write phase
+/// reports a combinatorial MERGE blow-up as an honest structured error rather
+/// than exhausting memory.
+fn fanout_cap_error(binding_cap: usize) -> CypherError {
+    CypherError::UnsupportedFeature(format!(
+        "MERGE fan-out working set exceeds {binding_cap} bindings; a MERGE matching \
+         many committed entities (or multiple chained MERGEs) multiplies the working \
+         set combinatorially, each binding buffering writes in one transaction -- add \
+         a more selective pattern or labels to narrow the match (configurable via \
+         max_schema_as_of_entities)"
+    ))
+}
+
 /// Apply one write clause to the whole working set of bindings, returning the
 /// resulting set. Most clauses are 1->1 (each input binding maps to itself after
 /// its side effects), but a MERGE whose pattern matches multiple committed
 /// entities fans one binding into N (Issue #3623), so this maps `Vec<Binding>`
-/// to `Vec<Binding>` rather than mutating a single binding in place.
+/// to `Vec<Binding>` rather than mutating a single binding in place. `binding_cap`
+/// bounds the MERGE fan-out mid-extend (Issue #3623 review).
 #[allow(clippy::too_many_arguments)]
 fn apply_clause(
     tx: &mut crate::api::transaction::WriteTransaction,
@@ -309,6 +347,7 @@ fn apply_clause(
     deleted_edges: &mut HashSet<EdgeId>,
     created_edges: &mut Vec<(EdgeId, NodeId, NodeId)>,
     created_nodes: &mut Vec<(NodeId, String, PropertyMap)>,
+    binding_cap: usize,
 ) -> Result<Vec<Binding>> {
     match clause {
         CypherWriteClause::Create(patterns) => {
@@ -372,6 +411,14 @@ fn apply_clause(
                     created_edges,
                     created_nodes,
                 )?);
+                // Bound the fan-out mid-extend (Issue #3623 review): a single
+                // MERGE matching many committed entities across many input
+                // bindings could otherwise balloon `out` to ~cap^2 before the
+                // caller's post-clause check runs. Reject as soon as it exceeds
+                // the cap, matching the read matcher's per-step bound.
+                if out.len() > binding_cap {
+                    return Err(fanout_cap_error(binding_cap).into());
+                }
             }
             Ok(out)
         }
@@ -420,6 +467,28 @@ fn apply_clause(
 /// every one. The write executor carries a working set of bindings
 /// (`Vec<Binding>`) precisely so this fan-out composes with subsequent clauses
 /// and `RETURN` (each fanned row runs the rest of the statement independently).
+///
+/// ## Combinatorial cost and the aggregate cap
+///
+/// Fan-out is **multiplicative**: `M` base rows times `N` matches per MERGE, and
+/// `k` chained MERGEs can grow the working set to `M * N^k` bindings, each
+/// buffering its own writes inside the one transaction. To keep a pathological
+/// statement from exhausting memory, the working set is bounded by the same
+/// configurable `max_schema_as_of_entities` limit the read matcher applies to
+/// its intermediate binding count. The bound is checked mid-extend here and
+/// again after each clause in [`execute`]; exceeding it returns the structured
+/// [`fanout_cap_error`] ([`CypherError::UnsupportedFeature`]) rather than an OOM.
+///
+/// ## Bi-temporal multi-versioning of a single entity
+///
+/// Because `ON MATCH SET` (and any following write clause) runs **once per
+/// fanned row**, a single statement can record MULTIPLE new bi-temporal
+/// versions of ONE entity when that entity is bound by more than one match/row
+/// (e.g. a node reached by two matched relationship paths, or the far node of a
+/// base-row cross product). Each per-row update is a distinct `update_node`, so
+/// the entity is versioned once per binding -- a known deviation from
+/// openCypher's set-once-per-write semantics that is documented, not deduped, in
+/// v1.
 ///
 /// # v1 concurrency
 ///
