@@ -8,19 +8,24 @@
 //! Security-critical invariant asserted throughout: raw key hex must NEVER
 //! appear in stdout/stderr, in any encoding an error message might use.
 //!
-//! ## Architectural note (why no successful-rotation CLI test)
+//! ## Architectural note (rotation scope: WAL + index succeed, cold still refuses)
 //!
-//! The shipped rotation engine (`AletheiaDB::rotate_index_keys`) is *index
-//! layer only* and hard-refuses whenever any OTHER at-rest layer (WAL, cold,
-//! checkpoint) is encrypted under the same master key -- rotating the index
-//! alone to a new MEK would strand those layers (`rotation.rs` P0.1). Because
-//! AletheiaDB's config encrypts *uniformly* (enabling encryption encrypts the
-//! WAL too; there is no config knob for index-only encryption), a normally
-//! opened encrypted database ALWAYS has an encrypted WAL. Therefore
-//! `keys rotate --new-key` against any config-encrypted database correctly
-//! REFUSES with the cross-layer guard -- and that honest refusal is what these
-//! tests assert. A CLI-reachable successful rotation must wait on the
-//! documented full-MEK (all-layer) rotation follow-up.
+//! The rotation engine (`AletheiaDB::rotate_index_keys`) re-keys the index and,
+//! since Issue #3617 PR2, the WAL as well (checkpoint -> force-roll under the new
+//! WAL DEK -> truncate the old segments), so the WAL is no longer a cross-layer
+//! conflict. AletheiaDB's config encrypts *uniformly* (enabling encryption
+//! encrypts the WAL too), and the standard `make_encrypted_db` fixture configures
+//! only WAL + index persistence with NO cold storage. Therefore
+//! `keys rotate --new-key` / `--new-env-var` against that fixture now SUCCEEDS
+//! (exit 0), re-encrypting every persisted file and bumping the key version --
+//! and that success is what these tests assert.
+//!
+//! The one at-rest layer NOT yet covered is cold storage (PR3): when a tiered
+//! cold store is configured under the same master key, an index+WAL rotation
+//! would strand the cold values, so the cross-layer guard STILL refuses and
+//! names `cold_storage`. `keys_rotate_start_with_cold_storage_refuses_cross_layer`
+//! asserts that CLI refusal end-to-end (the unit test
+//! `rotate_still_refuses_when_cold_storage_encrypted` covers the engine level).
 
 use std::path::Path;
 use std::process::Command;
@@ -350,7 +355,7 @@ fn encryption_verify_disabled_is_informational() {
 mod encrypted {
     use super::*;
     use aletheiadb::AletheiaDB;
-    use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
+    use aletheiadb::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
     use aletheiadb::encryption::FileKeyProvider;
     use aletheiadb::encryption::config::EncryptionConfig;
     use aletheiadb::storage::index_persistence::PersistenceConfig;
@@ -437,6 +442,74 @@ mod encrypted {
         run_env(args, &borrowed)
     }
 
+    /// Create an encrypted database WITH an encrypted cold tier configured (in
+    /// addition to WAL + index persistence), then drop it, leaving a TOML config
+    /// the CLI can reopen. Used to assert that key rotation still refuses while a
+    /// cold tier is present (Issue #3617 PR3 is the cold re-keyer follow-up).
+    fn make_encrypted_db_with_cold() -> EncryptedFixture {
+        use std::time::Duration;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let key_path = root.join("master.key");
+        FileKeyProvider::generate_key_file(&key_path).unwrap();
+
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(root.join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_delay_ms: 5,
+                        max_batch_size: 64,
+                    })
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: root.join("data"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(root.join("cold.redb"))
+                    .migration_age_threshold(Duration::from_secs(3600))
+                    .build(),
+            )
+            .encryption(EncryptionConfig::file_based(&key_path))
+            .build();
+
+        let toml_path = root.join("aletheia.toml");
+        config.to_toml_file(&toml_path).unwrap();
+
+        // Seed from the SAME TOML the CLI will open, so paths match exactly.
+        {
+            let cfg = AletheiaDBConfig::from_toml_file(&toml_path).unwrap();
+            let db = AletheiaDB::with_unified_config(cfg).unwrap();
+            let a = db
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )
+                .unwrap();
+            let b = db
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
+                )
+                .unwrap();
+            db.create_edge(a, b, "KNOWS", PropertyMap::new()).unwrap();
+            db.persist_indexes().unwrap();
+        }
+
+        EncryptedFixture {
+            _dir: dir,
+            toml_path,
+            key_path,
+        }
+    }
+
     #[test]
     fn keys_rotate_status_fresh_encrypted_reports_no_pending() {
         let f = make_encrypted_db();
@@ -455,7 +528,12 @@ mod encrypted {
     }
 
     #[test]
-    fn keys_rotate_start_uniform_encrypted_refuses_cross_layer() {
+    fn keys_rotate_start_uniform_encrypted_succeeds() {
+        // Issue #3617 PR2: a uniformly-encrypted DB with WAL + index persistence
+        // and NO cold storage is now fully rotatable. The WAL is re-keyed by the
+        // checkpoint -> force-roll -> truncate driver rather than treated as a
+        // cross-layer conflict, so `keys rotate --new-key` SUCCEEDS: it
+        // re-encrypts every persisted index file and bumps the key version.
         let f = make_encrypted_db();
         // A brand-new key to rotate TO.
         let new_key = f.toml_path.parent().unwrap().join("rotate-to.key");
@@ -465,15 +543,31 @@ mod encrypted {
             &["keys", "rotate", "--new-key", new_key.to_str().unwrap()],
             &cfg_env(&f),
         );
-        assert_ne!(
+        assert_eq!(
             r.code, 0,
-            "rotate on a uniformly-encrypted DB must refuse (WAL encrypted); stdout={:?}",
-            r.stdout
+            "rotate on a uniform WAL+index-encrypted DB (no cold) must succeed; \
+             stdout={:?} stderr={:?}",
+            r.stdout, r.stderr
         );
         let c = r.combined_lower();
+        // Success summary: completion headline + old->new key-version bump + the
+        // re-encrypted file count (the CLI's print_rotation_report / progress line).
         assert!(
-            c.contains("wal") && c.contains("encrypted"),
-            "refusal must name the conflicting WAL layer; got={c:?}"
+            c.contains("rotation complete"),
+            "success must print the completion headline; got={c:?}"
+        );
+        assert!(
+            c.contains("key version") && c.contains("->"),
+            "success must print the old->new key-version bump; got={c:?}"
+        );
+        assert!(
+            c.contains("re-encrypted"),
+            "success must report the re-encrypted file count; got={c:?}"
+        );
+        // It must NOT be the old cross-layer refusal.
+        assert!(
+            !c.contains("other encrypted-at-rest layers"),
+            "must not be the cross-layer refusal; got={c:?}"
         );
         assert!(!c.contains("panicked"), "must not panic; got={c:?}");
         assert_no_key_leak(&r, &[f.key_path.as_path(), new_key.as_path()]);
@@ -551,27 +645,82 @@ mod encrypted {
     }
 
     #[test]
-    fn keys_rotate_start_via_env_var_refuses_cross_layer() {
+    fn keys_rotate_start_via_env_var_succeeds() {
         // Exercises the `--new-env-var` start path (KeyProviderConfig::Env
-        // branch). On a uniformly-encrypted DB the cross-layer guard refuses
-        // before the env var is ever sourced, so the var need not exist.
+        // branch). Issue #3617 PR2: a uniform WAL+index DB (no cold) is now
+        // rotatable, so the guard no longer short-circuits -- the env var IS
+        // sourced and must hold the hex-encoded new MEK. We generate a fresh key
+        // and export its hex, then assert the rotation succeeds.
         let f = make_encrypted_db();
+        let new_key = f.toml_path.parent().unwrap().join("rotate-to.key");
+        FileKeyProvider::generate_key_file(&new_key).unwrap();
+        // EnvKeyProvider reads a hex-encoded MEK from the named variable.
+        let new_key_hex = std::fs::read_to_string(&new_key)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let mut env = cfg_env(&f);
+        env.push(("ALETHEIADB_MEK_NEW", new_key_hex));
         let r = run_with(
             &["keys", "rotate", "--new-env-var", "ALETHEIADB_MEK_NEW"],
+            &env,
+        );
+        assert_eq!(
+            r.code, 0,
+            "rotate via env-var on a uniform WAL+index-encrypted DB (no cold) must \
+             succeed; stdout={:?} stderr={:?}",
+            r.stdout, r.stderr
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("rotation complete"),
+            "success must print the completion headline; got={c:?}"
+        );
+        assert!(
+            c.contains("key version") && c.contains("->"),
+            "success must print the old->new key-version bump; got={c:?}"
+        );
+        assert!(
+            c.contains("re-encrypted"),
+            "success must report the re-encrypted file count; got={c:?}"
+        );
+        assert!(
+            !c.contains("other encrypted-at-rest layers"),
+            "must not be the cross-layer refusal; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        // The exported hex is a key encoding: it must never leak into output.
+        assert_no_key_leak(&r, &[f.key_path.as_path(), new_key.as_path()]);
+    }
+
+    #[test]
+    fn keys_rotate_start_with_cold_storage_refuses_cross_layer() {
+        // Issue #3617 PR2: cold storage is NOT yet covered (PR3). A DB with an
+        // encrypted cold tier configured must STILL refuse an index+WAL rotation
+        // (it would strand the cold values under the old MEK). This is the CLI
+        // end-to-end counterpart to the engine unit test
+        // `rotate_still_refuses_when_cold_storage_encrypted`.
+        let f = make_encrypted_db_with_cold();
+        let new_key = f.toml_path.parent().unwrap().join("rotate-to.key");
+        FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        let r = run_with(
+            &["keys", "rotate", "--new-key", new_key.to_str().unwrap()],
             &cfg_env(&f),
         );
         assert_ne!(
             r.code, 0,
-            "rotate via env-var on a uniformly-encrypted DB must refuse; stdout={:?}",
+            "rotate with encrypted cold storage configured must still refuse; stdout={:?}",
             r.stdout
         );
         let c = r.combined_lower();
         assert!(
-            c.contains("wal") && c.contains("encrypted"),
-            "refusal must name the conflicting WAL layer; got={c:?}"
+            c.contains("cold_storage"),
+            "refusal must name the conflicting cold_storage layer; got={c:?}"
         );
         assert!(!c.contains("panicked"), "must not panic; got={c:?}");
-        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+        assert_no_key_leak(&r, &[f.key_path.as_path(), new_key.as_path()]);
     }
 
     /// Overwrite the 4-byte little-endian `key_version` field (offset 6..10) of

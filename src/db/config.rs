@@ -419,6 +419,21 @@ impl AletheiaDB {
             // used as a targeted fallback below only when a cipher is
             // configured, preserving the #3420/#3430 encrypted seed exactly.
             //
+            // Issue #3617 PR2 (crash-consistency): if a WAL rotation ledger is
+            // PENDING, install BOTH the old and new WAL key generations into the
+            // keyring BEFORE the replay read, so a half-rotated WAL (old-DEK +
+            // new-DEK segments both on disk) decrypts regardless of generation.
+            // Without this the read below fails on new-DEK frames before
+            // `resume_pending_rotation` (further down) can install the new
+            // generation. Additive: a no-op when no rotation is pending.
+            if config.encryption.enabled && config.persistence.enabled {
+                crate::db::rotation::install_pending_wal_generations(
+                    &wal,
+                    &config.encryption,
+                    &config.persistence.data_dir,
+                )?;
+            }
+
             // Held (as `mut`, consumed by whichever replay branch runs) across
             // index load so no later pass re-reads the segment directory.
             let mut startup_wal_entries = wal.read_from(crate::storage::wal::LSN::initial())?;
@@ -527,10 +542,24 @@ impl AletheiaDB {
             // loading indexes, so the index directory is a single, uniform key
             // generation by the time it is read back (a crash mid-rotation left
             // a mix of old/new key files plus a `rotation.state` breadcrumb).
+            //
+            // Issue #3617 PR2 (resume-path double-crash data-loss fix): pass
+            // `wal_persist = None` — the startup path DEFERS retiring the
+            // old-generation WAL segments (indexes are not loaded yet, so a
+            // persist here would snapshot empty state). Retirement + ledger clear
+            // happen in `finalize_resumed_wal_rotation` below, AFTER the snapshot
+            // is loaded and the WAL is replayed into current state and captured by
+            // a synchronous `persist_indexes()`. This pass still installs both WAL
+            // generations so the replay read decrypts every segment.
             if let Some(ref manager) = persistence_manager
                 && config.encryption.enabled
             {
-                crate::db::rotation::resume_pending_rotation(manager, &config.encryption)?;
+                crate::db::rotation::resume_pending_rotation(
+                    manager,
+                    &config.encryption,
+                    Some(&db.wal),
+                    None,
+                )?;
             }
 
             // Load indexes on startup if enabled
@@ -731,6 +760,33 @@ impl AletheiaDB {
                     db.edge_id_gen.ensure_at_least(max_eid + 1);
                 }
                 db.version_id_gen.ensure_at_least(next_version_id);
+            }
+
+            // Issue #3617 PR2 (resume-path double-crash data-loss fix): PHASE 2 of
+            // a startup-resumed WAL key rotation. `resume_pending_rotation` above
+            // installed both WAL generations but DEFERRED retiring the
+            // old-generation segments (indexes were not loaded yet, so a persist
+            // then would have snapshotted empty state). Now that the snapshot is
+            // loaded and the WAL has been replayed into current state, retire the
+            // old-generation segments — but only AFTER a SYNCHRONOUS
+            // `persist_indexes()` captures the replayed `[checkpoint, seal)` writes
+            // (run inside `finalize_resumed_wal_rotation`, after the seal and
+            // before the retire). So no old-generation WAL segment is deleted until
+            // its entries are durable in the index snapshot, closing the window
+            // where a second crash before the async checkpoint lost them. A no-op
+            // when no WAL rotation is pending. MUST run BEFORE the background
+            // persistence thread starts, so the synchronous persist is the one
+            // that closes the window (not a racy async checkpoint).
+            if let Some(ref manager) = persistence_manager
+                && config.encryption.enabled
+                && config.persistence.load_on_startup
+            {
+                crate::db::rotation::finalize_resumed_wal_rotation(
+                    manager,
+                    &config.encryption,
+                    &db.wal,
+                    || db.persist_indexes(),
+                )?;
             }
 
             // Start background persistence thread if enabled
