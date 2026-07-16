@@ -312,10 +312,12 @@ impl QueryExecutor {
                 )),
 
                 // Full edge scan (SQL `SELECT * FROM edges`). Mirrors `NodeScan`.
-                // Yields `EntityResult::Edge` rows; note these survive `collect_all`
-                // / `count_all` / direct iteration but are dropped by the
-                // node-centric `collect_structured`/`collect_nodes` helpers, which
-                // remain node-only by design (see `results.rs`).
+                // Yields `EntityResult::Edge` rows; these survive `collect_all` /
+                // `count_all` / direct iteration and the edge-shaped structured
+                // projection `collect_structured_edges`/`collect_edges` (Issue
+                // #3626). The node-centric `collect_structured`/`collect_nodes`
+                // helpers remain node-only by design and drop edge rows (see
+                // `results.rs`).
                 PhysicalOp::EdgeScan { edge_type, .. } => Box::new(
                     iterators::EdgeScanIterator::new(edge_type.clone(), Arc::clone(&self.current)),
                 ),
@@ -541,6 +543,18 @@ impl QueryExecutor {
                     // Historical storage is required to reconstruct each matched
                     // entity's valid-time history per window (Issue #3363).
                     Box::new(iterators::TemporalWindowAggregateIterator::new(
+                        input_iter,
+                        spec.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
+                PhysicalOp::TemporalAlign { input, spec } => {
+                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    // Historical storage is required to reconstruct each matched
+                    // participant's valid-time history (and gating edge validity)
+                    // at the alignment coordinates (Issue #3379).
+                    Box::new(iterators::TemporalJoinIterator::new(
                         input_iter,
                         spec.clone(),
                         Arc::clone(&self.historical),

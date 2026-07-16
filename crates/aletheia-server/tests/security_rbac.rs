@@ -55,7 +55,7 @@ fn principal_with_role(role: Role) -> Principal {
 // ── AC (b): registry / inventory conformance ────────────────────────────────
 
 /// The RBAC registry equals `tests/parity/inventory.json`'s `mcp.tools[]`
-/// EXACTLY — same 51 names, same class per name, in both directions. The
+/// EXACTLY — same 57 names, same class per name, in both directions. The
 /// inventory is the cross-lane source of truth; this pins the registry to it so
 /// neither can drift silently.
 #[test]
@@ -88,7 +88,7 @@ fn registry_matches_inventory_exactly() {
         rbac::MCP_TOOL_CLASSES.len(),
         "registry has duplicate tool names"
     );
-    assert_eq!(inventory.len(), 51, "inventory advertises 51 MCP tools");
+    assert_eq!(inventory.len(), 57, "inventory advertises 57 MCP tools");
     assert_eq!(
         registry, inventory,
         "MCP_TOOL_CLASSES must equal inventory.json mcp.tools[] exactly \

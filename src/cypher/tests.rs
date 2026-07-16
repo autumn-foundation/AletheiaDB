@@ -8215,14 +8215,14 @@ mod mutations {
         assert_eq!(db.edge_count(), 3);
     }
 
-    /// #18 Second finding: a MERGE whose pattern matches MORE THAN ONE committed
-    /// entity is rejected (the single-binding-per-row executor cannot expand
-    /// rows), with a structured error and NO partial write.
+    /// #18 (Issue #3623) A MERGE whose pattern matches MORE THAN ONE committed
+    /// entity now binds ALL matches (openCypher whole-pattern MATCH semantics)
+    /// and applies `ON MATCH SET` to every one -- no create, no rejection.
     #[test]
-    fn merge_multi_match_is_rejected_no_partial_write() {
+    fn merge_multi_match_binds_all_and_sets_each() {
         let db = AletheiaDB::new().unwrap();
         // Two Persons named 'Dup': a bare `MERGE (n:Person {name:'Dup'})` matches
-        // both, which cannot be expressed as a single row.
+        // both and fans into two rows.
         for _ in 0..2 {
             db.create_node(
                 "Person",
@@ -8231,15 +8231,415 @@ mod mutations {
             .unwrap();
         }
         let before = db.node_count();
-        assert_query_error(
+        run(
             &db,
             "MERGE (n:Person {name: 'Dup'}) ON MATCH SET n.touched = 1",
         );
-        assert_eq!(db.node_count(), before, "no partial write on multi-match");
+        assert_eq!(db.node_count(), before, "no create on multi-match");
+        // ON MATCH SET applied to BOTH matched nodes.
+        for id in db.scan_nodes_by_label("Person") {
+            let node = db.get_node(id).unwrap();
+            assert_eq!(
+                node.get_property("touched"),
+                Some(&PropertyValue::Int(1)),
+                "ON MATCH SET must apply to every matched node"
+            );
+        }
+    }
+
+    /// #18b (Issue #3623) A multi-match MERGE with RETURN fans into one row per
+    /// matched entity.
+    #[test]
+    fn merge_multi_match_returns_row_per_match() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..3 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let rows = run(&db, "MERGE (n:Person {name: 'Dup'}) RETURN n");
+        assert_eq!(rows.len(), 3, "one RETURN row per matched entity");
+        for row in &rows {
+            assert_eq!(str_prop(&row.entity, "name").unwrap(), "Dup");
+        }
+    }
+
+    /// #18c (Issue #3623) A bare multi-match MERGE (no ON MATCH SET) records NO
+    /// new versions -- it is a pure match -- and creates nothing.
+    #[test]
+    fn merge_multi_match_bare_records_no_versions() {
+        let db = AletheiaDB::new().unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            ids.push(
+                db.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Dup").build(),
+                )
+                .unwrap(),
+            );
+        }
+        let before: Vec<usize> = ids
+            .iter()
+            .map(|id| db.get_node_history(*id).unwrap().version_count())
+            .collect();
+        let before_count = db.node_count();
+        let rows = run(&db, "MERGE (n:Person {name: 'Dup'}) RETURN n");
+        assert_eq!(rows.len(), 2, "one row per match");
+        assert_eq!(db.node_count(), before_count, "no create");
+        for (id, was) in ids.iter().zip(before) {
+            assert_eq!(
+                db.get_node_history(*id).unwrap().version_count(),
+                was,
+                "a bare match must record no new version"
+            );
+        }
+    }
+
+    /// #18d (Issue #3623) A clause AFTER a multi-match MERGE runs per fanned row:
+    /// `SET n.x = 1` must apply to EVERY matched node (composition correctness).
+    #[test]
+    fn merge_multi_match_composes_with_following_clause() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        run(&db, "MERGE (n:Person {name: 'Dup'}) SET n.x = 1");
+        for id in db.scan_nodes_by_label("Person") {
+            assert_eq!(
+                db.get_node(id).unwrap().get_property("x"),
+                Some(&PropertyValue::Int(1)),
+                "a SET after a multi-match MERGE must apply to every fanned row"
+            );
+        }
+    }
+
+    /// #18e (Issue #3623) The create branch still yields exactly ONE row / ONE
+    /// node when no committed match exists (no accidental fan-out).
+    #[test]
+    fn merge_no_match_creates_exactly_one_row() {
+        let db = AletheiaDB::new().unwrap();
+        let rows = run(&db, "MERGE (n:City {name: 'NYC'}) RETURN n");
+        assert_eq!(rows.len(), 1, "create branch yields exactly one row");
+        assert_eq!(db.scan_nodes_by_label("City").count(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "NYC");
+    }
+
+    /// #18f (Issue #3623 review) The fan-out working set is bounded by the same
+    /// configurable `max_schema_as_of_entities` cap the read matcher uses. Two
+    /// chained MERGEs each matching N committed 'Dup' persons multiply the
+    /// working set to N*N; exceeding the cap returns a structured
+    /// `UnsupportedFeature` rejection (never an OOM/panic) with the whole
+    /// transaction aborted. Each individual match (3) stays under the cap, so
+    /// this exercises the *fan-out* bound, not the read matcher's per-pattern one.
+    #[test]
+    fn merge_fanout_exceeding_cap_is_structured_error() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+        use crate::core::error::QueryError;
+        use crate::test_utils::unique_wal_dir;
+
+        // Isolate the WAL dir (Issue #3500) since this test builds its own config.
+        let wal_home = unique_wal_dir();
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(wal_home.path().join("wal"))
+                    .build(),
+            )
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .max_schema_as_of_entities(5)
+                    .build(),
+            )
+            .build();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
+        for _ in 0..3 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let before = db.node_count();
+        // 3 matches x 3 matches = 9 working-set bindings > cap of 5.
+        match db.execute_cypher("MERGE (n:Person {name: 'Dup'}) MERGE (m:Person {name: 'Dup'})") {
+            Ok(_) => panic!("expected a structured fan-out cap error, got Ok"),
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature cap error, got {other:?}"),
+        }
         assert_eq!(
-            int_prop_node(&db, "Person", "Dup", "touched"),
-            None,
-            "ON MATCH SET must not have applied to either match"
+            db.node_count(),
+            before,
+            "no partial write on a capped fan-out"
+        );
+    }
+
+    /// #18g (Issue #3623) Relationship-pattern multi-match: a MERGE relationship
+    /// pattern matching multiple committed paths binds ALL of them -- one fanned
+    /// row per matched path, `ON MATCH SET` applied to every far node, and
+    /// nothing created.
+    #[test]
+    fn merge_relationship_multi_match_binds_all_paths() {
+        use crate::core::property::PropertyMap;
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        let c = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "C").build(),
+            )
+            .unwrap();
+        let d = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "D").build(),
+            )
+            .unwrap();
+        // Two committed KNOWS paths: (A)->(B), (C)->(D).
+        db.create_edge(a, b, "KNOWS", PropertyMap::new()).unwrap();
+        db.create_edge(c, d, "KNOWS", PropertyMap::new()).unwrap();
+        let before_nodes = db.node_count();
+        let before_edges = db.edge_count();
+
+        let rows = run(
+            &db,
+            "MERGE (x:Person)-[:KNOWS]->(y:Person) ON MATCH SET y.touched = 1 RETURN x, y",
+        );
+
+        // (a) one row per matched path.
+        assert_eq!(rows.len(), 2, "one RETURN row per matched KNOWS path");
+        // (b) ON MATCH SET on the far node applied to EVERY matched path.
+        assert_eq!(
+            db.get_node(b).unwrap().get_property("touched"),
+            Some(&PropertyValue::Int(1))
+        );
+        assert_eq!(
+            db.get_node(d).unwrap().get_property("touched"),
+            Some(&PropertyValue::Int(1))
+        );
+        // Near nodes are untouched (only the far endpoint `y` was SET).
+        assert_eq!(db.get_node(a).unwrap().get_property("touched"), None);
+        assert_eq!(db.get_node(c).unwrap().get_property("touched"), None);
+        // (c) counts unchanged -- pure match, no create.
+        assert_eq!(
+            db.node_count(),
+            before_nodes,
+            "no node created on relationship multi-match"
+        );
+        assert_eq!(
+            db.edge_count(),
+            before_edges,
+            "no edge created on relationship multi-match"
+        );
+    }
+
+    /// #18h (Issue #3623) Same-entity multi-versioning finding: when one node is
+    /// the far endpoint of TWO matched paths, `ON MATCH SET` runs once per fanned
+    /// row, so the shared node is versioned ONCE PER binding -- a documented
+    /// deviation from openCypher's set-once semantics (see the `apply_merge`
+    /// docstring). This asserts the current double-bump so it stays visible.
+    #[test]
+    fn merge_shared_target_versioned_once_per_matched_path() {
+        use crate::core::property::PropertyMap;
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        let hub = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Hub").build(),
+            )
+            .unwrap();
+        // Two paths share the far node `hub`: (A)->(Hub), (B)->(Hub).
+        db.create_edge(a, hub, "KNOWS", PropertyMap::new()).unwrap();
+        db.create_edge(b, hub, "KNOWS", PropertyMap::new()).unwrap();
+        let hub_versions_before = db.get_node_history(hub).unwrap().version_count();
+
+        run(
+            &db,
+            "MERGE (x:Person)-[:KNOWS]->(y:Person) ON MATCH SET y.seen = 1",
+        );
+
+        // `hub` is bound by two matched paths -> two per-row updates -> two new
+        // versions (the same-entity double-bump this finding surfaces).
+        assert_eq!(
+            db.get_node_history(hub).unwrap().version_count(),
+            hub_versions_before + 2,
+            "shared far node is versioned once per matched path (documented double-bump)"
+        );
+        assert_eq!(
+            db.get_node(hub).unwrap().get_property("seen"),
+            Some(&PropertyValue::Int(1))
+        );
+    }
+
+    /// #18i (Issue #3623) Atomicity on mid-fan-out failure: a multi-match MERGE
+    /// whose `ON MATCH SET` succeeds on an early fanned row but violates a unique
+    /// constraint on a later one aborts the WHOLE transaction -- NO node is
+    /// mutated (all version counts unchanged), proving all-or-nothing across the
+    /// fan-out.
+    #[test]
+    fn merge_multi_match_mid_fanout_failure_is_atomic() {
+        let db = AletheiaDB::new().unwrap();
+        db.unique_constraint("Person", "tag").enable().unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            ids.push(
+                db.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Dup").build(),
+                )
+                .unwrap(),
+            );
+        }
+        let before: Vec<usize> = ids
+            .iter()
+            .map(|id| db.get_node_history(*id).unwrap().version_count())
+            .collect();
+
+        // Both matched 'Dup' nodes fan out; `ON MATCH SET tag='X'` on the first
+        // reserves the unique value, the second collides -> commit-time abort.
+        let result = db.execute_cypher("MERGE (n:Person {name: 'Dup'}) ON MATCH SET n.tag = 'X'");
+        assert!(
+            result.is_err(),
+            "the colliding multi-match MERGE must abort"
+        );
+
+        // No node mutated: every version count is unchanged, no `tag` persisted.
+        for (id, was) in ids.iter().zip(before) {
+            assert_eq!(
+                db.get_node_history(*id).unwrap().version_count(),
+                was,
+                "no partial mutation on abort"
+            );
+            assert_eq!(
+                db.get_node(*id).unwrap().get_property("tag"),
+                None,
+                "no tag persisted on abort"
+            );
+        }
+    }
+
+    /// #18j (Issue #3623) `ON CREATE SET` does NOT fire on the multi-match
+    /// branch: two committed 'Dup' nodes matched by a MERGE apply only
+    /// `ON MATCH SET`; none receives the `ON CREATE SET` property.
+    #[test]
+    fn merge_multi_match_on_create_set_does_not_fire() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Dup'}) ON CREATE SET n.created = 1 ON MATCH SET n.touched = 1",
+        );
+        for id in db.scan_nodes_by_label("Person") {
+            let node = db.get_node(id).unwrap();
+            assert_eq!(
+                node.get_property("touched"),
+                Some(&PropertyValue::Int(1)),
+                "ON MATCH SET fires on every matched node"
+            );
+            assert_eq!(
+                node.get_property("created"),
+                None,
+                "ON CREATE SET must not fire on the multi-match branch"
+            );
+        }
+    }
+
+    /// #18k (Issue #3623) A write clause AFTER a multi-match MERGE composes per
+    /// fanned row: `MERGE (...) CREATE (n)-[:HAS]->(t:Tag)` over two matched
+    /// nodes creates one Tag + one edge PER fanned row (two of each).
+    #[test]
+    fn merge_multi_match_following_create_composes_per_row() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Dup'}) CREATE (n)-[:HAS]->(t:Tag)",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("Tag").count(),
+            2,
+            "one Tag per fanned row"
+        );
+        assert_eq!(db.edge_count(), 2, "one HAS edge per fanned row");
+    }
+
+    /// #18l (Issue #3623) M base rows x N matches: a leading MATCH yielding 2
+    /// rows followed by a MERGE multi-matching 2 each yields the full 2x2=4
+    /// cross-product -- RETURN emits 4 rows and a following CREATE fires once per
+    /// cross-product row (4 edges), with no new match-target created.
+    #[test]
+    fn merge_base_by_match_cross_product() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Base",
+                PropertyMapBuilder::new().insert("name", "P").build(),
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            db.create_node(
+                "Widget",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let rows = run(
+            &db,
+            "MATCH (p:Base {name: 'P'}) MERGE (n:Widget {name: 'Dup'}) \
+             CREATE (p)-[:SAW]->(n) RETURN p, n",
+        );
+        assert_eq!(
+            rows.len(),
+            4,
+            "2 base rows x 2 matches = 4 cross-product rows"
+        );
+        assert_eq!(db.edge_count(), 4, "one SAW edge per cross-product row");
+        assert_eq!(
+            db.scan_nodes_by_label("Widget").count(),
+            2,
+            "no new Widget created (pure match)"
         );
     }
 

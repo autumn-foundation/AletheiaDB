@@ -92,6 +92,37 @@ impl PartialOrd for State {
     }
 }
 
+/// Outcome of a bounded semantic path search.
+///
+/// The bounded search has three terminal states that callers frequently need
+/// to distinguish. Two of them are perfectly **normal** outcomes (not server
+/// faults): a genuinely disconnected pair of nodes, and a search that hit its
+/// DoS-protection expansion budget before finding the goal. Conflating these
+/// with hard errors (invalid node id, missing vector property) — as an
+/// `Err(Error::other(..))` for both would — misleads a caller into treating a
+/// normal "no route exists" answer as an internal bug. This enum makes the
+/// three cases explicit so the MCP surface can map them to the right
+/// structured error code.
+///
+/// Hard errors (start/end invalid, missing vector) are still surfaced as
+/// `Err` from the search; only the three *reachability* outcomes are modeled
+/// here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathSearchOutcome {
+    /// A path from `start` to `end` (inclusive) was found.
+    Found(Vec<NodeId>),
+    /// The two nodes are not connected: the search exhausted the reachable
+    /// component (within budget) without reaching `end`.
+    NoPath,
+    /// The expansion budget was exhausted before `end` was reached. The graph
+    /// may still contain a path; the bounded search simply refused to keep
+    /// exploring. Carries the budget that was hit so the caller can report it.
+    BudgetExhausted {
+        /// The `max_expansions` budget that was reached.
+        max_expansions: usize,
+    },
+}
+
 impl<'a> SemanticNavigator<'a> {
     /// Create a new SemanticNavigator.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -123,6 +154,73 @@ impl<'a> SemanticNavigator<'a> {
     /// - `Ok(Vec<NodeId>)`: The path from start to end (inclusive).
     /// - `Err`: If start/end nodes are invalid, missing vectors, or no path exists.
     pub fn find_path(&self, start: NodeId, end: NodeId, vector_prop: &str) -> Result<Vec<NodeId>> {
+        // The unbounded variant is a thin wrapper over the bounded search with an
+        // effectively-infinite expansion budget, so the two share one code path.
+        // With `usize::MAX` the budget can never be exhausted, so the only
+        // non-success reachability outcome is a genuinely disconnected pair,
+        // which this variant reports (unchanged external behavior) as the
+        // historical `Err(Error::other("No path found"))`.
+        match self.search(start, end, vector_prop, usize::MAX)? {
+            PathSearchOutcome::Found(path) => Ok(path),
+            PathSearchOutcome::NoPath | PathSearchOutcome::BudgetExhausted { .. } => {
+                Err(Error::other("No path found"))
+            }
+        }
+    }
+
+    /// Bounded variant of [`find_path`](Self::find_path) for untrusted callers
+    /// (e.g. the MCP surface).
+    ///
+    /// The plain A* search is **unbounded**: on a large or adversarial graph it
+    /// can expand an arbitrary number of nodes before concluding, a denial-of-
+    /// service risk when the endpoints are attacker-controlled. This variant caps
+    /// the number of node expansions (pops from the open set) at
+    /// `max_expansions`; once the budget is exhausted without reaching `end`, it
+    /// returns an error instead of continuing to explore. All other semantics are
+    /// identical to [`find_path`](Self::find_path).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Starting node ID.
+    /// * `end` - Target node ID.
+    /// * `vector_prop` - Name of the property containing the vector embedding.
+    /// * `max_expansions` - Maximum number of node expansions before giving up.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(PathSearchOutcome::Found(path))`: The path from start to end
+    ///   (inclusive).
+    /// - `Ok(PathSearchOutcome::NoPath)`: The two nodes are not connected —
+    ///   a normal outcome, not an error.
+    /// - `Ok(PathSearchOutcome::BudgetExhausted { .. })`: The expansion budget
+    ///   was exhausted before `end` was reached — a DoS-protection refusal, not
+    ///   an error.
+    /// - `Err`: Only for hard faults — start/end invalid or missing the vector
+    ///   property. Reachability outcomes are reported via [`PathSearchOutcome`],
+    ///   so callers (e.g. the MCP surface) can map "no path" and "budget
+    ///   exhausted" to distinct, non-`INTERNAL` error codes.
+    pub fn find_path_bounded(
+        &self,
+        start: NodeId,
+        end: NodeId,
+        vector_prop: &str,
+        max_expansions: usize,
+    ) -> Result<PathSearchOutcome> {
+        self.search(start, end, vector_prop, max_expansions)
+    }
+
+    /// Core bounded A* search shared by [`find_path`](Self::find_path) and
+    /// [`find_path_bounded`](Self::find_path_bounded).
+    ///
+    /// Returns a [`PathSearchOutcome`] for the three reachability outcomes;
+    /// only hard faults (invalid nodes, missing vectors) are surfaced as `Err`.
+    fn search(
+        &self,
+        start: NodeId,
+        end: NodeId,
+        vector_prop: &str,
+        max_expansions: usize,
+    ) -> Result<PathSearchOutcome> {
         // 1. Validate Start/End and get Goal Vector
         let start_node = self.db.get_node(start)?;
         let end_node = self.db.get_node(end)?;
@@ -172,13 +270,23 @@ impl<'a> SemanticNavigator<'a> {
         // it helps performance on general graphs.
         // However, g_score check implicitly handles this.
 
+        let mut expansions: usize = 0;
         while let Some(State {
             cost: _current_f,
             node: current,
         }) = open_set.pop()
         {
             if current == end {
-                return Ok(self.reconstruct_path(came_from, current));
+                return Ok(PathSearchOutcome::Found(
+                    self.reconstruct_path(came_from, current),
+                ));
+            }
+
+            // Enforce the expansion budget (DoS protection for untrusted
+            // callers). We count a node the moment it is popped for expansion.
+            expansions = expansions.saturating_add(1);
+            if expansions > max_expansions {
+                return Ok(PathSearchOutcome::BudgetExhausted { max_expansions });
             }
 
             // Get current vector for cost calculation
@@ -233,7 +341,7 @@ impl<'a> SemanticNavigator<'a> {
             }
         }
 
-        Err(Error::other("No path found"))
+        Ok(PathSearchOutcome::NoPath)
     }
 
     fn reconstruct_path(
@@ -353,5 +461,79 @@ mod tests {
             result.is_err(),
             "Should fail if start/end nodes lack vectors"
         );
+    }
+
+    #[test]
+    fn bounded_no_path_reports_no_path_outcome() {
+        let (db, _dir) = create_test_db();
+        // Two disconnected nodes, both with vectors, no edge between them.
+        let a = db
+            .create_node(
+                "Node",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Node",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 1.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let nav = SemanticNavigator::new(&db);
+        let outcome = nav.find_path_bounded(a, b, "vec", 1000).unwrap();
+        assert_eq!(
+            outcome,
+            PathSearchOutcome::NoPath,
+            "disconnected pair must report NoPath, not a hard error"
+        );
+
+        // The unbounded convenience wrapper preserves its historical contract:
+        // NoPath is surfaced as an Err.
+        assert!(nav.find_path(a, b, "vec").is_err());
+    }
+
+    #[test]
+    fn bounded_budget_exhausted_reports_budget_outcome() {
+        let (db, _dir) = create_test_db();
+        // Build a long chain A -> B -> C -> ... so a tiny budget is exhausted
+        // before the far end is reached.
+        let mut ids = Vec::new();
+        for i in 0..50u64 {
+            let x = (i as f32) / 50.0;
+            let id = db
+                .create_node(
+                    "Node",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[1.0 - x, x])
+                        .build(),
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        for w in ids.windows(2) {
+            db.create_edge(w[0], w[1], "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+        }
+
+        let nav = SemanticNavigator::new(&db);
+        let outcome = nav
+            .find_path_bounded(ids[0], ids[ids.len() - 1], "vec", 2)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            PathSearchOutcome::BudgetExhausted { max_expansions: 2 },
+            "a tiny budget on a long chain must report BudgetExhausted"
+        );
+
+        // A generous budget still finds the path.
+        let found = nav
+            .find_path_bounded(ids[0], ids[ids.len() - 1], "vec", usize::MAX)
+            .unwrap();
+        assert!(matches!(found, PathSearchOutcome::Found(_)));
     }
 }

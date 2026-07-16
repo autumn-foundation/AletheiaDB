@@ -319,10 +319,14 @@ pub struct ConcurrentWalSystem {
     /// Crash-torn-tail recovery policy applied by [`Self::read_from`]
     /// (Issue #3433).
     tolerate_torn_tail: bool,
-    /// Optional WAL cipher for encryption at rest. Retained so [`Self::read_from`]
-    /// can decrypt encrypted segments during recovery replay; the write path
-    /// receives its own copy through the inner `ConcurrentWal`.
-    wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+    /// Optional WAL DEK keyring for encryption at rest (Issue #3617). Retained
+    /// so [`Self::read_from`] can decrypt encrypted segments during recovery
+    /// replay — dispatching per segment on its `key_version` so a mixed
+    /// old-DEK/new-DEK directory (an in-flight full-MEK rotation) replays
+    /// correctly. The flush coordinator holds a clone (shared `Arc` state), so
+    /// advancing the current generation here is observed by the write path
+    /// immediately.
+    wal_keyring: Option<crate::encryption::wal_encryption::WalKeyring>,
 }
 
 impl ConcurrentWalSystem {
@@ -337,6 +341,16 @@ impl ConcurrentWalSystem {
             segments_to_retain: config.segments_to_retain,
         };
 
+        // Build the WAL DEK keyring from the configured cipher (Issue #3617). A
+        // never-rotated encrypted WAL starts as a single-generation keyring
+        // (stamps INITIAL_WAL_KEY_VERSION, decrypts any segment); a full-MEK
+        // rotation later advances it to a second generation. Plaintext WALs have
+        // no keyring.
+        let wal_keyring = config
+            .wal_cipher
+            .clone()
+            .map(crate::encryption::wal_encryption::WalKeyring::single);
+
         // Create FlushCoordinator config
         let coordinator_config = FlushCoordinatorConfig {
             wal_dir: config.wal_dir,
@@ -348,11 +362,8 @@ impl ConcurrentWalSystem {
                 DurabilityMode::Synchronous | DurabilityMode::GroupCommit { .. }
             ),
             write_buffer_size: config.write_buffer_size,
-            wal_cipher: config.wal_cipher.clone(),
+            wal_keyring: wal_keyring.clone(),
         };
-
-        // Retain the cipher on the system for the recovery read path.
-        let wal_cipher = config.wal_cipher.clone();
 
         let wal = Arc::new(ConcurrentWal::new(wal_config)?);
         let coordinator = Arc::new(FlushCoordinator::new(coordinator_config)?);
@@ -427,7 +438,7 @@ impl ConcurrentWalSystem {
             group_commit,
             consecutive_flush_errors,
             tolerate_torn_tail: config.tolerate_torn_tail,
-            wal_cipher,
+            wal_keyring,
         })
     }
 
@@ -773,7 +784,62 @@ impl ConcurrentWalSystem {
     /// undecryptable. Never exposes the cipher or any key material.
     #[must_use]
     pub(crate) fn is_encrypted(&self) -> bool {
-        self.wal_cipher.is_some()
+        self.wal_keyring.is_some()
+    }
+
+    /// The WAL DEK keyring, if this WAL is encrypted (Issue #3617).
+    ///
+    /// Exposed so the full-MEK rotation driver can install the new WAL DEK
+    /// generation before force-rolling the active segment. Never returns key
+    /// material directly — only the shared, redacting-`Debug` keyring handle.
+    #[must_use]
+    pub(crate) fn wal_keyring(&self) -> Option<&crate::encryption::wal_encryption::WalKeyring> {
+        self.wal_keyring.as_ref()
+    }
+
+    /// Whether every on-disk WAL segment is stamped with `key_version` — the
+    /// rotation driver's "old generation fully retired" signal (Issue #3617).
+    /// See [`FlushCoordinator::all_segments_use_key_version`].
+    pub(crate) fn all_segments_use_key_version(&self, key_version: u32) -> bool {
+        self.coordinator.all_segments_use_key_version(key_version)
+    }
+
+    /// Retire (delete) every sealed old-generation WAL segment, keeping only
+    /// segments stamped `keep_key_version` and the active segment (Issue #3617).
+    /// See [`FlushCoordinator::retire_old_generation_segments`].
+    pub(crate) fn retire_old_generation_segments(&self, keep_key_version: u32) -> Result<usize> {
+        self.coordinator
+            .retire_old_generation_segments(keep_key_version)
+    }
+
+    /// Force-roll the active WAL segment for a full-MEK key rotation (Issue
+    /// #3617): drain and durably flush every in-flight ring-buffer entry into
+    /// the CURRENT (old-generation) segment, then atomically seal it, run
+    /// `advance` (which flips the WAL keyring to the new generation), and open a
+    /// fresh segment stamped with — and encrypting under — the new generation.
+    ///
+    /// # Quiesce / correctness
+    ///
+    /// Appends land in the lock-free ring buffer BEFORE any flush. This method
+    /// first drains and flushes them (with fsync) into the old segment, so no
+    /// acknowledged entry is lost across the roll. The subsequent seal + keyring
+    /// flip + reopen all run under the coordinator `writer` mutex, which every
+    /// flush also holds while it reads the write cipher and writes the segment
+    /// header — so the (segment header generation, frame-encrypting generation)
+    /// pair is always consistent and a batch can never straddle two generations.
+    /// Any append racing the roll is simply picked up by whichever flush runs
+    /// next and written, consistently, to whatever segment is current at that
+    /// flush. `advance` runs while holding only the `writer` mutex, so it must
+    /// not acquire any lock ordered after `wal` (no cold flush inside it).
+    pub(crate) fn seal_active_segment_for_rotation<F: FnOnce()>(&self, advance: F) -> Result<()> {
+        // 1. Drain + flush all pending entries into the current (old) segment,
+        //    with fsync, so nothing acknowledged is left only in the ring buffer.
+        let entries = self.wal.drain_all();
+        if !entries.is_empty() {
+            self.coordinator.flush(entries, true)?;
+        }
+        // 2. Seal old + flip keyring + open new, atomically under the writer mutex.
+        self.coordinator.seal_active_segment_and_reopen(advance)
     }
 
     /// Read WAL entries from disk, starting from the specified LSN.
@@ -790,10 +856,10 @@ impl ConcurrentWalSystem {
         // segments cannot be decoded without it, so an encryption-at-rest
         // database replaying its WAL tail after a crash must decrypt here.
         // Passing `None` (no encryption) preserves plaintext behavior exactly.
-        crate::storage::wal_reader::read_wal_entries_with_cipher_and_options(
+        crate::storage::wal::segment_reader::read_entries_from_dir_with_keyring(
             self.wal_dir(),
             start_lsn,
-            self.wal_cipher.as_ref(),
+            self.wal_keyring.as_ref(),
             self.tolerate_torn_tail,
         )
     }
@@ -844,6 +910,146 @@ mod tests {
             valid_from: time::now(),
             provenance: None,
         }
+    }
+
+    // ── Issue #3617: WAL DEK force-roll (dual-generation rotation) ────────
+
+    fn wal_test_cipher(seed: u8) -> Arc<dyn crate::encryption::cipher::Cipher> {
+        use zeroize::Zeroizing;
+        let key = Zeroizing::new([seed; 32]);
+        Arc::new(crate::encryption::Aes256GcmCipher::new(&key))
+    }
+
+    fn encrypted_sync_config(
+        dir: &std::path::Path,
+        cipher: Arc<dyn crate::encryption::cipher::Cipher>,
+    ) -> ConcurrentWalSystemConfig {
+        let mut config = ConcurrentWalSystemConfig::new(dir);
+        config.durability_mode = DurabilityMode::Synchronous;
+        config.wal_cipher = Some(cipher);
+        config
+    }
+
+    #[test]
+    fn force_roll_writes_new_generation_and_recovers_both() {
+        let dir = tempdir().unwrap();
+        let old_dek = wal_test_cipher(7);
+        let new_dek = wal_test_cipher(9);
+        let wal = ConcurrentWalSystem::new(encrypted_sync_config(dir.path(), Arc::clone(&old_dek)))
+            .unwrap();
+
+        // Write a couple entries under the OLD generation (v16, key_version 1).
+        wal.append(create_test_operation(1)).unwrap();
+        wal.append(create_test_operation(2)).unwrap();
+
+        // Force-roll: seal the old segment and start a new one under a NEW DEK
+        // (key_version 2). The keyring flip runs inside the atomic hand-off.
+        let ring = wal.wal_keyring().unwrap().clone();
+        let advance_cipher = Arc::clone(&new_dek);
+        wal.seal_active_segment_for_rotation(move || {
+            ring.add_generation(2, advance_cipher);
+        })
+        .unwrap();
+
+        // Subsequent appends land in the fresh, new-generation segment.
+        wal.append(create_test_operation(3)).unwrap();
+        wal.append(create_test_operation(4)).unwrap();
+        wal.flush().unwrap();
+
+        // Recovery via the (now two-generation) keyring recovers every entry —
+        // old segments under the old DEK, new under the new.
+        let entries = wal.read_from(LSN::initial()).unwrap();
+        let ids: Vec<u64> = entries
+            .iter()
+            .filter_map(|e| match &e.operation {
+                WalOperation::CreateNode { node_id, .. } => Some(node_id.as_u64()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4],
+            "all entries across both generations recover"
+        );
+    }
+
+    /// Hammer appends from many threads WHILE a force-roll happens: every
+    /// acknowledged entry must recover (none lost) and decrypt (none unreadable),
+    /// proving the seal is atomic w.r.t. concurrent appenders (Issue #3617).
+    #[test]
+    fn append_hammer_across_force_roll_loses_nothing() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicU64, Ordering as AtOrd};
+
+        let dir = tempdir().unwrap();
+        let old_dek = wal_test_cipher(7);
+        let new_dek = wal_test_cipher(9);
+        let mut config = ConcurrentWalSystemConfig::new(dir.path());
+        config.durability_mode = DurabilityMode::GroupCommit {
+            max_batch_size: 16,
+            max_delay_ms: 2,
+        };
+        config.wal_cipher = Some(Arc::clone(&old_dek));
+        let wal = Arc::new(ConcurrentWalSystem::new(config).unwrap());
+
+        let threads = 4u64;
+        let per_thread = 200u64;
+        let next_id = Arc::new(AtomicU64::new(1));
+        let barrier = Arc::new(Barrier::new(threads as usize + 1));
+
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            let wal = Arc::clone(&wal);
+            let next_id = Arc::clone(&next_id);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..per_thread {
+                    let id = next_id.fetch_add(1, AtOrd::Relaxed);
+                    let (_lsn, handle) = wal
+                        .wal
+                        .append_with_handle(create_test_operation(id))
+                        .unwrap();
+                    // Ensure the entry is flushed so nothing is stuck unflushed.
+                    let _ = wal.commit();
+                    let _ = handle.wait();
+                }
+            }));
+        }
+
+        // Release the appenders, then force-roll partway through the storm.
+        barrier.wait();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let ring = wal.wal_keyring().unwrap().clone();
+        let advance_cipher = Arc::clone(&new_dek);
+        wal.seal_active_segment_for_rotation(move || {
+            ring.add_generation(2, advance_cipher);
+        })
+        .unwrap();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        wal.flush().unwrap();
+
+        let total = threads * per_thread;
+        let entries = wal.read_from(LSN::initial()).unwrap();
+        let mut ids: Vec<u64> = entries
+            .iter()
+            .filter_map(|e| match &e.operation {
+                WalOperation::CreateNode { node_id, .. } => Some(node_id.as_u64()),
+                _ => None,
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len() as u64,
+            total,
+            "every acknowledged entry across the roll must recover (none lost, none unreadable)"
+        );
+        assert_eq!(*ids.first().unwrap(), 1);
+        assert_eq!(*ids.last().unwrap(), total);
     }
 
     #[test]

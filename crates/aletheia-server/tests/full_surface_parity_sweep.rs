@@ -113,7 +113,7 @@ async fn live_mcp_catalog(client: &TestClient) -> BTreeSet<String> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (1) MCP catalog == inventory — EXACT set equality across all 51 tools.
+// (1) MCP catalog == inventory — EXACT set equality across all 57 tools.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -133,8 +133,8 @@ async fn mcp_catalog_equals_inventory_exactly() {
 
     assert_eq!(
         inv.len(),
-        51,
-        "inventory must advertise exactly 51 MCP tools"
+        57,
+        "inventory must advertise exactly 57 MCP tools"
     );
 
     // Symmetric difference, reported precisely so a drift names the culprits.
@@ -148,20 +148,20 @@ async fn mcp_catalog_equals_inventory_exactly() {
     );
     assert_eq!(
         live.len(),
-        51,
-        "the live catalog must be exactly 51 tools (got {})",
+        57,
+        "the live catalog must be exactly 57 tools (got {})",
         live.len()
     );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (2) Access-class conformance for all 51 (belt-and-suspenders full-set check;
+// (2) Access-class conformance for all 57 (belt-and-suspenders full-set check;
 //     `tests/security_rbac.rs::registry_matches_inventory_exactly` pins the
 //     static registry, this pins the *live-catalog-anchored* class per tool).
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn access_class_conformance_for_all_46() {
+async fn access_class_conformance_for_all_57() {
     let (db, store) = fixture();
     let client = build_server_client(db, store, AuthMode::Required);
     let live = live_mcp_catalog(&client).await;
@@ -387,14 +387,14 @@ async fn budgetable_and_cursorable_sets_match_inventory() {
         .collect();
     assert_eq!(
         inv_budgetable.len(),
-        14,
-        "inventory must mark exactly 14 budgetable read tools"
+        20,
+        "inventory must mark exactly 20 budgetable read tools"
     );
     // Cross-check against the totals block too.
     assert_eq!(
         doc["totals"]["mcp_budgetable_read_tools"].as_u64(),
-        Some(14),
-        "totals.mcp_budgetable_read_tools must be 14"
+        Some(20),
+        "totals.mcp_budgetable_read_tools must be 20"
     );
 
     // The crate's DISPATCH_ROUTED_READ_TOOLS is precisely the budgetable set:

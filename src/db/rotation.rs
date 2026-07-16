@@ -68,6 +68,7 @@ use crate::storage::index_persistence::reencrypt::DecryptProbeReport;
 use crate::storage::index_persistence::{
     IndexKeyRotation, IndexPersistenceManager, RotationError, RotationProgress, RotationStatus,
 };
+use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 
 /// Summary of a completed index key rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +163,80 @@ fn derive_index_dek(
     KeyDerivation::new(mek)
         .derive_index_dek()
         .map_err(|e| RotationError::KeyProvider(e.to_string()))
+}
+
+/// Derive the WAL DEK for a MEK using the shared HKDF context (Issue #3617).
+fn derive_wal_dek(
+    mek: Zeroizing<[u8; 32]>,
+) -> std::result::Result<Zeroizing<[u8; 32]>, RotationError> {
+    KeyDerivation::new(mek)
+        .derive_wal_dek()
+        .map_err(|e| RotationError::KeyProvider(e.to_string()))
+}
+
+/// Force-roll the WAL under the new DEK and retire the old-generation segments
+/// (Issue #3617). Shared by the forward driver and crash-resume.
+///
+/// Installs `new_wal_cipher` as key generation `new_key_version` on the WAL
+/// keyring (so subsequent appends use the new DEK) via an atomic force-roll,
+/// runs `persist_after_roll`, then deletes every sealed old-DEK segment
+/// (identified by header — legacy or a different `key_version`). Idempotent: a
+/// re-run seals another fresh (already-new-generation) segment and re-retires (a
+/// no-op once the old tail is gone).
+///
+/// # Ordering (DEFECT #3617-PR2 data-loss fix)
+///
+/// The old sequence checkpointed only ONCE, BEFORE the ledger, then rolled and
+/// retired. Any write acknowledged between that pre-ledger checkpoint and the
+/// seal landed in the old active segment, was NOT in the pre-ledger snapshot,
+/// and was then physically deleted by the retire — surviving only in RAM, so a
+/// crash before the next periodic checkpoint lost an acknowledged write.
+///
+/// The fix reorders to **seal → persist_after_roll → retire**: after the seal,
+/// every old-generation segment is sealed and no new old-gen data can appear
+/// (fresh appends go to the new-gen active segment), so a persist here durably
+/// captures ALL old-gen data into the index manifest, and the subsequent
+/// header-based retire is then provably lossless. The forward driver supplies a
+/// real `persist_indexes()` closure; the startup-resume path supplies a no-op
+/// (indexes are not loaded yet at resume time — its safety rests on the startup
+/// replay read having already captured every segment before retire runs).
+fn roll_and_retire_wal(
+    wal: &ConcurrentWalSystem,
+    new_wal_cipher: Arc<dyn Cipher>,
+    new_key_version: u32,
+    persist_after_roll: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if wal.wal_keyring().is_none() {
+        return Ok(());
+    }
+    let ring = wal.wal_keyring().expect("checked above").clone();
+    let cipher = Arc::clone(&new_wal_cipher);
+    // The keyring flip runs inside the atomic seal→reopen hand-off (holding the
+    // coordinator writer mutex), so the sealed segment stays on the old DEK and
+    // the fresh segment is written under the new one.
+    wal.seal_active_segment_for_rotation(move || {
+        ring.add_generation(new_key_version, cipher);
+    })?;
+    // Capture every post-checkpoint write (now sealed into an old-generation
+    // segment) into the durable index snapshot BEFORE retiring old-gen segments,
+    // so a retired segment never holds an un-snapshotted acknowledged write.
+    persist_after_roll()?;
+    wal.retire_old_generation_segments(new_key_version)?;
+    Ok(())
+}
+
+/// Rewrite the durable ledger flipping `layer.wal=complete` (Issue #3617),
+/// preserving every other field. A no-op when no ledger is present (already
+/// cleared). Keeps the #488 P0.2 ordering: the completion is fsync'd before the
+/// old generation is retired / the ledger is cleared.
+fn mark_wal_complete(manager: &IndexPersistenceManager) -> Result<()> {
+    if let Some(mut ledger) = read_rotation_state(manager)?
+        && ledger.wal != LayerStatus::Complete
+    {
+        ledger.wal = LayerStatus::Complete;
+        write_ledger(manager, &ledger)?;
+    }
+    Ok(())
 }
 
 /// The four encrypted-at-rest layers a full-MEK rotation must eventually cover
@@ -498,12 +573,15 @@ impl AletheiaDB {
     /// is safe. Never exposes ciphers or key material.
     fn conflicting_encrypted_layers(&self) -> Vec<&'static str> {
         let mut layers = Vec::new();
-        // WAL: encrypted under the WAL DEK derived from the same MEK.
-        if self.wal.is_encrypted() {
-            layers.push("wal");
-        }
-        // Cold storage: when a tiered/cold store is configured and encryption is
-        // enabled, its files are under the cold DEK from the same MEK.
+        // WAL is now rotatable by the full-MEK driver (Issue #3617 PR2): a
+        // checkpoint → force-roll under the new WAL DEK → truncate of the old
+        // segments re-keys it with no bulk rewrite, so it is no longer a
+        // cross-layer conflict.
+        //
+        // Cold storage is NOT yet covered (PR3): when a tiered/cold store is
+        // configured and encryption is enabled, its files are under the cold DEK
+        // from the same MEK, so an index+WAL rotation would still strand them —
+        // keep refusing until the cold re-keyer lands.
         if self.encryption_manager.is_some() && self.historical.read().has_tiered_storage() {
             layers.push("cold_storage");
         }
@@ -625,7 +703,14 @@ impl AletheiaDB {
             .encryption_config
             .clone()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
-        resume_pending_rotation(&manager, &enc_cfg)
+        // Live-db resume: the index state is already loaded, so drive the WAL
+        // layer with a REAL persist-before-retire closure (mirrors the forward
+        // path). This keeps the resume lossless here too — the old no-op persist
+        // could strand un-checkpointed writes on this path as well (Issue #3617
+        // PR2). The startup path instead passes `None` and defers via
+        // `finalize_resumed_wal_rotation`.
+        let persist = || self.persist_indexes();
+        resume_pending_rotation(&manager, &enc_cfg, Some(&self.wal), Some(&persist))
     }
 
     fn run_rotation(
@@ -678,23 +763,49 @@ impl AletheiaDB {
         // a contract-violating concurrent index persist) before the ledger is on
         // stable storage — a power loss can then never strand a new-key file
         // with a lost ledger (Issue #488 P0.2, preserved per-layer for #3617).
-        // `write_rotation_state` fsyncs the file and its parent dir; only once
-        // it returns does the driver flip the keyring.
-        write_rotation_state(
+        // The WAL layer is recorded `Pending` when it is encrypted, so crash
+        // resume drives it; `write_ledger` fsyncs the file and its parent dir,
+        // and only once it returns does the driver flip any keyring.
+        let wal_in_scope = self.wal.is_encrypted();
+
+        // WAL-rotation invariant (Issue #3617): checkpoint BEFORE the ledger is
+        // written. `persist_indexes` captures every committed entry into the
+        // durable index snapshot and stamps the manifest, so once the ledger
+        // exists ("a rotation is in flight") ALL pre-rotation WAL data is already
+        // durable outside the WAL. Crash-resume can then retire the old-DEK
+        // segments unconditionally without re-checkpointing (indexes are not
+        // loaded yet at startup-resume time). Skipped for an index-only rotation,
+        // preserving that path's exact behavior.
+        if wal_in_scope {
+            self.persist_indexes()?;
+        }
+
+        write_ledger(
             manager,
-            new_version,
-            new_key_source,
-            RotationDirection::Forward,
+            &RotationLedger::forward_scope(new_version, new_key_source.clone(), wal_in_scope),
         )?;
         self.emit_rotation_audit(&AuditEvent::RotationStarted {
             old_version,
             new_version,
         });
 
-        // Drive each recorded layer. PR1 runs only the index/checkpoint domain
-        // through the mature #488 engine; wal/cold are recorded Skipped.
+        // Drive the index/checkpoint domain through the mature #488 engine.
         let progress =
             drive_forward_layers(manager, &keyring, old_version, new_version, &layer_ciphers)?;
+
+        // WAL layer (Issue #3617 PR2): re-key the WAL with no bulk rewrite —
+        // checkpoint (persist) → force-roll under the new WAL DEK → truncate the
+        // old-DEK segments. Runs after the index pass so `persist_indexes` writes
+        // fresh index files under the already-installed new index generation.
+        if wal_in_scope {
+            let wal_new_cipher = layer_ciphers
+                .iter()
+                .find(|lc| lc.layer == RotationLayer::Wal)
+                .map(|lc| Arc::clone(&lc.new))
+                .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
+            self.rotate_wal_layer(manager, wal_new_cipher, new_version)?;
+        }
+
         clear_rotation_state(manager);
 
         Ok(RotationReport {
@@ -705,6 +816,73 @@ impl AletheiaDB {
             files_skipped: progress.files_skipped,
             duration_ms: started.elapsed().as_millis() as u64,
         })
+    }
+
+    /// Re-key the WAL layer to `new_wal_cipher` (Issue #3617 PR2), with no bulk
+    /// rewrite of historical segments.
+    ///
+    /// Sequence (no cold storage — the only case the cross-layer guard allows a
+    /// rotation through today):
+    /// 1. **Checkpoint** — `persist_indexes` captures the current in-memory
+    ///    state into the durable index snapshot and stamps the manifest with the
+    ///    applied-watermark LSN, so all committed data below that LSN survives a
+    ///    WAL truncation.
+    /// 2. **Force-roll** — atomically seal the active (old-DEK) segment, advance
+    ///    the WAL keyring to the new generation, and open a fresh segment written
+    ///    under the new DEK.
+    /// 3. **Re-checkpoint** — persist the index snapshot AGAIN, now that every
+    ///    old-generation segment is sealed and no new old-gen data can appear, so
+    ///    any write acknowledged between the pre-ledger checkpoint and the seal is
+    ///    captured durably BEFORE its segment is retired (DEFECT #3617-PR2
+    ///    data-loss fix — the old order retired it first, losing the write on a
+    ///    crash before the next periodic checkpoint).
+    /// 4. **Retire** — delete every sealed old-DEK segment (by header), now safe
+    ///    because step 3 durably captured all their data; no old-DEK ciphertext
+    ///    remains, so the old WAL DEK can be dropped after a provider switch.
+    /// 5. **Complete** — flip `layer.wal=complete` in the durable ledger, but
+    ///    only once no old-generation segment remains on disk (fail-safe: if a
+    ///    tail could not be retired, return an error and leave it `pending` for a
+    ///    later pass — never report success while a stranded old-DEK tail
+    ///    survives).
+    ///
+    /// Assumes heavy writes are quiesced for its duration (the same contract as
+    /// index rotation); an append racing the roll still recovers (durability),
+    /// but full old-tail retirement assumes no post-checkpoint writes.
+    fn rotate_wal_layer(
+        &self,
+        manager: &IndexPersistenceManager,
+        new_wal_cipher: Arc<dyn Cipher>,
+        new_key_version: u32,
+    ) -> Result<()> {
+        if !self.wal.is_encrypted() {
+            return Ok(());
+        }
+        // Force-roll under the new DEK; the persist closure runs AFTER the seal
+        // (capturing any post-checkpoint write now sealed into an old-gen
+        // segment) and BEFORE the retire (DEFECT #3617-PR2 data-loss fix), so no
+        // retired segment holds an un-snapshotted acknowledged write.
+        roll_and_retire_wal(&self.wal, new_wal_cipher, new_key_version, || {
+            self.persist_indexes()
+        })?;
+
+        // DEFECT #3617-PR2: gate completion/success on ACTUAL retirement. Mark
+        // the WAL layer complete only once every old-generation segment is gone.
+        // If a tail could not be retired (retire errored, or a stale old-gen
+        // segment remains), the rotation did NOT complete: surface an error so
+        // `run_rotation` leaves the ledger PENDING (never clears it) and never
+        // reports success — the operator must NOT drop the old key; a later
+        // resume finishes the retirement.
+        if !self.wal.all_segments_use_key_version(new_key_version) {
+            return Err(StorageError::InconsistentState {
+                reason: "WAL key rotation incomplete: old-generation segment(s) remain after \
+                         retirement. Rotation left pending for a later resume; do NOT drop the \
+                         old key until it completes."
+                    .to_string(),
+            }
+            .into());
+        }
+        mark_wal_complete(manager)?;
+        Ok(())
     }
 }
 
@@ -806,6 +984,26 @@ impl RotationLedger {
             index: LayerStatus::Pending,
             checkpoint: LayerStatus::Pending,
             wal: LayerStatus::Skipped,
+            cold: LayerStatus::Skipped,
+        }
+    }
+
+    /// The PR2 cross-layer plan (Issue #3617): index + checkpoint always
+    /// re-key through the index engine; the WAL is `Pending` when it is
+    /// encrypted (the full-MEK driver re-keys it), else `Skipped`; cold remains
+    /// out of scope (`Skipped`) until PR3.
+    fn forward_scope(new_version: u32, new_source: KeyProviderConfig, wal_in_scope: bool) -> Self {
+        Self {
+            direction: RotationDirection::Forward,
+            new_version,
+            new_source,
+            index: LayerStatus::Pending,
+            checkpoint: LayerStatus::Pending,
+            wal: if wal_in_scope {
+                LayerStatus::Pending
+            } else {
+                LayerStatus::Skipped
+            },
             cold: LayerStatus::Skipped,
         }
     }
@@ -938,8 +1136,16 @@ fn clear_rotation_state(manager: &IndexPersistenceManager) {
 /// (`missing version`) rather than being silently assumed to be any format.
 /// This is what lets the version dispatch below trust the number it reads.
 fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<RotationLedger>> {
-    let path = rotation_state_path(manager);
-    let body = match std::fs::read_to_string(&path) {
+    read_rotation_state_at(&rotation_state_path(manager))
+}
+
+/// Path-based core of [`read_rotation_state`] (Issue #3617 PR2): read + parse the
+/// ledger directly from `path`, so startup wiring that does not yet hold an
+/// [`IndexPersistenceManager`] (the pre-replay dual-generation WAL install) can
+/// consult the ledger from the persistence `data_dir` alone. Same fail-closed
+/// semantics: absent → `Ok(None)`, present-but-corrupt → `Err`.
+fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedger>> {
+    let body = match std::fs::read_to_string(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
@@ -1045,6 +1251,55 @@ fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<Rotat
     }))
 }
 
+/// Install BOTH WAL key generations into the live WAL keyring when a rotation
+/// ledger is PENDING at startup — BEFORE the startup replay read (Issue #3617
+/// PR2 crash-consistency).
+///
+/// # Why (DEFECT: half-rotated WAL undecryptable at startup)
+///
+/// A mid-rotation crash leaves the WAL directory holding BOTH generations:
+/// old-DEK segments (not yet retired) and new-DEK segments (fresh appends after
+/// the roll). Startup's `wal.read_from` runs BEFORE [`resume_pending_rotation`]
+/// installs the new generation, so with only the single (old) keyring it cannot
+/// decrypt the new-DEK frames and the replay read fails before resume can help.
+///
+/// This installs the recorded new generation (derived from the ledger's
+/// `new_source`) alongside the old one FIRST, so the replay read decrypts each
+/// segment under its own generation. Additive and fail-closed: a no-op when no
+/// ledger is present, the WAL layer is not `Pending`, or the WAL is unencrypted.
+/// Never logs or returns key material.
+pub fn install_pending_wal_generations(
+    wal: &ConcurrentWalSystem,
+    enc_cfg: &EncryptionConfig,
+    data_dir: &std::path::Path,
+) -> Result<()> {
+    let ledger_path = data_dir.join("rotation.state");
+    let Some(ledger) = read_rotation_state_at(&ledger_path)? else {
+        return Ok(());
+    };
+    if !matches!(ledger.wal, LayerStatus::Pending) {
+        return Ok(());
+    }
+    let Some(wal_keyring) = wal.wal_keyring() else {
+        return Ok(());
+    };
+    // The old generation is already the single cipher in the startup keyring;
+    // re-derive the NEW WAL DEK from the ledger's recorded source. Both live only
+    // in `Zeroizing` and never leave it.
+    let Some((old_cipher, old_version)) = wal_keyring.current() else {
+        return Ok(());
+    };
+    let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
+        .map_err(rotation_err)?;
+    let new_wal_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_wal_dek));
+    // Re-assert the old generation (flips the keyring to strict per-version
+    // dispatch) then add the new one, so legacy/old-kv segments resolve to the
+    // old DEK and new-kv segments to the new DEK.
+    wal_keyring.add_generation(old_version, Arc::clone(&old_cipher));
+    wal_keyring.add_generation(ledger.new_version, new_wal_cipher);
+    Ok(())
+}
+
 /// Resume an interrupted index key rotation on startup (Issue #488).
 ///
 /// If a `rotation.state` breadcrumb is present, reconstruct the new generation
@@ -1068,6 +1323,8 @@ fn read_rotation_state(manager: &IndexPersistenceManager) -> Result<Option<Rotat
 pub fn resume_pending_rotation(
     manager: &Arc<IndexPersistenceManager>,
     enc_cfg: &EncryptionConfig,
+    wal: Option<&ConcurrentWalSystem>,
+    wal_persist: Option<&dyn Fn() -> Result<()>>,
 ) -> Result<Option<RotationReport>> {
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(None);
@@ -1082,22 +1339,79 @@ pub fn resume_pending_rotation(
         .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
     let old_version = keyring.current_version();
 
-    // DERIVATION ASYMMETRY (Issue #3617 PR1): the forward driver
-    // (`run_rotation`) derives the full four-DEK `MekKeyset` (wal/index/cold/
-    // checkpoint) up front, but resume derives ONLY the index DEK here because
-    // PR1's only executable layer is the index domain (index + checkpoint, which
-    // rides the index DEK); wal/cold are recorded `Skipped` and have no resume
-    // work. This is a deliberate, load-bearing gap: PR2 (WAL) and PR3 (cold)
-    // MUST extend resume to derive AND drive their layers' DEKs — not just the
-    // forward path — or an interrupted full-MEK rotation would resume the index
-    // pass while silently leaving the WAL/cold layers half-rotated. Mirror the
-    // `MekKeyset::derive` + `drive_forward_layers` structure here when those
-    // engines land.
+    // Index DEK (index + checkpoint ride it). PR3 will add the cold DEK here.
     let new_dek = derive_index_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
         .map_err(rotation_err)?;
     let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
 
     keyring.add_generation(ledger.new_version, Arc::clone(&new_cipher));
+
+    // WAL layer (Issue #3617 PR2): when the ledger records the WAL as in flight
+    // and a WAL system is available, add BOTH generations to its keyring — so a
+    // half-rotated directory (old-DEK + new-DEK segments) replays correctly on
+    // this open — and drive the layer to completion idempotently.
+    //
+    // Retirement (physically deleting the old-generation segments) is only safe
+    // once every write those segments hold is durable in the index snapshot. The
+    // `wal_persist` argument selects HOW that guarantee is met:
+    //
+    // * `Some(persist)` — LIVE-db resume (`resume_pending_index_rotation`): the
+    //   index state is already loaded, so we persist-then-retire INLINE, exactly
+    //   like the forward `rotate_wal_layer` path (seal → persist → retire).
+    //
+    // * `None` — STARTUP resume (`db::config`): indexes are NOT loaded yet (index
+    //   load + WAL replay run AFTER this pass), so a persist here would snapshot
+    //   EMPTY state and retiring the old-generation segments would strand every
+    //   write in `[checkpoint, seal)` that lives only in the in-RAM replay buffer
+    //   until the async checkpoint — a second crash would lose it (DEFECT
+    //   #3617-PR2 resume-path double-crash window). We therefore DEFER the
+    //   roll+retire+ledger-clear to `finalize_resumed_wal_rotation`, run after
+    //   replay + a SYNCHRONOUS `persist_indexes()`. Both WAL generations are
+    //   already installed here (and by `install_pending_wal_generations` before
+    //   the replay read), so replay decrypts every segment regardless of
+    //   generation; the ledger stays PENDING for the finalize pass.
+    let wal_pending = matches!(ledger.wal, LayerStatus::Pending);
+    // DEFECT #3617-PR2: track whether the WAL layer actually finished retiring so
+    // the final `clear_rotation_state` below is GATED on real completion (never
+    // clears the ledger while an old-generation segment survives).
+    let mut wal_incomplete = false;
+    // DEFECT #3617-PR2 (resume-path double-crash): set when the startup path
+    // defers WAL retirement to `finalize_resumed_wal_rotation`; the ledger MUST
+    // NOT be cleared here while an un-snapshotted old-generation segment survives.
+    let mut wal_finalize_deferred = false;
+    if wal_pending
+        && let Some(wal) = wal
+        && let Some(wal_keyring) = wal.wal_keyring()
+    {
+        // Always install BOTH generations so a half-rotated directory replays
+        // correctly regardless of which mode drives retirement.
+        let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
+            .map_err(rotation_err)?;
+        let new_wal_cipher: Arc<dyn Cipher> =
+            Arc::from(create_cipher(enc_cfg.algorithm, &new_wal_dek));
+        // The startup keyring is `single(old_wal_dek)`; adding the new generation
+        // makes both live (legacy/old-kv → old, new-kv → new).
+        wal_keyring.add_generation(ledger.new_version, Arc::clone(&new_wal_cipher));
+        match wal_persist {
+            Some(persist) => {
+                // Live-db resume: persist-before-retire is lossless (mirrors the
+                // forward path — the seal runs first, then `persist` captures any
+                // post-checkpoint write now sealed into an old-gen segment, then
+                // the retire deletes segments whose data is already snapshotted).
+                roll_and_retire_wal(wal, new_wal_cipher, ledger.new_version, persist)?;
+                if wal.all_segments_use_key_version(ledger.new_version) {
+                    mark_wal_complete(manager)?;
+                } else {
+                    wal_incomplete = true;
+                }
+            }
+            None => {
+                // Startup resume: defer roll+retire+ledger-clear to
+                // `finalize_resumed_wal_rotation` (after replay + sync persist).
+                wal_finalize_deferred = true;
+            }
+        }
+    }
 
     let engine = IndexKeyRotation::new(
         manager.indexes_path(),
@@ -1125,11 +1439,36 @@ pub fn resume_pending_rotation(
                 RotationProgress::default()
             };
             engine.complete().map_err(rotation_err)?;
-            clear_rotation_state(manager);
-            logger.log(&AuditEvent::RotationCompleted {
-                new_version: ledger.new_version,
-                duration_ms: started.elapsed().as_millis() as u64,
-            });
+            // DEFECT #3617-PR2: only clear the ledger when the WAL layer actually
+            // finished retiring its old generation. If an old-gen segment still
+            // survives, leave the ledger PENDING and surface an error so a later
+            // resume completes it — never report a completed resume while a
+            // stranded old-DEK tail remains (which would let the operator drop the
+            // old key and wedge startup).
+            if wal_incomplete {
+                return Err(StorageError::InconsistentState {
+                    reason: "WAL key rotation resume incomplete: old-generation segment(s) remain \
+                             after retirement. Ledger left pending for a later resume; do NOT drop \
+                             the old key until it completes."
+                        .to_string(),
+                }
+                .into());
+            }
+            // DEFECT #3617-PR2 (resume-path double-crash): when the startup path
+            // deferred WAL retirement, the ledger MUST stay PENDING until
+            // `finalize_resumed_wal_rotation` has synchronously snapshotted the
+            // replayed state and retired the old-generation segments. Clearing it
+            // here (before the deferred retire) would re-open the very data-loss
+            // window this fix closes. The index re-encrypt + `complete()` above
+            // are durable and idempotent, so leaving the ledger for the finalize
+            // pass is safe and re-entrant across another crash.
+            if !wal_finalize_deferred {
+                clear_rotation_state(manager);
+                logger.log(&AuditEvent::RotationCompleted {
+                    new_version: ledger.new_version,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                });
+            }
             RotationReport {
                 old_version,
                 new_version: ledger.new_version,
@@ -1162,6 +1501,85 @@ pub fn resume_pending_rotation(
     };
 
     Ok(Some(report))
+}
+
+/// Phase 2 of a startup-resumed WAL key rotation (Issue #3617 PR2): retire the
+/// old-generation WAL segments and clear the ledger, AFTER the startup replay has
+/// been captured by a synchronous persist.
+///
+/// This closes the resume-path double-crash data-loss window. On the startup
+/// path [`resume_pending_rotation`] (called with `wal_persist = None`) installs
+/// both WAL generations but does NOT retire — because at that point the index
+/// state is not loaded, so a persist would snapshot empty state and retiring the
+/// old-generation segments would strand the `[checkpoint, seal)` writes that live
+/// only in the in-RAM replay buffer. Once `db::config` has loaded the snapshot
+/// and replayed the WAL into current state, it calls this function, which:
+///
+/// 1. re-installs the new WAL generation (idempotent),
+/// 2. force-rolls under the new DEK, runs `persist` (a SYNCHRONOUS
+///    `persist_indexes()` capturing the now-replayed state) AFTER the seal and
+///    BEFORE the retire — reusing the forward-path `roll_and_retire_wal`
+///    ordering verbatim — then retires the sealed old-generation segments, and
+/// 3. once no old-generation segment remains, marks the WAL layer complete and
+///    clears the ledger.
+///
+/// So no old-generation WAL segment is ever deleted until its entries are durable
+/// in the index snapshot — on BOTH the forward and resume paths.
+///
+/// A no-op (returns `Ok(())`) when no ledger is present, the WAL layer is not
+/// `Pending`, or the WAL is unencrypted — so `db::config` can call it
+/// unconditionally on the encrypted-persistent startup path. Completion-gated
+/// exactly like the forward path: if a stale old-generation segment cannot be
+/// retired, the ledger is left PENDING and an error is surfaced so a later resume
+/// finishes it (never reports success while a stranded old-DEK tail survives).
+///
+/// # Errors
+///
+/// Returns an error if the recorded new key source cannot be sourced, the persist
+/// fails, the roll/retire fails, or a stale old-generation segment survives
+/// retirement (ledger left pending).
+pub fn finalize_resumed_wal_rotation(
+    manager: &Arc<IndexPersistenceManager>,
+    enc_cfg: &EncryptionConfig,
+    wal: &ConcurrentWalSystem,
+    persist: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let Some(ledger) = read_rotation_state(manager)? else {
+        return Ok(());
+    };
+    if !matches!(ledger.wal, LayerStatus::Pending) {
+        return Ok(());
+    }
+    let Some(wal_keyring) = wal.wal_keyring() else {
+        return Ok(());
+    };
+
+    // Re-derive + re-install the new WAL generation (idempotent: it was already
+    // installed by `resume_pending_rotation` / `install_pending_wal_generations`).
+    let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
+        .map_err(rotation_err)?;
+    let new_wal_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_wal_dek));
+    wal_keyring.add_generation(ledger.new_version, Arc::clone(&new_wal_cipher));
+
+    // Seal → persist (captures the replayed `[checkpoint, seal)` writes into the
+    // durable index snapshot) → retire. Identical ordering to the forward path.
+    roll_and_retire_wal(wal, new_wal_cipher, ledger.new_version, persist)?;
+
+    // Completion-gated: only mark complete + clear once every old-generation
+    // segment is gone; otherwise leave the ledger PENDING for a later resume.
+    if !wal.all_segments_use_key_version(ledger.new_version) {
+        return Err(StorageError::InconsistentState {
+            reason:
+                "WAL key rotation resume-finalize incomplete: old-generation segment(s) remain \
+                     after retirement. Ledger left pending for a later resume; do NOT drop the old \
+                     key until it completes."
+                    .to_string(),
+        }
+        .into());
+    }
+    mark_wal_complete(manager)?;
+    clear_rotation_state(manager);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1558,7 +1976,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("a pending rotation should resume");
         assert_eq!(report.new_version, 2);
@@ -1569,10 +1987,11 @@ mod tests {
     // ── P0.1: cross-layer MEK-desync guard ───────────────────────────
 
     #[test]
-    fn rotate_refuses_when_wal_encrypted() {
-        // A fully-encrypted DB (WAL under the same MEK) must REFUSE an index-only
-        // rotation: rotating the index alone to a new MEK then switching the key
-        // provider would strand the WAL under the old key (catastrophic loss).
+    fn rotate_reencrypts_wal() {
+        // Issue #3617 PR2: a fully-encrypted DB WITHOUT cold storage (WAL + index
+        // under the same MEK) now ROTATES successfully — the full-MEK driver
+        // re-keys the WAL via checkpoint → force-roll → truncate, so a subsequent
+        // provider switch is safe. (This flips the former index-only refusal.)
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let old_key = root.join("old.key");
@@ -1580,10 +1999,101 @@ mod tests {
         crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
         crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
 
-        let db = build_db(root, &old_key); // WAL encrypted too
-        seed(&db);
-        assert!(db.wal.is_encrypted(), "precondition: WAL is encrypted");
+        let (alice, bob) = {
+            let db = build_db(root, &old_key); // WAL encrypted too
+            let ids = seed(&db);
+            assert!(db.wal.is_encrypted(), "precondition: WAL is encrypted");
+            assert!(
+                db.conflicting_encrypted_layers().is_empty(),
+                "no cold storage → WAL+index rotation is now allowed"
+            );
 
+            let report = db
+                .rotate_index_keys(KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .expect("WAL+index rotation without cold storage must succeed");
+            assert_eq!(report.new_version, 2);
+
+            // Data is intact in-memory immediately after rotation.
+            assert_eq!(db.node_count(), 2);
+            assert_eq!(db.edge_count(), 1);
+
+            // The rotation cleared its ledger.
+            assert!(!root.join("data").join("rotation.state").exists());
+
+            // Every remaining WAL segment is stamped with the NEW key_version;
+            // the old-DEK segments were truncated.
+            assert!(
+                db.wal.all_segments_use_key_version(2),
+                "all remaining WAL segments must carry the new key_version"
+            );
+            ids
+        };
+
+        // Reopen under the NEW key ONLY (the provider switch the whole feature
+        // exists to make safe): the WAL replays under the new DEK, index files
+        // decrypt under the new DEK, and the graph is fully recovered.
+        {
+            let db = build_db(root, &new_key);
+            assert_eq!(db.node_count(), 2, "graph must recover under the new key");
+            assert_eq!(db.edge_count(), 1);
+            // Both seeded nodes are readable (and decrypt) under the new key.
+            db.get_node(alice)
+                .expect("alice recovers under the new key");
+            db.get_node(bob).expect("bob recovers under the new key");
+        }
+    }
+
+    #[test]
+    fn rotate_still_refuses_when_cold_storage_encrypted() {
+        // Issue #3617 PR2: cold storage is NOT yet covered (PR3). A DB with
+        // encrypted cold storage must STILL refuse — an index+WAL rotation would
+        // strand the cold values under the old MEK.
+        use crate::config::HistoricalConfigBuilder;
+        use std::time::Duration;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(root.join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_delay_ms: 5,
+                        max_batch_size: 64,
+                    })
+                    .build(),
+            )
+            .persistence(crate::storage::index_persistence::PersistenceConfig {
+                enabled: true,
+                data_dir: root.join("data"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(root.join("cold.redb"))
+                    .migration_age_threshold(Duration::from_secs(3600))
+                    .build(),
+            )
+            .encryption(EncryptionConfig::file_based(&old_key))
+            .build();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
+        seed(&db);
+        assert!(db.wal.is_encrypted());
+
+        let conflicting = db.conflicting_encrypted_layers();
+        assert!(
+            conflicting.contains(&"cold_storage"),
+            "cold storage must still be a conflict until PR3, got: {conflicting:?}"
+        );
         let err = db
             .rotate_index_keys(KeyProviderConfig::File {
                 path: new_key.clone(),
@@ -1591,11 +2101,72 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("other encrypted-at-rest layers") && msg.contains("wal"),
-            "expected cross-layer refusal naming the WAL, got: {msg}"
+            msg.contains("other encrypted-at-rest layers") && msg.contains("cold_storage"),
+            "expected cross-layer refusal naming cold_storage, got: {msg}"
         );
-        // Refusal leaves NO breadcrumb behind (checked before any state write).
         assert!(!root.join("data").join("rotation.state").exists());
+    }
+
+    /// Crash right after the rotation ledger was fsync'd but before any layer
+    /// finished (design §5 step 2): the durable ledger records index + WAL
+    /// `pending`. On the next open — still under the OLD key, since the rotation
+    /// never completed — startup resume drives BOTH layers to completion (index
+    /// re-encrypted, WAL force-rolled + old segments truncated), clears the
+    /// ledger, and the graph is intact; a subsequent reopen under the NEW key
+    /// alone then succeeds (the provider switch is now safe).
+    #[test]
+    fn crash_after_ledger_resumes_wal_and_index() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        // 1. Seed an encrypted DB and persist (the manifest covers all data), then
+        //    plant a durable ledger simulating a crash right after it was written.
+        {
+            let db = build_db(root, &old_key);
+            seed(&db); // persists indexes
+            let manager = db.persistence_manager.as_ref().unwrap().clone();
+            super::write_ledger(
+                &manager,
+                &super::RotationLedger::forward_scope(
+                    2,
+                    KeyProviderConfig::File {
+                        path: new_key.clone(),
+                    },
+                    true, // WAL in scope
+                ),
+            )
+            .unwrap();
+            assert!(root.join("data").join("rotation.state").exists());
+        }
+
+        // 2. Reopen under the OLD key (rotation in flight): startup resume
+        //    completes both layers and clears the ledger.
+        {
+            let db = build_db(root, &old_key);
+            assert!(
+                !root.join("data").join("rotation.state").exists(),
+                "startup resume must complete the pending rotation and clear the ledger"
+            );
+            assert_eq!(db.node_count(), 2, "graph intact after resume");
+            assert_eq!(db.edge_count(), 1);
+            assert!(
+                db.wal.all_segments_use_key_version(2),
+                "resume must retire the old-generation WAL segments"
+            );
+            // Resume is idempotent: a second run with no ledger is a clean no-op.
+            assert!(db.resume_pending_index_rotation().unwrap().is_none());
+        }
+
+        // 3. Provider switch: reopen under the NEW key only — everything decrypts.
+        {
+            let db = build_db(root, &new_key);
+            assert_eq!(db.node_count(), 2, "graph recovers under the new key");
+            assert_eq!(db.edge_count(), 1);
+        }
     }
 
     #[test]
@@ -1763,7 +2334,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let err = resume_pending_rotation(&manager, &enc_cfg).unwrap_err();
+        let err = resume_pending_rotation(&manager, &enc_cfg, None, None).unwrap_err();
         assert!(
             err.to_string().contains("corrupt"),
             "corrupt breadcrumb must abort startup, got: {err}"
@@ -1771,7 +2342,7 @@ mod tests {
         // And an ABSENT breadcrumb is a clean no-op (distinguish absent vs corrupt).
         std::fs::remove_file(data_dir.join("rotation.state")).unwrap();
         assert!(
-            resume_pending_rotation(&manager, &enc_cfg)
+            resume_pending_rotation(&manager, &enc_cfg, None, None)
                 .unwrap()
                 .is_none()
         );
@@ -1851,7 +2422,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("a pending cancel should resume");
         assert_eq!(report.new_version, 1, "cancel rolls back to the old key");
@@ -2326,7 +2897,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("a pending rotation should resume from the v2 ledger");
         assert_eq!(report.new_version, 2);
@@ -2436,7 +3007,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("a pending rotation should resume");
         assert_eq!(report.new_version, 2);
@@ -2527,7 +3098,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let report = resume_pending_rotation(&resume_mgr, &enc_cfg)
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None)
             .unwrap()
             .expect("an index=Complete ledger should still resume to verify+clear");
         assert_eq!(report.new_version, 2);
@@ -2605,7 +3176,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let err = resume_pending_rotation(&resume_mgr, &enc_cfg).expect_err(
+        let err = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None).expect_err(
             "a ledger claiming index=Complete over unmigrated old-key files MUST fail closed",
         );
         // The verify_complete() fail-closed path (OldKeyFilesRemain /
@@ -2654,6 +3225,379 @@ mod tests {
         assert!(
             msg.contains("unsupported ledger version") || msg.contains("corrupt"),
             "expected an unsupported-version corruption error, got: {msg}"
+        );
+    }
+
+    /// DEFECT #3617-PR2 (completion-gating): if WAL retirement cannot remove
+    /// every old-generation segment, `rotate_index_keys` must NOT report success
+    /// and must NOT clear the ledger (else the operator drops the old MEK and a
+    /// stranded old-DEK segment wedges startup). A later resume, once the blocker
+    /// clears, finishes the rotation and ONLY THEN clears the ledger. Also pins
+    /// that `all_segments_use_key_version(new)` gates the clear.
+    #[test]
+    fn incomplete_wal_retirement_leaves_ledger_pending_and_no_success() {
+        use crate::storage::wal::segment_reader::{WAL_MAGIC, WAL_VERSION_ENCRYPTED_STRING_LABELS};
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        let db = build_db(root, &old_key);
+        seed(&db);
+        let ledger_path = root.join("data").join("rotation.state");
+
+        // Plant a stale old-generation WAL segment retirement cannot remove: its
+        // id sits far above the active segment, so retire skips it as "active"
+        // and it survives — tripping `all_segments_use_key_version(new)` = false.
+        let stale = root.join("wal").join("999999.log");
+        let mut hdr = Vec::new();
+        hdr.extend_from_slice(&WAL_MAGIC);
+        hdr.push(WAL_VERSION_ENCRYPTED_STRING_LABELS); // legacy (old-generation) header
+        std::fs::write(&stale, &hdr).unwrap();
+
+        // (b) Rotation must FAIL (incomplete) — no success report.
+        let result = db.rotate_index_keys(KeyProviderConfig::File {
+            path: new_key.clone(),
+        });
+        assert!(
+            result.is_err(),
+            "incomplete WAL retirement must NOT report a success RotationReport"
+        );
+        assert!(
+            !db.wal.all_segments_use_key_version(2),
+            "precondition: a stale old-generation segment remains on disk"
+        );
+        // (a) Ledger must remain PENDING (not cleared).
+        assert!(
+            ledger_path.exists(),
+            "the ledger must remain pending when retirement is incomplete (never cleared)"
+        );
+
+        // (c) Clear the blocker; resume now completes and ONLY THEN clears.
+        std::fs::remove_file(&stale).unwrap();
+        let resumed = db
+            .resume_pending_index_rotation()
+            .expect("resume must not error once the blocker is cleared");
+        assert!(
+            resumed.is_some(),
+            "resume must complete the pending rotation"
+        );
+        assert!(
+            !ledger_path.exists(),
+            "resume clears the ledger only after full old-generation retirement"
+        );
+        assert!(
+            db.wal.all_segments_use_key_version(2),
+            "all remaining WAL segments now carry the new key_version"
+        );
+        assert_eq!(db.node_count(), 2, "data intact throughout");
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    /// DEFECT #3617-PR2 (data-loss window): the OLD order retired (physically
+    /// deleted) the sealed old-generation WAL segments while the durable index
+    /// manifest still sat at the PRE-rotation checkpoint LSN. Any write
+    /// acknowledged between that checkpoint and the roll therefore lived only in a
+    /// segment that was then deleted, at an LSN ABOVE the manifest — so a crash
+    /// before the next periodic checkpoint would lose it (node/edge state is
+    /// recovered from the manifest snapshot + WAL replay, and the WAL no longer
+    /// held it). The fix persists AGAIN after the roll and before the retire.
+    ///
+    /// Observable invariant asserted here (independent of the index backstop):
+    /// after rotation, the persisted manifest LSN must be >= the WAL LSN of every
+    /// retired (pre-roll) write — i.e. no retired segment holds un-snapshotted
+    /// acknowledged entries.
+    #[test]
+    fn post_checkpoint_write_snapshotted_before_wal_retirement() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        let db = build_db(root, &old_key);
+        seed(&db); // persists indexes — the PRE-rotation checkpoint
+        let manager = db.persistence_manager.clone().unwrap();
+
+        // Post-checkpoint write: acknowledged AFTER the checkpoint, so its LSN is
+        // above the checkpoint's manifest LSN and it lives in the old active WAL
+        // segment (not yet in the durable snapshot).
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Carol").build(),
+        )
+        .unwrap();
+
+        let manifest_lsn_checkpoint = manager.load_manifest_and_strings().unwrap().lsn;
+        let wal_lsn_before_roll = db.wal.current_lsn().0;
+        assert!(
+            wal_lsn_before_roll > manifest_lsn_checkpoint,
+            "precondition: the post-checkpoint write (wal LSN {wal_lsn_before_roll}) is above the \
+             checkpoint manifest LSN ({manifest_lsn_checkpoint})"
+        );
+
+        // Drive the WAL-layer rotation (roll -> [fix: persist] -> retire). The
+        // retire deletes the sealed old-generation segments holding the pre-roll
+        // writes.
+        let algorithm = db.encryption_config.as_ref().unwrap().algorithm;
+        let new_wal_dek = super::derive_wal_dek(
+            super::load_mek(&KeyProviderConfig::File {
+                path: new_key.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let new_wal_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(algorithm, &new_wal_dek));
+        db.rotate_wal_layer(&manager, new_wal_cipher, 2)
+            .expect("WAL layer rotation must succeed");
+
+        // For the header-based retire to be lossless, the persisted manifest LSN
+        // must now cover every retired write. Without persist-after-roll it is
+        // still stuck at the pre-rotation checkpoint LSN — the data-loss window.
+        let manifest_lsn_after = manager.load_manifest_and_strings().unwrap().lsn;
+        assert!(
+            manifest_lsn_after >= wal_lsn_before_roll,
+            "persist-after-roll must snapshot all pre-roll writes into the durable manifest \
+             BEFORE retiring their segments: manifest LSN {manifest_lsn_after} must cover the \
+             pre-roll WAL LSN {wal_lsn_before_roll}, else a retired segment holds \
+             un-snapshotted acknowledged writes (crash-consistency data-loss window)"
+        );
+    }
+
+    /// DEFECT #3617-PR2 (resume-path double-crash data-loss window): on the
+    /// forward path `rotate_wal_layer` persists the index snapshot AFTER the roll
+    /// and BEFORE retiring the old-generation segments, so a retired segment never
+    /// holds an un-snapshotted write. The RESUME (startup) path used to retire the
+    /// old-generation segments with a NO-OP persist while the durable index
+    /// manifest still sat at the pre-rotation checkpoint LSN — any write
+    /// acknowledged between that checkpoint and the seal then lived ONLY in the
+    /// in-RAM replay buffer (applied to current state) and in an on-disk segment
+    /// that resume immediately deleted. A SECOND crash before the async
+    /// background checkpoint therefore lost it: on the next open the snapshot is
+    /// still at the checkpoint LSN and the segment holding the write is gone.
+    ///
+    /// The fix defers the resume-path retire+ledger-clear until after the startup
+    /// replay has been captured by a SYNCHRONOUS `persist_indexes()`, so no
+    /// old-generation WAL segment is deleted until its entries are durable in the
+    /// index snapshot. This test builds the crash-A on-disk state (a
+    /// post-checkpoint write living only in an old-generation segment, PENDING
+    /// ledger), runs the resume/open path, and asserts BOTH the crux manifest-LSN
+    /// invariant (the durable manifest must cover the pre-retire write) AND that
+    /// the write survives a SECOND crash with no async checkpoint in between.
+    #[test]
+    fn resume_path_persists_before_retiring_survives_second_crash() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        // ── Crash A: a forward WAL rotation crashed between the seal and the
+        // post-roll persist. On disk: the seeded graph is durable in the index
+        // snapshot at checkpoint LSN L_c; a post-checkpoint write ("Carol") lives
+        // ONLY in the (old-generation) active WAL segment at an LSN above L_c; the
+        // ledger is PENDING with the WAL in scope.
+        //
+        // The crash is simulated with `std::mem::forget` so the db's `Drop`
+        // (which signals the background persistence thread to run a FINAL
+        // shutdown persist_all_indexes) never runs — exactly like a `SIGKILL`.
+        // A clean drop here would durably snapshot Carol and mask the bug. ──
+        let carol_wal_lsn;
+        let checkpoint_lsn;
+        {
+            let db = build_db(root, &old_key);
+            seed(&db); // persists indexes — the PRE-rotation checkpoint at L_c
+            let manager = db.persistence_manager.clone().unwrap();
+            checkpoint_lsn = manager.load_manifest_and_strings().unwrap().lsn;
+
+            // Post-checkpoint write: acknowledged AFTER the checkpoint, so its LSN
+            // is above L_c and it lives only in the old-DEK active WAL segment (not
+            // in the durable snapshot). GroupCommit durability makes it durable in
+            // the WAL before `create_node` returns.
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+            )
+            .unwrap();
+            carol_wal_lsn = db.wal.current_lsn().0;
+            assert!(
+                carol_wal_lsn > checkpoint_lsn,
+                "precondition: Carol's write (wal LSN {carol_wal_lsn}) is above the checkpoint \
+                 manifest LSN ({checkpoint_lsn})"
+            );
+
+            // Plant the PENDING ledger (WAL in scope): a rotation is in flight.
+            super::write_ledger(
+                &manager,
+                &super::RotationLedger::forward_scope(
+                    2,
+                    KeyProviderConfig::File {
+                        path: new_key.clone(),
+                    },
+                    true, // WAL in scope
+                ),
+            )
+            .unwrap();
+            assert!(root.join("data").join("rotation.state").exists());
+            // On-disk index snapshot is still at the pre-rotation checkpoint.
+            assert_eq!(
+                manager.load_manifest_and_strings().unwrap().lsn,
+                checkpoint_lsn,
+                "precondition: Carol is NOT yet in the durable index snapshot"
+            );
+            std::mem::forget(db); // crash A — skip the clean-shutdown final persist
+        }
+
+        // ── Reopen 1 (crash-A recovery): the startup resume path runs. Read the
+        // durable manifest IMMEDIATELY, then crash again (`mem::forget`) so no
+        // async/shutdown checkpoint captures Carol after resume. The crux
+        // invariant: by the time resume has retired any old-generation segment,
+        // the durable manifest LSN must already cover Carol. The old
+        // no-op-persist resume left the manifest stuck at L_c, so a second crash
+        // here lost Carol. ──
+        let manifest_lsn_after_resume;
+        {
+            let db = build_db(root, &old_key);
+            let manager = db.persistence_manager.clone().unwrap();
+            manifest_lsn_after_resume = manager.load_manifest_and_strings().unwrap().lsn;
+            assert_eq!(
+                db.node_count(),
+                3,
+                "Alice, Bob, Carol all present in RAM after resume+replay"
+            );
+            assert!(
+                manifest_lsn_after_resume >= carol_wal_lsn,
+                "resume must snapshot every pre-retire write into the durable manifest BEFORE \
+                 retiring its old-generation segment: manifest LSN {manifest_lsn_after_resume} \
+                 must cover Carol's WAL LSN {carol_wal_lsn} (checkpoint was {checkpoint_lsn}), \
+                 else a retired segment held un-snapshotted acknowledged writes and a second \
+                 crash before the async checkpoint loses them (resume-path data-loss window)"
+            );
+            std::mem::forget(db); // crash B — no async/shutdown checkpoint runs
+        }
+
+        // ── Reopen 2 (crash-B recovery, now under the NEW key — the rotation
+        // completed during reopen 1): with no async/shutdown checkpoint between
+        // reopen 1 and here, Carol survives ONLY if reopen 1 durably snapshotted
+        // her before retiring her old-generation segment. ──
+        {
+            let db = build_db(root, &new_key);
+            assert_eq!(
+                db.node_count(),
+                3,
+                "Carol survives the second crash — reopen 1 durably snapshotted her before \
+                 retiring her old-generation WAL segment"
+            );
+        }
+    }
+
+    /// DEFECT #3617-PR2 (dual-generation startup install): a half-rotated WAL —
+    /// old-DEK + new-DEK segments both on disk with a PENDING ledger — must have
+    /// BOTH WAL key generations installed BEFORE the startup replay read. A fresh
+    /// single(old) keyring (the startup state before resume runs) cannot decrypt
+    /// the new-DEK frames — they are dropped as an undecodable tail — silently
+    /// losing any write whose only durable copy is a new-DEK segment.
+    /// `install_pending_wal_generations`, called before the replay read, recovers
+    /// both generations. Asserted at the WAL-replay level so no index backstop
+    /// masks the loss.
+    #[test]
+    fn half_rotated_wal_needs_both_generations_installed_before_replay() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let wal_dir = root.join("wal");
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let algorithm = enc_cfg.algorithm;
+        let old_wal_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(
+            algorithm,
+            &super::derive_wal_dek(super::load_mek(&enc_cfg.key_provider).unwrap()).unwrap(),
+        ));
+        let new_wal_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(
+            algorithm,
+            &super::derive_wal_dek(
+                super::load_mek(&KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap(),
+        ));
+
+        // Lay down a half-rotated WAL with a real DB: Alice under the old DEK
+        // (kv=1), then roll to gen 2 and write Bob under the new DEK (kv=2), and
+        // record a PENDING ledger. No persist — the entries live ONLY in the WAL.
+        {
+            let db = build_db(root, &old_key);
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+            let ring = db.wal.wal_keyring().expect("encrypted WAL").clone();
+            let cipher = Arc::clone(&new_wal_cipher);
+            db.wal
+                .seal_active_segment_for_rotation(move || ring.add_generation(2, cipher))
+                .unwrap();
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+            let manager = db.persistence_manager.clone().unwrap();
+            super::write_ledger(
+                &manager,
+                &super::RotationLedger::forward_scope(
+                    2,
+                    KeyProviderConfig::File {
+                        path: new_key.clone(),
+                    },
+                    true,
+                ),
+            )
+            .unwrap();
+            // Drop (crash) with the rotation still pending.
+        }
+
+        let fresh_wal = || {
+            let mut cfg = ConcurrentWalSystemConfig::new(wal_dir.clone());
+            cfg.wal_cipher = Some(Arc::clone(&old_wal_cipher));
+            cfg.tolerate_torn_tail = true;
+            ConcurrentWalSystem::new(cfg).unwrap()
+        };
+        let lsn0 = crate::storage::wal::LSN::initial();
+
+        // A fresh single(old) keyring — the startup state BEFORE the install —
+        // cannot decrypt Bob's new-DEK (kv=2) frames: they are dropped, so only
+        // Alice's old-DEK (kv=1) entries come back. (A node create emits several
+        // framed WAL entries, so we compare counts rather than assume one each.)
+        let n_single = fresh_wal().read_from(lsn0).map(|v| v.len()).unwrap_or(0);
+
+        // Installing BOTH generations before the replay read makes Bob's new-DEK
+        // frames replayable too, so strictly MORE entries are recovered.
+        let wal = fresh_wal();
+        super::install_pending_wal_generations(&wal, &enc_cfg, &data_dir).unwrap();
+        let n_both = wal.read_from(lsn0).unwrap().len();
+        assert!(
+            n_single > 0,
+            "sanity: the old-DEK (Alice) entries must be recoverable ({n_single})"
+        );
+        assert!(
+            n_both > n_single,
+            "installing BOTH WAL generations must recover strictly more entries than a fresh \
+             single(old) keyring: the new-DEK (Bob) frames the old keyring silently drops \
+             become replayable (single={n_single}, both={n_both}). Without the pre-replay \
+             install, a half-rotated WAL loses every write whose only durable copy is a \
+             new-DEK segment."
         );
     }
 }

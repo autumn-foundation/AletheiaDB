@@ -317,6 +317,7 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Embeddings** | `embed_query`, `embed_text`, `semantic_search`, `create_node_with_embedding`, `update_node_embedding` (generate embeddings from text and run text-based semantic search; require the `embeddings` feature + a configured model, else return a structured unavailable/precondition error — see [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md#mcp-embedding-tools)) |
+| **Semantic** | `semantic_path`, `concept_analogy`, `concept_mean`, `find_duplicate_candidates`, `semantic_horizon`, `context_aspects` (read-only analysis over the stable `semantic-search` cohort; gated on the `semantic-search` feature — return `FAILED_PRECONDITION` with `required_feature` when absent; see [docs/guides/mcp-semantic-search-tools.md](docs/guides/mcp-semantic-search-tools.md)) |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
@@ -409,9 +410,12 @@ serializable `DatabaseStats`; every field is an O(1)/cached counter read
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#database-stats-and-storage-tier-health-database_stats).
 
 **Per-query resource limits (Issue #3368)**: the wall-clock-timeout and
-result-byte-cap enforcement that guards the `query` tool now also governs six
+result-byte-cap enforcement that guards the `query` tool now also governs the
 read tools — `traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`,
-`get_edge_at_time`, `find_nodes_at_time` — wrapped at the dispatch seam
+`get_edge_at_time`, `find_nodes_at_time`, plus the six #2907 semantic-search
+analysis tools (`semantic_path`, `concept_analogy`, `concept_mean`,
+`find_duplicate_candidates`, `semantic_horizon`, `context_aspects`) enrolled for
+uniform coverage — wrapped at the dispatch seam
 (`RESOURCE_LIMITED_READ_TOOLS`), reusing the `query` tool's timeout thread-race
 and bounded in-flight-worker DoS guard. A breach returns `RESOURCE_EXHAUSTED`
 with `details.dimension` (`wall_clock_timeout`, retriable; `result_bytes`,
@@ -429,14 +433,14 @@ on a timeout-race worker (thread-spawn + mpsc + in-flight-CAS, exactly like the
 `query` tool) — response-identical but not free. The per-call worker-spawn cost
 on hot-path reads (including cheap `get_node_at_time`/`get_edge_at_time`) has a
 quantifying micro-benchmark deferred to Lane-2. The `max_in_flight_queries` cap
-(default 64) is a **single shared pool** across the `query` tool and these six
+(default 64) is a **single shared pool** across the `query` tool and these
 wrapped read tools, so a flood of slow calls to one can make the others return
 `UNAVAILABLE` (bounded, retriable); a per-class sub-budget is a Lane-2
 follow-up. `database_stats` additively surfaces a
 `resource_limits` block (`timeout_terminations`, `byte_cap_terminations`,
 `override_rejections`) from process-lifetime atomic counters (the
 `DatabaseStats` struct/storage layer are untouched; row-cap breaches are **not**
-counted — they self-disclose via `truncated`/`has_more`). **v1 scope for the six
+counted — they self-disclose via `truncated`/`has_more`). **v1 scope for these
 read tools:** server defaults only (no per-call `limits` override), **post-hoc**
 byte cap (the response is fully serialized then rejected if over cap). **Deferred
 to Lane-2:** memory-budget dimension, true engine-level cancellation, Rust
@@ -547,11 +551,13 @@ temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
 `get_node_history`), which have no `include_vectors` flag and always return
 full vectors.
 
-**Token-budget-aware responses (Issue #3353)**: the fourteen budgetable read
+**Token-budget-aware responses (Issue #3353)**: the twenty budgetable read
 tools — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
 `get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
 `semantic_search`, `hybrid_query`, `query`, `find_nodes_at_time`,
-`get_node_history`, `get_schema`
+`get_node_history`, `get_schema`, `semantic_path`, `concept_analogy`,
+`concept_mean`, `find_duplicate_candidates`, `semantic_horizon`,
+`context_aspects`
 (the single source of truth is `BUDGETABLE_READ_TOOLS`; not *every* read tool —
 e.g. `get_node_at_time`, `get_edge_history`, `diff_node_versions`,
 `temporal_extent`, `database_stats`, `count_nodes` are out of scope) — accept an
@@ -907,6 +913,54 @@ dangling ref, `INVALID_ARGUMENT` for self/cycle, `FAILED_PRECONDITION` for
 already-recorded), all non-retriable. Durable persistence of lineage is a
 #3413 follow-up; the #3427 attribution caveat applies. See
 [docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
+
+### Schema Constraints: Property Types & Required Keys (Issue #3378)
+
+**Opt-in** per-label (node) / per-edge-type declarations that a property must be
+present and/or hold a declared type; a label with no declaration stays fully
+schemaless (zero behavior change, zero write-path overhead). Declared via a
+builder mirroring `unique_constraint`:
+
+```rust
+use aletheiadb::core::{EntityKind, constraint::DeclaredType};
+db.schema_constraint(EntityKind::Node, "Person")
+    .require("name")                              // required, any type
+    .require_typed("age", DeclaredType::Integer)  // required + typed
+    .typed("email", DeclaredType::String)         // optional but typed
+    .enable()?;                                    // -> ConformanceReport
+```
+
+`DeclaredType` = `String|Integer|Float|Boolean|Temporal|Bytes|Vector{dim:Option<usize>}`
+(`Temporal` maps to `Int` micros-since-epoch; `Vector{dim:Some(d)}` requires
+exactly dim `d`). Enforced at the existing pre-apply commit hook
+(`check_constraints`, alongside #3218 uniqueness) for **both nodes and edges**,
+so all write paths (incl. bulk import) are covered atomically — one violating op
+aborts the whole transaction, zero partial writes. Updates are **PATCH**: checks
+run against the effective post-merge map (a patch nulling a required key fails; a
+patch not touching it passes). `enable()` scans **current state** only and
+returns a `ConformanceReport` (`conforms`, counts, aggregated `violations` with
+sample ids); on a populated non-conforming label it returns
+`ConstraintError::NonConformingOnEnable` and declares nothing; `.dry_run()`
+returns the report without applying. **Forward-only temporal**: history is never
+re-scanned/invalidated (time-travel reads keep working; reads never blocked); a
+backdated (`valid_time`) write is validated against the constraint set active at
+its transaction time = now (AC7). API: `schema_constraint(kind,label)` builder,
+`list_schema_constraints()`, `drop_schema_constraint(kind,label)`. `get_schema`
+gains `declared_constraints` per label/type (declared vs merely observed keys).
+
+**Errors (#3234):** `TypeViolation`/`MissingRequiredKey` → `CONSTRAINT_VIOLATION`,
+`NonConformingOnEnable` → `FAILED_PRECONDITION` (all `retriable:false`).
+
+**Durability:** a bitcode+CRC sidecar `{data_dir}/schema_constraints.dat` (atomic
+temp→fsync→rename, tolerant/quarantining load) — ephemeral `new()` is in-memory
+only — and folded into the `.albk` backup payload (round-trips through
+restore). **Residue:** #3218 uniqueness constraints are WAL-persisted but NOT in
+`.albk`; these schema constraints ARE.
+
+**v1 scope:** Rust API + a minimal MCP error-classification hunk only. MCP/CLI
+declaration tools and AQL/Cypher DDL (#560) are follow-ups.
+
+**See [docs/guides/schema-constraints.md](docs/guides/schema-constraints.md).**
 
 ### Changefeed Subscriptions (Issue #3375)
 

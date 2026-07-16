@@ -16,9 +16,10 @@
 //!
 //! The query executor executes `Sort` (ORDER BY) and `EdgeScan` (`FROM edges`)
 //! physical operators end-to-end. `SELECT * FROM edges` yields edge rows
-//! consumed via `collect_all()` (the node-centric `collect_structured()` /
-//! `collect_nodes()` helpers remain node-only, see the v1 limitation note in
-//! the `select_edges` module); ORDER BY returns rows in sorted order.
+//! consumed via `collect_all()` or the edge-shaped structured projection
+//! `collect_structured_edges()` / `collect_edges()` (Issue #3626); the
+//! node-centric `collect_structured()` / `collect_nodes()` helpers remain
+//! node-only by design. ORDER BY returns rows in sorted order.
 
 #![cfg(feature = "sql")]
 
@@ -566,13 +567,12 @@ mod order_by {
 // ## v1 limitations
 //
 // `SELECT * FROM edges` yields `EntityResult::Edge` rows that are consumed via
-// `collect_all()` / `count_all()` / direct iteration (the paths these tests
-// use). The node-centric structured helpers `collect_structured()` /
+// `collect_all()` / `count_all()` / direct iteration, or via the edge-shaped
+// structured projection `collect_structured_edges()` / `collect_edges()`
+// (Issue #3626). The node-centric structured helpers `collect_structured()` /
 // `collect_nodes()` intentionally remain node-only (they populate a
-// `Vec<NodeId>`), so they silently drop edge rows -- a pre-existing shape that
-// this change deliberately does not widen (that would ripple into the
-// node-oriented structured-result consumers). Consume edge scans via
-// `collect_all()`.
+// `Vec<NodeId>`) and silently drop edge rows -- edges are surfaced structurally
+// by their own `collect_structured_edges()` counterpart instead.
 //
 // A `WHERE` predicate over *edge property* leaves now filters edge rows for real
 // (Issue #3622): the executor detects an `EdgeScan`-rooted stream and runs the
@@ -873,8 +873,10 @@ mod select_edges {
     #[test]
     fn select_edges_collect_all_is_the_consumption_path() {
         // Explicitly assert the primary consumption path (collect_all) surfaces
-        // edge rows -- the node-centric collect_nodes()/collect_structured()
-        // helpers remain node-only by design (see the module v1-limitation note).
+        // edge rows. The node-centric collect_nodes()/collect_structured()
+        // helpers remain node-only by design; the edge-shaped structured path is
+        // collect_structured_edges()/collect_edges() (Issue #3626, exercised by
+        // select_edges_collect_structured_edges below).
         let db = setup_graph_db();
         let query = parse_sql("SELECT * FROM edges").expect("Failed to parse SQL");
         let rows = db
@@ -1052,6 +1054,89 @@ mod select_edges {
             b,
             "node B target sorts second descending"
         );
+    }
+  
+    #[test]
+    fn select_edges_collect_structured_edges() {
+        // Issue #3626: the edge-shaped structured projection. `SELECT * FROM edges`
+        // -> collect_structured_edges() yields parallel vectors of ids, endpoints,
+        // labels, and properties -- the edge counterpart to collect_structured().
+        let db = setup_graph_db();
+
+        // Resolve node ids by name so the endpoint assertion is order-independent.
+        let node_rows = db
+            .execute_query(parse_sql("SELECT * FROM nodes").expect("parse nodes"))
+            .expect("node scan should execute")
+            .collect_all()
+            .expect("collect node rows");
+        let id_of = |name: &str| {
+            node_rows
+                .iter()
+                .filter_map(|r| r.entity.as_node())
+                .find(|n| n.get_property("name") == Some(&PropertyValue::String(name.into())))
+                .map(|n| n.id)
+                .unwrap_or_else(|| panic!("node named {name} should exist"))
+        };
+        let (alice, bob, carol) = (id_of("Alice"), id_of("Bob"), id_of("Carol"));
+
+        let structured = db
+            .execute_query(parse_sql("SELECT * FROM edges").expect("parse edges"))
+            .expect("Edge scan should execute")
+            .collect_structured_edges()
+            .expect("collect_structured_edges should succeed");
+
+        assert_eq!(
+            structured.len(),
+            2,
+            "setup_graph_db has exactly 2 KNOWS edges"
+        );
+        assert!(!structured.is_empty());
+
+        // Endpoints are available (full edges) and match Alice->Bob, Bob->Carol.
+        let triples = structured
+            .edges_with_endpoints()
+            .expect("full edges expose endpoints");
+        let mut endpoints: Vec<(u64, u64)> = triples
+            .iter()
+            .map(|(_, s, t)| (s.as_u64(), t.as_u64()))
+            .collect();
+        endpoints.sort_unstable();
+        let mut expected = vec![
+            (alice.as_u64(), bob.as_u64()),
+            (bob.as_u64(), carol.as_u64()),
+        ];
+        expected.sort_unstable();
+        assert_eq!(endpoints, expected, "structured endpoints must round-trip");
+
+        // Labels resolve to KNOWS for both edges.
+        let labels = structured.labels.as_ref().expect("labels present");
+        assert!(
+            labels.iter().all(|l| l.to_string() == "KNOWS"),
+            "both edges are KNOWS"
+        );
+
+        // Properties vector is present and parallel to edges.
+        let props = structured.properties.as_ref().expect("properties present");
+        assert_eq!(props.len(), 2);
+
+        // No temporal / ranking context on a plain scan.
+        assert!(structured.scores.is_none());
+        assert!(structured.versions.is_none());
+    }
+
+    #[test]
+    fn select_edges_collect_structured_edges_empty_db() {
+        // A database with no edges yields an empty EdgeQueryResult (all Option fields
+        // None), not an error.
+        let db = setup_person_db();
+        let structured = db
+            .execute_query(parse_sql("SELECT * FROM edges").expect("parse edges"))
+            .expect("Edge scan should execute")
+            .collect_structured_edges()
+            .expect("collect_structured_edges should succeed on empty edge set");
+        assert!(structured.is_empty());
+        assert!(structured.sources.is_none());
+        assert!(structured.edges_with_endpoints().is_none());
     }
 }
 

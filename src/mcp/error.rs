@@ -320,6 +320,13 @@ fn classify_constraint_error(e: &ConstraintError) -> (McpErrorCode, bool) {
         ConstraintError::UniqueViolation { .. } => (McpErrorCode::ConstraintViolation, false),
         ConstraintError::UnsupportedKeyType { .. } => (McpErrorCode::InvalidArgument, false),
         ConstraintError::DuplicateOnEnable { .. } => (McpErrorCode::FailedPrecondition, false),
+        // Schema constraints (Issue #3378). A type/required-key violation on a
+        // write is a declared constraint rejecting *this* write
+        // (CONSTRAINT_VIOLATION); non-conformance on enable is a state problem
+        // the caller must fix first (FAILED_PRECONDITION). All non-retriable.
+        ConstraintError::TypeViolation { .. } => (McpErrorCode::ConstraintViolation, false),
+        ConstraintError::MissingRequiredKey { .. } => (McpErrorCode::ConstraintViolation, false),
+        ConstraintError::NonConformingOnEnable { .. } => (McpErrorCode::FailedPrecondition, false),
     }
 }
 
@@ -663,6 +670,42 @@ mod tests {
             query_kind_classification("runtime_error"),
             (McpErrorCode::Internal, false)
         );
+    }
+
+    #[test]
+    fn schema_constraint_errors_classify_per_contract() {
+        // Issue #3378: type/required-key violations are CONSTRAINT_VIOLATION,
+        // non-conformance on enable is FAILED_PRECONDITION; all non-retriable.
+        let type_violation = ConstraintError::TypeViolation {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            property: "age".into(),
+            expected_type: "int",
+            actual_type: "string",
+        };
+        let (code, retriable) = classify_constraint_error(&type_violation);
+        assert_eq!(code, McpErrorCode::ConstraintViolation);
+        assert!(!retriable);
+
+        let missing = ConstraintError::MissingRequiredKey {
+            entity_kind: "edge".into(),
+            label: "KNOWS".into(),
+            missing_keys: vec!["since".into()],
+        };
+        let (code, retriable) = classify_constraint_error(&missing);
+        assert_eq!(code, McpErrorCode::ConstraintViolation);
+        assert!(!retriable);
+
+        let non_conforming = ConstraintError::NonConformingOnEnable {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            violations: vec![],
+            total_non_conforming: 3,
+            sample_ids: vec![1, 2, 3],
+        };
+        let (code, retriable) = classify_constraint_error(&non_conforming);
+        assert_eq!(code, McpErrorCode::FailedPrecondition);
+        assert!(!retriable);
     }
 
     #[test]

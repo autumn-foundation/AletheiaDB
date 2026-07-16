@@ -481,12 +481,27 @@ harness = false
 path = "benches/performance_targets.rs"
 required-features = []
 
+# Schema-constraint write-path overhead gate (Issue #3378).
+[[bench]]
+name = "schema_constraints"
+harness = false
+path = "benches/schema_constraints.rs"
+required-features = []
+
 # Temporal aggregation windows (Issue #3363): 12-window monthly aggregation
 # over ~1,000 historical versions, targeting < 50ms end-to-end.
 [[bench]]
 name = "temporal_window"
 harness = false
 path = "benches/temporal_window.rs"
+required-features = []
+
+# Temporal joins (Issue #3379): event-aligned join over ~100 alignment instants
+# across 2 entities, targeting < 50ms p99 end-to-end.
+[[bench]]
+name = "temporal_join"
+harness = false
+path = "benches/temporal_join.rs"
 required-features = []
 
 # OpenTelemetry tracing overhead gate (Issue #3376): disabled vs enabled.

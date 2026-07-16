@@ -103,6 +103,15 @@ pub fn execute(
     // Static validation independent of the data (fails before any transaction).
     validate(write)?;
 
+    // Cap the fan-out working set (Issue #3623 review): a MERGE that matches
+    // many committed entities -- or several chained MERGEs -- multiplies the
+    // working set combinatorially (up to N^k for k MERGEs over N matches each),
+    // and every binding buffers writes in this single transaction. Bound it with
+    // the SAME configurable `max_schema_as_of_entities` limit the read matcher
+    // uses (see `match_bindings` in `multi_pattern.rs`), turning a potential OOM
+    // into an honest structured rejection. Read once, up front.
+    let binding_cap = db.historical.read().max_schema_as_of_entities();
+
     // Read phase: matched rows drive the write clauses. A statement with no
     // reading part (a bare `CREATE`) runs once against a single empty binding.
     let base_rows: Vec<Binding> = match &write.reading {
@@ -136,22 +145,41 @@ pub fn execute(
         let mut created_nodes: Vec<(NodeId, String, PropertyMap)> = Vec::new();
 
         for base in &base_rows {
-            let mut binding = base.clone();
+            // Working set of bindings for this base row. A clause maps the set:
+            // CREATE/SET/DELETE are 1->1, but a MERGE whose pattern matches
+            // multiple committed entities fans one binding into N (openCypher
+            // whole-pattern MATCH semantics, Issue #3623), so later clauses and
+            // RETURN run once per fanned row.
+            let mut rows: Vec<Binding> = vec![base.clone()];
             for clause in &write.clauses {
-                apply_clause(
+                rows = apply_clause(
                     tx,
                     db,
                     clause,
-                    &mut binding,
+                    rows,
                     params,
                     &mut deleted_nodes,
                     &mut deleted_edges,
                     &mut created_edges,
                     &mut created_nodes,
+                    binding_cap,
                 )?;
+                // Aggregate cap after each clause (Issue #3623 review): every
+                // clause is 1->1 except MERGE (which fans 1->N), so this bounds
+                // the whole working set as it grows clause-over-clause. Defense
+                // in depth alongside the mid-extend check inside the MERGE arm.
+                if rows.len() > binding_cap {
+                    return Err(fanout_cap_error(binding_cap).into());
+                }
             }
             if let Some(ret) = &write.return_clause {
-                return_snapshots.push(collect_return_snapshots(ret, &binding)?);
+                // The RETURN order of fanned rows is intentionally left
+                // unasserted: openCypher gives no row order without ORDER BY, so
+                // the emission order of a multi-match MERGE's fan-out is not a
+                // contract (tests assert the SET of rows, not their sequence).
+                for binding in &rows {
+                    return_snapshots.push(collect_return_snapshots(ret, binding)?);
+                }
             }
         }
         Ok(())
@@ -286,54 +314,114 @@ fn validate_return(ret: &CypherReturn) -> std::result::Result<(), CypherError> {
 // Clause application
 // ---------------------------------------------------------------------------
 
+/// The structured rejection returned when a statement's fan-out working set
+/// exceeds the configured cap (Issue #3623 review). Mirrors the read matcher's
+/// [`match_bindings`] cap error shape (a [`CypherError::UnsupportedFeature`]
+/// keyed on the same `max_schema_as_of_entities` knob) so the write phase
+/// reports a combinatorial MERGE blow-up as an honest structured error rather
+/// than exhausting memory.
+fn fanout_cap_error(binding_cap: usize) -> CypherError {
+    CypherError::UnsupportedFeature(format!(
+        "MERGE fan-out working set exceeds {binding_cap} bindings; a MERGE matching \
+         many committed entities (or multiple chained MERGEs) multiplies the working \
+         set combinatorially, each binding buffering writes in one transaction -- add \
+         a more selective pattern or labels to narrow the match (configurable via \
+         max_schema_as_of_entities)"
+    ))
+}
+
+/// Apply one write clause to the whole working set of bindings, returning the
+/// resulting set. Most clauses are 1->1 (each input binding maps to itself after
+/// its side effects), but a MERGE whose pattern matches multiple committed
+/// entities fans one binding into N (Issue #3623), so this maps `Vec<Binding>`
+/// to `Vec<Binding>` rather than mutating a single binding in place. `binding_cap`
+/// bounds the MERGE fan-out mid-extend (Issue #3623 review).
 #[allow(clippy::too_many_arguments)]
 fn apply_clause(
     tx: &mut crate::api::transaction::WriteTransaction,
     db: &AletheiaDB,
     clause: &CypherWriteClause,
-    binding: &mut Binding,
+    rows: Vec<Binding>,
     params: &Params,
     deleted_nodes: &mut HashSet<NodeId>,
     deleted_edges: &mut HashSet<EdgeId>,
     created_edges: &mut Vec<(EdgeId, NodeId, NodeId)>,
     created_nodes: &mut Vec<(NodeId, String, PropertyMap)>,
-) -> Result<()> {
+    binding_cap: usize,
+) -> Result<Vec<Binding>> {
     match clause {
         CypherWriteClause::Create(patterns) => {
-            for pattern in patterns {
-                create_pattern(tx, pattern, binding, params, created_edges, created_nodes)?;
+            let mut out = Vec::with_capacity(rows.len());
+            for mut binding in rows {
+                for pattern in patterns {
+                    create_pattern(
+                        tx,
+                        pattern,
+                        &mut binding,
+                        params,
+                        created_edges,
+                        created_nodes,
+                    )?;
+                }
+                out.push(binding);
             }
-            Ok(())
+            Ok(out)
         }
         CypherWriteClause::Set(items) => {
-            apply_set(tx, items, binding, params, deleted_nodes, deleted_edges)
+            let mut out = Vec::with_capacity(rows.len());
+            for binding in rows {
+                apply_set(tx, items, &binding, params, deleted_nodes, deleted_edges)?;
+                out.push(binding);
+            }
+            Ok(out)
         }
-        CypherWriteClause::Delete { detach, targets } => apply_delete(
-            tx,
-            *detach,
-            targets,
-            binding,
-            deleted_nodes,
-            deleted_edges,
-            created_edges,
-        ),
+        CypherWriteClause::Delete { detach, targets } => {
+            let mut out = Vec::with_capacity(rows.len());
+            for binding in rows {
+                apply_delete(
+                    tx,
+                    *detach,
+                    targets,
+                    &binding,
+                    deleted_nodes,
+                    deleted_edges,
+                    created_edges,
+                )?;
+                out.push(binding);
+            }
+            Ok(out)
+        }
         CypherWriteClause::Merge {
             pattern,
             on_create,
             on_match,
-        } => apply_merge(
-            tx,
-            db,
-            pattern,
-            on_create,
-            on_match,
-            binding,
-            params,
-            deleted_nodes,
-            deleted_edges,
-            created_edges,
-            created_nodes,
-        ),
+        } => {
+            let mut out = Vec::with_capacity(rows.len());
+            for binding in rows {
+                out.extend(apply_merge(
+                    tx,
+                    db,
+                    pattern,
+                    on_create,
+                    on_match,
+                    binding,
+                    params,
+                    deleted_nodes,
+                    deleted_edges,
+                    created_edges,
+                    created_nodes,
+                )?);
+                // Bound the fan-out mid-extend (Issue #3623 review): a single
+                // MERGE matching many committed entities across many input
+                // bindings could otherwise balloon `out` to ~cap^2 before the
+                // caller's post-clause check runs. Reject as soon as it exceeds
+                // the cap, matching the read matcher's per-step bound.
+                if out.len() > binding_cap {
+                    return Err(fanout_cap_error(binding_cap).into());
+                }
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -371,14 +459,36 @@ fn apply_clause(
 /// `MATCH (p:Person) MERGE (p)-[:R]->(c:City {name:'NYC'})` correctly creates
 /// one NYC per person (a NYC connected only to p1 does not satisfy p2's path).
 ///
-/// # v1 limitation: multi-match
+/// # Multi-match binding (Issue #3623)
 ///
-/// The single-binding-per-row write executor cannot expand one MERGE into
-/// multiple output rows. A MERGE whose pattern matches MORE THAN ONE committed
-/// entity is therefore **rejected** with a structured `UnsupportedFeature`
-/// error rather than silently binding the first (openCypher would bind all and
-/// apply `ON MATCH SET` to every one). Add a uniquely-identifying property or a
-/// unique constraint so the pattern identifies at most one entity.
+/// A MERGE whose pattern matches MORE THAN ONE committed entity binds **all**
+/// matches (openCypher whole-pattern MATCH semantics): it fans the input
+/// binding into one output binding per match and applies `ON MATCH SET` to
+/// every one. The write executor carries a working set of bindings
+/// (`Vec<Binding>`) precisely so this fan-out composes with subsequent clauses
+/// and `RETURN` (each fanned row runs the rest of the statement independently).
+///
+/// ## Combinatorial cost and the aggregate cap
+///
+/// Fan-out is **multiplicative**: `M` base rows times `N` matches per MERGE, and
+/// `k` chained MERGEs can grow the working set to `M * N^k` bindings, each
+/// buffering its own writes inside the one transaction. To keep a pathological
+/// statement from exhausting memory, the working set is bounded by the same
+/// configurable `max_schema_as_of_entities` limit the read matcher applies to
+/// its intermediate binding count. The bound is checked mid-extend here and
+/// again after each clause in [`execute`]; exceeding it returns the structured
+/// [`fanout_cap_error`] ([`CypherError::UnsupportedFeature`]) rather than an OOM.
+///
+/// ## Bi-temporal multi-versioning of a single entity
+///
+/// Because `ON MATCH SET` (and any following write clause) runs **once per
+/// fanned row**, a single statement can record MULTIPLE new bi-temporal
+/// versions of ONE entity when that entity is bound by more than one match/row
+/// (e.g. a node reached by two matched relationship paths, or the far node of a
+/// base-row cross product). Each per-row update is a distinct `update_node`, so
+/// the entity is versioned once per binding -- a known deviation from
+/// openCypher's set-once-per-write semantics that is documented, not deduped, in
+/// v1.
 ///
 /// # v1 concurrency
 ///
@@ -394,65 +504,75 @@ fn apply_merge(
     pattern: &CypherPattern,
     on_create: &[CypherSetItem],
     on_match: &[CypherSetItem],
-    binding: &mut Binding,
+    binding: Binding,
     params: &Params,
     deleted_nodes: &HashSet<NodeId>,
     deleted_edges: &HashSet<EdgeId>,
     created_edges: &mut Vec<(EdgeId, NodeId, NodeId)>,
     created_nodes: &mut Vec<(NodeId, String, PropertyMap)>,
-) -> Result<()> {
+) -> Result<Vec<Binding>> {
     // Pre-transaction match against committed current state, filtered to rows
-    // consistent with variables already bound in this row. Collected into a Vec
-    // so the borrow of `binding` ends before the branches mutate it.
+    // consistent with variables already bound in this row. Fully drained into a
+    // Vec before any write so no read borrow is held across the tx mutations.
     let committed: Vec<Binding> = match_bindings(db, std::slice::from_ref(pattern), None, params)?
         .into_iter()
-        .filter(|row| consistent_with(row, binding))
+        .filter(|row| consistent_with(row, &binding))
         .collect();
 
-    // Second finding: a MERGE pattern that matches more than one committed
-    // entity cannot be expressed by the single-binding-per-row executor. Reject
-    // rather than silently binding the first / dropping rows (openCypher would
-    // bind ALL matches and apply ON MATCH SET to every one).
-    if committed.len() > 1 {
-        return Err(CypherError::UnsupportedFeature(
-            "MERGE pattern matched multiple existing entities; MERGE requires a pattern that \
-             identifies at most one (add a uniquely-identifying property or a unique constraint)"
-                .to_string(),
-        )
-        .into());
-    }
-
-    if let Some(row) = committed.into_iter().next() {
-        // MATCH branch: adopt the newly-discovered bindings (a leading
-        // variable already present is rebound to the same id), then apply
-        // ON MATCH SET only. A bare match (empty on_match) records nothing.
-        for (name, entity) in row {
-            bind(binding, &name, entity);
+    // MATCH branch (Issue #3623): a pattern matching one OR MORE committed
+    // entities binds ALL of them (openCypher whole-pattern MATCH semantics),
+    // fanning the input binding into one output binding per match and applying
+    // ON MATCH SET to every one. A bare match (empty on_match) records nothing.
+    if !committed.is_empty() {
+        let mut out = Vec::with_capacity(committed.len());
+        for row in committed {
+            let mut b = binding.clone();
+            for (name, entity) in row {
+                bind(&mut b, &name, entity);
+            }
+            apply_set(tx, on_match, &b, params, deleted_nodes, deleted_edges)?;
+            out.push(b);
         }
-        apply_set(tx, on_match, binding, params, deleted_nodes, deleted_edges)?;
-        return Ok(());
+        return Ok(out);
     }
 
-    // No committed match. For a single-node pattern that would be created (an
-    // unbound/labelled node), consult this statement's created-node ledger so
-    // repeated single-node MERGEs of the same key dedup to one node.
-    if let Some(node) = single_creatable_node(pattern, binding)
+    // No committed match: a single output binding (create or ledger-match).
+    let mut binding = binding;
+
+    // For a single-node pattern that would be created (an unbound/labelled
+    // node), consult this statement's created-node ledger so repeated
+    // single-node MERGEs of the same key dedup to one node.
+    if let Some(node) = single_creatable_node(pattern, &binding)
         && let Some(id) = find_created_single_node(node, created_nodes, params)?
     {
         // Ledger MATCH branch: bind the buffered-created node and apply
         // ON MATCH SET only (no create, no whole-pattern duplicate).
         if let Some(var) = &node.variable {
-            bind(binding, var, EntityResult::NodeId(id));
+            bind(&mut binding, var, EntityResult::NodeId(id));
         }
-        apply_set(tx, on_match, binding, params, deleted_nodes, deleted_edges)?;
-        return Ok(());
+        apply_set(tx, on_match, &binding, params, deleted_nodes, deleted_edges)?;
+        return Ok(vec![binding]);
     }
 
     // CREATE branch: create the whole pattern (a bound leading variable is
     // reused; the unbound remainder is created), then ON CREATE SET.
-    create_pattern(tx, pattern, binding, params, created_edges, created_nodes)?;
-    apply_set(tx, on_create, binding, params, deleted_nodes, deleted_edges)?;
-    Ok(())
+    create_pattern(
+        tx,
+        pattern,
+        &mut binding,
+        params,
+        created_edges,
+        created_nodes,
+    )?;
+    apply_set(
+        tx,
+        on_create,
+        &binding,
+        params,
+        deleted_nodes,
+        deleted_edges,
+    )?;
+    Ok(vec![binding])
 }
 
 /// If a MERGE pattern is a single node that would be *created* (exactly one

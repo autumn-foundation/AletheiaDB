@@ -1633,3 +1633,179 @@ pub struct PropertyChangeResponse {
     pub old_value: serde_json::Value,
     pub new_value: serde_json::Value,
 }
+
+// ============================================================================
+// Semantic-search analysis tools (Issue #2907)
+//
+// Six read-only tools exposing the stable `semantic-search` cohort's analysis
+// primitives over MCP. They are advertised unconditionally (Design A); when the
+// `semantic-search` feature is not compiled in, the handler bodies return a
+// structured `FAILED_PRECONDITION` (`required_feature: "semantic-search"`)
+// rather than being absent from the catalog.
+// ============================================================================
+
+/// Request for `semantic_path` — vector-similarity-guided A* pathfinding.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SemanticPathRequest {
+    /// Starting node id.
+    #[schemars(description = "Starting node id for the path search.")]
+    pub start: u64,
+
+    /// Target node id.
+    #[schemars(description = "Target node id for the path search.")]
+    pub end: u64,
+
+    /// The property holding the vector embedding used to guide the search.
+    #[schemars(
+        description = "The property name holding the vector embedding used to guide the A* search \
+                       (e.g. 'embedding'). A vector index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Optional maximum traversal depth (clamped to the server maximum).
+    #[schemars(
+        description = "Optional maximum traversal depth. Clamped to the server maximum (20). Used \
+                       to derive a bounded node-expansion budget so the search cannot run \
+                       unbounded on large graphs."
+    )]
+    pub max_depth: Option<usize>,
+}
+
+/// Request for `concept_analogy` — vector analogy `a : b :: c : ?`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ConceptAnalogyRequest {
+    /// First node of the analogy pair (`a`).
+    #[schemars(description = "Node id 'a' in the analogy a : b :: c : ?")]
+    pub a: u64,
+
+    /// Second node of the analogy pair (`b`).
+    #[schemars(description = "Node id 'b' in the analogy a : b :: c : ?")]
+    pub b: u64,
+
+    /// Third node — the base of the completion (`c`).
+    #[schemars(description = "Node id 'c' in the analogy a : b :: c : ? (the completion base)")]
+    pub c: u64,
+
+    /// The property holding the vector embedding.
+    #[schemars(
+        description = "The property name holding the vector embedding (e.g. 'embedding'). A vector \
+                       index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Number of results to return (clamped to the server maximum).
+    #[schemars(description = "Number of results to return (default 10, clamped to 1000).")]
+    pub k: Option<usize>,
+}
+
+/// Request for `concept_mean` — nearest neighbours to the centroid of a set.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ConceptMeanRequest {
+    /// The node ids whose embeddings are averaged.
+    #[schemars(
+        description = "Node ids whose embeddings are averaged; the result ranks nodes nearest the \
+                       centroid. Capped at 10000 ids."
+    )]
+    pub nodes: Vec<u64>,
+
+    /// The property holding the vector embedding.
+    #[schemars(
+        description = "The property name holding the vector embedding (e.g. 'embedding'). A vector \
+                       index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Number of results to return (clamped to the server maximum).
+    #[schemars(description = "Number of results to return (default 10, clamped to 1000).")]
+    pub k: Option<usize>,
+}
+
+/// Request for `find_duplicate_candidates` — near-duplicate entity detection.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct FindDuplicateCandidatesRequest {
+    /// The node whose near-duplicates are sought.
+    #[schemars(description = "The node id whose near-duplicate candidates are sought.")]
+    pub node_id: u64,
+
+    /// The property whose vector index is used.
+    ///
+    /// v1 note: the underlying similarity query resolves against the node's own
+    /// indexed embedding; `property_name` selects the index whose existence is
+    /// validated. A per-property selector is a documented follow-up.
+    #[schemars(
+        description = "The property name whose vector index is validated (e.g. 'embedding'). v1 \
+                       note: the search uses the node's indexed embedding; property_name selects \
+                       the index to validate rather than an arbitrary property vector."
+    )]
+    pub property_name: String,
+
+    /// Minimum cosine similarity for a candidate to be reported.
+    #[schemars(
+        description = "Minimum cosine similarity in [0, 1] for a candidate to be reported \
+                       (default 0.9)."
+    )]
+    pub threshold: Option<f32>,
+
+    /// Maximum number of candidates to return (clamped to the server maximum).
+    #[schemars(
+        description = "Maximum number of candidates to return (default 10, clamped to 1000)."
+    )]
+    pub limit: Option<usize>,
+}
+
+/// Request for `semantic_horizon` — semantic event-horizon mapping.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SemanticHorizonRequest {
+    /// The seed node the horizon is mapped from.
+    #[schemars(description = "The seed node id the semantic event horizon is mapped from.")]
+    pub seed: u64,
+
+    /// The property holding the vector embedding.
+    #[schemars(
+        description = "The property name holding the vector embedding (e.g. 'embedding'). A vector \
+                       index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Similarity threshold in [0, 1]; neighbours below it form the horizon.
+    #[schemars(
+        description = "Similarity threshold in [0, 1]. Neighbours at or above it are interior; \
+                       the first neighbours to fall below form the horizon (boundary)."
+    )]
+    pub threshold: f32,
+
+    /// Optional maximum traversal depth (clamped to the server maximum).
+    #[schemars(
+        description = "Optional maximum traversal depth from the seed (default 20, clamped to 20)."
+    )]
+    pub max_depth: Option<usize>,
+}
+
+/// Request for `context_aspects` — disentangled neighbourhood aspects.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ContextAspectsRequest {
+    /// The node whose neighbourhood is decomposed.
+    #[schemars(description = "The node id whose local context (neighbourhood) is decomposed.")]
+    pub node_id: u64,
+
+    /// The property holding the vector embedding.
+    #[schemars(
+        description = "The property name holding the vector embedding (e.g. 'embedding'). A vector \
+                       index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Number of aspects (clusters) to extract (clamped to the server maximum).
+    #[schemars(
+        description = "Number of semantic aspects (clusters) to extract (default 10, clamped to 1000)."
+    )]
+    pub k: Option<usize>,
+
+    /// When true, return each aspect's full centroid vector instead of the
+    /// elided descriptor.
+    #[schemars(
+        description = "When true, return each aspect's full centroid float array instead of the \
+                       elided {type, dim, elided:true} descriptor (default false)."
+    )]
+    pub include_vectors: Option<bool>,
+}
