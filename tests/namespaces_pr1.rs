@@ -3,9 +3,7 @@
 //! Covers the design doc's T1–T3, T9 (registry + ride-along replay), T10, and
 //! the hard-requirement reserved-key elision SWEEP.
 
-use aletheiadb::core::namespace::{
-    NAMESPACE_KEY, is_reserved_property_key, user_facing_properties,
-};
+use aletheiadb::core::namespace::{NAMESPACE_KEY, is_reserved_property_key};
 use aletheiadb::{AletheiaDB, Namespace, NamespaceError, PropertyMapBuilder, PropertyValue};
 
 fn props(name: &str) -> aletheiadb::PropertyMap {
@@ -349,8 +347,8 @@ fn sweep_reserved_key_never_leaks_user_facing() {
     assert!(!ee.user_properties().contains_key(NAMESPACE_KEY));
     assert_no_reserved_bytes(&ee.user_properties(), "edge view");
 
-    // The free-function view helper is airtight too.
-    let stripped = user_facing_properties(&na.properties);
+    // The public user-facing accessor is airtight too.
+    let stripped = na.user_properties();
     assert!(!stripped.contains_key(NAMESPACE_KEY));
 }
 
@@ -389,4 +387,369 @@ fn sweep_backup_restore_preserves_namespace_and_elides() {
     assert!(!ee.user_properties().contains_key(NAMESPACE_KEY));
     assert_no_reserved_bytes(&na.user_properties(), "restored node view");
     assert_no_reserved_bytes(&ee.user_properties(), "restored edge view");
+}
+
+// ============================================================================
+// Reserved-key rejection across EVERY write seam (T2, exhaustive).
+// ============================================================================
+
+fn reserved_map(key: &str) -> aletheiadb::PropertyMap {
+    PropertyMapBuilder::new().insert(key, "x").build()
+}
+
+fn is_reserved_err(err: &aletheiadb::Error) -> bool {
+    matches!(
+        err,
+        aletheiadb::Error::Namespace(NamespaceError::ReservedPropertyKey { .. })
+    )
+}
+
+#[test]
+fn reserved_key_rejected_on_every_property_map_seam() {
+    use aletheiadb::PropertyValue;
+    use aletheiadb::core::temporal::time;
+
+    for forged in ["__aletheia_ns", "__shred_x"] {
+        let db = AletheiaDB::new().unwrap();
+        let a = db.create_node("Person", props("A")).unwrap();
+        let b = db.create_node("Person", props("B")).unwrap();
+        let e = db.create_edge(a, b, "KNOWS", props("edge")).unwrap();
+
+        // update_edge (PATCH)
+        assert!(
+            is_reserved_err(
+                &db.update_edge_with_valid_time(e, reserved_map(forged), None)
+                    .unwrap_err()
+            ),
+            "update_edge must reject {forged}"
+        );
+        // replace_node (full overwrite)
+        assert!(
+            is_reserved_err(
+                &db.replace_node(a, "Person", reserved_map(forged))
+                    .unwrap_err()
+            ),
+            "replace_node must reject {forged}"
+        );
+        // replace_edge (full overwrite)
+        assert!(
+            is_reserved_err(&db.replace_edge(e, reserved_map(forged)).unwrap_err()),
+            "replace_edge must reject {forged}"
+        );
+        // compare_and_set_node
+        let nv = db.get_node(a).unwrap().current_version;
+        assert!(
+            is_reserved_err(
+                &db.compare_and_set_node(a, nv, reserved_map(forged))
+                    .unwrap_err()
+            ),
+            "compare_and_set_node must reject {forged}"
+        );
+        // compare_and_set_edge
+        let ev = db.get_edge(e).unwrap().current_version;
+        assert!(
+            is_reserved_err(
+                &db.compare_and_set_edge(e, ev, reserved_map(forged))
+                    .unwrap_err()
+            ),
+            "compare_and_set_edge must reject {forged}"
+        );
+        // claim_with_lease
+        let nv2 = db.get_node(a).unwrap().current_version;
+        let lease_until = time::from_secs(time::now().wallclock() / 1_000_000 + 3_600);
+        assert!(
+            is_reserved_err(
+                &db.claim_with_lease(
+                    a,
+                    nv2,
+                    "lease_owner",
+                    "lease_until",
+                    PropertyValue::from("worker-1"),
+                    lease_until,
+                    reserved_map(forged),
+                )
+                .unwrap_err()
+            ),
+            "claim_with_lease must reject {forged}"
+        );
+        // remove_node_property / remove_edge_property (key is the forged one)
+        assert!(
+            is_reserved_err(&db.remove_node_property(a, forged).unwrap_err()),
+            "remove_node_property must reject {forged}"
+        );
+        assert!(
+            is_reserved_err(&db.remove_edge_property(e, forged).unwrap_err()),
+            "remove_edge_property must reject {forged}"
+        );
+    }
+}
+
+// ============================================================================
+// Edge + CAS immutability re-stamp: every non-create path preserves the ns.
+// ============================================================================
+
+#[test]
+fn edge_and_cas_paths_preserve_immutable_namespace() {
+    use aletheiadb::PropertyValue;
+    use aletheiadb::core::temporal::time;
+
+    let db = AletheiaDB::new().unwrap();
+    let a = db
+        .create_node_in_namespace("Person", props("Alice"), "agent:planner")
+        .unwrap();
+    let b = db
+        .create_node_in_namespace("Person", props("Bob"), "agent:planner")
+        .unwrap();
+    let e = db
+        .create_edge_in_namespace(a, b, "KNOWS", props("edge"), "agent:planner")
+        .unwrap();
+
+    // update_edge PATCH
+    db.update_edge_with_valid_time(e, PropertyMapBuilder::new().insert("k", 1).build(), None)
+        .unwrap();
+    assert_eq!(
+        db.get_edge(e).unwrap().namespace().as_str(),
+        "agent:planner"
+    );
+
+    // replace_edge full overwrite (no ns key in the new map)
+    db.replace_edge(e, PropertyMapBuilder::new().insert("since", 2021).build())
+        .unwrap();
+    assert_eq!(
+        db.get_edge(e).unwrap().namespace().as_str(),
+        "agent:planner"
+    );
+
+    // compare_and_set_node
+    let nv = db.get_node(a).unwrap().current_version;
+    db.compare_and_set_node(
+        a,
+        nv,
+        PropertyMapBuilder::new().insert("name", "Alice3").build(),
+    )
+    .unwrap();
+    assert_eq!(
+        db.get_node(a).unwrap().namespace().as_str(),
+        "agent:planner"
+    );
+
+    // compare_and_set_edge
+    let ev = db.get_edge(e).unwrap().current_version;
+    db.compare_and_set_edge(
+        e,
+        ev,
+        PropertyMapBuilder::new().insert("since", 2022).build(),
+    )
+    .unwrap();
+    assert_eq!(
+        db.get_edge(e).unwrap().namespace().as_str(),
+        "agent:planner"
+    );
+
+    // claim_with_lease
+    let nv2 = db.get_node(a).unwrap().current_version;
+    let lease_until = time::from_secs(time::now().wallclock() / 1_000_000 + 3_600);
+    db.claim_with_lease(
+        a,
+        nv2,
+        "lease_owner",
+        "lease_until",
+        PropertyValue::from("worker-1"),
+        lease_until,
+        PropertyMapBuilder::new().insert("name", "Alice4").build(),
+    )
+    .unwrap();
+    assert_eq!(
+        db.get_node(a).unwrap().namespace().as_str(),
+        "agent:planner"
+    );
+}
+
+// ============================================================================
+// Adversarial "cannot move": forged ns rejected; clean re-stamp keeps original;
+// explicit namespace on a non-create op is INVALID_ARGUMENT (never a silent no-op).
+// ============================================================================
+
+#[test]
+fn forged_namespace_on_replace_and_cas_is_rejected() {
+    let db = AletheiaDB::new().unwrap();
+    let a = db
+        .create_node_in_namespace("Person", props("Alice"), "agent:a")
+        .unwrap();
+    let b = db
+        .create_node_in_namespace("Person", props("Bob"), "agent:a")
+        .unwrap();
+    let e = db
+        .create_edge_in_namespace(a, b, "KNOWS", props("edge"), "agent:a")
+        .unwrap();
+
+    // A forged `__aletheia_ns="other"` in the overwrite map is rejected as a
+    // reserved key — it can never be applied to move the entity.
+    let forged = PropertyMapBuilder::new()
+        .insert("name", "Alice2")
+        .insert(NAMESPACE_KEY, "other")
+        .build();
+    assert!(is_reserved_err(
+        &db.replace_node(a, "Person", forged.clone()).unwrap_err()
+    ));
+    let forged_edge = PropertyMapBuilder::new()
+        .insert(NAMESPACE_KEY, "other")
+        .build();
+    assert!(is_reserved_err(
+        &db.replace_edge(e, forged_edge).unwrap_err()
+    ));
+    let nv = db.get_node(a).unwrap().current_version;
+    assert!(is_reserved_err(
+        &db.compare_and_set_node(a, nv, forged).unwrap_err()
+    ));
+    // Still in the original namespace after all rejected attempts.
+    assert_eq!(db.get_node(a).unwrap().namespace().as_str(), "agent:a");
+}
+
+#[test]
+fn explicit_namespace_on_non_create_is_invalid_argument() {
+    use aletheiadb::api::transaction::WriteRequestOptions;
+    use aletheiadb::core::temporal::time;
+    use aletheiadb::{PropertyValue, core::namespace::Namespace as Ns};
+
+    let db = AletheiaDB::new().unwrap();
+    let a = db
+        .create_node_in_namespace("Person", props("Alice"), "agent:a")
+        .unwrap();
+    let b = db
+        .create_node_in_namespace("Person", props("Bob"), "agent:a")
+        .unwrap();
+    let e = db
+        .create_edge_in_namespace(a, b, "KNOWS", props("edge"), "agent:a")
+        .unwrap();
+
+    let other = Ns::new("agent:b").unwrap();
+    let is_immutable = |err: &aletheiadb::Error| {
+        matches!(err, aletheiadb::Error::Namespace(NamespaceError::Immutable))
+    };
+
+    // update_node
+    let opts = WriteRequestOptions::new().with_namespace(other.clone());
+    assert!(is_immutable(
+        &db.update_node_with_options(a, props("x"), opts)
+            .unwrap_err()
+    ));
+    // update_edge
+    let opts = WriteRequestOptions::new().with_namespace(other.clone());
+    assert!(is_immutable(
+        &db.update_edge_with_options(e, props("x"), opts)
+            .unwrap_err()
+    ));
+    // replace_node
+    let opts = WriteRequestOptions::new().with_namespace(other.clone());
+    assert!(is_immutable(
+        &db.replace_node_with_options(a, "Person", props("x"), opts)
+            .unwrap_err()
+    ));
+    // replace_edge
+    let opts = WriteRequestOptions::new().with_namespace(other.clone());
+    assert!(is_immutable(
+        &db.replace_edge_with_options(e, props("x"), opts)
+            .unwrap_err()
+    ));
+    // compare_and_set_node
+    let nv = db.get_node(a).unwrap().current_version;
+    let opts = WriteRequestOptions::new().with_namespace(other.clone());
+    assert!(is_immutable(
+        &db.compare_and_set_node_with_options(a, nv, props("x"), opts)
+            .unwrap_err()
+    ));
+    // compare_and_set_edge
+    let ev = db.get_edge(e).unwrap().current_version;
+    let opts = WriteRequestOptions::new().with_namespace(other.clone());
+    assert!(is_immutable(
+        &db.compare_and_set_edge_with_options(e, ev, props("x"), opts)
+            .unwrap_err()
+    ));
+    // claim_with_lease
+    let nv2 = db.get_node(a).unwrap().current_version;
+    let lease_until = time::from_secs(time::now().wallclock() / 1_000_000 + 3_600);
+    let opts = WriteRequestOptions::new().with_namespace(other);
+    assert!(is_immutable(
+        &db.claim_with_lease_with_options(
+            a,
+            nv2,
+            "lease_owner",
+            "lease_until",
+            PropertyValue::from("worker-1"),
+            lease_until,
+            props("x"),
+            opts,
+        )
+        .unwrap_err()
+    ));
+
+    // Nothing moved: still agent:a.
+    assert_eq!(db.get_node(a).unwrap().namespace().as_str(), "agent:a");
+    assert_eq!(db.get_edge(e).unwrap().namespace().as_str(), "agent:a");
+}
+
+// ============================================================================
+// SHOULD-FIX #3 — a create that fails validation leaves NO registered namespace.
+// ============================================================================
+
+#[test]
+fn failed_create_does_not_leave_namespace_registered() {
+    let db = AletheiaDB::new().unwrap();
+    // A forged reserved key makes the write fail AFTER namespace validation but
+    // BEFORE (now) any registration; the namespace must not be registered.
+    let bad = PropertyMapBuilder::new().insert("__shred_x", 1).build();
+    let err = db
+        .create_node_in_namespace("Person", bad, "agent:doomed")
+        .unwrap_err();
+    assert!(is_reserved_err(&err));
+
+    let names: Vec<String> = db.list_namespaces().into_iter().map(|i| i.name).collect();
+    assert!(
+        !names.contains(&"agent:doomed".to_string()),
+        "a failed write must not durably register its namespace: {names:?}"
+    );
+}
+
+// ============================================================================
+// Delete-namespace-then-write: writing to a deleted namespace re-auto-registers.
+// ============================================================================
+
+#[test]
+fn delete_namespace_then_write_reregisters() {
+    let db = AletheiaDB::new().unwrap();
+    db.create_namespace("agent:x", None).unwrap();
+    db.delete_namespace("agent:x").unwrap();
+    assert!(db.describe_namespace("agent:x").is_err());
+
+    // A write to the now-absent namespace auto-registers it again.
+    db.create_node_in_namespace("Person", props("Alice"), "agent:x")
+        .unwrap();
+    let names: Vec<String> = db.list_namespaces().into_iter().map(|i| i.name).collect();
+    assert!(
+        names.contains(&"agent:x".to_string()),
+        "writing to a deleted namespace must re-auto-register it: {names:?}"
+    );
+}
+
+// ============================================================================
+// Historical-read view elides the ride-along key (T3 extension).
+// ============================================================================
+
+#[test]
+fn historical_read_view_elides_namespace_key() {
+    use aletheiadb::core::temporal::time;
+    let db = AletheiaDB::new().unwrap();
+    let id = db
+        .create_node_in_namespace("Person", props("Alice"), "agent:planner")
+        .unwrap();
+    // Capture a valid-time coordinate at/after creation so the node is valid there.
+    let vt = time::now();
+
+    // Reconstruct at a valid-time within the node's validity: the point-in-time
+    // view still carries the namespace as a first-class field, elided from props.
+    let node = db.get_node_at_valid_time(id, vt).unwrap();
+    assert_eq!(node.namespace().as_str(), "agent:planner");
+    assert!(!node.user_properties().contains_key(NAMESPACE_KEY));
+    assert_no_reserved_bytes(&node.user_properties(), "historical node view");
 }

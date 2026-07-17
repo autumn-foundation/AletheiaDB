@@ -210,6 +210,12 @@ pub enum NamespaceError {
         /// The offending reserved key.
         key: String,
     },
+    /// A namespace was explicitly supplied to a non-create write
+    /// (update / replace / CAS / lease-claim). A namespace is fixed at creation,
+    /// so passing one to an update-class op is a caller error rather than a
+    /// silent no-op. Maps to `INVALID_ARGUMENT`.
+    #[error("namespace is immutable and cannot be changed after creation")]
+    Immutable,
 }
 
 // ============================================================================
@@ -223,7 +229,7 @@ pub enum NamespaceError {
 /// fails validation also degrades to the default rather than erroring (the
 /// engine controls what it writes, so this is defensive only).
 #[must_use]
-pub fn namespace_of(properties: &PropertyMap) -> Namespace {
+pub(crate) fn namespace_of(properties: &PropertyMap) -> Namespace {
     match properties
         .get(NAMESPACE_KEY)
         .and_then(PropertyValue::as_str)
@@ -237,7 +243,12 @@ pub fn namespace_of(properties: &PropertyMap) -> Namespace {
 /// property map, if any. Used by the write-validation seam to reject a forged
 /// namespace/shred marker before it can be stamped or committed.
 #[must_use]
-pub fn first_reserved_key(properties: &PropertyMap) -> Option<String> {
+pub(crate) fn first_reserved_key(properties: &PropertyMap) -> Option<String> {
+    // Fast path: an empty property map (a common no-property write) can carry no
+    // reserved key, so skip the per-key interner-resolve scan entirely.
+    if properties.is_empty() {
+        return None;
+    }
     for (key, _) in properties.iter() {
         if let Some(name) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string())
             && is_reserved_property_key(&name)
@@ -257,11 +268,32 @@ pub fn first_reserved_key(properties: &PropertyMap) -> Option<String> {
 /// # Errors
 ///
 /// [`NamespaceError::ReservedPropertyKey`] naming the offending key.
-pub fn reject_reserved_keys(properties: &PropertyMap) -> Result<(), NamespaceError> {
+pub(crate) fn reject_reserved_keys(properties: &PropertyMap) -> Result<(), NamespaceError> {
     match first_reserved_key(properties) {
         Some(key) => Err(NamespaceError::ReservedPropertyKey { key }),
         None => Ok(()),
     }
+}
+
+/// Reject an explicit namespace supplied to a **non-create** write
+/// (update / replace / CAS / lease-claim).
+///
+/// A namespace is fixed at creation and immutable thereafter; the update-class
+/// paths re-stamp it from the existing entity, so an explicit namespace on such
+/// a call would otherwise be a **silent no-op success**. Rejecting it up front
+/// keeps the surface never-silently-wrong.
+///
+/// # Errors
+///
+/// [`NamespaceError::Immutable`] (→ MCP `INVALID_ARGUMENT`) when `namespace` is
+/// `Some`.
+pub(crate) fn reject_namespace_on_update(
+    namespace: Option<&Namespace>,
+) -> Result<(), NamespaceError> {
+    if namespace.is_some() {
+        return Err(NamespaceError::Immutable);
+    }
+    Ok(())
 }
 
 /// Stamp the namespace ride-along key onto a **create** property map.
@@ -271,7 +303,7 @@ pub fn reject_reserved_keys(properties: &PropertyMap) -> Result<(), NamespaceErr
 /// omitted-namespace behavior is unchanged. A non-default namespace is written
 /// as a [`PropertyValue::String`] under [`NAMESPACE_KEY`].
 #[must_use]
-pub fn stamp_namespace(properties: PropertyMap, namespace: &Namespace) -> PropertyMap {
+pub(crate) fn stamp_namespace(properties: PropertyMap, namespace: &Namespace) -> PropertyMap {
     if namespace.is_default() {
         return properties;
     }
@@ -288,7 +320,10 @@ pub fn stamp_namespace(properties: PropertyMap, namespace: &Namespace) -> Proper
 /// existing entity. If the existing entity is in the default namespace there is
 /// nothing to carry (and the new map already lacks the key).
 #[must_use]
-pub fn restamp_namespace(new_properties: PropertyMap, existing: &PropertyMap) -> PropertyMap {
+pub(crate) fn restamp_namespace(
+    new_properties: PropertyMap,
+    existing: &PropertyMap,
+) -> PropertyMap {
     let ns = namespace_of(existing);
     stamp_namespace(new_properties, &ns)
 }
@@ -302,7 +337,7 @@ pub fn restamp_namespace(new_properties: PropertyMap, existing: &PropertyMap) ->
 /// reserved key — the overwhelmingly common case — so the default namespace
 /// pays nothing.
 #[must_use]
-pub fn user_facing_properties(properties: &PropertyMap) -> PropertyMap {
+pub(crate) fn user_facing_properties(properties: &PropertyMap) -> PropertyMap {
     if first_reserved_key(properties).is_none() {
         return properties.clone();
     }

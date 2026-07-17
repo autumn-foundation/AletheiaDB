@@ -17614,3 +17614,131 @@ mod embedding_tools_tests {
         }
     }
 }
+
+// ============================================================================
+// Namespace reserved-key elision — SURFACE sweep (Issue #3349, PR1).
+//
+// The unit sweep in `core::namespace` only proves the elision *helper* strips
+// the ride-along key. These tests prove the production MCP serializers actually
+// call it: a namespaced node AND edge are created, then every read tool is
+// exercised through `dispatch_tool_json` (the exact seam the HTTP surface also
+// routes through) and its serialized JSON is asserted to contain no
+// `__aletheia_` substring. Without the serializer guards these fail (red).
+// ============================================================================
+#[cfg(test)]
+mod namespace_surface_sweep_tests {
+    use super::*;
+
+    /// Seed a namespaced node + edge and return `(server, src, dst)` as u64 ids.
+    fn seed_namespaced() -> (AletheiaMcpServer, u64, u64) {
+        let server = create_test_server();
+        let a = server
+            .db()
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                "agent:planner",
+            )
+            .expect("create namespaced node a");
+        let b = server
+            .db()
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+                "agent:planner",
+            )
+            .expect("create namespaced node b");
+        server
+            .db()
+            .create_edge_in_namespace(
+                a,
+                b,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2020).build(),
+                "agent:planner",
+            )
+            .expect("create namespaced edge");
+        (server, a.as_u64(), b.as_u64())
+    }
+
+    /// Assert a serialized tool response leaks no engine-reserved ride-along key.
+    fn assert_no_reserved(json: &str, tool: &str) {
+        assert!(
+            !json.contains("__aletheia_"),
+            "reserved ride-along key leaked into `{tool}` response: {json}"
+        );
+        // The full namespace marker specifically must be absent.
+        assert!(
+            !json.contains(crate::core::namespace::NAMESPACE_KEY),
+            "namespace key leaked into `{tool}` response: {json}"
+        );
+    }
+
+    #[test]
+    fn sweep_get_node_elides_reserved_key() {
+        let (server, a, _b) = seed_namespaced();
+        let out = server.dispatch_tool_json("get_node", serde_json::json!({ "node_id": a }));
+        // The node is still returned with its user property...
+        assert!(out.contains("Alice"), "expected the node payload: {out}");
+        // ...but the ride-along key is elided.
+        assert_no_reserved(&out, "get_node");
+    }
+
+    #[test]
+    fn sweep_list_nodes_elides_reserved_key() {
+        let (server, _a, _b) = seed_namespaced();
+        let out = server.dispatch_tool_json("list_nodes", serde_json::json!({ "label": "Person" }));
+        assert!(out.contains("Alice"), "expected node list payload: {out}");
+        assert_no_reserved(&out, "list_nodes");
+    }
+
+    #[test]
+    fn sweep_traverse_elides_reserved_key() {
+        let (server, a, _b) = seed_namespaced();
+        let out = server.dispatch_tool_json(
+            "traverse",
+            serde_json::json!({ "start_node_id": a, "edge_label": "KNOWS" }),
+        );
+        assert!(
+            out.contains("Bob"),
+            "expected traversal to reach Bob: {out}"
+        );
+        assert_no_reserved(&out, "traverse");
+    }
+
+    #[test]
+    fn sweep_get_node_history_elides_reserved_key() {
+        let (server, a, _b) = seed_namespaced();
+        // Add a second version so history has content beyond the create.
+        server.dispatch_tool_json(
+            "update_node",
+            serde_json::json!({ "node_id": a, "properties": { "age": 30 } }),
+        );
+        let out =
+            server.dispatch_tool_json("get_node_history", serde_json::json!({ "node_id": a }));
+        assert!(out.contains("Alice"), "expected history payload: {out}");
+        assert_no_reserved(&out, "get_node_history");
+    }
+
+    #[test]
+    fn sweep_query_return_n_elides_reserved_key() {
+        let (server, _a, _b) = seed_namespaced();
+        // AQL is always available under `mcp-server` (no cypher feature needed).
+        let out = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({ "language": "aql", "query": "MATCH (n:Person) RETURN n" }),
+        );
+        assert!(out.contains("Alice"), "expected query rows: {out}");
+        assert_no_reserved(&out, "query");
+    }
+
+    #[test]
+    fn sweep_get_schema_elides_reserved_key() {
+        let (server, _a, _b) = seed_namespaced();
+        let out = server.dispatch_tool_json("get_schema", serde_json::json!({}));
+        // The user property key IS a legitimate schema key...
+        assert!(out.contains("name"), "expected schema payload: {out}");
+        // ...but the ride-along key must never surface as a schema property key.
+        assert_no_reserved(&out, "get_schema");
+    }
+}

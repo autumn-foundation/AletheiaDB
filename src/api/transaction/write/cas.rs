@@ -156,6 +156,11 @@ impl WriteTransaction {
             .into());
         }
 
+        // A namespace is immutable after creation: reject an explicit namespace
+        // on a CAS / lease-claim rather than silently ignoring it (#3349). This
+        // also covers `claim_with_lease_impl`, which routes through here.
+        namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
         // Reject engine-reserved keys on the user-supplied replacement map
         // (Issue #3349); the immutable namespace is re-stamped from the
         // existing node below.
@@ -238,6 +243,10 @@ impl WriteTransaction {
             }
             .into());
         }
+
+        // A namespace is immutable after creation: reject an explicit namespace
+        // on an edge CAS rather than silently ignoring it (#3349).
+        namespace::reject_namespace_on_update(options.namespace.as_ref())?;
 
         // Reject engine-reserved keys on the user-supplied replacement map
         // (Issue #3349); the immutable namespace is re-stamped below.

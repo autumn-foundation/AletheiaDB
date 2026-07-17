@@ -118,8 +118,21 @@ impl WriteRequestOptions {
         self
     }
 
-    /// Set the target namespace for a **create** write (Issue #3349). No effect
-    /// on update/replace/delete/CAS, where the namespace is immutable.
+    /// Set the target namespace for a **create** write (Issue #3349).
+    ///
+    /// Supplying a namespace to a non-create op (update / replace / CAS /
+    /// lease-claim) is rejected with `INVALID_ARGUMENT`
+    /// ([`NamespaceError::Immutable`](crate::core::namespace::NamespaceError::Immutable)),
+    /// because a namespace is fixed at creation and those paths re-stamp it from
+    /// the existing entity.
+    ///
+    /// Note: this low-level write-path does **not** auto-register the namespace
+    /// in the registry — that is the caller's responsibility (the
+    /// `create_*_in_namespace` convenience methods and the PR3 MCP/HTTP handlers
+    /// register after a successful commit). A raw `with_namespace` write can
+    /// therefore stamp an entity in a namespace the registry does not list; the
+    /// membership index rebuilt at load reconciles that registry-vs-data
+    /// divergence.
     #[must_use]
     pub fn with_namespace(mut self, namespace: crate::core::namespace::Namespace) -> Self {
         self.namespace = Some(namespace);

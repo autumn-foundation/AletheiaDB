@@ -142,6 +142,12 @@ pub fn property_map_to_py_dict(py: Python<'_>, map: &PropertyMap) -> PyResult<Py
     let dict = PyDict::new_bound(py);
     for (key, value) in map.iter() {
         let key_str = resolve_interned(*key);
+        // Elide engine-reserved ride-along keys (the namespace marker, #3349,
+        // and crypto-shred markers): they are surfaced as first-class fields,
+        // never as user properties.
+        if aletheiadb::core::namespace::is_reserved_property_key(&key_str) {
+            continue;
+        }
         dict.set_item(key_str, property_value_to_py(py, value)?)?;
     }
     Ok(dict.unbind())

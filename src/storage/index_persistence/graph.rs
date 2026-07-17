@@ -184,15 +184,22 @@ pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<Property
     for (key_idx, value) in &persisted.entries {
         let key_id = crate::core::InternedString::from_raw(*key_idx);
         let val = restore_property_value(value)?;
-        builder = GLOBAL_INTERNER
-            .resolve_with(key_id, |key_str| builder.insert(key_str, val))
-            .ok_or_else(|| {
-                IndexPersistenceError::Serialization(format!(
-                    "Failed to resolve interned property key with ID: {}. \
+        // Resolve the key to an owned Arc<str> BEFORE inserting it into the
+        // builder. `resolve_with` runs its closure while holding a DashMap shard
+        // read-guard on the interner; calling `builder.insert` (which re-interns
+        // the key) inside that closure re-enters the interner on the same shard
+        // and can self-deadlock under concurrent writers (shard reader/writer
+        // starvation — a restore racing another thread's fresh intern). Cloning
+        // the Arc via `resolve` releases the guard before the re-intern.
+        #[allow(deprecated)]
+        let key_str = GLOBAL_INTERNER.resolve(key_id).ok_or_else(|| {
+            IndexPersistenceError::Serialization(format!(
+                "Failed to resolve interned property key with ID: {}. \
                  This likely indicates data corruption.",
-                    key_idx
-                ))
-            })?;
+                key_idx
+            ))
+        })?;
+        builder = builder.insert(key_str.as_ref(), val);
     }
     Ok(builder.build())
 }

@@ -509,9 +509,18 @@ impl AletheiaDB {
     ) -> Result<crate::core::id::NodeId> {
         use crate::api::transaction::{WriteOps, WriteRequestOptions};
         let ns = Namespace::new(namespace.as_ref())?;
+        let options = WriteRequestOptions::new().with_namespace(ns.clone());
+        // Register the namespace only AFTER the write commits successfully.
+        // `ensure_registered` fsyncs a new registry entry; running it first would
+        // leave a durable empty namespace behind if the write then failed (e.g.
+        // a reserved-key rejection or constraint violation), even though the call
+        // returns Err (#3349). Preferring data-without-registry over
+        // registry-without-data keeps the registry from accumulating phantom
+        // namespaces; the membership index (PR2) rebuilds registry state from the
+        // data at load, so the surviving divergence is self-healing.
+        let node_id = self.write(|tx| tx.create_node_with_options(label, properties, options))?;
         self.namespaces.ensure_registered(&ns)?;
-        let options = WriteRequestOptions::new().with_namespace(ns);
-        self.write(|tx| tx.create_node_with_options(label, properties, options))
+        Ok(node_id)
     }
 
     /// Create an edge in the given namespace (Issue #3349). See
@@ -532,9 +541,13 @@ impl AletheiaDB {
     ) -> Result<crate::core::id::EdgeId> {
         use crate::api::transaction::{WriteOps, WriteRequestOptions};
         let ns = Namespace::new(namespace.as_ref())?;
+        let options = WriteRequestOptions::new().with_namespace(ns.clone());
+        // Register only AFTER a successful commit; see `create_node_in_namespace`
+        // for why (a failed write must not leave a durable empty namespace).
+        let edge_id = self
+            .write(|tx| tx.create_edge_with_options(source, target, label, properties, options))?;
         self.namespaces.ensure_registered(&ns)?;
-        let options = WriteRequestOptions::new().with_namespace(ns);
-        self.write(|tx| tx.create_edge_with_options(source, target, label, properties, options))
+        Ok(edge_id)
     }
 }
 

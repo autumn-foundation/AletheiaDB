@@ -1690,6 +1690,10 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // A namespace is immutable after creation: reject an explicit
+            // namespace on this update rather than silently ignoring it (#3349).
+            namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
             // Reject engine-reserved keys on the incoming PATCH (Issue #3349):
             // a user may not set/overwrite a namespace/shred ride-along key.
             namespace::reject_reserved_keys(&properties)?;
@@ -1795,6 +1799,10 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // A namespace is immutable after creation: reject an explicit
+            // namespace on this update rather than silently ignoring it (#3349).
+            namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
             // Reject engine-reserved keys on the incoming PATCH (Issue #3349).
             namespace::reject_reserved_keys(&properties)?;
 
@@ -1884,6 +1892,10 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // A namespace is immutable after creation: reject an explicit
+            // namespace on this replace rather than silently ignoring it (#3349).
+            namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
             // Reject engine-reserved keys on the user-supplied overwrite map
             // (Issue #3349); the immutable namespace is re-stamped from the
             // existing node inside `buffer_node_replace`.
@@ -1911,6 +1923,10 @@ impl WriteOps for WriteTransaction {
                 }
                 .into());
             }
+
+            // A namespace is immutable after creation: reject an explicit
+            // namespace on this replace rather than silently ignoring it (#3349).
+            namespace::reject_namespace_on_update(options.namespace.as_ref())?;
 
             // Reject engine-reserved keys on the user-supplied overwrite map
             // (Issue #3349); the immutable namespace is re-stamped from the

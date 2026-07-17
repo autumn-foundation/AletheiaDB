@@ -261,9 +261,9 @@ fn classify_lineage_error(e: &crate::core::lineage::LineageError) -> (McpErrorCo
 fn classify_namespace_error(e: &crate::core::namespace::NamespaceError) -> (McpErrorCode, bool) {
     use crate::core::namespace::NamespaceError;
     match e {
-        NamespaceError::InvalidName { .. } | NamespaceError::ReservedPropertyKey { .. } => {
-            (McpErrorCode::InvalidArgument, false)
-        }
+        NamespaceError::InvalidName { .. }
+        | NamespaceError::ReservedPropertyKey { .. }
+        | NamespaceError::Immutable => (McpErrorCode::InvalidArgument, false),
         NamespaceError::NotFound { .. } => (McpErrorCode::NotFound, false),
         NamespaceError::AlreadyExists { .. } => (McpErrorCode::Conflict, false),
     }
