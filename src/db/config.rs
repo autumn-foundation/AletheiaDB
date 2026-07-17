@@ -719,6 +719,15 @@ impl AletheiaDB {
                 )?;
             }
 
+            // Issue #3616 PR3: resume an interrupted plaintext → encrypted enable
+            // migration BEFORE loading indexes, so any half-wrapped index/cold
+            // bytes are completed before the index directory is read back. This is
+            // DISTINCT from `resume_pending_rotation` above: an interrupted enable
+            // has NOT yet flipped the encryption.state authority, so
+            // `config.encryption.enabled` is still false and that gated path never
+            // fires. A guarded no-op when no pending-enable ledger exists.
+            db.resume_pending_enable()?;
+
             // Load indexes on startup if enabled
             if let Some(ref manager) = persistence_manager
                 && config.persistence.load_on_startup
