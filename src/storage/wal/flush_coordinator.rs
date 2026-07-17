@@ -49,6 +49,7 @@ use super::segment_reader::{
     WAL_VERSION_STRING_LABELS,
 };
 use crate::encryption::wal_encryption::WalKeyring;
+use arc_swap::ArcSwapOption;
 
 /// Metadata about a WAL segment's LSN range.
 ///
@@ -124,16 +125,24 @@ pub struct FlushCoordinatorConfig {
     /// Write buffer size for segment files.
     pub write_buffer_size: usize,
     /// Optional WAL DEK keyring for encrypting WAL entries before writing to
-    /// disk (Issue #3617).
+    /// disk, held in a runtime-swappable presence cell (Issues #3617, #3616).
     ///
-    /// When set, entries are encrypted (4-byte length-prefixed) under the
-    /// keyring's CURRENT generation and fresh segments use the keyversioned
-    /// (v16) header stamping that generation's `key_version`; a full-MEK
-    /// rotation advances the current generation so subsequent segments are
-    /// written under the new DEK while legacy/old-DEK segments still replay
-    /// under the retained old generation. When `None`, segments use the
+    /// When the cell holds a keyring, entries are encrypted (4-byte
+    /// length-prefixed) under its CURRENT generation and fresh segments use the
+    /// keyversioned (v16) header stamping that generation's `key_version`; a
+    /// full-MEK rotation advances the current generation so subsequent segments
+    /// are written under the new DEK while legacy/old-DEK segments still replay
+    /// under the retained old generation. When empty (`None`), segments use the
     /// plaintext (v13) format (backward compatible).
-    pub wal_keyring: Option<WalKeyring>,
+    ///
+    /// This is the **same** `Arc<ArcSwapOption<..>>` cell shared with the owning
+    /// [`ConcurrentWalSystem`](super::concurrent_system::ConcurrentWalSystem), so a
+    /// runtime install (`None` → `Some`, Issue #3616 PR2) performed through the
+    /// system is observed here on the write path immediately. All write-path reads
+    /// happen under the coordinator `writer` mutex, and the install stores into the
+    /// cell inside the seal→reopen hand-off, so the (segment header, encrypting
+    /// cipher) pair is always consistent.
+    pub wal_keyring: Arc<ArcSwapOption<WalKeyring>>,
 }
 
 impl std::fmt::Debug for FlushCoordinatorConfig {
@@ -145,7 +154,7 @@ impl std::fmt::Debug for FlushCoordinatorConfig {
             .field("flush_interval_ms", &self.flush_interval_ms)
             .field("sync_on_flush", &self.sync_on_flush)
             .field("write_buffer_size", &self.write_buffer_size)
-            .field("wal_keyring", &self.wal_keyring)
+            .field("wal_keyring", &*self.wal_keyring.load())
             .finish()
     }
 }
@@ -159,7 +168,7 @@ impl Default for FlushCoordinatorConfig {
             flush_interval_ms: 10, // 10ms
             sync_on_flush: true,
             write_buffer_size: 64 * 1024, // 64 KB
-            wal_keyring: None,
+            wal_keyring: Arc::new(ArcSwapOption::from(None)),
         }
     }
 }
@@ -444,7 +453,7 @@ impl FlushCoordinator {
     /// advances it — all serialized under the coordinator `writer` mutex so the
     /// (segment header, encrypting cipher) pair is always consistent.
     fn current_write_format(&self) -> (u8, Option<u32>) {
-        match &self.config.wal_keyring {
+        match self.config.wal_keyring.load().as_ref() {
             Some(keyring) => (
                 WAL_VERSION_ENCRYPTED_KEYVERSIONED,
                 Some(keyring.current_version()),
@@ -881,6 +890,7 @@ impl FlushCoordinator {
             let batch_cipher = self
                 .config
                 .wal_keyring
+                .load()
                 .as_ref()
                 .and_then(|k| k.current())
                 .map(|(cipher, _version)| cipher);
