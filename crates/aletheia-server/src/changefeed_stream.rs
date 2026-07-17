@@ -207,6 +207,12 @@ pub async fn changes_stream(
                 // `closed()` at once, so we stop and drop the subscription without
                 // waiting for the next record or the keepalive tick.
                 biased;
+                // If a record's `recv_async` and `tx.closed()` are ready on the
+                // same poll, disconnect wins and that final in-flight batch is
+                // dropped with the subscription. This is intentional and matches
+                // the SSE at-least-once contract: the client resumes from the
+                // last cursor it actually received via `list_changes` +
+                // `resume_token`, so nothing is silently lost.
                 _ = tx.closed() => return,
                 res = sub.recv_async(STREAM_POLL_INTERVAL) => match res {
                     // Keepalive tick with nothing buffered: loop (the SSE

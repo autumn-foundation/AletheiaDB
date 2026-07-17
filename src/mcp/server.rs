@@ -5700,6 +5700,13 @@ impl AletheiaMcpServer {
     /// mappings (Issue #3234): a lagged subscription → retriable
     /// `RESOURCE_EXHAUSTED` with `details.resume_token`; a subscribe cap breach →
     /// retriable `UNAVAILABLE`; a malformed `from_token` → `INVALID_ARGUMENT`.
+    ///
+    /// This synchronous entry is now reached only via `dispatch_tool`
+    /// (embedded / programmatic / test callers): the native MCP `call_tool`
+    /// seam intercepts `await_changes` and routes it through the event-driven
+    /// [`Self::dispatch_await_changes_async`] instead (Issue #3673), so the
+    /// `block_in_place` worker bridge below no longer runs on the live MCP
+    /// server surface.
     fn handle_await_changes(
         &self,
         args: serde_json::Value,
