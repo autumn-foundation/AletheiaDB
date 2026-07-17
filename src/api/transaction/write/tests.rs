@@ -4325,6 +4325,11 @@ mod lock_poisoning_tests {
     /// Poisoning `current_timestamp` causes `commit()` to return `LockPoisoned`
     /// instead of panicking.
     #[test]
+    // Produces `Error::Transaction(LockPoisoned)`, which bumps the process-global
+    // `error_transaction_total` metric under the `observability` feature. Join the
+    // `metrics` serial group so it never runs concurrently with the delta-based
+    // metric asserters that read that counter (de-flake, Wave-8 Lane P).
+    #[cfg_attr(feature = "observability", serial_test::serial(metrics))]
     fn test_timestamp_lock_poisoning_during_commit() {
         let harness = TestHarness::new();
         let poisoned_ts: Arc<Mutex<Timestamp>> = Arc::new(Mutex::new(time::now()));
@@ -4354,6 +4359,10 @@ mod lock_poisoning_tests {
     /// When multiple threads attempt concurrent commits against a poisoned lock,
     /// each thread gets a `LockPoisoned` error rather than panicking.
     #[test]
+    // Each thread produces `Error::Transaction(LockPoisoned)`, bumping the
+    // process-global `error_transaction_total` metric under `observability`. Join
+    // the `metrics` serial group (de-flake, Wave-8 Lane P).
+    #[cfg_attr(feature = "observability", serial_test::serial(metrics))]
     fn test_concurrent_commits_with_poisoned_lock() {
         let poisoned_ts: Arc<Mutex<Timestamp>> = Arc::new(Mutex::new(time::now()));
         poison_mutex(&poisoned_ts);
@@ -4398,6 +4407,10 @@ mod lock_poisoning_tests {
     /// Poisoning `commit_clock_observed_at` causes `commit()` to return
     /// `LockPoisoned` via the adaptive forward-jump guard, not a panic.
     #[test]
+    // Produces `Error::Transaction(LockPoisoned)`, bumping the process-global
+    // `error_transaction_total` metric under `observability`. Join the `metrics`
+    // serial group (de-flake, Wave-8 Lane P).
+    #[cfg_attr(feature = "observability", serial_test::serial(metrics))]
     fn test_commit_clock_observed_at_lock_poisoning() {
         let harness = TestHarness::new();
         let poisoned_clock: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
