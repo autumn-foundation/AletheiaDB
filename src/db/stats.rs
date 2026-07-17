@@ -71,6 +71,19 @@ pub struct DatabaseStats {
     /// Tamper-evident provenance hash chain status (Issue #3351). `enabled:
     /// false` with all-`None` fields when the chain is not configured.
     pub chain: ProvenanceChainStats,
+    /// Per-namespace current node/edge counts (Issue #3349). One entry per
+    /// registered or populated namespace, sorted by name; O(1) membership-index
+    /// reads. Empty on a database that only uses the implicit `default`
+    /// namespace with no explicit registrations (the `default` entry is still
+    /// present when it holds entities).
+    ///
+    /// **Not serialized in PR2**: surfacing this block through the MCP/HTTP
+    /// `database_stats` JSON is deliberately deferred to PR3 (the coordinated
+    /// surface slice), so the wire shape is unchanged here. The field is fully
+    /// populated on the Rust `AletheiaDB::stats()` value; only serialization is
+    /// skipped. PR3 removes this `skip` and updates the shape-stability test.
+    #[cfg_attr(feature = "serde", serde(skip_serializing))]
+    pub namespaces: Vec<crate::db::namespace_query::NamespaceCount>,
     /// Push-changefeed subscription state, including the per-principal quota
     /// breakdown (Issue #3678). This is the authenticated surface for the
     /// per-principal detail deliberately kept OFF the bounded `/metrics`
@@ -409,6 +422,9 @@ impl AletheiaDB {
             },
         };
 
+        // Per-namespace counts (Issue #3349): O(1) membership-index reads.
+        let namespaces = self.namespace_counts();
+
         // Changefeed subscription state (Issue #3678): a brief registry read,
         // O(live subscriptions). The per-principal breakdown is the authenticated
         // surface for the fairness quota — never a `/metrics` label, and its
@@ -440,6 +456,7 @@ impl AletheiaDB {
             cold_storage,
             wal,
             chain,
+            namespaces,
             changefeed,
         }
     }

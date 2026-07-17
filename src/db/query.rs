@@ -116,14 +116,32 @@ impl AletheiaDB {
             let _span =
                 crate::observability::query_execute_span("query.execute", "hybrid").entered();
 
+            // Namespace scope (Issue #3349, PR2) is orthogonal to planning: the
+            // planner ignores it and the executor applies it as an entity filter
+            // (and traversal boundary). Lift it out before the plan consumes the
+            // query by value.
+            let scope = query.scope.clone();
+
+            // Validate the scope before planning/executing (Issue #3349 A3):
+            // an unknown namespace is a `NOT_FOUND` (not a silently empty
+            // result), and an empty `List` scope built via
+            // `QueryBuilder::in_namespaces([])` is an `INVALID_ARGUMENT` (not a
+            // silent unscoped-all). `All`/omitted scope validate trivially.
+            if let Some(scope) = &scope {
+                self.validate_scope(scope)?;
+            }
+
             // Use cached statistics for cost-based optimization
             // Statistics are shared across all queries for this database instance
             let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
             let physical_plan = planner.plan(query)?;
 
             // Execute the plan
-            let executor =
+            let mut executor =
                 QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
+            if let Some(scope) = scope {
+                executor = executor.with_namespace_scope(scope);
+            }
 
             executor.execute(physical_plan)
         })();

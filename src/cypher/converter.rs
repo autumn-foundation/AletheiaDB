@@ -490,6 +490,8 @@ impl CypherConverter {
                     ops,
                     temporal_context,
                     hints: QueryHints::default(),
+                    // Cypher namespace scoping is a follow-up (PR2b).
+                    scope: None,
                 })
             }
             // A standalone `UNWIND` produces scalar rows, not stored entities,

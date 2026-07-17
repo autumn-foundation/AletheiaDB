@@ -48,6 +48,8 @@ pub mod graph_view;
 pub mod lineage;
 /// Agent-scoped memory namespaces: registry + namespaced entity creation (Issue #3349).
 pub mod namespace;
+/// Namespace-scoped reads and traversal (Issue #3349, PR2).
+pub mod namespace_query;
 /// Basic graph operations (CRUD).
 pub mod ops;
 /// Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374).
@@ -88,6 +90,7 @@ pub use crypto_shred::{
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
 pub use lineage::{FactStatus, LineageView, LineageViewEntry};
 pub use namespace::NamespaceInfo;
+pub use namespace_query::NamespaceCount;
 pub use ops::NodesAtTime;
 pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};

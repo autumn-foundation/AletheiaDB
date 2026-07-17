@@ -12,6 +12,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::core::error::Result;
+use crate::core::namespace::{NamespaceScope, ResolvedScope};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
@@ -123,6 +124,17 @@ pub struct QueryExecutor {
     historical: Arc<RwLock<HistoricalStorage>>,
     /// Execution configuration (used for timeout/parallelism in future)
     _config: ExecutionConfig,
+    /// Optional namespace scope (Issue #3349, PR2). When set, the executor
+    /// filters produced entities to those whose namespace ∈ scope and threads
+    /// the boundary into graph traversal. `Arc` so it can be cheaply shared into
+    /// the traversal iterator. `None` ⇒ prior namespace-agnostic behavior.
+    scope: Option<Arc<NamespaceScope>>,
+    /// The attached `scope` resolved to interned ids **once** (Issue #3349, PR2
+    /// hoist), computed in [`with_namespace_scope`](Self::with_namespace_scope)
+    /// and cheaply cloned into every source-leaf filter and the traversal
+    /// boundary so no per-source/per-hop probe re-derives ids or allocates.
+    /// [`ResolvedScope::All`] when no restricting scope is attached.
+    resolved_scope: ResolvedScope,
 }
 
 impl QueryExecutor {
@@ -132,6 +144,8 @@ impl QueryExecutor {
             current,
             historical,
             _config: ExecutionConfig::default(),
+            scope: None,
+            resolved_scope: ResolvedScope::All,
         }
     }
 
@@ -145,7 +159,29 @@ impl QueryExecutor {
             current,
             historical,
             _config: config,
+            scope: None,
+            resolved_scope: ResolvedScope::All,
         }
+    }
+
+    /// Attach a namespace scope (Issue #3349, PR2). Produced entities are
+    /// filtered to those in scope and graph traversal honors the scope boundary
+    /// (an out-of-scope edge or node is never crossed). [`NamespaceScope::All`]
+    /// is a no-op filter. See [`QueryBuilder::in_namespace`](crate::query::QueryBuilder::in_namespace).
+    #[must_use]
+    pub fn with_namespace_scope(mut self, scope: NamespaceScope) -> Self {
+        // Resolve the scope to interned ids ONCE here (Issue #3349, PR2 hoist),
+        // then thread cheap clones into each source-leaf filter and the traversal
+        // boundary, rather than re-resolving per source/per traversal.
+        self.resolved_scope = scope.resolve();
+        self.scope = Some(Arc::new(scope));
+        self
+    }
+
+    /// Whether the attached scope actually restricts results (i.e. is present and
+    /// not [`NamespaceScope::All`]).
+    fn scope_is_restricting(&self) -> bool {
+        matches!(&self.scope, Some(s) if !matches!(s.as_ref(), NamespaceScope::All))
     }
 
     /// Execute a physical plan and return results.
@@ -199,6 +235,10 @@ impl QueryExecutor {
             let bind_edge = plan_needs_edge_binding(&plan.root);
             self.build_op(&plan.root, &mut None, 0, bind_edge)?
         };
+        // Namespace scope (Issue #3349, PR2) is enforced at the source operators
+        // during `build_op` (see `maybe_scope_source`), so everything downstream --
+        // LIMIT/SKIP, ORDER BY, aggregation, COUNT -- already sees only in-scope
+        // rows. No outermost post-filter is applied here.
         // Wrap with provenance filter to conditionally strip metadata
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
@@ -227,6 +267,7 @@ impl QueryExecutor {
             let bind_edge = plan_needs_edge_binding(&plan.root);
             self.build_op(&plan.root, &mut registry, 0, bind_edge)?
         };
+        // Scope is applied at the source operators (see `maybe_scope_source`).
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
@@ -443,19 +484,27 @@ impl QueryExecutor {
                     temporal_context,
                 } => {
                     let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
-                    Box::new(
-                        iterators::TraversalIterator::new(
-                            input_iter,
-                            *direction,
-                            label.clone(),
-                            *min_depth,
-                            *traversal_depth,
-                            Arc::clone(&self.current),
-                            Arc::clone(&self.historical),
-                            *temporal_context,
-                        )
-                        .bind_edges(bind_edge),
+                    let mut traversal = iterators::TraversalIterator::new(
+                        input_iter,
+                        *direction,
+                        label.clone(),
+                        *min_depth,
+                        *traversal_depth,
+                        Arc::clone(&self.current),
+                        Arc::clone(&self.historical),
+                        *temporal_context,
                     )
+                    .bind_edges(bind_edge);
+                    // Namespace boundary (Issue #3349, PR2): when a restricting
+                    // scope is attached, the traversal never crosses an
+                    // out-of-scope edge nor bridges through an out-of-scope node.
+                    if self.scope_is_restricting()
+                        && let Some(scope) = &self.scope
+                    {
+                        traversal = traversal
+                            .with_namespace_scope(Arc::clone(scope), self.resolved_scope.clone());
+                    }
+                    Box::new(traversal)
                 }
 
                 PhysicalOp::PropertyScan {
@@ -530,12 +579,30 @@ impl QueryExecutor {
 
                 PhysicalOp::OptionalApply { input, steps } => {
                     let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
-                    Box::new(iterators::OptionalApplyIterator::new(
-                        input_iter,
-                        steps.clone(),
-                        Arc::clone(&self.current),
-                        Arc::clone(&self.historical),
-                    ))
+                    // Namespace scope (Issue #3349, PR2): thread the scope into the
+                    // OPTIONAL MATCH sub-pipeline so its source leaf and traversal
+                    // hops are scope-bounded, matching the main pipeline (defense
+                    // in depth — unreachable until PR3 wires Cypher/AQL scope to
+                    // OPTIONAL MATCH, but never silently wrong). The unscoped path
+                    // uses the plain constructor and pays nothing.
+                    match (self.scope_is_restricting(), &self.scope) {
+                        (true, Some(scope)) => {
+                            Box::new(iterators::OptionalApplyIterator::with_namespace_scope(
+                                input_iter,
+                                steps.clone(),
+                                Arc::clone(&self.current),
+                                Arc::clone(&self.historical),
+                                Some(Arc::clone(scope)),
+                                self.resolved_scope.clone(),
+                            ))
+                        }
+                        _ => Box::new(iterators::OptionalApplyIterator::new(
+                            input_iter,
+                            steps.clone(),
+                            Arc::clone(&self.current),
+                            Arc::clone(&self.historical),
+                        )),
+                    }
                 }
 
                 PhysicalOp::Aggregate {
@@ -637,11 +704,52 @@ impl QueryExecutor {
                 }
             };
 
+        // Namespace scope (Issue #3349, PR2): push the scope filter down onto the
+        // SOURCE operators (scans, lookups, property/vector sources) rather than
+        // applying it as an outermost post-filter. Wrapping the leaf that produces
+        // entities guarantees every downstream operator -- LIMIT/SKIP, ORDER BY,
+        // DISTINCT, aggregation, and COUNT -- sees only in-scope rows, so a scoped
+        // `count()` reports the scoped cardinality (not the global one) and a
+        // scoped `LIMIT n` returns up to `n` *in-scope* rows (not `n` pre-filter
+        // rows of which some are then dropped). Graph traversal is deliberately
+        // NOT wrapped here: `IndexedTraversal` enforces the boundary at build time
+        // (never bridging an out-of-scope edge/node) and its own input source is
+        // wrapped by this same recursion, so its start node is scope-checked
+        // (Issue #3349 A4) and its emitted targets are already in-scope.
+        let iter = self.maybe_scope_source(op, iter);
+
         // Instrument this operator when profiling.
         Ok(match handle {
             Some(h) => Box::new(ProfilingIterator::new(iter, h)),
             None => iter,
         })
+    }
+
+    /// Wrap a **source-leaf** operator's iterator in the namespace-scope entity
+    /// filter (Issue #3349, PR2) when a restricting scope is attached; otherwise
+    /// return it unchanged so the namespace-agnostic path pays nothing.
+    ///
+    /// Only leaf operators that *produce* entities are wrapped (scans, id
+    /// lookups, property scans, and vector/temporal sources). Intermediate and
+    /// combining operators are never wrapped: their entity rows always originate
+    /// at a wrapped source (or at an already-boundary-filtered traversal), so
+    /// double-filtering is avoided. See [`is_scoped_source_leaf`].
+    fn maybe_scope_source(
+        &self,
+        op: &PhysicalOp,
+        iter: Box<dyn ResultIterator>,
+    ) -> Box<dyn ResultIterator> {
+        match &self.scope {
+            Some(scope) if self.scope_is_restricting() && is_scoped_source_leaf(op) => {
+                Box::new(iterators::ScopeFilterIterator::new(
+                    iter,
+                    Arc::clone(scope),
+                    self.resolved_scope.clone(),
+                    Arc::clone(&self.current),
+                ))
+            }
+            _ => iter,
+        }
     }
 
     fn execute_hnsw_search(
@@ -763,6 +871,35 @@ impl QueryExecutor {
 /// including binary set ops, aggregation, and node/temporal scans -- is treated
 /// as not edge-typed, so the conservative default is the existing pass-through /
 /// node-only behavior.
+/// Whether `op` is a **source leaf** that produces entity rows directly from
+/// storage and therefore must have the namespace scope filter applied to it
+/// (Issue #3349, PR2). These are the scans, id lookups, property scans, and
+/// vector/temporal sources. Every entity row in a plan originates at one of
+/// these leaves (or at a boundary-filtered [`PhysicalOp::IndexedTraversal`],
+/// which is handled separately and is intentionally excluded here), so wrapping
+/// exactly these leaves pushes the scope filter below LIMIT/SKIP/ORDER BY/COUNT
+/// without any double-filtering.
+///
+/// `Empty` produces no rows, so it is not wrapped. `IndexedTraversal` is
+/// excluded (it enforces the boundary at build time and its own input source is
+/// wrapped by the recursion). Combining/intermediate operators are excluded
+/// because their inputs are already scoped.
+fn is_scoped_source_leaf(op: &PhysicalOp) -> bool {
+    matches!(
+        op,
+        PhysicalOp::NodeLookup { .. }
+            | PhysicalOp::NodeScan { .. }
+            | PhysicalOp::EdgeScan { .. }
+            | PhysicalOp::HnswSearch { .. }
+            | PhysicalOp::TemporalNodeLookup { .. }
+            | PhysicalOp::TemporalVectorSearch { .. }
+            | PhysicalOp::TemporalNodeScan { .. }
+            | PhysicalOp::TemporalNodeRangeScan { .. }
+            | PhysicalOp::SimilarToNode { .. }
+            | PhysicalOp::PropertyScan { .. }
+    )
+}
+
 fn subtree_yields_edges(op: &PhysicalOp) -> bool {
     match op {
         PhysicalOp::EdgeScan { .. } => true,

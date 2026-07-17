@@ -54,6 +54,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::core::NodeId;
+use crate::core::namespace::{Namespace, NamespaceScope};
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::index::vector::DistanceMetric;
@@ -70,6 +71,12 @@ pub struct Query {
     pub(crate) temporal_context: Option<TemporalContext>,
     /// Query hints for optimization
     pub(crate) hints: QueryHints,
+    /// Namespace scope (Issue #3349, PR2). `None` reproduces prior,
+    /// namespace-agnostic behavior exactly. When set, the executor filters
+    /// produced entities — start nodes, traversal results, and ranked results —
+    /// to those whose (immutable) namespace ∈ scope, and traversal never crosses
+    /// an out-of-scope edge or bridges through an out-of-scope node.
+    pub(crate) scope: Option<NamespaceScope>,
 }
 
 impl Query {
@@ -137,6 +144,7 @@ pub struct QueryBuilder<S: QueryState> {
     ops: Vec<QueryOp>,
     temporal_context: Option<TemporalContext>,
     hints: QueryHints,
+    scope: Option<NamespaceScope>,
     _phantom: PhantomData<S>,
 }
 
@@ -148,6 +156,7 @@ impl QueryBuilder<state::Initial> {
             ops: Vec::new(),
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
             _phantom: PhantomData,
         }
     }
@@ -168,6 +177,17 @@ impl QueryBuilder<state::Initial> {
     ///
     /// Uses the default "embedding" property and Cosine distance.
     /// For custom properties or metrics, use [`find_similar_builder()`](Self::find_similar_builder).
+    ///
+    /// **Namespace scope caveat (Issue #3349, PR2):** when combined with
+    /// [`in_namespace`](Self::in_namespace)/[`in_namespaces`](Self::in_namespaces),
+    /// the executor performs the index k-NN first and then **post-filters** the
+    /// `k` results to the scope, so a scoped vector search here may return
+    /// **fewer than `k`** in-scope rows. For a filter-complete k-NN that
+    /// over-fetches to guarantee `k` genuinely in-scope results, use
+    /// [`AletheiaDB::find_similar_scoped`](crate::AletheiaDB::find_similar_scoped)
+    /// /
+    /// [`find_similar_by_embedding_scoped`](crate::AletheiaDB::find_similar_by_embedding_scoped)
+    /// instead.
     #[must_use]
     pub fn find_similar(
         self,
@@ -816,6 +836,55 @@ impl<S: QueryState> QueryBuilder<S> {
         let query = self.build();
         db.execute_query(query)
     }
+    /// Scope the query to a single namespace (Issue #3349, PR2).
+    ///
+    /// Results — start nodes, traversal results, and ranked results — are
+    /// filtered to entities whose (immutable) namespace equals `namespace`, and
+    /// traversal never crosses an out-of-scope edge or bridges through an
+    /// out-of-scope node. Omitting the scope reproduces prior behavior exactly.
+    ///
+    /// Note: for a filter-complete index-backed k-NN (`k` guaranteed in-scope
+    /// results even under a highly selective scope), prefer
+    /// [`AletheiaDB::find_similar_scoped`](crate::AletheiaDB::find_similar_scoped);
+    /// the builder applies scope as a post-filter, so an index-search start
+    /// (`find_similar`/`similar_to`) may yield fewer than `k` in-scope rows.
+    #[must_use]
+    pub fn in_namespace(mut self, namespace: Namespace) -> Self {
+        self.scope = Some(NamespaceScope::single(namespace));
+        self
+    }
+
+    /// Scope the query to the **union** of a non-empty list of namespaces
+    /// (Issue #3349, PR2). See [`in_namespace`](Self::in_namespace).
+    ///
+    /// An empty list is an **invalid** scope, not "no scope": an empty union
+    /// would silently match nothing, which the never-silently-wrong contract
+    /// forbids. Because the builder cannot surface an error, the empty-list
+    /// intent is preserved as an empty [`NamespaceScope::List`] and rejected with
+    /// `INVALID_ARGUMENT` when the query is executed
+    /// ([`execute`](Self::execute) → `AletheiaDB::execute_query` calls
+    /// `validate_scope`). It must never silently degrade to the unscoped
+    /// (all-namespaces) path.
+    #[must_use]
+    pub fn in_namespaces(mut self, namespaces: impl IntoIterator<Item = Namespace>) -> Self {
+        let list: Vec<Namespace> = namespaces.into_iter().collect();
+        // Preserve the empty-list intent (do NOT collapse to `None`, which would
+        // mean "unscoped / all namespaces"). An empty `List` is a distinct,
+        // match-nothing scope that the execute path validates and rejects as
+        // INVALID_ARGUMENT (Issue #3349 A2).
+        self.scope = Some(NamespaceScope::List(list));
+        self
+    }
+
+    /// Scope the query to every namespace (Issue #3349, PR2) — i.e. no namespace
+    /// filtering, the `all` selector. Useful to make cross-namespace intent
+    /// explicit at a call site.
+    #[must_use]
+    pub fn in_all_namespaces(mut self) -> Self {
+        self.scope = Some(NamespaceScope::all());
+        self
+    }
+
     /// Build the final query
     #[must_use]
     pub fn build(self) -> Query {
@@ -823,6 +892,7 @@ impl<S: QueryState> QueryBuilder<S> {
             ops: self.ops,
             temporal_context: self.temporal_context,
             hints: self.hints,
+            scope: self.scope,
         }
     }
 
@@ -833,6 +903,7 @@ impl<S: QueryState> QueryBuilder<S> {
             ops: self.ops,
             temporal_context: self.temporal_context,
             hints: self.hints,
+            scope: self.scope,
             _phantom: PhantomData,
         }
     }

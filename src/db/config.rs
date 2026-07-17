@@ -149,6 +149,36 @@ fn wire_temporal_indexes(db: &AletheiaDB) {
     hist.rebuild_temporal_index_from_versions();
 }
 
+/// Reconcile the namespace registry with the entities actually present after a
+/// load (Issue #3349, PR2). Every namespace that holds at least one node or edge
+/// in the rebuilt membership index is ensured-registered, so a scoped read
+/// naming it validates (rather than returning `NOT_FOUND`) after a load path
+/// that populates entities without the `namespaces.json` sidecar — notably
+/// `.albk` restore, whose payload carries the ride-along namespace on each
+/// entity but not the registry sidecar.
+///
+/// Idempotent and off the hot path: on a durable reopen (sidecar already loaded)
+/// every name is already registered, so this is a cheap no-op scan. A per-name
+/// persist failure never bricks startup — the entity data is already loaded and
+/// the membership index is authoritative for isolation.
+///
+/// v1 caveat: an *empty* explicitly-created namespace (registered but holding no
+/// entities) is not carried across `.albk` restore, because the registry sidecar
+/// is not part of the backup payload; folding the registry into the payload is a
+/// deliberate follow-up (`// TODO(#3349)`).
+fn reconcile_namespace_registry(db: &AletheiaDB) {
+    for ns in db.current.populated_namespaces() {
+        if let Err(_e) = db.namespaces.ensure_registered(&ns) {
+            #[cfg(feature = "observability")]
+            tracing::warn!(
+                namespace = %ns,
+                error = %_e,
+                "failed to auto-register namespace during load reconciliation"
+            );
+        }
+    }
+}
+
 impl AletheiaDB {
     /// Create a new **ephemeral** in-memory database.
     ///
@@ -934,6 +964,7 @@ impl AletheiaDB {
             }
 
             wire_temporal_indexes(&db);
+            reconcile_namespace_registry(&db);
 
             // Initialize cold storage if enabled
             if enable_cold_storage && let Some(cold_storage_path) = cold_storage_path {
@@ -1134,6 +1165,7 @@ impl AletheiaDB {
             };
             seed_startup_current_timestamp(&db)?;
             wire_temporal_indexes(&db);
+            reconcile_namespace_registry(&db);
 
             Ok(db)
         })();

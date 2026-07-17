@@ -1257,6 +1257,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         assert!(planner.plan(query).is_err());
@@ -1283,6 +1284,7 @@ mod tests {
             ops: vec![QueryOp::Filter(Predicate::True)],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         assert!(planner.plan(query).is_err());
@@ -1339,6 +1341,7 @@ mod tests {
             ops: vec![QueryOp::Limit(10)],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         assert!(planner.plan(query).is_err());
@@ -1407,6 +1410,7 @@ mod tests {
             ops: vec![QueryOp::ScanNodes { label: None }, QueryOp::Count],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1420,6 +1424,7 @@ mod tests {
             ops: vec![QueryOp::Count],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         assert!(planner.plan(query).is_err());
@@ -1433,6 +1438,7 @@ mod tests {
             ops: vec![QueryOp::ScanNodes { label: None }, QueryOp::Distinct],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1450,6 +1456,7 @@ mod tests {
             ],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1503,6 +1510,7 @@ mod tests {
             ops: vec![],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         assert!(planner.plan(query).is_err());
@@ -1523,6 +1531,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         assert!(planner.plan(query).is_err());
@@ -1535,6 +1544,7 @@ mod tests {
             ops: vec![QueryOp::Distinct],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         assert!(planner.plan(query).is_err());
@@ -1547,6 +1557,7 @@ mod tests {
             ops: vec![QueryOp::Project(vec!["name".to_string()])],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         assert!(planner.plan(query).is_err());
@@ -1637,6 +1648,7 @@ mod tests {
             ],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1673,6 +1685,7 @@ mod tests {
             ],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1689,6 +1702,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let result = planner.plan(query);
@@ -1708,6 +1722,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let result = planner.plan(query);
@@ -1724,6 +1739,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let result = planner.plan(query);
@@ -1740,6 +1756,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let result = planner.plan(query);
@@ -1774,6 +1791,7 @@ mod tests {
             }],
             temporal_context: Some(TemporalContext::as_of(now, now)),
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1797,6 +1815,7 @@ mod tests {
             }],
             temporal_context: Some(TemporalContext::as_of_transaction_time(now)),
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1815,6 +1834,7 @@ mod tests {
             }],
             temporal_context: Some(TemporalContext::valid_time_between(range)),
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1836,6 +1856,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1855,6 +1876,7 @@ mod tests {
             }],
             temporal_context: Some(TemporalContext::transaction_time_between(range)),
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let err = planner.plan(query).unwrap_err();
@@ -1879,6 +1901,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         // Add temporal context
@@ -1896,6 +1919,7 @@ mod tests {
             ops: vec![QueryOp::FilterLabel("Person".to_string())],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let result = planner.plan(query);
@@ -1911,6 +1935,7 @@ mod tests {
             ops: vec![QueryOp::Skip(10)],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let result = planner.plan(query);
@@ -1948,6 +1973,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -1977,6 +2003,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -2235,6 +2262,7 @@ mod tests {
             ],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -2254,6 +2282,7 @@ mod tests {
             ops: vec![QueryOp::ScanEdges { edge_type: None }, QueryOp::Limit(5)],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -2289,6 +2318,7 @@ mod tests {
             ],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -2344,6 +2374,7 @@ mod tests {
             ],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -2391,6 +2422,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();
@@ -2423,6 +2455,7 @@ mod tests {
             ],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let err = planner.plan(query).unwrap_err();
@@ -2447,6 +2480,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let err = planner.plan(query).unwrap_err();
@@ -2472,6 +2506,7 @@ mod tests {
             ],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let err = planner.plan(query).unwrap_err();
@@ -2500,6 +2535,7 @@ mod tests {
             }],
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let err = planner.plan(query).unwrap_err();
@@ -2527,6 +2563,7 @@ mod tests {
             ],
             temporal_context: Some(TemporalContext::as_of(1000.into(), 2000.into())),
             hints: QueryHints::default(),
+            scope: None,
         };
 
         let plan = planner.plan(query).unwrap();

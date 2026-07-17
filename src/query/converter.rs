@@ -756,6 +756,9 @@ impl AstConverter {
                 ops,
                 temporal_context,
                 hints,
+                // AQL/Cypher namespace scoping is a follow-up (PR2b); the
+                // converter never scopes today (Issue #3349).
+                scope: None,
             });
         }
 
@@ -770,6 +773,9 @@ impl AstConverter {
                 ops,
                 temporal_context,
                 hints,
+                // AQL/Cypher namespace scoping is a follow-up (PR2b); the
+                // converter never scopes today (Issue #3349).
+                scope: None,
             });
         }
 
@@ -815,6 +821,8 @@ impl AstConverter {
             ops,
             temporal_context,
             hints,
+            // AQL/Cypher namespace scoping is a follow-up (PR2b).
+            scope: None,
         })
     }
 
