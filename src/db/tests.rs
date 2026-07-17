@@ -1950,6 +1950,11 @@ fn test_write_transaction_commit_then_rollback_path() {
 }
 
 #[test]
+// This test propagates an `Error::Storage`, which bumps the process-global
+// `error_storage_total` metric under the `observability` feature. It must join
+// the `metrics` serial group so it never runs concurrently with the delta-based
+// metric asserters that read that same counter (de-flake, Wave-8 Lane P).
+#[cfg_attr(feature = "observability", serial_test::serial(metrics))]
 fn test_write_closure_error_propagation() {
     let db = AletheiaDB::new().unwrap();
 
@@ -1972,6 +1977,10 @@ fn test_write_closure_error_propagation() {
 }
 
 #[test]
+// Propagates an `Error::Storage` (bumps `error_storage_total` under
+// `observability`); joins the `metrics` serial group so it never races the
+// delta-based metric asserters reading that counter (de-flake, Wave-8 Lane P).
+#[cfg_attr(feature = "observability", serial_test::serial(metrics))]
 fn test_read_closure_error_propagation() {
     let db = AletheiaDB::new().unwrap();
 
@@ -2763,23 +2772,39 @@ fn poison_mutex<T>(mutex: &std::sync::Arc<std::sync::Mutex<T>>) {
 
 #[cfg(feature = "observability")]
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(metrics)]
 fn test_create_node_transaction_error_counted_once_when_lock_poisoned() {
-    crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();
 
     poison_mutex(&db.current_timestamp);
 
+    // Delta-based assertion (not absolute-count-after-`reset()`): the counter is
+    // a process-global singleton shared by the whole test binary, so an absolute
+    // assertion races any concurrent test that bumps the same counter. Reading
+    // the counter immediately before and after the single failing action, and
+    // asserting the increment attributable to THAT action is exactly 1, both
+    // preserves the "counted exactly once (not double-counted)" intent and is
+    // robust to concurrent neighbors. The `metrics` serial group additionally
+    // fences out the known same-counter bumpers so the delta window is clean.
+    let before = crate::observability::METRICS
+        .snapshot()
+        .error_transaction_total;
     let result = db.create_node("Person", PropertyMapBuilder::new().build());
     assert!(result.is_err());
+    let after = crate::observability::METRICS
+        .snapshot()
+        .error_transaction_total;
 
-    let snapshot = crate::observability::METRICS.snapshot();
-    assert_eq!(snapshot.error_transaction_total, 1);
+    assert_eq!(
+        after - before,
+        1,
+        "failing create_node must record exactly one transaction error"
+    );
 }
 
 #[cfg(feature = "observability")]
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(metrics)]
 fn test_vector_builder_duplicate_enable_counts_error_once() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
@@ -2787,52 +2812,74 @@ fn test_vector_builder_duplicate_enable_counts_error_once() {
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
-    crate::observability::METRICS.reset();
+    // Delta-based (see `test_create_node_transaction_error_counted_once_when_lock_poisoned`
+    // for the rationale): robust to concurrent bumps of the process-global counter.
+    let before = crate::observability::METRICS.snapshot().error_vector_total;
     let result = db
         .vector_index("embedding")
         .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
         .enable();
     assert!(result.is_err());
+    let after = crate::observability::METRICS.snapshot().error_vector_total;
 
-    let snapshot = crate::observability::METRICS.snapshot();
-    assert_eq!(snapshot.error_vector_total, 1);
+    assert_eq!(
+        after - before,
+        1,
+        "duplicate vector-index enable must record exactly one vector error"
+    );
 }
 
 #[cfg(feature = "observability")]
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(metrics)]
 fn test_read_closure_db_error_counts_once() {
-    crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();
 
     let missing_id = NodeId::new(999_999).unwrap();
+    // Delta-based (see `test_create_node_transaction_error_counted_once_when_lock_poisoned`
+    // for the rationale): robust to concurrent bumps of the process-global counter.
+    let before = crate::observability::METRICS.snapshot().error_storage_total;
     let result: Result<()> = db.read(|tx| {
         tx.get_node(missing_id)?;
         Ok(())
     });
     assert!(result.is_err());
+    let after = crate::observability::METRICS.snapshot().error_storage_total;
 
-    let snapshot = crate::observability::METRICS.snapshot();
-    assert_eq!(snapshot.error_storage_total, 1);
+    assert_eq!(
+        after - before,
+        1,
+        "failing read closure must record exactly one storage error"
+    );
 }
 
 #[cfg(feature = "observability")]
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(metrics)]
 fn test_write_commit_error_counts_once() {
-    crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();
 
     poison_mutex(&db.commit_clock_observed_at);
 
+    // Delta-based (see `test_create_node_transaction_error_counted_once_when_lock_poisoned`
+    // for the rationale): robust to concurrent bumps of the process-global counter.
+    let before = crate::observability::METRICS
+        .snapshot()
+        .error_transaction_total;
     let result: Result<()> = db.write(|tx| {
         tx.create_node("Person", PropertyMapBuilder::new().build())?;
         Ok(())
     });
     assert!(result.is_err());
+    let after = crate::observability::METRICS
+        .snapshot()
+        .error_transaction_total;
 
-    let snapshot = crate::observability::METRICS.snapshot();
-    assert_eq!(snapshot.error_transaction_total, 1);
+    assert_eq!(
+        after - before,
+        1,
+        "failing write commit must record exactly one transaction error"
+    );
 }
 
 // ==================== Schema Discovery Tests (Issue #3214) ====================
