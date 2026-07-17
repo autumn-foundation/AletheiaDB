@@ -1347,6 +1347,17 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Test-only accessor for the private JSON serializer (crypto-shred PR-1b
+    /// erased-marker test lives in `db::crypto_shred::integration_tests`).
+    #[cfg(test)]
+    pub(crate) fn property_map_to_json_for_test(
+        &self,
+        props: &PropertyMap,
+        include_vectors: bool,
+    ) -> HashMap<String, serde_json::Value> {
+        self.property_map_to_json(props, include_vectors)
+    }
+
     fn property_map_to_json(
         &self,
         props: &PropertyMap,
@@ -1378,6 +1389,18 @@ impl AletheiaMcpServer {
             PropertyValue::Float(f) => json!(*f),
             PropertyValue::String(s) => serde_json::Value::String(s.to_string()),
             PropertyValue::Bytes(b) => {
+                // GDPR crypto-shred (Issue #3359, PR-1b): a sealed `SUBJ` envelope
+                // that reaches the MCP funnel belongs to a known erasure subject.
+                // Active-subject values are already unsealed to plaintext at the db
+                // read boundary, so a surviving envelope is (almost always) erased —
+                // render the erased descriptor (analogous to the #3220 vector-elision
+                // shape) instead of leaking opaque ciphertext as base64. A `Bytes`
+                // value whose subject the keyring does not recognize is treated as
+                // ordinary user bytes.
+                #[cfg(feature = "audit-export")]
+                if let Some(descriptor) = self.sealed_value_descriptor(b) {
+                    return descriptor;
+                }
                 serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
             PropertyValue::Array(arr) => serde_json::Value::Array(
@@ -1412,6 +1435,32 @@ impl AletheiaMcpServer {
                 }
             }
         }
+    }
+
+    /// If `bytes` is a sealed crypto-shred `SUBJ` envelope for a subject the
+    /// keyring recognizes, return its MCP descriptor (Issue #3359, PR-1b);
+    /// otherwise `None` (render as ordinary bytes). An erased subject yields
+    /// `{"type":"sealed","erased":true,"subject_id":<id>}`; an active subject
+    /// that somehow reached here un-unsealed yields `erased:false` — never the
+    /// plaintext and never the raw ciphertext.
+    #[cfg(feature = "audit-export")]
+    fn sealed_value_descriptor(&self, bytes: &[u8]) -> Option<serde_json::Value> {
+        use crate::db::crypto_shred::envelope;
+        if !envelope::is_envelope(bytes) {
+            return None;
+        }
+        let header = envelope::parse_header(bytes).ok()?;
+        let erased = self.db.crypto_shred.is_erased(&header.subject_id);
+        let active = self.db.crypto_shred.is_active(&header.subject_id);
+        if !erased && !active {
+            // Not a subject we know — treat as ordinary user bytes.
+            return None;
+        }
+        Some(json!({
+            "type": "sealed",
+            "erased": erased,
+            "subject_id": header.subject_id,
+        }))
     }
 
     pub(crate) fn json_to_property_map(

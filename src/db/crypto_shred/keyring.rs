@@ -110,6 +110,14 @@ pub struct SubjectKeyring {
     entries: BTreeMap<String, SubjectEntry>,
     /// Unwrapped-DEK cache; entries dropped (and thus zeroized) on erase.
     cache: HashMap<String, SubjectKey>,
+    /// Reverse designation index: `(is_node, entity_id) -> subject ids` (PR-1b).
+    ///
+    /// Lets the write/read hooks answer "which subject(s) seal this entity?"
+    /// in O(1) instead of scanning every subject's designation set. In-memory
+    /// only (rebuilt from `entries` on load). Erased subjects are **retained**
+    /// in this index so the read hook can still report an erased marker for a
+    /// value whose key was destroyed.
+    designation_index: HashMap<(bool, u64), Vec<String>>,
 }
 
 impl std::fmt::Debug for SubjectKeyring {
@@ -149,7 +157,39 @@ impl SubjectKeyring {
 
     /// Insert or replace a subject entry.
     pub fn upsert(&mut self, entry: SubjectEntry) {
+        self.index_entry(&entry);
         self.entries.insert(entry.subject_id.clone(), entry);
+    }
+
+    /// Fold one entry's designation targets into the reverse index (idempotent).
+    ///
+    /// Designations only ever grow in v1 (merge adds targets; erase retains
+    /// them), so a plain additive re-index with per-key dedup is sufficient and
+    /// never leaves a stale mapping.
+    fn index_entry(&mut self, entry: &SubjectEntry) {
+        for target in &entry.designation {
+            let key = (target.is_node(), target.entity_id());
+            let bucket = self.designation_index.entry(key).or_default();
+            if !bucket.iter().any(|s| s == &entry.subject_id) {
+                bucket.push(entry.subject_id.clone());
+            }
+        }
+    }
+
+    /// The subject ids that designate `(is_node, entity_id)`, in insertion order.
+    #[must_use]
+    pub fn subjects_for_entity(&self, is_node: bool, entity_id: u64) -> &[String] {
+        self.designation_index
+            .get(&(is_node, entity_id))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether any subject is currently `Active`.
+    #[must_use]
+    pub fn any_active(&self) -> bool {
+        self.entries
+            .values()
+            .any(|e| e.state == SubjectState::Active)
     }
 
     /// Cache an unwrapped DEK for a subject.
@@ -228,10 +268,13 @@ impl SubjectKeyring {
         }
     }
 
-    /// Replace all entries from a loaded sidecar (cache is left empty).
+    /// Replace all entries from a loaded sidecar (cache is left empty), and
+    /// rebuild the in-memory reverse designation index from scratch.
     fn load_from_sidecar(&mut self, sidecar: SubjectKeyringSidecar) {
         self.entries.clear();
+        self.designation_index.clear();
         for entry in sidecar.entries {
+            self.index_entry(&entry);
             self.entries.insert(entry.subject_id.clone(), entry);
         }
     }
