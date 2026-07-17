@@ -41,7 +41,10 @@
 
 use aletheiadb::AletheiaDB;
 use aletheiadb::PropertyMapBuilder;
+use aletheiadb::api::transaction::WriteRequestOptions;
+use aletheiadb::core::error::{Error, QueryError};
 use aletheiadb::core::property::PropertyValue;
+use aletheiadb::core::provenance::Provenance;
 use aletheiadb::core::temporal::Timestamp;
 use aletheiadb::query::executor::{EntityResult, QueryRow};
 use aletheiadb::query::temporal_window::parse_boundary_micros;
@@ -241,6 +244,76 @@ fn cypher_is_error(db: &AletheiaDB, q: &str) -> bool {
         Err(_) => true,
         Ok(results) => results.collect_all().is_err(),
     }
+}
+
+/// Full result rows of an AQL query (for row-count / edge-channel inspection).
+fn aql_rows(db: &AletheiaDB, q: &str) -> Vec<QueryRow> {
+    match db.execute_aql(q).and_then(|r| r.collect_all()) {
+        Ok(rows) => rows,
+        Err(e) => panic!("AQL failed to execute [{q}]: {e:?}"),
+    }
+}
+
+/// Full result rows of a Cypher query.
+fn cypher_rows(db: &AletheiaDB, q: &str) -> Vec<QueryRow> {
+    match db.execute_cypher(q).and_then(|r| r.collect_all()) {
+        Ok(rows) => rows,
+        Err(e) => panic!("Cypher failed to execute [{q}]: {e:?}"),
+    }
+}
+
+/// The `since` value on an AQL row's traversed-edge side channel (Issue #3622),
+/// or `None` if the row carries no edge / the edge has no integer `since`.
+fn aql_row_edge_since(row: &QueryRow) -> Option<i64> {
+    match row.edge.as_ref()?.get_property("since") {
+        Some(PropertyValue::Int(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+/// The structured error of an AQL query (parse/convert/execute), or `None` if it
+/// succeeded.
+fn aql_error(db: &AletheiaDB, q: &str) -> Option<Error> {
+    db.execute_aql(q).and_then(|r| r.collect_all()).err()
+}
+
+/// Whether an error is the structured "single, fixed-length hop" rejection
+/// emitted for an edge-variable predicate/ORDER BY on an unsupported
+/// (multi-hop / variable-length) pattern (Issue #3622 F7).
+fn is_unsupported_hop_error(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Query(QueryError::UnsupportedFeature { feature })
+            if feature.contains("single, fixed-length hop")
+    )
+}
+
+/// Parity harness with row-count + no-drop rigor (Issue #3622 F12): asserts the
+/// AQL and Cypher forms return the same number of rows, that every row yields a
+/// name (no silently-dropped nameless row), and that the sorted name multisets
+/// are identical AND equal `expected`.
+fn assert_where_parity(db: &AletheiaDB, aql: &str, cypher: &str, expected: &[&str]) {
+    let a_rows = aql_rows(db, aql);
+    let c_rows = cypher_rows(db, cypher);
+    let a: Vec<String> = a_rows.iter().filter_map(row_name).collect();
+    let c: Vec<String> = c_rows.iter().filter_map(row_name).collect();
+    assert_eq!(
+        a.len(),
+        a_rows.len(),
+        "AQL dropped a nameless row for [{aql}]"
+    );
+    assert_eq!(
+        c.len(),
+        c_rows.len(),
+        "Cypher dropped a nameless row for [{cypher}]"
+    );
+    assert_eq!(
+        a_rows.len(),
+        c_rows.len(),
+        "row-count parity AQL [{aql}] vs Cypher [{cypher}]"
+    );
+    assert_eq!(sorted(a.clone()), sorted(c), "name multiset parity");
+    assert_eq!(sorted(a), owned(expected), "matches expected");
 }
 
 /// The KNOWS-only start pattern shared by most WHERE / ORDER BY cases.
@@ -1022,5 +1095,795 @@ fn regression_cypher_return_edge_order_by_since_is_green() {
         sinces,
         vec![Some(2019), Some(2021), Some(2022), None],
         "edges ordered by since ASC, null (Erin) last"
+    );
+}
+// ===========================================================================
+// F1 -- relationship-distinct emission: parallel edges + self-loop.
+// ===========================================================================
+
+const PAR_KNOWS: &str = "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person)";
+
+/// Two PARALLEL KNOWS edges Alice->Bob with different `since` (a multigraph).
+fn parallel_graph() -> AletheiaDB {
+    let db = AletheiaDB::new().expect("db");
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("alice");
+    let bob = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .expect("bob");
+    db.create_edge(
+        alice,
+        bob,
+        "KNOWS",
+        PropertyMapBuilder::new().insert("since", 2019).build(),
+    )
+    .expect("edge 2019");
+    db.create_edge(
+        alice,
+        bob,
+        "KNOWS",
+        PropertyMapBuilder::new().insert("since", 2023).build(),
+    )
+    .expect("edge 2023");
+    db
+}
+
+#[test]
+fn aql_parallel_edges_both_surface() {
+    let db = parallel_graph();
+    // Reference r (so the edge var binds -> relationship-distinct emission).
+    let rows = aql_rows(&db, &format!("{PAR_KNOWS} WHERE r.since >= 0 RETURN b"));
+    assert_eq!(
+        rows.len(),
+        2,
+        "both parallel edges surface (relationship-distinct), not node-distinct"
+    );
+    let mut sinces: Vec<i64> = rows.iter().filter_map(aql_row_edge_since).collect();
+    sinces.sort();
+    assert_eq!(sinces, vec![2019, 2023]);
+}
+
+#[test]
+fn cypher_parallel_edges_both_surface() {
+    let db = parallel_graph();
+    // Reference r so the row set is per-edge (Cypher binds the edge variable).
+    let rows = cypher_rows(&db, &format!("{PAR_KNOWS} WHERE r.since >= 0 RETURN b"));
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn aql_parallel_edge_where_picks_right_edge() {
+    let db = parallel_graph();
+    // WHERE selects the matching edge even though both target the same node --
+    // a node-distinct traversal binding only the first-discovered edge would
+    // drop Bob if that edge was the 2023 one.
+    let r19 = aql_rows(&db, &format!("{PAR_KNOWS} WHERE r.since = 2019 RETURN b"));
+    assert_eq!(r19.len(), 1);
+    assert_eq!(aql_row_edge_since(&r19[0]), Some(2019));
+    let r23 = aql_rows(&db, &format!("{PAR_KNOWS} WHERE r.since = 2023 RETURN b"));
+    assert_eq!(r23.len(), 1);
+    assert_eq!(aql_row_edge_since(&r23[0]), Some(2023));
+}
+
+#[test]
+fn cypher_parallel_edge_where_picks_right_edge() {
+    let db = parallel_graph();
+    assert_eq!(
+        cypher_names(&db, &format!("{PAR_KNOWS} WHERE r.since = 2019 RETURN b")),
+        owned(&["Bob"])
+    );
+}
+
+#[test]
+fn parity_different_type_parallel_edge_where() {
+    // std_graph: Alice-KNOWS{since:2021}->Bob AND Alice-FOLLOWS{since:2020}->Bob.
+    // `-[r]->` WHERE r.since = 2020 must surface Bob via the FOLLOWS edge; a
+    // node-distinct traversal binding the first KNOWS(2021) edge would drop it.
+    let (db, _) = std_graph();
+    assert_where_parity(
+        &db,
+        &format!("{ANYREL} WHERE r.since = 2020 RETURN b.name AS name"),
+        &format!("{ANYREL} WHERE r.since = 2020 RETURN b.name AS name"),
+        &["Bob"],
+    );
+}
+
+/// Alice with a KNOWS self-loop (source == target).
+fn self_loop_graph() -> (AletheiaDB, u64) {
+    let db = AletheiaDB::new().expect("db");
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("alice");
+    db.create_edge(
+        alice,
+        alice,
+        "KNOWS",
+        PropertyMapBuilder::new().insert("since", 2021).build(),
+    )
+    .expect("self-loop");
+    (db, alice.as_u64())
+}
+
+#[test]
+fn aql_self_loop_emits_row() {
+    let (db, _) = self_loop_graph();
+    // The edge var is referenced, so the self-loop (source == target) emits one
+    // relationship-distinct row bound to its edge.
+    assert_eq!(
+        aql_names(
+            &db,
+            &format!("{PAR_KNOWS} WHERE r.since = 2021 RETURN b.name AS name")
+        ),
+        owned(&["Alice"])
+    );
+}
+
+#[test]
+fn cypher_self_loop_emits_row() {
+    let (db, _) = self_loop_graph();
+    assert_eq!(
+        cypher_names(
+            &db,
+            &format!("{PAR_KNOWS} WHERE r.since = 2021 RETURN b.name AS name")
+        ),
+        owned(&["Alice"])
+    );
+}
+
+#[test]
+fn aql_self_loop_reserved_source_equals_target() {
+    let (db, alice) = self_loop_graph();
+    // On a self-loop, structural r.source == r.target == alice.
+    assert_eq!(
+        aql_names(
+            &db,
+            &format!(
+                "{PAR_KNOWS} WHERE r.source = {alice} AND r.target = {alice} RETURN b.name AS name"
+            )
+        ),
+        owned(&["Alice"])
+    );
+    assert!(
+        aql_names(
+            &db,
+            &format!("{PAR_KNOWS} WHERE r.target = 999999 RETURN b.name AS name")
+        )
+        .is_empty()
+    );
+}
+
+// ===========================================================================
+// F5 -- reserved-field SHADOWING: structural fields beat like-named user props.
+// ===========================================================================
+
+const SH_KNOWS: &str = "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person)";
+
+/// Two KNOWS edges carrying like-named USER props `type`/`source` set to
+/// reordering/mismatching values, so a flipped precedence would change results.
+fn shadow_graph() -> (AletheiaDB, u64) {
+    let db = AletheiaDB::new().expect("db");
+    let person = |name: &str| {
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", name).build(),
+        )
+        .expect("node")
+    };
+    let alice = person("Alice");
+    let bob = person("Bob");
+    let carol = person("Carol");
+    db.create_edge(
+        alice,
+        bob,
+        "KNOWS",
+        PropertyMapBuilder::new()
+            .insert("type", "bogus")
+            .insert("source", 2)
+            .insert("since", 2021)
+            .build(),
+    )
+    .expect("bob edge");
+    db.create_edge(
+        alice,
+        carol,
+        "KNOWS",
+        PropertyMapBuilder::new()
+            .insert("type", "bogus")
+            .insert("source", 1)
+            .insert("since", 2019)
+            .build(),
+    )
+    .expect("carol edge");
+    (db, alice.as_u64())
+}
+
+#[test]
+fn aql_reserved_type_shadows_user_prop() {
+    let (db, _) = shadow_graph();
+    // Structural label wins: `r.type = 'KNOWS'` matches, `r.type = 'bogus'`
+    // (the USER prop value) does NOT.
+    assert_eq!(
+        sorted(aql_names(
+            &db,
+            &format!("{SH_KNOWS} WHERE r.type = 'KNOWS' RETURN b.name AS name")
+        )),
+        owned(&["Bob", "Carol"])
+    );
+    assert!(
+        aql_names(
+            &db,
+            &format!("{SH_KNOWS} WHERE r.type = 'bogus' RETURN b.name AS name")
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn cypher_reserved_type_shadows_user_prop() {
+    let (db, _) = shadow_graph();
+    assert_eq!(
+        sorted(cypher_names(
+            &db,
+            &format!("{SH_KNOWS} WHERE r.type = 'KNOWS' RETURN b.name AS name")
+        )),
+        owned(&["Bob", "Carol"])
+    );
+    assert!(
+        cypher_names(
+            &db,
+            &format!("{SH_KNOWS} WHERE r.type = 'bogus' RETURN b.name AS name")
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn parity_reserved_type_shadowing() {
+    let (db, _) = shadow_graph();
+    assert_where_parity(
+        &db,
+        &format!("{SH_KNOWS} WHERE r.type = 'KNOWS' RETURN b.name AS name"),
+        &format!("{SH_KNOWS} WHERE r.type = 'KNOWS' RETURN b.name AS name"),
+        &["Bob", "Carol"],
+    );
+}
+
+#[test]
+fn aql_reserved_source_shadows_user_prop() {
+    let (db, alice) = shadow_graph();
+    // Structural source (== alice) wins over the user `source` (1 / 2).
+    assert_eq!(
+        sorted(aql_names(
+            &db,
+            &format!("{SH_KNOWS} WHERE r.source = {alice} RETURN b.name AS name")
+        )),
+        owned(&["Bob", "Carol"])
+    );
+    // The user `source` value 1 (Carol's edge) must NOT match once shadowed.
+    assert!(
+        aql_names(
+            &db,
+            &format!("{SH_KNOWS} WHERE r.source = 1 RETURN b.name AS name")
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn aql_order_by_reserved_source_shadows_user_prop() {
+    let (db, _) = shadow_graph();
+    // Structural source is the same (alice) for both edges -> a stable no-op
+    // sort preserves creation order [Bob, Carol]. Ordering by the USER `source`
+    // (Bob=2, Carol=1) would instead give [Carol, Bob], so this pins the
+    // structural-wins precedence for ORDER BY.
+    assert_eq!(
+        aql_names(
+            &db,
+            &format!("{SH_KNOWS} RETURN b.name AS name ORDER BY r.source ASC")
+        ),
+        owned(&["Bob", "Carol"])
+    );
+}
+
+#[test]
+fn cypher_order_by_reserved_source_shadows_user_prop() {
+    let (db, _) = shadow_graph();
+    assert_eq!(
+        cypher_names(
+            &db,
+            &format!("{SH_KNOWS} RETURN b.name AS name ORDER BY r.source ASC")
+        ),
+        owned(&["Bob", "Carol"])
+    );
+}
+
+// ===========================================================================
+// F6/F7 -- ORDER BY reject path + structured error KIND for reject cases.
+// ===========================================================================
+
+#[test]
+fn aql_multihop_relationship_var_order_by_is_error() {
+    let (db, _) = std_graph();
+    let q = "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person)-[s:KNOWS]->(c:Person) \
+             RETURN c.name AS name ORDER BY r.since";
+    assert!(aql_is_error(&db, q));
+}
+
+#[test]
+fn aql_variable_depth_edge_order_by_is_error() {
+    let (db, _) = std_graph();
+    let q = "MATCH (a:Person {name: 'Alice'})-[r:KNOWS*1..3]->(b:Person) \
+             RETURN b.name AS name ORDER BY r.since";
+    assert!(aql_is_error(&db, q));
+}
+
+#[test]
+fn aql_reject_error_kind_is_unsupported_single_hop() {
+    // F7: pin the reject reason (not merely "some Err") on all four shapes.
+    let (db, _) = std_graph();
+    let cases = [
+        "MATCH (a:Person {name: 'Alice'})-[r:KNOWS*1..3]->(b:Person) \
+         WHERE r.since > 2020 RETURN b.name AS name",
+        "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person)-[s:KNOWS]->(c:Person) \
+         WHERE r.since > 2020 RETURN c.name AS name",
+        "MATCH (a:Person {name: 'Alice'})-[r:KNOWS*1..3]->(b:Person) \
+         RETURN b.name AS name ORDER BY r.since",
+        "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person)-[s:KNOWS]->(c:Person) \
+         RETURN c.name AS name ORDER BY r.since",
+    ];
+    for q in cases {
+        let e = aql_error(&db, q).unwrap_or_else(|| panic!("expected an error for [{q}]"));
+        assert!(
+            is_unsupported_hop_error(&e),
+            "expected the 'single, fixed-length hop' UnsupportedFeature for [{q}], got {e:?}"
+        );
+    }
+}
+
+// ===========================================================================
+// F8 -- reserved r.id and r.label.
+// ===========================================================================
+
+const ID_KNOWS: &str = "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person)";
+
+/// Alice-KNOWS->Bob then Alice-KNOWS->Carol; returns (db, bob_edge_id, carol_edge_id).
+fn id_graph() -> (AletheiaDB, u64, u64) {
+    let db = AletheiaDB::new().expect("db");
+    let person = |name: &str| {
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", name).build(),
+        )
+        .expect("node")
+    };
+    let alice = person("Alice");
+    let bob = person("Bob");
+    let carol = person("Carol");
+    let e_bob = db
+        .create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2021).build(),
+        )
+        .expect("bob edge");
+    let e_carol = db
+        .create_edge(
+            alice,
+            carol,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2019).build(),
+        )
+        .expect("carol edge");
+    (db, e_bob.as_u64(), e_carol.as_u64())
+}
+
+#[test]
+fn aql_where_reserved_id() {
+    let (db, e_bob, _) = id_graph();
+    assert_eq!(
+        aql_names(
+            &db,
+            &format!("{ID_KNOWS} WHERE r.id = {e_bob} RETURN b.name AS name")
+        ),
+        owned(&["Bob"])
+    );
+}
+
+#[test]
+fn cypher_where_reserved_id() {
+    let (db, e_bob, _) = id_graph();
+    assert_eq!(
+        cypher_names(
+            &db,
+            &format!("{ID_KNOWS} WHERE r.id = {e_bob} RETURN b.name AS name")
+        ),
+        owned(&["Bob"])
+    );
+}
+
+#[test]
+fn aql_order_by_reserved_id() {
+    let (db, _, _) = id_graph();
+    // Bob's edge is created first (lower id), so ORDER BY r.id ASC -> [Bob, Carol].
+    assert_eq!(
+        aql_names(
+            &db,
+            &format!("{ID_KNOWS} RETURN b.name AS name ORDER BY r.id ASC")
+        ),
+        owned(&["Bob", "Carol"])
+    );
+}
+
+#[test]
+fn parity_where_reserved_label() {
+    let (db, _) = std_graph();
+    // `r.label` is the structural label alias of `r.type`.
+    assert_where_parity(
+        &db,
+        &format!("{KNOWS} WHERE r.label = 'KNOWS' RETURN b.name AS name"),
+        &format!("{KNOWS} WHERE r.label = 'KNOWS' RETURN b.name AS name"),
+        &["Bob", "Carol", "Dave", "Erin"],
+    );
+}
+
+// ===========================================================================
+// F9 -- edge leaf AND node-provenance leaf in one WHERE (each routes to its
+// own entity while the edge channel is populated).
+// ===========================================================================
+
+fn prov_graph() -> AletheiaDB {
+    let db = AletheiaDB::new().expect("db");
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("alice");
+    let person_conf = |name: &str, conf: f64| {
+        db.create_node_with_options(
+            "Person",
+            PropertyMapBuilder::new().insert("name", name).build(),
+            WriteRequestOptions::new().with_provenance(
+                Provenance::builder()
+                    .confidence(conf)
+                    .build()
+                    .expect("valid provenance"),
+            ),
+        )
+        .expect("node")
+    };
+    let bob = person_conf("Bob", 0.95);
+    let carol = person_conf("Carol", 0.95);
+    let dave = person_conf("Dave", 0.5);
+    let knows = |tgt, since: i64| {
+        db.create_edge(
+            alice,
+            tgt,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", since).build(),
+        )
+        .expect("edge");
+    };
+    knows(bob, 2021);
+    knows(carol, 2019);
+    knows(dave, 2022);
+    db
+}
+
+#[test]
+fn aql_where_edge_and_provenance() {
+    let db = prov_graph();
+    // Edge leaf (r.since) routes to the edge channel; node-provenance leaf
+    // (confidence(b)) routes to the target node's provenance. Carol fails the
+    // EDGE leaf (2019 !> 2020); Dave fails the NODE-provenance leaf (0.5 < 0.9).
+    assert_eq!(
+        aql_names(
+            &db,
+            "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person) \
+             WHERE r.since > 2020 AND confidence(b) >= 0.9 RETURN b.name AS name"
+        ),
+        owned(&["Bob"])
+    );
+}
+
+// ===========================================================================
+// F10 -- negative / float edge property (range WHERE + ORDER BY).
+// ===========================================================================
+
+const W_KNOWS: &str = "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person)";
+
+fn weight_graph() -> AletheiaDB {
+    let db = AletheiaDB::new().expect("db");
+    let person = |name: &str| {
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", name).build(),
+        )
+        .expect("node")
+    };
+    let alice = person("Alice");
+    let bob = person("Bob");
+    let carol = person("Carol");
+    let dave = person("Dave");
+    let knows = |tgt, w: f64| {
+        db.create_edge(
+            alice,
+            tgt,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("weight", w).build(),
+        )
+        .expect("edge");
+    };
+    knows(bob, -1.5);
+    knows(carol, 2.5);
+    knows(dave, 0.0);
+    db
+}
+
+#[test]
+fn parity_where_negative_float_weight() {
+    let db = weight_graph();
+    // Compare with a float literal `0.0`: AQL's WHERE comparators do not coerce
+    // Float-vs-Int operands (a pre-existing AQL limitation orthogonal to this
+    // lane -- it affects node comparisons too), so a type-matched literal keeps
+    // the test in-lane while still exercising a negative float edge property.
+    assert_where_parity(
+        &db,
+        &format!("{W_KNOWS} WHERE r.weight < 0.0 RETURN b.name AS name"),
+        &format!("{W_KNOWS} WHERE r.weight < 0.0 RETURN b.name AS name"),
+        &["Bob"],
+    );
+}
+
+#[test]
+fn aql_order_by_float_weight() {
+    let db = weight_graph();
+    assert_eq!(
+        aql_names(
+            &db,
+            &format!("{W_KNOWS} RETURN b.name AS name ORDER BY r.weight ASC")
+        ),
+        owned(&["Bob", "Dave", "Carol"])
+    );
+}
+
+#[test]
+fn cypher_order_by_float_weight() {
+    let db = weight_graph();
+    assert_eq!(
+        cypher_names(
+            &db,
+            &format!("{W_KNOWS} RETURN b.name AS name ORDER BY r.weight ASC")
+        ),
+        owned(&["Bob", "Dave", "Carol"])
+    );
+}
+
+// ===========================================================================
+// F11 -- edge-prop IN / CONTAINS / IS NULL parity (plain + negated), incl.
+// the absent-property node-semantics that F2 fixes on the Cypher side.
+// ===========================================================================
+
+#[test]
+fn parity_where_in() {
+    let (db, _) = std_graph();
+    assert_where_parity(
+        &db,
+        &format!("{KNOWS} WHERE r.role IN ['engineer', 'manager'] RETURN b.name AS name"),
+        &format!("{KNOWS} WHERE r.role IN ['engineer', 'manager'] RETURN b.name AS name"),
+        &["Bob", "Carol", "Dave"],
+    );
+}
+
+#[test]
+fn parity_where_not_in_absent_includes() {
+    let (db, _) = std_graph();
+    // Erin's edge has no `since` -> node-semantics `IN` is definite false ->
+    // NOT includes Erin (F2). Dave (2022 not in list) also included.
+    assert_where_parity(
+        &db,
+        &format!("{KNOWS} WHERE NOT (r.since IN [2019, 2021]) RETURN b.name AS name"),
+        &format!("{KNOWS} WHERE NOT (r.since IN [2019, 2021]) RETURN b.name AS name"),
+        &["Dave", "Erin"],
+    );
+}
+
+#[test]
+fn parity_where_contains() {
+    let (db, _) = std_graph();
+    assert_where_parity(
+        &db,
+        &format!("{KNOWS} WHERE r.role CONTAINS 'eng' RETURN b.name AS name"),
+        &format!("{KNOWS} WHERE r.role CONTAINS 'eng' RETURN b.name AS name"),
+        &["Bob", "Dave"],
+    );
+}
+
+#[test]
+fn parity_where_not_contains_absent_includes() {
+    let (db, _) = std_graph();
+    // No edge carries `nope` -> node-semantics CONTAINS is definite false ->
+    // NOT includes every KNOWS target (F2 Cypher fix; AQL already did this).
+    assert_where_parity(
+        &db,
+        &format!("{KNOWS} WHERE NOT (r.nope CONTAINS 'x') RETURN b.name AS name"),
+        &format!("{KNOWS} WHERE NOT (r.nope CONTAINS 'x') RETURN b.name AS name"),
+        &["Bob", "Carol", "Dave", "Erin"],
+    );
+}
+
+#[test]
+fn parity_where_is_null() {
+    let (db, _) = std_graph();
+    assert_where_parity(
+        &db,
+        &format!("{KNOWS} WHERE r.since IS NULL RETURN b.name AS name"),
+        &format!("{KNOWS} WHERE r.since IS NULL RETURN b.name AS name"),
+        &["Erin"],
+    );
+}
+
+#[test]
+fn parity_where_is_not_null() {
+    let (db, _) = std_graph();
+    assert_where_parity(
+        &db,
+        &format!("{KNOWS} WHERE r.since IS NOT NULL RETURN b.name AS name"),
+        &format!("{KNOWS} WHERE r.since IS NOT NULL RETURN b.name AS name"),
+        &["Bob", "Carol", "Dave"],
+    );
+}
+
+// ===========================================================================
+// F13 -- parity_where_reserved_source (sibling of type/target).
+// ===========================================================================
+
+#[test]
+fn parity_where_reserved_source() {
+    let (db, ids) = std_graph();
+    assert_where_parity(
+        &db,
+        &format!(
+            "{KNOWS} WHERE r.source = {} RETURN b.name AS name",
+            ids.alice
+        ),
+        &format!(
+            "{KNOWS} WHERE r.source = {} RETURN b.name AS name",
+            ids.alice
+        ),
+        &["Bob", "Carol", "Dave", "Erin"],
+    );
+}
+
+// ===========================================================================
+// F15 -- unknown-variable WHERE/ORDER BY leaf is a structured error (AQL).
+// ===========================================================================
+
+#[test]
+fn aql_where_unknown_variable_is_error() {
+    let (db, _) = std_graph();
+    // `rr` is not bound by the pattern (typo for `r`): reject, do not silently
+    // treat it as a node filter.
+    let q = format!("{KNOWS} WHERE rr.since = 2019 RETURN b.name AS name");
+    let e = aql_error(&db, &q).expect("expected an error for an unknown variable");
+    assert!(
+        matches!(e, Error::Query(QueryError::SyntaxError { ref message }) if message.contains("unknown variable")),
+        "expected an unknown-variable SyntaxError, got {e:?}"
+    );
+}
+
+#[test]
+fn aql_order_by_unknown_variable_is_error() {
+    let (db, _) = std_graph();
+    let q = format!("{KNOWS} RETURN b.name AS name ORDER BY rr.since");
+    assert!(aql_is_error(&db, &q));
+}
+
+#[test]
+fn aql_where_known_node_var_still_allowed() {
+    // A declared node variable (even the anchor `a`) is NOT rejected -- only
+    // genuinely unknown variables are (F15 conservative contract).
+    let (db, _) = std_graph();
+    // `a` is the declared anchor node; referencing it in WHERE must still
+    // parse/execute (prior behavior preserved), NOT raise the unknown-variable
+    // rejection. (Its leaf resolves against the row entity as before -- that
+    // non-terminal-node semantics is pre-existing and out of this lane's scope;
+    // here we only assert it is not rejected.)
+    let q = format!("{KNOWS} WHERE a.name = 'Alice' RETURN b.name AS name");
+    assert!(
+        aql_error(&db, &q).is_none(),
+        "a declared node variable must not be rejected as unknown"
+    );
+}
+
+// ===========================================================================
+// F16 -- cross-entity property comparison `r.x = b.y` is a structured error.
+// ===========================================================================
+
+#[test]
+fn aql_cross_entity_comparison_is_error() {
+    let (db, _) = std_graph();
+    let q = format!("{KNOWS} WHERE r.since = b.age RETURN b.name AS name");
+    let e = aql_error(&db, &q).expect("expected an error for cross-entity comparison");
+    assert!(
+        matches!(e, Error::Query(QueryError::UnsupportedFeature { ref feature }) if feature.contains("two property accesses")),
+        "expected the cross-entity UnsupportedFeature, got {e:?}"
+    );
+}
+
+// ===========================================================================
+// F3 -- node/edge AS-OF consistency (target node reconstructed at coordinate).
+// ===========================================================================
+
+/// Alice (valid 2018), Bob node valid only from 2024, and a single-version edge
+/// Alice-KNOWS{since:2019}->Bob valid from 2020. So at AS OF 2022 the edge is
+/// valid but Bob's node is not yet -- a coordinate-consistent read must exclude
+/// the row (F3), whereas a current-state target read would wrongly surface Bob.
+fn f3_graph() -> AletheiaDB {
+    let db = AletheiaDB::new().expect("db");
+    let alice = db
+        .create_node_with_valid_time(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            Some(ts("2018-01-01T00:00:00Z")),
+        )
+        .expect("alice");
+    let bob = db
+        .create_node_with_valid_time(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Bob")
+                .insert("age", 25)
+                .build(),
+            Some(ts("2024-01-01T00:00:00Z")),
+        )
+        .expect("bob");
+    db.create_edge_with_valid_time(
+        alice,
+        bob,
+        "KNOWS",
+        PropertyMapBuilder::new().insert("since", 2019).build(),
+        Some(ts("2020-01-01T00:00:00Z")),
+    )
+    .expect("edge");
+    db
+}
+
+#[test]
+fn aql_bitemporal_target_node_reconstructed_at_coordinate() {
+    let db = f3_graph();
+    // AS OF 2022: edge valid, Bob's node not yet valid -> row excluded (the node
+    // is read AS-OF the coordinate, consistent with the reconstructed edge).
+    let early = micros("2022-01-01T00:00:00Z");
+    assert!(
+        aql_names(
+            &db,
+            &format!("AS OF {early} {BT_KNOWS} WHERE r.since = 2019 RETURN b.name AS name")
+        )
+        .is_empty(),
+        "target node not valid at the coordinate -> excluded (F3 consistency)"
+    );
+    // AS OF 2025: both valid -> Bob surfaces, and his reconstructed node carries
+    // age 25 (node property read at the coordinate).
+    let late = micros("2025-01-01T00:00:00Z");
+    assert_eq!(
+        aql_names(
+            &db,
+            &format!(
+                "AS OF {late} {BT_KNOWS} WHERE r.since = 2019 AND b.age = 25 RETURN b.name AS name"
+            )
+        ),
+        owned(&["Bob"])
     );
 }
