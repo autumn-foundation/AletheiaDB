@@ -227,6 +227,40 @@ data path — no `src/encryption/`, `rotation.rs`, `wal_encryption.rs`, or
   erased value is never surfaced as plaintext on the MCP surface. Extending the
   Rust unseal hook to these is a follow-up.
 
+## ⚠️ PR-1b operational caveats (hardening follow-up — READ before enabling erasure)
+
+Three load-bearing caveats surfaced in the PR-1b hardening review. Flagged
+prominently here because each can silently mislead an operator:
+
+1. **`verify_chain` breaks after an erasure until slice 2 lands.** The provenance
+   hash chain's per-version leaf still binds **plaintext** properties — the
+   erasure-stable ciphertext commitment in `canonical.rs` / `verify.rs` is
+   **slice 2**, NOT yet implemented. The moment a subject is erased, its sealed
+   property's plaintext is gone, so `verify_chain` recomputes a leaf over the
+   now-opaque envelope and the digest no longer matches the recorded chain —
+   **verification fails**. Do **not** enable erasure in production on top of this
+   slice alone: either wait for slice 2 or explicitly accept post-erasure
+   chain-verify breakage. Designation + seal-at-write are safe without slice 2;
+   only *erasure* trips the chain (the sealed value hashed at write is the
+   plaintext, not yet the ciphertext).
+2. **Read-path unseal is wired only on `get_node` / `get_edge` /
+   `get_node_at_time` / `get_edge_at_time`.** Every other read path — `with_node`,
+   `list_nodes` / `list_edges`, adjacency (`get_outgoing_edges` /
+   `get_incoming_edges`), `traverse`, `find_nodes_at_time`, the query executor,
+   and `read_tx` reconstructs — returns the **raw sealed `Bytes`** (opaque
+   ciphertext) for an *active* subject, not the plaintext. This is **fail-safe**
+   (ciphertext is never surfaced as plaintext), but a caller using those paths
+   sees opaque bytes rather than the value. Extending the Rust unseal hook to them
+   is a tracked follow-up; the MCP funnel still renders the erased descriptor for
+   any envelope that reaches it.
+3. **The erase-vs-seal race is now fail-closed (aborts).** An in-flight write
+   buffered before an erasure that would otherwise commit *after* it — persisting
+   plaintext of an already-erased subject — now **aborts at commit** with
+   `CryptoShredError::WriteAfterErasure` (`FAILED_PRECONDITION`, non-retriable),
+   mirroring the #3416 first-committer-wins validation abort. Sealing is
+   impossible once the DEK is destroyed, so abort is the only fail-closed outcome;
+   the write never persists erasable plaintext.
+
 ## AC4 disclosure — sealed-property verify semantics
 
 The provenance hash chain's per-version leaf (`version_leaf`,

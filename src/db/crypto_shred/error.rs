@@ -27,6 +27,18 @@ pub enum CryptoShredError {
     #[error("subject '{0}' has been erased; its key was destroyed and cannot be recovered")]
     SubjectErased(String),
 
+    /// A write reached the seal hook carrying a property that is designated under
+    /// an **erased** subject (all covering subjects have had their key
+    /// destroyed), so the value cannot be sealed. Fail-closed: the enclosing
+    /// commit is **aborted** rather than persisting the erasable value as
+    /// plaintext (mirrors the #3416 first-committer-wins validation abort).
+    /// Maps to `FAILED_PRECONDITION`, non-retriable. The message carries only the
+    /// subject id — never the plaintext value being rejected.
+    #[error(
+        "write to a property designated under erased subject '{0}' aborted (fail-closed): its key was destroyed, so the value cannot be sealed and must not be persisted as plaintext"
+    )]
+    WriteAfterErasure(String),
+
     /// A subject already exists (designation conflict) or a re-designation would
     /// change immutable attributes. Maps to `CONFLICT`.
     #[error("{0}")]
@@ -58,7 +70,8 @@ impl CryptoShredError {
             CryptoShredError::InvalidArgument(_) => "INVALID_ARGUMENT",
             CryptoShredError::NotDesignated(_)
             | CryptoShredError::EncryptionNotConfigured
-            | CryptoShredError::SubjectErased(_) => "FAILED_PRECONDITION",
+            | CryptoShredError::SubjectErased(_)
+            | CryptoShredError::WriteAfterErasure(_) => "FAILED_PRECONDITION",
             CryptoShredError::Conflict(_) => "CONFLICT",
             CryptoShredError::Crypto(_)
             | CryptoShredError::Io(_)

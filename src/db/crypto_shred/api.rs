@@ -190,4 +190,45 @@ impl AletheiaDB {
         edge.properties = props;
         edge
     }
+
+    /// The crypto-shred status of a node's current-state properties (PR-1b).
+    ///
+    /// Returns a typed [`ShredStatusMap`] keyed by property key: an entry is
+    /// present only for a property whose subject key has been **destroyed**
+    /// ([`super::ShredStatus::Erased`]); an absent key is
+    /// [`super::ShredStatus::Plaintext`] (never sealed, or sealed under a still
+    /// active subject and thus readable). The map is empty for a node with no
+    /// erased designated property, and empty (allocation-free) when the database
+    /// has never used crypto-shred. This is the **public Rust** surface for the
+    /// erased marker — the complement to [`AletheiaDB::get_node`], which returns
+    /// the (possibly opaque) values but discards the status side-channel.
+    ///
+    /// # Errors
+    /// Propagates the underlying node read error (e.g. the node does not exist).
+    pub fn node_shred_status(
+        &self,
+        node_id: crate::core::NodeId,
+    ) -> crate::core::error::Result<ShredStatusMap> {
+        // Read the RAW stored node (sealed bytes intact) directly from the
+        // current tier, bypassing the `get_node` unseal hook, so the status
+        // reflects the stored envelopes rather than already-unsealed plaintext.
+        let node = self.current.get_node(node_id)?;
+        let (_props, status) = self.materialize_shred(node.id.as_u64(), node.properties);
+        Ok(status)
+    }
+
+    /// The crypto-shred status of an edge's current-state properties (PR-1b).
+    ///
+    /// See [`AletheiaDB::node_shred_status`] — the edge analog.
+    ///
+    /// # Errors
+    /// Propagates the underlying edge read error (e.g. the edge does not exist).
+    pub fn edge_shred_status(
+        &self,
+        edge_id: crate::core::EdgeId,
+    ) -> crate::core::error::Result<ShredStatusMap> {
+        let edge = self.current.get_edge(edge_id)?;
+        let (_props, status) = self.materialize_shred(edge.id.as_u64(), edge.properties);
+        Ok(status)
+    }
 }

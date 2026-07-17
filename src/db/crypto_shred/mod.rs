@@ -639,15 +639,25 @@ impl CryptoShredState {
     /// reverse index), the value is replaced with a sealed-envelope
     /// [`PropertyValue::Bytes`]. Engine-reserved keys (`__aletheia_*` /
     /// `__shred_*`) are never sealed (short-circuited by
-    /// [`designation::should_seal_key`]). Erased subjects do **not** re-seal
-    /// (their key is gone); their entities' new writes stay plaintext. The
-    /// returned map must be routed **byte-identically** to both the current and
-    /// historical tiers (seal exactly once — the envelope carries a random
-    /// per-encryption nonce).
+    /// [`designation::should_seal_key`]). The returned map must be routed
+    /// **byte-identically** to both the current and historical tiers (seal
+    /// exactly once — the envelope carries a random per-encryption nonce).
+    ///
+    /// # Fail-closed erase-vs-seal race
+    /// If a property key is designated but **every** covering subject has been
+    /// **erased** (no active subject can seal it — its DEK is destroyed), the
+    /// write is **aborted** with [`CryptoShredError::WriteAfterErasure`] rather
+    /// than persisting the erasable value as plaintext. This closes the race in
+    /// which an in-flight write buffered before an erasure would otherwise commit
+    /// afterward: sealing is impossible (the key is gone), so abort is the only
+    /// fail-closed outcome. A key designated by *some* active subject (even if
+    /// another covering subject is erased) still seals under the first active one.
     ///
     /// # Errors
-    /// [`CryptoShredError::Crypto`] on DEK unwrap / AEAD seal failure. Fail-closed:
-    /// a seal error aborts the enclosing write rather than persisting plaintext.
+    /// - [`CryptoShredError::WriteAfterErasure`] when a designated key is covered
+    ///   only by erased subjects (fail-closed abort — see above).
+    /// - [`CryptoShredError::Crypto`] on DEK unwrap / AEAD seal failure. Fail-closed:
+    ///   a seal error aborts the enclosing write rather than persisting plaintext.
     pub(crate) fn seal_map(
         &self,
         is_node: bool,
@@ -686,27 +696,45 @@ impl CryptoShredState {
             if designation::is_reserved_key(&key_str) {
                 continue;
             }
+            // Fail-closed erase-vs-seal race: choose the first ACTIVE subject that
+            // designates this key. If the key is designated only by ERASED
+            // subject(s) (their DEK is destroyed), we cannot seal it — abort the
+            // write rather than persist erasable plaintext.
+            let mut active: Option<(String, u32)> = None;
+            let mut designated_by_erased: Option<String> = None;
             for subject_id in &subjects {
                 let Some(entry) = guard.get(subject_id) else {
                     continue;
                 };
-                if entry.state != keyring::SubjectState::Active {
+                if !designation::any_should_seal(&entry.designation, is_node, entity_id, &key_str) {
                     continue;
                 }
-                if designation::any_should_seal(&entry.designation, is_node, entity_id, &key_str) {
-                    let key_version = entry
-                        .wrapped_key
-                        .as_ref()
-                        .map_or(keyring::INITIAL_SUBJECT_KEY_VERSION, |w| w.key_version);
-                    plan.push(SealItem {
-                        key: *key,
-                        key_str,
-                        value: value.clone(),
-                        subject_id: subject_id.clone(),
-                        key_version,
-                    });
-                    break;
+                match entry.state {
+                    keyring::SubjectState::Active => {
+                        let key_version = entry
+                            .wrapped_key
+                            .as_ref()
+                            .map_or(keyring::INITIAL_SUBJECT_KEY_VERSION, |w| w.key_version);
+                        active = Some((subject_id.clone(), key_version));
+                        break;
+                    }
+                    keyring::SubjectState::Erased => {
+                        designated_by_erased.get_or_insert_with(|| subject_id.clone());
+                    }
                 }
+            }
+            if let Some((subject_id, key_version)) = active {
+                plan.push(SealItem {
+                    key: *key,
+                    key_str,
+                    value: value.clone(),
+                    subject_id,
+                    key_version,
+                });
+            } else if let Some(subject_id) = designated_by_erased {
+                // Designated, but only by erased subject(s): sealing is
+                // impossible (key gone). Fail closed — abort the commit.
+                return Err(CryptoShredError::WriteAfterErasure(subject_id));
             }
         }
 
