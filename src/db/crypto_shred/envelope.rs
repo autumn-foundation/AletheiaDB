@@ -7,10 +7,22 @@
 //! ```
 //!
 //! The `AEAD_blob` is `[nonce || ciphertext || tag]` produced by the subject
-//! cipher. The AEAD **AAD binds the subject id + key version**, so an envelope
-//! only decrypts under its own subject's key at its own key version — a
-//! cross-entity swap (moving an envelope onto another subject) is a loud AEAD
-//! auth failure, never fabricated plaintext.
+//! cipher. The AEAD **AAD binds the subject id + key version + an opaque
+//! write-site context**, so an envelope only decrypts under its own subject's
+//! key at its own key version *and* at the same write-site context — a
+//! cross-entity swap (moving an envelope onto another subject, or relocating it
+//! to a different entity/property within the same subject) is a loud AEAD auth
+//! failure, never fabricated plaintext.
+//!
+//! ## Write-site context
+//!
+//! `seal`/`unseal` take an opaque `context: &[u8]` folded into the AAD. PR-1a
+//! call sites pass an empty context (`b""`); PR-1b will pass the write-site
+//! binding (e.g. `entity_id || property_key`) so ciphertext cannot be relocated
+//! within a subject. The parameter exists now, while the API is private, so
+//! PR-1b binds context without an API break.
+
+use zeroize::Zeroizing;
 
 use crate::core::property::PropertyValue;
 use crate::encryption::Cipher;
@@ -30,20 +42,29 @@ pub const ENVELOPE_HEADER_LEN: usize = 4 + 1 + 1 + 4 + 2;
 /// AAD domain-separation prefix (bound alongside key version + subject id).
 const AAD_DOMAIN: &[u8] = b"aletheiadb-subject-envelope-v1";
 
-/// Build the AEAD AAD binding this envelope to its subject id + key version.
-fn envelope_aad(subject_id: &[u8], key_version: u32) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + 4 + subject_id.len());
+/// Build the AEAD AAD binding this envelope to its subject id + key version +
+/// opaque write-site context.
+///
+/// Every variable-length field is length-prefixed so distinct
+/// `(subject_id, context)` splits can never collide (injective encoding).
+fn envelope_aad(subject_id: &[u8], key_version: u32, context: &[u8]) -> Vec<u8> {
+    let mut aad =
+        Vec::with_capacity(AAD_DOMAIN.len() + 4 + 8 + subject_id.len() + 8 + context.len());
     aad.extend_from_slice(AAD_DOMAIN);
     aad.extend_from_slice(&key_version.to_le_bytes());
+    aad.extend_from_slice(&(subject_id.len() as u64).to_le_bytes());
     aad.extend_from_slice(subject_id);
+    aad.extend_from_slice(&(context.len() as u64).to_le_bytes());
+    aad.extend_from_slice(context);
     aad
 }
 
 /// Seal `plaintext` into a self-describing envelope under `cipher`.
 ///
 /// `subject_id` and `key_version` are stamped into the header AND bound as AEAD
-/// AAD. `cipher` must be the subject's own cipher (built from the unwrapped
-/// subject DEK).
+/// AAD, together with the opaque `context` (a write-site binding — pass `b""`
+/// when there is none). `cipher` must be the subject's own cipher (built from
+/// the unwrapped subject DEK).
 ///
 /// # Errors
 /// [`CryptoShredError::InvalidArgument`] if `subject_id` is longer than `u16`
@@ -52,6 +73,7 @@ pub fn seal(
     plaintext: &[u8],
     subject_id: &str,
     key_version: u32,
+    context: &[u8],
     cipher: &dyn Cipher,
 ) -> Result<Vec<u8>, CryptoShredError> {
     let subj = subject_id.as_bytes();
@@ -59,7 +81,7 @@ pub fn seal(
         CryptoShredError::InvalidArgument("subject id too long to seal".to_string())
     })?;
 
-    let aad = envelope_aad(subj, key_version);
+    let aad = envelope_aad(subj, key_version, context);
     let blob = cipher
         .encrypt(plaintext, &aad)
         .map_err(|e| CryptoShredError::Crypto(e.to_string()))?;
@@ -150,16 +172,22 @@ pub fn parse_header(envelope: &[u8]) -> Result<EnvelopeHeader, CryptoShredError>
 
 /// Unseal an envelope produced by [`seal`], returning the original plaintext.
 ///
-/// The AAD (subject id + key version) is reconstructed from the parsed header,
-/// so a mismatch — a tampered header, a swapped subject, or the wrong key —
-/// fails the AEAD auth check loudly rather than fabricating a value.
+/// The AAD (subject id + key version + `context`) is reconstructed from the
+/// parsed header and the caller-supplied `context`, so a mismatch — a tampered
+/// header, a swapped subject, the wrong key, or the wrong write-site context —
+/// fails the AEAD auth check loudly rather than fabricating a value. `context`
+/// must match the value passed to [`seal`] (`b""` when there was none).
 ///
 /// # Errors
 /// [`CryptoShredError::Crypto`] if the envelope is malformed or AEAD auth fails
-/// (including "wrong / destroyed key").
-pub fn unseal(envelope: &[u8], cipher: &dyn Cipher) -> Result<Vec<u8>, CryptoShredError> {
+/// (including "wrong / destroyed key" and "wrong context").
+pub fn unseal(
+    envelope: &[u8],
+    context: &[u8],
+    cipher: &dyn Cipher,
+) -> Result<Vec<u8>, CryptoShredError> {
     let (header, blob) = parse(envelope)?;
-    let aad = envelope_aad(header.subject_id.as_bytes(), header.key_version);
+    let aad = envelope_aad(header.subject_id.as_bytes(), header.key_version, context);
     cipher
         .decrypt(blob, &aad)
         .map_err(|e| CryptoShredError::Crypto(e.to_string()))
@@ -167,30 +195,41 @@ pub fn unseal(envelope: &[u8], cipher: &dyn Cipher) -> Result<Vec<u8>, CryptoShr
 
 /// Seal a [`PropertyValue`] by encoding it to bytes then sealing.
 ///
+/// The serialized plaintext is held in a [`Zeroizing`] buffer so the cleartext
+/// property bytes are wiped after encryption rather than left on the heap.
+/// `context` is the opaque write-site binding (pass `b""` when there is none).
+///
 /// # Errors
 /// [`CryptoShredError::Crypto`] on encode failure, or the errors of [`seal`].
 pub fn seal_property_value(
     value: &PropertyValue,
     subject_id: &str,
     key_version: u32,
+    context: &[u8],
     cipher: &dyn Cipher,
 ) -> Result<Vec<u8>, CryptoShredError> {
-    let bytes = value
-        .serialize()
-        .map_err(|e| CryptoShredError::Crypto(format!("property encode failed: {e}")))?;
-    seal(&bytes, subject_id, key_version, cipher)
+    let bytes = Zeroizing::new(
+        value
+            .serialize()
+            .map_err(|e| CryptoShredError::Crypto(format!("property encode failed: {e}")))?,
+    );
+    seal(&bytes, subject_id, key_version, context, cipher)
 }
 
 /// Unseal an envelope back into a [`PropertyValue`].
+///
+/// `context` must match the value passed to [`seal_property_value`] (`b""` when
+/// there was none).
 ///
 /// # Errors
 /// The errors of [`unseal`], plus [`CryptoShredError::Crypto`] if the decrypted
 /// bytes do not decode to a `PropertyValue`.
 pub fn unseal_property_value(
     envelope: &[u8],
+    context: &[u8],
     cipher: &dyn Cipher,
 ) -> Result<PropertyValue, CryptoShredError> {
-    let bytes = unseal(envelope, cipher)?;
+    let bytes = unseal(envelope, context, cipher)?;
     let (value, _) = PropertyValue::deserialize(&bytes)
         .map_err(|e| CryptoShredError::Crypto(format!("property decode failed: {e}")))?;
     Ok(value)

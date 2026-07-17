@@ -197,6 +197,12 @@ impl SubjectKeyring {
                 }
             }
             None => {
+                // Recovered-orphan tombstone: the breadcrumb named a subject with
+                // no keyring entry (crashed before the entry was ever persisted, or
+                // designation itself was interrupted). We fail-closed by minting an
+                // empty tombstone. It necessarily carries `designation: Vec::new()`,
+                // so any later attestation over it reports `entity_count == 0` — the
+                // recorded designation facts were lost with the un-persisted entry.
                 self.entries.insert(
                     subject_id.to_string(),
                     SubjectEntry {
@@ -311,10 +317,32 @@ pub fn read_breadcrumb(path: &Path) -> Result<Option<String>, CryptoShredError> 
 
 /// Remove the breadcrumb and fsync its parent directory so the removal is
 /// durable (a crash right after must not resurrect the breadcrumb).
+///
+/// Return-`Ok` behavior is preserved (this never surfaces an error), but a
+/// removal failure for a reason **other** than "already gone" is logged so a
+/// stuck breadcrumb — which would force the subject to be re-erased on the next
+/// restart — is observable rather than silent.
 pub fn clear_breadcrumb(path: &Path) {
-    if std::fs::remove_file(path).is_ok()
-        && let Some(parent) = path.parent()
-    {
-        crate::storage::index_persistence::fsync_dir(parent);
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            if let Some(parent) = path.parent() {
+                crate::storage::index_persistence::fsync_dir(parent);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            // Do not include the subject id here (it lives in the breadcrumb),
+            // only the path + error, so nothing sensitive is logged. Uses the
+            // crate's `observability`-gated logging style (mirrors
+            // `log_authority_warning` in `src/db/encryption_state.rs`).
+            let message = format!(
+                "crypto-shred: failed to clear erase breadcrumb at {}: {e}",
+                path.display()
+            );
+            #[cfg(feature = "observability")]
+            tracing::warn!("{}", message);
+            #[cfg(not(feature = "observability"))]
+            eprintln!("WARNING: {}", message);
+        }
     }
 }

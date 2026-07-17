@@ -107,10 +107,14 @@ impl SubjectKey {
         Self(bytes)
     }
 
-    /// Wrap raw key bytes (used after unwrapping from the keyring).
+    /// Wrap already-zeroizing key bytes (used after unwrapping from the keyring).
+    ///
+    /// Takes a [`Zeroizing`] buffer (not a bare array) so every caller is forced
+    /// onto the wiped path — the transit copy of the unwrapped DEK is guaranteed
+    /// to be zeroized on drop, never left in a plain stack array.
     #[must_use]
-    pub fn from_bytes(bytes: [u8; SUBJECT_KEY_LEN]) -> Self {
-        Self(Zeroizing::new(bytes))
+    pub fn from_bytes(bytes: Zeroizing<[u8; SUBJECT_KEY_LEN]>) -> Self {
+        Self(bytes)
     }
 
     /// Borrow the raw key bytes (crate-internal; for wrapping/cipher build only).

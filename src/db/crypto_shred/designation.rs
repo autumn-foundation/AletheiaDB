@@ -34,7 +34,6 @@ pub enum DesignationTarget {
     EdgeProperties(u64, Vec<String>),
 }
 
-/// Whether a target refers to a node (`true`) or an edge (`false`).
 impl DesignationTarget {
     /// The entity id this target applies to.
     #[must_use]

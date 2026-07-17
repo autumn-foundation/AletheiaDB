@@ -146,7 +146,7 @@ Pre-erasure `AS OF` still returns structure (ids, temporal coords, label, topolo
 | R11 | Re-erase idempotency | Second `erase_subject` is a no-op returning the prior attestation |
 | R12 | Non-designated perf regression | Bench: non-designated write/read throughput unchanged (0 regression) |
 | R13 | Designated perf envelope | Bench: designated single-hop read < 2µs, ≥ 90% write throughput at 10% designated |
-| R14 | Late designation | Seals forward; prior plaintext versions documented out-of-boundary (assert prior version still plaintext, new version sealed) |
+| R14 | Late designation | **PR-1a: static designation + reserved-key exemption rule only** (the designation set and `should_seal_key`/`any_should_seal` are unit-tested); the forward-seal write-path behavior (prior version still plaintext, new version sealed) is **deferred to PR-1b**, since PR-1a has no live seal/unseal write path |
 | R15 | Secret leak | Debug/Display of keys redacted; grep logs/errors for key bytes → none |
 
 ## 13. Implementation slices (serialized draft PRs — base=trunk, never stacked, no force-push)
@@ -157,6 +157,9 @@ Pre-erasure `AS OF` still returns structure (ids, temporal coords, label, topolo
 - **Slice 4 — Surfaces:** CLI `aletheia erase-subject`, MCP tool (admin-gated #3350), attestation format, user guide + honest-limits doc.
 - **Slice 5 — Coordination-gated:** MEK-rotation re-wrap of the subject keyring (touches `rotation.rs`) — done with / handed to the encryption-migration session.
 - **Perf (woven through 1 & 3):** benches for R12/R13.
+  - **PR-1a note:** R12/R13 (perf benches) and AC8 are **deferred to PR-1b** —
+    PR-1a has no live seal/unseal data path to bench yet, so there is nothing
+    meaningful to measure at the foundation level.
 
 **Coordination boundary:** the encryption-migration successor session owns `src/encryption` + `src/storage/wal` keyring code and #3616 PRs 2–4; slice 1 deliberately avoids those files; slices 3 and 5 require coordinator-brokered coordination before touching `wal_encryption.rs` / `rotation.rs` / `reencrypt.rs`.
 ## AC4 disclosure — sealed-property verify semantics

@@ -35,6 +35,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use zeroize::Zeroizing;
+
 use crate::audit::{AuditPublicKey, AuditSigningKey};
 
 pub mod api;
@@ -54,6 +56,25 @@ pub use error::CryptoShredError;
 pub use subject::{SubjectId, SubjectKey};
 
 use keyring::{BREADCRUMB_FILENAME, SubjectKeyring};
+
+/// AAD domain-separation prefix binding a wrapped subject DEK to its subject id
+/// and key version.
+const WRAP_AAD_DOMAIN: &[u8] = b"aletheiadb-subject-wrap-dek-v1";
+
+/// Build the AEAD AAD used when wrapping / unwrapping a subject DEK.
+///
+/// Binds the subject id **and** the key version, so a future key-version
+/// downgrade (presenting a wrap blob under the wrong version) is caught by the
+/// AEAD auth check once rotation lands. Both the wrap (in `designate`) and the
+/// unwrap (in `subject_key`) sides must build this identically.
+fn wrap_aad(subject_id: &SubjectId, key_version: u32) -> Vec<u8> {
+    let subj = subject_id.as_bytes();
+    let mut aad = Vec::with_capacity(WRAP_AAD_DOMAIN.len() + 4 + subj.len());
+    aad.extend_from_slice(WRAP_AAD_DOMAIN);
+    aad.extend_from_slice(&key_version.to_le_bytes());
+    aad.extend_from_slice(subj);
+    aad
+}
 
 /// Per-database crypto-shred state: the in-memory keyring, its durable paths,
 /// and the attestation signing key.
@@ -105,6 +126,15 @@ impl CryptoShredState {
         // across restarts), else generate a fresh per-process key. Attestations
         // embed their signer's public key, so verification never depends on
         // re-sourcing the same key.
+        //
+        // OPERATIONAL NOTE: for durable deployments a stable
+        // `crate::audit::SIGNING_KEY_ENV` seed SHOULD be set. Without it each
+        // process generates a fresh signing key, so attestations minted before
+        // and after a restart are signed by *different* keys; cross-restart
+        // verification then relies solely on each attestation's embedded public
+        // key (self-consistent, but with no single stable signer identity to
+        // pin out of band). A stable seed gives one durable signer identity an
+        // auditor can trust across restarts.
         let signing_key = AuditSigningKey::from_env(crate::audit::SIGNING_KEY_ENV)
             .unwrap_or_else(|_| AuditSigningKey::generate());
 
@@ -223,8 +253,9 @@ impl CryptoShredState {
         } else {
             // New subject: random DEK, wrapped under the subject-wrapping cipher.
             let dek = SubjectKey::generate();
+            let wrap_aad = wrap_aad(subject_id, INITIAL_SUBJECT_KEY_VERSION);
             let wrapped = wrap_cipher
-                .encrypt(dek.expose_bytes(), subject_id.as_bytes())
+                .encrypt(dek.expose_bytes(), &wrap_aad)
                 .map_err(|e| CryptoShredError::Crypto(e.to_string()))?;
             let mut deduped: Vec<DesignationTarget> = Vec::with_capacity(targets.len());
             for t in targets.drain(..) {
@@ -281,12 +312,23 @@ impl CryptoShredState {
             .wrapped_key
             .as_ref()
             .ok_or_else(|| CryptoShredError::SubjectErased(subject_id.to_string()))?;
-        let raw = wrap_cipher
-            .decrypt(&wrapped.wrapped, subject_id.as_bytes())
-            .map_err(|e| CryptoShredError::Crypto(e.to_string()))?;
-        let bytes: [u8; subject::SUBJECT_KEY_LEN] = raw.as_slice().try_into().map_err(|_| {
-            CryptoShredError::Crypto("unwrapped subject key has wrong length".to_string())
-        })?;
+        // Zeroize every transit copy of the unwrapped DEK: the decrypt output
+        // lands in a Zeroizing<Vec<u8>>, and the fixed-size array we hand to
+        // SubjectKey is built inside a Zeroizing<[u8;N]> — neither is left in a
+        // plain buffer that could survive on the stack/heap after use.
+        let aad = wrap_aad(subject_id, wrapped.key_version);
+        let raw = Zeroizing::new(
+            wrap_cipher
+                .decrypt(&wrapped.wrapped, &aad)
+                .map_err(|e| CryptoShredError::Crypto(e.to_string()))?,
+        );
+        if raw.len() != subject::SUBJECT_KEY_LEN {
+            return Err(CryptoShredError::Crypto(
+                "unwrapped subject key has wrong length".to_string(),
+            ));
+        }
+        let mut bytes = Zeroizing::new([0u8; subject::SUBJECT_KEY_LEN]);
+        bytes.copy_from_slice(&raw);
         let key = SubjectKey::from_bytes(bytes);
         guard.cache_key(subject_id.as_str(), key.clone());
         Ok(key)

@@ -85,7 +85,7 @@ fn subject_id_validation() {
 
 #[test]
 fn subject_key_debug_redacts() {
-    let key = SubjectKey::from_bytes([0xAB; 32]);
+    let key = SubjectKey::from_bytes(Zeroizing::new([0xAB; 32]));
     let dbg = format!("{key:?}");
     assert_eq!(dbg, "SubjectKey(<redacted>)");
     // No key byte / hex leaks.
@@ -99,15 +99,75 @@ fn subject_key_debug_redacts() {
 fn envelope_seal_unseal_roundtrip() {
     let cipher = test_cipher(1);
     let plaintext = b"the-quick-brown-fox";
-    let sealed = envelope::seal(plaintext, "subj-1", 1, cipher.as_ref()).unwrap();
+    let sealed = envelope::seal(plaintext, "subj-1", 1, b"", cipher.as_ref()).unwrap();
     assert!(envelope::is_envelope(&sealed));
     let header = envelope::parse_header(&sealed).unwrap();
     assert_eq!(header.subject_id, "subj-1");
     assert_eq!(header.key_version, 1);
-    let out = envelope::unseal(&sealed, cipher.as_ref()).unwrap();
+    let out = envelope::unseal(&sealed, b"", cipher.as_ref()).unwrap();
     assert_eq!(out, plaintext);
     // Plaintext must not appear verbatim in the sealed bytes.
     assert!(!sealed.windows(plaintext.len()).any(|w| w == plaintext));
+}
+
+#[test]
+fn envelope_context_binds_write_site() {
+    // An envelope sealed with one write-site context must not unseal under a
+    // different context, even with the correct key — the context is folded into
+    // the AAD, so a relocation within the same subject is a loud auth failure.
+    let cipher = test_cipher(7);
+    let sealed = envelope::seal(b"payload", "subj-C", 1, b"node:1|email", cipher.as_ref()).unwrap();
+    // Correct context round-trips.
+    let out = envelope::unseal(&sealed, b"node:1|email", cipher.as_ref()).unwrap();
+    assert_eq!(out, b"payload");
+    // Wrong context fails the AEAD auth check.
+    let err = envelope::unseal(&sealed, b"node:2|email", cipher.as_ref()).unwrap_err();
+    assert!(matches!(err, CryptoShredError::Crypto(_)));
+    // Empty context (the value the seal did NOT use) also fails.
+    assert!(matches!(
+        envelope::unseal(&sealed, b"", cipher.as_ref()),
+        Err(CryptoShredError::Crypto(_))
+    ));
+}
+
+#[test]
+fn envelope_malformed_bytes_error_not_panic() {
+    let cipher = test_cipher(4);
+    // Truncated (shorter than the fixed header).
+    assert!(matches!(
+        envelope::unseal(b"SUB", b"", cipher.as_ref()),
+        Err(CryptoShredError::Crypto(_))
+    ));
+    assert!(matches!(
+        envelope::parse_header(b"SUB"),
+        Err(CryptoShredError::Crypto(_))
+    ));
+    // Wrong magic, header-length bytes but not "SUBJ".
+    let wrong_magic = vec![0u8; envelope::ENVELOPE_HEADER_LEN + 8];
+    assert!(matches!(
+        envelope::unseal(&wrong_magic, b"", cipher.as_ref()),
+        Err(CryptoShredError::Crypto(_))
+    ));
+    assert!(matches!(
+        envelope::parse_header(&wrong_magic),
+        Err(CryptoShredError::Crypto(_))
+    ));
+    // Random noise beginning with the magic but with a bogus subj_len that
+    // overruns the buffer — must error, never panic.
+    let mut bogus = Vec::new();
+    bogus.extend_from_slice(envelope::ENVELOPE_MAGIC);
+    bogus.push(envelope::ENVELOPE_FORMAT_VERSION);
+    bogus.push(1); // alg id
+    bogus.extend_from_slice(&1u32.to_le_bytes()); // key version
+    bogus.extend_from_slice(&0xFFFFu16.to_le_bytes()); // subj_len = 65535 (overruns)
+    assert!(matches!(
+        envelope::unseal(&bogus, b"", cipher.as_ref()),
+        Err(CryptoShredError::Crypto(_))
+    ));
+    assert!(matches!(
+        envelope::parse_header(&bogus),
+        Err(CryptoShredError::Crypto(_))
+    ));
 }
 
 #[test]
@@ -116,26 +176,47 @@ fn envelope_aad_binds_subject_and_version() {
     // header is rewritten to claim a different subject/version — the AAD mismatch
     // is a loud auth failure, not fabricated plaintext (cross-entity swap guard).
     let cipher = test_cipher(2);
-    let sealed = envelope::seal(b"secret", "subj-A", 1, cipher.as_ref()).unwrap();
+    let sealed = envelope::seal(b"secret", "subj-A", 1, b"", cipher.as_ref()).unwrap();
 
-    // Tamper the subject id bytes in place (same length "subj-B").
+    // Tamper the subject id bytes in place (same length "subj-B"). The AEAD auth
+    // path must fire (Crypto error), not merely "some error".
     let mut swapped = sealed.clone();
     let start = envelope::ENVELOPE_HEADER_LEN;
     swapped[start..start + 6].copy_from_slice(b"subj-B");
-    assert!(envelope::unseal(&swapped, cipher.as_ref()).is_err());
+    assert!(matches!(
+        envelope::unseal(&swapped, b"", cipher.as_ref()),
+        Err(CryptoShredError::Crypto(_))
+    ));
 
     // Tamper the key-version field.
     let mut kv = sealed.clone();
     kv[6] = 9;
-    assert!(envelope::unseal(&kv, cipher.as_ref()).is_err());
+    assert!(matches!(
+        envelope::unseal(&kv, b"", cipher.as_ref()),
+        Err(CryptoShredError::Crypto(_))
+    ));
+
+    // Cross-subject swap using subject B's ACTUALLY-DIFFERENT cipher (a distinct
+    // key, not just a header-byte rewrite): B's cipher cannot unseal A's
+    // envelope, and A's cipher cannot unseal an envelope B sealed for itself.
+    let cipher_b = test_cipher(3);
+    assert!(matches!(
+        envelope::unseal(&sealed, b"", cipher_b.as_ref()),
+        Err(CryptoShredError::Crypto(_))
+    ));
+    let sealed_b = envelope::seal(b"secret-b", "subj-B", 1, b"", cipher_b.as_ref()).unwrap();
+    assert!(matches!(
+        envelope::unseal(&sealed_b, b"", cipher.as_ref()),
+        Err(CryptoShredError::Crypto(_))
+    ));
 }
 
 #[test]
 fn envelope_property_value_roundtrip() {
     let cipher = test_cipher(3);
     let value = PropertyValue::String(Arc::from("diagnosis: confidential"));
-    let sealed = envelope::seal_property_value(&value, "subj-P", 1, cipher.as_ref()).unwrap();
-    let out = envelope::unseal_property_value(&sealed, cipher.as_ref()).unwrap();
+    let sealed = envelope::seal_property_value(&value, "subj-P", 1, b"", cipher.as_ref()).unwrap();
+    let out = envelope::unseal_property_value(&sealed, b"", cipher.as_ref()).unwrap();
     assert_eq!(out, value);
 }
 
@@ -177,8 +258,9 @@ fn keyring_roundtrip_seal_unseal() {
     let key = db.subject_key("subject-1").unwrap();
     let cipher = create_cipher(Algorithm::Aes256Gcm, &Zeroizing::new(*key.expose_bytes()));
     let value = PropertyValue::Int(4242);
-    let sealed = envelope::seal_property_value(&value, "subject-1", 1, cipher.as_ref()).unwrap();
-    let out = envelope::unseal_property_value(&sealed, cipher.as_ref()).unwrap();
+    let sealed =
+        envelope::seal_property_value(&value, "subject-1", 1, b"", cipher.as_ref()).unwrap();
+    let out = envelope::unseal_property_value(&sealed, b"", cipher.as_ref()).unwrap();
     assert_eq!(out, value);
 }
 
@@ -192,7 +274,7 @@ fn erase_destroys_key_ac1() {
     // Seal a value under the subject key while active.
     let key = db.subject_key("gdpr-subject").unwrap();
     let cipher = create_cipher(Algorithm::Aes256Gcm, &Zeroizing::new(*key.expose_bytes()));
-    let sealed = envelope::seal(b"personal-data", "gdpr-subject", 1, cipher.as_ref()).unwrap();
+    let sealed = envelope::seal(b"personal-data", "gdpr-subject", 1, b"", cipher.as_ref()).unwrap();
     drop(key);
     drop(cipher);
 
@@ -224,7 +306,7 @@ fn blast_radius_ac6() {
 
     let key_b_before = *db.subject_key("B").unwrap().expose_bytes();
     let cipher_b = create_cipher(Algorithm::Aes256Gcm, &Zeroizing::new(key_b_before));
-    let sealed_b = envelope::seal(b"b-data", "B", 1, cipher_b.as_ref()).unwrap();
+    let sealed_b = envelope::seal(b"b-data", "B", 1, b"", cipher_b.as_ref()).unwrap();
 
     // Erase A.
     db.erase_subject("A").unwrap();
@@ -232,7 +314,7 @@ fn blast_radius_ac6() {
     // B's key still unwraps, byte-identical, and B's envelope still unseals.
     let key_b_after = *db.subject_key("B").unwrap().expose_bytes();
     assert_eq!(key_b_before, key_b_after);
-    let out = envelope::unseal(&sealed_b, cipher_b.as_ref()).unwrap();
+    let out = envelope::unseal(&sealed_b, b"", cipher_b.as_ref()).unwrap();
     assert_eq!(out, b"b-data");
 }
 
@@ -282,14 +364,50 @@ fn fail_closed_on_corrupt_keyring() {
 }
 
 #[test]
+fn erase_physically_removes_wrapped_key_and_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let kr_path = dir.path().join(keyring::KEYRING_FILENAME);
+    {
+        let db = enc_db(dir.path());
+        db.designate_subject("gdpr", vec![DesignationTarget::WholeNode(1)])
+            .unwrap();
+        let before = keyring::load_keyring(&kr_path).unwrap();
+        assert!(before.get("gdpr").unwrap().wrapped_key.is_some());
+        db.erase_subject("gdpr").unwrap();
+    }
+    // Reopen COLD from disk: erasure must persist AND the wrapped DEK must be
+    // physically gone.
+    let db2 = enc_db(dir.path());
+    assert!(matches!(
+        db2.subject_key("gdpr"),
+        Err(CryptoShredError::SubjectErased(_))
+    ));
+    let after = keyring::load_keyring(&kr_path).unwrap();
+    assert!(
+        after.get("gdpr").unwrap().wrapped_key.is_none(),
+        "wrapped DEK must be physically removed, else key is recoverable"
+    );
+    assert!(db2.subject_key("gdpr").is_err());
+}
+
+#[test]
 fn breadcrumb_crash_resume_erases_subject() {
     let dir = tempfile::tempdir().unwrap();
+    let kr_path = dir.path().join(keyring::KEYRING_FILENAME);
+    let sealed;
+    let key_bytes;
     {
         let db = enc_db(dir.path());
         db.designate_subject("S", vec![DesignationTarget::WholeNode(1)])
             .unwrap();
         // Subject is active with a wrapped key on disk.
         assert!(db.crypto_shred.is_active("S"));
+        // SEAL a value under the subject's key BEFORE the simulated crash, so we
+        // can prove the prior envelope is unrecoverable after recovery.
+        let key = db.subject_key("S").unwrap();
+        key_bytes = *key.expose_bytes();
+        let cipher = create_cipher(Algorithm::Aes256Gcm, &Zeroizing::new(key_bytes));
+        sealed = envelope::seal(b"S-personal-data", "S", 1, b"", cipher.as_ref()).unwrap();
         drop(db);
     }
 
@@ -307,6 +425,86 @@ fn breadcrumb_crash_resume_erases_subject() {
         Err(CryptoShredError::SubjectErased(_))
     ));
     assert!(!bc_path.exists(), "breadcrumb must be cleared after resume");
+    drop(db2);
+
+    // (i) A SECOND cold reopen still shows Erased (recovery was durable, not just
+    // an in-memory flip).
+    let db3 = enc_db(dir.path());
+    assert!(db3.crypto_shred.is_erased("S"));
+    // (ii) The wrapped_key is physically None in the reloaded keyring.
+    let reloaded = keyring::load_keyring(&kr_path).unwrap();
+    assert!(reloaded.get("S").unwrap().wrapped_key.is_none());
+    // (iii) subject_key errs, so the prior envelope can never be unsealed.
+    assert!(matches!(
+        db3.subject_key("S"),
+        Err(CryptoShredError::SubjectErased(_))
+    ));
+    // The old key bytes cannot help either: the point is the DEK is gone from the
+    // durable store; the envelope still exists but is undecryptable via any live
+    // path. (We deliberately do not "cheat" by reusing key_bytes — that only
+    // works because the test captured them pre-crash; a real attacker post-erase
+    // has no such copy.)
+    let _ = &sealed;
+    let _ = key_bytes;
+}
+
+#[test]
+fn breadcrumb_resume_creates_tombstone_for_absent_subject() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = enc_db(dir.path());
+        // Designate a DIFFERENT subject so the keyring file exists, but never
+        // designate "ghost".
+        db.designate_subject("other", vec![DesignationTarget::WholeNode(1)])
+            .unwrap();
+        drop(db);
+    }
+
+    // Write a breadcrumb naming a subject that was never designated.
+    let bc_path = dir.path().join(keyring::BREADCRUMB_FILENAME);
+    keyring::write_breadcrumb(&bc_path, "ghost").unwrap();
+
+    // Reopen → fail-closed: a tombstone for "ghost" is minted (Erased), and the
+    // breadcrumb is cleared.
+    let db2 = enc_db(dir.path());
+    assert!(db2.crypto_shred.is_erased("ghost"));
+    assert!(matches!(
+        db2.subject_key("ghost"),
+        Err(CryptoShredError::SubjectErased(_))
+    ));
+    // The unrelated subject is untouched.
+    assert!(db2.crypto_shred.is_active("other"));
+    assert!(!bc_path.exists(), "breadcrumb must be cleared after resume");
+}
+
+#[test]
+fn erase_mints_attestation_on_recovered_tombstone() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = enc_db(dir.path());
+        db.designate_subject("other", vec![DesignationTarget::WholeNode(1)])
+            .unwrap();
+        drop(db);
+    }
+    // Crash-recovered tombstone with attestation == None (minted by recovery, not
+    // by an erase() call).
+    let bc_path = dir.path().join(keyring::BREADCRUMB_FILENAME);
+    keyring::write_breadcrumb(&bc_path, "ghost").unwrap();
+    let db2 = enc_db(dir.path());
+    assert!(db2.crypto_shred.is_erased("ghost"));
+
+    // Calling erase_subject on the recovered tombstone must mint a valid SIGNED
+    // attestation (it had none) that verifies with its embedded pubkey.
+    let att = db2.erase_subject("ghost").unwrap();
+    assert!(att.verify());
+    assert_eq!(att.subject_id, "ghost");
+    // Recovered orphan tombstone had no recorded designation → entity_count 0.
+    assert_eq!(att.entity_count, 0);
+
+    // A subsequent erase is now idempotent and returns the same attestation.
+    let att2 = db2.erase_subject("ghost").unwrap();
+    assert_eq!(att.signature, att2.signature);
+    assert!(att2.verify());
 }
 
 // ── attestation ────────────────────────────────────────────────────
@@ -338,6 +536,88 @@ fn attestation_signature_verifies_and_carries_no_content() {
     let record = att.to_record();
     let rebuilt = attestation::ErasureAttestation::from_record(&record).unwrap();
     assert!(rebuilt.verify());
+}
+
+// ── secret redaction (populated structures) ────────────────────────
+
+#[test]
+fn debug_of_populated_structures_leaks_no_secrets() {
+    use keyring::{
+        INITIAL_SUBJECT_KEY_VERSION, SubjectEntry, SubjectKeyring, SubjectState, WrappedKey,
+    };
+
+    // Distinctive, easily-greppable secret patterns.
+    let wrapped_blob = vec![0x11u8; 48]; // hex "11" repeated
+    let cached_key = SubjectKey::from_bytes(Zeroizing::new([0xCDu8; 32])); // hex "cd" repeated
+
+    // A populated WrappedKey must not render its blob bytes.
+    let wk = WrappedKey {
+        key_version: INITIAL_SUBJECT_KEY_VERSION,
+        wrapped: wrapped_blob.clone(),
+    };
+    let wk_dbg = format!("{wk:?}");
+    assert!(
+        !wk_dbg.contains("11, 11"),
+        "WrappedKey debug leaked blob: {wk_dbg}"
+    );
+    assert!(
+        !wk_dbg.contains("1111"),
+        "WrappedKey debug leaked blob hex: {wk_dbg}"
+    );
+
+    // A populated SubjectKeyring (entry with wrapped blob + a cached DEK) must
+    // render only counts / ids.
+    let mut kr = SubjectKeyring::new();
+    kr.upsert(SubjectEntry {
+        subject_id: "redact-subject".to_string(),
+        wrapped_key: Some(wk),
+        designation: vec![DesignationTarget::WholeNode(1)],
+        state: SubjectState::Active,
+        created_at_micros: 1,
+        erased_at_micros: None,
+        attestation: None,
+    });
+    kr.cache_key("redact-subject", cached_key);
+    let kr_dbg = format!("{kr:?}");
+    // No wrapped-blob bytes and no cached-key hex.
+    assert!(
+        !kr_dbg.contains("11, 11"),
+        "keyring debug leaked blob: {kr_dbg}"
+    );
+    assert!(
+        !kr_dbg.contains("cd"),
+        "keyring debug leaked key hex: {kr_dbg}"
+    );
+    assert!(
+        !kr_dbg.contains("205, 205"),
+        "keyring debug leaked key bytes: {kr_dbg}"
+    );
+
+    // A populated CryptoShredState (durable, with a wrapped blob + cached DEK on
+    // disk) must render only its path / durability, never key material.
+    let dir = tempfile::tempdir().unwrap();
+    let db = enc_db(dir.path());
+    db.designate_subject("state-subject", vec![DesignationTarget::WholeNode(1)])
+        .unwrap();
+    let _ = db.subject_key("state-subject").unwrap(); // populate the DEK cache
+    let state_dbg = format!("{:?}", db.crypto_shred);
+    assert!(state_dbg.contains("CryptoShredState"));
+    // No key/blob material or entry contents should appear (the Debug renders
+    // only the path + durability flag). We avoid substring-matching the random
+    // DEK bytes (unknown) or the tempdir path; instead assert the structure does
+    // not spill keyring internals.
+    assert!(
+        !state_dbg.contains("wrapped"),
+        "state debug leaked wrap material: {state_dbg}"
+    );
+    assert!(
+        !state_dbg.contains("SubjectEntry"),
+        "state debug leaked entries: {state_dbg}"
+    );
+    assert!(
+        !state_dbg.contains("cached_key"),
+        "state debug leaked cache: {state_dbg}"
+    );
 }
 
 // ── ephemeral (in-memory) path ─────────────────────────────────────
