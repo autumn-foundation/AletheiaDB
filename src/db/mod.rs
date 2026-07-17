@@ -32,6 +32,12 @@ pub mod changefeed_sub;
 pub mod config;
 /// Uniqueness constraint builder.
 pub mod constraint_builder;
+/// GDPR crypto-shred: per-subject key axis + designation/erasure (Issue #3359).
+///
+/// Gated on `audit-export` (a default feature): the signed erasure attestation
+/// reuses the audit Ed25519 signing key, so the module needs `crate::audit`.
+#[cfg(feature = "audit-export")]
+pub mod crypto_shred;
 /// Durable encryption-state authority — `{data_dir}/encryption.state` (Issue #3616).
 pub(crate) mod encryption_state;
 /// Queryable bi-temporal extent of the dataset (Issue #3238).
@@ -72,6 +78,10 @@ pub mod vector_builder;
 
 pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
+#[cfg(feature = "audit-export")]
+pub use crypto_shred::{
+    CryptoShredError, DesignationTarget, ErasureAttestation, SubjectId, SubjectKey,
+};
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
 pub use lineage::{FactStatus, LineageView, LineageViewEntry};
 pub use ops::NodesAtTime;
@@ -221,6 +231,12 @@ pub struct AletheiaDB {
     /// startup. Lives under the data dir (the parent of the WAL dir), mirroring
     /// the provenance-chain sidecar's placement.
     pub(crate) schema_constraint_path: Option<std::path::PathBuf>,
+    /// GDPR crypto-shred state (Issue #3359): the per-subject key registry, its
+    /// durable paths, and the attestation signing key. In-memory-only for an
+    /// ephemeral database (no index persistence). Loaded fail-closed at startup
+    /// with breadcrumb crash-recovery.
+    #[cfg(feature = "audit-export")]
+    pub(crate) crypto_shred: Arc<crate::db::crypto_shred::CryptoShredState>,
     /// Fact-to-fact derivation lineage index (Issue #3371).
     ///
     /// Records that a fact version was derived from a set of source fact
