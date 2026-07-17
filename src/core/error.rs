@@ -965,6 +965,80 @@ pub enum ConstraintError {
     },
 }
 
+impl ConstraintError {
+    /// Structured, machine-readable `details` for the schema-constraint
+    /// (Issue #3378) variants, shared by the MCP (#3234) and HTTP error
+    /// surfaces so both render byte-identical metadata under `error.details`.
+    ///
+    /// Returns `Some(..)` only for the schema-constraint variants —
+    /// [`Self::TypeViolation`], [`Self::MissingRequiredKey`], and
+    /// [`Self::NonConformingOnEnable`]. The uniqueness variants
+    /// ([`Self::UniqueViolation`] / [`Self::DuplicateOnEnable`] /
+    /// [`Self::UnsupportedKeyType`]) return `None`: their surface-specific
+    /// `details` (e.g. the MCP `UniqueViolation`'s `existing_node_id` plus
+    /// legacy top-level fields) are still built at their existing call sites,
+    /// so this method does not change their behavior.
+    ///
+    /// Every payload is **bounded**: `missing_keys` is exactly the declared
+    /// required keys that were absent, `NonConformingOnEnable`'s `sample_ids`
+    /// and each violation's `sample_ids` are already capped at
+    /// [`crate::core::constraint::MAX_CONFORMANCE_SAMPLE_IDS`], and the
+    /// aggregated `violations` list is one entry per distinct
+    /// `(property, reason)` — never a per-entity dump.
+    pub fn structured_details(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        match self {
+            ConstraintError::TypeViolation {
+                entity_kind,
+                label,
+                property,
+                expected_type,
+                actual_type,
+            } => Some(json!({
+                "entity_kind": entity_kind,
+                "label": label,
+                "property": property,
+                "expected_type": expected_type,
+                "actual_type": actual_type,
+            })),
+            ConstraintError::MissingRequiredKey {
+                entity_kind,
+                label,
+                missing_keys,
+            } => Some(json!({
+                "entity_kind": entity_kind,
+                "label": label,
+                // Always a JSON array, even for a single missing key, so a
+                // caller can iterate uniformly.
+                "missing_keys": missing_keys,
+            })),
+            ConstraintError::NonConformingOnEnable {
+                entity_kind,
+                label,
+                violations,
+                total_non_conforming,
+                sample_ids,
+            } => Some(json!({
+                "entity_kind": entity_kind,
+                "label": label,
+                "total_non_conforming": total_non_conforming,
+                "sample_ids": sample_ids,
+                "violations": violations
+                    .iter()
+                    .map(|v| json!({
+                        "property": v.property,
+                        "reason": v.reason,
+                        "sample_ids": v.sample_ids,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+            ConstraintError::UniqueViolation { .. }
+            | ConstraintError::DuplicateOnEnable { .. }
+            | ConstraintError::UnsupportedKeyType { .. } => None,
+        }
+    }
+}
+
 /// Errors related to vector operations and validation.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum VectorError {

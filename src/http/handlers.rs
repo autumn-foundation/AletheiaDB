@@ -327,7 +327,10 @@ async fn handle_create_node(
     blocking(move || {
         let node_id = db
             .create_node_with_options(&label, props, write_options_for(principal.as_deref()))
-            .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+            // Issue #3378: a schema-constraint violation renders with the
+            // structured #3234 envelope (code/details); every other write
+            // error keeps the prior 400 BadRequest mapping.
+            .map_err(|e| AletheiaHttpError::from_db_error(&e))?;
         let node = db
             .get_node(node_id)
             .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
@@ -640,7 +643,8 @@ async fn handle_bulk_create_nodes(
                 }
                 Ok::<_, crate::core::error::Error>(ids)
             })
-            .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+            // Issue #3378: forward schema-constraint details on the bulk path too.
+            .map_err(|e| AletheiaHttpError::from_db_error(&e))?;
 
         let mut created = Vec::with_capacity(created_ids.len());
         for id in created_ids {
@@ -706,7 +710,8 @@ async fn handle_bulk_update_nodes(
                 }
                 Ok::<_, crate::core::error::Error>(ids)
             })
-            .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+            // Issue #3378: forward schema-constraint details on the bulk path too.
+            .map_err(|e| AletheiaHttpError::from_db_error(&e))?;
 
         let mut updated = Vec::with_capacity(updated_ids.len());
         for id in updated_ids {
