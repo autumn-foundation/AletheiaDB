@@ -192,6 +192,18 @@ impl ColdRotationCursor {
     }
 }
 
+/// How the shared cold value-migration driver obtains the plaintext to encrypt
+/// under the target generation for each source value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColdSourceMode {
+    /// Rekey (Issue #3617 PR3): decrypt each source value under its own
+    /// (old/legacy) generation, then re-encrypt under the target DEK.
+    Rekey,
+    /// Enable wrap-only (Issue #3616 PR3): each un-`ACV1` source value is BARE
+    /// plaintext (never encrypted), used directly as the plaintext to encrypt.
+    WrapPlaintext,
+}
+
 /// Statistics returned by a cold bulk re-encrypt pass (Issue #3617 PR3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ColdReencryptStats {
@@ -1648,6 +1660,58 @@ impl RedbColdStorage {
             })
         })?;
 
+        self.migrate_cold_values(target_version, &target_cipher, ColdSourceMode::Rekey)
+    }
+
+    /// Wrap every **bare (plaintext, never-encrypted)** cold value into the `ACV1`
+    /// format under `target_cipher`, stamping `target_version` (Issue #3616 PR3 —
+    /// the plaintext → encrypted *enable* migration).
+    ///
+    /// This is the cold counterpart the enable engine needs but
+    /// [`reencrypt_cold_values`](Self::reencrypt_cold_values) cannot provide: that
+    /// pass *decrypts* each source value first (it rekeys an already-encrypted
+    /// store old-gen → new-gen), and the cold reader treats a bare value as legacy
+    /// **ciphertext** — so feeding a bare plaintext value to the rekey pass would
+    /// fail AEAD authentication. This pass instead treats each un-`ACV1` value as
+    /// the plaintext to encrypt, so a plaintext cold store becomes a uniformly
+    /// `ACV1`-wrapped one whose values the cold reader dispatches correctly (never
+    /// mis-reading a bare value as legacy ciphertext once wrapped).
+    ///
+    /// The cipher is passed explicitly rather than sourced from the keyring, so the
+    /// pass runs on a store opened with **no** keyring (the live plaintext handle
+    /// during `enable`) as well as one opened under the enable cold DEK (a resuming
+    /// `open()`). Only `node_versions`/`edge_versions` VALUES are rewritten;
+    /// `flushed_lsn` / `temporal_extent` are never touched.
+    ///
+    /// **Idempotent / resumable / crash-safe** exactly like
+    /// [`reencrypt_cold_values`](Self::reencrypt_cold_values): a value already
+    /// wrapped at `target_version` is skipped, and each batch's rewrites + cursor
+    /// advance commit in one redb transaction, so a crash mid-pass resumes with no
+    /// double-encrypt. On completion the [`COLD_VALUE_FORMAT_KEY`] marker is set to
+    /// `wrapped@target_version` and the cursor is cleared.
+    ///
+    /// # Errors
+    ///
+    /// A value fails to encrypt, or a redb transaction fails.
+    pub fn wrap_plaintext_cold_values(
+        &self,
+        target_cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
+        target_version: u32,
+    ) -> Result<ColdReencryptStats> {
+        self.migrate_cold_values(target_version, target_cipher, ColdSourceMode::WrapPlaintext)
+    }
+
+    /// Shared driver for the cold value-migration passes (Issue #3617 PR3 rekey /
+    /// Issue #3616 PR3 enable-wrap): resume from the durable cursor, process the
+    /// Node then Edge value tables in bounded batches, and write the terminal
+    /// format marker. The `source_mode` selects how each source value's plaintext
+    /// is obtained (decrypt-under-own-generation vs treat-bare-as-plaintext).
+    fn migrate_cold_values(
+        &self,
+        target_version: u32,
+        target_cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
+        source_mode: ColdSourceMode,
+    ) -> Result<ColdReencryptStats> {
         let mut stats = ColdReencryptStats::default();
 
         // Resume point: a cursor for THIS target resumes it; any other cursor
@@ -1670,7 +1734,8 @@ impl RedbColdStorage {
             self.reencrypt_one_table(
                 table,
                 target_version,
-                &target_cipher,
+                target_cipher,
+                source_mode,
                 resume_after,
                 &mut stats,
             )?;
@@ -1706,6 +1771,7 @@ impl RedbColdStorage {
         table_kind: ColdTableKind,
         target_version: u32,
         target_cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
+        source_mode: ColdSourceMode,
         mut resume_after: Option<u64>,
         stats: &mut ColdReencryptStats,
     ) -> Result<()> {
@@ -1765,11 +1831,18 @@ impl RedbColdStorage {
                         last_key = Some(*key);
                         continue;
                     }
-                    // Decrypt under the value's own (old/legacy) generation, then
-                    // re-encrypt the SAME compressed bytes under the target DEK and
-                    // re-wrap. Value-identity-preserving: no record is decoded, so
-                    // temporal bounds cannot change.
-                    let compressed = self.decrypt_if_needed(value)?;
+                    // Obtain the plaintext to encrypt under the target DEK. In
+                    // `Rekey` mode the source value is decrypted under its own
+                    // (old/legacy) generation; in `WrapPlaintext` mode (enable) the
+                    // bare value already IS the plaintext (never encrypted), so it
+                    // must NOT be decrypted (the cold reader would mis-read it as
+                    // legacy ciphertext). Either way the SAME compressed bytes are
+                    // re-wrapped: no record is decoded, so temporal bounds cannot
+                    // change.
+                    let compressed = match source_mode {
+                        ColdSourceMode::Rekey => self.decrypt_if_needed(value)?,
+                        ColdSourceMode::WrapPlaintext => value.clone(),
+                    };
                     let ciphertext = target_cipher.encrypt(&compressed, &[]).map_err(
                         |e| -> crate::core::error::Error {
                             StorageError::Encryption(format!(
@@ -2193,6 +2266,26 @@ impl RedbColdStorage {
             NODE_VERSIONS_TABLE,
             &self.stats.node_version_reads,
         )
+    }
+
+    /// Test-only: read the RAW stored bytes for a node version (the exact value in
+    /// the `node_versions` table, before any decrypt/decompress), so a test can
+    /// assert the on-disk wire shape (e.g. the `ACV1` wrapper after an enable wrap
+    /// pass, or its absence for a bare plaintext value).
+    #[cfg(test)]
+    pub(crate) fn raw_node_value_for_test(&self, version_id: u64) -> Option<Vec<u8>> {
+        let read_txn = self.db.begin_read().ok()?;
+        let table = read_txn.open_table(NODE_VERSIONS_TABLE).ok()?;
+        let guard = table.get(version_id).ok()??;
+        Some(guard.value().to_vec())
+    }
+
+    /// Test-only: is the raw stored value for `version_id` an `ACV1`-wrapped value?
+    #[cfg(test)]
+    pub(crate) fn raw_node_value_is_acv1_for_test(&self, version_id: u64) -> bool {
+        self.raw_node_value_for_test(version_id)
+            .and_then(|v| parse_cold_wrapper(&v).map(|_| ()))
+            .is_some()
     }
 
     /// Retrieve multiple node versions in a single call.

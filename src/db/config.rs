@@ -458,6 +458,26 @@ impl AletheiaDB {
                 }
             }
 
+            // Issue #3616 PR3: an INTERRUPTED plaintext → encrypted enable leaves
+            // the durable authority NOT yet flipped, so `config.encryption.enabled`
+            // is still `false` here even though the on-disk WAL/index/cold bytes may
+            // already have been (partially) migrated. On that branch, resolve the
+            // enable DEKs from the pending ENABLE ledger so the at-rest layers below
+            // (index manager, cold store) are built UNDER those DEKs — otherwise
+            // they would be built plaintext and then fail to read (or over-write
+            // with plaintext) the freshly-wrapped `AEIX`/`ACV1` bytes the resume
+            // passes produce. The WAL is handled separately by the pre-read hook.
+            // `None` on the common path (no pending enable) reproduces prior
+            // behavior exactly.
+            let enable_resume = if config.persistence.enabled && !config.encryption.enabled {
+                crate::db::rotation::enable_resume_ciphers(
+                    &config.persistence.data_dir,
+                    config.encryption.algorithm,
+                )?
+            } else {
+                None
+            };
+
             // Create encryption manager if encryption is enabled
             let encryption_manager = if config.encryption.enabled {
                 let manager = crate::encryption::EncryptionManager::from_config(&config.encryption)
@@ -595,9 +615,19 @@ impl AletheiaDB {
             // encrypted at rest (Issue #481); mirrors the WAL cipher wiring
             // above. Encryption disabled => None => plaintext, unchanged.
             let persistence_manager = if config.persistence.enabled {
-                let index_cipher = encryption_manager
+                // Issue #3616 PR3: on an interrupted-enable resume the manager must
+                // read/write under the enable index DEK (checkpoints ride it), so a
+                // half-wrapped index dir loads and the resume wrap pass publishes
+                // `AEIX` the same open() then reads back. Otherwise the index cipher
+                // comes from the (enabled) encryption manager as before.
+                let index_cipher = enable_resume
                     .as_ref()
-                    .map(|mgr| Arc::clone(mgr.index_cipher()));
+                    .map(|e| Arc::clone(&e.index))
+                    .or_else(|| {
+                        encryption_manager
+                            .as_ref()
+                            .map(|mgr| Arc::clone(mgr.index_cipher()))
+                    });
                 // Issue #488 version-provisioning: build the index keyring at the
                 // resolved on-disk version so `index_rotation_status` /
                 // `encryption verify` classify rotated files correctly after a
@@ -1009,6 +1039,16 @@ impl AletheiaDB {
                         }
                         None => cold_storage.with_cipher(Arc::clone(enc_mgr.cold_cipher())),
                     };
+                } else if let Some(ref e) = enable_resume {
+                    // Issue #3616 PR3: on an interrupted-enable resume the authority
+                    // is not yet flipped (no encryption manager), but the cold store
+                    // must be built under the enable cold DEK so `ACV1` values
+                    // written by the resume wrap pass (below) are read back this same
+                    // open(). Provisioned at the enable version.
+                    cold_storage = cold_storage.with_cipher_versioned(
+                        Arc::clone(&e.cold),
+                        crate::db::rotation::ENABLE_KEY_VERSION,
+                    );
                 }
 
                 let cold_storage = Arc::new(cold_storage);
@@ -1054,6 +1094,16 @@ impl AletheiaDB {
                 db.historical
                     .write()
                     .set_tiered_storage(Arc::new(tiered_storage));
+
+                // Issue #3616 PR3: finish an interrupted plaintext → encrypted
+                // enable migration's COLD layer, now that the cold store is wired.
+                // `resume_pending_enable` (run before index load) deferred the cold
+                // wrap + the authority flip + the ledger clear to here — this wraps
+                // the bare cold values to `ACV1`, then (all layers settled) flips
+                // the authority and clears the ledger, preserving the binding order.
+                // A guarded no-op when no enable migration with a cold layer is
+                // pending.
+                db.resume_pending_enable_cold()?;
             }
 
             seed_startup_current_timestamp(&db)?;

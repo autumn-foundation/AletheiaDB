@@ -255,7 +255,7 @@ pub(crate) fn mark_wal_complete(manager: &IndexPersistenceManager) -> Result<()>
 /// preserving every other field. A no-op when no ledger is present. Keeps the
 /// #488 P0.2 ordering: the completion is fsync'd before the old cold generation
 /// is retired / the ledger is cleared.
-fn mark_cold_complete(manager: &IndexPersistenceManager) -> Result<()> {
+pub(crate) fn mark_cold_complete(manager: &IndexPersistenceManager) -> Result<()> {
     if let Some(mut ledger) = read_rotation_state(manager)?
         && ledger.cold != LayerStatus::Complete
     {
@@ -1559,10 +1559,16 @@ impl EnableLedgerView {
         }
     }
 
-    /// Every non-WAL layer this engine version can complete is settled, so the
-    /// only remaining work is the authority flip + ledger clear. (Index /
-    /// checkpoint / cold are `Skipped` in the WAL-first engine; a follow-up
-    /// worker that flips them to `Pending` MUST extend this predicate.)
+    /// Every non-WAL layer is settled (none still `Pending`), so the only
+    /// remaining enable work is the authority flip + ledger clear.
+    ///
+    /// The enable engine completes the index + checkpoint layers *inline* (their
+    /// plaintext → `AEIX` wrap pass runs in `resume_pending_enable`, before the
+    /// index directory is read back), so once that pass marks them `Complete`
+    /// this predicate depends only on whether the cold layer is still `Pending`.
+    /// Cold is completed in a *later* phase (`resume_pending_enable_cold`, after
+    /// the cold store is wired), so a cold-in-scope resume keeps the ledger and
+    /// defers the flip until that phase.
     pub(crate) fn non_wal_layers_settled(&self) -> bool {
         !self.index_pending && !self.checkpoint_pending && !self.cold_pending
     }
@@ -1647,6 +1653,106 @@ pub(crate) fn install_pending_enable_wal_keyring(
     }
     let keyring = build_enable_wal_keyring(&view.new_source, enc_cfg.algorithm)?;
     wal.install_wal_keyring(keyring)
+}
+
+/// Build the index DEK cipher for an enable, derived from the recorded key
+/// `source` (`MEK → HKDF index DEK → cipher`). Checkpoints ride this same DEK and
+/// format. No key material leaves `Zeroizing`.
+pub(crate) fn build_enable_index_cipher(
+    source: &KeyProviderConfig,
+    algorithm: Algorithm,
+) -> Result<Arc<dyn Cipher>> {
+    let index_dek =
+        derive_index_dek(load_mek(source).map_err(rotation_err)?).map_err(rotation_err)?;
+    Ok(Arc::from(create_cipher(algorithm, &index_dek)))
+}
+
+/// Build the cold-storage DEK cipher for an enable, derived from the recorded key
+/// `source` (`MEK → HKDF cold DEK → cipher`). No key material leaves `Zeroizing`.
+pub(crate) fn build_enable_cold_cipher(
+    source: &KeyProviderConfig,
+    algorithm: Algorithm,
+) -> Result<Arc<dyn Cipher>> {
+    let cold_dek =
+        derive_cold_dek(load_mek(source).map_err(rotation_err)?).map_err(rotation_err)?;
+    Ok(Arc::from(create_cipher(algorithm, &cold_dek)))
+}
+
+/// Run the plaintext → `AEIX` wrap pass over the manager's `indexes/` directory
+/// for an enable (Issue #3616 PR3), stamping [`ENABLE_KEY_VERSION`]. Idempotent /
+/// resumable: files already carrying the `AEIX` header are skipped. Checkpoint
+/// files ride the index DEK/format and are covered by this same pass.
+pub(crate) fn wrap_enable_index_files(
+    manager: &IndexPersistenceManager,
+    source: &KeyProviderConfig,
+    algorithm: Algorithm,
+) -> Result<()> {
+    let cipher = build_enable_index_cipher(source, algorithm)?;
+    crate::storage::index_persistence::reencrypt::wrap_plaintext_index_dir(
+        &manager.indexes_path(),
+        &cipher,
+        ENABLE_KEY_VERSION,
+    )
+    .map_err(rotation_err)?;
+    Ok(())
+}
+
+/// Rewrite the durable ledger flipping BOTH `layer.index` and `layer.checkpoint`
+/// to `complete` (Issue #3616 PR3), preserving every other field. Checkpoints
+/// ride the index DEK/format, so the index wrap pass settles both at once. A
+/// no-op when no ledger is present.
+pub(crate) fn mark_index_complete(manager: &IndexPersistenceManager) -> Result<()> {
+    if let Some(mut ledger) = read_rotation_state(manager)? {
+        let mut changed = false;
+        if ledger.index != LayerStatus::Complete {
+            ledger.index = LayerStatus::Complete;
+            changed = true;
+        }
+        if ledger.checkpoint != LayerStatus::Complete {
+            ledger.checkpoint = LayerStatus::Complete;
+            changed = true;
+        }
+        if changed {
+            write_ledger(manager, &ledger)?;
+        }
+    }
+    Ok(())
+}
+
+/// The at-rest ciphers an INTERRUPTED plaintext → encrypted enable must build its
+/// layers under on the resuming `open()` (Issue #3616 PR3).
+///
+/// A crash before the authority flip leaves `config.encryption.enabled == false`,
+/// so `open()` would build the index manager and cold store *plaintext* — and
+/// then fail to read (or, worse, over-write with plaintext) the bytes the resume
+/// wrap passes are turning into `AEIX` / `ACV1`. This bundle lets `open()` build
+/// those layers under the enable DEKs derived from the pending ledger's recorded
+/// source, so the resumed session reads its own freshly-wrapped bytes. The WAL is
+/// handled separately by [`install_pending_enable_wal_keyring`].
+pub(crate) struct EnableResumeCiphers {
+    /// The index DEK cipher (checkpoints ride it).
+    pub(crate) index: Arc<dyn Cipher>,
+    /// The cold-storage DEK cipher.
+    pub(crate) cold: Arc<dyn Cipher>,
+}
+
+/// Resolve the [`EnableResumeCiphers`] for a pending ENABLE ledger at `data_dir`,
+/// or `Ok(None)` when no enable migration is pending (the common path). Called on
+/// the `!config.encryption.enabled` startup branch (authority not yet flipped) so
+/// the index manager + cold store are built under the enable DEKs. Fail-closed on
+/// a corrupt ledger.
+pub(crate) fn enable_resume_ciphers(
+    data_dir: &std::path::Path,
+    algorithm: Algorithm,
+) -> Result<Option<EnableResumeCiphers>> {
+    let ledger_path = data_dir.join("rotation.state");
+    let Some(view) = read_enable_ledger_at(&ledger_path)? else {
+        return Ok(None);
+    };
+    Ok(Some(EnableResumeCiphers {
+        index: build_enable_index_cipher(&view.new_source, algorithm)?,
+        cold: build_enable_cold_cipher(&view.new_source, algorithm)?,
+    }))
 }
 
 /// Resume an interrupted index key rotation on startup (Issue #488).
