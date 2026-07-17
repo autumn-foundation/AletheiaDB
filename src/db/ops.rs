@@ -1005,7 +1005,13 @@ impl AletheiaDB {
     /// This uses the fast path (current storage) for O(1) lookup.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, node_id: NodeId) -> Result<Node> {
-        self.current.get_node(node_id).record_error_metric()
+        let node = self.current.get_node(node_id).record_error_metric()?;
+        // GDPR crypto-shred (Issue #3359, PR-1b): unseal designated properties on
+        // read (active subjects -> plaintext; erased -> opaque ciphertext). No-op
+        // unless the database has designations.
+        #[cfg(feature = "audit-export")]
+        let node = self.unseal_node_view(node);
+        Ok(node)
     }
 
     /// Access a node without cloning, executing a closure on the node data.
@@ -1037,7 +1043,12 @@ impl AletheiaDB {
     /// Get the current state of an edge.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
-        self.current.get_edge(edge_id).record_error_metric()
+        let edge = self.current.get_edge(edge_id).record_error_metric()?;
+        // GDPR crypto-shred (Issue #3359, PR-1b): unseal designated properties on
+        // read. No-op unless the database has designations.
+        #[cfg(feature = "audit-export")]
+        let edge = self.unseal_edge_view(edge);
+        Ok(edge)
     }
 
     /// Scan all nodes with a specific label, returning an iterator over node IDs.

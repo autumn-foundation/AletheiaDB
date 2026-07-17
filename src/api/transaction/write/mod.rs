@@ -131,6 +131,15 @@ pub struct WriteTransaction {
     /// matching subscribers AFTER the commit is durable, applied, and visible — outside
     /// every write-path lock (the broadcaster's lock is a leaf).
     pub(crate) changefeed: Option<Arc<crate::core::changefeed_subscription::ChangefeedBroadcaster>>,
+
+    /// GDPR crypto-shred sealing context (Issue #3359, PR-1b). `None` unless the
+    /// parent database has at least one **active** erasure designation, so a
+    /// database that never used crypto-shred pays nothing. When present, the
+    /// apply hook (`apply_node_write`/`apply_edge_write`) replaces designated
+    /// property values with sealed `SUBJ` envelopes before they reach either the
+    /// current or the historical tier.
+    #[cfg(feature = "audit-export")]
+    pub(crate) sealing: Option<crate::db::crypto_shred::SealingContext>,
 }
 
 impl WriteTransaction {
@@ -271,6 +280,8 @@ impl WriteTransaction {
             in_flight: None,
             cas_preconditions: Vec::new(),
             changefeed: None,
+            #[cfg(feature = "audit-export")]
+            sealing: None,
         }
     }
 
@@ -300,6 +311,58 @@ impl WriteTransaction {
     ) -> Self {
         self.changefeed = Some(broadcaster);
         self
+    }
+
+    /// Attach the GDPR crypto-shred sealing context (Issue #3359, PR-1b, called
+    /// by the DB layer when the database has active designations). When set, the
+    /// apply hook seals designated property values before persisting them.
+    #[cfg(feature = "audit-export")]
+    pub(crate) fn with_sealing_context(
+        mut self,
+        sealing: crate::db::crypto_shred::SealingContext,
+    ) -> Self {
+        self.sealing = Some(sealing);
+        self
+    }
+
+    /// Seal designated property values in the write buffer (Issue #3359, PR-1b).
+    ///
+    /// Called from `commit_with_timestamp_inner` AFTER validation + constraint
+    /// checks (which must see plaintext values) but BEFORE WAL logging and apply,
+    /// so the WAL segment, the current tier, and the historical tier all receive
+    /// **byte-identical** sealed ciphertext (each envelope is sealed exactly once;
+    /// its random per-encryption nonce is shared across every tier). No-op when no
+    /// sealing context is attached (no active designation) or when no buffered
+    /// entity carries a designated key.
+    ///
+    /// # Errors
+    /// Propagates the seal error (fail-closed: a seal failure aborts the commit
+    /// rather than persisting plaintext of erasable data).
+    #[cfg(feature = "audit-export")]
+    pub(crate) fn seal_buffer(&mut self) -> Result<()> {
+        use super::BufferedWrite as BW;
+        // Cheap clone (two Arc + a Copy enum) so we can borrow the buffer mutably.
+        let Some(ctx) = self.sealing.clone() else {
+            return Ok(());
+        };
+        for op in self.buffer.operations_mut() {
+            let (is_node, entity_id) = match op {
+                BW::CreateNode { node_id, .. } | BW::UpdateNode { node_id, .. } => {
+                    (true, node_id.as_u64())
+                }
+                BW::CreateEdge { edge_id, .. } | BW::UpdateEdge { edge_id, .. } => {
+                    (false, edge_id.as_u64())
+                }
+                // Deletes/retracts re-persist already-sealed bytes read back from
+                // storage — no re-seal needed.
+                _ => continue,
+            };
+            if let Some(props_ref) = op.properties_mut() {
+                let props = std::mem::take(props_ref);
+                *props_ref = ctx.seal_map(is_node, entity_id, props)?;
+            }
+        }
+        Ok(())
     }
 
     /// Get transaction metadata.
@@ -450,6 +513,16 @@ impl WriteTransaction {
         } else {
             None
         };
+
+        // GDPR crypto-shred (Issue #3359, PR-1b): seal designated property values
+        // in the buffer AFTER validation + constraint checks (which must see
+        // plaintext) but BEFORE WAL logging + apply, so every tier (WAL segment,
+        // current, historical) records byte-identical sealed ciphertext. Runs
+        // outside the `current_timestamp` critical section, keeping the keyring
+        // lock off the timestamp-held path. Fail-closed. No-op without an active
+        // designation.
+        #[cfg(feature = "audit-export")]
+        self.seal_buffer()?;
 
         // Issue #3406: pre-generate the closing (delete tombstone / retraction)
         // version ids BEFORE WAL logging, so the SAME ids are both (a) recorded

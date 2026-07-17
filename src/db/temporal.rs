@@ -103,10 +103,16 @@ impl AletheiaDB {
         #[cfg(feature = "observability")]
         let _span = crate::observability::temporal_query_span("get_node_at_time").entered();
 
-        self.historical
+        let node = self
+            .historical
             .read()
             .get_node_at_time(node_id, valid_time, transaction_time)
-            .record_error_metric()
+            .record_error_metric()?;
+        // GDPR crypto-shred (Issue #3359, PR-1b): unseal designated properties on
+        // the point-in-time read boundary. No-op unless the DB has designations.
+        #[cfg(feature = "audit-export")]
+        let node = self.unseal_node_view(node);
+        Ok(node)
     }
 
     /// Get an edge as it existed at a specific point in bi-temporal space.
@@ -123,10 +129,16 @@ impl AletheiaDB {
         #[cfg(feature = "observability")]
         let _span = crate::observability::temporal_query_span("get_edge_at_time").entered();
 
-        self.historical
+        let edge = self
+            .historical
             .read()
             .get_edge_at_time(edge_id, valid_time, transaction_time)
-            .record_error_metric()
+            .record_error_metric()?;
+        // GDPR crypto-shred (Issue #3359, PR-1b): unseal designated properties on
+        // the point-in-time read boundary. No-op unless the DB has designations.
+        #[cfg(feature = "audit-export")]
+        let edge = self.unseal_edge_view(edge);
+        Ok(edge)
     }
 
     /// Get multiple nodes as they existed at a specific point in bi-temporal space.

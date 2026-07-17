@@ -4,11 +4,17 @@
 //! encryption config and delegate to [`super::CryptoShredState`]. No live
 //! data-path integration here — that is PR-1b.
 
+use std::sync::Arc;
+
+use crate::core::graph::{Edge, Node};
+use crate::core::property::PropertyMap;
 use crate::db::AletheiaDB;
 use crate::encryption::{Cipher, KeyDerivation, create_cipher};
 
 use super::error::CryptoShredError;
-use super::{DesignationTarget, ErasureAttestation, SubjectId, SubjectKey};
+use super::{
+    DesignationTarget, ErasureAttestation, SealingContext, ShredStatusMap, SubjectId, SubjectKey,
+};
 
 /// HKDF component label for the subject-wrapping DEK. Yields HKDF info string
 /// `aletheiadb-subject-wrap-dek-v1` (see `KeyDerivation::derive_dek`).
@@ -106,5 +112,82 @@ impl AletheiaDB {
     #[must_use]
     pub fn erasure_attestation_public_key(&self) -> crate::audit::AuditPublicKey {
         self.crypto_shred.attestation_public_key()
+    }
+
+    // ---- PR-1b live data-path integration -------------------------------------
+
+    /// Build a prepared [`SealingContext`] for a write transaction, or `None`
+    /// when there is nothing to seal (no active designation) — the cheap common
+    /// case. Fail-closed: when active designations exist but the subject-wrapping
+    /// cipher cannot be built (e.g. encryption misconfigured), returns `Err` so
+    /// the write aborts rather than silently persisting plaintext.
+    pub(crate) fn sealing_context(&self) -> Result<Option<SealingContext>, CryptoShredError> {
+        if !self.crypto_shred.has_active_designations() {
+            return Ok(None);
+        }
+        let cfg = self
+            .encryption_config
+            .as_ref()
+            .ok_or(CryptoShredError::EncryptionNotConfigured)?;
+        let wrap = self
+            .crypto_shred
+            .cached_wrap_cipher(|| self.subject_wrap_cipher())?;
+        Ok(Some(SealingContext::new(
+            Arc::clone(&self.crypto_shred),
+            wrap,
+            cfg.algorithm,
+        )))
+    }
+
+    /// Materialize sealed property values on read (PR-1b read hook).
+    ///
+    /// Unseal active-subject envelopes to plaintext in place; leave erased ones
+    /// as opaque ciphertext and report them via the returned [`ShredStatusMap`].
+    /// Cheap no-op (returns the map untouched) when the database has never had
+    /// any designation. Building the subject-wrapping cipher (needed only to
+    /// unwrap active DEKs on a cache miss) is memoized; a failure to build it
+    /// leaves values opaque rather than fabricating plaintext.
+    pub(crate) fn materialize_shred(
+        &self,
+        entity_id: u64,
+        props: PropertyMap,
+    ) -> (PropertyMap, ShredStatusMap) {
+        if !self.crypto_shred.has_any_designations() {
+            return (props, ShredStatusMap::new());
+        }
+        let Some(cfg) = self.encryption_config.as_ref() else {
+            return (props, ShredStatusMap::new());
+        };
+        let wrap = match self
+            .crypto_shred
+            .cached_wrap_cipher(|| self.subject_wrap_cipher())
+        {
+            Ok(w) => w,
+            Err(_) => return (props, ShredStatusMap::new()),
+        };
+        self.crypto_shred
+            .unseal_map(entity_id, props, wrap.as_ref(), cfg.algorithm)
+    }
+
+    /// Unseal a node's designated properties for a read boundary (PR-1b).
+    #[must_use]
+    pub(crate) fn unseal_node_view(&self, mut node: Node) -> Node {
+        if !self.crypto_shred.has_any_designations() {
+            return node;
+        }
+        let (props, _status) = self.materialize_shred(node.id.as_u64(), node.properties);
+        node.properties = props;
+        node
+    }
+
+    /// Unseal an edge's designated properties for a read boundary (PR-1b).
+    #[must_use]
+    pub(crate) fn unseal_edge_view(&self, mut edge: Edge) -> Edge {
+        if !self.crypto_shred.has_any_designations() {
+            return edge;
+        }
+        let (props, _status) = self.materialize_shred(edge.id.as_u64(), edge.properties);
+        edge.properties = props;
+        edge
     }
 }

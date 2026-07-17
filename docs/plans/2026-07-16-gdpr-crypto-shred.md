@@ -162,6 +162,71 @@ Pre-erasure `AS OF` still returns structure (ids, temporal coords, label, topolo
     meaningful to measure at the foundation level.
 
 **Coordination boundary:** the encryption-migration successor session owns `src/encryption` + `src/storage/wal` keyring code and #3616 PRs 2–4; slice 1 deliberately avoids those files; slices 3 and 5 require coordinator-brokered coordination before touching `wal_encryption.rs` / `rotation.rs` / `reencrypt.rs`.
+
+## PR-1b delivered / deferred (property-path integration)
+
+**Delivered in PR-1b** (wires the PR-1a cryptographic core into the live
+data path — no `src/encryption/`, `rotation.rs`, `wal_encryption.rs`, or
+`reencrypt.rs` edits):
+
+- **Reverse designation index** on `SubjectKeyring`
+  (`HashMap<(is_node,u64), Vec<subject_id>>`): maintained in `upsert` (so it
+  grows with `designate`'s merge/new arms), rebuilt in `load_from_sidecar`, left
+  intact by `erase_in_memory`/`force_erased` (so reads still report erased).
+  Plus lock-free gates `has_active` / `has_any` (AtomicBool) so a database with
+  no active designations pays zero per-write cost and one with no designations
+  at all pays zero per-read cost.
+- **Seal at write:** `apply_node_write` / `apply_edge_write` rebind `properties`
+  through a single `seal_map` at the top, so BOTH the current and historical
+  tiers receive **byte-identical** sealed-envelope ciphertext (one seal, random
+  nonce shared). `WriteTransaction` carries a prepared `SealingContext`
+  (`Arc<CryptoShredState>` + memoized wrap cipher + algorithm), populated in
+  `write_transaction()` only when active designations exist (gated
+  `#[cfg(feature="audit-export")]`). Reserved keys (`__aletheia_*` / `__shred_*`,
+  incl. the `__aletheia_ns` namespace marker) are never sealed — free via
+  `should_seal_key`. Write-site context binds `entity_id ‖ property_key`. A
+  sealed `Vector` becomes `Bytes`, so `try_index_vector`'s `as_vector()` gate
+  naturally **excludes designated embeddings from the shared HNSW** (no
+  `try_index_vector` change).
+- **Unseal at read:** `AletheiaDB::materialize_shred` + `unseal_node_view` /
+  `unseal_edge_view`, hooked at `get_node` / `get_edge` (current fast path) and
+  `get_node_at_time` / `get_edge_at_time` (point-in-time). Active subjects →
+  plaintext in place; erased subjects → opaque ciphertext left untouched +
+  `ShredStatus::Erased{subject_id}` recorded in a side-channel `ShredStatusMap`
+  (NOT a `PropertyValue` variant, NOT a wire change). The **restore path**
+  (`restore_property_map`) stays a pure ciphertext passthrough — never unsealed
+  there (no keyring / interner-guard hazard).
+- **MCP erased marker:** `property_value_to_json` renders a surviving `SUBJ`
+  envelope for a known subject as `{"type":"sealed","erased":<bool>,"subject_id":<id>}`
+  (mirrors the #3220 vector-elision descriptor); a `Bytes` value whose subject
+  the keyring does not recognize renders as ordinary bytes.
+- **Erase op unchanged from PR-1a** (key destruction + durable keyring
+  Erased-state + signed attestation). **No `db.write` tombstone added here.**
+
+**Deferred (explicitly out of PR-1b):**
+
+- **WAL-transaction erasure tombstone + changefeed observability** → a
+  **#3413-aligned follow-up**. It needs a WAL-format extension to survive crash
+  recovery, and emitting it from `erase()` would take `historical`/`wal` while
+  the keyring `Mutex` is held, inverting the lock order (seams §6). The durable
+  keyring Erased record IS the erasure record for now.
+- **Cold-tier + `.albk` sentinel completeness** → **slice 3** (the PR-1b
+  sentinel byte-scan covers only the in-scope hot tiers: WAL segments,
+  index-persistence files incl. usearch `.bin`, current-tier persisted files,
+  checkpoint if present — NOT cold redb or `.albk`).
+- **Chain-leaf ciphertext binding (AC4)** → **slice 2**.
+- **Exhaustive every-query-path unseal** → the Rust unseal hook covers the
+  primary single-entity boundaries (`get_node`, `get_edge`,
+  `get_node_at_time`, `get_edge_at_time`). Paths that still return **raw sealed
+  `Bytes`** (opaque ciphertext — safe, never plaintext, just not yet
+  unsealed/marked at the Rust level): `with_node` (zero-copy borrow),
+  `list_nodes` / `list_edges`, adjacency (`get_outgoing_edges` /
+  `get_incoming_edges`), `traverse`, `find_nodes_at_time`, the query executor
+  (`iterators.rs`) and `read_tx` reconstructs. For all of these the MCP funnel
+  still renders the erased descriptor for any envelope that reaches it, so an
+  erased value is never surfaced as plaintext on the MCP surface. Extending the
+  Rust unseal hook to these is a follow-up.
+
 ## AC4 disclosure — sealed-property verify semantics
 
 The provenance hash chain's per-version leaf (`version_leaf`,

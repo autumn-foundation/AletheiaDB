@@ -33,11 +33,15 @@
 //! irreversible even for a holder of the MEK.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
 
 use crate::audit::{AuditPublicKey, AuditSigningKey};
+use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+use crate::encryption::Cipher;
+use crate::encryption::factory::{Algorithm, algorithm_from_id, create_cipher};
 
 pub mod api;
 pub mod attestation;
@@ -50,12 +54,104 @@ pub mod subject;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod integration_tests;
+
 pub use attestation::ErasureAttestation;
 pub use designation::DesignationTarget;
 pub use error::CryptoShredError;
 pub use subject::{SubjectId, SubjectKey};
 
 use keyring::{BREADCRUMB_FILENAME, SubjectKeyring};
+
+/// Crypto-shred status of a single materialized property value (PR-1b).
+///
+/// Surfaced as a **side-channel** from the db read boundary alongside the
+/// (possibly-unsealed) [`PropertyMap`] — it is deliberately NOT a
+/// [`PropertyValue`] variant and NOT a wire-format change. A property is
+/// [`ShredStatus::Plaintext`] when it carried no sealed envelope, or when its
+/// subject is still active and the value was unsealed in place. It is
+/// [`ShredStatus::Erased`] when the value is a sealed envelope whose subject key
+/// has been destroyed — the plaintext is permanently unrecoverable and the read
+/// hook leaves the opaque ciphertext in place rather than fabricating a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShredStatus {
+    /// Not sealed, or unsealed in place (subject active).
+    Plaintext,
+    /// Sealed under a subject whose key was destroyed (unrecoverable).
+    Erased {
+        /// The erasure subject the value belonged to.
+        subject_id: String,
+    },
+}
+
+/// Per-property crypto-shred status keyed by property key (PR-1b).
+///
+/// Only carries entries that are **not** plain plaintext (i.e. erased sealed
+/// values); an absent key means [`ShredStatus::Plaintext`]. Empty when nothing
+/// on the read was sealed/erased, so a non-designated read allocates nothing.
+pub type ShredStatusMap = std::collections::HashMap<String, ShredStatus>;
+
+/// A prepared sealing context threaded onto a [`crate::api::transaction::WriteTransaction`]
+/// (PR-1b write plumbing).
+///
+/// Built once per write transaction — only when the database has at least one
+/// active designation — from the shared [`CryptoShredState`], the memoized
+/// subject-wrapping cipher, and the configured AEAD algorithm. Cloning is cheap
+/// (two `Arc` clones + a `Copy` enum), so attaching it to a transaction is
+/// effectively free; a database with no active designations attaches `None` and
+/// pays nothing.
+#[derive(Clone)]
+pub struct SealingContext {
+    state: Arc<CryptoShredState>,
+    wrap_cipher: Arc<dyn Cipher>,
+    algorithm: Algorithm,
+}
+
+impl std::fmt::Debug for SealingContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealingContext")
+            .field("algorithm", &self.algorithm)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SealingContext {
+    /// Construct a sealing context from its parts.
+    #[must_use]
+    pub(crate) fn new(
+        state: Arc<CryptoShredState>,
+        wrap_cipher: Arc<dyn Cipher>,
+        algorithm: Algorithm,
+    ) -> Self {
+        Self {
+            state,
+            wrap_cipher,
+            algorithm,
+        }
+    }
+
+    /// Seal the designated property values of an entity (see
+    /// [`CryptoShredState::seal_map`]). Fast path when the entity carries no
+    /// designated key: the map is returned unchanged.
+    ///
+    /// # Errors
+    /// Propagates [`CryptoShredState::seal_map`]'s error (fail-closed).
+    pub(crate) fn seal_map(
+        &self,
+        is_node: bool,
+        entity_id: u64,
+        props: PropertyMap,
+    ) -> Result<PropertyMap, CryptoShredError> {
+        self.state.seal_map(
+            is_node,
+            entity_id,
+            props,
+            self.wrap_cipher.as_ref(),
+            self.algorithm,
+        )
+    }
+}
 
 /// AAD domain-separation prefix binding a wrapped subject DEK to its subject id
 /// and key version.
@@ -67,13 +163,29 @@ const WRAP_AAD_DOMAIN: &[u8] = b"aletheiadb-subject-wrap-dek-v1";
 /// downgrade (presenting a wrap blob under the wrong version) is caught by the
 /// AEAD auth check once rotation lands. Both the wrap (in `designate`) and the
 /// unwrap (in `subject_key`) sides must build this identically.
-fn wrap_aad(subject_id: &SubjectId, key_version: u32) -> Vec<u8> {
+fn wrap_aad(subject_id: &str, key_version: u32) -> Vec<u8> {
     let subj = subject_id.as_bytes();
     let mut aad = Vec::with_capacity(WRAP_AAD_DOMAIN.len() + 4 + subj.len());
     aad.extend_from_slice(WRAP_AAD_DOMAIN);
     aad.extend_from_slice(&key_version.to_le_bytes());
     aad.extend_from_slice(subj);
     aad
+}
+
+/// Build the sealed-envelope **write-site context** binding a value to its
+/// entity id and property key (PR-1b).
+///
+/// Folded into the envelope AEAD AAD (alongside subject id + key version) so a
+/// sealed value cannot be relocated to a different `(entity, key)` slot within
+/// the same subject without a loud AEAD auth failure. The seal (write) and
+/// unseal (read) sites MUST build this identically: `entity_id` little-endian
+/// followed by the raw property-key bytes.
+fn seal_context(entity_id: u64, key: &str) -> Vec<u8> {
+    let kb = key.as_bytes();
+    let mut ctx = Vec::with_capacity(8 + kb.len());
+    ctx.extend_from_slice(&entity_id.to_le_bytes());
+    ctx.extend_from_slice(kb);
+    ctx
 }
 
 /// Per-database crypto-shred state: the in-memory keyring, its durable paths,
@@ -92,6 +204,21 @@ pub struct CryptoShredState {
     /// Ed25519 key used to sign erasure attestations. Sourced from the audit
     /// signing-key env var when set, else freshly generated for this process.
     signing_key: AuditSigningKey,
+    /// Lock-free fast-path gate (PR-1b): `true` iff at least one subject is
+    /// `Active`. The write hook consults this **without** locking so a database
+    /// with no active designations pays zero per-transaction cost.
+    has_active: AtomicBool,
+    /// Lock-free fast-path gate (PR-1b): `true` iff at least one subject exists
+    /// (active OR erased). The read hook consults this without locking so a
+    /// database that never used crypto-shred pays zero per-read cost.
+    has_any: AtomicBool,
+    /// Memoized subject-wrapping cipher (PR-1b). Built lazily on the first
+    /// seal/unseal from the database's encryption config and reused for the
+    /// process lifetime. Safe to cache because the subject-wrapping DEK is a
+    /// deterministic `HKDF(MEK, "subject-wrap")` and v1 crypto-shred does not
+    /// rotate the MEK (subject-keyring re-wrap on rotation is deferred to a
+    /// later slice, which must invalidate this cache).
+    wrap_cipher: Mutex<Option<Arc<dyn Cipher>>>,
 }
 
 impl std::fmt::Debug for CryptoShredState {
@@ -148,11 +275,16 @@ impl CryptoShredState {
             None => SubjectKeyring::new(),
         };
 
+        let has_active = keyring.any_active();
+        let has_any = !keyring.is_empty();
         let state = Self {
             keyring: Mutex::new(keyring),
             keyring_path,
             breadcrumb_path,
             signing_key,
+            has_active: AtomicBool::new(has_active),
+            has_any: AtomicBool::new(has_any),
+            wrap_cipher: Mutex::new(None),
         };
 
         state.recover_from_breadcrumb()?;
@@ -175,6 +307,7 @@ impl CryptoShredState {
             let mut keyring = self.lock_keyring();
             keyring.force_erased(&subject_id, now);
             keyring::save_keyring(keyring_path, &keyring)?;
+            self.refresh_gates(&keyring);
         }
         keyring::clear_breadcrumb(breadcrumb_path);
         Ok(())
@@ -199,6 +332,25 @@ impl CryptoShredState {
         self.keyring
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Recompute the lock-free fast-path gates from a locked keyring guard.
+    /// Called after any mutation that can change active/any state.
+    fn refresh_gates(&self, guard: &SubjectKeyring) {
+        self.has_active.store(guard.any_active(), Ordering::Relaxed);
+        self.has_any.store(!guard.is_empty(), Ordering::Relaxed);
+    }
+
+    /// Whether any subject is currently `Active` (lock-free write-path gate).
+    #[must_use]
+    pub(crate) fn has_active_designations(&self) -> bool {
+        self.has_active.load(Ordering::Relaxed)
+    }
+
+    /// Whether any subject exists at all (lock-free read-path gate).
+    #[must_use]
+    pub(crate) fn has_any_designations(&self) -> bool {
+        self.has_any.load(Ordering::Relaxed)
     }
 
     /// The durable keyring path, if any.
@@ -253,7 +405,7 @@ impl CryptoShredState {
         } else {
             // New subject: random DEK, wrapped under the subject-wrapping cipher.
             let dek = SubjectKey::generate();
-            let wrap_aad = wrap_aad(subject_id, INITIAL_SUBJECT_KEY_VERSION);
+            let wrap_aad = wrap_aad(subject_id.as_str(), INITIAL_SUBJECT_KEY_VERSION);
             let wrapped = wrap_cipher
                 .encrypt(dek.expose_bytes(), &wrap_aad)
                 .map_err(|e| CryptoShredError::Crypto(e.to_string()))?;
@@ -282,6 +434,7 @@ impl CryptoShredState {
         if let Some(path) = self.keyring_path() {
             keyring::save_keyring(path, &guard)?;
         }
+        self.refresh_gates(&guard);
         Ok(())
     }
 
@@ -296,14 +449,34 @@ impl CryptoShredState {
         subject_id: &SubjectId,
         wrap_cipher: &dyn crate::encryption::Cipher,
     ) -> Result<SubjectKey, CryptoShredError> {
+        let mut guard = self.lock_keyring();
+        Self::dek_from_guard(&mut guard, subject_id.as_str(), wrap_cipher)
+    }
+
+    /// Fetch a subject's unwrapped DEK from an **already-locked** keyring guard.
+    ///
+    /// Checks the unwrapped-DEK cache first, else unwraps the stored wrapped blob
+    /// with `wrap_cipher` and caches the result. Kept `&mut guard`-based (not
+    /// `&self`) so the seal/unseal hot paths, which already hold the keyring lock
+    /// to consult the reverse index, never re-lock (`std::sync::Mutex` is not
+    /// reentrant — re-locking would deadlock).
+    ///
+    /// # Errors
+    /// - [`CryptoShredError::NotDesignated`] if the subject is unknown.
+    /// - [`CryptoShredError::SubjectErased`] if the subject was erased (key gone).
+    /// - [`CryptoShredError::Crypto`] on unwrap / AEAD failure.
+    fn dek_from_guard(
+        guard: &mut SubjectKeyring,
+        subject_id: &str,
+        wrap_cipher: &dyn crate::encryption::Cipher,
+    ) -> Result<SubjectKey, CryptoShredError> {
         use keyring::SubjectState;
 
-        let mut guard = self.lock_keyring();
-        if let Some(cached) = guard.cached_key(subject_id.as_str()) {
+        if let Some(cached) = guard.cached_key(subject_id) {
             return Ok(cached.clone());
         }
         let entry = guard
-            .get(subject_id.as_str())
+            .get(subject_id)
             .ok_or_else(|| CryptoShredError::NotDesignated(subject_id.to_string()))?;
         if entry.state == SubjectState::Erased {
             return Err(CryptoShredError::SubjectErased(subject_id.to_string()));
@@ -316,7 +489,8 @@ impl CryptoShredState {
         // lands in a Zeroizing<Vec<u8>>, and the fixed-size array we hand to
         // SubjectKey is built inside a Zeroizing<[u8;N]> — neither is left in a
         // plain buffer that could survive on the stack/heap after use.
-        let aad = wrap_aad(subject_id, wrapped.key_version);
+        let key_version = wrapped.key_version;
+        let aad = wrap_aad(subject_id, key_version);
         let raw = Zeroizing::new(
             wrap_cipher
                 .decrypt(&wrapped.wrapped, &aad)
@@ -330,7 +504,7 @@ impl CryptoShredState {
         let mut bytes = Zeroizing::new([0u8; subject::SUBJECT_KEY_LEN]);
         bytes.copy_from_slice(&raw);
         let key = SubjectKey::from_bytes(bytes);
-        guard.cache_key(subject_id.as_str(), key.clone());
+        guard.cache_key(subject_id, key.clone());
         Ok(key)
     }
 
@@ -393,16 +567,25 @@ impl CryptoShredState {
         let attestation =
             ErasureAttestation::sign(self.signing_key(), subject_id.as_str(), entity_count, now);
         guard.erase_in_memory(subject_id.as_str(), now, attestation.to_record());
+        self.refresh_gates(&guard);
 
         // Rewrite the keyring durably so the wrapped blob is physically gone.
         if let Some(path) = self.keyring_path() {
             keyring::save_keyring(path, &guard)?;
         }
 
-        // PR-1b SEAM: record the erasure tombstone as a normal write transaction
-        // here (subject id + entity/version counts + timestamp, no properties),
-        // riding the existing is_tombstone machinery. Deferred out of PR-1a so
-        // this slice stays free of live data-path integration.
+        // NOTE (PR-1b): the durable keyring record above IS the erasure record —
+        // an erased subject's key is physically gone and its state is `Erased`,
+        // fail-closed across restart. A WAL-transaction erasure *tombstone*
+        // (subject id + entity/version counts + timestamp, riding the
+        // `is_tombstone` machinery) plus changefeed observability is deliberately
+        // DEFERRED to a #3413-aligned follow-up: emitting it needs a WAL-format
+        // extension to survive crash recovery, and doing it here would force
+        // `db.write(...)` — acquiring `historical`/`wal` — while this method holds
+        // the keyring `Mutex`, inverting the lock order (the keyring lock must be
+        // *released before* the write-path primitives are taken; see the
+        // lock-order note in CLAUDE.md / seams §6). So erase does NOT call
+        // `db.write` in this slice — no lock-order change is required.
 
         // (e) Clear the breadcrumb — erase is complete.
         if let Some(bc) = self.breadcrumb_path() {
@@ -426,5 +609,222 @@ impl CryptoShredState {
         self.lock_keyring()
             .get(subject_id)
             .is_some_and(|e| e.state == keyring::SubjectState::Erased)
+    }
+
+    /// Return the memoized subject-wrapping cipher, building it once via `build`
+    /// on first use (see the `wrap_cipher` field doc for the caching rationale).
+    ///
+    /// # Errors
+    /// Propagates `build`'s error (e.g. encryption not configured).
+    pub(crate) fn cached_wrap_cipher(
+        &self,
+        build: impl FnOnce() -> Result<Box<dyn Cipher>, CryptoShredError>,
+    ) -> Result<Arc<dyn Cipher>, CryptoShredError> {
+        let mut guard = self
+            .wrap_cipher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = guard.as_ref() {
+            return Ok(Arc::clone(existing));
+        }
+        let cipher: Arc<dyn Cipher> = Arc::from(build()?);
+        *guard = Some(Arc::clone(&cipher));
+        Ok(cipher)
+    }
+
+    /// Seal the designated property values of an entity into `SUBJ` envelopes
+    /// (PR-1b write hook).
+    ///
+    /// For every property key that an **active** subject designates (via the
+    /// reverse index), the value is replaced with a sealed-envelope
+    /// [`PropertyValue::Bytes`]. Engine-reserved keys (`__aletheia_*` /
+    /// `__shred_*`) are never sealed (short-circuited by
+    /// [`designation::should_seal_key`]). Erased subjects do **not** re-seal
+    /// (their key is gone); their entities' new writes stay plaintext. The
+    /// returned map must be routed **byte-identically** to both the current and
+    /// historical tiers (seal exactly once — the envelope carries a random
+    /// per-encryption nonce).
+    ///
+    /// # Errors
+    /// [`CryptoShredError::Crypto`] on DEK unwrap / AEAD seal failure. Fail-closed:
+    /// a seal error aborts the enclosing write rather than persisting plaintext.
+    pub(crate) fn seal_map(
+        &self,
+        is_node: bool,
+        entity_id: u64,
+        props: PropertyMap,
+        wrap_cipher: &dyn Cipher,
+        algorithm: Algorithm,
+    ) -> Result<PropertyMap, CryptoShredError> {
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::property::PropertyKey;
+
+        let mut guard = self.lock_keyring();
+        let subjects: Vec<String> = guard.subjects_for_entity(is_node, entity_id).to_vec();
+        if subjects.is_empty() {
+            return Ok(props);
+        }
+
+        // Plan which keys to seal (resolve interned keys to owned strings first,
+        // so re-interning via the builder never nests inside a resolve guard).
+        struct SealItem {
+            key: PropertyKey,
+            key_str: String,
+            value: PropertyValue,
+            subject_id: String,
+            key_version: u32,
+        }
+        let mut plan: Vec<SealItem> = Vec::new();
+        for (key, value) in props.iter() {
+            // Resolve the interned key to an owned String via `resolve_with` (no
+            // owned-Arc deprecation, and — critically — we never re-enter the
+            // interner while a resolve guard is held: `insert_by_key` below takes
+            // the already-interned key, it does not re-intern a string).
+            let Some(key_str) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string()) else {
+                continue;
+            };
+            if designation::is_reserved_key(&key_str) {
+                continue;
+            }
+            for subject_id in &subjects {
+                let Some(entry) = guard.get(subject_id) else {
+                    continue;
+                };
+                if entry.state != keyring::SubjectState::Active {
+                    continue;
+                }
+                if designation::any_should_seal(&entry.designation, is_node, entity_id, &key_str) {
+                    let key_version = entry
+                        .wrapped_key
+                        .as_ref()
+                        .map_or(keyring::INITIAL_SUBJECT_KEY_VERSION, |w| w.key_version);
+                    plan.push(SealItem {
+                        key: *key,
+                        key_str,
+                        value: value.clone(),
+                        subject_id: subject_id.clone(),
+                        key_version,
+                    });
+                    break;
+                }
+            }
+        }
+
+        if plan.is_empty() {
+            return Ok(props);
+        }
+
+        let mut builder = PropertyMapBuilder::from_map(props);
+        for item in plan {
+            let dek = Self::dek_from_guard(&mut guard, &item.subject_id, wrap_cipher)?;
+            let cipher = create_cipher(algorithm, &Zeroizing::new(*dek.expose_bytes()));
+            let context = seal_context(entity_id, &item.key_str);
+            let sealed = envelope::seal_property_value(
+                &item.value,
+                &item.subject_id,
+                item.key_version,
+                &context,
+                cipher.as_ref(),
+            )?;
+            builder =
+                builder.insert_by_key(item.key, PropertyValue::Bytes(std::sync::Arc::from(sealed)));
+        }
+        Ok(builder.build())
+    }
+
+    /// Materialize sealed property values on read (PR-1b read hook).
+    ///
+    /// For each `SUBJ` envelope whose subject the keyring knows: if the subject
+    /// is **active**, unseal to plaintext in place; if it is **erased**, leave the
+    /// opaque ciphertext untouched and record [`ShredStatus::Erased`] in the
+    /// returned side-channel — never fabricated, never silently dropped. A
+    /// `Bytes` value that merely *looks* like an envelope but whose subject is
+    /// unknown, or that fails to unseal under an active subject (tamper /
+    /// corruption), is left byte-untouched (opaque ciphertext, never plaintext).
+    ///
+    /// Returns the (possibly-transformed) map plus a [`ShredStatusMap`] carrying
+    /// only the erased keys (empty allocation-free when nothing was sealed).
+    pub(crate) fn unseal_map(
+        &self,
+        entity_id: u64,
+        props: PropertyMap,
+        wrap_cipher: &dyn Cipher,
+        algorithm_hint: Algorithm,
+    ) -> (PropertyMap, ShredStatusMap) {
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::property::PropertyKey;
+
+        let mut statuses = ShredStatusMap::new();
+        let mut guard = self.lock_keyring();
+
+        // Collect envelope-bearing keys whose subject the keyring recognizes.
+        struct SealedItem {
+            key: PropertyKey,
+            key_str: String,
+            header: envelope::EnvelopeHeader,
+            bytes: std::sync::Arc<[u8]>,
+        }
+        let mut sealed: Vec<SealedItem> = Vec::new();
+        for (key, value) in props.iter() {
+            let PropertyValue::Bytes(b) = value else {
+                continue;
+            };
+            if !envelope::is_envelope(b) {
+                continue;
+            }
+            let Ok(header) = envelope::parse_header(b) else {
+                continue;
+            };
+            if guard.get(&header.subject_id).is_none() {
+                // Looks like an envelope but no such subject — treat as opaque
+                // user bytes, never as ours.
+                continue;
+            }
+            let Some(key_str) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string()) else {
+                continue;
+            };
+            sealed.push(SealedItem {
+                key: *key,
+                key_str,
+                header,
+                bytes: std::sync::Arc::clone(b),
+            });
+        }
+
+        if sealed.is_empty() {
+            return (props, statuses);
+        }
+
+        let mut builder = PropertyMapBuilder::from_map(props);
+        for item in sealed {
+            let is_erased = guard
+                .get(&item.header.subject_id)
+                .is_some_and(|e| e.state == keyring::SubjectState::Erased);
+            if is_erased {
+                // Key destroyed: leave opaque ciphertext, report erased.
+                statuses.insert(
+                    item.key_str,
+                    ShredStatus::Erased {
+                        subject_id: item.header.subject_id,
+                    },
+                );
+                continue;
+            }
+            // Active subject: unseal to plaintext. On any failure leave the
+            // opaque ciphertext (never fabricate a plaintext value).
+            let Ok(dek) = Self::dek_from_guard(&mut guard, &item.header.subject_id, wrap_cipher)
+            else {
+                continue;
+            };
+            let algorithm = algorithm_from_id(item.header.algorithm_id).unwrap_or(algorithm_hint);
+            let cipher = create_cipher(algorithm, &Zeroizing::new(*dek.expose_bytes()));
+            let context = seal_context(entity_id, &item.key_str);
+            if let Ok(value) =
+                envelope::unseal_property_value(&item.bytes, &context, cipher.as_ref())
+            {
+                builder = builder.insert_by_key(item.key, value);
+            }
+        }
+        (builder.build(), statuses)
     }
 }

@@ -241,7 +241,7 @@ impl AletheiaDB {
             self.visibility_manager.register_active(tx_id);
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-            Ok(WriteTransaction::new_with_clock_observed_at(
+            let tx = WriteTransaction::new_with_clock_observed_at(
                 tx_id,
                 snapshot,
                 Arc::clone(&self.current),
@@ -257,7 +257,15 @@ impl AletheiaDB {
             )
             .with_constraint_registry(Arc::clone(&self.constraint_registry))
             .with_in_flight_tracker(Arc::clone(&self.in_flight))
-            .with_changefeed(Arc::clone(&self.changefeed)))
+            .with_changefeed(Arc::clone(&self.changefeed));
+            // GDPR crypto-shred (Issue #3359, PR-1b): attach the seal context when
+            // the database has active designations (fail-closed on cipher-build).
+            #[cfg(feature = "audit-export")]
+            let tx = match self.sealing_context()? {
+                Some(ctx) => tx.with_sealing_context(ctx),
+                None => tx,
+            };
+            Ok(tx)
         })();
         result.record_error_metric()
     }
@@ -486,7 +494,7 @@ impl AletheiaDB {
 
             let durability = options.effective_durability(self.default_durability);
 
-            Ok(WriteTransaction::new_with_durability_and_clock_observed_at(
+            let tx = WriteTransaction::new_with_durability_and_clock_observed_at(
                 tx_id,
                 snapshot,
                 Arc::clone(&self.current),
@@ -503,7 +511,15 @@ impl AletheiaDB {
             )
             .with_constraint_registry(Arc::clone(&self.constraint_registry))
             .with_in_flight_tracker(Arc::clone(&self.in_flight))
-            .with_changefeed(Arc::clone(&self.changefeed)))
+            .with_changefeed(Arc::clone(&self.changefeed));
+            // GDPR crypto-shred (Issue #3359, PR-1b): attach the seal context when
+            // the database has active designations (fail-closed on cipher-build).
+            #[cfg(feature = "audit-export")]
+            let tx = match self.sealing_context()? {
+                Some(ctx) => tx.with_sealing_context(ctx),
+                None => tx,
+            };
+            Ok(tx)
         })();
         result.record_error_metric()
     }

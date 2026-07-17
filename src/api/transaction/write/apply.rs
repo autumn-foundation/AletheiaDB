@@ -88,6 +88,12 @@ pub(crate) fn apply_node_write(
     historical: &mut HistoricalStorage,
     provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
+    // GDPR crypto-shred (Issue #3359, PR-1b): `properties` here already carry any
+    // sealed `SUBJ` envelopes — sealing happens once on the write buffer in
+    // `commit_with_timestamp_inner` (post-validation, pre-WAL), so the WAL
+    // segment, the current tier below, and the historical tier below all receive
+    // byte-identical ciphertext. Do NOT seal again here (it would double-seal).
+
     // Create node with pending metadata (commit_timestamp finalized after full apply_changes).
     // Using uncommitted here prevents phantom visibility if apply_changes fails partway through.
     let metadata = VersionMetadata::uncommitted(tx.tx_id);
@@ -149,6 +155,10 @@ pub(crate) fn apply_edge_write(
     historical: &mut HistoricalStorage,
     provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
+    // GDPR crypto-shred (Issue #3359, PR-1b): `properties` already carry any
+    // sealed envelopes (sealed on the write buffer in `commit_with_timestamp_inner`
+    // before WAL logging). Do NOT seal again here.
+
     // Create edge with pending metadata (commit_timestamp finalized after full apply_changes).
     let metadata = VersionMetadata::uncommitted(tx.tx_id);
     let edge = Edge::with_metadata(
