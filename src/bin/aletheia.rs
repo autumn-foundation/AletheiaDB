@@ -79,6 +79,16 @@ fn run() -> Result<(), String> {
         Some("audit-verify") => audit::handle_verify(args.collect()),
         #[cfg(feature = "audit-export")]
         Some("audit-render") => audit::handle_render(args.collect()),
+        // GDPR crypto-shred operator commands (Issue #3359): designate an
+        // erasure subject over one or more targets, then irreversibly erase it,
+        // returning a signed attestation. Local-admin context (no RBAC); the
+        // real precondition is that encryption is configured (via
+        // ALETHEIADB_CONFIG). Gated exactly like the `audit-*` verbs so
+        // `--no-default-features` builds stay clean.
+        #[cfg(feature = "audit-export")]
+        Some("designate-subject") => crypto_shred_cli::handle_designate_subject(args.collect()),
+        #[cfg(feature = "audit-export")]
+        Some("erase-subject") => crypto_shred_cli::handle_erase_subject(args.collect()),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -141,6 +151,8 @@ Usage:\n\
   aletheia audit-export <node|edge> <id> --key <key_file> --out <path> [--db-id ID] [--redact k1,k2]\n\
   aletheia audit-verify <artifact_path> [--public-key HEX]\n\
   aletheia audit-render <artifact_path>\n\
+  aletheia designate-subject <subject_id> --target <kind>:<id>[:key1,key2] [--target ...]\n\
+  aletheia erase-subject <subject_id>\n\
 \nCommands map to core MCP-style graph operations while using local storage.\n\
 \nGetting started:\n\
   demo    — Boot a seeded, ephemeral bi-temporal graph and run a guided tour of\n\
@@ -187,6 +199,18 @@ Usage:\n\
   audit-export — Sign an entity's full bi-temporal history into a portable artifact.\n\
   audit-verify — Verify an artifact OFFLINE (no database) with the signer's public key.\n\
   audit-render — Render an artifact as a human-readable chronology.\n\
+\nGDPR crypto-shred (Issue #3359):\n\
+  designate-subject — Group entities and/or specific property keys under an\n\
+                      erasure subject id. --target is repeatable:\n\
+                        node:100            whole node\n\
+                        edge:200            whole edge\n\
+                        node:101:ssn,email  only the listed node property keys\n\
+                        edge:200:since      only the listed edge property keys\n\
+                      Requires encryption configured via ALETHEIADB_CONFIG.\n\
+  erase-subject     — Irreversibly destroy a subject's key material (its sealed\n\
+                      payload becomes permanently undecryptable) and print a\n\
+                      signed erasure attestation (subject id + entity count +\n\
+                      timestamp + signature; never any property content).\n\
 \nEncryption keys (Issue #490):\n\
   keys generate — Provision a new 32-byte master key file (0600 on Unix).\n\
                   Refuses to overwrite unless --force. Key bytes are never printed.\n\
@@ -2737,6 +2761,189 @@ mod audit {
     }
 }
 
+/// GDPR crypto-shred operator commands (Issue #3359).
+///
+/// `designate-subject` groups entities and/or specific property keys under an
+/// erasure subject; `erase-subject` irreversibly destroys the subject's key
+/// material and prints a signed [`ErasureAttestation`]. Both run in the CLI's
+/// local-admin context (no RBAC — the same trust level as `backup` / `keys
+/// rotate`) and open the database via [`open_db`], honouring `ALETHEIADB_CONFIG`
+/// / `ALETHEIADB_DATA_DIR`. Designation requires encryption configured (via an
+/// `ALETHEIADB_CONFIG` TOML enabling a key provider); an unconfigured database
+/// surfaces a clean error and a non-zero exit.
+///
+/// **Security:** command output carries only the subject id, an entity count, a
+/// timestamp, and the attestation signature / signer public key — never key
+/// material or plaintext property content.
+#[cfg(feature = "audit-export")]
+mod crypto_shred_cli {
+    use super::open_db;
+    use aletheiadb::db::{CryptoShredError, DesignationTarget, ErasureAttestation};
+
+    /// Collect every value of a repeatable `--flag value` option, in order.
+    ///
+    /// A local, feature-independent equivalent of the `import`-gated
+    /// `arg_values` helper (the crypto-shred verbs are gated on `audit-export`,
+    /// not `import`, so they cannot rely on it).
+    fn repeated_values(args: &[String], flag: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut iter = args.iter();
+        while let Some(token) = iter.next() {
+            if token == flag
+                && let Some(value) = iter.next()
+            {
+                out.push(value.clone());
+            }
+        }
+        out
+    }
+
+    /// `aletheia designate-subject <subject_id> --target <kind>:<id>[:key1,key2] ...`
+    ///
+    /// Designate one or more targets under `subject_id`. `--target` is
+    /// repeatable; at least one is required.
+    pub(super) fn handle_designate_subject(args: Vec<String>) -> Result<(), String> {
+        let subject_id = positional_subject_id(&args, "designate-subject")?;
+        let specs = repeated_values(&args, "--target");
+        if specs.is_empty() {
+            return Err(usage_designate());
+        }
+        let targets = specs
+            .iter()
+            .map(|spec| parse_target(spec))
+            .collect::<Result<Vec<_>, String>>()?;
+        let count = targets.len();
+
+        let db = open_db()?;
+        db.designate_subject(subject_id.clone(), targets)
+            .map_err(cli_error)?;
+
+        let value = serde_json::json!({
+            "ok": true,
+            "subject_id": subject_id,
+            "targets_designated": count,
+        });
+        let rendered = serde_json::to_string(&value)
+            .map_err(|e| format!("failed to render JSON output: {e}"))?;
+        println!("{rendered}");
+        Ok(())
+    }
+
+    /// `aletheia erase-subject <subject_id>` — irreversibly erase and print the
+    /// signed attestation as JSON.
+    pub(super) fn handle_erase_subject(args: Vec<String>) -> Result<(), String> {
+        let subject_id = positional_subject_id(&args, "erase-subject")?;
+        let db = open_db()?;
+        let attestation = db.erase_subject(subject_id).map_err(cli_error)?;
+        println!("{}", attestation_json(&attestation)?);
+        Ok(())
+    }
+
+    /// Extract the leading positional `<subject_id>` argument, rejecting a
+    /// missing value or a leading flag.
+    fn positional_subject_id(args: &[String], verb: &str) -> Result<String, String> {
+        match args.first() {
+            Some(id) if !id.starts_with("--") => Ok(id.clone()),
+            _ if verb == "designate-subject" => Err(usage_designate()),
+            _ => Err("usage: aletheia erase-subject <subject_id>".to_string()),
+        }
+    }
+
+    /// Parse one `--target` value into a [`DesignationTarget`].
+    ///
+    /// Grammar: `<kind>:<id>` seals the whole entity; `<kind>:<id>:key1,key2`
+    /// seals only the listed property keys. `kind` is `node` or `edge`; `id` is
+    /// a `u64`; keys are a non-empty comma-separated list.
+    pub(super) fn parse_target(spec: &str) -> Result<DesignationTarget, String> {
+        // Split into at most three fields: kind, id, and the (optional) key list.
+        // The key list itself may not contain ':' so a 2-way splitn after the id
+        // is exact.
+        let mut parts = spec.splitn(3, ':');
+        let kind = parts.next().unwrap_or("");
+        let id_str = parts
+            .next()
+            .ok_or_else(|| format!("invalid --target '{spec}': expected <kind>:<id>[:keys]"))?;
+        let keys_str = parts.next();
+
+        let id: u64 = id_str.parse().map_err(|_| {
+            format!("invalid --target '{spec}': entity id '{id_str}' is not a valid integer")
+        })?;
+
+        let keys = match keys_str {
+            Some(raw) => {
+                let keys: Vec<String> = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                if keys.is_empty() {
+                    return Err(format!(
+                        "invalid --target '{spec}': property key list must not be empty"
+                    ));
+                }
+                Some(keys)
+            }
+            None => None,
+        };
+
+        match (kind, keys) {
+            ("node", None) => Ok(DesignationTarget::WholeNode(id)),
+            ("node", Some(keys)) => Ok(DesignationTarget::NodeProperties(id, keys)),
+            ("edge", None) => Ok(DesignationTarget::WholeEdge(id)),
+            ("edge", Some(keys)) => Ok(DesignationTarget::EdgeProperties(id, keys)),
+            (other, _) => Err(format!(
+                "invalid --target '{spec}': unknown entity kind '{other}' (expected node|edge)"
+            )),
+        }
+    }
+
+    /// Render an [`ErasureAttestation`] as a single JSON line.
+    ///
+    /// Emits only non-sensitive fields (subject id, entity count, timestamp,
+    /// signature, signer public key) — never key material or plaintext.
+    pub(super) fn attestation_json(att: &ErasureAttestation) -> Result<String, String> {
+        let timestamp =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_micros(att.timestamp_micros)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| att.timestamp_micros.to_string());
+        let value = serde_json::json!({
+            "ok": true,
+            "subject_id": att.subject_id,
+            "entity_count": att.entity_count,
+            "timestamp_micros": att.timestamp_micros,
+            "timestamp": timestamp,
+            "signature": to_hex(&att.signature),
+            "signer_public_key": att.signer_public_key.to_hex(),
+        });
+        serde_json::to_string(&value).map_err(|e| format!("failed to render JSON output: {e}"))
+    }
+
+    /// Map a [`CryptoShredError`] into a clean CLI error string carrying its
+    /// stable #3234 code. The error `Display` never includes key bytes or
+    /// plaintext, so this is safe to print.
+    fn cli_error(e: CryptoShredError) -> String {
+        format!("{} [{}]", e, e.code())
+    }
+
+    /// Dependency-free lowercase hex encoding for the raw signature bytes.
+    fn to_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
+
+    fn usage_designate() -> String {
+        "usage: aletheia designate-subject <subject_id> --target <kind>:<id>[:key1,key2] \
+         [--target ...]  (kind = node|edge)"
+            .to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2818,6 +3025,144 @@ mod tests {
         assert!(parse_cli_timestamp("2024-01-15T10:00:00Z").is_ok());
         assert!(parse_cli_timestamp("1705312800000000").is_ok());
         assert!(parse_cli_timestamp("not-a-time").is_err());
+    }
+
+    // ── GDPR crypto-shred CLI (Issue #3359) ──────────────────────────────
+
+    #[cfg(feature = "audit-export")]
+    #[test]
+    fn parse_target_accepts_all_four_shapes() {
+        use super::crypto_shred_cli::parse_target;
+        use aletheiadb::db::DesignationTarget;
+
+        assert_eq!(
+            parse_target("node:100").unwrap(),
+            DesignationTarget::WholeNode(100)
+        );
+        assert_eq!(
+            parse_target("edge:200").unwrap(),
+            DesignationTarget::WholeEdge(200)
+        );
+        assert_eq!(
+            parse_target("node:101:ssn,email").unwrap(),
+            DesignationTarget::NodeProperties(101, vec!["ssn".to_string(), "email".to_string()])
+        );
+        assert_eq!(
+            parse_target("edge:200:since").unwrap(),
+            DesignationTarget::EdgeProperties(200, vec!["since".to_string()])
+        );
+    }
+
+    #[cfg(feature = "audit-export")]
+    #[test]
+    fn parse_target_rejects_malformed_specs() {
+        use super::crypto_shred_cli::parse_target;
+
+        // Unknown kind.
+        assert!(parse_target("person:1").is_err());
+        // Non-integer id.
+        assert!(parse_target("node:abc").is_err());
+        // Missing id.
+        assert!(parse_target("node").is_err());
+        // Empty key list after the id.
+        assert!(parse_target("node:1:").is_err());
+        // Whitespace-only key list.
+        assert!(parse_target("node:1: , ").is_err());
+    }
+
+    #[cfg(feature = "audit-export")]
+    #[test]
+    fn handle_designate_subject_without_target_returns_usage() {
+        // The --target requirement is enforced before any database is opened.
+        let err = super::crypto_shred_cli::handle_designate_subject(vec!["subject-1".to_string()])
+            .unwrap_err();
+        assert!(err.contains("usage:"), "unexpected error: {err}");
+    }
+
+    #[cfg(feature = "audit-export")]
+    #[test]
+    fn handle_erase_subject_missing_arg_returns_usage() {
+        let err = super::crypto_shred_cli::handle_erase_subject(vec![]).unwrap_err();
+        assert!(err.contains("usage:"), "unexpected error: {err}");
+    }
+
+    #[cfg(feature = "audit-export")]
+    #[test]
+    fn designate_then_erase_on_encrypted_db_yields_verifiable_attestation() {
+        use super::crypto_shred_cli::attestation_json;
+        use aletheiadb::db::DesignationTarget;
+        use aletheiadb::encryption::{EncryptionConfig, FileKeyProvider};
+        use aletheiadb::{AletheiaDB, AletheiaDBConfig, PersistenceConfig, WalConfigBuilder};
+
+        // A plaintext sentinel that must never appear in the attestation output.
+        const SENTINEL: &str = "SENTINEL_ssn_1234567890_MUST_NOT_LEAK";
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let key_file = root.join("mek.key");
+        FileKeyProvider::generate_key_file(&key_file).unwrap();
+        let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(root.join("wal")).build())
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: root.join("data"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .encryption(EncryptionConfig::file_based(&key_file))
+            .build();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
+
+        // Create a node carrying the sentinel property, designate it, then erase.
+        let node_id = db
+            .create_node(
+                "Person",
+                aletheiadb::PropertyMapBuilder::new()
+                    .insert("ssn", SENTINEL)
+                    .build(),
+            )
+            .unwrap();
+        db.designate_subject(
+            "subject-cli-1",
+            vec![DesignationTarget::WholeNode(node_id.as_u64())],
+        )
+        .unwrap();
+
+        let attestation = db.erase_subject("subject-cli-1").unwrap();
+        // The attestation must self-verify (signature over its canonical root).
+        assert!(attestation.verify(), "attestation must self-verify");
+
+        let rendered = attestation_json(&attestation).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["ok"], serde_json::json!(true));
+        assert_eq!(parsed["subject_id"], serde_json::json!("subject-cli-1"));
+        assert_eq!(parsed["entity_count"], serde_json::json!(1));
+        // Signature is a 64-byte Ed25519 sig -> 128 lowercase hex chars.
+        let sig = parsed["signature"].as_str().unwrap();
+        assert_eq!(sig.len(), 128, "signature must be 64-byte hex");
+        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(parsed["signer_public_key"].as_str().is_some());
+        assert!(parsed["timestamp"].as_str().is_some());
+
+        // Security: the attestation output must never carry plaintext content.
+        assert!(
+            !rendered.contains(SENTINEL),
+            "attestation output must not leak plaintext property content"
+        );
+    }
+
+    #[cfg(feature = "audit-export")]
+    #[test]
+    fn erase_undesignated_subject_is_a_clean_failed_precondition() {
+        use aletheiadb::AletheiaDB;
+
+        // An ephemeral database (no designation) — erasing an unknown subject is
+        // a clean, non-panicking error that the CLI surfaces as `error: ...`
+        // with a non-zero exit. (This is also the shape seen when encryption is
+        // not configured: a clean Err, never a panic.)
+        let db = AletheiaDB::new().unwrap();
+        let err = db.erase_subject("never-designated").unwrap_err();
+        assert_eq!(err.code(), "FAILED_PRECONDITION");
     }
 
     #[test]

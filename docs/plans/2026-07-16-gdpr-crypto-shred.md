@@ -2,6 +2,8 @@
 
 **Lane:** Wave-8 Lane G · **Status:** DESIGN (pre-implementation, coordinator collision-check pending) · **Date:** 2026-07-16
 
+**User guide:** [docs/guides/crypto-shred.md](../guides/crypto-shred.md) — CLI (`aletheia designate-subject` / `erase-subject`), the signed erasure attestation, and honest-limits (slice 4a).
+
 ## 1. Problem & shred unit
 
 GDPR "right to erasure" over an append-only bi-temporal store: you cannot physically delete history without breaking temporal invariants and the provenance hash chain. **Crypto-shred** solves this by encrypting the erasable payload under a **per-subject key** and erasing by **destroying that key** — the ciphertext may remain across every tier but becomes permanently undecryptable.

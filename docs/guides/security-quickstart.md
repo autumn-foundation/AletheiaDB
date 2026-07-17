@@ -259,6 +259,23 @@ non-leaking auth errors.
   authorization); roles are database-wide.
 - Rate limiting on authentication attempts.
 
+## Crypto-shred is an admin-only operation
+
+GDPR crypto-shred (designating an erasure subject and irreversibly erasing it —
+Issue #3359) is a **privileged, admin-only** capability:
+
+- On the **CLI** it runs in the local-admin context (the same trust level as
+  `backup` / `keys rotate`): `aletheia designate-subject <id> --target …` and
+  `aletheia erase-subject <id>`. It does **not** go through API-key RBAC — a
+  local operator holds full privilege — but it does require encryption
+  configured (`ALETHEIADB_CONFIG`).
+- On the **MCP / HTTP server surfaces**, the `designate_subject` / `erase_subject`
+  tools are gated to the **admin** role (a follow-up to the CLI slice); a
+  reader/writer/metrics key is denied.
+
+See [crypto-shred.md](crypto-shred.md) for the full guide, the signed erasure
+attestation, and the honest limits of what crypto-shred does and does not erase.
+
 ## Operational notes
 
 - Per-call auth overhead is a SHA-256 hash plus a constant-time scan of
