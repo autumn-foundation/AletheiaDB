@@ -1113,6 +1113,39 @@ impl CurrentStorage {
         self.indexes.node_count()
     }
 
+    /// Node ids currently in `namespace`, from the secondary membership index
+    /// (Issue #3349). O(members), no property scan.
+    #[inline]
+    pub fn namespace_node_ids(&self, namespace: &crate::core::namespace::Namespace) -> Vec<NodeId> {
+        self.indexes.namespace_node_ids(namespace)
+    }
+
+    /// Edge ids currently in `namespace`, from the secondary membership index.
+    #[inline]
+    pub fn namespace_edge_ids(&self, namespace: &crate::core::namespace::Namespace) -> Vec<EdgeId> {
+        self.indexes.namespace_edge_ids(namespace)
+    }
+
+    /// Number of nodes currently in `namespace` (O(1) membership-set read).
+    #[inline]
+    pub fn namespace_node_count(&self, namespace: &crate::core::namespace::Namespace) -> usize {
+        self.indexes.namespace_node_count(namespace)
+    }
+
+    /// Number of edges currently in `namespace` (O(1) membership-set read).
+    #[inline]
+    pub fn namespace_edge_count(&self, namespace: &crate::core::namespace::Namespace) -> usize {
+        self.indexes.namespace_edge_count(namespace)
+    }
+
+    /// Every namespace currently holding at least one node or edge.
+    #[inline]
+    pub fn populated_namespaces(
+        &self,
+    ) -> std::collections::BTreeSet<crate::core::namespace::Namespace> {
+        self.indexes.populated_namespaces()
+    }
+
     /// Get an exclusive upper bound on node ids present in current storage.
     ///
     /// Used by the query executor's full-scan iterator to bound a lazy id sweep

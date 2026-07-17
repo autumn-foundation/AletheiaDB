@@ -7,9 +7,10 @@
 use crate::core::graph::{Edge, Node, NodeHeader};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
+use crate::core::namespace::Namespace;
 use crate::index::adjacency::AdjacencyEntry;
 use crate::index::incremental_adjacency::{CompactionScheduler, IncrementalAdjacencyIndex};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -73,6 +74,26 @@ pub struct CurrentIndexes {
     /// the storage's own id generator is never advanced and cannot bound a
     /// scan.
     max_node_id: AtomicU64,
+    /// Secondary namespace → member-node membership index (Issue #3349, PR2).
+    ///
+    /// A derived, **non-persisted** acceleration structure mapping each
+    /// namespace to the set of node ids that currently live in it, so a
+    /// namespace-scoped read can enumerate members without a full property
+    /// scan. The durable ground truth is the reserved ride-along property on
+    /// each node ([`crate::core::namespace::NAMESPACE_KEY`]); this index is
+    /// rebuilt for free at load / WAL-replay because every node insertion
+    /// funnels through [`insert_node`](Self::insert_node).
+    ///
+    /// # Lock discipline
+    ///
+    /// This is a **leaf** in the lock-acquisition order: a lock-free `DashMap`
+    /// of lock-free `DashSet`s, mutated only inside
+    /// `insert_node`/`remove_node`, and it never calls back into `historical`,
+    /// `wal`, or `current_timestamp`.
+    ns_nodes: DashMap<Namespace, DashSet<NodeId>>,
+    /// Secondary namespace → member-edge membership index (Issue #3349, PR2).
+    /// The edge counterpart of [`ns_nodes`](Self::ns_nodes); see its docs.
+    ns_edges: DashMap<Namespace, DashSet<EdgeId>>,
 }
 
 impl CurrentIndexes {
@@ -90,6 +111,8 @@ impl CurrentIndexes {
             outgoing_compaction: None,
             incoming_compaction: None,
             max_node_id: AtomicU64::new(0),
+            ns_nodes: DashMap::new(),
+            ns_edges: DashMap::new(),
         }
     }
 
@@ -118,6 +141,8 @@ impl CurrentIndexes {
             outgoing_compaction: Some((outgoing_scheduler, outgoing_handle)),
             incoming_compaction: Some((incoming_scheduler, incoming_handle)),
             max_node_id: AtomicU64::new(0),
+            ns_nodes: DashMap::new(),
+            ns_edges: DashMap::new(),
         }
     }
 
@@ -173,8 +198,15 @@ impl CurrentIndexes {
         // node visibility itself is governed by the DashMap insert below.
         self.max_node_id
             .fetch_max(node.id.as_u64().wrapping_add(1), Ordering::Relaxed);
+        // Maintain the namespace membership index (Issue #3349). Read the
+        // namespace off the node before moving it into the map. The insert is
+        // idempotent, so re-inserting on an in-place update is a no-op (the
+        // namespace is immutable for the life of the entity).
+        let node_id = node.id;
+        let ns = node.namespace();
         self.nodes.insert(node.id, node);
         self.node_headers.insert(header.id, header);
+        self.ns_nodes.entry(ns).or_default().insert(node_id);
     }
 
     /// Exclusive upper bound on the node id space: `max(id ever inserted) + 1`.
@@ -213,11 +245,14 @@ impl CurrentIndexes {
             }
             Entry::Vacant(e) => {
                 // New edge: insert into both edge map and adjacency
+                let ns = edge.namespace();
                 e.insert(edge);
                 self.outgoing
                     .insert(source, AdjacencyEntry::new(target, edge_id, label));
                 self.incoming
                     .insert(target, AdjacencyEntry::new(source, edge_id, label));
+                // Maintain the namespace membership index (Issue #3349).
+                self.ns_edges.entry(ns).or_default().insert(edge_id);
             }
         }
     }
@@ -583,6 +618,10 @@ impl CurrentIndexes {
     pub fn remove_node(&self, id: NodeId) -> Option<Node> {
         self.nodes.remove(&id).map(|(_, node)| {
             self.node_headers.remove(&id);
+            // Drop the node from its namespace membership set (Issue #3349).
+            if let Some(members) = self.ns_nodes.get(&node.namespace()) {
+                members.remove(&id);
+            }
             node
         })
     }
@@ -633,6 +672,10 @@ impl CurrentIndexes {
             // Mark as deleted in both adjacency indexes (O(1))
             self.outgoing.delete(id);
             self.incoming.delete(id);
+            // Drop the edge from its namespace membership set (Issue #3349).
+            if let Some(members) = self.ns_edges.get(&edge.namespace()) {
+                members.remove(&id);
+            }
             edge
         })
     }
@@ -641,6 +684,64 @@ impl CurrentIndexes {
     #[inline]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    // ========================================================================
+    // Namespace membership index (Issue #3349, PR2)
+    // ========================================================================
+
+    /// Node ids currently in `namespace`, from the secondary membership index.
+    ///
+    /// O(members) with no property scan. Returns an empty vec for a namespace
+    /// with no members. Order is unspecified (DashSet iteration); callers that
+    /// need determinism should sort.
+    pub fn namespace_node_ids(&self, namespace: &Namespace) -> Vec<NodeId> {
+        self.ns_nodes
+            .get(namespace)
+            .map(|members| members.iter().map(|e| *e.key()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Edge ids currently in `namespace`, from the secondary membership index.
+    pub fn namespace_edge_ids(&self, namespace: &Namespace) -> Vec<EdgeId> {
+        self.ns_edges
+            .get(namespace)
+            .map(|members| members.iter().map(|e| *e.key()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Number of nodes currently in `namespace` (O(1) set-length read).
+    #[inline]
+    pub fn namespace_node_count(&self, namespace: &Namespace) -> usize {
+        self.ns_nodes
+            .get(namespace)
+            .map_or(0, |members| members.len())
+    }
+
+    /// Number of edges currently in `namespace` (O(1) set-length read).
+    #[inline]
+    pub fn namespace_edge_count(&self, namespace: &Namespace) -> usize {
+        self.ns_edges
+            .get(namespace)
+            .map_or(0, |members| members.len())
+    }
+
+    /// Every namespace that currently holds at least one node or edge, from
+    /// the membership index. Used to enumerate populated namespaces for
+    /// per-namespace stats/schema without a full entity scan.
+    pub fn populated_namespaces(&self) -> std::collections::BTreeSet<Namespace> {
+        let mut out = std::collections::BTreeSet::new();
+        for entry in self.ns_nodes.iter() {
+            if !entry.value().is_empty() {
+                out.insert(entry.key().clone());
+            }
+        }
+        for entry in self.ns_edges.iter() {
+            if !entry.value().is_empty() {
+                out.insert(entry.key().clone());
+            }
+        }
+        out
     }
 
     /// Get the number of edges.

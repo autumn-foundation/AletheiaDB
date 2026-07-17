@@ -219,6 +219,103 @@ pub enum NamespaceError {
 }
 
 // ============================================================================
+// Read scope (Issue #3349, PR2)
+// ============================================================================
+
+/// A namespace read scope: which namespaces a scoped read is allowed to see
+/// (Issue #3349).
+///
+/// - [`Single`](Self::Single): exactly one namespace.
+/// - [`List`](Self::List): the **union** of a non-empty set of namespaces
+///   (a read sees entities in any of them and may traverse within and between
+///   them).
+/// - [`All`](Self::All): every namespace — no filtering (the `all`
+///   read-selector keyword).
+///
+/// The default scope is `Single(`[`Namespace::DEFAULT`]`)`, so an omitted
+/// scope reproduces exact single-agent back-compat over `default`-namespace
+/// data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NamespaceScope {
+    /// Exactly one namespace.
+    Single(Namespace),
+    /// The union of a non-empty list of namespaces.
+    List(Vec<Namespace>),
+    /// Every namespace (no filtering).
+    All,
+}
+
+impl Default for NamespaceScope {
+    /// The default scope is the `default` namespace only — exact back-compat
+    /// for omitted-scope reads over legacy / single-agent data.
+    fn default() -> Self {
+        NamespaceScope::Single(Namespace::default())
+    }
+}
+
+impl NamespaceScope {
+    /// A scope over exactly one namespace.
+    #[must_use]
+    pub fn single(namespace: Namespace) -> Self {
+        NamespaceScope::Single(namespace)
+    }
+
+    /// A scope over every namespace (no filtering).
+    #[must_use]
+    pub fn all() -> Self {
+        NamespaceScope::All
+    }
+
+    /// A union scope over a non-empty list of namespaces.
+    ///
+    /// # Errors
+    ///
+    /// [`NamespaceError::InvalidName`] (→ MCP `INVALID_ARGUMENT`) with an empty
+    /// `name` when `namespaces` is empty — an empty scope would silently match
+    /// nothing, which the never-silently-wrong contract forbids.
+    pub fn list(namespaces: Vec<Namespace>) -> Result<Self, NamespaceError> {
+        if namespaces.is_empty() {
+            return Err(NamespaceError::InvalidName {
+                name: String::new(),
+                reason: "namespace scope list must not be empty".to_string(),
+            });
+        }
+        Ok(NamespaceScope::List(namespaces))
+    }
+
+    /// Whether `namespace` is inside this scope.
+    #[must_use]
+    pub fn contains(&self, namespace: &Namespace) -> bool {
+        match self {
+            NamespaceScope::All => true,
+            NamespaceScope::Single(ns) => ns == namespace,
+            NamespaceScope::List(list) => list.iter().any(|ns| ns == namespace),
+        }
+    }
+
+    /// The concrete namespaces named by this scope, or `None` for
+    /// [`All`](Self::All) (which names no finite set). Deduplicated iteration
+    /// helper for callers that enumerate members per namespace.
+    #[must_use]
+    pub fn explicit_namespaces(&self) -> Option<Vec<Namespace>> {
+        match self {
+            NamespaceScope::All => None,
+            NamespaceScope::Single(ns) => Some(vec![ns.clone()]),
+            NamespaceScope::List(list) => {
+                let mut seen = std::collections::BTreeSet::new();
+                let mut out = Vec::with_capacity(list.len());
+                for ns in list {
+                    if seen.insert(ns.clone()) {
+                        out.push(ns.clone());
+                    }
+                }
+                Some(out)
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Ride-along read/write helpers
 // ============================================================================
 

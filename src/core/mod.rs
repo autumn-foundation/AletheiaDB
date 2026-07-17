@@ -60,7 +60,7 @@ pub use lineage::{
     LineageClosure, LineageEntry, LineageError, LineageQueryOptions, LineageRecord, LineageRef,
     LineageStore,
 };
-pub use namespace::{NAMESPACE_KEY, Namespace, NamespaceError};
+pub use namespace::{NAMESPACE_KEY, Namespace, NamespaceError, NamespaceScope};
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use provenance::{
     Provenance, ProvenanceBuilder, ProvenanceError, ProvenanceFilter, ProvenanceFilterError,

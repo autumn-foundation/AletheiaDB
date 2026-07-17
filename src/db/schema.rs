@@ -91,6 +91,12 @@ pub struct GraphSchema {
     pub sampled: bool,
     /// The bi-temporal instant this schema reflects, or `None` for current state.
     pub as_of: Option<SchemaInstant>,
+    /// Per-namespace current node/edge counts (Issue #3349). Populated for the
+    /// current-state [`AletheiaDB::schema`]; **empty** for
+    /// [`AletheiaDB::schema_as_of`] (the namespace membership index is a
+    /// current-state acceleration structure, so a point-in-time namespace
+    /// breakdown is a deliberate follow-up).
+    pub namespaces: Vec<crate::db::namespace_query::NamespaceCount>,
 }
 
 /// Accumulates per-label/per-type counts and the union of property keys
@@ -160,6 +166,7 @@ impl AletheiaDB {
             false,
             None,
             &self.constraint_registry,
+            self.namespace_counts(),
         ))
     }
 
@@ -232,6 +239,8 @@ impl AletheiaDB {
                 transaction_time,
             }),
             &self.constraint_registry,
+            // Namespace breakdown is current-state only; empty for AS OF.
+            Vec::new(),
         ))
     }
 }
@@ -287,6 +296,7 @@ fn build_schema(
     sampled: bool,
     as_of: Option<SchemaInstant>,
     registry: &ConstraintRegistry,
+    namespaces: Vec<crate::db::namespace_query::NamespaceCount>,
 ) -> GraphSchema {
     let mut total_nodes = 0;
     let mut node_labels: Vec<LabelSchema> = node_acc
@@ -343,6 +353,7 @@ fn build_schema(
         total_edges,
         sampled,
         as_of,
+        namespaces,
     }
 }
 
