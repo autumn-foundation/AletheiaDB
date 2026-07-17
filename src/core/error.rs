@@ -1319,17 +1319,25 @@ mod tests {
 
     #[cfg(feature = "observability")]
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(metrics)]
     fn test_result_ext_records_storage_metric_once() {
-        crate::observability::METRICS.reset();
-
+        // Delta-based assertion (not absolute-count-after-`reset()`): the counter
+        // is a process-global singleton shared across the whole test binary, so an
+        // absolute assertion races any concurrent test that bumps the same counter.
+        // Reading immediately before and after the single `record_error_metric()`
+        // call and asserting the increment is exactly 1 preserves the "recorded
+        // exactly once (not double-counted)" intent while being robust to concurrent
+        // neighbors. The `metrics` serial group fences out the known same-counter
+        // bumpers so the delta window is clean (de-flake, Wave-8 Lane P).
         let err: Result<()> = Err(StorageError::NodeNotFound(NodeId::new(1).unwrap()).into());
-        let snapshot = crate::observability::METRICS.snapshot();
-        assert_eq!(snapshot.error_storage_total, 0);
-
+        let before = crate::observability::METRICS.snapshot().error_storage_total;
         let _ = err.record_error_metric();
-        let snapshot = crate::observability::METRICS.snapshot();
-        assert_eq!(snapshot.error_storage_total, 1);
+        let after = crate::observability::METRICS.snapshot().error_storage_total;
+        assert_eq!(
+            after - before,
+            1,
+            "record_error_metric must record exactly one storage error"
+        );
     }
 
     #[test]

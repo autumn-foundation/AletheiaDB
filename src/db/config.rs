@@ -593,12 +593,28 @@ impl AletheiaDB {
                 crate::db::snapshot::registry_path_for(&config.persistence),
             )?);
 
-            // Namespace registry (Issue #3349): durable sidecar at
+           // Namespace registry (Issue #3349): durable sidecar at
             // `{data_dir}/namespaces.json` when index persistence is enabled,
             // in-memory-only otherwise. Loaded here so registrations survive restart.
             let namespaces = Arc::new(crate::db::namespace::NamespaceRegistry::open(
                 crate::db::namespace::registry_path_for(&config.persistence),
             )?);
+            
+            // GDPR crypto-shred (Issue #3359): load the durable per-subject
+            // keyring fail-closed and run breadcrumb crash-recovery. Co-located
+            // with the schema-constraint sidecar in the data root `{D}`;
+            // in-memory-only when index persistence is disabled.
+            #[cfg(feature = "audit-export")]
+            let crypto_shred = {
+                let crypto_shred_path = if config.persistence.enabled {
+                    Some(chain_data_dir.join(crate::db::crypto_shred::keyring::KEYRING_FILENAME))
+                } else {
+                    None
+                };
+                Arc::new(crate::db::crypto_shred::CryptoShredState::open(
+                    crypto_shred_path,
+                )?)
+            };
 
             let mut db = AletheiaDB {
                 current: Arc::new(CurrentStorage::new()),
@@ -630,6 +646,8 @@ impl AletheiaDB {
                 } else {
                     None
                 },
+                #[cfg(feature = "audit-export")]
+                crypto_shred,
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 changefeed: Arc::new(
                     crate::core::changefeed_subscription::ChangefeedBroadcaster::new(),
@@ -1093,6 +1111,9 @@ impl AletheiaDB {
                 // `with_full_config` has no index-persistence data dir; schema
                 // constraints are in-memory only (ephemeral `new()` path).
                 schema_constraint_path: None,
+                // Ephemeral: crypto-shred keyring is in-memory only (no path).
+                #[cfg(feature = "audit-export")]
+                crypto_shred: Arc::new(crate::db::crypto_shred::CryptoShredState::open(None)?),
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 changefeed: Arc::new(
                     crate::core::changefeed_subscription::ChangefeedBroadcaster::new(),
