@@ -51,8 +51,10 @@ tower_governor = { version = "0.8", default-features = false, features = ["axum"
 governor = "0.10"
 # The custom `/mcp` security gate (B4) is a hand-written `tower::Layer` /
 # `tower::Service`; `secure_mcp` accepts any such layer. autumn-web 0.5 / axum
-# 0.8 are on tower 0.5.
-tower = { version = "0.5" }
+# 0.8 are on tower 0.5. The `limit` feature adds
+# `GlobalConcurrencyLimitLayer` — the inbound HTTP + MCP-over-HTTP concurrency
+# budgets with backpressure (Issue #3561 §8 AC1/AC5).
+tower = { version = "0.5", features = ["limit"] }
 # Cursor-signing primitive (Lane B4): base64url token encoding, SHA-256 for the
 # hand-rolled HMAC (no extra hmac crate — mirrors legacy `src/mcp/cursor.rs`),
 # constant-time MAC compare via subtle, a random per-process secret via rand,

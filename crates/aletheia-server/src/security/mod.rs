@@ -18,14 +18,16 @@
 //! - [`auth::Authorized`] **authenticates and enforces the RBAC class** via
 //!   [`authorize`] (Lane B): a role that does not permit the handler's
 //!   declared `C::CLASS` gets a byte-identical 403.
-//! - [`resource_limits`], [`rate_limit`], [`cursor`] carry the Lane B security
-//!   **primitives** — per-query timeout/row/byte caps + bounded in-flight guard
-//!   (#3542 / #3550), the default-off `tower-governor` rate-limit layer (#3561
-//!   §8), and signed opaque cursor tokens (#3360). They are the building blocks
-//!   the B4 wiring PR mounts via [`apply_security`]; PR1 behavior is unchanged
-//!   until then (rate limiting off, generous caps, no cursor validation wired).
+//! - [`resource_limits`], [`rate_limit`], [`cursor`], [`concurrency`] carry the
+//!   Lane B security **primitives** — per-query timeout/row/byte caps + bounded
+//!   in-flight guard (#3542 / #3550), the default-off `tower-governor`
+//!   rate-limit layer (#3561 §8), signed opaque cursor tokens (#3360), and the
+//!   default-off inbound HTTP + MCP-over-HTTP concurrency budgets with
+//!   backpressure (#3561 §8 AC1/AC5). They are the building blocks
+//!   [`apply_security`] mounts.
 
 pub mod auth;
+pub mod concurrency;
 pub mod cursor;
 pub mod mcp_gate;
 pub mod rate_limit;
@@ -33,10 +35,12 @@ pub mod rbac;
 pub mod resource_limits;
 
 use aletheiadb::auth::{AuthMode, AuthStore};
+use autumn_web::config::AutumnConfig;
 use autumn_web::prelude::AppState as AutumnAppState;
 use autumn_web::test::TestApp;
 use std::sync::Arc;
 use std::time::Duration;
+use tower::ServiceBuilder;
 
 pub use auth::{
     AccessClassMarker, AdminClass, ApiKeyStore, AuthStoreTokenAdapter, Authorized, MetricsClass,
@@ -85,7 +89,28 @@ pub struct SecurityConfig {
     /// Max concurrently-live cursors per connection (Lane B4, #3360 default
     /// 128). Wired at B4.
     pub max_live_cursors_per_conn: usize,
+    /// App-wide HTTP concurrency budget (Issue #3561 §8 AC1). `None` = **off**
+    /// (default, parity with today); `Some(n)` mounts a global
+    /// [`tower::limit::GlobalConcurrencyLimitLayer`] admitting at most `n`
+    /// concurrently-processed requests and back-pressuring the rest. `Some(0)`
+    /// is treated as off (see [`concurrency::app_concurrency_layer`]).
+    pub max_concurrent_requests: Option<usize>,
+    /// Concurrency budget for MCP-over-HTTP sessions on `/mcp` (Issue #3561 §8
+    /// AC5). `None` = **off** (default, parity); `Some(n)` composes a global
+    /// concurrency limit over the `/mcp` security gate so at most `n` MCP
+    /// sessions are processed concurrently, back-pressuring the rest.
+    pub max_mcp_sessions: Option<usize>,
+    /// Max accepted request body size, in bytes (Issue #3561 §8 AC3 / #3108).
+    /// Applied app-wide via [`axum::extract::DefaultBodyLimit`]; an over-limit
+    /// body is rejected `413` before it is buffered. Default 2 MiB, matching the
+    /// legacy HTTP surface's `DEFAULT_MAX_REQUEST_BODY_BYTES` (and axum's own
+    /// implicit default), so making it explicit changes no client behavior.
+    pub max_request_body_bytes: usize,
 }
+
+/// Default app-wide request-body cap (2 MiB), matching the legacy HTTP surface's
+/// `DEFAULT_MAX_REQUEST_BODY_BYTES` (Issue #3108) and axum's implicit default.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 impl SecurityConfig {
     /// Build a config from a shared store and mode, with the not-yet-wired
@@ -104,6 +129,9 @@ impl SecurityConfig {
             max_in_flight_queries: 64,
             cursor_ttl: Duration::from_secs(300),
             max_live_cursors_per_conn: 128,
+            max_concurrent_requests: None,
+            max_mcp_sessions: None,
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
         }
     }
 
@@ -140,6 +168,28 @@ impl SecurityConfig {
     #[must_use]
     pub fn with_max_in_flight_queries(mut self, cap: usize) -> Self {
         self.max_in_flight_queries = cap;
+        self
+    }
+
+    /// Set the app-wide HTTP concurrency budget (AC1). `None`/`Some(0)` = off.
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, cap: Option<usize>) -> Self {
+        self.max_concurrent_requests = cap;
+        self
+    }
+
+    /// Set the MCP-over-HTTP session concurrency budget (AC5). `None`/`Some(0)`
+    /// = off.
+    #[must_use]
+    pub fn with_max_mcp_sessions(mut self, cap: Option<usize>) -> Self {
+        self.max_mcp_sessions = cap;
+        self
+    }
+
+    /// Override the app-wide request-body cap in bytes (AC3, `DefaultBodyLimit`).
+    #[must_use]
+    pub fn with_max_request_body_bytes(mut self, bytes: usize) -> Self {
+        self.max_request_body_bytes = bytes;
         self
     }
 }
@@ -241,10 +291,40 @@ impl axum::extract::FromRequestParts<AutumnAppState> for ServerSecurityState {
 /// enforce per-request.
 #[must_use]
 pub fn apply_security(app: TestApp, cfg: &SecurityConfig) -> TestApp {
-    // 1. Custom /mcp gate (both modes; branches on mode internally).
-    let app = app.secure_mcp(McpSecurityLayer::new(cfg.store.clone(), cfg.mode));
+    // 1. Custom /mcp gate (both modes; branches on mode internally), optionally
+    //    fronted by the MCP-over-HTTP session concurrency budget (AC5). When a
+    //    budget is set, a global concurrency limit is composed OUTSIDE the gate
+    //    (permit acquired before any auth work), so at most `max_mcp_sessions`
+    //    MCP requests are processed concurrently, back-pressuring the rest.
+    let mcp_auth = McpSecurityLayer::new(cfg.store.clone(), cfg.mode);
+    let app = match concurrency::mcp_session_layer(cfg) {
+        Some(budget) => app.secure_mcp(ServiceBuilder::new().layer(budget).layer(mcp_auth)),
+        None => app.secure_mcp(mcp_auth),
+    };
 
-    // 2. Default-off per-IP rate limiter, mounted app-wide only when enabled.
+    // 2. App-wide request-body cap (AC3 / #3108): reject an over-limit body with
+    //    `413` before it is buffered/deserialized. autumn already mounts a global
+    //    `DefaultBodyLimit` from `security.upload.max_request_size_bytes` (an
+    //    outer `.layer(DefaultBodyLimit)` here would be overridden by that inner
+    //    one), so the effective, non-overridden knob is that config value — set
+    //    it from `max_request_body_bytes` so the operator-configurable cap
+    //    actually takes effect on the assembled surface. (autumn merges `/mcp`
+    //    after this middleware, so `/mcp` keeps its own built-in 2 MiB limit —
+    //    the gate buffers to that bound independently.)
+    let mut autumn_cfg = AutumnConfig::default();
+    autumn_cfg.security.upload.max_request_size_bytes = cfg.max_request_body_bytes;
+    let app = app.config(autumn_cfg);
+
+    // 3. App-wide HTTP concurrency budget (AC1), default-off. When enabled, a
+    //    global concurrency limit back-pressures requests over the cap surface-
+    //    wide (queue, not reject — the load-shedding 503 path is the separate
+    //    per-query `InFlightLimiter`).
+    let app = match concurrency::app_concurrency_layer(cfg) {
+        Some(layer) => app.layer(layer),
+        None => app,
+    };
+
+    // 4. Default-off per-IP rate limiter, mounted app-wide only when enabled.
     //    When enabled, retain the `RateLimit`'s GC handle and drive it from a
     //    lifecycle-tied background task so the per-IP keyed state cannot grow
     //    without bound (MUST-FIX 8c). The task holds only a weak handle, so it
