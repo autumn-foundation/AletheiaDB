@@ -16,6 +16,7 @@ use crate::constraints_lineage_audit_tools;
 use crate::edge_tools;
 use crate::http_routes;
 use crate::metrics_exposition;
+use crate::namespace_tools;
 use crate::node_tools;
 use crate::schema_batch_tools;
 use crate::security::{self, SecurityConfig};
@@ -133,6 +134,9 @@ pub fn try_build_server_testapp(
             constraints_lineage_audit_tools::audit_export,
             constraints_lineage_audit_tools::verify_chain,
             constraints_lineage_audit_tools::export_chain_head,
+            namespace_tools::create_namespace,
+            namespace_tools::list_namespaces,
+            namespace_tools::describe_namespace,
         ])
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");

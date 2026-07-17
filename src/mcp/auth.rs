@@ -117,6 +117,9 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     // Provenance hash chain verification / anchor export — read-only (Issue #3351).
     ("verify_chain", AccessClass::Read),
     ("export_chain_head", AccessClass::Read),
+    // Namespace discovery — read-only (Issue #3349, PR3b).
+    ("list_namespaces", AccessClass::Read),
+    ("describe_namespace", AccessClass::Read),
     // ---- Metrics: operational health/stats.
     ("database_stats", AccessClass::Metrics),
     // ---- Write: graph mutations plus index/constraint state changes.
@@ -135,6 +138,8 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     // Embedding-backed writes (Issue #2906).
     ("create_node_with_embedding", AccessClass::Write),
     ("update_node_embedding", AccessClass::Write),
+    // Namespace creation — a write (Issue #3349, PR3b).
+    ("create_namespace", AccessClass::Write),
     // ---- Admin: none yet. Key lifecycle is served by the HTTP admin
     // surface (Phase 1) over the shared persisted store.
 ];

@@ -1,9 +1,9 @@
 {
-  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 54 — have only their name + access class pinned via the golden set. Live drift detection of the full 58-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
+  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 57 — have only their name + access class pinned via the golden set. Live drift detection of the full 61-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
   "generated_for": "framework port parity harness",
   "totals": {
     "http_routes": 5,
-    "mcp_tools": 58,
+    "mcp_tools": 61,
     "mcp_budgetable_read_tools": 20
   },
   "http": {
@@ -186,6 +186,9 @@
       {"name": "audit_export", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "verify_chain", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "export_chain_head", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "create_namespace", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "list_namespaces", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "describe_namespace", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "database_stats", "access_class": "metrics", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]}
     ]
   },

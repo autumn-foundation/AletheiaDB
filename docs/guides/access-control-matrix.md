@@ -121,6 +121,8 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `audit_export` | read |
 | `verify_chain` | read |
 | `export_chain_head` | read |
+| `list_namespaces` | read |
+| `describe_namespace` | read |
 | `database_stats` | metrics |
 | `create_node` | write |
 | `update_node` | write |
@@ -136,6 +138,7 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `enable_unique_constraint` | write |
 | `create_node_with_embedding` | write |
 | `update_node_embedding` | write |
+| `create_namespace` | write |
 
 <!-- mcp-tool-matrix:end -->
 

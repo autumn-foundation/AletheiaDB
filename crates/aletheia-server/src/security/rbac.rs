@@ -31,7 +31,7 @@
 //!
 //! This registry is anchored on `tests/parity/inventory.json` — the inventory's
 //! `mcp.tools[].access_class` is the shared source of truth. It enumerates all
-//! 58 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
+//! 61 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
 //! checks it bidirectionally against the inventory, and
 //! `mcp_routable_tools_are_all_classified` checks the live routable set is a
 //! subset (every routable tool classified). Handlers become routable one slice
@@ -44,7 +44,7 @@ use aletheiadb::auth::{AccessClass, Role};
 /// tests derive from THIS list, so the routable-name set and the class-table
 /// set cannot silently drift into two independently-maintained lists.
 ///
-/// This registry is **inventory-anchored**: it enumerates all 58 tools from
+/// This registry is **inventory-anchored**: it enumerates all 61 tools from
 /// `tests/parity/inventory.json` (`mcp.tools[].access_class`) upfront, mirroring
 /// the legacy `src/mcp/auth.rs::TOOL_ACCESS_CLASSES` verbatim. The conformance
 /// test `registry_matches_inventory_exactly` (`tests/security_rbac.rs`) proves
@@ -102,6 +102,9 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     ("audit_export", AccessClass::Read),
     ("verify_chain", AccessClass::Read),
     ("export_chain_head", AccessClass::Read),
+    // Namespace discovery (Issue #3349, PR3b) — read-only.
+    ("list_namespaces", AccessClass::Read),
+    ("describe_namespace", AccessClass::Read),
     // ---- Metrics: operational health/stats.
     ("database_stats", AccessClass::Metrics),
     // ---- Write: graph mutations plus index/constraint state changes.
@@ -120,6 +123,8 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     // Embedding-backed writes (Issue #2906).
     ("create_node_with_embedding", AccessClass::Write),
     ("update_node_embedding", AccessClass::Write),
+    // Namespace creation (Issue #3349, PR3b) — a write.
+    ("create_namespace", AccessClass::Write),
     // ---- Admin: none yet. Key lifecycle is served by the HTTP admin surface
     // over the shared persisted store (no Admin-class MCP tools).
 ];

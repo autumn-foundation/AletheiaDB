@@ -913,6 +913,33 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Create (register) an agent-scoped namespace (Issue #3349, PR3b).
+    ///
+    /// Returns the created `{name, description, created_at}`; a duplicate name
+    /// (or the implicit `default`) is a `CONFLICT`, a malformed/reserved name is
+    /// `INVALID_ARGUMENT`.
+    pub fn create_namespace(&self, req: CreateNamespaceRequest) -> String {
+        Self::extract_text(self.handle_create_namespace(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// List all registered namespaces with per-namespace counts (Issue #3349,
+    /// PR3b).
+    pub fn list_namespaces(&self, req: ListNamespacesRequest) -> String {
+        Self::extract_text(self.handle_list_namespaces(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Describe a single namespace by name (Issue #3349, PR3b). An unregistered
+    /// name is `NOT_FOUND` (`details.namespace`).
+    pub fn describe_namespace(&self, req: DescribeNamespaceRequest) -> String {
+        Self::extract_text(self.handle_describe_namespace(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// Find similar nodes.
     ///
     /// Performs a K-Nearest Neighbors (k-NN) search using vector embeddings.
@@ -3607,6 +3634,86 @@ impl AletheiaMcpServer {
             }
         } else {
             self.success_json(json!({"count": self.db.node_count()}))
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Namespace management (Issue #3349, PR3b)
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// Render a namespace's metadata (without counts) as a JSON object:
+    /// `{name, description, created_at}` (created_at RFC 3339).
+    fn namespace_info_json(info: &crate::db::NamespaceInfo) -> serde_json::Value {
+        json!({
+            "name": info.name,
+            "description": info.description,
+            "created_at": time::to_iso8601(info.created_at),
+        })
+    }
+
+    /// Look up the current-state `(node_count, edge_count)` for a namespace name
+    /// from the O(1) membership-index-backed [`AletheiaDB::namespace_counts`]
+    /// snapshot. Missing (a registered-but-unpopulated namespace not folded into
+    /// the counts snapshot) defaults to `(0, 0)`.
+    fn namespace_counts_for(counts: &[crate::db::NamespaceCount], name: &str) -> (usize, usize) {
+        counts
+            .iter()
+            .find(|c| c.name == name)
+            .map_or((0, 0), |c| (c.node_count, c.edge_count))
+    }
+
+    fn handle_create_namespace(&self, args: serde_json::Value) -> CallToolResult {
+        let req: CreateNamespaceRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        match self.db.create_namespace(&req.name, req.description) {
+            Ok(info) => self.success_json(Self::namespace_info_json(&info)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    fn handle_list_namespaces(&self, args: serde_json::Value) -> CallToolResult {
+        let _req: ListNamespacesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let counts = self.db.namespace_counts();
+        let namespaces: Vec<serde_json::Value> = self
+            .db
+            .list_namespaces()
+            .iter()
+            .map(|info| {
+                let (node_count, edge_count) = Self::namespace_counts_for(&counts, &info.name);
+                let mut obj = Self::namespace_info_json(info);
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("node_count".to_string(), json!(node_count));
+                    map.insert("edge_count".to_string(), json!(edge_count));
+                }
+                obj
+            })
+            .collect();
+        let count = namespaces.len();
+        self.success_json(json!({ "namespaces": namespaces, "count": count }))
+    }
+
+    fn handle_describe_namespace(&self, args: serde_json::Value) -> CallToolResult {
+        let req: DescribeNamespaceRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        match self.db.get_namespace(&req.name) {
+            Ok(info) => {
+                let counts = self.db.namespace_counts();
+                let (node_count, edge_count) = Self::namespace_counts_for(&counts, &info.name);
+                let mut obj = Self::namespace_info_json(&info);
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("node_count".to_string(), json!(node_count));
+                    map.insert("edge_count".to_string(), json!(edge_count));
+                }
+                self.success_json(obj)
+            }
+            Err(e) => self.db_error(e),
         }
     }
 
@@ -8800,6 +8907,10 @@ impl AletheiaMcpServer {
             "database_stats" => self.handle_database_stats(args, self.caller_is_admin()),
             "verify_chain" => self.handle_verify_chain(args),
             "export_chain_head" => self.handle_export_chain_head(args),
+            // Namespace management (Issue #3349, PR3b).
+            "create_namespace" => self.handle_create_namespace(args),
+            "list_namespaces" => self.handle_list_namespaces(args),
+            "describe_namespace" => self.handle_describe_namespace(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
                     .details(json!({ "tool": name })),
@@ -9813,6 +9924,36 @@ fn tool_definitions() -> Vec<Tool> {
              commit_ts, anchor_lsn, genesis_digest} with digests as lowercase hex. Requires \
              the chain to be enabled; otherwise returns a FAILED_PRECONDITION error.",
             make_input_schema::<ExportChainHeadRequest>(),
+        ),
+        // Namespace management (Issue #3349, PR3b).
+        Tool::new(
+            "create_namespace",
+            "Create (register) an agent-scoped namespace so it is listable/describable even \
+             when empty (Issue #3349). Pass `name` (e.g. 'agent:planner'; charset \
+             [A-Za-z0-9._:/-], max 128 bytes) and an optional `description`. Returns the created \
+             namespace {name, description, created_at}. A duplicate name (or the implicit \
+             'default') is a CONFLICT; a malformed name or the reserved 'all' selector is \
+             INVALID_ARGUMENT. Registering up front is optional — writing to an unknown namespace \
+             auto-registers it — but doing so lets you record a description and detect typos via \
+             list_namespaces.",
+            make_input_schema::<CreateNamespaceRequest>(),
+        ),
+        Tool::new(
+            "list_namespaces",
+            "List all registered namespaces (the implicit 'default' first, then others in \
+             creation order), so a caller can discover every scope and catch a mistyped \
+             auto-registered namespace (Issue #3349). No arguments. Returns \
+             {namespaces:[{name, description, created_at, node_count, edge_count}], count}; the \
+             per-namespace current-state node/edge counts are O(1) membership-index reads.",
+            make_input_schema::<ListNamespacesRequest>(),
+        ),
+        Tool::new(
+            "describe_namespace",
+            "Describe a single namespace by name (Issue #3349). Pass `name`; returns \
+             {name, description, created_at, node_count, edge_count}. The implicit 'default' \
+             namespace always resolves; an unregistered name returns NOT_FOUND with \
+             details.namespace.",
+            make_input_schema::<DescribeNamespaceRequest>(),
         ),
     ];
 
