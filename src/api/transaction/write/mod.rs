@@ -21,6 +21,7 @@ use crate::core::hlc::{
 };
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
+use crate::core::namespace;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::temporal::{Timestamp, time};
@@ -1147,6 +1148,10 @@ impl WriteTransaction {
         let existing = self.read_own_node(node_id)?;
         let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
 
+        // Re-stamp the immutable namespace from the existing node (Issue #3349)
+        // so a full overwrite (replace / remove-property) can never drop it.
+        let properties = namespace::restamp_namespace(properties, &existing.properties);
+
         // A replace may add, change, OR remove vector properties; mark the
         // buffer so the temporal vector index is notified on commit if either
         // the old or the new state carries a vector.
@@ -1223,6 +1228,10 @@ impl WriteTransaction {
 
         let edge_id = edge.id;
         let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+
+        // Re-stamp the immutable namespace from the existing edge (Issue #3349)
+        // so a full overwrite (replace / remove-property) can never drop it.
+        let properties = namespace::restamp_namespace(properties, &edge.properties);
 
         // A replace may add/change/remove vector properties.
         if !self.buffer.has_vector_operations()
@@ -1511,10 +1520,20 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // Reject any engine-reserved property key on the user-supplied map
+            // BEFORE stamping the namespace (Issue #3349): a caller may not
+            // forge/overwrite a `__aletheia_*` / `__shred_*` ride-along key.
+            namespace::reject_reserved_keys(&properties)?;
+
             // Generate IDs
             let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
             let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
             let label_interned = GLOBAL_INTERNER.intern(label)?;
+
+            // Stamp the namespace ride-along (Issue #3349). `None` ⇒ default,
+            // which is deliberately NOT stamped (byte-identical to legacy data).
+            let ns = options.namespace.clone().unwrap_or_default();
+            let properties = namespace::stamp_namespace(properties, &ns);
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
@@ -1564,10 +1583,17 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // Reject engine-reserved keys before stamping the namespace (#3349).
+            namespace::reject_reserved_keys(&properties)?;
+
             // Generate IDs
             let edge_id = EdgeId::new_unchecked(self.edge_id_gen.next()?);
             let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
             let label_interned = GLOBAL_INTERNER.intern(label)?;
+
+            // Stamp the namespace ride-along (Issue #3349); default not stamped.
+            let ns = options.namespace.clone().unwrap_or_default();
+            let properties = namespace::stamp_namespace(properties, &ns);
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
@@ -1664,6 +1690,10 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // Reject engine-reserved keys on the incoming PATCH (Issue #3349):
+            // a user may not set/overwrite a namespace/shred ride-along key.
+            namespace::reject_reserved_keys(&properties)?;
+
             // Get current node to preserve label and existing properties.
             // Buffer-aware read (Issue #3417): read-your-own-writes so an
             // update of a node created/updated earlier in THIS transaction
@@ -1681,8 +1711,11 @@ impl WriteOps for WriteTransaction {
                 builder = builder.insert_by_key(*key, value.clone());
             }
 
-            // Build the final merged property map
-            let merged_properties = builder.build();
+            // Build the final merged property map, then re-stamp the immutable
+            // namespace from the existing node (Issue #3349). A PATCH inherently
+            // preserves the ride-along key; re-stamping makes that a hard
+            // guarantee that no update path can ever drop or change it.
+            let merged_properties = namespace::restamp_namespace(builder.build(), &node.properties);
 
             // A PATCH may drop or downgrade a vector (e.g. overwrite the
             // embedding key with a scalar, or remove it): mark the buffer so
@@ -1762,6 +1795,9 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // Reject engine-reserved keys on the incoming PATCH (Issue #3349).
+            namespace::reject_reserved_keys(&properties)?;
+
             // Get current edge to preserve source, target, label and existing
             // properties. Buffer-aware read (Issue #3417): read-your-own-writes
             // so an update of a same-tx-created/updated edge merges onto the
@@ -1778,8 +1814,9 @@ impl WriteOps for WriteTransaction {
                 builder = builder.insert_by_key(*key, value.clone());
             }
 
-            // Build the final merged property map
-            let merged_properties = builder.build();
+            // Build the merged map, then re-stamp the immutable namespace from
+            // the existing edge (Issue #3349).
+            let merged_properties = namespace::restamp_namespace(builder.build(), &edge.properties);
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
@@ -1847,6 +1884,11 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // Reject engine-reserved keys on the user-supplied overwrite map
+            // (Issue #3349); the immutable namespace is re-stamped from the
+            // existing node inside `buffer_node_replace`.
+            namespace::reject_reserved_keys(&properties)?;
+
             let label_interned = GLOBAL_INTERNER.intern(label)?;
             self.buffer_node_replace(node_id, label_interned, properties, options)
         })();
@@ -1870,6 +1912,11 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // Reject engine-reserved keys on the user-supplied overwrite map
+            // (Issue #3349); the immutable namespace is re-stamped from the
+            // existing edge inside `buffer_edge_replace`.
+            namespace::reject_reserved_keys(&properties)?;
+
             // Verify the edge exists and capture its immutable endpoints/type
             // (read-your-own-writes, Issue #3417). Full overwrite of properties
             // only: source/target/label are preserved from the existing edge.
@@ -1881,6 +1928,15 @@ impl WriteOps for WriteTransaction {
     }
 
     fn remove_node_property(&mut self, node_id: NodeId, key: &str) -> Result<()> {
+        // An engine-reserved key (the namespace ride-along, #3349) is not a
+        // user property and may not be targeted for removal.
+        if namespace::is_reserved_property_key(key) {
+            return Err(namespace::NamespaceError::ReservedPropertyKey {
+                key: key.to_string(),
+            }
+            .into())
+            .record_error_metric();
+        }
         // Check transaction state up front so an absent-key no-op on an
         // inactive transaction still reports the state error.
         if self.state != TxState::Active {
@@ -1919,6 +1975,14 @@ impl WriteOps for WriteTransaction {
     }
 
     fn remove_edge_property(&mut self, edge_id: EdgeId, key: &str) -> Result<()> {
+        // An engine-reserved key (#3349) is not a user property.
+        if namespace::is_reserved_property_key(key) {
+            return Err(namespace::NamespaceError::ReservedPropertyKey {
+                key: key.to_string(),
+            }
+            .into())
+            .record_error_metric();
+        }
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
                 current: format!("{:?}", self.state),

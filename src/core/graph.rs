@@ -101,6 +101,26 @@ impl Node {
         self.properties.get(key)
     }
 
+    /// The node's namespace (Issue #3349), read from the reserved ride-along
+    /// property key. A node carrying no key — every `default` and every legacy
+    /// node — resolves to
+    /// [`Namespace::DEFAULT`](crate::core::namespace::Namespace::DEFAULT).
+    #[inline]
+    #[must_use]
+    pub fn namespace(&self) -> crate::core::namespace::Namespace {
+        crate::core::namespace::namespace_of(&self.properties)
+    }
+
+    /// A user-facing copy of the node's properties with all engine-reserved
+    /// keys (the `__aletheia_*` / `__shred_*` prefixes, including the namespace
+    /// ride-along) elided (Issue #3349). The namespace is surfaced separately
+    /// via [`namespace`](Self::namespace).
+    #[inline]
+    #[must_use]
+    pub fn user_properties(&self) -> crate::core::property::PropertyMap {
+        crate::core::namespace::user_facing_properties(&self.properties)
+    }
+
     /// Check if this node has a specific label.
     #[inline]
     pub fn has_label(&self, label: InternedString) -> bool {
@@ -231,6 +251,24 @@ impl Edge {
     #[inline]
     pub fn get_property(&self, key: &str) -> Option<&crate::core::property::PropertyValue> {
         self.properties.get(key)
+    }
+
+    /// The edge's namespace (Issue #3349), read from the reserved ride-along
+    /// property key. An edge carrying no key resolves to
+    /// [`Namespace::DEFAULT`](crate::core::namespace::Namespace::DEFAULT).
+    #[inline]
+    #[must_use]
+    pub fn namespace(&self) -> crate::core::namespace::Namespace {
+        crate::core::namespace::namespace_of(&self.properties)
+    }
+
+    /// A user-facing copy of the edge's properties with all engine-reserved
+    /// keys elided (Issue #3349); the namespace is surfaced separately via
+    /// [`namespace`](Self::namespace).
+    #[inline]
+    #[must_use]
+    pub fn user_properties(&self) -> crate::core::property::PropertyMap {
+        crate::core::namespace::user_facing_properties(&self.properties)
     }
 
     /// Check if this edge has a specific label.

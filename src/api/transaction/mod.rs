@@ -91,6 +91,11 @@ use crate::core::temporal::Timestamp;
 pub struct WriteRequestOptions {
     pub(crate) valid_from: Option<Timestamp>,
     pub(crate) provenance: Option<Provenance>,
+    /// Target namespace for a **create** (Issue #3349). `None` ⇒ the default
+    /// namespace (byte-identical to pre-namespace behavior). Ignored by update /
+    /// replace / delete / CAS paths, where the namespace is immutable and
+    /// re-stamped from the existing entity instead.
+    pub(crate) namespace: Option<crate::core::namespace::Namespace>,
 }
 
 impl WriteRequestOptions {
@@ -110,6 +115,14 @@ impl WriteRequestOptions {
     #[must_use]
     pub fn with_provenance(mut self, provenance: Provenance) -> Self {
         self.provenance = Some(provenance);
+        self
+    }
+
+    /// Set the target namespace for a **create** write (Issue #3349). No effect
+    /// on update/replace/delete/CAS, where the namespace is immutable.
+    #[must_use]
+    pub fn with_namespace(mut self, namespace: crate::core::namespace::Namespace) -> Self {
+        self.namespace = Some(namespace);
         self
     }
 }
@@ -541,6 +554,7 @@ pub trait WriteOps: ReadOps {
         let options = WriteRequestOptions {
             valid_from,
             provenance: None,
+            namespace: None,
         };
         self.create_node_with_options(label, properties, options)
     }
@@ -634,6 +648,7 @@ pub trait WriteOps: ReadOps {
         let options = WriteRequestOptions {
             valid_from,
             provenance: None,
+            namespace: None,
         };
         self.create_edge_with_options(source, target, label, properties, options)
     }
@@ -719,6 +734,7 @@ pub trait WriteOps: ReadOps {
         let options = WriteRequestOptions {
             valid_from,
             provenance: None,
+            namespace: None,
         };
         self.update_node_with_options(node_id, properties, options)
     }
@@ -929,6 +945,7 @@ pub trait WriteOps: ReadOps {
         let options = WriteRequestOptions {
             valid_from,
             provenance: None,
+            namespace: None,
         };
         self.update_edge_with_options(edge_id, properties, options)
     }
@@ -1011,6 +1028,7 @@ pub trait WriteOps: ReadOps {
             WriteRequestOptions {
                 valid_from,
                 provenance: None,
+                namespace: None,
             },
         )
     }
@@ -1140,6 +1158,7 @@ pub trait WriteOps: ReadOps {
             WriteRequestOptions {
                 valid_from,
                 provenance: None,
+                namespace: None,
             },
         )
     }
@@ -1227,6 +1246,7 @@ pub trait WriteOps: ReadOps {
             WriteRequestOptions {
                 valid_from,
                 provenance: None,
+                namespace: None,
             },
         )
     }
@@ -1276,6 +1296,7 @@ pub trait WriteOps: ReadOps {
             WriteRequestOptions {
                 valid_from,
                 provenance: None,
+                namespace: None,
             },
         )
     }

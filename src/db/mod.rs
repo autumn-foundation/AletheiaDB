@@ -40,6 +40,8 @@ pub mod extent;
 pub mod graph_view;
 /// Fact-to-fact derivation lineage API (Issue #3371).
 pub mod lineage;
+/// Agent-scoped memory namespaces: registry + namespaced entity creation (Issue #3349).
+pub mod namespace;
 /// Basic graph operations (CRUD).
 pub mod ops;
 /// Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374).
@@ -74,6 +76,7 @@ pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
 pub use lineage::{FactStatus, LineageView, LineageViewEntry};
+pub use namespace::NamespaceInfo;
 pub use ops::NodesAtTime;
 pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
@@ -249,6 +252,16 @@ pub struct AletheiaDB {
     /// a `{data_dir}/snapshots.json` sidecar when index persistence is enabled;
     /// in-memory-only for ephemeral databases. See [`crate::db::snapshot`].
     pub(crate) snapshots: Arc<snapshot::SnapshotRegistry>,
+    /// Agent-scoped namespace registry (Issue #3349).
+    ///
+    /// Maps a namespace name to its `{description, created_at}` metadata so
+    /// namespaces are creatable / listable / describable even when empty.
+    /// Auto-registered on first write to an unknown namespace. Entirely off the
+    /// data write path (a leaf, like [`snapshots`](Self::snapshots)). Durably
+    /// persisted to a `{data_dir}/namespaces.json` sidecar when index
+    /// persistence is enabled; in-memory-only for ephemeral databases. See
+    /// [`crate::db::namespace`].
+    pub(crate) namespaces: Arc<namespace::NamespaceRegistry>,
     /// Opt-in tamper-evident provenance hash chain (Issue #3351).
     ///
     /// `None` unless `config.chain.enabled`. When present, each committed
