@@ -151,59 +151,159 @@ pub enum AletheiaHttpError {
         cap: usize,
     },
 
-    /// A schema-constraint violation surfaced from the db layer (Issue #3378),
-    /// pre-classified into the unified #3234 envelope so the HTTP body carries
-    /// the same `code`/`retriable`/`details` as the MCP surface. Built via
-    /// [`Self::from_db_error`]; every other db error keeps its prior HTTP
-    /// mapping (a 400 `BadRequest`), so this is purely additive for the
-    /// type/required-key/non-conforming cases.
+    /// A db-layer error pre-classified into the unified #3234 envelope, so the
+    /// HTTP body carries the same `code`/`retriable`/`details` as the MCP
+    /// surface. Built via [`Self::from_db_error`], which classifies the
+    /// schema-constraint (Issue #3378), uniqueness, and transaction
+    /// conflict/precondition classes; every other db error keeps its prior HTTP
+    /// mapping (a 400 `BadRequest`).
     #[error("{message}")]
-    SchemaConstraint {
-        /// The #3234 code string (`CONSTRAINT_VIOLATION` | `FAILED_PRECONDITION`).
+    Structured {
+        /// The #3234 code string (e.g. `CONSTRAINT_VIOLATION`,
+        /// `FAILED_PRECONDITION`, `CONFLICT`, `UNAVAILABLE`).
         code: &'static str,
-        /// HTTP status derived from the code (`409` / `412`).
+        /// HTTP status derived from the code (`409` / `412` / `503` / …).
         status: StatusCode,
+        /// Whether a fresh attempt could usefully succeed. `true` only for the
+        /// transient conflict / clock-skew classes; `false` for the caller-fault
+        /// constraint / precondition classes.
+        retriable: bool,
         /// Free-text message: the db error's `Display` (preserved verbatim).
         message: String,
-        /// Structured metadata from [`crate::core::error::ConstraintError::structured_details`].
+        /// Structured, machine-readable metadata (shared with the MCP surface).
         details: Option<Value>,
     },
 }
 
 impl AletheiaHttpError {
     /// Classify a db-layer [`Error`](crate::core::error::Error) surfaced from a
-    /// write handler into the HTTP error envelope. Schema-constraint violations
-    /// (Issue #3378) map to the dedicated [`Self::SchemaConstraint`] variant so
-    /// the response carries the same `code`/`details` as the MCP surface; every
-    /// other error preserves the prior write-path mapping (`400 BadRequest`
-    /// with the free-text message), so this is a purely additive change for the
-    /// constraint cases.
+    /// write handler into the HTTP error envelope, using the same #3234 code
+    /// vocabulary as the MCP surface (`src/mcp/error.rs`).
+    ///
+    /// Three classes are pre-classified into [`Self::Structured`] so the
+    /// response carries the same `code`/`retriable`/`details` as the MCP
+    /// surface:
+    ///
+    /// - **Constraint violations** (Issue #3378 + uniqueness): a
+    ///   type/required-key/unique violation is a declared constraint rejecting
+    ///   *this* write → `CONSTRAINT_VIOLATION` (`409`); a non-conforming enable
+    ///   or a pre-existing duplicate is a state problem the caller must fix
+    ///   first → `FAILED_PRECONDITION` (`412`). All non-retriable.
+    /// - **Transaction conflicts / preconditions**: a serialization failure /
+    ///   write conflict / abort is transient → `CONFLICT` (`409`, retriable); a
+    ///   validation failure (e.g. the #3416 concurrent-orphan guard), invalid
+    ///   state, already-committed, or lost CAS is a caller-fault precondition →
+    ///   `FAILED_PRECONDITION` (`412`, non-retriable); clock skew heals on its
+    ///   own → `UNAVAILABLE` (`503`, retriable).
+    ///
+    /// Everything else preserves the prior write-path mapping (`400 BadRequest`
+    /// with the free-text message) — critically, this keeps genuinely bad input
+    /// (a malformed property map wrapped as [`Error::Other`], an invalid id) at
+    /// `400`, so extending the classifier never over-broadens a real
+    /// bad-request into a constraint or internal error.
+    ///
+    /// [`Error::Other`]: crate::core::error::Error::Other
     #[must_use]
     pub(crate) fn from_db_error(e: &crate::core::error::Error) -> Self {
         use crate::core::error::ConstraintError as CE;
-        match e.as_constraint() {
-            // A type/required-key violation is the constraint rejecting *this*
-            // write → CONSTRAINT_VIOLATION, rendered `409 Conflict`.
-            Some(ce @ (CE::TypeViolation { .. } | CE::MissingRequiredKey { .. })) => {
-                Self::SchemaConstraint {
+        use crate::core::error::Error as E;
+        use crate::core::error::TransactionError as TE;
+
+        // --- Constraint violations (Issue #3378 schema + uniqueness). ---
+        if let Some(ce) = e.as_constraint() {
+            return match ce {
+                // A declared type/required-key violation rejects *this* write.
+                CE::TypeViolation { .. } | CE::MissingRequiredKey { .. } => Self::Structured {
                     code: "CONSTRAINT_VIOLATION",
                     status: StatusCode::CONFLICT,
+                    retriable: false,
                     message: e.to_string(),
                     details: ce.structured_details(),
+                },
+                // A uniqueness violation is likewise CONSTRAINT_VIOLATION. Its
+                // `structured_details()` is `None`, so build the machine-readable
+                // metadata here, mirroring the MCP surface's `db_error` call site
+                // (`label`/`property`/`value`/`existing_node_id`).
+                CE::UniqueViolation {
+                    label,
+                    property,
+                    value,
+                    existing_node_id,
+                } => Self::Structured {
+                    code: "CONSTRAINT_VIOLATION",
+                    status: StatusCode::CONFLICT,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: Some(json!({
+                        "label": label,
+                        "property": property,
+                        "value": value,
+                        "existing_node_id": existing_node_id.as_u64(),
+                    })),
+                },
+                // A non-conforming enable or a pre-existing duplicate is a state
+                // problem the caller must fix first.
+                CE::NonConformingOnEnable { .. } | CE::DuplicateOnEnable { .. } => {
+                    Self::Structured {
+                        code: "FAILED_PRECONDITION",
+                        status: StatusCode::PRECONDITION_FAILED,
+                        retriable: false,
+                        message: e.to_string(),
+                        // `None` for DuplicateOnEnable (no shared structured details).
+                        details: ce.structured_details(),
+                    }
                 }
-            }
-            // Non-conformance on enable is a state problem the caller must fix
-            // first → FAILED_PRECONDITION, rendered `412 Precondition Failed`.
-            Some(ce @ CE::NonConformingOnEnable { .. }) => Self::SchemaConstraint {
-                code: "FAILED_PRECONDITION",
-                status: StatusCode::PRECONDITION_FAILED,
-                message: e.to_string(),
-                details: ce.structured_details(),
-            },
-            // Uniqueness variants and every non-constraint error keep the prior
-            // write-path mapping unchanged (a 400 BadRequest).
-            _ => Self::BadRequest(e.to_string()),
+                // An unsupported key type in the *enable request itself* is a
+                // genuine bad request, not a constraint rejecting a write.
+                CE::UnsupportedKeyType { .. } => Self::BadRequest(e.to_string()),
+            };
         }
+
+        // --- Transaction conflicts / preconditions (mirrors the MCP
+        // classifier in src/mcp/error.rs::classify_transaction_error). ---
+        if let E::Transaction(te) = e {
+            return match te {
+                // Concurrency conflicts a fresh attempt can win.
+                TE::SerializationFailure { .. } | TE::WriteConflict { .. } | TE::Aborted { .. } => {
+                    Self::Structured {
+                        code: "CONFLICT",
+                        status: StatusCode::CONFLICT,
+                        retriable: true,
+                        message: e.to_string(),
+                        details: None,
+                    }
+                }
+                // Well-formed but forbidden by current state (e.g. the #3416
+                // concurrent-orphan validation guard, a lost compare-and-set):
+                // retrying the identical call cannot succeed.
+                TE::ValidationFailed { .. }
+                | TE::InvalidState { .. }
+                | TE::AlreadyCommitted { .. }
+                | TE::CasMismatch { .. } => Self::Structured {
+                    code: "FAILED_PRECONDITION",
+                    status: StatusCode::PRECONDITION_FAILED,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: None,
+                },
+                // A clock-adjacent hiccup heals on its own at a later tick.
+                TE::ClockSkew { .. } => Self::Structured {
+                    code: "UNAVAILABLE",
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    retriable: true,
+                    message: e.to_string(),
+                    details: None,
+                },
+                // Genuine internal failures (commit/rollback/poisoned lock).
+                TE::CommitFailed { .. } | TE::RollbackFailed { .. } | TE::LockPoisoned { .. } => {
+                    Self::Internal(e.to_string())
+                }
+            };
+        }
+
+        // Every other db error keeps the prior write-path mapping (400
+        // BadRequest), preserving the contract that genuine bad input stays 400.
+        Self::BadRequest(e.to_string())
     }
 
     fn status(&self) -> StatusCode {
@@ -214,9 +314,8 @@ impl AletheiaHttpError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::PermissionDenied { .. } => StatusCode::FORBIDDEN,
             Self::InvalidLimitOverride(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            // A pre-classified schema-constraint violation carries its own
-            // status (409 CONSTRAINT_VIOLATION / 412 FAILED_PRECONDITION).
-            Self::SchemaConstraint { status, .. } => *status,
+            // A pre-classified db error carries its own status (409 / 412 / 503).
+            Self::Structured { status, .. } => *status,
             // Transient overload → 503 Service Unavailable (retriable).
             Self::InFlightCapacityExceeded { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::ResourceLimitExceeded(e) => match e.dimension {
@@ -245,6 +344,9 @@ impl AletheiaHttpError {
             Self::ResourceLimitExceeded(e) => e.retriable,
             // Transient overload: backing off and retrying can succeed.
             Self::InFlightCapacityExceeded { .. } => true,
+            // A pre-classified db error carries its own retriability (true only
+            // for the transient conflict / clock-skew classes).
+            Self::Structured { retriable, .. } => *retriable,
             _ => false,
         }
     }
@@ -288,10 +390,9 @@ impl AletheiaHttpError {
                 "reason": "in_flight_query_cap",
                 "max_in_flight_queries": cap,
             })),
-            // A schema-constraint violation forwards the structured details
-            // built by the shared core classifier (Issue #3378), so the HTTP
-            // body is byte-shape-identical to the MCP surface.
-            Self::SchemaConstraint { details, .. } => details.clone(),
+            // A pre-classified db error forwards its structured details (shared
+            // with the MCP surface), so the HTTP body is byte-shape-identical.
+            Self::Structured { details, .. } => details.clone(),
             _ => None,
         }
     }
@@ -313,7 +414,7 @@ impl AletheiaHttpError {
             Self::ResourceLimitExceeded(_) => "RESOURCE_EXHAUSTED",
             Self::InFlightCapacityExceeded { .. } => "UNAVAILABLE",
             // The #3234 code was fixed when the variant was classified.
-            Self::SchemaConstraint { code, .. } => code,
+            Self::Structured { code, .. } => code,
         }
     }
 
@@ -634,6 +735,142 @@ mod tests {
         assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
         assert_eq!(body["error"]["retriable"], false);
         assert!(body["error"].get("details").is_none());
+    }
+
+    /// Issue #3629/#3234: a uniqueness violation surfaced from a legacy
+    /// JSON-RPC write is classified into the unified envelope — `409
+    /// CONSTRAINT_VIOLATION`, `retriable: false`, and machine-readable
+    /// `details` (`label`/`property`/`value`/`existing_node_id`) mirroring the
+    /// MCP surface — instead of the pre-#3629 blanket `400 INVALID_ARGUMENT`.
+    #[tokio::test]
+    async fn unique_violation_renders_nested_constraint_violation_with_existing_id() {
+        use crate::core::error::ConstraintError;
+        use crate::core::id::NodeId;
+        let db_err: crate::core::error::Error = ConstraintError::UniqueViolation {
+            label: "Person".into(),
+            property: "email".into(),
+            value: "a@b.com".into(),
+            existing_node_id: NodeId::new(7).unwrap(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.get("success").is_none());
+        assert_eq!(body["error"]["code"], "CONSTRAINT_VIOLATION");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["message"], db_err.to_string());
+        assert_eq!(body["error"]["details"]["label"], "Person");
+        assert_eq!(body["error"]["details"]["property"], "email");
+        assert_eq!(body["error"]["details"]["value"], "a@b.com");
+        assert_eq!(body["error"]["details"]["existing_node_id"], 7);
+    }
+
+    /// A pre-existing duplicate blocking a constraint enable is a state problem
+    /// the caller must fix first → `412 FAILED_PRECONDITION`, non-retriable.
+    #[tokio::test]
+    async fn duplicate_on_enable_renders_412_failed_precondition() {
+        use crate::core::error::ConstraintError;
+        use crate::core::id::NodeId;
+        let db_err: crate::core::error::Error = ConstraintError::DuplicateOnEnable {
+            label: "Person".into(),
+            property: "email".into(),
+            value: "a@b.com".into(),
+            node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()],
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+        // No shared structured details for this uniqueness variant.
+        assert!(body["error"].get("details").is_none());
+    }
+
+    /// An unsupported key type in the *enable request itself* is genuine bad
+    /// input and stays `400 INVALID_ARGUMENT` (not reclassified as a
+    /// constraint) — guards against the classifier over-broadening.
+    #[tokio::test]
+    async fn unsupported_key_type_stays_400_invalid_argument() {
+        use crate::core::error::ConstraintError;
+        let db_err: crate::core::error::Error = ConstraintError::UnsupportedKeyType {
+            label: "Person".into(),
+            property: "email".into(),
+            type_name: "vector".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["error"]["retriable"], false);
+        assert!(body["error"].get("details").is_none());
+    }
+
+    /// A validation failure at commit (e.g. the #3416 concurrent-orphan guard)
+    /// is a caller-fault precondition → `412 FAILED_PRECONDITION`,
+    /// non-retriable (retrying the identical call cannot succeed).
+    #[tokio::test]
+    async fn validation_failed_renders_412_failed_precondition_not_retriable() {
+        use crate::core::error::TransactionError;
+        let db_err: crate::core::error::Error = TransactionError::ValidationFailed {
+            reason: "delete would orphan a concurrently-created edge".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["message"], db_err.to_string());
+    }
+
+    /// A serialization failure / write conflict is transient → `409 CONFLICT`,
+    /// `retriable: true` (a fresh attempt can win the race).
+    #[tokio::test]
+    async fn serialization_failure_renders_409_conflict_retriable() {
+        use crate::core::error::TransactionError;
+        let db_err: crate::core::error::Error = TransactionError::SerializationFailure {
+            entity: "node:5".into(),
+            reason: "concurrent write committed after snapshot".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "CONFLICT");
+        assert_eq!(
+            body["error"]["retriable"], true,
+            "a serialization conflict is retriable"
+        );
+    }
+
+    /// Clock skew heals on its own → `503 UNAVAILABLE`, `retriable: true`.
+    #[tokio::test]
+    async fn clock_skew_renders_503_unavailable_retriable() {
+        use crate::core::error::TransactionError;
+        let db_err: crate::core::error::Error = TransactionError::ClockSkew {
+            wallclock: 100,
+            previous: 200,
+            drift_us: -100,
+            max_allowed: 50,
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "UNAVAILABLE");
+        assert_eq!(body["error"]["retriable"], true);
+    }
+
+    /// A genuine internal transaction failure (commit failed) stays `500
+    /// INTERNAL`, non-retriable — never reclassified as a caller fault.
+    #[tokio::test]
+    async fn commit_failed_renders_500_internal() {
+        use crate::core::error::TransactionError;
+        let db_err: crate::core::error::Error = TransactionError::CommitFailed {
+            reason: "wal fsync failed".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "INTERNAL");
+        assert_eq!(body["error"]["retriable"], false);
     }
 
     #[tokio::test]
