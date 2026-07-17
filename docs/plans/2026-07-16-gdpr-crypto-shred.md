@@ -73,12 +73,39 @@ At the write choke point, a designated entity/property's erasable value is repla
 
 ## 6. Provenance-chain compatibility (AC4 — the hardest constraint)
 
-`version_leaf = SHA256(LEAF_DOMAIN || canon(version))` currently binds **plaintext** `properties` (`src/provenance_chain/canonical.rs`). Destroying plaintext would break `verify` for everyone.
+`version_leaf = SHA256(LEAF_DOMAIN || canon(version))` binds a version's
+`properties` (`src/provenance_chain/canonical.rs`). If it bound the **plaintext**
+of a sealed property, destroying that plaintext would break `verify` for everyone.
 
-**Fix:** for **sealed** properties, the canonical form binds the **stored sealed-envelope bytes** (which survive erasure — only the key is destroyed), not the plaintext value. Non-designated properties are unchanged. Result:
+**Status — already holds by construction as of #3689 (seal-before-apply):** the
+erasure-stable ciphertext leaf is **not** a new `version_leaf` rewrite in this
+slice. As of the PR-1b seal-at-write path (#3689), a designated property is
+sealed to a `PropertyValue::Bytes(SUBJ…)` envelope in the write buffer *before*
+`apply_changes`, so both the current and historical tiers store **ciphertext**.
+The chain leaf is computed *post-commit* by the sealer (`Sealer::seal_one`,
+`src/provenance_chain/engine.rs`) from `DbVersionSource`, which reconstructs
+properties via the **raw** `reconstruct_*_properties` storage path
+(`src/db/chain_source.rs`) — crypto-shred-**unaware**, so it returns the stored
+sealed bytes, never plaintext. `verify` recomputes from the *same* raw path, and
+`erase_subject` destroys only the subject key (never the stored envelope). So,
+with **zero special-casing** in `Canon::value`/`version_canonical`, the leaf
+already binds the stored sealed-envelope bytes for a designated property:
 - `verify` recomputes hash-of-envelope-bytes → matches post-shred (chain stays valid). ✓ AC4
 - Mutating the envelope ciphertext changes the hash → tamper still caught. ✓ AC4 tamper test
-- Single choke point: `Canon::value` / `version_canonical` in `canonical.rs` + `VersionSource` in `verify.rs`.
+- Non-designated properties are unchanged: with no designation, historical holds
+  plaintext and the leaf binds it exactly as before.
+
+**Consequence — Slice 2 is regression proof + a guardrail, not a leaf rewrite:**
+no `canonical.rs`/`verify.rs` code change and **no on-disk format change** — the
+`hash(plaintext)` → `hash(ciphertext)` shift for sealed properties landed with
+#3689, not here. Slice 2 delivers (1) regression tests
+(`crypto_shred_ac4_tests` in `src/db/chain.rs`) proving `verify_chain` still
+passes after a crypto-shred (node and edge) and that a byte-flip of the stored
+envelope is still detected, plus a non-designated no-regression check; and (2) a
+guardrail comment on `DbVersionSource::fetch_locked` pinning it to the raw
+`reconstruct_*_properties` path — it MUST NOT be rerouted through the db-API
+unsealing boundary (`materialize_shred`/`unseal_*_view`), which would make the
+leaf bind plaintext and break AC4.
 
 No separate commitment store needed — the ciphertext IS the erasure-stable commitment.
 
@@ -152,7 +179,7 @@ Pre-erasure `AS OF` still returns structure (ids, temporal coords, label, topolo
 ## 13. Implementation slices (serialized draft PRs — base=trunk, never stacked, no force-push)
 
 - **Slice 1 — Foundation (NO rotation.rs / wal_encryption.rs / reencrypt.rs touch):** subject key axis (random DEK, MEK-wrap, durable `subject_keyring.dat` + designation registry via `write_durable`); Rust API `designate_subject` / `erase_subject` (breadcrumb → key destroy → tombstone tx → signed attestation); sealed-envelope write/read choke point; erased read indicator; exclude designated vectors from HNSW. Tests R1–R11, R14, R15. **On-disk formats (keyring, registry, sealed envelope) → DRAFT, coordinator surfaces for user sign-off.**
-- **Slice 2 — Chain compat (AC4):** erasure-stable (ciphertext) commitment in `version_leaf` (`canonical.rs` + `verify.rs`). Tests R3, R4.
+- **Slice 2 — Chain compat (AC4):** the erasure-stable (ciphertext) commitment in the version leaf **already holds by construction as of #3689** (seal-before-apply + post-seal leaf capture from the raw historical reconstruct — see §6). This slice is therefore **regression proof + a guardrail, NOT a `version_leaf` rewrite and NO on-disk format change**: regression tests (`crypto_shred_ac4_tests`, `src/db/chain.rs`) proving `verify_chain` still passes after a crypto-shred (node + edge) and that an envelope-byte tamper is still caught, plus a guardrail comment pinning `DbVersionSource::fetch_locked` (`src/db/chain_source.rs`) to the raw `reconstruct_*_properties` path (never the unsealing boundary). Tests R3, R4.
 - **Slice 3 — Full-tier completeness (MAY touch WAL/cold — coordinate with encryption-migration session):** cold/checkpoint/`.albk` v6 pass-through + full sentinel scan across ALL artifacts. Tests R2, R9.
 - **Slice 4 — Surfaces:** CLI `aletheia erase-subject`, MCP tool (admin-gated #3350), attestation format, user guide + honest-limits doc.
 - **Slice 5 — Coordination-gated:** MEK-rotation re-wrap of the subject keyring (touches `rotation.rs`) — done with / handed to the encryption-migration session.
@@ -249,10 +276,14 @@ hidden:
 
 This ciphertext-binding is the erasure-stable commitment — no separate
 commitment store is needed, because the ciphertext IS the commitment that
-survives key destruction. The `canonical.rs` / `verify.rs` implementation of
-this binding is **slice 2** (this PR, slice PR-1a, is foundation-only: the
-cryptographic core in isolation, with no live seal/unseal integration and no
-chain changes yet).
+survives key destruction. This binding **already holds by construction** as of
+the seal-before-apply write path (#3689): sealing runs pre-apply so historical
+storage holds the ciphertext envelope, and the chain leaf is computed post-commit
+from that raw stored envelope (`DbVersionSource` → `reconstruct_*_properties`),
+with no special-casing in `canonical.rs`/`verify.rs`. **Slice 2** therefore does
+**not** rewrite `version_leaf` and makes **no on-disk format change** — it adds
+regression tests + a guardrail comment locking `DbVersionSource` to the raw
+reconstruct path (see §6). Existing non-crypto-shred chains are unaffected.
 
 ## Reconciliation with the prior VANTAGE hard-delete spec
 
