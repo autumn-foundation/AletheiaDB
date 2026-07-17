@@ -173,6 +173,8 @@ impl SqlConverter {
             // Temporal context is set by convert_sql() after extraction
             temporal_context: None,
             hints: QueryHints::default(),
+            // SQL namespace scoping is a follow-up (PR2b); no scope today.
+            scope: None,
         })
     }
 

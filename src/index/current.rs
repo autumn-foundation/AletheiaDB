@@ -710,6 +710,27 @@ impl CurrentIndexes {
             .unwrap_or_default()
     }
 
+    /// Whether `node_id` currently lives in `namespace` (Issue #3349, PR2).
+    ///
+    /// O(1) membership test against the secondary index — no property load, no
+    /// `Namespace` allocation — so a scoped traversal's per-edge boundary check
+    /// is a hash probe rather than a full node reconstruction.
+    #[inline]
+    pub fn node_in_namespace(&self, node_id: NodeId, namespace: &Namespace) -> bool {
+        self.ns_nodes
+            .get(namespace)
+            .is_some_and(|members| members.contains(&node_id))
+    }
+
+    /// Whether `edge_id` currently lives in `namespace` (Issue #3349, PR2). The
+    /// edge counterpart of [`node_in_namespace`](Self::node_in_namespace).
+    #[inline]
+    pub fn edge_in_namespace(&self, edge_id: EdgeId, namespace: &Namespace) -> bool {
+        self.ns_edges
+            .get(namespace)
+            .is_some_and(|members| members.contains(&edge_id))
+    }
+
     /// Number of nodes currently in `namespace` (O(1) set-length read).
     #[inline]
     pub fn namespace_node_count(&self, namespace: &Namespace) -> usize {

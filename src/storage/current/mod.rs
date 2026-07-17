@@ -1126,6 +1126,29 @@ impl CurrentStorage {
         self.indexes.namespace_edge_ids(namespace)
     }
 
+    /// Whether `node_id` currently lives in `namespace` (Issue #3349, PR2). O(1)
+    /// membership probe — no property load — for scoped-traversal boundary checks.
+    #[inline]
+    pub fn node_in_namespace(
+        &self,
+        node_id: NodeId,
+        namespace: &crate::core::namespace::Namespace,
+    ) -> bool {
+        self.indexes.node_in_namespace(node_id, namespace)
+    }
+
+    /// Whether `edge_id` currently lives in `namespace` (Issue #3349, PR2). O(1)
+    /// membership probe — no property load. See
+    /// [`node_in_namespace`](Self::node_in_namespace).
+    #[inline]
+    pub fn edge_in_namespace(
+        &self,
+        edge_id: EdgeId,
+        namespace: &crate::core::namespace::Namespace,
+    ) -> bool {
+        self.indexes.edge_in_namespace(edge_id, namespace)
+    }
+
     /// Number of nodes currently in `namespace` (O(1) membership-set read).
     #[inline]
     pub fn namespace_node_count(&self, namespace: &crate::core::namespace::Namespace) -> usize {
@@ -1499,6 +1522,59 @@ impl CurrentStorage {
         let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
         Self::validate_embedding_dimensions(query, &config)?;
         index.search_with_filter(query, k, predicate)
+    }
+
+    /// Filter-complete k-NN from an existing node's embedding on the **default**
+    /// vector index (Issue #3349, PR2 / test T6).
+    ///
+    /// Resolves the default vector property and the query node's embedding, then
+    /// delegates to the index's [`search_with_filter`](crate::index::VectorIndex::search_with_filter),
+    /// which **over-fetches** candidates until it has `k` results satisfying
+    /// `predicate` (or the index is exhausted) — so a namespace-scoped caller
+    /// never receives fewer than `k` in-scope results when that many exist. The
+    /// query node itself is always excluded (folded into the predicate), so
+    /// callers pass only their scope predicate.
+    ///
+    /// The predicate is deliberately **ignorant of why a vector is absent** from
+    /// the index: it is called only for candidates the index actually returns, so
+    /// a vector excluded from the index for any reason (e.g. a crypto-shredded
+    /// embedding) simply never reaches the predicate — this method makes no
+    /// assumption about vector presence.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn find_similar_by_node_with_predicate<F>(
+        &self,
+        query_node_id: NodeId,
+        k: usize,
+        predicate: F,
+    ) -> Result<Vec<(NodeId, f32)>>
+    where
+        F: Fn(&NodeId) -> bool + Send + Sync,
+    {
+        let (prop_name, index, _) = self.get_vector_index_internal(None)?;
+        let query_vector = self.get_node_vector(query_node_id, &prop_name)?;
+        index.search_with_filter(&query_vector, k, move |id| {
+            *id != query_node_id && predicate(id)
+        })
+    }
+
+    /// Filter-complete k-NN from a raw embedding on the **default** vector index
+    /// (Issue #3349, PR2 / test T6). Like
+    /// [`find_similar_by_node_with_predicate`](Self::find_similar_by_node_with_predicate)
+    /// but the query is an externally-supplied embedding (no node exclusion). See
+    /// that method for the filter-completeness and absent-vector guarantees.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn find_similar_by_embedding_with_predicate<F>(
+        &self,
+        embedding: &[f32],
+        k: usize,
+        predicate: F,
+    ) -> Result<Vec<(NodeId, f32)>>
+    where
+        F: Fn(&NodeId) -> bool + Send + Sync,
+    {
+        let (_, index, config) = self.get_vector_index_internal(None)?;
+        Self::validate_embedding_dimensions(embedding, &config)?;
+        index.search_with_filter(embedding, k, predicate)
     }
 
     // ========================================================================

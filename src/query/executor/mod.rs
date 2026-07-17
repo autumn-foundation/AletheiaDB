@@ -12,6 +12,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::core::error::Result;
+use crate::core::namespace::NamespaceScope;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
@@ -123,6 +124,11 @@ pub struct QueryExecutor {
     historical: Arc<RwLock<HistoricalStorage>>,
     /// Execution configuration (used for timeout/parallelism in future)
     _config: ExecutionConfig,
+    /// Optional namespace scope (Issue #3349, PR2). When set, the executor
+    /// filters produced entities to those whose namespace ∈ scope and threads
+    /// the boundary into graph traversal. `Arc` so it can be cheaply shared into
+    /// the traversal iterator. `None` ⇒ prior namespace-agnostic behavior.
+    scope: Option<Arc<NamespaceScope>>,
 }
 
 impl QueryExecutor {
@@ -132,6 +138,7 @@ impl QueryExecutor {
             current,
             historical,
             _config: ExecutionConfig::default(),
+            scope: None,
         }
     }
 
@@ -145,7 +152,24 @@ impl QueryExecutor {
             current,
             historical,
             _config: config,
+            scope: None,
         }
+    }
+
+    /// Attach a namespace scope (Issue #3349, PR2). Produced entities are
+    /// filtered to those in scope and graph traversal honors the scope boundary
+    /// (an out-of-scope edge or node is never crossed). [`NamespaceScope::All`]
+    /// is a no-op filter. See [`QueryBuilder::in_namespace`](crate::query::QueryBuilder::in_namespace).
+    #[must_use]
+    pub fn with_namespace_scope(mut self, scope: NamespaceScope) -> Self {
+        self.scope = Some(Arc::new(scope));
+        self
+    }
+
+    /// Whether the attached scope actually restricts results (i.e. is present and
+    /// not [`NamespaceScope::All`]).
+    fn scope_is_restricting(&self) -> bool {
+        matches!(&self.scope, Some(s) if !matches!(s.as_ref(), NamespaceScope::All))
     }
 
     /// Execute a physical plan and return results.
@@ -199,12 +223,32 @@ impl QueryExecutor {
             let bind_edge = plan_needs_edge_binding(&plan.root);
             self.build_op(&plan.root, &mut None, 0, bind_edge)?
         };
+        let iterator = self.wrap_scope_filter(iterator);
         // Wrap with provenance filter to conditionally strip metadata
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
         ));
         Ok(QueryResults::new(filtered))
+    }
+
+    /// Wrap `iterator` in a namespace-scope entity filter (Issue #3349, PR2) when
+    /// a restricting scope is attached; otherwise return it unchanged so the
+    /// namespace-agnostic path pays nothing. This drops produced nodes/edges
+    /// whose namespace ∉ scope — the traversal boundary itself is enforced deeper
+    /// (in `TraversalIterator`) so an out-of-scope bridge node is never even
+    /// reached.
+    fn wrap_scope_filter(&self, iterator: Box<dyn ResultIterator>) -> Box<dyn ResultIterator> {
+        match &self.scope {
+            Some(scope) if self.scope_is_restricting() => {
+                Box::new(iterators::ScopeFilterIterator::new(
+                    iterator,
+                    Arc::clone(scope),
+                    Arc::clone(&self.current),
+                ))
+            }
+            _ => iterator,
+        }
     }
 
     /// Execute a physical plan with per-operator profiling instrumentation
@@ -227,6 +271,7 @@ impl QueryExecutor {
             let bind_edge = plan_needs_edge_binding(&plan.root);
             self.build_op(&plan.root, &mut registry, 0, bind_edge)?
         };
+        let iterator = self.wrap_scope_filter(iterator);
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
@@ -443,19 +488,26 @@ impl QueryExecutor {
                     temporal_context,
                 } => {
                     let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
-                    Box::new(
-                        iterators::TraversalIterator::new(
-                            input_iter,
-                            *direction,
-                            label.clone(),
-                            *min_depth,
-                            *traversal_depth,
-                            Arc::clone(&self.current),
-                            Arc::clone(&self.historical),
-                            *temporal_context,
-                        )
-                        .bind_edges(bind_edge),
+                    let mut traversal = iterators::TraversalIterator::new(
+                        input_iter,
+                        *direction,
+                        label.clone(),
+                        *min_depth,
+                        *traversal_depth,
+                        Arc::clone(&self.current),
+                        Arc::clone(&self.historical),
+                        *temporal_context,
                     )
+                    .bind_edges(bind_edge);
+                    // Namespace boundary (Issue #3349, PR2): when a restricting
+                    // scope is attached, the traversal never crosses an
+                    // out-of-scope edge nor bridges through an out-of-scope node.
+                    if self.scope_is_restricting()
+                        && let Some(scope) = &self.scope
+                    {
+                        traversal = traversal.with_namespace_scope(Arc::clone(scope));
+                    }
+                    Box::new(traversal)
                 }
 
                 PhysicalOp::PropertyScan {

@@ -14,6 +14,7 @@ use tracing;
 use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
+use crate::core::namespace::NamespaceScope;
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::vector::DistanceMetric as VectorMetric;
@@ -1504,6 +1505,11 @@ pub struct TraversalIterator {
     /// an edge variable (a `Predicate::EdgeScoped` / `SortKey::EdgeProperty`),
     /// so the overwhelming common case pays zero extra edge fetches.
     bind_edge: bool,
+    /// Optional namespace scope (Issue #3349, PR2). When set, the traversal never
+    /// crosses an edge whose namespace ∉ scope, nor enqueues a target node whose
+    /// namespace ∉ scope — so an out-of-scope node is never reached, emitted, or
+    /// used as a bridge. `None` ⇒ prior namespace-agnostic behavior.
+    scope: Option<Arc<NamespaceScope>>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
     visited: HashSet<NodeId>,
@@ -1538,10 +1544,50 @@ impl TraversalIterator {
             historical,
             temporal_context,
             bind_edge: false,
+            scope: None,
             frontier: VecDeque::new(),
             visited: HashSet::new(),
             input_exhausted: false,
         }
+    }
+
+    /// Attach a namespace scope (Issue #3349, PR2) so the traversal honors the
+    /// scope boundary: an edge whose namespace ∉ scope is never crossed, and a
+    /// target node whose namespace ∉ scope is never enqueued (so it is neither
+    /// emitted nor used to bridge deeper). [`NamespaceScope::All`] is a no-op.
+    #[must_use]
+    pub fn with_namespace_scope(mut self, scope: Arc<NamespaceScope>) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Whether crossing to `target` over `edge_id` is permitted by the namespace
+    /// scope boundary (Issue #3349, PR2). Returns `true` when no restricting
+    /// scope is attached (fetching nothing). When a scope is attached, the edge
+    /// and target are reconstructed at the query coordinate and both their
+    /// (immutable) namespaces must be in scope.
+    fn boundary_allows(&self, edge_id: EdgeId, target: NodeId) -> bool {
+        let Some(scope) = &self.scope else {
+            return true;
+        };
+        if matches!(scope.as_ref(), NamespaceScope::All) {
+            return true;
+        }
+        // Fast path (current-state traversal): namespace is immutable, so the
+        // O(1) membership index is authoritative — no full edge/node
+        // reconstruction. Two hash probes per edge.
+        if self.temporal_context.is_none() {
+            return scope_contains_current_edge(&self.current, edge_id, scope)
+                && scope_contains_current_node(&self.current, target, scope);
+        }
+        // Temporal traversal: reconstruct the edge and target AS-OF the
+        // coordinate so a since-deleted-but-then-valid edge is judged by its
+        // historical state (the membership index only reflects current state).
+        match self.reconstruct_bound_edge(edge_id) {
+            Ok(edge) if scope.contains(&edge.namespace()) => {}
+            _ => return false,
+        }
+        matches!(self.fetch_target_node(target), Ok(Some(node)) if scope.contains(&node.namespace()))
     }
 
     /// Enable attaching the immediately-traversed edge (reconstructed at the
@@ -1761,6 +1807,15 @@ impl ResultIterator for TraversalIterator {
                 if current_depth < self.depth {
                     let neighbors = self.get_neighbors(node_id);
                     for (target, edge_id) in neighbors {
+                        // Namespace scope boundary (Issue #3349, PR2): skip this
+                        // edge entirely when the edge's or the target's namespace
+                        // is out of scope, so an out-of-scope node is never
+                        // enqueued (never emitted, never a bridge). Skipping
+                        // *before* `visited.insert` means the same target can
+                        // still be reached over a different, in-scope edge.
+                        if !self.boundary_allows(edge_id, target) {
+                            continue;
+                        }
                         // Node-distinct / shortest-path reachability: a node is
                         // enqueued (and thus later emitted) once, at its shortest
                         // BFS depth. This also makes cyclic graphs terminate. It
@@ -1851,6 +1906,108 @@ impl ResultIterator for TraversalIterator {
                         return None;
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Whether the current edge `edge_id` is inside `scope`, via O(1) membership
+/// probes (Issue #3349, PR2). [`NamespaceScope::All`] matches everything.
+fn scope_contains_current_edge(
+    current: &CurrentStorage,
+    edge_id: EdgeId,
+    scope: &NamespaceScope,
+) -> bool {
+    match scope {
+        NamespaceScope::All => true,
+        NamespaceScope::Single(ns) => current.edge_in_namespace(edge_id, ns),
+        NamespaceScope::List(list) => list.iter().any(|ns| current.edge_in_namespace(edge_id, ns)),
+    }
+}
+
+/// Whether the current node `node_id` is inside `scope`, via O(1) membership
+/// probes (Issue #3349, PR2). See [`scope_contains_current_edge`].
+fn scope_contains_current_node(
+    current: &CurrentStorage,
+    node_id: NodeId,
+    scope: &NamespaceScope,
+) -> bool {
+    match scope {
+        NamespaceScope::All => true,
+        NamespaceScope::Single(ns) => current.node_in_namespace(node_id, ns),
+        NamespaceScope::List(list) => list.iter().any(|ns| current.node_in_namespace(node_id, ns)),
+    }
+}
+
+/// Namespace-scope entity filter (Issue #3349, PR2).
+///
+/// Drops rows whose primary entity's (immutable) namespace ∉ scope, so a scoped
+/// [`QueryBuilder`](crate::query::QueryBuilder) query returns only in-scope
+/// entities. It is applied at the very end of the pipeline, over start nodes,
+/// traversal results, and ranked results alike. The traversal *boundary* (never
+/// bridging through an out-of-scope node) is enforced upstream in
+/// [`TraversalIterator`], so this filter only has to reject out-of-scope
+/// terminal entities.
+///
+/// Rows that carry no single scoped entity — a null binding, or an aggregation /
+/// multi-variable computed row — pass through unchanged (namespace scoping of
+/// aggregates is out of PR2 scope). An id-only entity is resolved against
+/// current storage to read its namespace; if it can no longer be loaded it is
+/// dropped (indistinguishable, to a scoped caller, from out-of-scope).
+pub struct ScopeFilterIterator {
+    input: Box<dyn ResultIterator>,
+    scope: Arc<NamespaceScope>,
+    current: Arc<CurrentStorage>,
+}
+
+impl ScopeFilterIterator {
+    /// Wrap `input`, keeping only rows whose entity is in `scope`.
+    #[must_use]
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        scope: Arc<NamespaceScope>,
+        current: Arc<CurrentStorage>,
+    ) -> Self {
+        ScopeFilterIterator {
+            input,
+            scope,
+            current,
+        }
+    }
+
+    /// Whether `row`'s entity is visible under the scope.
+    fn row_in_scope(&self, row: &QueryRow) -> bool {
+        match &row.entity {
+            EntityResult::Node(node) => self.scope.contains(&node.namespace()),
+            EntityResult::Edge(edge) => self.scope.contains(&edge.namespace()),
+            EntityResult::NodeId(id) => self
+                .current
+                .get_node(*id)
+                .map(|n| self.scope.contains(&n.namespace()))
+                .unwrap_or(false),
+            EntityResult::EdgeId(id) => self
+                .current
+                .get_edge(*id)
+                .map(|e| self.scope.contains(&e.namespace()))
+                .unwrap_or(false),
+            // A null binding or a computed (aggregate / multi-variable) row has
+            // no single scoped entity — pass it through unchanged.
+            EntityResult::Null => true,
+        }
+    }
+}
+
+impl ResultIterator for ScopeFilterIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        loop {
+            match self.input.next()? {
+                Ok(row) => {
+                    if self.row_in_scope(&row) {
+                        return Some(Ok(row));
+                    }
+                    // otherwise skip and pull the next row
+                }
+                Err(e) => return Some(Err(e)),
             }
         }
     }
