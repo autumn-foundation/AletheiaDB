@@ -49,11 +49,11 @@ fn bench_commit_throughput(c: &mut Criterion) {
     // emit stays cheap; this measures the steady-state fan-out overhead on the writer.
     group.bench_function("commit/100_idle_subscribers", |b| {
         let db = AletheiaDB::new().unwrap();
-        db.set_changefeed_config(ChangefeedConfig {
-            max_subscriptions: 256,
-            buffer_capacity: 1024,
-            ..ChangefeedConfig::default()
-        });
+        db.set_changefeed_config(
+            ChangefeedConfig::default()
+                .with_max_subscriptions(256)
+                .with_buffer_capacity(1024),
+        );
         let _subs: Vec<Subscription> = (0..100)
             .map(|_| db.subscribe_changes(ChangeFilter::all()).unwrap())
             .collect();
@@ -68,11 +68,11 @@ fn bench_commit_throughput(c: &mut Criterion) {
     // for per-commit fan-out cost: every commit clones + pushes to all 100 live buffers).
     group.bench_function("commit/100_draining_subscribers", |b| {
         let db = AletheiaDB::new().unwrap();
-        db.set_changefeed_config(ChangefeedConfig {
-            max_subscriptions: 256,
-            buffer_capacity: 1024,
-            ..ChangefeedConfig::default()
-        });
+        db.set_changefeed_config(
+            ChangefeedConfig::default()
+                .with_max_subscriptions(256)
+                .with_buffer_capacity(1024),
+        );
         let subs: Vec<Subscription> = (0..100)
             .map(|_| db.subscribe_changes(ChangeFilter::all()).unwrap())
             .collect();

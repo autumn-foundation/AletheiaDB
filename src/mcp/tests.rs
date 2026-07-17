@@ -11331,12 +11331,21 @@ mod database_stats_tests {
             keys(&value),
             vec![
                 "chain",
+                "changefeed",
                 "cold_storage",
                 "current",
                 "historical",
                 "resource_limits",
                 "wal"
             ]
+        );
+        // Push-changefeed subscription block (Issue #3678): the scalar aggregate
+        // plus the per-principal breakdown. The embedded `new()` server is
+        // anonymous (admin-privileged), so the admin-gated `per_principal` key is
+        // present (empty here — no live subscriptions).
+        assert_eq!(
+            keys(&value["changefeed"]),
+            vec!["active_subscriptions", "per_principal"]
         );
         // Issue #3368 residue: the additive per-query resource-limit
         // termination counters are surfaced under a stable `resource_limits`

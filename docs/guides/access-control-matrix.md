@@ -143,6 +143,18 @@ Note: `query` is classified `read` because the tool is read-only **by
 contract** — mutating clauses (CREATE/MERGE/SET/DELETE/…) are rejected by the
 shared guard (`src/query/read_only.rs`) before execution and never write.
 
+Note: `database_stats` stays `metrics`-class (any monitoring credential may read
+the holistic snapshot), but one **field is admin-gated** (Issue #3678): the
+changefeed **`per_principal` identity breakdown** — the roster of *other*
+principals' ids and live subscription counts — is included **only for an `admin`
+caller**. A `metrics`/`reader`/`writer` caller receives every scalar aggregate
+(including `changefeed.active_subscriptions`) but the `per_principal` key is
+omitted entirely, so a low-privilege credential cannot enumerate who is
+currently subscribed. Both surfaces enforce this: the MCP handler derives
+admin-ness from the session principal, the HTTP `GET /database_stats` route from
+its own authenticated principal. Conformance:
+`crates/aletheia-server/tests/changefeed_principal_quota_surface.rs::database_stats_per_principal_breakdown_is_admin_gated`.
+
 ## HTTP surface
 
 The HTTP credential is per-request (`Authorization: Bearer <key>` or

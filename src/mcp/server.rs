@@ -1075,18 +1075,50 @@ impl AletheiaMcpServer {
     /// Thin aggregator over [`AletheiaDB::stats`] — all values are O(1)/cached
     /// counter reads, never a version scan.
     pub fn database_stats(&self, req: DatabaseStatsRequest) -> String {
+        // Native/MCP path: derive the per-principal breakdown visibility from
+        // the MCP session principal (anonymous mode is fully privileged →
+        // included). The HTTP route authenticates independently and must call
+        // `database_stats_with_visibility` with its own principal's role.
+        self.database_stats_with_visibility(req, self.caller_is_admin())
+    }
+
+    /// `database_stats` with an explicit decision on whether the changefeed
+    /// per-principal identity breakdown is included (Issue #3678).
+    ///
+    /// The HTTP `GET /database_stats` route authenticates independently of the
+    /// MCP session, so it computes admin-ness from its own
+    /// `Authorized<MetricsClass>` principal and threads it here. A non-admin
+    /// caller receives the scalar aggregates but not the per-principal roster.
+    #[must_use]
+    pub fn database_stats_with_visibility(
+        &self,
+        req: DatabaseStatsRequest,
+        include_per_principal: bool,
+    ) -> String {
         Self::extract_text(self.handle_database_stats(
             serde_json::to_value(req).expect("request serialization should not fail"),
+            include_per_principal,
         ))
+    }
+
+    /// Whether the current MCP session principal may see admin-gated details
+    /// (Issue #3678). Anonymous mode has no session principal and is fully
+    /// privileged, so it returns `true`; an authenticated session returns
+    /// `true` only for the `admin` role.
+    fn caller_is_admin(&self) -> bool {
+        self.session_principal()
+            .is_none_or(|p| p.role.allows(crate::auth::AccessClass::Admin))
     }
 
     /// Test-only access to the raw `database_stats` handler, bypassing typed
     /// request construction so tests can exercise wire-level argument edge
     /// cases (null arguments, non-object arguments, unknown keys) exactly as
-    /// `call_tool` delivers them.
+    /// `call_tool` delivers them. Admin-visible (per-principal breakdown
+    /// included) so the argument-edge assertions are unaffected by the #3678
+    /// gate.
     #[cfg(test)]
     pub(crate) fn database_stats_raw(&self, args: serde_json::Value) -> String {
-        Self::extract_text(self.handle_database_stats(args))
+        Self::extract_text(self.handle_database_stats(args, true))
     }
 
     /// List graph-wide changes within a transaction-time window.
@@ -6529,7 +6561,23 @@ impl AletheiaMcpServer {
     /// [`AletheiaDB::stats`] snapshot and serializes it — no storage logic
     /// lives here. The underlying getters are all O(1)/cached (see
     /// `src/db/stats.rs`), so this never triggers a version scan.
-    fn handle_database_stats(&self, args: serde_json::Value) -> CallToolResult {
+    ///
+    /// `include_per_principal` gates the changefeed per-principal breakdown
+    /// (Issue #3678): the scalar aggregates (`active_subscriptions`, the
+    /// `#3368 resource_limits` counters, everything else) stay at the
+    /// `database_stats` tool's `metrics` access tier, but the
+    /// `changefeed.per_principal` identity list — which would let a
+    /// lowest-privilege `metrics`/`reader` credential enumerate every other
+    /// principal's id + live count — is **omitted** unless the caller is
+    /// admin. Both surfaces route here: the MCP dispatch passes
+    /// [`caller_is_admin`](Self::caller_is_admin) (session-derived), the HTTP
+    /// route passes its own authenticated principal's admin-ness via
+    /// [`database_stats_with_visibility`](Self::database_stats_with_visibility).
+    fn handle_database_stats(
+        &self,
+        args: serde_json::Value,
+        include_per_principal: bool,
+    ) -> CallToolResult {
         // The tool takes no required arguments; clients may send no
         // `arguments` at all (surfaced here as JSON null) or an empty
         // object. Normalize null so both forms are accepted.
@@ -6561,6 +6609,24 @@ impl AletheiaMcpServer {
                             "override_rejections": snap.override_rejected,
                         }),
                     );
+                }
+                // Admin-gate the per-principal changefeed identity roster
+                // (Issue #3678). For a non-admin caller the whole
+                // `changefeed.per_principal` key is removed — not emptied — so
+                // the response carries NO other principal's identity, while the
+                // scalar `changefeed.active_subscriptions` aggregate remains
+                // for monitoring at the metrics tier. Expressed as a single
+                // `if let` over a combinator to avoid a nested (collapsible)
+                // `if` without introducing a `let`-chain.
+                if let Some(changefeed) = (!include_per_principal)
+                    .then(|| {
+                        value
+                            .get_mut("changefeed")
+                            .and_then(serde_json::Value::as_object_mut)
+                    })
+                    .flatten()
+                {
+                    changefeed.remove("per_principal");
                 }
                 self.success_json(value)
             }
@@ -7868,7 +7934,7 @@ impl AletheiaMcpServer {
             "lineage_upstream" => self.handle_lineage_upstream(args),
             "lineage_downstream" => self.handle_lineage_downstream(args),
             "audit_export" => self.handle_audit_export(args),
-            "database_stats" => self.handle_database_stats(args),
+            "database_stats" => self.handle_database_stats(args, self.caller_is_admin()),
             "verify_chain" => self.handle_verify_chain(args),
             "export_chain_head" => self.handle_export_chain_head(args),
             _ => self.error_result(

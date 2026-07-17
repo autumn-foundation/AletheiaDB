@@ -428,11 +428,11 @@ fn durable_reopen_recovers_pre_crash_changes_via_cursor() {
 #[test]
 fn bounded_buffer_overflow_disconnects_and_is_recoverable() {
     let db = AletheiaDB::new().unwrap();
-    db.set_changefeed_config(ChangefeedConfig {
-        max_subscriptions: 16,
-        buffer_capacity: 4,
-        ..ChangefeedConfig::default()
-    });
+    db.set_changefeed_config(
+        ChangefeedConfig::default()
+            .with_max_subscriptions(16)
+            .with_buffer_capacity(4),
+    );
     let slow = db.subscribe_changes(ChangeFilter::all()).unwrap();
     let healthy = db.subscribe_changes(ChangeFilter::all()).unwrap();
 
@@ -506,11 +506,11 @@ fn bounded_buffer_overflow_disconnects_and_is_recoverable() {
 #[test]
 fn max_subscriptions_cap_returns_structured_error() {
     let db = AletheiaDB::new().unwrap();
-    db.set_changefeed_config(ChangefeedConfig {
-        max_subscriptions: 2,
-        buffer_capacity: 8,
-        ..ChangefeedConfig::default()
-    });
+    db.set_changefeed_config(
+        ChangefeedConfig::default()
+            .with_max_subscriptions(2)
+            .with_buffer_capacity(8),
+    );
     let _s1 = db.subscribe_changes(ChangeFilter::all()).unwrap();
     let _s2 = db.subscribe_changes(ChangeFilter::all()).unwrap();
     let err = db.subscribe_changes(ChangeFilter::all()).unwrap_err();
@@ -528,11 +528,11 @@ fn max_subscriptions_cap_returns_structured_error() {
 #[test]
 fn commits_succeed_with_many_idle_subscribers() {
     let db = AletheiaDB::new().unwrap();
-    db.set_changefeed_config(ChangefeedConfig {
-        max_subscriptions: 200,
-        buffer_capacity: 8,
-        ..ChangefeedConfig::default()
-    });
+    db.set_changefeed_config(
+        ChangefeedConfig::default()
+            .with_max_subscriptions(200)
+            .with_buffer_capacity(8),
+    );
     // 100 idle subscribers that never drain.
     let mut subs = Vec::new();
     for _ in 0..100 {
@@ -653,11 +653,11 @@ fn concurrent_writers_union_equals_ground_truth() {
         let db = Arc::new(AletheiaDB::new().unwrap());
         // A moderate buffer: large enough to usually keep pace, small enough that a slow
         // trial may Lag — both paths must remain lossless via the resume token.
-        db.set_changefeed_config(ChangefeedConfig {
-            max_subscriptions: 16,
-            buffer_capacity: 128,
-            ..ChangefeedConfig::default()
-        });
+        db.set_changefeed_config(
+            ChangefeedConfig::default()
+                .with_max_subscriptions(16)
+                .with_buffer_capacity(128),
+        );
         let sub = db.subscribe_changes(ChangeFilter::all()).unwrap();
 
         // Everything the consumer drained live, and the resume anchor at its disconnect point.
@@ -737,12 +737,12 @@ use std::collections::HashMap;
 #[test]
 fn per_principal_quota_enforced_via_db_api() {
     let db = AletheiaDB::new().unwrap();
-    db.set_changefeed_config(ChangefeedConfig {
-        max_subscriptions: 100,
-        buffer_capacity: 16,
-        max_subscriptions_per_principal: 2,
-        ..ChangefeedConfig::default()
-    });
+    db.set_changefeed_config(
+        ChangefeedConfig::default()
+            .with_max_subscriptions(100)
+            .with_buffer_capacity(16)
+            .with_max_subscriptions_per_principal(2),
+    );
     let _a1 = db
         .subscribe_changes_for_principal(Some("alice"), ChangeFilter::all())
         .unwrap();
@@ -777,15 +777,14 @@ fn per_principal_quota_enforced_via_db_api() {
 /// `database_stats`.
 #[test]
 fn changefeed_config_default_and_override_from_unified_config() {
-    let mut overrides = HashMap::new();
-    overrides.insert("vip".to_string(), 4);
     let config = AletheiaDBConfig::builder()
-        .changefeed(ChangefeedConfig {
-            max_subscriptions: 100,
-            buffer_capacity: 16,
-            max_subscriptions_per_principal: 1,
-            per_principal_overrides: overrides,
-        })
+        .changefeed(
+            ChangefeedConfig::default()
+                .with_max_subscriptions(100)
+                .with_buffer_capacity(16)
+                .with_max_subscriptions_per_principal(1)
+                .with_per_principal_override("vip", 4),
+        )
         .build();
     let db = AletheiaDB::with_unified_config(config).unwrap();
 
@@ -824,12 +823,12 @@ fn changefeed_config_default_and_override_from_unified_config() {
 #[test]
 fn anonymous_principals_share_one_bucket() {
     let db = AletheiaDB::new().unwrap();
-    db.set_changefeed_config(ChangefeedConfig {
-        max_subscriptions: 100,
-        buffer_capacity: 16,
-        max_subscriptions_per_principal: 2,
-        ..ChangefeedConfig::default()
-    });
+    db.set_changefeed_config(
+        ChangefeedConfig::default()
+            .with_max_subscriptions(100)
+            .with_buffer_capacity(16)
+            .with_max_subscriptions_per_principal(2),
+    );
     let _s1 = db
         .subscribe_changes_for_principal(Some("anonymous"), ChangeFilter::all())
         .unwrap();
@@ -851,12 +850,12 @@ fn anonymous_principals_share_one_bucket() {
 #[test]
 fn subscribe_changes_bypasses_per_principal_quota() {
     let db = AletheiaDB::new().unwrap();
-    db.set_changefeed_config(ChangefeedConfig {
-        max_subscriptions: 100,
-        buffer_capacity: 16,
-        max_subscriptions_per_principal: 1,
-        ..ChangefeedConfig::default()
-    });
+    db.set_changefeed_config(
+        ChangefeedConfig::default()
+            .with_max_subscriptions(100)
+            .with_buffer_capacity(16)
+            .with_max_subscriptions_per_principal(1),
+    );
     // Well past the per-principal cap of 1 — the bare path is unaffected.
     let mut subs = Vec::new();
     for _ in 0..5 {
@@ -875,6 +874,31 @@ fn subscribe_changes_bypasses_per_principal_quota() {
     })
     .unwrap();
     assert_eq!(subs[0].poll().len(), 1);
+}
+
+/// A subscription created through the principal-scoped funnel
+/// (`subscribe_changes_for_principal(Some(..))`) delivers committed changes
+/// byte-identically to the bare path (AC f: delivery semantics unchanged for the
+/// NEW funnel, not just the bare one — the two share the same broadcaster, and
+/// this pins that they do).
+#[test]
+fn subscribe_changes_for_principal_delivers() {
+    let db = AletheiaDB::new().unwrap();
+    let sub = db
+        .subscribe_changes_for_principal(Some("alice"), ChangeFilter::all())
+        .unwrap();
+    assert_eq!(db.changefeed_principal_counts().len(), 1);
+
+    db.write(|tx| {
+        tx.create_node("Person", props("Alice"))?;
+        Ok::<_, Error>(())
+    })
+    .unwrap();
+
+    let delivered = sub.poll();
+    assert_eq!(delivered.len(), 1, "principal-path subscription delivers");
+    assert_eq!(delivered[0].kind, EntityKind::Node);
+    assert_eq!(delivered[0].change_type, ChangeType::Created);
 }
 
 /// The authenticated `database_stats` surface carries the per-principal
@@ -914,12 +938,12 @@ fn database_stats_shows_per_principal_changefeed_breakdown() {
 fn changefeed_metrics_move_with_quota_and_live_count() {
     use aletheiadb::observability::METRICS;
     let db = AletheiaDB::new().unwrap();
-    db.set_changefeed_config(ChangefeedConfig {
-        max_subscriptions: 100,
-        buffer_capacity: 16,
-        max_subscriptions_per_principal: 1,
-        ..ChangefeedConfig::default()
-    });
+    db.set_changefeed_config(
+        ChangefeedConfig::default()
+            .with_max_subscriptions(100)
+            .with_buffer_capacity(16)
+            .with_max_subscriptions_per_principal(1),
+    );
     let held = db
         .subscribe_changes_for_principal(Some("metered"), ChangeFilter::all())
         .unwrap();

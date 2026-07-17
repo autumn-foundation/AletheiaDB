@@ -411,12 +411,16 @@ impl AletheiaDB {
 
         // Changefeed subscription state (Issue #3678): a brief registry read,
         // O(live subscriptions). The per-principal breakdown is the authenticated
-        // surface for the fairness quota — never a `/metrics` label.
+        // surface for the fairness quota — never a `/metrics` label, and its
+        // identity roster is admin-gated at the MCP/HTTP `database_stats`
+        // handlers. Both the aggregate total and the per-principal rows are read
+        // under a SINGLE registry read lock so the snapshot cannot straddle two
+        // instants under concurrent subscribe/deregister.
+        let (active_subscriptions, per_principal_counts) =
+            self.changefeed.subscription_count_and_per_principal();
         let changefeed = ChangefeedStats {
-            active_subscriptions: self.changefeed.subscription_count(),
-            per_principal: self
-                .changefeed
-                .per_principal_counts()
+            active_subscriptions,
+            per_principal: per_principal_counts
                 .into_iter()
                 .map(
                     |(principal, active_subscriptions)| PrincipalSubscriptionStat {

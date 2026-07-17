@@ -306,4 +306,44 @@ mod tests {
         };
         assert!(build_filter(&q).is_err());
     }
+
+    /// A per-principal quota breach maps to `AletheiaHttpError::PrincipalQuotaExceeded`
+    /// carrying the caller's `{principal, current, limit}` and rendering 429
+    /// `RESOURCE_EXHAUSTED` (Issue #3678). A GLOBAL cap breach stays a 503
+    /// `UNAVAILABLE`, and anything else is a 500 — the three arms are distinct.
+    #[test]
+    fn map_subscribe_err_classifies_principal_quota_and_capacity() {
+        // Per-principal quota → 429 with details preserved.
+        let err = map_subscribe_err(Error::Storage(StorageError::PrincipalQuotaExceeded {
+            principal: "alice".to_string(),
+            current: 2,
+            limit: 2,
+        }));
+        match err {
+            AletheiaHttpError::PrincipalQuotaExceeded {
+                ref principal,
+                current,
+                limit,
+            } => {
+                assert_eq!(principal, "alice");
+                assert_eq!(current, 2);
+                assert_eq!(limit, 2);
+            }
+            other => panic!("expected PrincipalQuotaExceeded, got {other:?}"),
+        }
+
+        // Global cap breach → the (retriable) capacity/unavailable envelope.
+        let cap = map_subscribe_err(Error::Storage(StorageError::CapacityExceeded {
+            resource: "changefeed subscriptions".to_string(),
+            current: 128,
+            limit: 128,
+        }));
+        assert!(
+            matches!(
+                cap,
+                AletheiaHttpError::InFlightCapacityExceeded { cap: 128 }
+            ),
+            "global cap breach maps to the capacity/unavailable envelope"
+        );
+    }
 }
