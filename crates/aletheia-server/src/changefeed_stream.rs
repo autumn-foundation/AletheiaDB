@@ -15,15 +15,20 @@
 //!    the `await_changes` long-poll tool (`#[api_doc(mcp)]`), delegating to
 //!    [`AletheiaMcpServer::await_changes`](aletheiadb::mcp::AletheiaMcpServer::await_changes).
 //!
-//! Both are [`ReadClass`]. The runtime-protection strategy differs by surface:
-//! these **HTTP** handlers offload the blocking `recv_timeout` long-poll onto a
-//! `spawn_blocking` worker so it never starves the async runtime. The **native
-//! MCP** `await_changes` tool (invoked directly over stdio, not through this
-//! HTTP projection) instead uses a `block_in_place` runtime bridge inside
-//! `AletheiaMcpServer::await_changes` for the same protection (it has no
-//! `spawn_blocking` boundary to rely on). Note the idle SSE reap latency is
-//! bounded by [`STREAM_POLL_INTERVAL`] (~15s) after a client disconnects — an
-//! actively-delivering feed cleans up immediately when its receiver drops.
+//! Both are [`ReadClass`]. Both wait **event-driven** (Issue #3673): they await
+//! the changefeed via [`Subscription::recv_async`](aletheiadb::core::changefeed_subscription::Subscription::recv_async)
+//! — a `tokio::sync::Notify` wait — instead of parking a `spawn_blocking` /
+//! `block_in_place` worker on the synchronous `recv_timeout`. A suspended
+//! long-poll therefore pins **zero** runtime threads, and because each handler
+//! future is dropped when its client disconnects, the underlying
+//! `Subscription` drops immediately — freeing the per-principal slot without
+//! waiting out `timeout_ms` (await) or up to one [`STREAM_POLL_INTERVAL`] (SSE).
+//! The SSE worker additionally races `tx.closed()` so an *idle* disconnected
+//! stream is reaped at once rather than on the next keepalive tick. The native
+//! stdio MCP `await_changes` tool is likewise routed through the async dispatch;
+//! its per-call disconnect release is best-effort (stdio has no per-call
+//! connection-closed future) and bounded by `timeout_ms` as a backstop, but the
+//! worker-pin is gone there too.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -41,9 +46,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::security::{Authorized, ReadClass};
 use crate::state::ServerState;
 
-/// How long each `recv_timeout` poll blocks before looping to re-check liveness
-/// and let the SSE keep-alive fire. Bounded so a disconnected idle client is
-/// reaped within one interval rather than pinning a subscription indefinitely.
+/// Coarse keepalive re-loop interval for the SSE worker's `recv_async` wait
+/// (Issue #3673). Since a client disconnect is now caught event-driven via
+/// `tx.closed()` and new data via the `Notify` signal, this is no longer the
+/// disconnect-reap bound — it merely wakes the loop periodically alongside the
+/// SSE keep-alive; a disconnect is reaped in well under one interval.
 const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Parse an MCP tool method's JSON string result into a [`Value`] for the HTTP
@@ -187,39 +194,54 @@ pub async fn changes_stream(
         .map_err(map_subscribe_err)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(16);
-    tokio::task::spawn_blocking(move || {
+    // Event-driven async worker (Issue #3673): wait on the changefeed via the
+    // `recv_async` Notify path and race it against `tx.closed()`, so a client
+    // disconnect wakes the worker IMMEDIATELY (dropping `sub` → deregistering the
+    // subscription and freeing its per-principal slot) instead of lingering up to
+    // one `STREAM_POLL_INTERVAL` (~15s) as the old `spawn_blocking` +
+    // `recv_timeout` poll loop did. No thread is pinned for the wait.
+    tokio::spawn(async move {
         loop {
-            match sub.recv_timeout(STREAM_POLL_INTERVAL) {
-                // Idle timeout: keep looping (the SSE keep-alive covers the wire),
-                // but stop if the client has gone so we don't pin the subscription.
-                Ok(recs) if recs.is_empty() => {
-                    if tx.is_closed() {
-                        return;
-                    }
-                }
-                Ok(recs) => {
-                    for record in &recs {
-                        let event = match Event::default().json_data(change_record_json(record)) {
-                            Ok(ev) => ev,
-                            // A record that will not serialize is skipped rather
-                            // than tearing down the whole stream.
-                            Err(_) => continue,
-                        };
-                        if tx.blocking_send(Ok(event)).is_err() {
-                            return;
+            tokio::select! {
+                // Disconnect wins the race (biased): the receiver dropping resolves
+                // `closed()` at once, so we stop and drop the subscription without
+                // waiting for the next record or the keepalive tick.
+                biased;
+                // If a record's `recv_async` and `tx.closed()` are ready on the
+                // same poll, disconnect wins and that final in-flight batch is
+                // dropped with the subscription. This is intentional and matches
+                // the SSE at-least-once contract: the client resumes from the
+                // last cursor it actually received via `list_changes` +
+                // `resume_token`, so nothing is silently lost.
+                _ = tx.closed() => return,
+                res = sub.recv_async(STREAM_POLL_INTERVAL) => match res {
+                    // Keepalive tick with nothing buffered: loop (the SSE
+                    // keep-alive covers the wire).
+                    Ok(recs) if recs.is_empty() => {}
+                    Ok(recs) => {
+                        for record in &recs {
+                            let event = match Event::default().json_data(change_record_json(record)) {
+                                Ok(ev) => ev,
+                                // A record that will not serialize is skipped rather
+                                // than tearing down the whole stream.
+                                Err(_) => continue,
+                            };
+                            if tx.send(Ok(event)).await.is_err() {
+                                return;
+                            }
                         }
                     }
-                }
-                Err(RecvError::Lagged { resume_token }) => {
-                    let payload = match &resume_token {
-                        Some(token) => json!({ "resume_token": token }),
-                        None => json!({}),
-                    };
-                    if let Ok(event) = Event::default().event("lagged").json_data(payload) {
-                        let _ = tx.blocking_send(Ok(event));
+                    Err(RecvError::Lagged { resume_token }) => {
+                        let payload = match &resume_token {
+                            Some(token) => json!({ "resume_token": token }),
+                            None => json!({}),
+                        };
+                        if let Ok(event) = Event::default().event("lagged").json_data(payload) {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        return;
                     }
-                    return;
-                }
+                },
             }
         }
     });
@@ -230,10 +252,14 @@ pub async fn changes_stream(
 /// `POST /changes/await` — the MCP-over-HTTP projection of the `await_changes`
 /// long-poll tool (Issue #3375). [`ReadClass`]. HTTP + MCP tool.
 ///
-/// Delegates to [`AletheiaMcpServer::await_changes`]. On this **HTTP** surface
-/// the blocking long-poll is driven on a `spawn_blocking` worker so it does not
-/// starve the async runtime (the native stdio MCP tool has no such boundary and
-/// uses a `block_in_place` runtime bridge internally instead).
+/// Delegates to the event-driven
+/// [`AletheiaMcpServer::await_changes_for_principal_async`] (Issue #3673): the
+/// long-poll awaits a `tokio::sync::Notify` rather than parking a
+/// `spawn_blocking` worker, so it starves no runtime thread AND — because the
+/// handler future is dropped when the HTTP client disconnects — the underlying
+/// `Subscription` drops immediately, releasing the per-principal slot without
+/// waiting out the timeout (the old `spawn_blocking` task was not cancelled on
+/// drop and held the slot for the full `timeout_ms`).
 pub async fn await_changes_impl(
     state: ServerState,
     req: AwaitChangesRequest,
@@ -244,21 +270,9 @@ pub async fn await_changes_impl(
     // the shared embedded MCP server has no per-request session, so the route's
     // principal must be passed explicitly or the quota would fall back to a single
     // shared bucket for every HTTP caller.
-    let out = tokio::task::spawn_blocking(move || {
-        server.await_changes_for_principal(req, Some(principal_id))
-    })
-    .await
-    .unwrap_or_else(|_| {
-        // A panicked worker is an internal fault; surface the #3234 envelope.
-        json!({
-            "error": {
-                "code": "INTERNAL",
-                "message": "await_changes worker terminated unexpectedly",
-                "retriable": false
-            }
-        })
-        .to_string()
-    });
+    let out = server
+        .await_changes_for_principal_async(req, Some(principal_id))
+        .await;
     tool_json(out)
 }
 

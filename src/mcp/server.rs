@@ -144,7 +144,7 @@ use serde_json::json;
 
 use crate::api::transaction::WriteOps;
 use crate::core::changefeed::ChangeCursor;
-use crate::core::changefeed_subscription::{ChangeFilter, RecvError};
+use crate::core::changefeed_subscription::{ChangeFilter, RecvError, Subscription};
 use crate::core::temporal::time;
 use crate::core::{
     ChangeFeedQuery, ChangeType, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
@@ -330,6 +330,22 @@ pub struct AletheiaMcpServer {
     /// compiled they return a structured unavailable-feature error instead.
     #[cfg(feature = "embeddings")]
     embedder: Option<Arc<crate::embeddings::Embedder>>,
+}
+
+/// Outcome of the `await_changes` synchronous prelude (Issue #3673): either an
+/// immediate result (bad args / subscribe error / catch-up hit) or a live
+/// [`Subscription`] to wait on for `timeout`. Shared by the sync
+/// [`AletheiaMcpServer::handle_await_changes`] (blocking Condvar) and the async
+/// [`AletheiaMcpServer::dispatch_await_changes_async`] (event-driven Notify) so
+/// both run identical subscribe + catch-up logic and differ only in HOW they
+/// wait. The `Immediate` result is boxed so the enum's variants stay
+/// size-balanced (`CallToolResult` is far larger than a `Subscription`).
+enum AwaitChangesStep {
+    Immediate(Box<CallToolResult>),
+    Block {
+        sub: Subscription,
+        timeout: std::time::Duration,
+    },
 }
 
 /// RAII slot in the bounded in-flight-query pool (Issue #3368). Decrements the
@@ -1168,6 +1184,30 @@ impl AletheiaMcpServer {
             serde_json::to_value(req).expect("request serialization should not fail"),
             principal_key,
         ))
+    }
+
+    /// Event-driven async counterpart to [`await_changes_for_principal`]
+    /// (Issue #3673).
+    ///
+    /// Waits on the changefeed via the `recv_async` Notify path, so the long-poll
+    /// pins **no** Tokio worker for its duration and releases its per-principal
+    /// slot immediately when the caller's future is dropped (HTTP client
+    /// disconnect). Used by the HTTP `/changes/await` projection; the native MCP
+    /// `call_tool` seam routes through [`dispatch_await_changes_async`](Self::dispatch_await_changes_async)
+    /// directly. Behavior (delivery / resume / timeout / lagged semantics) is
+    /// identical to the sync entry — only the wait mechanism differs.
+    pub async fn await_changes_for_principal_async(
+        &self,
+        req: AwaitChangesRequest,
+        principal_key: Option<String>,
+    ) -> String {
+        Self::extract_text(
+            self.dispatch_await_changes_async(
+                serde_json::to_value(req).expect("request serialization should not fail"),
+                principal_key,
+            )
+            .await,
+        )
     }
 
     /// Execute a hybrid query.
@@ -5709,14 +5749,89 @@ impl AletheiaMcpServer {
     /// mappings (Issue #3234): a lagged subscription → retriable
     /// `RESOURCE_EXHAUSTED` with `details.resume_token`; a subscribe cap breach →
     /// retriable `UNAVAILABLE`; a malformed `from_token` → `INVALID_ARGUMENT`.
+    ///
+    /// This synchronous entry is now reached only via `dispatch_tool`
+    /// (embedded / programmatic / test callers): the native MCP `call_tool`
+    /// seam intercepts `await_changes` and routes it through the event-driven
+    /// [`Self::dispatch_await_changes_async`] instead (Issue #3673), so the
+    /// `block_in_place` worker bridge below no longer runs on the live MCP
+    /// server surface.
     fn handle_await_changes(
         &self,
         args: serde_json::Value,
         principal_override: Option<String>,
     ) -> CallToolResult {
+        match self.await_changes_prelude(args, principal_override) {
+            AwaitChangesStep::Immediate(result) => *result,
+            AwaitChangesStep::Block { sub, timeout } => {
+                // Synchronous Condvar long-poll for embedded/programmatic callers
+                // (and any non-`call_tool` sync dispatch). SAFETY/why:
+                // `recv_timeout` parks this worker for up to 60s. On a multi-thread
+                // Tokio runtime, run it inside `block_in_place` so Tokio can spin up
+                // a replacement worker; on a current-thread runtime or with no
+                // runtime (embedded/programmatic callers) `block_in_place` would
+                // panic, so call inline. The event-driven native `call_tool` and
+                // HTTP `/changes/await` paths instead use the async
+                // [`Self::dispatch_await_changes_async`] wait, which pins no worker
+                // and releases promptly on client disconnect (Issue #3673).
+                let recv_result = match tokio::runtime::Handle::try_current() {
+                    Ok(handle)
+                        if handle.runtime_flavor()
+                            == tokio::runtime::RuntimeFlavor::MultiThread =>
+                    {
+                        tokio::task::block_in_place(|| sub.recv_timeout(timeout))
+                    }
+                    _ => sub.recv_timeout(timeout),
+                };
+                self.finish_await_recv(&sub, recv_result)
+            }
+        }
+    }
+
+    /// Event-driven async counterpart to [`handle_await_changes`] (Issue #3673).
+    ///
+    /// Runs the identical subscribe + catch-up prelude, then — for the blocking
+    /// leg — awaits [`Subscription::recv_async`] instead of parking a worker on
+    /// the synchronous `recv_timeout`. Because the wait is a suspended future, N
+    /// concurrent long-polls pin **zero** worker threads (fixing the AC(a)
+    /// `block_in_place` pin), and dropping this future on client disconnect drops
+    /// the `Subscription` immediately, freeing its per-principal slot without
+    /// waiting out the timeout. Used by the native MCP `call_tool` seam and the
+    /// HTTP `/changes/await` projection.
+    pub(crate) async fn dispatch_await_changes_async(
+        &self,
+        args: serde_json::Value,
+        principal_override: Option<String>,
+    ) -> CallToolResult {
+        match self.await_changes_prelude(args, principal_override) {
+            AwaitChangesStep::Immediate(result) => *result,
+            AwaitChangesStep::Block { sub, timeout } => {
+                let recv_result = sub.recv_async(timeout).await;
+                self.finish_await_recv(&sub, recv_result)
+            }
+        }
+    }
+
+    /// The synchronous prelude shared by [`handle_await_changes`] (sync Condvar
+    /// wait) and [`dispatch_await_changes_async`] (event-driven Notify wait),
+    /// Issue #3673: it resolves the principal bucket, builds the filter,
+    /// subscribes (capturing the frontier), and runs the optional catch-up — all
+    /// fast, non-blocking work — returning either an [`AwaitChangesStep::Immediate`]
+    /// result or a live [`Subscription`] to wait on. Factoring it out guarantees
+    /// both surfaces run byte-identical subscribe/catch-up logic and differ ONLY
+    /// in how they wait, so delivery semantics stay unchanged (AC c).
+    fn await_changes_prelude(
+        &self,
+        args: serde_json::Value,
+        principal_override: Option<String>,
+    ) -> AwaitChangesStep {
         let req: AwaitChangesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+            Err(e) => {
+                return AwaitChangesStep::Immediate(Box::new(
+                    self.invalid_argument(&format!("Invalid arguments: {}", e)),
+                ));
+            }
         };
 
         // Resolve the per-principal quota bucket (Issue #3678): the surface-supplied
@@ -5738,7 +5853,9 @@ impl AletheiaMcpServer {
         if let Some(change_types) = &req.change_types {
             let parsed = match Self::parse_change_types(change_types) {
                 Ok(v) => v,
-                Err(msg) => return self.invalid_argument(&msg),
+                Err(msg) => {
+                    return AwaitChangesStep::Immediate(Box::new(self.invalid_argument(&msg)));
+                }
             };
             filter = filter.with_change_types(parsed);
         }
@@ -5774,17 +5891,19 @@ impl AletheiaMcpServer {
                     },
                 ) = &e
                 {
-                    return self.error_result(
-                        McpError::new(McpErrorCode::Unavailable, e.to_string())
-                            .retriable(true)
-                            .details(json!({
-                                "resource": resource,
-                                "current": current,
-                                "limit": limit,
-                            })),
-                    );
+                    return AwaitChangesStep::Immediate(Box::new(
+                        self.error_result(
+                            McpError::new(McpErrorCode::Unavailable, e.to_string())
+                                .retriable(true)
+                                .details(json!({
+                                    "resource": resource,
+                                    "current": current,
+                                    "limit": limit,
+                                })),
+                        ),
+                    ));
                 }
-                return self.db_error(e);
+                return AwaitChangesStep::Immediate(Box::new(self.db_error(e)));
             }
         };
 
@@ -5795,8 +5914,9 @@ impl AletheiaMcpServer {
             let decoded = match ChangeCursor::decode(token) {
                 Ok(c) => c,
                 Err(_) => {
-                    return self
-                        .invalid_argument("Invalid from_token: malformed continuation token");
+                    return AwaitChangesStep::Immediate(Box::new(
+                        self.invalid_argument("Invalid from_token: malformed continuation token"),
+                    ));
                 }
             };
             let query = ChangeFeedQuery {
@@ -5828,37 +5948,34 @@ impl AletheiaMcpServer {
                         .next_cursor
                         .clone()
                         .or_else(|| page.changes.last().map(|r| r.cursor().encode()));
-                    return self.await_changes_success(
+                    return AwaitChangesStep::Immediate(Box::new(self.await_changes_success(
                         &filtered,
                         resume,
                         false,
                         page.next_cursor.is_some(),
-                    );
+                    )));
                 }
                 Ok(_) => { /* nothing buffered yet — fall through to block */ }
-                Err(e) => return self.db_error(e),
+                Err(e) => return AwaitChangesStep::Immediate(Box::new(self.db_error(e))),
             }
         }
 
         // Block for the next change up to the clamped timeout (default 25s, hard
-        // cap 60s). `recv_timeout(0)` returns instantly (Ok(empty)).
+        // cap 60s). `recv_*(0)` returns instantly (Ok(empty)).
         let timeout_ms = req.timeout_ms.unwrap_or(25_000).min(60_000);
         let timeout = std::time::Duration::from_millis(timeout_ms);
-        // SAFETY/why: `recv_timeout` parks this worker for up to 60s. On a
-        // multi-thread Tokio runtime (the `aletheia-mcp` binary and
-        // `aletheia-server`), run it inside `block_in_place` so Tokio can spin
-        // up a replacement worker — otherwise one native-stdio long-poll would
-        // stall the whole async `call_tool` dispatch loop. On a current-thread
-        // runtime or with no runtime at all (embedded/programmatic callers),
-        // `block_in_place` would panic, so call `recv_timeout` inline as before.
-        // Mirrors the `block_on_embedding` runtime guard; only this blocking
-        // call needs the bridge (subscribe/list_changes are fast).
-        let recv_result = match tokio::runtime::Handle::try_current() {
-            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(|| sub.recv_timeout(timeout))
-            }
-            _ => sub.recv_timeout(timeout),
-        };
+        AwaitChangesStep::Block { sub, timeout }
+    }
+
+    /// Format a completed `recv` (sync `recv_timeout` or async `recv_async`) into
+    /// the `await_changes` response envelope, Issue #3673 — shared by both wait
+    /// paths so they return a byte-identical result and only the wait mechanism
+    /// differs.
+    fn finish_await_recv(
+        &self,
+        sub: &Subscription,
+        recv_result: std::result::Result<Vec<crate::core::ChangeRecord>, RecvError>,
+    ) -> CallToolResult {
         match recv_result {
             Ok(recs) if !recs.is_empty() => {
                 let resume = recs.last().map(|r| r.cursor().encode());
@@ -9188,6 +9305,20 @@ impl ServerHandler for AletheiaMcpServer {
             .arguments
             .map(serde_json::Value::Object)
             .unwrap_or(serde_json::Value::Null);
+
+        // `await_changes` is an event-driven long-poll (Issue #3673): route it
+        // through the async dispatch so the suspended future pins NO worker thread
+        // and drops (freeing its per-principal slot) the moment the caller's
+        // future is cancelled on disconnect. It is deliberately excluded from the
+        // #3353/#3368/#3360 wrappers `dispatch_tool` applies, so bypassing them
+        // changes nothing but the wait mechanism — but auth must still be enforced
+        // here to mirror `dispatch_tool`.
+        if request.name.as_ref() == "await_changes" {
+            if let Err(err) = self.auth.authorize_tool("await_changes") {
+                return Ok(self.error_result(err));
+            }
+            return Ok(self.dispatch_await_changes_async(args, None).await);
+        }
 
         Ok(self.dispatch_tool(request.name.as_ref(), args))
     }
