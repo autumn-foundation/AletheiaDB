@@ -190,13 +190,24 @@ impl McpError {
     /// This is the single boundary mapping from the library's `thiserror`
     /// taxonomy to the stable MCP codes; the message is always
     /// `e.to_string()`, preserving the pre-#3234 free text verbatim.
+    ///
+    /// Schema-constraint violations (Issue #3378) additionally carry their
+    /// structured `details` here — `TypeViolation`'s `expected_type`/
+    /// `actual_type`, `MissingRequiredKey`'s `missing_keys`, and
+    /// `NonConformingOnEnable`'s bounded violation report — so a caller can
+    /// self-repair without parsing the free-text `message`. This mirrors the
+    /// `UniqueViolation` precedent (whose `existing_node_id` details are built
+    /// at the `server::db_error` call site, along with its legacy top-level
+    /// fields); that path is unchanged because
+    /// [`ConstraintError::structured_details`] returns `None` for it.
     pub fn from_db_error(e: &Error) -> Self {
         let (code, retriable) = classify_db_error(e);
+        let details = e.as_constraint().and_then(|ce| ce.structured_details());
         Self {
             code,
             message: e.to_string(),
             retriable,
-            details: None,
+            details,
         }
     }
 }
@@ -706,6 +717,132 @@ mod tests {
         let (code, retriable) = classify_constraint_error(&non_conforming);
         assert_eq!(code, McpErrorCode::FailedPrecondition);
         assert!(!retriable);
+    }
+
+    #[test]
+    fn type_violation_carries_expected_and_actual_type_details() {
+        // Issue #3378: a TypeViolation surfaces `expected_type`/`actual_type`
+        // under `error.details` (CONSTRAINT_VIOLATION, non-retriable), so a
+        // caller can self-repair without parsing the free-text message.
+        let e: Error = ConstraintError::TypeViolation {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            property: "age".into(),
+            expected_type: "int",
+            actual_type: "string",
+        }
+        .into();
+        let err = McpError::from_db_error(&e);
+        assert_eq!(err.code(), McpErrorCode::ConstraintViolation);
+        assert!(!err.is_retriable());
+        // Message free text is preserved verbatim.
+        assert_eq!(err.message(), e.to_string());
+        let json = err.to_json();
+        assert_eq!(json["code"], "CONSTRAINT_VIOLATION");
+        assert_eq!(json["retriable"], false);
+        assert_eq!(json["details"]["entity_kind"], "node");
+        assert_eq!(json["details"]["label"], "Person");
+        assert_eq!(json["details"]["property"], "age");
+        // The type tokens are the stable DeclaredType/PropertyValue names.
+        assert_eq!(json["details"]["expected_type"], "int");
+        assert_eq!(json["details"]["actual_type"], "string");
+    }
+
+    #[test]
+    fn missing_required_key_details_are_always_an_array() {
+        // A single missing key must still serialize as a JSON array, so a
+        // caller can iterate uniformly (Issue #3378).
+        let single: Error = ConstraintError::MissingRequiredKey {
+            entity_kind: "edge".into(),
+            label: "KNOWS".into(),
+            missing_keys: vec!["since".into()],
+        }
+        .into();
+        let json = McpError::from_db_error(&single).to_json();
+        assert_eq!(json["code"], "CONSTRAINT_VIOLATION");
+        assert_eq!(json["retriable"], false);
+        assert_eq!(json["details"]["entity_kind"], "edge");
+        assert_eq!(json["details"]["label"], "KNOWS");
+        assert!(
+            json["details"]["missing_keys"].is_array(),
+            "missing_keys must be an array even for one key"
+        );
+        assert_eq!(
+            json["details"]["missing_keys"],
+            serde_json::json!(["since"])
+        );
+
+        // Multiple missing keys are all reported, in order.
+        let multi: Error = ConstraintError::MissingRequiredKey {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            missing_keys: vec!["name".into(), "age".into()],
+        }
+        .into();
+        let json = McpError::from_db_error(&multi).to_json();
+        assert_eq!(
+            json["details"]["missing_keys"],
+            serde_json::json!(["name", "age"])
+        );
+    }
+
+    #[test]
+    fn non_conforming_on_enable_details_are_bounded() {
+        // Issue #3378: NonConformingOnEnable is FAILED_PRECONDITION and
+        // surfaces a *bounded* structured report — a per-(property,reason)
+        // aggregated violations list plus a capped id sample, never a raw
+        // per-entity id dump.
+        use crate::core::constraint::ConformanceViolation;
+        let e: Error = ConstraintError::NonConformingOnEnable {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            violations: vec![ConformanceViolation {
+                entity_kind: "node".into(),
+                label: "Person".into(),
+                property: Some("age".into()),
+                reason: "expected type int, got string".into(),
+                sample_ids: vec![1, 2, 3],
+            }],
+            total_non_conforming: 42,
+            sample_ids: vec![1, 2, 3, 4, 5],
+        }
+        .into();
+        let err = McpError::from_db_error(&e);
+        assert_eq!(err.code(), McpErrorCode::FailedPrecondition);
+        assert!(!err.is_retriable());
+        let json = err.to_json();
+        assert_eq!(json["code"], "FAILED_PRECONDITION");
+        assert_eq!(json["retriable"], false);
+        assert_eq!(json["details"]["entity_kind"], "node");
+        assert_eq!(json["details"]["label"], "Person");
+        assert_eq!(json["details"]["total_non_conforming"], 42);
+        assert_eq!(
+            json["details"]["sample_ids"],
+            serde_json::json!([1, 2, 3, 4, 5])
+        );
+        let violations = json["details"]["violations"].as_array().unwrap();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0]["property"], "age");
+        assert_eq!(violations[0]["reason"], "expected type int, got string");
+        assert_eq!(violations[0]["sample_ids"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn unique_violation_details_are_not_built_by_from_db_error() {
+        // The UniqueViolation `details` (existing_node_id + legacy top-level
+        // fields) are built at the `server::db_error` call site, NOT here, so
+        // `from_db_error` must leave `details` unset for it — the existing
+        // behavior is unchanged by the schema-constraint work.
+        let e: Error = ConstraintError::UniqueViolation {
+            label: "Person".into(),
+            property: "email".into(),
+            value: "a".into(),
+            existing_node_id: NodeId::new(1).unwrap(),
+        }
+        .into();
+        let err = McpError::from_db_error(&e);
+        assert_eq!(err.code(), McpErrorCode::ConstraintViolation);
+        assert!(err.to_json().get("details").is_none());
     }
 
     #[test]

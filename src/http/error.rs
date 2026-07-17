@@ -150,9 +150,62 @@ pub enum AletheiaHttpError {
         /// The configured `max_in_flight_queries` cap that was reached.
         cap: usize,
     },
+
+    /// A schema-constraint violation surfaced from the db layer (Issue #3378),
+    /// pre-classified into the unified #3234 envelope so the HTTP body carries
+    /// the same `code`/`retriable`/`details` as the MCP surface. Built via
+    /// [`Self::from_db_error`]; every other db error keeps its prior HTTP
+    /// mapping (a 400 `BadRequest`), so this is purely additive for the
+    /// type/required-key/non-conforming cases.
+    #[error("{message}")]
+    SchemaConstraint {
+        /// The #3234 code string (`CONSTRAINT_VIOLATION` | `FAILED_PRECONDITION`).
+        code: &'static str,
+        /// HTTP status derived from the code (`409` / `412`).
+        status: StatusCode,
+        /// Free-text message: the db error's `Display` (preserved verbatim).
+        message: String,
+        /// Structured metadata from [`crate::core::error::ConstraintError::structured_details`].
+        details: Option<Value>,
+    },
 }
 
 impl AletheiaHttpError {
+    /// Classify a db-layer [`Error`](crate::core::error::Error) surfaced from a
+    /// write handler into the HTTP error envelope. Schema-constraint violations
+    /// (Issue #3378) map to the dedicated [`Self::SchemaConstraint`] variant so
+    /// the response carries the same `code`/`details` as the MCP surface; every
+    /// other error preserves the prior write-path mapping (`400 BadRequest`
+    /// with the free-text message), so this is a purely additive change for the
+    /// constraint cases.
+    #[must_use]
+    pub(crate) fn from_db_error(e: &crate::core::error::Error) -> Self {
+        use crate::core::error::ConstraintError as CE;
+        match e.as_constraint() {
+            // A type/required-key violation is the constraint rejecting *this*
+            // write → CONSTRAINT_VIOLATION, rendered `409 Conflict`.
+            Some(ce @ (CE::TypeViolation { .. } | CE::MissingRequiredKey { .. })) => {
+                Self::SchemaConstraint {
+                    code: "CONSTRAINT_VIOLATION",
+                    status: StatusCode::CONFLICT,
+                    message: e.to_string(),
+                    details: ce.structured_details(),
+                }
+            }
+            // Non-conformance on enable is a state problem the caller must fix
+            // first → FAILED_PRECONDITION, rendered `412 Precondition Failed`.
+            Some(ce @ CE::NonConformingOnEnable { .. }) => Self::SchemaConstraint {
+                code: "FAILED_PRECONDITION",
+                status: StatusCode::PRECONDITION_FAILED,
+                message: e.to_string(),
+                details: ce.structured_details(),
+            },
+            // Uniqueness variants and every non-constraint error keep the prior
+            // write-path mapping unchanged (a 400 BadRequest).
+            _ => Self::BadRequest(e.to_string()),
+        }
+    }
+
     fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) | Self::QueryParse(_) => StatusCode::BAD_REQUEST,
@@ -161,6 +214,9 @@ impl AletheiaHttpError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::PermissionDenied { .. } => StatusCode::FORBIDDEN,
             Self::InvalidLimitOverride(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            // A pre-classified schema-constraint violation carries its own
+            // status (409 CONSTRAINT_VIOLATION / 412 FAILED_PRECONDITION).
+            Self::SchemaConstraint { status, .. } => *status,
             // Transient overload → 503 Service Unavailable (retriable).
             Self::InFlightCapacityExceeded { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::ResourceLimitExceeded(e) => match e.dimension {
@@ -232,6 +288,10 @@ impl AletheiaHttpError {
                 "reason": "in_flight_query_cap",
                 "max_in_flight_queries": cap,
             })),
+            // A schema-constraint violation forwards the structured details
+            // built by the shared core classifier (Issue #3378), so the HTTP
+            // body is byte-shape-identical to the MCP surface.
+            Self::SchemaConstraint { details, .. } => details.clone(),
             _ => None,
         }
     }
@@ -252,6 +312,8 @@ impl AletheiaHttpError {
             Self::PermissionDenied { .. } => "PERMISSION_DENIED",
             Self::ResourceLimitExceeded(_) => "RESOURCE_EXHAUSTED",
             Self::InFlightCapacityExceeded { .. } => "UNAVAILABLE",
+            // The #3234 code was fixed when the variant was classified.
+            Self::SchemaConstraint { code, .. } => code,
         }
     }
 
@@ -483,6 +545,93 @@ mod tests {
         );
         assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
         assert_eq!(body["error"]["message"], "nope");
+        assert_eq!(body["error"]["retriable"], false);
+        assert!(body["error"].get("details").is_none());
+    }
+
+    /// Issue #3378: a schema type violation surfaced from a write handler is
+    /// classified into the unified #3234 envelope — `409 CONSTRAINT_VIOLATION`,
+    /// `retriable: false`, and structured `details` byte-shape-identical to the
+    /// MCP surface (`expected_type`/`actual_type`).
+    #[tokio::test]
+    async fn schema_type_violation_renders_nested_constraint_violation_with_details() {
+        use crate::core::error::ConstraintError;
+        let db_err: crate::core::error::Error = ConstraintError::TypeViolation {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            property: "age".into(),
+            expected_type: "int",
+            actual_type: "string",
+        }
+        .into();
+        let http_err = AletheiaHttpError::from_db_error(&db_err);
+        let (status, body) = body_json(http_err).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "CONSTRAINT_VIOLATION");
+        assert_eq!(body["error"]["retriable"], false);
+        // Message free text is preserved verbatim from the db error.
+        assert_eq!(body["error"]["message"], db_err.to_string());
+        assert_eq!(body["error"]["details"]["entity_kind"], "node");
+        assert_eq!(body["error"]["details"]["label"], "Person");
+        assert_eq!(body["error"]["details"]["property"], "age");
+        assert_eq!(body["error"]["details"]["expected_type"], "int");
+        assert_eq!(body["error"]["details"]["actual_type"], "string");
+    }
+
+    /// Parity guard: the HTTP `error.details` payload is exactly the shared
+    /// core [`ConstraintError::structured_details`] output — the same single
+    /// source of truth the MCP `from_db_error` mapping uses — so the two
+    /// surfaces can never drift. Also covers the `missing_keys`-is-an-array
+    /// contract and the `FAILED_PRECONDITION` (412) rung.
+    #[tokio::test]
+    async fn schema_constraint_http_details_match_shared_core_source() {
+        use crate::core::error::ConstraintError;
+
+        // MissingRequiredKey → CONSTRAINT_VIOLATION (409), details.missing_keys array.
+        let missing: crate::core::error::Error = ConstraintError::MissingRequiredKey {
+            entity_kind: "edge".into(),
+            label: "KNOWS".into(),
+            missing_keys: vec!["since".into()],
+        }
+        .into();
+        let expected = missing.as_constraint().unwrap().structured_details();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&missing)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "CONSTRAINT_VIOLATION");
+        assert!(body["error"]["details"]["missing_keys"].is_array());
+        assert_eq!(Some(&body["error"]["details"]), expected.as_ref());
+
+        // NonConformingOnEnable → FAILED_PRECONDITION (412), bounded report.
+        let non_conforming: crate::core::error::Error = ConstraintError::NonConformingOnEnable {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            violations: vec![],
+            total_non_conforming: 3,
+            sample_ids: vec![1, 2, 3],
+        }
+        .into();
+        let expected = non_conforming.as_constraint().unwrap().structured_details();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&non_conforming)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["total_non_conforming"], 3);
+        assert_eq!(Some(&body["error"]["details"]), expected.as_ref());
+    }
+
+    /// A non-constraint db error keeps the prior write-path mapping unchanged:
+    /// a `400 BadRequest` with no `details` (no behavior change outside the
+    /// schema-constraint cases).
+    #[tokio::test]
+    async fn from_db_error_preserves_bad_request_for_non_constraint_errors() {
+        let db_err = crate::core::error::Error::other("boom");
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
         assert_eq!(body["error"]["retriable"], false);
         assert!(body["error"].get("details").is_none());
     }
