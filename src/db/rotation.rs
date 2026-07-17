@@ -63,6 +63,7 @@ use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
 use crate::encryption::factory::Algorithm;
 use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::KeyDerivation;
+use crate::encryption::wal_encryption::WalKeyring;
 use crate::storage::index_persistence::common::{ENC_INDEX_KEY_VERSION_V1, IndexKeyring};
 use crate::storage::index_persistence::reencrypt::DecryptProbeReport;
 use crate::storage::index_persistence::{
@@ -240,7 +241,7 @@ fn roll_and_retire_wal(
 /// preserving every other field. A no-op when no ledger is present (already
 /// cleared). Keeps the #488 P0.2 ordering: the completion is fsync'd before the
 /// old generation is retired / the ledger is cleared.
-fn mark_wal_complete(manager: &IndexPersistenceManager) -> Result<()> {
+pub(crate) fn mark_wal_complete(manager: &IndexPersistenceManager) -> Result<()> {
     if let Some(mut ledger) = read_rotation_state(manager)?
         && ledger.wal != LayerStatus::Complete
     {
@@ -1003,6 +1004,12 @@ impl AletheiaDB {
 enum RotationDirection {
     Forward,
     Cancel,
+    /// A plaintext → encrypted **enable** migration (Issue #3616 PR3). Recorded
+    /// on the same cross-layer ledger as a rotation, but distinguished by this
+    /// direction so the rotation resume paths (which assume an already-encrypted
+    /// old→new generation, gated on `encryption.enabled`) never touch an enable
+    /// ledger — the enable engine's own `resume_pending_enable` drives it.
+    Enable,
 }
 
 impl RotationDirection {
@@ -1010,6 +1017,7 @@ impl RotationDirection {
         match self {
             RotationDirection::Forward => "forward",
             RotationDirection::Cancel => "cancel",
+            RotationDirection::Enable => "enable",
         }
     }
 }
@@ -1115,6 +1123,39 @@ impl RotationLedger {
             cold: scope(cold_in_scope),
         }
     }
+
+    /// The plaintext → encrypted **enable** plan (Issue #3616 PR3).
+    ///
+    /// The WAL is ALWAYS `Pending` (an enable's whole point is to encrypt the
+    /// live WAL). Index / checkpoint / cold are `Pending` only when there are
+    /// bytes of that layer to wrap (`*_in_scope`), else `Skipped` — the WAL-first
+    /// engine records index/checkpoint/cold `Skipped` until their bare→encrypted
+    /// wrap passes land (a follow-up worker flips them to `Pending`). Callers and
+    /// the resumer MUST drive off each per-field [`LayerStatus`], never a count of
+    /// layers, so adding a future layer cannot silently skip migration or resume.
+    fn enable_scope(
+        new_version: u32,
+        new_source: KeyProviderConfig,
+        index_in_scope: bool,
+        cold_in_scope: bool,
+    ) -> Self {
+        let scope = |in_scope: bool| {
+            if in_scope {
+                LayerStatus::Pending
+            } else {
+                LayerStatus::Skipped
+            }
+        };
+        Self {
+            direction: RotationDirection::Enable,
+            new_version,
+            new_source,
+            index: scope(index_in_scope),
+            checkpoint: scope(index_in_scope),
+            wal: LayerStatus::Pending,
+            cold: scope(cold_in_scope),
+        }
+    }
 }
 
 fn rotation_state_path(manager: &IndexPersistenceManager) -> std::path::PathBuf {
@@ -1211,7 +1252,7 @@ pub(crate) fn write_durable(path: &std::path::Path, bytes: &[u8]) -> Result<()> 
     Ok(())
 }
 
-fn clear_rotation_state(manager: &IndexPersistenceManager) {
+pub(crate) fn clear_rotation_state(manager: &IndexPersistenceManager) {
     let path = rotation_state_path(manager);
     if std::fs::remove_file(&path).is_ok()
         && let Some(parent) = path.parent()
@@ -1301,6 +1342,7 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
                 direction = match v {
                     "forward" => RotationDirection::Forward,
                     "cancel" => RotationDirection::Cancel,
+                    "enable" => RotationDirection::Enable,
                     other => return Err(corrupt(&format!("unknown direction {other:?}"))),
                 }
             }
@@ -1444,6 +1486,12 @@ pub fn install_pending_wal_generations(
     let Some(ledger) = read_rotation_state_at(&ledger_path)? else {
         return Ok(());
     };
+    // A plaintext → encrypted ENABLE ledger (Issue #3616 PR3) is driven by the
+    // enable engine's own pre-read hook + `resume_pending_enable`, never by the
+    // rotation resume paths (which assume an already-encrypted old→new gen).
+    if matches!(ledger.direction, RotationDirection::Enable) {
+        return Ok(());
+    }
     if !matches!(ledger.wal, LayerStatus::Pending) {
         return Ok(());
     }
@@ -1465,6 +1513,140 @@ pub fn install_pending_wal_generations(
     wal_keyring.add_generation(old_version, Arc::clone(&old_cipher));
     wal_keyring.add_generation(ledger.new_version, new_wal_cipher);
     Ok(())
+}
+
+// ── Plaintext → encrypted ENABLE engine ledger helpers (Issue #3616 PR3) ──────
+//
+// The enable engine reuses the cross-layer rotation ledger + `LayerStatus`, but
+// records `direction=enable` (see [`RotationDirection::Enable`]) so the rotation
+// resume paths never touch it. These `pub(crate)` helpers are the seam the
+// engine in `crate::db::encryption_enable` drives; all ledger internals stay
+// private to this module.
+
+/// The fresh-enable key generation. A plaintext database has no prior key
+/// version, so its first (and only) generation is the base version, matching the
+/// WAL's [`INITIAL_WAL_KEY_VERSION`](crate::encryption::wal_encryption::INITIAL_WAL_KEY_VERSION)
+/// and the index base [`ENC_INDEX_KEY_VERSION_V1`] (both `1`).
+pub(crate) const ENABLE_KEY_VERSION: u32 = ENC_INDEX_KEY_VERSION_V1;
+
+/// Per-field view of an in-flight enable ledger for the resume driver — exposes
+/// the recorded key source and each layer's pending/complete state WITHOUT
+/// leaking the private [`RotationLedger`] / [`LayerStatus`] types.
+pub(crate) struct EnableLedgerView {
+    /// The File/Env key-source reference recorded in the ledger.
+    pub(crate) new_source: KeyProviderConfig,
+    /// `true` while the WAL layer still needs its keyring install + roll.
+    pub(crate) wal_pending: bool,
+    /// `true` once the WAL layer's roll+retire is durably complete.
+    pub(crate) wal_complete: bool,
+    /// `true` while the index layer still needs its plaintext→AEIX wrap pass.
+    pub(crate) index_pending: bool,
+    /// `true` while the checkpoint layer is still pending.
+    pub(crate) checkpoint_pending: bool,
+    /// `true` while the cold layer still needs its bare→ACV1 wrap pass.
+    pub(crate) cold_pending: bool,
+}
+
+impl EnableLedgerView {
+    fn from_ledger(ledger: RotationLedger) -> Self {
+        Self {
+            wal_pending: matches!(ledger.wal, LayerStatus::Pending),
+            wal_complete: matches!(ledger.wal, LayerStatus::Complete),
+            index_pending: matches!(ledger.index, LayerStatus::Pending),
+            checkpoint_pending: matches!(ledger.checkpoint, LayerStatus::Pending),
+            cold_pending: matches!(ledger.cold, LayerStatus::Pending),
+            new_source: ledger.new_source,
+        }
+    }
+
+    /// Every non-WAL layer this engine version can complete is settled, so the
+    /// only remaining work is the authority flip + ledger clear. (Index /
+    /// checkpoint / cold are `Skipped` in the WAL-first engine; a follow-up
+    /// worker that flips them to `Pending` MUST extend this predicate.)
+    pub(crate) fn non_wal_layers_settled(&self) -> bool {
+        !self.index_pending && !self.checkpoint_pending && !self.cold_pending
+    }
+}
+
+/// Read the in-flight ENABLE ledger for `manager`, if one is present. Returns
+/// `Ok(None)` when absent OR when a ledger is present but is a rotation (not an
+/// enable) ledger. Fail-closed on a corrupt ledger (propagates the error).
+pub(crate) fn read_enable_ledger(
+    manager: &IndexPersistenceManager,
+) -> Result<Option<EnableLedgerView>> {
+    Ok(read_rotation_state(manager)?
+        .filter(|l| matches!(l.direction, RotationDirection::Enable))
+        .map(EnableLedgerView::from_ledger))
+}
+
+/// Path-based twin of [`read_enable_ledger`] for the pre-manager startup hook.
+pub(crate) fn read_enable_ledger_at(path: &std::path::Path) -> Result<Option<EnableLedgerView>> {
+    Ok(read_rotation_state_at(path)?
+        .filter(|l| matches!(l.direction, RotationDirection::Enable))
+        .map(EnableLedgerView::from_ledger))
+}
+
+/// Durably write the pending-enable ledger BEFORE any layer is touched (Issue
+/// #3616 PR3). WAL is always `Pending`; index/checkpoint/cold are `Pending` iff
+/// their `*_in_scope` bytes exist, else `Skipped`. Same crash-safe ordering as
+/// the rotation ledger (temp → fsync → rename → parent-dir fsync).
+pub(crate) fn write_enable_ledger(
+    manager: &IndexPersistenceManager,
+    new_source: &KeyProviderConfig,
+    index_in_scope: bool,
+    cold_in_scope: bool,
+) -> Result<()> {
+    write_ledger(
+        manager,
+        &RotationLedger::enable_scope(
+            ENABLE_KEY_VERSION,
+            new_source.clone(),
+            index_in_scope,
+            cold_in_scope,
+        ),
+    )
+}
+
+/// Build the WAL DEK keyring to install for an enable, derived from the recorded
+/// key `source` (`MEK → HKDF wal DEK → cipher`), stamped at
+/// [`ENABLE_KEY_VERSION`]. No key material leaves `Zeroizing`.
+pub(crate) fn build_enable_wal_keyring(
+    source: &KeyProviderConfig,
+    algorithm: Algorithm,
+) -> Result<WalKeyring> {
+    let wal_dek = derive_wal_dek(load_mek(source).map_err(rotation_err)?).map_err(rotation_err)?;
+    let cipher: Arc<dyn Cipher> = Arc::from(create_cipher(algorithm, &wal_dek));
+    Ok(WalKeyring::single_versioned(cipher, ENABLE_KEY_VERSION))
+}
+
+/// Install the WAL keyring for an INTERRUPTED enable BEFORE the startup replay
+/// read (Issue #3616 PR3) — the crux crash-consistency hook.
+///
+/// A crash after the enable rolled the WAL to encrypted (v16) but before the
+/// authority flip leaves `config.encryption.enabled == false`, so the WAL was
+/// built with a `None` keyring and the replay read would hit encrypted frames
+/// with no cipher and fail — mis-reading encrypted bytes as (undecodable)
+/// plaintext. This hook, run in the `!config.encryption.enabled` startup branch,
+/// detects a pending ENABLE ledger whose WAL layer is `Pending`/`Complete` and
+/// installs the keyring (derived from the ledger's recorded source) via the PR2
+/// `install_wal_keyring` seam, so the read decrypts. Idempotent / fail-closed: a
+/// no-op when no enable ledger is pending or the WAL is already encrypted.
+pub(crate) fn install_pending_enable_wal_keyring(
+    wal: &ConcurrentWalSystem,
+    enc_cfg: &EncryptionConfig,
+    data_dir: &std::path::Path,
+) -> Result<()> {
+    let ledger_path = data_dir.join("rotation.state");
+    let Some(view) = read_enable_ledger_at(&ledger_path)? else {
+        return Ok(());
+    };
+    // The WAL is in the encrypted picture whenever its layer is Pending (roll may
+    // have started) or Complete (roll finished). Already-encrypted → nothing to do.
+    if !(view.wal_pending || view.wal_complete) || wal.is_encrypted() {
+        return Ok(());
+    }
+    let keyring = build_enable_wal_keyring(&view.new_source, enc_cfg.algorithm)?;
+    wal.install_wal_keyring(keyring)
 }
 
 /// Resume an interrupted index key rotation on startup (Issue #488).
@@ -1496,6 +1678,11 @@ pub fn resume_pending_rotation(
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(None);
     };
+    // An ENABLE ledger (Issue #3616 PR3) is not a rotation — leave it for
+    // `resume_pending_enable`, never resume it as an old→new-generation rotation.
+    if matches!(ledger.direction, RotationDirection::Enable) {
+        return Ok(None);
+    }
     let Some(keyring) = manager.keyring().cloned() else {
         // Encryption not configured on this startup; leave the ledger.
         return Ok(None);
@@ -1672,6 +1859,12 @@ pub fn resume_pending_rotation(
                 duration_ms: started.elapsed().as_millis() as u64,
             }
         }
+        // A `direction=enable` ledger is short-circuited to `Ok(None)` at the top
+        // of this function (the rotation resume paths never drive an enable), so
+        // it can never reach this match.
+        RotationDirection::Enable => {
+            unreachable!("enable ledgers are skipped before rotation resume")
+        }
     };
 
     Ok(Some(report))
@@ -1721,6 +1914,9 @@ pub fn finalize_resumed_wal_rotation(
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(());
     };
+    if matches!(ledger.direction, RotationDirection::Enable) {
+        return Ok(());
+    }
     if !matches!(ledger.wal, LayerStatus::Pending) {
         return Ok(());
     }
@@ -1814,6 +2010,9 @@ pub fn finalize_resumed_cold_rotation(
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(());
     };
+    if matches!(ledger.direction, RotationDirection::Enable) {
+        return Ok(());
+    }
     if !matches!(ledger.cold, LayerStatus::Pending) {
         return Ok(());
     }

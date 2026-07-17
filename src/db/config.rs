@@ -544,6 +544,21 @@ impl AletheiaDB {
                     &config.encryption,
                     &config.persistence.data_dir,
                 )?;
+            } else if config.persistence.enabled {
+                // Issue #3616 PR3: an INTERRUPTED plaintext→encrypted enable leaves
+                // the authority NOT yet flipped, so `config.encryption.enabled` is
+                // false here even though the WAL may already have been rolled to
+                // encrypted. Install the WAL keyring from the pending enable ledger
+                // BEFORE the replay read so those encrypted segments decrypt
+                // (otherwise the read below mis-reads ciphertext as undecodable
+                // plaintext and fails). `resume_pending_enable` (further down)
+                // finishes the migration. A no-op when no enable ledger is pending
+                // or the WAL is not yet encrypted.
+                crate::db::rotation::install_pending_enable_wal_keyring(
+                    &wal,
+                    &config.encryption,
+                    &config.persistence.data_dir,
+                )?;
             }
 
             // Held (as `mut`, consumed by whichever replay branch runs) across

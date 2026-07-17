@@ -880,11 +880,8 @@ impl ConcurrentWalSystem {
     ///
     /// [`add_generation`]: crate::encryption::wal_encryption::WalKeyring::add_generation
     // PR2 (#3616) ships this structural install seam; its production consumer is
-    // the plaintext → encrypted enable engine landing in #3616 PR3. Until then the
-    // only caller is the concurrency-test suite, so the non-test lib build sees it
-    // as unused — allow that here rather than block the seam on its future driver.
-    // TODO(#3616 PR3): remove this allow once the enable engine calls install_wal_keyring.
-    #[allow(dead_code)]
+    // the plaintext → encrypted enable engine (#3616 PR3), which drives it from
+    // `enable_encryption` and the startup `install_pending_enable_wal_keyring` hook.
     pub(crate) fn install_wal_keyring(
         &self,
         keyring: crate::encryption::wal_encryption::WalKeyring,

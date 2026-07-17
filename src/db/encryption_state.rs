@@ -77,11 +77,9 @@ impl EncryptionState {
     /// `key_source` must be a File or Env reference; other backends are refused
     /// at write time (they carry secrets the line format cannot persist).
     ///
-    /// The producer is the `encryption enable` migration engine (Issue #3616,
-    /// landing in a follow-up commit on this same PR). Until then only the
-    /// READ + precedence path is wired into `open()`, so this constructor and
-    /// [`write_encryption_state_durable`] have test-only callers.
-    #[allow(dead_code)]
+    /// The producer is the `encryption enable` migration engine (Issue #3616 PR3,
+    /// `crate::db::encryption_enable`), which flips this authority durably as the
+    /// binding step BEFORE clearing the migration ledger.
     pub(crate) fn enabled(key_source: KeyProviderConfig) -> Self {
         Self {
             enabled: true,
@@ -208,10 +206,10 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
 /// * The directory cannot be created or the file cannot be written durably.
 ///
 /// The production caller is the `encryption enable` migration engine (Issue
-/// #3616), which lands in a follow-up commit on this PR; this foundation commit
-/// wires only the READ + precedence path into `open()`, so the writer's only
-/// callers today are the round-trip / crash-safety tests below.
-#[allow(dead_code)]
+/// #3616 PR3, `crate::db::encryption_enable`): `enable_encryption` flips the
+/// authority to `enabled` as the binding step before clearing the ledger, and
+/// `resume_pending_enable` performs the same flip when finishing an interrupted
+/// enable.
 pub(crate) fn write_encryption_state_durable(
     data_dir: &Path,
     state: &EncryptionState,
