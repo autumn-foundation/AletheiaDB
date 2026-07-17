@@ -496,6 +496,7 @@ fn query_over_ceiling_override_is_invalid_argument() {
     let v = run_query(
         &s,
         QueryRequest {
+            namespace: None,
             language: "aql".into(),
             query: "MATCH (n) RETURN n".into(),
             params: None,
@@ -528,6 +529,7 @@ fn query_byte_cap_is_resource_exhausted() {
     let v = run_query(
         &s,
         QueryRequest {
+            namespace: None,
             language: "aql".into(),
             query: "MATCH (n:Widget) RETURN n".into(),
             params: None,
@@ -559,6 +561,7 @@ fn query_row_cap_override_truncates_successfully() {
     let v = run_query(
         &s,
         QueryRequest {
+            namespace: None,
             language: "aql".into(),
             query: "MATCH (n:Widget) RETURN n".into(),
             params: None,

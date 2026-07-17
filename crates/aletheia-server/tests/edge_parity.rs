@@ -218,6 +218,7 @@ async fn create_edge_byte_parity_with_legacy_mcp() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).create_edge(CreateEdgeRequest {
+        namespace: None,
         source_id: a_mcp.as_u64(),
         target_id: b_mcp.as_u64(),
         label: "KNOWS".to_string(),
@@ -278,6 +279,7 @@ async fn create_edge_backdated_valid_time_honored() {
     );
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).create_edge(CreateEdgeRequest {
+        namespace: None,
         source_id: a_mcp.as_u64(),
         target_id: b_mcp.as_u64(),
         label: "KNOWS".to_string(),
@@ -316,6 +318,7 @@ async fn create_edge_anonymous_mode_parity() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).create_edge(CreateEdgeRequest {
+        namespace: None,
         source_id: a_mcp.as_u64(),
         target_id: b_mcp.as_u64(),
         label: "KNOWS".to_string(),
@@ -365,6 +368,7 @@ async fn get_edge_byte_parity_and_temporal_block() {
     // Shared-db byte parity: get is a pure read, so both surfaces observe the
     // same version and are byte-identical without normalization.
     let legacy: Value = serde_json::from_str(&mcp_server(&db).get_edge(GetEdgeRequest {
+        namespace: None,
         edge_id: edge.as_u64(),
         include_vectors: None,
     }))
@@ -395,6 +399,7 @@ async fn get_edge_vector_elided_by_default_and_full_with_flag() {
         "vector elided by default: {elided}"
     );
     let legacy_elided: Value = serde_json::from_str(&mcp_server(&db).get_edge(GetEdgeRequest {
+        namespace: None,
         edge_id: edge.as_u64(),
         include_vectors: None,
     }))
@@ -414,6 +419,7 @@ async fn get_edge_vector_elided_by_default_and_full_with_flag() {
         "include_vectors=true returns the raw array: {full}"
     );
     let legacy_full: Value = serde_json::from_str(&mcp_server(&db).get_edge(GetEdgeRequest {
+        namespace: None,
         edge_id: edge.as_u64(),
         include_vectors: Some(true),
     }))
@@ -430,6 +436,7 @@ async fn get_edge_missing_returns_not_found_in_band() {
     assert_eq!(http_body["error"]["code"], "NOT_FOUND");
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db).get_edge(GetEdgeRequest {
+        namespace: None,
         edge_id: 999,
         include_vectors: None,
     }))
@@ -458,6 +465,7 @@ async fn update_edge_byte_parity_with_legacy_mcp() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).update_edge(UpdateEdgeRequest {
+        namespace: None,
         edge_id: e_mcp.as_u64(),
         properties: props(&[("since", json!(2021))]),
         valid_time: None,
@@ -490,6 +498,7 @@ async fn delete_edge_byte_parity() {
     assert_eq!(http_body["deleted_edge_id"], e_http.as_u64());
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).delete_edge(DeleteEdgeRequest {
+        namespace: None,
         edge_id: e_mcp.as_u64(),
         valid_time: None,
     }))
@@ -551,6 +560,7 @@ async fn list_edges_byte_parity() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db).list_edges(ListEdgesRequest {
+        namespace: None,
         label: None,
         limit: None,
         offset: None,

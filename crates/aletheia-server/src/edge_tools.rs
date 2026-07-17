@@ -258,6 +258,40 @@ where
     }))
 }
 
+/// Convert the HTTP query-string `namespace` scope value into the raw MCP
+/// `namespace` argument (Issue #3349 FIX1), so an HTTP read scopes **identically**
+/// to its MCP twin (through the same `parse_opt_scope` / `reject_unsupported_scope`
+/// the dispatch layer applies) instead of silently dropping the scope. A single
+/// value (`?namespace=agent:planner` or `?namespace=all`) forwards as a JSON
+/// string; a comma-separated value (`?namespace=agent:planner,shared`) forwards
+/// as a JSON array union — the namespace charset (`[A-Za-z0-9._:/-]`) excludes
+/// `,`, so it is an unambiguous separator. An entirely empty value (absent, `""`,
+/// or `,,`) yields `None`, which the dispatch layer resolves to the omitted =
+/// `default`-only scope (isolated-by-default). An empty *explicit* array cannot be
+/// expressed on the query surface; a caller wanting the empty-scope
+/// `INVALID_ARGUMENT` uses a JSON-body read.
+pub(crate) fn namespace_query_value(ns: Option<String>) -> Option<Value> {
+    let raw = ns?;
+    if raw.contains(',') {
+        let items: Vec<Value> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| Value::from(entry.to_string()))
+            .collect();
+        // All-empty (`,,`) collapses to absent, never an empty array.
+        if items.is_empty() {
+            None
+        } else {
+            Some(Value::Array(items))
+        }
+    } else if raw.trim().is_empty() {
+        None
+    } else {
+        Some(Value::from(raw))
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Edge reads: get_edge / list_edges / count_edges / get_outgoing_edges /
 // get_incoming_edges — all [`ReadClass`], #3220 vector elision default +
@@ -295,6 +329,10 @@ pub struct GetEdgeQuery {
         deserialize_with = "crate::edge_tools::de_priority_properties"
     )]
     pub priority_properties: Option<Vec<String>>,
+    /// #3349: namespace read scope — a single name, a comma-separated union
+    /// (`a,b`), or `all`. Omitted = the `default` namespace only. Forwarded into
+    /// dispatch so HTTP scopes identically to the MCP twin.
+    pub namespace: Option<String>,
 }
 
 /// `get_edge` — fetch an edge by id, with bi-temporal bounds. HTTP + MCP tool.
@@ -323,6 +361,11 @@ pub async fn get_edge(
         opts.max_response_bytes,
         opts.priority_properties,
     );
+    insert_opt(
+        &mut args,
+        "namespace",
+        namespace_query_value(opts.namespace),
+    );
     tool_json(server.dispatch_tool_json("get_edge", Value::Object(args)))
 }
 
@@ -350,6 +393,12 @@ pub struct ListEdgesQuery {
         deserialize_with = "crate::edge_tools::de_priority_properties"
     )]
     pub priority_properties: Option<Vec<String>>,
+    /// #3349: namespace read scope — a single name, a comma-separated union
+    /// (`a,b`), or `all`. `list_edges` does not support namespace scoping in v1:
+    /// a narrowing scope is rejected with INVALID_ARGUMENT at dispatch (never a
+    /// silently-unscoped result), identical to the MCP twin. Forwarded so HTTP
+    /// matches.
+    pub namespace: Option<String>,
 }
 
 /// `list_edges` — list edges with optional label filtering + paging. HTTP + MCP
@@ -380,6 +429,11 @@ pub async fn list_edges(
         opts.max_response_tokens,
         opts.max_response_bytes,
         opts.priority_properties,
+    );
+    insert_opt(
+        &mut args,
+        "namespace",
+        namespace_query_value(opts.namespace),
     );
     tool_json(server.dispatch_tool_json("list_edges", Value::Object(args)))
 }

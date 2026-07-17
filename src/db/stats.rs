@@ -77,12 +77,9 @@ pub struct DatabaseStats {
     /// namespace with no explicit registrations (the `default` entry is still
     /// present when it holds entities).
     ///
-    /// **Not serialized in PR2**: surfacing this block through the MCP/HTTP
-    /// `database_stats` JSON is deliberately deferred to PR3 (the coordinated
-    /// surface slice), so the wire shape is unchanged here. The field is fully
-    /// populated on the Rust `AletheiaDB::stats()` value; only serialization is
-    /// skipped. PR3 removes this `skip` and updates the shape-stability test.
-    #[cfg_attr(feature = "serde", serde(skip_serializing))]
+    /// Serialized on the MCP/HTTP `database_stats` JSON since PR3a (the
+    /// coordinated surface slice); each entry is `{name, node_count,
+    /// edge_count}`.
     pub namespaces: Vec<crate::db::namespace_query::NamespaceCount>,
     /// Push-changefeed subscription state, including the per-principal quota
     /// breakdown (Issue #3678). This is the authenticated surface for the

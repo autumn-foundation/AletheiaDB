@@ -644,6 +644,7 @@ impl AletheiaMcpServer {
     ///     valid_time: None,
     ///     provenance: None,
     ///     derived_from: None,
+    ///     namespace: None,
     /// };
     /// ```
     ///
@@ -1364,8 +1365,21 @@ impl AletheiaMcpServer {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
             properties: self.property_map_to_json(&node.properties, include_vectors),
+            namespace: Self::namespace_field(node.namespace()),
             provenance,
             temporal,
+        }
+    }
+
+    /// Render an entity's namespace as the first-class response field
+    /// (Issue #3349): `None` for the implicit `default` namespace — so a
+    /// single-agent (`default`-only) response stays byte-identical to
+    /// pre-namespace behavior — and `Some(name)` for any non-default namespace.
+    fn namespace_field(ns: crate::core::namespace::Namespace) -> Option<String> {
+        if ns.is_default() {
+            None
+        } else {
+            Some(ns.into_string())
         }
     }
 
@@ -1382,6 +1396,7 @@ impl AletheiaMcpServer {
             target_id: edge.target.as_u64(),
             label: self.interned_to_string(edge.label),
             properties: self.property_map_to_json(&edge.properties, include_vectors),
+            namespace: Self::namespace_field(edge.namespace()),
             provenance,
             temporal,
         }
@@ -1593,6 +1608,135 @@ impl AletheiaMcpServer {
             .map(|s| self.parse_timestamp(s))
             .transpose()
             .map_err(|e| self.invalid_argument(&format!("Invalid {label}: {e}")))
+    }
+
+    /// Parse an optional namespace **write** argument (Issue #3349, PR3a),
+    /// returning a structured `INVALID_ARGUMENT` error result on a malformed
+    /// name. `None`/absent ⇒ the default namespace (unchanged behavior). A
+    /// supplied `"default"` resolves to the default namespace (equivalent to
+    /// omitting it).
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp`.
+    #[allow(clippy::result_large_err)]
+    fn parse_opt_namespace(
+        &self,
+        value: &Option<String>,
+    ) -> std::result::Result<Option<crate::core::namespace::Namespace>, CallToolResult> {
+        match value.as_deref() {
+            None => Ok(None),
+            Some(s) => match crate::core::namespace::Namespace::new(s) {
+                Ok(ns) => Ok(Some(ns)),
+                Err(e) => Err(self.db_error(crate::core::error::Error::Namespace(e))),
+            },
+        }
+    }
+
+    /// Reject an explicit namespace supplied to a **non-create** write
+    /// (update / delete — Issue #3349, PR3a): a namespace is immutable after
+    /// creation, so supplying one is `INVALID_ARGUMENT`
+    /// ([`NamespaceError::Immutable`]) rather than a silent no-op. `None` ⇒ OK.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see above.
+    #[allow(clippy::result_large_err)]
+    fn reject_namespace_on_write_update(
+        &self,
+        value: &Option<String>,
+    ) -> std::result::Result<(), CallToolResult> {
+        if value.is_some() {
+            return Err(self.db_error(crate::core::error::Error::Namespace(
+                crate::core::namespace::NamespaceError::Immutable,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Parse an optional namespace **read scope** argument (Issue #3349, PR3a).
+    ///
+    /// Accepts three JSON shapes:
+    /// - a **string** namespace name (single-namespace scope), or the special
+    ///   selector `"all"` (no filter);
+    /// - an **array of string** namespace names (the union scope);
+    /// - absent ⇒ `Ok(None)`, meaning "no explicit scope supplied". Each scoped
+    ///   read tool resolves this to [`NamespaceScope::default`] — the `default`
+    ///   namespace ONLY (isolated-by-default, #3349 FIX2) — via
+    ///   `.unwrap_or_default()`, then routes through its `*_scoped` path. This is
+    ///   exact back-compat for any pre-namespace database (all data is `default`,
+    ///   so an omitted read returns all of it) and only isolates once non-default
+    ///   namespaces exist. It is therefore equivalent to an explicit
+    ///   `"default"`, and distinct from `"all"` (which imposes no filter). The
+    ///   non-scoping tools (`list_edges`/`hybrid_query`/`query`) instead treat an
+    ///   omitted/`"all"` scope as a no-op via [`reject_unsupported_scope`].
+    ///
+    /// An **empty array** is `INVALID_ARGUMENT` (a scope that silently matches
+    /// nothing is forbidden). A malformed namespace name is `INVALID_ARGUMENT`
+    /// with `details.namespace`. An unknown (unregistered) namespace is not
+    /// rejected here — it surfaces as `NOT_FOUND` when the scoped read validates
+    /// the scope against the registry (`details.namespace`).
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see above.
+    #[allow(clippy::result_large_err)]
+    fn parse_opt_scope(
+        &self,
+        value: &Option<serde_json::Value>,
+    ) -> std::result::Result<Option<crate::core::namespace::NamespaceScope>, CallToolResult> {
+        use crate::core::error::Error;
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        // An explicit JSON null is treated as "not supplied".
+        if value.is_null() {
+            return Ok(None);
+        }
+        let scope = match value {
+            serde_json::Value::String(s) if s == "all" => NamespaceScope::All,
+            serde_json::Value::String(s) => match Namespace::new(s.as_str()) {
+                Ok(ns) => NamespaceScope::Single(ns),
+                Err(e) => return Err(self.db_error(Error::Namespace(e))),
+            },
+            serde_json::Value::Array(arr) => {
+                let mut namespaces = Vec::with_capacity(arr.len());
+                for el in arr {
+                    let Some(name) = el.as_str() else {
+                        return Err(
+                            self.invalid_argument("namespace scope array elements must be strings")
+                        );
+                    };
+                    match Namespace::new(name) {
+                        Ok(ns) => namespaces.push(ns),
+                        Err(e) => return Err(self.db_error(Error::Namespace(e))),
+                    }
+                }
+                // Empty list ⇒ INVALID_ARGUMENT (never-silently-match-nothing).
+                match NamespaceScope::list(namespaces) {
+                    Ok(scope) => scope,
+                    Err(e) => return Err(self.db_error(Error::Namespace(e))),
+                }
+            }
+            _ => {
+                return Err(self.invalid_argument(
+                    "namespace must be a string, an array of strings, or \"all\"",
+                ));
+            }
+        };
+        Ok(Some(scope))
+    }
+
+    /// For a read tool that does **not** yet support a namespace scope in v1
+    /// (`list_edges`, `hybrid_query`, `query`): accept an absent scope or the
+    /// no-op `"all"` selector (both leave behavior unchanged), but reject any
+    /// narrowing scope with a structured `INVALID_ARGUMENT` — never a silently
+    /// unscoped result (never-silently-wrong). A malformed / empty scope still
+    /// surfaces its own `parse_opt_scope` error.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see above.
+    #[allow(clippy::result_large_err)]
+    fn reject_unsupported_scope(
+        &self,
+        value: &Option<serde_json::Value>,
+        message: &str,
+    ) -> std::result::Result<(), CallToolResult> {
+        match self.parse_opt_scope(value)? {
+            None | Some(crate::core::namespace::NamespaceScope::All) => Ok(()),
+            Some(_) => Err(self.invalid_argument(message)),
+        }
     }
 
     /// Resolve a pair of independently-optional `as_of_valid_time` /
@@ -2463,7 +2607,23 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
-        match self.db.get_node(node_id) {
+        // Issue #3349: a namespace scope narrows visibility (an out-of-scope
+        // node is reported NOT_FOUND, indistinguishable from missing). Omitted ⇒
+        // the `default` namespace only (isolated-by-default, #3349 FIX2), routed
+        // through the scoped read; `all` imposes no filter (byte-identical
+        // unscoped fast path). For a pre-namespace database (all data is
+        // `default`) an omitted read still returns all of it.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let node_result = match &scope {
+            crate::core::namespace::NamespaceScope::All => self.db.get_node(node_id),
+            scope => self.db.get_node_scoped(node_id, scope),
+        };
+
+        match node_result {
             Ok(node) => {
                 let now = time::now();
                 let response =
@@ -2526,12 +2686,20 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let namespace = match self.parse_opt_namespace(&req.namespace) {
+            Ok(ns) => ns,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
         if let Some(provenance) = provenance {
             options = options.with_provenance(provenance);
+        }
+        if let Some(ns) = namespace.clone() {
+            options = options.with_namespace(ns);
         }
 
         let created = if derived_from.is_empty() {
@@ -2547,6 +2715,15 @@ impl AletheiaMcpServer {
                 )
                 .map(|(node_id, _version)| node_id)
         };
+
+        // Auto-register the (non-default) namespace only AFTER a successful
+        // commit, mirroring `create_node_in_namespace` (a failed write must not
+        // leave a durable phantom namespace).
+        if let (Ok(_), Some(ns)) = (&created, &namespace)
+            && let Err(e) = self.db.register_namespace_on_write(ns)
+        {
+            return self.db_error(e);
+        }
 
         match created {
             Ok(node_id) => match self.db.get_node(node_id) {
@@ -2578,6 +2755,12 @@ impl AletheiaMcpServer {
             // regression vs pre-#3234 responses).
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
+
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on an update is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
 
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
@@ -2645,6 +2828,12 @@ impl AletheiaMcpServer {
             // regression vs pre-#3234 responses).
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
+
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on a delete is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
 
         let detach = req.detach.unwrap_or(false);
 
@@ -3079,6 +3268,16 @@ impl AletheiaMcpServer {
             if Self::has_provenance_filter_args(&args) {
                 return self.provenance_filter_cursor_unsupported();
             }
+            // Issue #3349: a narrowing namespace scope does not yet compose with
+            // the #3360 cursor path — fail closed rather than page an unscoped
+            // scan under a scope the caller asked for.
+            if let Err(result) = self.reject_unsupported_scope(
+                &args.get("namespace").cloned(),
+                "namespace scope does not compose with cursor paging (use_cursor) in v1; page the \
+                 scoped scan with offset/limit instead, or use \"all\".",
+            ) {
+                return result;
+            }
             return self.handle_list_nodes_cursor(&args);
         }
 
@@ -3112,6 +3311,21 @@ impl AletheiaMcpServer {
         }
         if req.property_key.is_some() && req.label.is_none() {
             return self.invalid_argument("Property filtering requires 'label' to be specified");
+        }
+
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes through the scoped
+        // membership index, exactly like an explicit narrowing scope. For a
+        // pre-namespace database (all data is `default`) this still returns all
+        // of it. Only the `all` selector falls through to the full-featured
+        // unscoped path below (byte-identical to the current unscoped behavior).
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        if !matches!(scope, crate::core::namespace::NamespaceScope::All) {
+            return self.handle_list_nodes_scoped(&req, &scope, prov_filter.as_ref());
         }
 
         // One request-scoped wallclock for every entity in the response
@@ -3264,6 +3478,109 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Namespace-scoped `list_nodes` page (Issue #3349): candidates come from
+    /// the membership index (not a full scan), filtered to the given
+    /// (narrowing) `scope`, then offset/limit-paginated and rendered exactly
+    /// like the unscoped path (temporal bounds, vector elision, first-class
+    /// `namespace` field, provenance filter). Unlike the unscoped path this does
+    /// not compose with the #3360 cursor or #3353 token-budget shaping in v1
+    /// (offset paging applies).
+    fn handle_list_nodes_scoped(
+        &self,
+        req: &ListNodesRequest,
+        scope: &crate::core::namespace::NamespaceScope,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+    ) -> CallToolResult {
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .clamp(1, MAX_RESULT_LIMIT);
+        let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let now = time::now();
+
+        // No label filter: reproduce the unscoped path's guidance response
+        // exactly (byte-identical back-compat for an omitted/default-scope read —
+        // #3349 FIX2). The unscoped path declines to enumerate every node without
+        // a label; we mirror that, reporting the **in-scope** node count as
+        // `total_count` (for a pre-namespace / `default`-only database this
+        // equals `node_count()`, so the response is byte-identical). `list_nodes_
+        // scoped` also validates the scope, so an unknown namespace still surfaces
+        // as NOT_FOUND(details.namespace) here.
+        if req.label.is_none() && req.property_key.is_none() {
+            let total = match self.db.list_nodes_scoped(None, scope) {
+                Ok(ids) => ids.len(),
+                Err(e) => return self.db_error(e),
+            };
+            let mut response = json!({
+                "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
+                "total_count": total,
+                "nodes": [],
+                "count": 0,
+                "offset": offset,
+                "limit": limit
+            });
+            Self::attach_completeness(&mut response, offset, 0, false, None);
+            return self.success_json(response);
+        }
+
+        // Resolve the candidate id set within scope (validates the scope against
+        // the registry — an unknown namespace ⇒ NOT_FOUND(details.namespace)).
+        let ids_result = if let (Some(label), Some(prop_key), Some(prop_val)) =
+            (&req.label, &req.property_key, &req.property_value)
+        {
+            let property_value = match self.json_to_property_value(prop_val) {
+                Some(v) => v,
+                None => {
+                    return self.invalid_argument(
+                        "Unsupported property_value type. Use strings, numbers, booleans, or null.",
+                    );
+                }
+            };
+            self.db
+                .find_nodes_by_property_scoped(label, prop_key, &property_value, scope)
+        } else {
+            self.db.list_nodes_scoped(req.label.as_deref(), scope)
+        };
+        let node_ids = match ids_result {
+            Ok(ids) => ids,
+            Err(e) => return self.db_error(e),
+        };
+
+        let total_matching = node_ids.len();
+        let mut nodes = Vec::with_capacity(limit.min(total_matching.saturating_sub(offset)));
+        for node_id in node_ids.into_iter().skip(offset).take(limit) {
+            if let Ok(node) = self.db.get_node(node_id) {
+                let resp = self.node_to_response(&node, include_vectors, now);
+                if prov_filter.is_none_or(|f| f.matches(resp.provenance.as_ref())) {
+                    nodes.push(resp);
+                }
+            }
+        }
+
+        let has_more = offset.saturating_add(limit) < total_matching;
+        let mut response = json!({
+            "nodes": nodes,
+            "count": nodes.len(),
+            "offset": offset,
+            "limit": limit,
+        });
+        // Match the unscoped path's total-reporting exactly (byte-identical
+        // back-compat for an omitted/default-scope read — #3349 FIX2): a
+        // property lookup reports the materialized `total_matching` (as the
+        // unscoped property path does), while a label-only / no-filter scan
+        // omits it (as the unscoped label-only path does). A provenance filter
+        // makes the materialized total the *unfiltered* candidate count, so it
+        // is likewise omitted. `has_more` always carries the completeness signal.
+        let reported_total = if prov_filter.is_some() || req.property_key.is_none() {
+            None
+        } else {
+            Some(total_matching)
+        };
+        Self::attach_completeness(&mut response, offset, limit, has_more, reported_total);
+        self.success_json(response)
+    }
+
     fn handle_count_nodes(&self, args: serde_json::Value) -> CallToolResult {
         let req: CountNodesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3308,7 +3625,20 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
-        match self.db.get_edge(edge_id) {
+        // Issue #3349: a namespace scope narrows visibility. Omitted ⇒ the
+        // `default` namespace only (isolated-by-default, #3349 FIX2); `all`
+        // imposes no filter (unscoped fast path).
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let edge_result = match &scope {
+            crate::core::namespace::NamespaceScope::All => self.db.get_edge(edge_id),
+            scope => self.db.get_edge_scoped(edge_id, scope),
+        };
+
+        match edge_result {
             Ok(edge) => {
                 let now = time::now();
                 let response =
@@ -3360,12 +3690,20 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let namespace = match self.parse_opt_namespace(&req.namespace) {
+            Ok(ns) => ns,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
         if let Some(provenance) = provenance {
             options = options.with_provenance(provenance);
+        }
+        if let Some(ns) = namespace.clone() {
+            options = options.with_namespace(ns);
         }
 
         let created = if derived_from.is_empty() {
@@ -3383,6 +3721,14 @@ impl AletheiaMcpServer {
                 )
                 .map(|(edge_id, _version)| edge_id)
         };
+
+        // Auto-register the (non-default) namespace only AFTER a successful
+        // commit (see handle_create_node).
+        if let (Ok(_), Some(ns)) = (&created, &namespace)
+            && let Err(e) = self.db.register_namespace_on_write(ns)
+        {
+            return self.db_error(e);
+        }
 
         match created {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
@@ -3414,6 +3760,12 @@ impl AletheiaMcpServer {
             // regression vs pre-#3234 responses).
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
+
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on an update is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
 
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
@@ -3482,6 +3834,12 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on a delete is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
+
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
             Ok(v) => v,
             Err(result) => return result,
@@ -3528,6 +3886,16 @@ impl AletheiaMcpServer {
                 )
                 .details(json!({ "cursorable_alternatives": ["get_outgoing_edges", "get_incoming_edges"] })),
             );
+        }
+
+        // Issue #3349: list_edges does not enumerate edges by namespace in v1;
+        // a narrowing scope is INVALID_ARGUMENT (never silently unscoped).
+        if let Err(result) = self.reject_unsupported_scope(
+            &args.get("namespace").cloned(),
+            "list_edges does not enumerate edges by namespace in v1; a namespace scope is not \
+             supported here. Use the scoped adjacency/traversal reads instead, or \"all\".",
+        ) {
+            return result;
         }
 
         let req: ListEdgesRequest = match serde_json::from_value(args) {
@@ -3824,6 +4192,15 @@ impl AletheiaMcpServer {
             if Self::has_provenance_filter_args(&args) {
                 return self.provenance_filter_cursor_unsupported();
             }
+            // Issue #3349: a narrowing namespace scope does not compose with the
+            // #3360 cursor path in v1 — fail closed.
+            if let Err(result) = self.reject_unsupported_scope(
+                &args.get("namespace").cloned(),
+                "namespace scope does not compose with cursor paging (use_cursor) in v1; use \
+                 offset/limit paging with the scope instead, or \"all\".",
+            ) {
+                return result;
+            }
             return self.handle_traverse_cursor(&args);
         }
 
@@ -3869,6 +4246,42 @@ impl AletheiaMcpServer {
         // (Issue #3391).
         let now = time::now();
 
+        // Issue #3349 (FIX2): resolve an omitted scope to the `default`
+        // namespace only (isolated-by-default). An explicit *non-default*
+        // narrowing scope routes through the boundary-enforcing scoped BFS (an
+        // edge is crossed only if the edge's own namespace AND the target node's
+        // namespace are in scope, so a scope cannot leak via transit through an
+        // out-of-scope node; outgoing-only in v1). The `default` scope — whether
+        // omitted or explicit — and the `all` selector run the full unscoped DFS
+        // below, which preserves the path/depth result shape and every traversal
+        // direction; the `default` case then drops any non-default node from the
+        // returned page so an omitted read stays default-isolated (a
+        // pre-namespace database is all `default`, so nothing is dropped and the
+        // result is byte-identical).
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let default_only = match &scope {
+            crate::core::namespace::NamespaceScope::All => false,
+            crate::core::namespace::NamespaceScope::Single(ns) if ns.is_default() => true,
+            _ => {
+                return self.handle_traverse_scoped(
+                    &req,
+                    &scope,
+                    start_id,
+                    direction,
+                    depth,
+                    limit,
+                    offset,
+                    temporal,
+                    prov_filter.as_ref(),
+                    now,
+                );
+            }
+        };
+
         let (mut results, has_more) = self.run_traversal(
             start_id,
             &req.edge_label,
@@ -3890,6 +4303,18 @@ impl AletheiaMcpServer {
         // edges the DFS follows (edge-provenance-gated path pruning is a
         // documented follow-up).
         let page_window = results.len();
+        // Default-scope isolation (#3349 FIX2): drop any non-default node from
+        // the page (its response carries `Some(namespace)`; the default
+        // namespace is elided to `None`). `page_window` above is the pre-filter
+        // DFS page size, so `next_offset` still advances over the unfiltered DFS
+        // order (gap-free/dup-free), exactly like the provenance filter. v1
+        // caveat: this filters returned nodes, not the crossed edges, so it does
+        // not enforce the full scoped traversal boundary for incoming/both — the
+        // outgoing scoped BFS (explicit narrowing scope) does; this is a
+        // documented follow-up.
+        if default_only {
+            results.retain(|r| r.node.namespace.is_none());
+        }
         if let Some(filter) = &prov_filter {
             results.retain(|r| filter.matches(r.node.provenance.as_ref()));
         }
@@ -3911,6 +4336,86 @@ impl AletheiaMcpServer {
         // `total_matching` is omitted; `has_more`/`next_offset` carry the
         // completeness signal.
         Self::attach_completeness(&mut response, offset, page_window, has_more, None);
+        self.success_json(response)
+    }
+
+    /// Namespace-scoped `traverse` (Issue #3349). Routes through the
+    /// boundary-enforcing scoped BFS (`traverse_scoped` / `traverse_scoped_as_of`)
+    /// so an edge is crossed only when the edge's own namespace AND the target
+    /// node's namespace are in scope — a scope can never leak across the
+    /// boundary or via transit through an out-of-scope node.
+    ///
+    /// v1 scope limitations vs the unscoped DFS: only `direction: "outgoing"` is
+    /// supported (incoming/both ⇒ `INVALID_ARGUMENT`); the scoped BFS returns
+    /// the reachable in-scope node set (sorted by id), so each result carries
+    /// its `node` (and `depth`/`path` are omitted — the boundary-correct set,
+    /// not per-path detail); it does not compose with the #3360 cursor /
+    /// #3353 token-budget shaping (offset paging applies).
+    #[allow(clippy::too_many_arguments)]
+    fn handle_traverse_scoped(
+        &self,
+        req: &TraverseRequest,
+        scope: &crate::core::namespace::NamespaceScope,
+        start_id: NodeId,
+        direction: &str,
+        depth: usize,
+        limit: usize,
+        offset: usize,
+        temporal: Option<(Timestamp, Timestamp)>,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+        now: Timestamp,
+    ) -> CallToolResult {
+        if direction != "outgoing" {
+            return self.invalid_argument(
+                "namespace-scoped traverse supports only direction \"outgoing\" in v1; an \
+                 incoming/both scoped traversal is a follow-up.",
+            );
+        }
+        // The scoped BFS takes an optional edge label; the MCP tool always
+        // supplies one (a required field), so restrict to that relationship.
+        let edge_label = Some(req.edge_label.as_str());
+        let reachable = match temporal {
+            Some((vt, tt)) => self
+                .db
+                .traverse_scoped_as_of(start_id, edge_label, depth, vt, tt, scope),
+            None => self.db.traverse_scoped(start_id, edge_label, depth, scope),
+        };
+        let reachable = match reachable {
+            Ok(ids) => ids,
+            Err(e) => return self.db_error(e),
+        };
+
+        let total = reachable.len();
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for node_id in reachable.into_iter().skip(offset).take(limit) {
+            let node = match temporal {
+                Some((vt, tt)) => self.db.get_node_at_time(node_id, vt, tt),
+                None => self.db.get_node(node_id),
+            };
+            if let Ok(node) = node {
+                let resp = self.node_to_response(&node, include_vectors, now);
+                if prov_filter.is_none_or(|f| f.matches(resp.provenance.as_ref())) {
+                    results.push(json!({ "node": resp }));
+                }
+            }
+        }
+
+        let has_more = offset.saturating_add(limit) < total;
+        let count = results.len();
+        let mut response = match temporal {
+            Some((vt, tt)) => json!({
+                "results": results,
+                "count": count,
+                "as_of_valid_time": time::to_iso8601(vt),
+                "as_of_transaction_time": time::to_iso8601(tt),
+            }),
+            None => json!({
+                "results": results,
+                "count": count,
+            }),
+        };
+        Self::attach_completeness(&mut response, offset, limit, has_more, Some(total));
         self.success_json(response)
     }
 
@@ -4599,6 +5104,22 @@ impl AletheiaMcpServer {
             return self.invalid_argument(&e);
         }
 
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes through the
+        // filter-complete scoped k-NN (over-fetches until it has k genuinely
+        // in-scope results — never k-then-drop), exactly like an explicit
+        // narrowing scope. For a pre-namespace database (all data is `default`)
+        // this returns the same top-k. Only the `all` selector falls through to
+        // the full unscoped search below.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        if !matches!(scope, crate::core::namespace::NamespaceScope::All) {
+            return self.handle_find_similar_scoped(&req, &scope, k, offset, prov_filter.as_ref());
+        }
+
         // Over-fetch one past the requested page (offset + k + 1, capped at
         // MAX_VECTOR_K + 1 by the offset bound above) so we can tell whether
         // more similar nodes exist beyond this page (`has_more`) without a
@@ -4675,6 +5196,63 @@ impl AletheiaMcpServer {
             }
             Err(e) => self.db_error(e),
         }
+    }
+
+    /// Namespace-scoped `find_similar` (Issue #3349). Routes through the
+    /// filter-complete scoped k-NN (`find_similar_by_embedding_scoped`), which
+    /// over-fetches until it has the requested number of genuinely in-scope
+    /// results (never k-then-drop); scores and ranking order match the unscoped
+    /// search. Offset paging applies; it does not compose with the #3360 cursor
+    /// or #3353 token-budget shaping in v1.
+    fn handle_find_similar_scoped(
+        &self,
+        req: &FindSimilarRequest,
+        scope: &crate::core::namespace::NamespaceScope,
+        k: usize,
+        offset: usize,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+    ) -> CallToolResult {
+        // Over-fetch one past the page window so `has_more` is exact, capped at
+        // the MAX_VECTOR_K resource horizon. When a provenance filter is active
+        // fetch the full horizon so the returned top-k are all filter-passing.
+        let fetch_k = if prov_filter.is_some() {
+            MAX_VECTOR_K.saturating_add(1)
+        } else {
+            offset
+                .saturating_add(k)
+                .saturating_add(1)
+                .min(MAX_VECTOR_K.saturating_add(1))
+        };
+        let ranked = match self
+            .db
+            .find_similar_by_embedding_scoped(&req.embedding, fetch_k, scope)
+        {
+            Ok(r) => r,
+            Err(e) => return self.db_error(e),
+        };
+
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let now = time::now();
+        let built: Vec<SimilarityResult> = ranked
+            .into_iter()
+            .filter_map(|(node_id, score)| {
+                self.db.get_node(node_id).ok().map(|node| SimilarityResult {
+                    node: self.node_to_response(&node, include_vectors, now),
+                    score,
+                })
+            })
+            .filter(|r| prov_filter.is_none_or(|f| f.matches(r.node.provenance.as_ref())))
+            .collect();
+
+        let has_more = built.len() > offset.saturating_add(k);
+        let page: Vec<SimilarityResult> = built.into_iter().skip(offset).take(k).collect();
+        let count = page.len();
+        let mut response = json!({
+            "results": page,
+            "count": count,
+        });
+        Self::attach_completeness(&mut response, offset, k, has_more, None);
+        self.success_json(response)
     }
 
     // ========================================================================
@@ -5360,7 +5938,25 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e),
         };
 
-        match self.db.get_node_at_time(node_id, valid_time, tx_time) {
+        // Issue #3349: reconstruct at the coordinate first, then filter by the
+        // (immutable) namespace scope; out of scope ⇒ NOT_FOUND. Omitted ⇒ the
+        // `default` namespace only (isolated-by-default, #3349 FIX2); `all`
+        // imposes no filter.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let node_result = match &scope {
+            crate::core::namespace::NamespaceScope::All => {
+                self.db.get_node_at_time(node_id, valid_time, tx_time)
+            }
+            scope => self
+                .db
+                .get_node_at_time_scoped(node_id, valid_time, tx_time, scope),
+        };
+
+        match node_result {
             Ok(node) => {
                 let now = time::now();
                 let response = self.node_to_response(&node, true, now);
@@ -5399,7 +5995,24 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e),
         };
 
-        match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
+        // Issue #3349: reconstruct then filter by the (immutable) namespace
+        // scope. Omitted ⇒ the `default` namespace only (isolated-by-default,
+        // #3349 FIX2); `all` imposes no filter.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let edge_result = match &scope {
+            crate::core::namespace::NamespaceScope::All => {
+                self.db.get_edge_at_time(edge_id, valid_time, tx_time)
+            }
+            scope => self
+                .db
+                .get_edge_at_time_scoped(edge_id, valid_time, tx_time, scope),
+        };
+
+        match edge_result {
             Ok(edge) => {
                 let now = time::now();
                 let response = self.edge_to_response(&edge, true, now);
@@ -5521,12 +6134,38 @@ impl AletheiaMcpServer {
         // Snapshot-anchored cursor paging (Issue #3360); offset paging below
         // is unchanged for backward compatibility.
         if Self::cursor_requested(&args) {
+            // Issue #3349: a narrowing namespace scope does not compose with the
+            // #3360 cursor path in v1 — fail closed.
+            if let Err(result) = self.reject_unsupported_scope(
+                &args.get("namespace").cloned(),
+                "namespace scope does not compose with cursor paging (use_cursor) in v1; use \
+                 offset/limit paging with the scope instead, or \"all\".",
+            ) {
+                return result;
+            }
             return self.handle_find_nodes_at_time_cursor(&args);
         }
 
         let req: FindNodesAtTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes each candidate
+        // (reconstructed at the coordinate) through the immutable namespace
+        // filter, exactly like an explicit narrowing scope. For a pre-namespace
+        // database (all data is `default`) the candidate set is unchanged. Only
+        // the `all` selector falls through unscoped.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let scope = if matches!(scope, crate::core::namespace::NamespaceScope::All) {
+            None
+        } else {
+            Some(scope)
         };
 
         // Validate property filter: both key and value are required together
@@ -5562,15 +6201,30 @@ impl AletheiaMcpServer {
                         "Unsupported property_value type. Use strings, numbers, booleans, or null.",
                     ),
                 };
-                self.db.find_nodes_by_property_at(
-                    &req.label,
-                    prop_key,
-                    &property_value,
-                    valid_time,
-                    tx_time,
-                )
+                match &scope {
+                    Some(scope) => self.db.find_nodes_by_property_at_scoped(
+                        &req.label,
+                        prop_key,
+                        &property_value,
+                        valid_time,
+                        tx_time,
+                        scope,
+                    ),
+                    None => self.db.find_nodes_by_property_at(
+                        &req.label,
+                        prop_key,
+                        &property_value,
+                        valid_time,
+                        tx_time,
+                    ),
+                }
             } else {
-                self.db.find_nodes_at_time(&req.label, valid_time, tx_time)
+                match &scope {
+                    Some(scope) => self
+                        .db
+                        .find_nodes_at_time_scoped(&req.label, valid_time, tx_time, scope),
+                    None => self.db.find_nodes_at_time(&req.label, valid_time, tx_time),
+                }
             };
 
         match matches {
@@ -6403,12 +7057,31 @@ impl AletheiaMcpServer {
             })
             .collect();
 
+        // Per-namespace current node/edge counts (Issue #3349, PR3a): one
+        // `{name, node_count, edge_count}` entry per registered-or-populated
+        // namespace, sorted by name. Empty for a bi-temporal (`as_of`) schema
+        // (the membership index is a current-state acceleration structure).
+        // NamespaceCount.name is a user-facing namespace name, never the elided
+        // ride-along key.
+        let namespaces: Vec<serde_json::Value> = schema
+            .namespaces
+            .iter()
+            .map(|n| {
+                json!({
+                    "name": n.name,
+                    "node_count": n.node_count,
+                    "edge_count": n.edge_count,
+                })
+            })
+            .collect();
+
         json!({
             "node_labels": node_labels,
             "edge_types": edge_types,
             "total_nodes": schema.total_nodes,
             "total_edges": schema.total_edges,
             "sampled": schema.sampled,
+            "namespaces": namespaces,
             "as_of": schema.as_of.map(|instant| json!({
                 "valid_time": time::to_iso8601(instant.valid_time),
                 "transaction_time": time::to_iso8601(instant.transaction_time),
@@ -6912,6 +7585,18 @@ impl AletheiaMcpServer {
     }
 
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
+        // Issue #3349: a filter-complete namespace scope over the vector ranking
+        // is not implemented for hybrid_query in v1; a narrowing scope is
+        // INVALID_ARGUMENT (never silently unscoped / incorrectly post-filtered).
+        if let Err(result) = self.reject_unsupported_scope(
+            &args.get("namespace").cloned(),
+            "hybrid_query does not support a namespace scope in v1 (a filter-complete scope over \
+             vector ranking is a follow-up). Use find_similar or traverse with a namespace scope \
+             instead, or \"all\".",
+        ) {
+            return result;
+        }
+
         // Issue #3348: parse the optional provenance filter before consuming args.
         let prov_filter = match self.parse_provenance_filter(&args) {
             Ok(f) => f,
@@ -7455,6 +8140,18 @@ impl AletheiaMcpServer {
         // Cursor paging is not supported for the declarative query tool in v1
         // (Issue #3360); captured before `args` is consumed by deserialization.
         let cursor_requested = Self::cursor_requested(&args);
+
+        // Issue #3349: declarative (AQL/Cypher) namespace scoping is a follow-up;
+        // a narrowing scope is rejected (never silently unscoped). Captured
+        // before `args` is consumed by deserialization.
+        if let Err(result) = self.reject_unsupported_scope(
+            &args.get("namespace").cloned(),
+            "declarative (AQL/Cypher) namespace scoping is not supported by the query tool in v1; \
+             use USE NAMESPACE in the query language when it lands, or the structured scoped read \
+             tools. Pass \"all\" to run unscoped.",
+        ) {
+            return result;
+        }
 
         let req: QueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,

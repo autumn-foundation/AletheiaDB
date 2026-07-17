@@ -151,6 +151,11 @@ pub struct FindSimilarBody {
     pub max_response_bytes: Option<u64>,
     /// #3353: property keys to protect first as the response degrades.
     pub priority_properties: Option<Vec<String>>,
+    /// #3349: namespace read scope — a JSON string (single name or `all`) or an
+    /// array of names (union). Omitted = the `default` namespace only
+    /// (isolated-by-default). Forwarded into dispatch so HTTP scopes identically
+    /// to the MCP twin (filter-complete scoped k-NN).
+    pub namespace: Option<Value>,
 }
 
 /// `find_similar` — k-nearest-neighbor search for nodes whose `property_name`
@@ -193,6 +198,7 @@ pub async fn find_similar(
         opts.max_response_bytes,
         opts.priority_properties,
     );
+    insert_opt(&mut args, "namespace", opts.namespace);
     dispatch_slow_read(&security, &state, "find_similar", Value::Object(args)).await
 }
 
@@ -236,6 +242,11 @@ pub struct HybridQueryBody {
     pub max_response_bytes: Option<u64>,
     /// #3353: property keys to protect first as the response degrades.
     pub priority_properties: Option<Vec<String>>,
+    /// #3349: namespace read scope — a JSON string (single name or `all`) or an
+    /// array of names (union). `hybrid_query` does not support namespace scoping
+    /// in v1: a narrowing scope is rejected with INVALID_ARGUMENT at dispatch
+    /// (never a silently-unscoped result), identical to the MCP twin.
+    pub namespace: Option<Value>,
 }
 
 /// `hybrid_query` — combined graph traversal + vector similarity + temporal
@@ -307,6 +318,7 @@ pub async fn hybrid_query(
         opts.max_response_bytes,
         opts.priority_properties,
     );
+    insert_opt(&mut args, "namespace", opts.namespace);
     dispatch_slow_read(&security, &state, "hybrid_query", Value::Object(args)).await
 }
 
@@ -358,6 +370,11 @@ pub struct QueryBody {
     pub use_cursor: Option<bool>,
     /// #3360: not supported by the `query` tool in v1 (see `use_cursor`).
     pub cursor: Option<String>,
+    /// #3349: namespace read scope — a JSON string (single name or `all`) or an
+    /// array of names (union). Declarative (AQL/Cypher) namespace scoping is a
+    /// follow-up: a narrowing scope is rejected with INVALID_ARGUMENT at dispatch
+    /// (never a silently-unscoped result), identical to the MCP twin.
+    pub namespace: Option<Value>,
 }
 
 /// `query` — execute a single read-only declarative statement (Cypher or AQL)
@@ -396,6 +413,7 @@ pub async fn query(
     );
     insert_opt(&mut args, "use_cursor", opts.use_cursor.map(Value::from));
     insert_opt(&mut args, "cursor", opts.cursor.map(Value::from));
+    insert_opt(&mut args, "namespace", opts.namespace);
     dispatch_slow_read(&security, &state, "query", Value::Object(args)).await
 }
 

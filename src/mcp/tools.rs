@@ -147,6 +147,18 @@ pub struct GetNodeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace scope. Omitted = the `default` namespace only \
+                       (isolated-by-default); for a pre-namespace database (all data is `default`) \
+                       that still returns all of it. Pass a single namespace name (string) to scope \
+                       to it, an array of names for a union (the read sees any of them), or the \
+                       string \"all\" for every namespace (no filter). An out-of-scope entity is \
+                       reported NOT_FOUND (indistinguishable from missing). An unknown namespace is \
+                       NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to create a new node.
@@ -188,6 +200,17 @@ pub struct CreateNodeRequest {
                        Omit for no lineage. Query it later via lineage_upstream/lineage_downstream."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace to create this node in (Issue #3349).
+    #[schemars(
+        description = "Optional namespace (agent/session scope) to create this node in, e.g. \
+                       'agent:planner'. Omit to use the default namespace ('default'), which is \
+                       byte-identical to pre-namespace behavior. An unknown namespace is \
+                       auto-registered. The namespace is fixed at creation and immutable \
+                       thereafter; it is surfaced back as the first-class `namespace` field on \
+                       reads and never as a user property. Charset [A-Za-z0-9._:/-], max 128 bytes."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to update an existing node's properties.
@@ -228,6 +251,16 @@ pub struct UpdateNodeRequest {
                        before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable after
+    /// creation, so supplying one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on an \
+                       update is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it; the node keeps its original namespace, echoed back as the \
+                       first-class `namespace` field."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to delete a node.
@@ -262,6 +295,15 @@ pub struct DeleteNodeRequest {
                        Transaction time is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on a \
+                       delete is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to retract a node: close its valid-time interval without
@@ -365,6 +407,16 @@ pub struct ListNodesRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. When set, only nodes whose namespace is in scope are listed. An \
+                       unknown namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to count nodes.
@@ -393,6 +445,15 @@ pub struct GetEdgeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. Out of scope, the edge is reported NOT_FOUND. An unknown namespace \
+                       is NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to create a new edge between nodes.
@@ -441,6 +502,17 @@ pub struct CreateEdgeRequest {
                        write with a structured error before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace to create this edge in (Issue #3349).
+    #[schemars(
+        description = "Optional namespace (agent/session scope) to create this edge in, e.g. \
+                       'agent:planner'. Omit to use the default namespace ('default'). An unknown \
+                       namespace is auto-registered. A cross-namespace edge (endpoints in other \
+                       namespaces) is legal; the edge's own namespace governs whether a scoped \
+                       traversal crosses it. Immutable after creation; echoed back as the \
+                       first-class `namespace` field. Charset [A-Za-z0-9._:/-], max 128 bytes."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to update an existing edge's properties.
@@ -481,6 +553,16 @@ pub struct UpdateEdgeRequest {
                        write before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on an \
+                       update is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it; the edge keeps its original namespace, echoed back as the \
+                       first-class `namespace` field."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to delete an edge.
@@ -499,6 +581,15 @@ pub struct DeleteEdgeRequest {
                        is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on a \
+                       delete is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to list edges with optional filtering.
@@ -523,6 +614,16 @@ pub struct ListEdgesRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). NOTE: list_edges does not enumerate \
+                       edges by namespace in v1; supplying a scope other than \"all\" returns a \
+                       structured INVALID_ARGUMENT rather than a silently-unscoped result. Use the \
+                       scoped adjacency/traversal reads instead."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to count edges.
@@ -651,6 +752,19 @@ pub struct TraverseRequest {
         description = "Optional transaction time (ISO 8601 or microseconds since epoch). Supplying this or as_of_valid_time switches to a bi-temporal, point-in-time traversal. If omitted while as_of_valid_time is set, defaults to the current time."
     )]
     pub as_of_transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       traversal. When set, an edge is crossed only if BOTH the edge's own \
+                       namespace AND the target node's namespace are in scope, so a scope can never \
+                       leak across the boundary. An unknown namespace is NOT_FOUND \
+                       (details.namespace); an empty array is INVALID_ARGUMENT. In v1 a scoped \
+                       traverse does not compose with the #3360 cursor / #3353 token-budget \
+                       shaping (offset paging still applies)."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -697,6 +811,17 @@ pub struct FindSimilarRequest {
                        is always returned in full regardless of this flag."
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       search. When set, the k-NN search is filter-complete: it over-fetches until \
+                       it has k genuinely in-scope results (never k-then-drop), with scores and \
+                       ordering unchanged. An unknown namespace is NOT_FOUND (details.namespace); \
+                       an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -933,6 +1058,17 @@ pub struct GetNodeAtTimeRequest {
         description = "Transaction time as ISO 8601 timestamp (when recorded). If not provided, uses current time."
     )]
     pub transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. The point-in-time reconstruction runs first, then the namespace \
+                       filter (immutable membership). Out of scope ⇒ NOT_FOUND. An unknown \
+                       namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to get an edge at a specific point in time.
@@ -954,6 +1090,17 @@ pub struct GetEdgeAtTimeRequest {
         description = "Transaction time as ISO 8601 timestamp (when recorded). If not provided, uses current time."
     )]
     pub transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. The point-in-time reconstruction runs first, then the namespace \
+                       filter (immutable membership). Out of scope ⇒ NOT_FOUND. An unknown \
+                       namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to find nodes by label (and optional exact property match) as of
@@ -1011,6 +1158,16 @@ pub struct FindNodesAtTimeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. Each candidate is reconstructed at (valid_time, transaction_time) \
+                       first, then filtered by its immutable namespace. An unknown namespace is \
+                       NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to list graph-wide changes (node & edge versions) committed within a
@@ -1298,6 +1455,17 @@ pub struct HybridQueryRequest {
                        is always returned in full regardless of this flag."
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). NOTE: hybrid_query does not yet \
+                       compose a filter-complete namespace scope with its vector ranking in v1; \
+                       supplying a scope other than \"all\" returns a structured INVALID_ARGUMENT \
+                       rather than a silently-unscoped (or incorrectly post-filtered) result. Use \
+                       find_similar / traverse with a namespace scope instead."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -1345,6 +1513,17 @@ pub struct QueryRequest {
                        an unbounded ceiling)."
     )]
     pub limits: Option<super::limits::QueryLimitsOverride>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). NOTE: declarative (AQL/Cypher) \
+                       namespace scoping is a follow-up; supplying a scope other than \"all\" \
+                       returns a structured INVALID_ARGUMENT rather than a silently-unscoped \
+                       result. Use USE NAMESPACE in the query language when it lands, or the \
+                       structured scoped read tools."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -1596,6 +1775,13 @@ pub struct NodeResponse {
     pub id: u64,
     pub label: String,
     pub properties: HashMap<String, serde_json::Value>,
+    /// The node's immutable namespace (Issue #3349), surfaced as a first-class
+    /// field (the ride-along property is elided). Omitted for `default`-namespace
+    /// entities so a single-agent (`default`-only) response stays byte-identical
+    /// to pre-namespace behavior (design AC1); present whenever the namespace is
+    /// non-default.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub namespace: Option<String>,
     /// The current version's write-time provenance bundle, if any. Omitted
     /// (never a fabricated `null`) when the version has none (Issue #3224).
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1615,6 +1801,13 @@ pub struct EdgeResponse {
     pub target_id: u64,
     pub label: String,
     pub properties: HashMap<String, serde_json::Value>,
+    /// The edge's immutable namespace (Issue #3349), surfaced as a first-class
+    /// field (the ride-along property is elided). Omitted for `default`-namespace
+    /// entities so a single-agent (`default`-only) response stays byte-identical
+    /// to pre-namespace behavior (design AC1); present whenever the namespace is
+    /// non-default.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub namespace: Option<String>,
     /// The current version's write-time provenance bundle, if any. Omitted
     /// (never a fabricated `null`) when the version has none (Issue #3224).
     #[serde(skip_serializing_if = "Option::is_none", default)]

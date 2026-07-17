@@ -121,6 +121,19 @@ impl Namespace {
                 reason: "'all' is a read-scope selector, not a creatable namespace".to_string(),
             });
         }
+        // Reject the engine-owned reserved prefixes as namespace *names* (Issue
+        // #3349 hardening), symmetric with the property-key reservation: a
+        // namespace called `__aletheia_ns` / `__shred_x` would collide with the
+        // ride-along marker space. Reuse the single reserved-prefix predicate.
+        if is_reserved_property_key(&name) {
+            return Err(NamespaceError::InvalidName {
+                reason: format!(
+                    "namespace must not use an engine-reserved prefix ('{ALETHEIA_RESERVED_PREFIX}' \
+                     or '{SHRED_RESERVED_PREFIX}')"
+                ),
+                name,
+            });
+        }
         if let Some(bad) = name
             .chars()
             .find(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | ':' | '/' | '-'))
@@ -695,6 +708,23 @@ mod tests {
         assert!(Namespace::new(&long).is_err());
         let ok = "a".repeat(MAX_NAMESPACE_LEN);
         assert!(Namespace::new(&ok).is_ok());
+    }
+
+    #[test]
+    fn reserved_prefix_names_rejected() {
+        // A namespace name may not use an engine-reserved prefix (symmetry with
+        // the property-key reservation, Issue #3349 hardening).
+        for name in ["__aletheia_ns", "__aletheia_foo", "__shred_x", "__shred_"] {
+            let err = Namespace::new(name).unwrap_err();
+            match err {
+                NamespaceError::InvalidName { name: n, .. } => assert_eq!(n, name),
+                other => panic!("expected InvalidName for {name}, got {other:?}"),
+            }
+        }
+        // A name that merely *contains* (not starts with) the marker is fine,
+        // as is a single-underscore near-miss.
+        assert!(Namespace::new("agent:__aletheia").is_ok());
+        assert!(Namespace::new("_aletheia_ns").is_ok());
     }
 
     #[test]
