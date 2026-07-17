@@ -32,10 +32,12 @@ const PROM_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 const ALLOWED_LABEL_KEYS: &[&str] = &["category", "event"];
 
 /// The exact number of time series the exposition emits: 7 error categories +
-/// 3 critical events + 2 unlabeled scalars (write_conflicts, transaction_commits).
+/// 3 critical events + 4 unlabeled scalars (write_conflicts, transaction_commits,
+/// aletheiadb_changefeed_subscriptions_active, aletheiadb_changefeed_quota_rejections_total).
+/// The last two bounded changefeed series were added by PR #3688.
 /// Pinning this count makes a future label/series addition fail loudly rather
 /// than silently widening the exposed surface.
-const EXPECTED_SERIES_COUNT: usize = 12;
+const EXPECTED_SERIES_COUNT: usize = 14;
 
 /// Parse every sample line's label KEYS (the identifiers left of each `=`) and
 /// count the total number of sample (time-series) lines. Comment/blank lines are
@@ -274,6 +276,6 @@ async fn metrics_endpoint_does_not_leak_credentials() {
     );
     assert_eq!(
         series, EXPECTED_SERIES_COUNT,
-        "exposition must emit exactly {EXPECTED_SERIES_COUNT} time series (7 error categories + 3 critical events + 2 scalars)"
+        "exposition must emit exactly {EXPECTED_SERIES_COUNT} time series (7 error categories + 3 critical events + 4 scalars)"
     );
 }

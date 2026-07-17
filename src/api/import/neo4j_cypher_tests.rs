@@ -949,7 +949,7 @@ fn scale_smoke_10k_nodes_50k_rels() {
         .expect("scale import");
     assert_eq!(report.nodes_imported, n);
     assert_eq!(report.relationships_imported, n * 5);
-    assert!(report.zero_loss, "{:?}", &report.unsupported);
+    assert!(report.zero_loss, "{:?}", report.unsupported);
     assert_eq!(db.node_count(), n);
 }
 
