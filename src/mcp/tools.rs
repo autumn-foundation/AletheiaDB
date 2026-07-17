@@ -757,12 +757,17 @@ pub struct TraverseRequest {
     #[schemars(
         description = "Optional namespace read scope: a single namespace name (string), an array \
                        of names (union), or \"all\" (no filter). Omit for the current, unscoped \
-                       traversal. When set, an edge is crossed only if BOTH the edge's own \
-                       namespace AND the target node's namespace are in scope, so a scope can never \
-                       leak across the boundary. An unknown namespace is NOT_FOUND \
-                       (details.namespace); an empty array is INVALID_ARGUMENT. In v1 a scoped \
-                       traverse does not compose with the #3360 cursor / #3353 token-budget \
-                       shaping (offset paging still applies)."
+                       traversal. With an explicit NON-DEFAULT scope, an edge is crossed only if \
+                       BOTH the edge's own namespace AND the target node's namespace are in scope, \
+                       so a non-default scope is boundary-enforced and can never leak across the \
+                       boundary. CAVEAT: an omitted scope or an explicit 'default' scope only \
+                       filters non-default nodes out of the RESULT — the underlying traversal still \
+                       routes THROUGH non-default (hidden) nodes to reach default ones, so \
+                       reachability can be inferred through data that is never returned. Use an \
+                       explicit non-default scope when you need boundary-enforced traversal. An \
+                       unknown namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT. In v1 a scoped traverse does not compose with the #3360 \
+                       cursor / #3353 token-budget shaping (offset paging still applies)."
     )]
     pub namespace: Option<serde_json::Value>,
 }
@@ -1604,6 +1609,43 @@ pub struct TemporalExtentRequest {
 /// single call.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct DatabaseStatsRequest {}
+
+// ============================================================================
+// Namespace management (Issue #3349, PR3b)
+// ============================================================================
+
+/// Request to create (register) an agent-scoped namespace.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CreateNamespaceRequest {
+    /// The namespace name to register (e.g. "agent:planner").
+    #[schemars(
+        description = "The namespace name to register, e.g. 'agent:planner'. Charset \
+                       [A-Za-z0-9._:/-], max 128 bytes. The implicit 'default' namespace and the \
+                       reserved 'all' selector cannot be created (CONFLICT / INVALID_ARGUMENT). \
+                       Registering a namespace up front makes an empty one listable/describable; \
+                       writing to an unknown namespace also auto-registers it."
+    )]
+    pub name: String,
+
+    /// Optional human-readable description.
+    #[schemars(description = "Optional human-readable description of the namespace's purpose")]
+    pub description: Option<String>,
+}
+
+/// Request to list all registered namespaces. Takes no arguments.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct ListNamespacesRequest {}
+
+/// Request to describe a single namespace by name.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DescribeNamespaceRequest {
+    /// The namespace name to describe.
+    #[schemars(
+        description = "The namespace name to describe. The implicit 'default' namespace always \
+                       resolves; an unregistered name is NOT_FOUND (details.namespace)."
+    )]
+    pub name: String,
+}
 
 // ============================================================================
 // Provenance hash chain (Issue #3351)

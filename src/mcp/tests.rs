@@ -19149,3 +19149,309 @@ mod namespace_surface_sweep_tests {
         );
     }
 }
+
+// ============================================================================
+// Namespace management tools (Issue #3349, PR3b):
+// create_namespace / list_namespaces / describe_namespace — driven through the
+// real `dispatch_tool_json` seam.
+// ============================================================================
+
+mod namespace_tools_tests {
+    use super::*;
+    use crate::auth::{AuthMode, AuthStore, Role, SecretString};
+    use crate::mcp::McpAuthConfig;
+
+    fn as_json(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("valid JSON response")
+    }
+
+    /// A `Required`-mode server whose session credential resolves to `role`.
+    fn server_with_role(role: Role) -> AletheiaMcpServer {
+        let store = Arc::new(AuthStore::new());
+        let (_principal, key) = store
+            .create_key(&format!("ns-{role}"), role)
+            .expect("create key");
+        AletheiaMcpServer::with_auth(
+            create_test_db(),
+            McpAuthConfig::new(AuthMode::Required, Arc::clone(&store))
+                .with_credential(SecretString::new(key.as_str())),
+        )
+    }
+
+    #[test]
+    fn create_namespace_round_trips() {
+        let server = create_test_server();
+        let out = server.dispatch_tool_json(
+            "create_namespace",
+            serde_json::json!({ "name": "agent:planner", "description": "planner scope" }),
+        );
+        let v = as_json(&out);
+        assert!(v.get("error").is_none(), "create must succeed: {out}");
+        assert_eq!(v["name"], "agent:planner");
+        assert_eq!(v["description"], "planner scope");
+        assert!(
+            v.get("created_at").and_then(|c| c.as_str()).is_some(),
+            "create_namespace must return a created_at timestamp: {out}"
+        );
+        assert!(
+            !out.contains("__aletheia_"),
+            "no reserved key may leak: {out}"
+        );
+    }
+
+    #[test]
+    fn create_namespace_without_description_is_null() {
+        let server = create_test_server();
+        let out = server.dispatch_tool_json(
+            "create_namespace",
+            serde_json::json!({ "name": "session:1" }),
+        );
+        let v = as_json(&out);
+        assert_eq!(v["name"], "session:1");
+        assert!(
+            v["description"].is_null(),
+            "an omitted description is JSON null: {out}"
+        );
+    }
+
+    #[test]
+    fn create_namespace_duplicate_is_conflict() {
+        let server = create_test_server();
+        server.dispatch_tool_json("create_namespace", serde_json::json!({ "name": "agent:a" }));
+        let out =
+            server.dispatch_tool_json("create_namespace", serde_json::json!({ "name": "agent:a" }));
+        let v = as_json(&out);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("CONFLICT"),
+            "a duplicate namespace must be CONFLICT: {out}"
+        );
+        assert_eq!(
+            v.pointer("/error/retriable").and_then(|r| r.as_bool()),
+            Some(false),
+            "CONFLICT on a duplicate name is non-retriable: {out}"
+        );
+    }
+
+    #[test]
+    fn create_default_namespace_is_conflict() {
+        let server = create_test_server();
+        let out =
+            server.dispatch_tool_json("create_namespace", serde_json::json!({ "name": "default" }));
+        assert_eq!(
+            as_json(&out)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("CONFLICT"),
+            "creating the implicit default namespace must be CONFLICT: {out}"
+        );
+    }
+
+    #[test]
+    fn create_namespace_invalid_name_is_invalid_argument() {
+        let server = create_test_server();
+        // A whitespace-bearing name violates the charset.
+        let out = server.dispatch_tool_json(
+            "create_namespace",
+            serde_json::json!({ "name": "bad name!" }),
+        );
+        assert_eq!(
+            as_json(&out)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "a malformed name must be INVALID_ARGUMENT: {out}"
+        );
+    }
+
+    #[test]
+    fn create_reserved_all_selector_is_invalid_argument() {
+        let server = create_test_server();
+        let out =
+            server.dispatch_tool_json("create_namespace", serde_json::json!({ "name": "all" }));
+        assert_eq!(
+            as_json(&out)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "the reserved 'all' selector must be INVALID_ARGUMENT: {out}"
+        );
+    }
+
+    #[test]
+    fn list_namespaces_includes_default_and_created() {
+        let server = create_test_server();
+        server.dispatch_tool_json(
+            "create_namespace",
+            serde_json::json!({ "name": "agent:planner", "description": "p" }),
+        );
+        let out = server.dispatch_tool_json("list_namespaces", serde_json::json!({}));
+        let v = as_json(&out);
+        let namespaces = v["namespaces"].as_array().expect("namespaces array");
+        assert_eq!(
+            v["count"].as_u64(),
+            Some(namespaces.len() as u64),
+            "count must equal the array length: {out}"
+        );
+        // default is always first.
+        assert_eq!(namespaces[0]["name"], "default");
+        let names: Vec<&str> = namespaces
+            .iter()
+            .filter_map(|n| n["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"agent:planner"),
+            "the created namespace must be listed: {out}"
+        );
+        // Per-namespace counts are present.
+        for entry in namespaces {
+            assert!(
+                entry.get("node_count").and_then(|c| c.as_u64()).is_some(),
+                "each entry carries node_count: {out}"
+            );
+            assert!(
+                entry.get("edge_count").and_then(|c| c.as_u64()).is_some(),
+                "each entry carries edge_count: {out}"
+            );
+        }
+        assert!(
+            !out.contains("__aletheia_"),
+            "no reserved key may leak: {out}"
+        );
+    }
+
+    #[test]
+    fn list_namespaces_reflects_current_counts() {
+        let (server, _a, _b) = {
+            let server = create_test_server();
+            let a = server
+                .db()
+                .create_node_in_namespace(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    "agent:planner",
+                )
+                .expect("node");
+            let b = server
+                .db()
+                .create_node_in_namespace(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    "agent:planner",
+                )
+                .expect("node");
+            (server, a, b)
+        };
+        let out = server.dispatch_tool_json("list_namespaces", serde_json::json!({}));
+        let v = as_json(&out);
+        let planner = v["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "agent:planner")
+            .expect("agent:planner listed");
+        assert_eq!(
+            planner["node_count"].as_u64(),
+            Some(2),
+            "two nodes were written to agent:planner: {out}"
+        );
+    }
+
+    #[test]
+    fn describe_namespace_known_returns_info_and_counts() {
+        let server = create_test_server();
+        server.dispatch_tool_json(
+            "create_namespace",
+            serde_json::json!({ "name": "agent:planner", "description": "planner" }),
+        );
+        let out = server.dispatch_tool_json(
+            "describe_namespace",
+            serde_json::json!({ "name": "agent:planner" }),
+        );
+        let v = as_json(&out);
+        assert!(v.get("error").is_none(), "describe must succeed: {out}");
+        assert_eq!(v["name"], "agent:planner");
+        assert_eq!(v["description"], "planner");
+        assert!(v.get("created_at").is_some(), "created_at present: {out}");
+        assert!(v.get("node_count").is_some(), "node_count present: {out}");
+        assert!(v.get("edge_count").is_some(), "edge_count present: {out}");
+    }
+
+    #[test]
+    fn describe_default_namespace_always_resolves() {
+        let server = create_test_server();
+        let out = server.dispatch_tool_json(
+            "describe_namespace",
+            serde_json::json!({ "name": "default" }),
+        );
+        let v = as_json(&out);
+        assert!(v.get("error").is_none(), "default must resolve: {out}");
+        assert_eq!(v["name"], "default");
+    }
+
+    #[test]
+    fn describe_unknown_namespace_is_not_found() {
+        let server = create_test_server();
+        let out = server.dispatch_tool_json(
+            "describe_namespace",
+            serde_json::json!({ "name": "agent:nonexistent" }),
+        );
+        let v = as_json(&out);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "an unregistered namespace must be NOT_FOUND: {out}"
+        );
+        assert_eq!(
+            v.pointer("/error/details/namespace")
+                .and_then(|n| n.as_str()),
+            Some("agent:nonexistent"),
+            "NOT_FOUND must carry the offending namespace in details: {out}"
+        );
+    }
+
+    #[test]
+    fn three_tools_present_in_live_catalog_of_61() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert_eq!(tools.len(), 61, "the live catalog must be exactly 61 tools");
+        for name in ["create_namespace", "list_namespaces", "describe_namespace"] {
+            assert!(
+                tools.iter().any(|t| t == name),
+                "{name} must be advertised in tools/list"
+            );
+        }
+    }
+
+    #[test]
+    fn reader_denied_create_namespace_writer_allowed() {
+        // A reader may NOT create a namespace (write-class tool).
+        let reader = server_with_role(Role::Reader);
+        let out =
+            reader.dispatch_tool_json("create_namespace", serde_json::json!({ "name": "agent:x" }));
+        assert_eq!(
+            as_json(&out)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("PERMISSION_DENIED"),
+            "a reader must be denied create_namespace: {out}"
+        );
+
+        // A reader MAY list/describe (read-class tools).
+        let listed = reader.dispatch_tool_json("list_namespaces", serde_json::json!({}));
+        assert!(
+            as_json(&listed).get("error").is_none(),
+            "a reader may list namespaces: {listed}"
+        );
+
+        // A writer MAY create.
+        let writer = server_with_role(Role::Writer);
+        let created =
+            writer.dispatch_tool_json("create_namespace", serde_json::json!({ "name": "agent:y" }));
+        assert!(
+            as_json(&created).get("error").is_none(),
+            "a writer may create a namespace: {created}"
+        );
+        assert_eq!(as_json(&created)["name"], "agent:y");
+    }
+}

@@ -1018,7 +1018,7 @@ fn forged_principal_on_destructive_op_is_ignored() {
 /// adding a Write/Metrics tool) must touch this literal list too.
 #[test]
 fn write_and_metrics_sets_match_hardcoded_snapshot() {
-    const EXPECTED_WRITE: [&str; 14] = [
+    const EXPECTED_WRITE: [&str; 15] = [
         "create_node",
         "update_node",
         "delete_node",
@@ -1033,6 +1033,8 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
         "enable_unique_constraint",
         "create_node_with_embedding",
         "update_node_embedding",
+        // Namespace creation (Issue #3349, PR3b).
+        "create_namespace",
     ];
     const EXPECTED_METRICS: [&str; 1] = ["database_stats"];
 
@@ -1065,8 +1067,8 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
     // Everything else must be Read (no fourth class sneaking in).
     assert_eq!(
         TOOL_ACCESS_CLASSES.len(),
-        actual_write.len() + actual_metrics.len() + 43,
-        "Read tool count changed (expected 43); if a tool was added or \
+        actual_write.len() + actual_metrics.len() + 45,
+        "Read tool count changed (expected 45); if a tool was added or \
          removed, re-verify its classification and update this count"
     );
 }
@@ -1089,27 +1091,27 @@ fn classification_uses_known_classes_only() {
 // 6. Live tool-inventory golden (drift detection for the external mirror)
 //
 // The external `tests/parity_mcp.rs::tool_inventory_golden_is_stable` test can
-// only validate a hardcoded 58-tool constant against itself, because the live
+// only validate a hardcoded 61-tool constant against itself, because the live
 // registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)` and
 // unreachable from an external test crate. This in-crate test closes that gap:
 // it derives the LIVE advertised `(tool_name, access_class)` set from the
-// registry and asserts it equals a hardcoded golden snapshot of the 58 pairs.
+// registry and asserts it equals a hardcoded golden snapshot of the 61 pairs.
 // A tool that is added, removed, renamed, or reclassified FAILS here — the
 // authoritative drift detector the external mirror points back to.
 // ============================================================================
 
 /// AC3 (drift): the LIVE advertised MCP tool inventory — every name paired
 /// with the `AccessClass` the registry assigns it — must equal this hardcoded
-/// golden set of exactly 58 pairs. Adding, dropping, renaming, or
+/// golden set of exactly 61 pairs. Adding, dropping, renaming, or
 /// reclassifying a tool changes the live set and fails this assertion; update
 /// the golden here AND the external mirror (`tests/parity_mcp.rs`) +
 /// `tests/parity/inventory.json` deliberately when that happens.
 #[test]
 fn live_tool_inventory_matches_golden() {
-    /// The 58 `(tool_name, access_class)` pairs the server is expected to
+    /// The 61 `(tool_name, access_class)` pairs the server is expected to
     /// advertise, derived from the current live `TOOL_ACCESS_CLASSES`.
-    const GOLDEN: [(&str, AccessClass); 58] = [
-        // Read (43)
+    const GOLDEN: [(&str, AccessClass); 61] = [
+        // Read (45)
         ("get_node", AccessClass::Read),
         ("list_nodes", AccessClass::Read),
         ("count_nodes", AccessClass::Read),
@@ -1155,9 +1157,12 @@ fn live_tool_inventory_matches_golden() {
         ("audit_export", AccessClass::Read),
         ("verify_chain", AccessClass::Read),
         ("export_chain_head", AccessClass::Read),
+        // Namespace discovery (Issue #3349, PR3b).
+        ("list_namespaces", AccessClass::Read),
+        ("describe_namespace", AccessClass::Read),
         // Metrics (1)
         ("database_stats", AccessClass::Metrics),
-        // Write (14)
+        // Write (15)
         ("create_node", AccessClass::Write),
         ("update_node", AccessClass::Write),
         ("delete_node", AccessClass::Write),
@@ -1172,6 +1177,8 @@ fn live_tool_inventory_matches_golden() {
         ("enable_unique_constraint", AccessClass::Write),
         ("create_node_with_embedding", AccessClass::Write),
         ("update_node_embedding", AccessClass::Write),
+        // Namespace creation (Issue #3349, PR3b).
+        ("create_namespace", AccessClass::Write),
     ];
 
     // Golden as a set of (name, class-string) pairs.
@@ -1179,7 +1186,7 @@ fn live_tool_inventory_matches_golden() {
         .iter()
         .map(|(name, class)| ((*name).to_string(), class.to_string()))
         .collect();
-    assert_eq!(golden.len(), 58, "golden must be 58 unique tool names");
+    assert_eq!(golden.len(), 61, "golden must be 61 unique tool names");
 
     // Live set derived from the advertised registry + classification table.
     let server = AletheiaMcpServer::new(db());
@@ -1197,7 +1204,7 @@ fn live_tool_inventory_matches_golden() {
     assert_eq!(
         live, golden,
         "the LIVE advertised MCP tool inventory drifted from the golden \
-         58-pair set — a tool was added, removed, renamed, or reclassified. \
+         61-pair set — a tool was added, removed, renamed, or reclassified. \
          Update GOLDEN here, tests/parity_mcp.rs::TOOL_INVENTORY, and \
          tests/parity/inventory.json deliberately."
     );
