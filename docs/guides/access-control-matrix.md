@@ -70,9 +70,11 @@ process start via `ALETHEIADB_MCP_API_KEY`) and re-verified on every tool
 call — revoking the key takes effect on the next call. Enforcement happens at
 the single dispatch point before any tool executes.
 
-There are no `admin`-class MCP tools yet: key lifecycle (create/list/revoke)
-is served by the HTTP admin endpoints over the shared persisted store
-(`{data_dir}/auth/keys.json`).
+The `admin`-class MCP tools are the GDPR crypto-shred surface
+(`designate_subject` / `erase_subject`, Issue #3359) — erasure destroys
+per-subject key material, an irreversible privileged operation. Key lifecycle
+(create/list/revoke) is **not** an MCP tool: it is served by the HTTP admin
+endpoints over the shared persisted store (`{data_dir}/auth/keys.json`).
 
 <!-- mcp-tool-matrix:start -->
 
@@ -139,6 +141,8 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `create_node_with_embedding` | write |
 | `update_node_embedding` | write |
 | `create_namespace` | write |
+| `designate_subject` | admin |
+| `erase_subject` | admin |
 
 <!-- mcp-tool-matrix:end -->
 

@@ -113,7 +113,7 @@ async fn live_mcp_catalog(client: &TestClient) -> BTreeSet<String> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (1) MCP catalog == inventory — EXACT set equality across all 61 tools.
+// (1) MCP catalog == inventory — EXACT set equality across all 63 tools.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -133,8 +133,8 @@ async fn mcp_catalog_equals_inventory_exactly() {
 
     assert_eq!(
         inv.len(),
-        61,
-        "inventory must advertise exactly 61 MCP tools"
+        63,
+        "inventory must advertise exactly 63 MCP tools"
     );
 
     // Symmetric difference, reported precisely so a drift names the culprits.
@@ -148,20 +148,20 @@ async fn mcp_catalog_equals_inventory_exactly() {
     );
     assert_eq!(
         live.len(),
-        61,
-        "the live catalog must be exactly 61 tools (got {})",
+        63,
+        "the live catalog must be exactly 63 tools (got {})",
         live.len()
     );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (2) Access-class conformance for all 61 (belt-and-suspenders full-set check;
+// (2) Access-class conformance for all 63 (belt-and-suspenders full-set check;
 //     `tests/security_rbac.rs::registry_matches_inventory_exactly` pins the
 //     static registry, this pins the *live-catalog-anchored* class per tool).
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn access_class_conformance_for_all_61() {
+async fn access_class_conformance_for_all_63() {
     let (db, store) = fixture();
     let client = build_server_client(db, store, AuthMode::Required);
     let live = live_mcp_catalog(&client).await;

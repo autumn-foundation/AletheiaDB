@@ -36,8 +36,9 @@
 //! Key management (create/list/revoke) is served by the HTTP admin surface
 //! (Phase 1: `POST/GET /admin/keys`, `POST /admin/keys/revoke`). Point both
 //! surfaces at the same persisted store path (`{data_dir}/auth/keys.json`)
-//! and keys minted over HTTP are usable here. No MCP-side lifecycle tools
-//! exist yet (and therefore no `Admin`-class MCP tools).
+//! and keys minted over HTTP are usable here. No MCP-side *key-lifecycle*
+//! tools exist yet. The `Admin`-class MCP tools that do exist are the GDPR
+//! crypto-shred surface (`designate_subject` / `erase_subject`, Issue #3359).
 //!
 //! The documented classification lives in
 //! `docs/guides/access-control-matrix.md`; a conformance test mechanically
@@ -140,8 +141,13 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("update_node_embedding", AccessClass::Write),
     // Namespace creation — a write (Issue #3349, PR3b).
     ("create_namespace", AccessClass::Write),
-    // ---- Admin: none yet. Key lifecycle is served by the HTTP admin
+    // ---- Admin: GDPR crypto-shred designation & irreversible erasure
+    // (Issue #3359, Slice 4b) — the first Admin-class MCP tools. Erasure
+    // destroys per-subject key material, an irreversible privileged op.
+    // Key lifecycle (create/list/revoke) remains served by the HTTP admin
     // surface (Phase 1) over the shared persisted store.
+    ("designate_subject", AccessClass::Admin),
+    ("erase_subject", AccessClass::Admin),
 ];
 
 /// Look up the [`AccessClass`] a tool requires. `None` for unknown tool

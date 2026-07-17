@@ -1037,6 +1037,9 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
         "create_namespace",
     ];
     const EXPECTED_METRICS: [&str; 1] = ["database_stats"];
+    // GDPR crypto-shred designation & erasure (Issue #3359, Slice 4b) — the
+    // first Admin-class MCP tools.
+    const EXPECTED_ADMIN: [&str; 2] = ["designate_subject", "erase_subject"];
 
     let mut actual_write: Vec<&str> = TOOL_ACCESS_CLASSES
         .iter()
@@ -1064,10 +1067,24 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
          this snapshot"
     );
 
-    // Everything else must be Read (no fourth class sneaking in).
+    let mut actual_admin: Vec<&str> = TOOL_ACCESS_CLASSES
+        .iter()
+        .filter(|(_, class)| *class == AccessClass::Admin)
+        .map(|(tool, _)| *tool)
+        .collect();
+    actual_admin.sort_unstable();
+    let mut expected_admin = EXPECTED_ADMIN.to_vec();
+    expected_admin.sort_unstable();
+    assert_eq!(
+        actual_admin, expected_admin,
+        "the Admin tool set changed — this is a privilege-level change; \
+         review it deliberately, then update this snapshot"
+    );
+
+    // Everything else must be Read (no fifth class sneaking in).
     assert_eq!(
         TOOL_ACCESS_CLASSES.len(),
-        actual_write.len() + actual_metrics.len() + 45,
+        actual_write.len() + actual_metrics.len() + actual_admin.len() + 45,
         "Read tool count changed (expected 45); if a tool was added or \
          removed, re-verify its classification and update this count"
     );
@@ -1079,10 +1096,11 @@ fn classification_uses_known_classes_only() {
         assert!(
             matches!(
                 class,
-                AccessClass::Read | AccessClass::Write | AccessClass::Metrics
+                AccessClass::Read | AccessClass::Write | AccessClass::Metrics | AccessClass::Admin
             ),
-            "tool '{tool}' uses class {class}; Admin-class MCP tools do not exist yet — \
-             review the matrix (and docs) before adding one"
+            "tool '{tool}' uses class {class}; only Read/Write/Metrics/Admin are \
+             valid MCP access classes — review the matrix (and docs) before adding \
+             a new one"
         );
     }
 }
@@ -1091,26 +1109,26 @@ fn classification_uses_known_classes_only() {
 // 6. Live tool-inventory golden (drift detection for the external mirror)
 //
 // The external `tests/parity_mcp.rs::tool_inventory_golden_is_stable` test can
-// only validate a hardcoded 61-tool constant against itself, because the live
+// only validate a hardcoded 63-tool constant against itself, because the live
 // registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)` and
 // unreachable from an external test crate. This in-crate test closes that gap:
 // it derives the LIVE advertised `(tool_name, access_class)` set from the
-// registry and asserts it equals a hardcoded golden snapshot of the 61 pairs.
+// registry and asserts it equals a hardcoded golden snapshot of the 63 pairs.
 // A tool that is added, removed, renamed, or reclassified FAILS here — the
 // authoritative drift detector the external mirror points back to.
 // ============================================================================
 
 /// AC3 (drift): the LIVE advertised MCP tool inventory — every name paired
 /// with the `AccessClass` the registry assigns it — must equal this hardcoded
-/// golden set of exactly 61 pairs. Adding, dropping, renaming, or
+/// golden set of exactly 63 pairs. Adding, dropping, renaming, or
 /// reclassifying a tool changes the live set and fails this assertion; update
 /// the golden here AND the external mirror (`tests/parity_mcp.rs`) +
 /// `tests/parity/inventory.json` deliberately when that happens.
 #[test]
 fn live_tool_inventory_matches_golden() {
-    /// The 61 `(tool_name, access_class)` pairs the server is expected to
+    /// The 63 `(tool_name, access_class)` pairs the server is expected to
     /// advertise, derived from the current live `TOOL_ACCESS_CLASSES`.
-    const GOLDEN: [(&str, AccessClass); 61] = [
+    const GOLDEN: [(&str, AccessClass); 63] = [
         // Read (45)
         ("get_node", AccessClass::Read),
         ("list_nodes", AccessClass::Read),
@@ -1179,6 +1197,9 @@ fn live_tool_inventory_matches_golden() {
         ("update_node_embedding", AccessClass::Write),
         // Namespace creation (Issue #3349, PR3b).
         ("create_namespace", AccessClass::Write),
+        // Admin (2) — GDPR crypto-shred designation & erasure (Issue #3359).
+        ("designate_subject", AccessClass::Admin),
+        ("erase_subject", AccessClass::Admin),
     ];
 
     // Golden as a set of (name, class-string) pairs.
@@ -1186,7 +1207,7 @@ fn live_tool_inventory_matches_golden() {
         .iter()
         .map(|(name, class)| ((*name).to_string(), class.to_string()))
         .collect();
-    assert_eq!(golden.len(), 61, "golden must be 61 unique tool names");
+    assert_eq!(golden.len(), 63, "golden must be 63 unique tool names");
 
     // Live set derived from the advertised registry + classification table.
     let server = AletheiaMcpServer::new(db());
@@ -1204,8 +1225,242 @@ fn live_tool_inventory_matches_golden() {
     assert_eq!(
         live, golden,
         "the LIVE advertised MCP tool inventory drifted from the golden \
-         61-pair set — a tool was added, removed, renamed, or reclassified. \
+         63-pair set — a tool was added, removed, renamed, or reclassified. \
          Update GOLDEN here, tests/parity_mcp.rs::TOOL_INVENTORY, and \
          tests/parity/inventory.json deliberately."
     );
+}
+
+// ============================================================================
+// 7. GDPR crypto-shred admin-gated tools (Issue #3359, Slice 4b)
+//
+// `designate_subject` / `erase_subject` are the FIRST Admin-class MCP tools.
+// These tests prove: (a) an admin key can designate then erase and receives a
+// verifiable signed attestation carrying NO key material or plaintext; (b) a
+// reader-key AND a writer-key caller are BOTH denied PERMISSION_DENIED on BOTH
+// tools (the load-bearing admin-gating proof); (c) erasing an undesignated
+// subject is FAILED_PRECONDITION; (d) malformed args are INVALID_ARGUMENT.
+// ============================================================================
+
+/// Build a persistent, encryption-configured database rooted at `root` so the
+/// crypto-shred key hierarchy is available (an unencrypted `AletheiaDB::new()`
+/// returns `FAILED_PRECONDITION` — `EncryptionNotConfigured`).
+fn encrypted_db(root: &std::path::Path) -> Arc<AletheiaDB> {
+    use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+    use crate::encryption::config::EncryptionConfig;
+    use crate::storage::index_persistence::PersistenceConfig;
+
+    let key_file = root.join("mek.key");
+    crate::encryption::FileKeyProvider::generate_key_file(&key_file).expect("generate key file");
+    let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(root.join("wal")).build())
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: root.join("data"),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .encryption(EncryptionConfig::file_based(&key_file))
+        .build();
+    Arc::new(AletheiaDB::with_unified_config(config).expect("encrypted db init"))
+}
+
+/// A `Required`-mode server over the given (encrypted) db whose session
+/// credential resolves to a principal with `role`.
+fn server_over_db_with_role(db: Arc<AletheiaDB>, role: Role) -> AletheiaMcpServer {
+    let store = Arc::new(AuthStore::new());
+    let (_principal, key) = store
+        .create_key(&format!("test-{role}"), role)
+        .expect("create key");
+    AletheiaMcpServer::with_auth(
+        db,
+        McpAuthConfig::new(AuthMode::Required, Arc::clone(&store))
+            .with_credential(SecretString::new(key.as_str())),
+    )
+}
+
+#[test]
+fn crypto_shred_admin_can_designate_then_erase_with_verifiable_attestation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = encrypted_db(tmp.path());
+
+    // Seed a node to designate.
+    let node_id = db
+        .create_node(
+            "Person",
+            crate::core::property::PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .build(),
+        )
+        .expect("create node")
+        .as_u64();
+    let public_key = db.erasure_attestation_public_key();
+
+    let server = server_over_db_with_role(Arc::clone(&db), Role::Admin);
+
+    // Designate the whole node under a subject.
+    let (value, is_error) = dispatch(
+        &server,
+        "designate_subject",
+        json!({
+            "subject_id": "user-42",
+            "targets": [{ "entity_kind": "node", "id": node_id }],
+        }),
+    );
+    assert!(!is_error, "admin designate_subject must succeed: {value}");
+    assert_eq!(value["success"], json!(true));
+    assert_eq!(value["subject_id"], json!("user-42"));
+    assert_eq!(value["targets_designated"], json!(1));
+
+    // Erase the subject and validate the signed attestation.
+    let (att, is_error) = dispatch(&server, "erase_subject", json!({ "subject_id": "user-42" }));
+    assert!(!is_error, "admin erase_subject must succeed: {att}");
+    assert_eq!(att["success"], json!(true));
+    assert_eq!(att["subject_id"], json!("user-42"));
+    assert_eq!(att["entity_count"], json!(1));
+    assert!(
+        att["timestamp"].is_string(),
+        "timestamp must be RFC3339: {att}"
+    );
+    assert!(
+        att["timestamp_micros"].is_i64(),
+        "timestamp_micros must be int: {att}"
+    );
+
+    // Reconstruct the attestation from the hex fields and verify the signature.
+    let sig_hex = att["signature"].as_str().expect("signature hex");
+    let pk_hex = att["signer_public_key"]
+        .as_str()
+        .expect("signer_public_key hex");
+    let sig_bytes = crate::core::hex::decode(sig_hex).expect("valid signature hex");
+    let signature: [u8; 64] = sig_bytes.as_slice().try_into().expect("64-byte signature");
+    let signer_public_key =
+        crate::audit::AuditPublicKey::from_hex(pk_hex).expect("valid public key hex");
+    // The returned signer key must match the db's attestation public key.
+    assert_eq!(
+        pk_hex,
+        public_key.to_hex(),
+        "attestation signer must match db key"
+    );
+    let reconstructed = crate::db::ErasureAttestation {
+        subject_id: att["subject_id"].as_str().unwrap().to_string(),
+        entity_count: att["entity_count"].as_u64().unwrap() as u32,
+        timestamp_micros: att["timestamp_micros"].as_i64().unwrap(),
+        signature,
+        signer_public_key,
+    };
+    assert!(
+        reconstructed.verify(),
+        "the returned attestation must verify against its embedded signer key: {att}"
+    );
+
+    // Security: the response carries NO key material or plaintext — only the
+    // documented attestation fields.
+    let obj = att.as_object().expect("attestation is a JSON object");
+    let allowed: std::collections::BTreeSet<&str> = [
+        "success",
+        "subject_id",
+        "entity_count",
+        "timestamp",
+        "timestamp_micros",
+        "signature",
+        "signer_public_key",
+    ]
+    .into_iter()
+    .collect();
+    for key in obj.keys() {
+        assert!(
+            allowed.contains(key.as_str()),
+            "erase_subject response must not carry an undocumented field '{key}': {att}"
+        );
+    }
+    // The seeded plaintext must never appear anywhere in the response.
+    assert!(
+        !att.to_string().contains("Alice"),
+        "attestation must not leak designated plaintext: {att}"
+    );
+}
+
+#[test]
+fn crypto_shred_reader_and_writer_denied_on_both_tools() {
+    // Admin-gating is independent of encryption state (the class gate runs
+    // before the tool body), so an unencrypted db is sufficient here.
+    for role in [Role::Reader, Role::Writer] {
+        let server = server_over_db_with_role(db(), role);
+        for tool in ["designate_subject", "erase_subject"] {
+            let (value, is_error) = dispatch(
+                &server,
+                tool,
+                json!({ "subject_id": "s", "targets": [{ "entity_kind": "node", "id": 1 }] }),
+            );
+            assert!(is_error, "[{role} × {tool}] must be denied, got: {value}");
+            assert_eq!(
+                error_code(&value),
+                Some("PERMISSION_DENIED"),
+                "[{role} × {tool}] denial must be PERMISSION_DENIED: {value}"
+            );
+            assert_eq!(
+                value["error"]["retriable"], false,
+                "[{role} × {tool}] PERMISSION_DENIED must not be retriable: {value}"
+            );
+            assert_eq!(
+                value["error"]["details"]["required_class"],
+                json!("admin"),
+                "[{role} × {tool}] required_class must be admin: {value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn crypto_shred_erase_undesignated_is_failed_precondition() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = encrypted_db(tmp.path());
+    let server = server_over_db_with_role(db, Role::Admin);
+
+    let (value, is_error) = dispatch(&server, "erase_subject", json!({ "subject_id": "never" }));
+    assert!(
+        is_error,
+        "erasing an undesignated subject must fail: {value}"
+    );
+    assert_eq!(
+        error_code(&value),
+        Some("FAILED_PRECONDITION"),
+        "undesignated erase must be FAILED_PRECONDITION: {value}"
+    );
+    assert_eq!(value["error"]["retriable"], false, "{value}");
+}
+
+#[test]
+fn crypto_shred_malformed_args_are_invalid_argument() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = encrypted_db(tmp.path());
+    let server = server_over_db_with_role(db, Role::Admin);
+
+    // Bad entity_kind.
+    let (value, is_error) = dispatch(
+        &server,
+        "designate_subject",
+        json!({ "subject_id": "s", "targets": [{ "entity_kind": "vertex", "id": 1 }] }),
+    );
+    assert!(is_error, "bad entity_kind must fail: {value}");
+    assert_eq!(error_code(&value), Some("INVALID_ARGUMENT"), "{value}");
+
+    // Missing subject_id (schema violation).
+    let (value, is_error) = dispatch(
+        &server,
+        "designate_subject",
+        json!({ "targets": [{ "entity_kind": "node", "id": 1 }] }),
+    );
+    assert!(is_error, "missing subject_id must fail: {value}");
+    assert_eq!(error_code(&value), Some("INVALID_ARGUMENT"), "{value}");
+
+    // Empty targets (API-level InvalidArgument).
+    let (value, is_error) = dispatch(
+        &server,
+        "designate_subject",
+        json!({ "subject_id": "s", "targets": [] }),
+    );
+    assert!(is_error, "empty targets must fail: {value}");
+    assert_eq!(error_code(&value), Some("INVALID_ARGUMENT"), "{value}");
 }

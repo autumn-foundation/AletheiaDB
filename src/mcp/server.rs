@@ -940,6 +940,22 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// ADMIN. Designate a GDPR erasure subject over one or more targets
+    /// (Issue #3359, Slice 4b). The first Admin-class MCP tool.
+    pub fn designate_subject(&self, req: DesignateSubjectRequest) -> String {
+        Self::extract_text(self.handle_designate_subject(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// ADMIN. Irreversibly erase a designated subject and return a signed
+    /// erasure attestation (Issue #3359, Slice 4b).
+    pub fn erase_subject(&self, req: EraseSubjectRequest) -> String {
+        Self::extract_text(self.handle_erase_subject(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// Find similar nodes.
     ///
     /// Performs a K-Nearest Neighbors (k-NN) search using vector embeddings.
@@ -3149,6 +3165,92 @@ impl AletheiaMcpServer {
                 "valid_to": Self::timestamp_to_rfc3339_micros(result.valid_to)
             })),
             Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Map a [`CryptoShredError`] to the MCP #3234 error envelope via its stable
+    /// `.code()` (Issue #3359, Slice 4b).
+    ///
+    /// `CryptoShredError` is NOT a `crate::core::error::Error` variant, so
+    /// routing it through [`Self::db_error`] would collapse `INVALID_ARGUMENT` /
+    /// `CONFLICT` to `INTERNAL` (its `From<..> for Error` only preserves
+    /// `FAILED_PRECONDITION`). We map directly instead. Its `Display` never
+    /// contains key bytes or plaintext (guaranteed by the error type), so the
+    /// message is safe to surface verbatim.
+    fn crypto_shred_error(&self, e: crate::db::CryptoShredError) -> CallToolResult {
+        let code = match e.code() {
+            "INVALID_ARGUMENT" => McpErrorCode::InvalidArgument,
+            "FAILED_PRECONDITION" => McpErrorCode::FailedPrecondition,
+            "CONFLICT" => McpErrorCode::Conflict,
+            "NOT_FOUND" => McpErrorCode::NotFound,
+            _ => McpErrorCode::Internal,
+        };
+        self.error_result(McpError::new(code, e.to_string()).retriable(e.retriable()))
+    }
+
+    /// ADMIN. Designate a GDPR erasure subject over one or more targets
+    /// (Issue #3359, Slice 4b).
+    fn handle_designate_subject(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::db::DesignationTarget;
+
+        let req: DesignateSubjectRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let mut targets = Vec::with_capacity(req.targets.len());
+        for t in req.targets {
+            let has_keys = t.keys.as_ref().is_some_and(|k| !k.is_empty());
+            let target = match (t.entity_kind.as_str(), has_keys) {
+                ("node", false) => DesignationTarget::WholeNode(t.id),
+                ("node", true) => DesignationTarget::NodeProperties(t.id, t.keys.unwrap()),
+                ("edge", false) => DesignationTarget::WholeEdge(t.id),
+                ("edge", true) => DesignationTarget::EdgeProperties(t.id, t.keys.unwrap()),
+                (other, _) => {
+                    return self.invalid_argument(&format!(
+                        "invalid entity_kind '{other}' (expected 'node' or 'edge')"
+                    ));
+                }
+            };
+            targets.push(target);
+        }
+
+        let count = targets.len();
+        match self.db.designate_subject(req.subject_id.clone(), targets) {
+            Ok(()) => self.success_json(json!({
+                "success": true,
+                "subject_id": req.subject_id,
+                "targets_designated": count,
+            })),
+            Err(e) => self.crypto_shred_error(e),
+        }
+    }
+
+    /// ADMIN. Irreversibly erase a designated subject and return a signed
+    /// erasure attestation (Issue #3359, Slice 4b). The response carries only
+    /// the subject id, entity count, timestamp, and signature/pubkey hex —
+    /// never key material or plaintext.
+    fn handle_erase_subject(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EraseSubjectRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        match self.db.erase_subject(req.subject_id) {
+            Ok(att) => {
+                let timestamp =
+                    Self::format_timestamp_rfc3339(Timestamp::from(att.timestamp_micros));
+                self.success_json(json!({
+                    "success": true,
+                    "subject_id": att.subject_id,
+                    "entity_count": att.entity_count,
+                    "timestamp": timestamp,
+                    "timestamp_micros": att.timestamp_micros,
+                    "signature": crate::core::hex::encode(&att.signature),
+                    "signer_public_key": att.signer_public_key.to_hex(),
+                }))
+            }
+            Err(e) => self.crypto_shred_error(e),
         }
     }
 
@@ -8911,6 +9013,9 @@ impl AletheiaMcpServer {
             "create_namespace" => self.handle_create_namespace(args),
             "list_namespaces" => self.handle_list_namespaces(args),
             "describe_namespace" => self.handle_describe_namespace(args),
+            // GDPR crypto-shred — ADMIN-class (Issue #3359, Slice 4b).
+            "designate_subject" => self.handle_designate_subject(args),
+            "erase_subject" => self.handle_erase_subject(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
                     .details(json!({ "tool": name })),
@@ -9954,6 +10059,30 @@ fn tool_definitions() -> Vec<Tool> {
              namespace always resolves; an unregistered name returns NOT_FOUND with \
              details.namespace.",
             make_input_schema::<DescribeNamespaceRequest>(),
+        ),
+        // GDPR crypto-shred — ADMIN-class (Issue #3359, Slice 4b). The first
+        // Admin-class MCP tools.
+        Tool::new(
+            "designate_subject",
+            "ADMIN. Designate a GDPR erasure subject over one or more targets — whole \
+             nodes/edges and/or specific property keys (Issue #3359). Pass `subject_id` \
+             (non-empty, <=256 bytes, no control chars) and a non-empty `targets` array of \
+             {entity_kind:'node'|'edge', id, keys?} — `keys` present seals only those \
+             properties, absent/empty seals the whole entity. Designating an already-active \
+             subject merges the new targets in. Requires encryption configured, else \
+             FAILED_PRECONDITION. Erasure of the designated subject later renders its sealed \
+             payload permanently undecryptable.",
+            make_input_schema::<DesignateSubjectRequest>(),
+        ),
+        Tool::new(
+            "erase_subject",
+            "ADMIN. Irreversibly erase a designated GDPR subject: destroy its key material so \
+             its sealed payload becomes permanently undecryptable, and return a signed erasure \
+             attestation {subject_id, entity_count, timestamp, timestamp_micros, signature (hex), \
+             signer_public_key (hex)} — never any property content or key material. Pass \
+             `subject_id`. Erasing an undesignated subject is FAILED_PRECONDITION; re-erasing is \
+             an idempotent no-op returning the recorded attestation.",
+            make_input_schema::<EraseSubjectRequest>(),
         ),
     ];
 

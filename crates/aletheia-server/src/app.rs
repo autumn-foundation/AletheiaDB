@@ -13,6 +13,7 @@
 
 use crate::changefeed_stream;
 use crate::constraints_lineage_audit_tools;
+use crate::crypto_shred_tools;
 use crate::edge_tools;
 use crate::http_routes;
 use crate::metrics_exposition;
@@ -137,6 +138,8 @@ pub fn try_build_server_testapp(
             namespace_tools::create_namespace,
             namespace_tools::list_namespaces,
             namespace_tools::describe_namespace,
+            crypto_shred_tools::designate_subject,
+            crypto_shred_tools::erase_subject,
         ])
         .openapi(OpenApiConfig::new("AletheiaDB", env!("CARGO_PKG_VERSION")))
         .mount_mcp("/mcp");
