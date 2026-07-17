@@ -56,10 +56,14 @@ pub const BACKUP_MAGIC: [u8; 4] = *b"ALBK";
 /// - **4 -> 5** (Issue #3378): the payload gained `schema_constraints`
 ///   (declared property-type / required-key constraints).
 ///
+/// - **5 -> 6** (Issue #3218): the payload gained `unique_constraints`
+///   (declared uniqueness constraints; previously only WAL-persisted and thus
+///   silently dropped by a fresh-WAL restore).
+///
 /// Older artifacts are still restorable -- see [`BackupPayloadV1`],
-/// [`BackupPayloadV2`], [`BackupPayloadV3`], [`BackupPayloadV4`] and
-/// `read_artifact`.
-pub const BACKUP_FORMAT_VERSION: u16 = 5;
+/// [`BackupPayloadV2`], [`BackupPayloadV3`], [`BackupPayloadV4`],
+/// [`BackupPayloadV5`] and `read_artifact`.
+pub const BACKUP_FORMAT_VERSION: u16 = 6;
 
 /// Maximum allowed decompressed payload size (5 GiB).
 ///
@@ -203,9 +207,14 @@ pub(crate) struct BackupPayload {
     pub temporal: TemporalIndexData,
     /// Declared property-type / required-key schema constraints (Issue #3378).
     /// Empty for a schemaless database. Restored through the normal startup
-    /// sidecar-load path. (Uniqueness constraints, Issue #3218, are persisted
-    /// via the WAL and are still NOT captured here — a known residue.)
+    /// sidecar-load path.
     pub schema_constraints: Vec<crate::core::constraint::SchemaConstraintDescriptor>,
+    /// Declared uniqueness constraints (Issue #3218). Empty when none are
+    /// declared. Uniqueness constraints are otherwise only WAL-persisted, so a
+    /// fresh-WAL restore would drop them; they are captured here and
+    /// re-declared on restore (which rebuilds the reservation index and writes
+    /// a durable WAL record into the restored database).
+    pub unique_constraints: Vec<crate::core::constraint::UniqueConstraintDescriptor>,
 }
 
 /// Pre-provenance (Issue #3224) `BackupPayload` shape, i.e. `BACKUP_FORMAT_VERSION == 1`.
@@ -248,6 +257,7 @@ impl From<BackupPayloadV1> for BackupPayload {
             graph: v1.graph,
             temporal: v1.temporal.into(),
             schema_constraints: Vec::new(),
+            unique_constraints: Vec::new(),
         }
     }
 }
@@ -299,6 +309,7 @@ impl From<BackupPayloadV2> for BackupPayload {
             graph: v2.graph,
             temporal: v2.temporal.into(),
             schema_constraints: Vec::new(),
+            unique_constraints: Vec::new(),
         }
     }
 }
@@ -352,6 +363,7 @@ impl From<BackupPayloadV3> for BackupPayload {
             graph: v3.graph,
             temporal: v3.temporal.into(),
             schema_constraints: Vec::new(),
+            unique_constraints: Vec::new(),
         }
     }
 }
@@ -398,6 +410,56 @@ impl From<BackupPayloadV4> for BackupPayload {
             graph: v4.graph,
             temporal: v4.temporal,
             schema_constraints: Vec::new(),
+            unique_constraints: Vec::new(),
+        }
+    }
+}
+
+/// Pre-unique-constraint-backup (Issue #3218) `BackupPayload` shape, i.e.
+/// `BACKUP_FORMAT_VERSION == 5`.
+///
+/// Identical to [`BackupPayload`] but without the `unique_constraints` field
+/// (it uses the LIVE `TemporalIndexData`, unchanged since v4). Kept only so
+/// `read_artifact` can restore version-5 artifacts; the `From` impl defaults
+/// the uniqueness constraints to empty.
+#[derive(Debug, Clone, Encode, Decode)]
+pub(crate) struct BackupPayloadV5 {
+    /// Unix timestamp (microseconds) when the backup was created.
+    pub created_at_micros: i64,
+    /// WAL LSN at which the consistent snapshot was taken.
+    pub source_lsn: u64,
+    /// Number of current nodes.
+    pub current_node_count: u64,
+    /// Number of current edges.
+    pub current_edge_count: u64,
+    /// Number of node versions (hot + cold).
+    pub node_version_count: u64,
+    /// Number of edge versions (hot + cold).
+    pub edge_version_count: u64,
+    /// String interner state.
+    pub interner: StringInternerData,
+    /// Current graph state (nodes and edges).
+    pub graph: GraphIndexData,
+    /// Complete temporal version history.
+    pub temporal: TemporalIndexData,
+    /// Declared property-type / required-key schema constraints (Issue #3378).
+    pub schema_constraints: Vec<crate::core::constraint::SchemaConstraintDescriptor>,
+}
+
+impl From<BackupPayloadV5> for BackupPayload {
+    fn from(v5: BackupPayloadV5) -> Self {
+        BackupPayload {
+            created_at_micros: v5.created_at_micros,
+            source_lsn: v5.source_lsn,
+            current_node_count: v5.current_node_count,
+            current_edge_count: v5.current_edge_count,
+            node_version_count: v5.node_version_count,
+            edge_version_count: v5.edge_version_count,
+            interner: v5.interner,
+            graph: v5.graph,
+            temporal: v5.temporal,
+            schema_constraints: v5.schema_constraints,
+            unique_constraints: Vec::new(),
         }
     }
 }
@@ -683,6 +745,12 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
             })?;
             Ok(legacy.into())
         }
+        5 => {
+            let legacy: BackupPayloadV5 = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(legacy.into())
+        }
         v if v == BACKUP_FORMAT_VERSION => {
             let payload: BackupPayload = bitcode::decode(&decoded_bytes).map_err(|e| {
                 BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
@@ -783,6 +851,7 @@ pub(crate) fn build_payload(
     source_lsn: u64,
     created_at_micros: i64,
     schema_constraints: Vec<crate::core::constraint::SchemaConstraintDescriptor>,
+    unique_constraints: Vec<crate::core::constraint::UniqueConstraintDescriptor>,
 ) -> Result<BackupPayload, BackupError> {
     let current_node_count = current_snapshot.node_count() as u64;
     let current_edge_count = current_snapshot.edge_count() as u64;
@@ -806,6 +875,7 @@ pub(crate) fn build_payload(
         graph,
         temporal,
         schema_constraints,
+        unique_constraints,
     })
 }
 
@@ -1004,6 +1074,7 @@ mod tests {
                 edge_anchors: vec![],
             },
             schema_constraints: vec![],
+            unique_constraints: vec![],
         }
     }
 
@@ -1423,6 +1494,75 @@ mod tests {
         assert!(
             restored.schema_constraints.is_empty(),
             "v4 artifact must restore with empty schema constraints"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Version-5 (pre-unique-constraint-backup, Issue #3218) compatibility
+    // -----------------------------------------------------------------------
+
+    /// Encode a version-5 artifact byte-for-byte the way a pre-#3218-backup
+    /// AletheiaDB would have: `[MAGIC][version=5][zstd(bitcode(BackupPayloadV5))]`.
+    fn encode_artifact_v5(payload: &BackupPayloadV5) -> Vec<u8> {
+        let encoded = bitcode::encode(payload);
+        let compressed = zstd::encode_all(encoded.as_slice(), 3).unwrap();
+        let mut out = Vec::with_capacity(6 + compressed.len());
+        out.extend_from_slice(&BACKUP_MAGIC);
+        out.extend_from_slice(&5u16.to_le_bytes());
+        out.extend_from_slice(&compressed);
+        out
+    }
+
+    /// A version-5 (Issue #3378 era, pre-#3218-backup) artifact -- the
+    /// immediately prior backup format this PR bumps -- must restore with
+    /// `unique_constraints` defaulting to empty (the field the v5 shape lacks),
+    /// while its `schema_constraints` are preserved verbatim.
+    #[test]
+    fn read_artifact_accepts_legacy_v5_format() {
+        use crate::core::constraint::{PropertyConstraintDescriptor, SchemaConstraintDescriptor};
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy_v5.albk");
+
+        // The v5 shape uses the LIVE temporal/interner/graph structs (unchanged
+        // since v4), so reuse the current empty payload's members.
+        let empty = empty_payload();
+        let payload = BackupPayloadV5 {
+            created_at_micros: 66,
+            source_lsn: 13,
+            current_node_count: 0,
+            current_edge_count: 0,
+            node_version_count: 0,
+            edge_version_count: 0,
+            interner: empty.interner,
+            graph: empty.graph,
+            temporal: empty.temporal,
+            schema_constraints: vec![SchemaConstraintDescriptor {
+                entity_kind: "node".to_string(),
+                label: "Person".to_string(),
+                properties: vec![PropertyConstraintDescriptor {
+                    property: "name".to_string(),
+                    declared_type: None,
+                    required: true,
+                    nullable: true,
+                }],
+            }],
+        };
+
+        std::fs::write(&path, encode_artifact_v5(&payload)).unwrap();
+
+        let restored = read_artifact(&path).unwrap();
+
+        assert_eq!(restored.source_lsn, 13);
+        assert_eq!(restored.created_at_micros, 66);
+        // Schema constraints survive the v5 -> v6 upgrade verbatim.
+        assert_eq!(restored.schema_constraints.len(), 1);
+        assert_eq!(restored.schema_constraints[0].label, "Person");
+        // The pre-#3218-backup artifact carries no uniqueness constraints; the
+        // upgrade From impl defaults them to empty.
+        assert!(
+            restored.unique_constraints.is_empty(),
+            "v5 artifact must restore with empty unique constraints"
         );
     }
 

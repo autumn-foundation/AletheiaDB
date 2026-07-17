@@ -132,6 +132,24 @@ pub struct SchemaConstraintDescriptor {
     pub properties: Vec<PropertyConstraintDescriptor>,
 }
 
+/// A serializable descriptor for one declared uniqueness constraint
+/// (Issue #3218).
+///
+/// Uniqueness constraints are normally persisted via the WAL
+/// (`DeclareUniqueConstraint`) and reconstructed by WAL replay. A `.albk`
+/// backup restores into a **fresh WAL**, so — like the #3378 schema
+/// constraints — the declarations must ride along in the backup payload
+/// (interned ids are not stable across restarts, so the durable form carries
+/// resolved strings) and be re-declared on restore.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct UniqueConstraintDescriptor {
+    /// The node label the constraint is scoped to.
+    pub label: String,
+    /// The property key whose value must be unique per label.
+    pub property: String,
+}
+
 /// One aggregated violation in a [`ConformanceReport`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConformanceViolation {
@@ -404,6 +422,23 @@ impl ConstraintRegistry {
         self.declarations.remove(&(label, property));
         self.reservation_index
             .retain(|k, _| !(k.label == label && k.property == property));
+    }
+
+    /// Export all declared uniqueness constraints as serializable, string-keyed
+    /// descriptors (for the `.albk` backup payload, Issue #3218). Sorted
+    /// deterministically by `(label, property)` so backups are reproducible.
+    pub fn export_unique_constraints(&self) -> Vec<UniqueConstraintDescriptor> {
+        let mut out: Vec<UniqueConstraintDescriptor> = self
+            .list()
+            .into_iter()
+            .map(|(label, property)| UniqueConstraintDescriptor { label, property })
+            .collect();
+        out.sort_by(|a, b| {
+            a.label
+                .cmp(&b.label)
+                .then_with(|| a.property.cmp(&b.property))
+        });
+        out
     }
 
     /// List all declared constraints as `(label_string, property_string)` pairs.

@@ -23,8 +23,9 @@
 //! `.albk` backup payload, so a backup→restore round-trip preserves them.
 //!
 //! Note: the pre-existing uniqueness constraints (Issue #3218) are persisted via
-//! the WAL and are **not** captured in `.albk` today; the schema constraints
-//! added here *are*.
+//! the WAL; they are also folded into the `.albk` payload (as of the #3218
+//! backup fix) and re-declared on restore, so both constraint kinds survive a
+//! backup→restore round-trip.
 
 use crate::core::changefeed::EntityKind;
 use crate::core::constraint::{
