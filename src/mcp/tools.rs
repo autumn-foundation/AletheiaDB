@@ -150,9 +150,11 @@ pub struct GetNodeRequest {
 
     /// Optional namespace read scope (Issue #3349).
     #[schemars(
-        description = "Optional namespace read scope: a single namespace name (string), an array \
-                       of names (union — the read sees any of them), or the selector \"all\" (no \
-                       filter). Omit for the current, unscoped behavior. Out of scope, the node is \
+        description = "Optional namespace scope. Omitted = the `default` namespace only \
+                       (isolated-by-default); for a pre-namespace database (all data is `default`) \
+                       that still returns all of it. Pass a single namespace name (string) to scope \
+                       to it, an array of names for a union (the read sees any of them), or the \
+                       string \"all\" for every namespace (no filter). An out-of-scope entity is \
                        reported NOT_FOUND (indistinguishable from missing). An unknown namespace is \
                        NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
     )]

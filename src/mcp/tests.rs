@@ -18231,7 +18231,12 @@ mod namespace_surface_sweep_tests {
     #[test]
     fn sweep_get_node_elides_reserved_key() {
         let (server, a, _b) = seed_namespaced();
-        let out = server.dispatch_tool_json("get_node", serde_json::json!({ "node_id": a }));
+        // The seeded node lives in agent:planner; an omitted read is default-only
+        // (#3349 FIX2), so scope to "all" to still exercise the elision sweep.
+        let out = server.dispatch_tool_json(
+            "get_node",
+            serde_json::json!({ "node_id": a, "namespace": "all" }),
+        );
         // The node is still returned with its user property...
         assert!(out.contains("Alice"), "expected the node payload: {out}");
         // ...but the ride-along key is elided.
@@ -18241,7 +18246,12 @@ mod namespace_surface_sweep_tests {
     #[test]
     fn sweep_list_nodes_elides_reserved_key() {
         let (server, _a, _b) = seed_namespaced();
-        let out = server.dispatch_tool_json("list_nodes", serde_json::json!({ "label": "Person" }));
+        // Namespaced seed data + default-only omitted reads (#3349 FIX2): scope
+        // to "all" so the sweep still sees the agent:planner node.
+        let out = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({ "label": "Person", "namespace": "all" }),
+        );
         assert!(out.contains("Alice"), "expected node list payload: {out}");
         assert_no_reserved(&out, "list_nodes");
     }
@@ -18249,9 +18259,11 @@ mod namespace_surface_sweep_tests {
     #[test]
     fn sweep_traverse_elides_reserved_key() {
         let (server, a, _b) = seed_namespaced();
+        // Namespaced seed data + default-only omitted reads (#3349 FIX2): scope
+        // to "all" so the traversal still crosses the agent:planner edge to Bob.
         let out = server.dispatch_tool_json(
             "traverse",
-            serde_json::json!({ "start_node_id": a, "edge_label": "KNOWS" }),
+            serde_json::json!({ "start_node_id": a, "edge_label": "KNOWS", "namespace": "all" }),
         );
         assert!(
             out.contains("Bob"),
@@ -18323,8 +18335,13 @@ mod namespace_surface_sweep_tests {
         );
         assert_no_reserved(&out, "create_node");
         // Read it back: the namespace persists and is surfaced on get_node.
+        // The node lives in agent:planner, so an omitted (default-only, #3349
+        // FIX2) read would not see it — scope the read to its namespace.
         let id = v.get("id").and_then(|i| i.as_u64()).expect("id");
-        let got = server.dispatch_tool_json("get_node", serde_json::json!({ "node_id": id }));
+        let got = server.dispatch_tool_json(
+            "get_node",
+            serde_json::json!({ "node_id": id, "namespace": "agent:planner" }),
+        );
         assert_eq!(
             as_json(&got).get("namespace").and_then(|n| n.as_str()),
             Some("agent:planner"),
@@ -18787,5 +18804,348 @@ mod namespace_surface_sweep_tests {
             "get_schema namespaces must include agent:planner: {out}"
         );
         assert_no_reserved(&out, "get_schema(counts)");
+    }
+
+    // ========================================================================
+    // PR3a hardening (adversarial-review fixes): omitted = default-only,
+    // scoped edge/temporal isolation, cursor+scope fail-closed, malformed /
+    // union / traverse-direction error contracts, edge-write registration.
+    // ========================================================================
+
+    /// The first outgoing edge id from `node` (unscoped adjacency read).
+    fn first_outgoing_edge_id(server: &AletheiaMcpServer, node: u64) -> u64 {
+        let edges =
+            server.dispatch_tool_json("get_outgoing_edges", serde_json::json!({ "node_id": node }));
+        as_json(&edges)
+            .get("edges")
+            .and_then(|e| e.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|e| e.get("id"))
+            .and_then(|i| i.as_u64())
+            .unwrap_or_else(|| panic!("expected an outgoing edge from {node}: {edges}"))
+    }
+
+    /// FIX2 / ADD-B regression guard: an omitted read scope is the `default`
+    /// namespace ONLY (isolated-by-default) — byte-for-byte equal to an explicit
+    /// `namespace:"default"`, and NOT equal to `namespace:"all"` once a
+    /// non-default entity exists. Pins the semantics so a future "convenience"
+    /// change can't silently revert omitted back to all-namespaces.
+    #[test]
+    fn omitted_scope_is_default_only_not_all() {
+        let server = create_test_server();
+        // One default node + one agent:planner node.
+        let dave = server
+            .db()
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dave").build(),
+            )
+            .expect("create default node")
+            .as_u64();
+        let eve = server
+            .db()
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Eve").build(),
+                "agent:planner",
+            )
+            .expect("create namespaced node")
+            .as_u64();
+
+        // list_nodes: omitted == explicit "default", and neither sees Eve.
+        let omitted =
+            server.dispatch_tool_json("list_nodes", serde_json::json!({ "label": "Person" }));
+        let explicit_default = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({ "label": "Person", "namespace": "default" }),
+        );
+        assert_eq!(
+            omitted, explicit_default,
+            "omitted list_nodes must be byte-identical to namespace:\"default\": {omitted} vs {explicit_default}"
+        );
+        assert!(
+            omitted.contains("Dave") && !omitted.contains("Eve"),
+            "omitted (default-only) must see Dave, never Eve: {omitted}"
+        );
+        // "all" DOES see Eve — proving omitted != all.
+        let all = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({ "label": "Person", "namespace": "all" }),
+        );
+        assert!(
+            all.contains("Dave") && all.contains("Eve"),
+            "namespace:\"all\" must see both: {all}"
+        );
+        assert_ne!(
+            omitted, all,
+            "omitted must NOT equal namespace:\"all\" when a non-default entity exists"
+        );
+
+        // get_node: Eve (agent:planner) is NOT_FOUND under an omitted read...
+        let eve_omitted =
+            server.dispatch_tool_json("get_node", serde_json::json!({ "node_id": eve }));
+        assert_eq!(
+            as_json(&eve_omitted)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "omitted get_node must not return a non-default node: {eve_omitted}"
+        );
+        // ...identical to an explicit "default" read...
+        let eve_default = server.dispatch_tool_json(
+            "get_node",
+            serde_json::json!({ "node_id": eve, "namespace": "default" }),
+        );
+        assert_eq!(
+            eve_omitted, eve_default,
+            "omitted get_node must equal namespace:\"default\": {eve_omitted} vs {eve_default}"
+        );
+        // ...but visible under "all".
+        let eve_all = server.dispatch_tool_json(
+            "get_node",
+            serde_json::json!({ "node_id": eve, "namespace": "all" }),
+        );
+        assert_eq!(
+            as_json(&eve_all).get("namespace").and_then(|n| n.as_str()),
+            Some("agent:planner"),
+            "namespace:\"all\" must return Eve: {eve_all}"
+        );
+        // Sanity: the default node reads back the same way omitted and explicit.
+        let dave_omitted =
+            server.dispatch_tool_json("get_node", serde_json::json!({ "node_id": dave }));
+        assert!(
+            dave_omitted.contains("Dave"),
+            "default node visible: {dave_omitted}"
+        );
+    }
+
+    #[test]
+    fn scoped_get_edge_isolates_other_namespace() {
+        let (server, a, _b) = seed_namespaced();
+        let edge_id = first_outgoing_edge_id(&server, a);
+        // In-scope: the edge is returned.
+        let ok = server.dispatch_tool_json(
+            "get_edge",
+            serde_json::json!({ "edge_id": edge_id, "namespace": "agent:planner" }),
+        );
+        assert_eq!(
+            as_json(&ok).get("namespace").and_then(|n| n.as_str()),
+            Some("agent:planner"),
+            "scoped get_edge should return the in-scope edge: {ok}"
+        );
+        // Out-of-scope: NOT_FOUND (never leaks).
+        let hidden = server.dispatch_tool_json(
+            "get_edge",
+            serde_json::json!({ "edge_id": edge_id, "namespace": "agent:researcher" }),
+        );
+        assert_eq!(
+            as_json(&hidden)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "out-of-scope get_edge must be NOT_FOUND: {hidden}"
+        );
+        // Omitted (default-only) also hides an agent:planner edge.
+        let omitted =
+            server.dispatch_tool_json("get_edge", serde_json::json!({ "edge_id": edge_id }));
+        assert_eq!(
+            as_json(&omitted)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "omitted get_edge (default-only) must not return a non-default edge: {omitted}"
+        );
+    }
+
+    #[test]
+    fn scoped_temporal_reads_narrow() {
+        let (server, alice, _bob, carol) = seed_two_namespaces();
+        // A far-future valid time resolves every committed fact (open-ended
+        // valid interval); transaction_time defaults to now.
+        let vt = "2999-01-01T00:00:00Z";
+        // get_node_at_time: in-scope returns, out-of-scope NOT_FOUND.
+        let ok = server.dispatch_tool_json(
+            "get_node_at_time",
+            serde_json::json!({ "node_id": alice, "valid_time": vt, "namespace": "agent:planner" }),
+        );
+        assert!(
+            ok.contains("Alice"),
+            "in-scope get_node_at_time returns: {ok}"
+        );
+        let hidden = server.dispatch_tool_json(
+            "get_node_at_time",
+            serde_json::json!({ "node_id": carol, "valid_time": vt, "namespace": "agent:planner" }),
+        );
+        assert_eq!(
+            as_json(&hidden)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "out-of-scope get_node_at_time must be NOT_FOUND: {hidden}"
+        );
+
+        // get_edge_at_time: the agent:planner edge is in-scope for planner,
+        // NOT_FOUND for researcher.
+        let edge_id = first_outgoing_edge_id(&server, alice);
+        let e_ok = server.dispatch_tool_json(
+            "get_edge_at_time",
+            serde_json::json!({ "edge_id": edge_id, "valid_time": vt, "namespace": "agent:planner" }),
+        );
+        assert!(
+            as_json(&e_ok).get("error").is_none(),
+            "in-scope get_edge_at_time returns: {e_ok}"
+        );
+        let e_hidden = server.dispatch_tool_json(
+            "get_edge_at_time",
+            serde_json::json!({ "edge_id": edge_id, "valid_time": vt, "namespace": "agent:researcher" }),
+        );
+        assert_eq!(
+            as_json(&e_hidden)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "out-of-scope get_edge_at_time must be NOT_FOUND: {e_hidden}"
+        );
+
+        // find_nodes_at_time: planner scope excludes Carol.
+        let found = server.dispatch_tool_json(
+            "find_nodes_at_time",
+            serde_json::json!({ "label": "Person", "valid_time": vt, "namespace": "agent:planner" }),
+        );
+        assert!(
+            found.contains("Alice") && !found.contains("Carol"),
+            "scoped find_nodes_at_time must exclude out-of-scope Carol: {found}"
+        );
+    }
+
+    #[test]
+    fn cursor_plus_narrowing_scope_fails_closed() {
+        let (server, alice, _bob, _carol) = seed_two_namespaces();
+        let vt = crate::core::temporal::time::to_iso8601(crate::core::temporal::time::now());
+        let cases = [
+            (
+                "list_nodes",
+                serde_json::json!({ "label": "Person", "use_cursor": true, "namespace": "agent:planner" }),
+            ),
+            (
+                "traverse",
+                serde_json::json!({ "start_node_id": alice, "edge_label": "KNOWS", "use_cursor": true, "namespace": "agent:planner" }),
+            ),
+            (
+                "find_nodes_at_time",
+                serde_json::json!({ "label": "Person", "valid_time": vt, "use_cursor": true, "namespace": "agent:planner" }),
+            ),
+        ];
+        for (tool, args) in cases {
+            let out = server.dispatch_tool_json(tool, args);
+            assert_eq!(
+                as_json(&out)
+                    .pointer("/error/code")
+                    .and_then(|c| c.as_str()),
+                Some("INVALID_ARGUMENT"),
+                "{tool} with use_cursor + narrowing scope must fail closed: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_scope_type_is_invalid_argument() {
+        let (server, _a, _b) = seed_namespaced();
+        let out = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({ "label": "Person", "namespace": 123 }),
+        );
+        assert_eq!(
+            as_json(&out)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "a non-string/array/\"all\" namespace must be INVALID_ARGUMENT: {out}"
+        );
+    }
+
+    #[test]
+    fn union_with_unknown_namespace_is_not_found() {
+        let (server, _a, _b, _c) = seed_two_namespaces();
+        let out = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({
+                "label": "Person",
+                "namespace": ["agent:planner", "agent:nonexistent"]
+            }),
+        );
+        let v = as_json(&out);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "a union containing an unknown namespace must be NOT_FOUND: {out}"
+        );
+        assert_eq!(
+            v.pointer("/error/details/namespace")
+                .and_then(|c| c.as_str()),
+            Some("agent:nonexistent"),
+            "NOT_FOUND must carry the offending namespace in details: {out}"
+        );
+    }
+
+    #[test]
+    fn scoped_traverse_incoming_or_both_rejected() {
+        let (server, alice, _bob, _carol) = seed_two_namespaces();
+        for direction in ["incoming", "both"] {
+            let out = server.dispatch_tool_json(
+                "traverse",
+                serde_json::json!({
+                    "start_node_id": alice, "edge_label": "KNOWS",
+                    "direction": direction, "namespace": "agent:planner"
+                }),
+            );
+            assert_eq!(
+                as_json(&out)
+                    .pointer("/error/code")
+                    .and_then(|c| c.as_str()),
+                Some("INVALID_ARGUMENT"),
+                "scoped traverse direction:{direction} must be INVALID_ARGUMENT (v1 limitation): {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_edge_in_namespace_registers_it() {
+        let server = create_test_server();
+        let a = server
+            .db()
+            .create_node_in_namespace("Person", PropertyMapBuilder::new().build(), "agent:planner")
+            .unwrap()
+            .as_u64();
+        let b = server
+            .db()
+            .create_node_in_namespace("Person", PropertyMapBuilder::new().build(), "agent:planner")
+            .unwrap()
+            .as_u64();
+        // Write an edge into a brand-new namespace via the MCP tool.
+        let out = server.dispatch_tool_json(
+            "create_edge",
+            serde_json::json!({
+                "source_id": a, "target_id": b, "label": "KNOWS",
+                "namespace": "agent:edgewriter"
+            }),
+        );
+        assert_eq!(
+            as_json(&out).get("namespace").and_then(|n| n.as_str()),
+            Some("agent:edgewriter"),
+            "create_edge must surface the namespace: {out}"
+        );
+        // list_namespaces (via database_stats has counts, but registration is the
+        // registry) shows the newly-written namespace.
+        let names: Vec<String> = server
+            .db()
+            .list_namespaces()
+            .into_iter()
+            .map(|i| i.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "agent:edgewriter"),
+            "a namespaced edge write must register the namespace: {names:?}"
+        );
     }
 }

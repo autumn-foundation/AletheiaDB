@@ -1655,11 +1655,16 @@ impl AletheiaMcpServer {
     /// - a **string** namespace name (single-namespace scope), or the special
     ///   selector `"all"` (no filter);
     /// - an **array of string** namespace names (the union scope);
-    /// - absent ⇒ `Ok(None)`, meaning "no explicit scope" — the caller keeps its
-    ///   current, unscoped behavior (byte-identical back-compat: the read is not
-    ///   narrowed). Note this is NOT the same as `Single(default)`: PR3a has no
-    ///   connection-default-scope config, so an omitted scope leaves the read
-    ///   exactly as it behaves today (all namespaces visible), not default-only.
+    /// - absent ⇒ `Ok(None)`, meaning "no explicit scope supplied". Each scoped
+    ///   read tool resolves this to [`NamespaceScope::default`] — the `default`
+    ///   namespace ONLY (isolated-by-default, #3349 FIX2) — via
+    ///   `.unwrap_or_default()`, then routes through its `*_scoped` path. This is
+    ///   exact back-compat for any pre-namespace database (all data is `default`,
+    ///   so an omitted read returns all of it) and only isolates once non-default
+    ///   namespaces exist. It is therefore equivalent to an explicit
+    ///   `"default"`, and distinct from `"all"` (which imposes no filter). The
+    ///   non-scoping tools (`list_edges`/`hybrid_query`/`query`) instead treat an
+    ///   omitted/`"all"` scope as a no-op via [`reject_unsupported_scope`].
     ///
     /// An **empty array** is `INVALID_ARGUMENT` (a scope that silently matches
     /// nothing is forbidden). A malformed namespace name is `INVALID_ARGUMENT`
@@ -2602,16 +2607,20 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
-        // Issue #3349: an explicit namespace scope narrows visibility (an
-        // out-of-scope node is reported NOT_FOUND, indistinguishable from
-        // missing). Omitted ⇒ current unscoped behavior.
+        // Issue #3349: a namespace scope narrows visibility (an out-of-scope
+        // node is reported NOT_FOUND, indistinguishable from missing). Omitted ⇒
+        // the `default` namespace only (isolated-by-default, #3349 FIX2), routed
+        // through the scoped read; `all` imposes no filter (byte-identical
+        // unscoped fast path). For a pre-namespace database (all data is
+        // `default`) an omitted read still returns all of it.
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
-        };
+        }
+        .unwrap_or_default();
         let node_result = match &scope {
-            Some(scope) => self.db.get_node_scoped(node_id, scope),
-            None => self.db.get_node(node_id),
+            crate::core::namespace::NamespaceScope::All => self.db.get_node(node_id),
+            scope => self.db.get_node_scoped(node_id, scope),
         };
 
         match node_result {
@@ -3304,16 +3313,18 @@ impl AletheiaMcpServer {
             return self.invalid_argument("Property filtering requires 'label' to be specified");
         }
 
-        // Issue #3349: a narrowing namespace scope routes through the scoped
-        // membership index. `All`/absent falls through to the full-featured
-        // unscoped path below (byte-identical back-compat).
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes through the scoped
+        // membership index, exactly like an explicit narrowing scope. For a
+        // pre-namespace database (all data is `default`) this still returns all
+        // of it. Only the `all` selector falls through to the full-featured
+        // unscoped path below (byte-identical to the current unscoped behavior).
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
-        };
-        if let Some(scope) =
-            scope.filter(|s| !matches!(s, crate::core::namespace::NamespaceScope::All))
-        {
+        }
+        .unwrap_or_default();
+        if !matches!(scope, crate::core::namespace::NamespaceScope::All) {
             return self.handle_list_nodes_scoped(&req, &scope, prov_filter.as_ref());
         }
 
@@ -3488,6 +3499,31 @@ impl AletheiaMcpServer {
         let include_vectors = req.include_vectors.unwrap_or(false);
         let now = time::now();
 
+        // No label filter: reproduce the unscoped path's guidance response
+        // exactly (byte-identical back-compat for an omitted/default-scope read —
+        // #3349 FIX2). The unscoped path declines to enumerate every node without
+        // a label; we mirror that, reporting the **in-scope** node count as
+        // `total_count` (for a pre-namespace / `default`-only database this
+        // equals `node_count()`, so the response is byte-identical). `list_nodes_
+        // scoped` also validates the scope, so an unknown namespace still surfaces
+        // as NOT_FOUND(details.namespace) here.
+        if req.label.is_none() && req.property_key.is_none() {
+            let total = match self.db.list_nodes_scoped(None, scope) {
+                Ok(ids) => ids.len(),
+                Err(e) => return self.db_error(e),
+            };
+            let mut response = json!({
+                "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
+                "total_count": total,
+                "nodes": [],
+                "count": 0,
+                "offset": offset,
+                "limit": limit
+            });
+            Self::attach_completeness(&mut response, offset, 0, false, None);
+            return self.success_json(response);
+        }
+
         // Resolve the candidate id set within scope (validates the scope against
         // the registry — an unknown namespace ⇒ NOT_FOUND(details.namespace)).
         let ids_result = if let (Some(label), Some(prop_key), Some(prop_val)) =
@@ -3529,10 +3565,14 @@ impl AletheiaMcpServer {
             "offset": offset,
             "limit": limit,
         });
-        // With a provenance filter active the materialized total is the
-        // *unfiltered* candidate count, so it would be misleading — omit it
-        // (mirroring the unscoped path); `has_more` still carries completeness.
-        let reported_total = if prov_filter.is_some() {
+        // Match the unscoped path's total-reporting exactly (byte-identical
+        // back-compat for an omitted/default-scope read — #3349 FIX2): a
+        // property lookup reports the materialized `total_matching` (as the
+        // unscoped property path does), while a label-only / no-filter scan
+        // omits it (as the unscoped label-only path does). A provenance filter
+        // makes the materialized total the *unfiltered* candidate count, so it
+        // is likewise omitted. `has_more` always carries the completeness signal.
+        let reported_total = if prov_filter.is_some() || req.property_key.is_none() {
             None
         } else {
             Some(total_matching)
@@ -3585,14 +3625,17 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
-        // Issue #3349: an explicit namespace scope narrows visibility.
+        // Issue #3349: a namespace scope narrows visibility. Omitted ⇒ the
+        // `default` namespace only (isolated-by-default, #3349 FIX2); `all`
+        // imposes no filter (unscoped fast path).
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
-        };
+        }
+        .unwrap_or_default();
         let edge_result = match &scope {
-            Some(scope) => self.db.get_edge_scoped(edge_id, scope),
-            None => self.db.get_edge(edge_id),
+            crate::core::namespace::NamespaceScope::All => self.db.get_edge(edge_id),
+            scope => self.db.get_edge_scoped(edge_id, scope),
         };
 
         match edge_result {
@@ -4203,31 +4246,41 @@ impl AletheiaMcpServer {
         // (Issue #3391).
         let now = time::now();
 
-        // Issue #3349: a narrowing namespace scope routes through the
-        // boundary-enforcing scoped BFS (an edge is crossed only if the edge's
-        // own namespace AND the target node's namespace are in scope, so a scope
-        // cannot leak via transit through an out-of-scope node). `All`/absent
-        // falls through to the full unscoped DFS below.
+        // Issue #3349 (FIX2): resolve an omitted scope to the `default`
+        // namespace only (isolated-by-default). An explicit *non-default*
+        // narrowing scope routes through the boundary-enforcing scoped BFS (an
+        // edge is crossed only if the edge's own namespace AND the target node's
+        // namespace are in scope, so a scope cannot leak via transit through an
+        // out-of-scope node; outgoing-only in v1). The `default` scope — whether
+        // omitted or explicit — and the `all` selector run the full unscoped DFS
+        // below, which preserves the path/depth result shape and every traversal
+        // direction; the `default` case then drops any non-default node from the
+        // returned page so an omitted read stays default-isolated (a
+        // pre-namespace database is all `default`, so nothing is dropped and the
+        // result is byte-identical).
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
-        };
-        if let Some(scope) =
-            scope.filter(|s| !matches!(s, crate::core::namespace::NamespaceScope::All))
-        {
-            return self.handle_traverse_scoped(
-                &req,
-                &scope,
-                start_id,
-                direction,
-                depth,
-                limit,
-                offset,
-                temporal,
-                prov_filter.as_ref(),
-                now,
-            );
         }
+        .unwrap_or_default();
+        let default_only = match &scope {
+            crate::core::namespace::NamespaceScope::All => false,
+            crate::core::namespace::NamespaceScope::Single(ns) if ns.is_default() => true,
+            _ => {
+                return self.handle_traverse_scoped(
+                    &req,
+                    &scope,
+                    start_id,
+                    direction,
+                    depth,
+                    limit,
+                    offset,
+                    temporal,
+                    prov_filter.as_ref(),
+                    now,
+                );
+            }
+        };
 
         let (mut results, has_more) = self.run_traversal(
             start_id,
@@ -4250,6 +4303,18 @@ impl AletheiaMcpServer {
         // edges the DFS follows (edge-provenance-gated path pruning is a
         // documented follow-up).
         let page_window = results.len();
+        // Default-scope isolation (#3349 FIX2): drop any non-default node from
+        // the page (its response carries `Some(namespace)`; the default
+        // namespace is elided to `None`). `page_window` above is the pre-filter
+        // DFS page size, so `next_offset` still advances over the unfiltered DFS
+        // order (gap-free/dup-free), exactly like the provenance filter. v1
+        // caveat: this filters returned nodes, not the crossed edges, so it does
+        // not enforce the full scoped traversal boundary for incoming/both — the
+        // outgoing scoped BFS (explicit narrowing scope) does; this is a
+        // documented follow-up.
+        if default_only {
+            results.retain(|r| r.node.namespace.is_none());
+        }
         if let Some(filter) = &prov_filter {
             results.retain(|r| filter.matches(r.node.provenance.as_ref()));
         }
@@ -5039,17 +5104,19 @@ impl AletheiaMcpServer {
             return self.invalid_argument(&e);
         }
 
-        // Issue #3349: a narrowing namespace scope routes through the
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes through the
         // filter-complete scoped k-NN (over-fetches until it has k genuinely
-        // in-scope results — never k-then-drop). `All`/absent falls through to
+        // in-scope results — never k-then-drop), exactly like an explicit
+        // narrowing scope. For a pre-namespace database (all data is `default`)
+        // this returns the same top-k. Only the `all` selector falls through to
         // the full unscoped search below.
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
-        };
-        if let Some(scope) =
-            scope.filter(|s| !matches!(s, crate::core::namespace::NamespaceScope::All))
-        {
+        }
+        .unwrap_or_default();
+        if !matches!(scope, crate::core::namespace::NamespaceScope::All) {
             return self.handle_find_similar_scoped(&req, &scope, k, offset, prov_filter.as_ref());
         }
 
@@ -5872,16 +5939,21 @@ impl AletheiaMcpServer {
         };
 
         // Issue #3349: reconstruct at the coordinate first, then filter by the
-        // (immutable) namespace scope; out of scope ⇒ NOT_FOUND.
+        // (immutable) namespace scope; out of scope ⇒ NOT_FOUND. Omitted ⇒ the
+        // `default` namespace only (isolated-by-default, #3349 FIX2); `all`
+        // imposes no filter.
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
-        };
+        }
+        .unwrap_or_default();
         let node_result = match &scope {
-            Some(scope) => self
+            crate::core::namespace::NamespaceScope::All => {
+                self.db.get_node_at_time(node_id, valid_time, tx_time)
+            }
+            scope => self
                 .db
                 .get_node_at_time_scoped(node_id, valid_time, tx_time, scope),
-            None => self.db.get_node_at_time(node_id, valid_time, tx_time),
         };
 
         match node_result {
@@ -5923,16 +5995,21 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e),
         };
 
-        // Issue #3349: reconstruct then filter by the (immutable) namespace scope.
+        // Issue #3349: reconstruct then filter by the (immutable) namespace
+        // scope. Omitted ⇒ the `default` namespace only (isolated-by-default,
+        // #3349 FIX2); `all` imposes no filter.
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
-        };
+        }
+        .unwrap_or_default();
         let edge_result = match &scope {
-            Some(scope) => self
+            crate::core::namespace::NamespaceScope::All => {
+                self.db.get_edge_at_time(edge_id, valid_time, tx_time)
+            }
+            scope => self
                 .db
                 .get_edge_at_time_scoped(edge_id, valid_time, tx_time, scope),
-            None => self.db.get_edge_at_time(edge_id, valid_time, tx_time),
         };
 
         match edge_result {
@@ -6074,12 +6151,21 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
-        // Issue #3349: an explicit narrowing namespace scope routes each
-        // candidate (reconstructed at the coordinate) through the immutable
-        // namespace filter. `All`/absent falls through unchanged.
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes each candidate
+        // (reconstructed at the coordinate) through the immutable namespace
+        // filter, exactly like an explicit narrowing scope. For a pre-namespace
+        // database (all data is `default`) the candidate set is unchanged. Only
+        // the `all` selector falls through unscoped.
         let scope = match self.parse_opt_scope(&req.namespace) {
-            Ok(s) => s.filter(|s| !matches!(s, crate::core::namespace::NamespaceScope::All)),
+            Ok(s) => s,
             Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let scope = if matches!(scope, crate::core::namespace::NamespaceScope::All) {
+            None
+        } else {
+            Some(scope)
         };
 
         // Validate property filter: both key and value are required together
