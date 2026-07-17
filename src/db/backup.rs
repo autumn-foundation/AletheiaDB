@@ -85,10 +85,14 @@ impl AletheiaDB {
             .unwrap_or_default()
             .as_micros() as i64;
 
-        // Capture declared schema constraints (Issue #3378) so they survive the
-        // backup→restore round-trip. (Uniqueness constraints, #3218, are WAL-
-        // persisted and are still NOT included in .albk — a known residue.)
+        // Capture declared schema constraints (Issue #3378) and uniqueness
+        // constraints (Issue #3218) so both survive the backup→restore
+        // round-trip. Uniqueness constraints are otherwise only WAL-persisted,
+        // so a fresh-WAL restore would silently drop them; they are captured
+        // here and re-declared on restore (see `reapply_unique_constraints`),
+        // which rebuilds the reservation index and writes a durable WAL record.
         let schema_constraints = self.constraint_registry.export_schema_constraints();
+        let unique_constraints = self.constraint_registry.export_unique_constraints();
 
         let payload = build_payload(
             current_snapshot,
@@ -98,6 +102,7 @@ impl AletheiaDB {
             source_lsn,
             created_at_micros,
             schema_constraints,
+            unique_constraints,
         )
         .map_err(Error::Backup)?;
 
@@ -149,6 +154,13 @@ impl AletheiaDB {
         // from the default "aletheiadb/wal" path.
         let config = build_restore_config(tmp.path(), tmp.path().join("wal"));
         let mut db = AletheiaDB::with_unified_config(config)?;
+
+        // Re-declare uniqueness constraints (Issue #3218) after the data is
+        // loaded: unlike the schema-constraint sidecar (loaded during startup
+        // above), uniqueness constraints are WAL-persisted, so they must be
+        // re-declared against the reopened DB — which rebuilds the reservation
+        // index from the restored nodes and writes a durable WAL record.
+        reapply_unique_constraints(&db, &payload.unique_constraints)?;
 
         // Keep the temp dir alive for the lifetime of the ephemeral DB.
         db._tempdir = Some(tmp);
@@ -202,8 +214,34 @@ impl AletheiaDB {
         // Reopen through the canonical durable config so the layout written above
         // is exactly the layout `open`/`open_from_env` will read on restart.
         let config = crate::config::durable_config_for_data_dir(data_dir);
-        AletheiaDB::with_unified_config(config)
+        let db = AletheiaDB::with_unified_config(config)?;
+
+        // Re-declare uniqueness constraints (Issue #3218). Because
+        // `enable_unique_constraint` appends a `DeclareUniqueConstraint` WAL
+        // record, the constraint is durable in the restored database and is
+        // recovered by normal WAL replay on a later reopen.
+        reapply_unique_constraints(&db, &payload.unique_constraints)?;
+        Ok(db)
     }
+}
+
+/// Re-declare each restored uniqueness constraint (Issue #3218) against a
+/// freshly-reopened database.
+///
+/// `enable_unique_constraint` runs the duplicate pre-flight scan (a safety net
+/// — a consistent backup enforced uniqueness, so no duplicates should exist),
+/// rebuilds the reservation index from the restored nodes, and appends a
+/// durable `DeclareUniqueConstraint` WAL record. A dangling/duplicate
+/// declaration surfaces as a normal error rather than silently dropping the
+/// constraint.
+fn reapply_unique_constraints(
+    db: &AletheiaDB,
+    descriptors: &[crate::core::constraint::UniqueConstraintDescriptor],
+) -> Result<()> {
+    for d in descriptors {
+        db.enable_unique_constraint(&d.label, &d.property)?;
+    }
+    Ok(())
 }
 
 /// The index-persistence base directory under a durable data root.
