@@ -586,14 +586,11 @@ impl EdgeScope {
     /// prior behavior) for a declared node variable, and reject a genuinely
     /// unknown variable (typo / unbound reference, Issue #3622 F15).
     fn scope_leaf(&self, var: &str, leaf: Predicate) -> Result<Predicate> {
-        if self.rel_vars.contains(var) {
-            return match self.single_hop_rel.as_deref() {
-                Some(v) if v == var => Ok(Predicate::EdgeScoped(Box::new(leaf))),
-                _ => Err(self.reject(var)),
-            };
+        if self.is_edge_var(var)? {
+            Ok(Predicate::EdgeScoped(Box::new(leaf)))
+        } else {
+            Ok(leaf)
         }
-        self.check_known_node_var(var)?;
-        Ok(leaf)
     }
 
     /// Whether `var` is a relationship variable that must be edge-scoped (a

@@ -74,11 +74,13 @@ fn cypher_comp_to_provenance_cmp(op: CypherCompOp) -> ProvenanceCmp {
     }
 }
 
-/// Flip a Cypher comparison operator when its operands are swapped, so an
-/// accessor on the right-hand side (`0.9 <= confidence(x)`) lowers identically
-/// to the accessor-on-left form (`confidence(x) >= 0.9`). Equality/inequality
-/// are symmetric (Issue #3354b).
-fn flip_cypher_comp_op(op: CypherCompOp) -> CypherCompOp {
+/// Flip a Cypher comparison operator when its operands are swapped, so
+/// `value <op> x` evaluates identically to `x <flipped> value` (an accessor on
+/// the right-hand side lowers like the accessor-on-left form). Equality/
+/// inequality are symmetric (Issue #3354b). Shared by every Cypher operand-swap
+/// site (provenance lowering, vector-score comparison, and the edge-property
+/// evaluator, Issue #3622).
+pub(crate) fn flip_cypher_comp_op(op: CypherCompOp) -> CypherCompOp {
     match op {
         CypherCompOp::Eq => CypherCompOp::Eq,
         CypherCompOp::Ne => CypherCompOp::Ne,
@@ -2194,7 +2196,7 @@ impl CypherConverter {
             }
             (_, CypherExpr::FunctionCall { name, args, .. }) if is_vector_function(name) => {
                 // `value <cmp> score` == `score <flipped-cmp> value`.
-                (name, args, flip_comparison(*op))
+                (name, args, flip_cypher_comp_op(*op))
             }
             _ => return Ok(None),
         };
@@ -2345,18 +2347,6 @@ fn score_comparison_for(op: CypherCompOp) -> Option<ScoreComparison> {
         CypherCompOp::Lt => Some(ScoreComparison::Lt),
         CypherCompOp::Le => Some(ScoreComparison::Le),
         CypherCompOp::Eq | CypherCompOp::Ne => None,
-    }
-}
-
-/// Flip a comparison operator so `value <op> score` becomes `score <flipped> value`.
-fn flip_comparison(op: CypherCompOp) -> CypherCompOp {
-    match op {
-        CypherCompOp::Gt => CypherCompOp::Lt,
-        CypherCompOp::Ge => CypherCompOp::Le,
-        CypherCompOp::Lt => CypherCompOp::Gt,
-        CypherCompOp::Le => CypherCompOp::Ge,
-        CypherCompOp::Eq => CypherCompOp::Eq,
-        CypherCompOp::Ne => CypherCompOp::Ne,
     }
 }
 
