@@ -234,9 +234,20 @@ pub async fn temporal_extent(
     description = "Holistic database snapshot: current size, bi-temporal depth, storage tiers, and WAL state",
     mcp
 )]
-pub async fn database_stats(_auth: Authorized<MetricsClass>, state: ServerState) -> Json<Value> {
+pub async fn database_stats(auth: Authorized<MetricsClass>, state: ServerState) -> Json<Value> {
     let server = AletheiaMcpServer::new(state.db_arc());
-    tool_json(server.database_stats(DatabaseStatsRequest {}))
+    // Admin-gate the changefeed per-principal identity breakdown (Issue #3678):
+    // `database_stats` is `MetricsClass`, so a monitoring/reader credential
+    // reaches this route, but only an admin caller may see the roster of other
+    // principals' ids + live subscription counts. The scalar aggregates stay
+    // available to every metrics-tier caller. The freshly-constructed
+    // `AletheiaMcpServer` is anonymous, so admin-ness MUST come from this
+    // route's own authenticated principal, not the (absent) MCP session.
+    let include_per_principal = auth
+        .principal()
+        .role
+        .allows(aletheiadb::auth::AccessClass::Admin);
+    tool_json(server.database_stats_with_visibility(DatabaseStatsRequest {}, include_per_principal))
 }
 
 // ════════════════════════════════════════════════════════════════════════════

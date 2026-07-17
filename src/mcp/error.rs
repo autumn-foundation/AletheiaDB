@@ -202,7 +202,10 @@ impl McpError {
     /// [`ConstraintError::structured_details`] returns `None` for it.
     pub fn from_db_error(e: &Error) -> Self {
         let (code, retriable) = classify_db_error(e);
-        let details = e.as_constraint().and_then(|ce| ce.structured_details());
+        let details = e
+            .as_constraint()
+            .and_then(|ce| ce.structured_details())
+            .or_else(|| principal_quota_details(e));
         Self {
             code,
             message: e.to_string(),
@@ -280,6 +283,27 @@ fn classify_namespace_error(e: &crate::core::namespace::NamespaceError) -> (McpE
     }
 }
 
+/// Structured `details` for a per-principal changefeed quota breach (Issue
+/// #3678): `{principal, current, limit}`. Shared by the MCP and HTTP surfaces so
+/// both render byte-identical metadata under `error.details`. Returns `None` for
+/// every other error.
+fn principal_quota_details(e: &Error) -> Option<serde_json::Value> {
+    if let Error::Storage(StorageError::PrincipalQuotaExceeded {
+        principal,
+        current,
+        limit,
+    }) = e
+    {
+        Some(serde_json::json!({
+            "principal": principal,
+            "current": current,
+            "limit": limit,
+        }))
+    } else {
+        None
+    }
+}
+
 fn classify_storage_error(e: &StorageError) -> (McpErrorCode, bool) {
     match e {
         StorageError::NodeNotFound(_)
@@ -295,6 +319,10 @@ fn classify_storage_error(e: &StorageError) -> (McpErrorCode, bool) {
         // Resource limits (DoS protection): the request is well-formed but
         // the system refuses in its current state.
         StorageError::CapacityExceeded { .. } => (McpErrorCode::FailedPrecondition, false),
+        // A per-principal changefeed quota breach (Issue #3678) is a transient
+        // fairness limit: another of this principal's subscriptions may drop, so
+        // retrying with backoff can succeed → RESOURCE_EXHAUSTED, retriable.
+        StorageError::PrincipalQuotaExceeded { .. } => (McpErrorCode::ResourceExhausted, true),
         StorageError::InconsistentState { .. }
         | StorageError::WalError { .. }
         | StorageError::CheckpointError { .. }
@@ -455,6 +483,26 @@ mod tests {
             McpErrorCode::ResourceExhausted.as_str(),
             "RESOURCE_EXHAUSTED"
         );
+    }
+
+    #[test]
+    fn principal_quota_breach_is_resource_exhausted_retriable_with_details() {
+        // Issue #3678: a per-principal changefeed quota breach classifies to the
+        // RESOURCE_EXHAUSTED envelope with retriable:true and structured
+        // details {principal, current, limit}.
+        let e: Error = crate::core::error::StorageError::PrincipalQuotaExceeded {
+            principal: "alice".to_string(),
+            current: 2,
+            limit: 2,
+        }
+        .into();
+        let err = McpError::from_db_error(&e);
+        let json = err.to_json();
+        assert_eq!(json["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(json["retriable"], true);
+        assert_eq!(json["details"]["principal"], "alice");
+        assert_eq!(json["details"]["current"], 2);
+        assert_eq!(json["details"]["limit"], 2);
     }
 
     #[test]

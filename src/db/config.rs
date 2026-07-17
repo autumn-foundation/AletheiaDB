@@ -586,6 +586,11 @@ impl AletheiaDB {
             let enable_cold_storage = config.historical.enable_cold_storage;
             let cold_storage_path = config.historical.cold_storage_path.clone();
 
+            // Capture the changefeed caps (incl. the Issue #3678 per-principal
+            // quota) before `config` fields are moved, so the broadcaster is
+            // constructed from the unified config rather than defaults.
+            let changefeed_config = config.changefeed.clone();
+
             // Named-snapshot registry (Issue #3370): durable sidecar at
             // `{data_dir}/snapshots.json` when index persistence is enabled,
             // in-memory-only otherwise. Loaded here so pins survive restart.
@@ -650,7 +655,9 @@ impl AletheiaDB {
                 crypto_shred,
                 lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 changefeed: Arc::new(
-                    crate::core::changefeed_subscription::ChangefeedBroadcaster::new(),
+                    crate::core::changefeed_subscription::ChangefeedBroadcaster::with_config(
+                        changefeed_config,
+                    ),
                 ),
                 snapshots,
                 namespaces,

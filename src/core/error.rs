@@ -448,6 +448,25 @@ pub enum StorageError {
         /// Maximum allowed
         limit: usize,
     },
+    /// A per-principal quota was exceeded (Issue #3678).
+    ///
+    /// Distinct from the global [`Self::CapacityExceeded`] so the two can be
+    /// classified differently: a per-principal quota breach is a **transient
+    /// fairness** limit (another of this principal's subscriptions may drop),
+    /// mapping to the MCP/HTTP `RESOURCE_EXHAUSTED` code with `retriable: true`,
+    /// whereas the global cap keeps its existing mapping. Raised when a principal
+    /// already holds `limit` concurrently-live changefeed subscriptions.
+    #[error(
+        "Per-principal quota exceeded for principal '{principal}': current={current}, limit={limit}"
+    )]
+    PrincipalQuotaExceeded {
+        /// The principal id whose quota was exceeded.
+        principal: String,
+        /// The principal's current live-subscription count.
+        current: usize,
+        /// The principal's configured maximum.
+        limit: usize,
+    },
     /// A Mutex lock was poisoned (a thread panicked while holding the lock).
     ///
     /// This indicates severe internal corruption. The affected resource cannot be

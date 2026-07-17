@@ -224,6 +224,81 @@ lost**, given the two-part precondition: (1) ordered (cursor-ascending) live del
 lag/reconnect/restart. Duplicates arise only from an overlapping resume pull and are deduped by
 the stable cursor.
 
+## Per-principal subscription quota (Issue #3678)
+
+Two caps protect the changefeed. `max_subscriptions` (default **128**) bounds the *total*
+concurrently-live subscriptions across the broadcaster. `max_subscriptions_per_principal`
+(default **16**, `DEFAULT_MAX_PER_PRINCIPAL_SUBSCRIPTIONS`) bounds how many any one
+*authenticated principal* may hold, so a single principal cannot exhaust the global cap and
+starve others. Both are enforced atomically under one lock; whichever binds first wins. A
+principal can be given a different limit via `per_principal_overrides` (keyed by principal id),
+and the shared `"anonymous"` bucket — used by every caller in anonymous mode, so the quota is
+never a no-op locally — is tunable via the `"anonymous"` key.
+
+Configure both through the unified config:
+
+`ChangefeedConfig` is `#[non_exhaustive]` (it holds a `HashMap` and dropped its
+`Copy` derive), so construct it from `ChangefeedConfig::default()` and the fluent
+`with_*` setters rather than a struct literal:
+
+```rust
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::core::changefeed_subscription::ChangefeedConfig;
+
+let config = AletheiaDBConfig::builder()
+    .changefeed(
+        ChangefeedConfig::default()
+            .with_max_subscriptions(256)
+            .with_buffer_capacity(1024)
+            .with_max_subscriptions_per_principal(16)
+            .with_per_principal_override("ingest-service", 64) // trusted high-fan-out principal
+            .with_per_principal_override("blocked-bot", 0),     // 0 = an intentional deny switch
+    )
+    .build();
+let db = AletheiaDB::with_unified_config(config)?;
+# Ok::<(), aletheiadb::Error>(())
+```
+
+A per-principal override of **`0` blocks that principal entirely** (it can never
+hold a subscription, not even its first). This is deliberately asymmetric with
+the *default* cap, which is floored at `1` — a zero default would disable the
+feed for everyone, whereas a zero override is a per-principal deny switch.
+
+Enforcement is identical across every subscription-creating surface — the MCP `await_changes`
+long-poll and the HTTP `POST /changes/await` + `GET /changes/stream` (SSE) all funnel through
+`AletheiaDB::subscribe_changes_for_principal`. A breach returns the structured
+`RESOURCE_EXHAUSTED` envelope with `retriable: true` and `details {principal, current, limit}`
+(it is a *fairness* limit — another of the principal's subscriptions may drop, so a backed-off
+retry can succeed). Slots release promptly on unsubscribe, client disconnect, long-poll return,
+and expiry, because the decrement lives only in the `Subscription` drop → `deregister` hook.
+
+The bare embedded `AletheiaDB::subscribe_changes` path carries no principal and is unaffected —
+omitting the principal reproduces the pre-#3678 behavior exactly.
+
+**Operator note — reconnect churn transiently inflates the effective quota.** A slot is released
+via the `Subscription` drop hook, but an SSE client that disconnects is only reaped when its
+worker next notices the closed channel — within one `STREAM_POLL_INTERVAL` (≤15s) for an idle
+stream, or ≤60s for an `await_changes` HTTP disconnect. A principal that rapidly reconnects can
+therefore leave not-yet-reaped "zombie" slots counted against its bucket for up to that window,
+and may momentarily hit `RESOURCE_EXHAUSTED` against its own stale connections. This is accurate
+accounting (the slots really are still live), it is `retriable: true`, and it self-heals within
+the reap window — but **size the per-principal cap with headroom over `expected reconnect rate ×
+reap window`** so normal reconnect churn never trips it.
+
+**Operator note — anonymous mode shares one bucket.** In anonymous mode every caller maps to the
+single shared `"anonymous"` principal, so the *whole deployment* is capped at
+`max_subscriptions_per_principal` concurrent changefeed subscriptions (default 16) across all
+clients — a real reduction from the global cap that pre-#3678 anonymous deployments could reach.
+This is intentional (it keeps the quota from being a no-op locally), but if you run several SSE
+dashboards or long-polls under anonymous mode, raise the headroom explicitly with a
+`per_principal_overrides` entry for the `"anonymous"` key.
+
+**Observability.** `/metrics` exposes only *bounded aggregates* — a
+`aletheiadb_changefeed_subscriptions_active` gauge and a
+`aletheiadb_changefeed_quota_rejections_total` counter (never a per-principal label, preserving
+the info-disclosure invariant). The per-principal breakdown is surfaced on the authenticated
+`database_stats` JSON under `changefeed.per_principal`.
+
 ## Performance
 
 The broadcast runs **after** the commit is durable, applied, and visible, and outside every

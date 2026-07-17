@@ -55,17 +55,63 @@ pub const DEFAULT_MAX_SUBSCRIPTIONS: usize = 128;
 /// Default per-subscription buffer capacity (events retained before Lagged).
 pub const DEFAULT_BUFFER_CAPACITY: usize = 1024;
 
+/// Default maximum concurrently-live subscriptions **per authenticated principal**
+/// (Issue #3678).
+///
+/// Chosen as `DEFAULT_MAX_SUBSCRIPTIONS / 8` so a single principal cannot exhaust
+/// the global fan-out cap and starve others: with the default global cap of 128,
+/// at least 8 distinct principals must be active before the global cap binds. The
+/// value is deliberately generous for a well-behaved client (few live SSE streams
+/// / long-polls) while still enforcing fairness.
+pub const DEFAULT_MAX_PER_PRINCIPAL_SUBSCRIPTIONS: usize = 16;
+
 /// Caps governing a [`ChangefeedBroadcaster`].
 ///
-/// Both bounds protect memory: `max_subscriptions` caps fan-out breadth, `buffer_capacity`
-/// caps how far a single slow consumer may fall behind before it is disconnected (Lagged)
-/// rather than growing without bound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The bounds protect memory and fairness: `max_subscriptions` caps total fan-out
+/// breadth, `buffer_capacity` caps how far a single slow consumer may fall behind
+/// before it is disconnected (Lagged), and `max_subscriptions_per_principal` (plus
+/// optional `per_principal_overrides`, Issue #3678) caps how many concurrent
+/// subscriptions any one authenticated principal may hold so no principal can
+/// exhaust the global cap and starve others.
+///
+/// The per-principal cap is enforced **only** when a subscription is created with a
+/// principal key (the MCP/HTTP changefeed surfaces always supply one — the
+/// authenticated principal id, or the shared `"anonymous"` bucket in anonymous
+/// mode). The bare embedded [`ChangefeedBroadcaster::subscribe`] /
+/// [`crate::db::AletheiaDB::subscribe_changes`] path carries no principal and is
+/// unaffected — omitting the principal reproduces the pre-#3678 behavior exactly.
+/// Marked `#[non_exhaustive]` (Issue #3678): the per-principal fields dropped
+/// the previous `Copy` derive (the struct now holds a `HashMap`), so external
+/// callers must construct it via [`ChangefeedConfig::default`] +
+/// field updates rather than a bare struct literal, and future field additions
+/// stay non-breaking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
+#[non_exhaustive]
 pub struct ChangefeedConfig {
     /// Maximum number of concurrently-live subscriptions.
     pub max_subscriptions: usize,
     /// Per-subscription buffer capacity, in events, before overflow → Lagged.
     pub buffer_capacity: usize,
+    /// Default maximum concurrently-live subscriptions per authenticated principal
+    /// (Issue #3678). Applies to every principal without an explicit override.
+    pub max_subscriptions_per_principal: usize,
+    /// Per-principal overrides, keyed by principal id (Issue #3678). A principal
+    /// listed here uses its override limit instead of
+    /// `max_subscriptions_per_principal`. The shared anonymous bucket can be
+    /// tuned via the `"anonymous"` key.
+    ///
+    /// An override of **`0` is an intentional block**: that principal can never
+    /// hold a changefeed subscription (not even its first), because the quota
+    /// check rejects any subscribe once `current >= limit` and `current` starts
+    /// at `0`. This is deliberately **asymmetric** with the default
+    /// `max_subscriptions_per_principal`, which is floored at `1` by
+    /// [`ChangefeedBroadcaster::with_config`]/`set_config` (a zero *default*
+    /// would disable the feed for everyone and is treated as a misconfiguration,
+    /// whereas a zero *override* is a per-principal deny switch). Override values
+    /// are stored verbatim and never floored.
+    pub per_principal_overrides: HashMap<String, usize>,
 }
 
 impl Default for ChangefeedConfig {
@@ -73,7 +119,50 @@ impl Default for ChangefeedConfig {
         ChangefeedConfig {
             max_subscriptions: DEFAULT_MAX_SUBSCRIPTIONS,
             buffer_capacity: DEFAULT_BUFFER_CAPACITY,
+            max_subscriptions_per_principal: DEFAULT_MAX_PER_PRINCIPAL_SUBSCRIPTIONS,
+            per_principal_overrides: HashMap::new(),
         }
+    }
+}
+
+impl ChangefeedConfig {
+    /// Fluent builders over [`ChangefeedConfig::default`] (Issue #3678). Because
+    /// the struct is `#[non_exhaustive]`, out-of-crate callers cannot use a
+    /// struct literal (with or without functional-record-update); these
+    /// consuming setters are the ergonomic construction path.
+    ///
+    /// Set the global maximum number of concurrently-live subscriptions.
+    #[must_use]
+    pub fn with_max_subscriptions(mut self, max_subscriptions: usize) -> Self {
+        self.max_subscriptions = max_subscriptions;
+        self
+    }
+
+    /// Set the per-subscription buffer capacity (events retained before Lagged).
+    #[must_use]
+    pub fn with_buffer_capacity(mut self, buffer_capacity: usize) -> Self {
+        self.buffer_capacity = buffer_capacity;
+        self
+    }
+
+    /// Set the default per-principal subscription cap (applies to every
+    /// principal without an explicit override).
+    #[must_use]
+    pub fn with_max_subscriptions_per_principal(mut self, max: usize) -> Self {
+        self.max_subscriptions_per_principal = max;
+        self
+    }
+
+    /// Add or replace a per-principal override. A limit of `0` blocks the
+    /// principal entirely (see the field docs).
+    #[must_use]
+    pub fn with_per_principal_override(
+        mut self,
+        principal: impl Into<String>,
+        limit: usize,
+    ) -> Self {
+        self.per_principal_overrides.insert(principal.into(), limit);
+        self
     }
 }
 
@@ -194,6 +283,13 @@ struct SubscriberState {
     id: u64,
     filter: ChangeFilter,
     buffer_capacity: usize,
+    /// The per-principal quota bucket this subscription counts against, if any
+    /// (Issue #3678). `None` for the bare embedded path (no principal accounting).
+    /// Stored here so [`ChangefeedBroadcaster::deregister`] can find and decrement
+    /// the correct principal counter from the subscription id alone — the single
+    /// leak-proof release anchor for every drop cause (unsubscribe, disconnect,
+    /// expiry).
+    principal_key: Option<String>,
     inner: Mutex<SubscriberInner>,
     cvar: Condvar,
 }
@@ -378,6 +474,38 @@ struct EmitSequencer {
     pending: BTreeMap<u64, Vec<ChangeRecord>>,
 }
 
+/// The registry guarded by the broadcaster's `subscribers` write lock.
+///
+/// Folding the per-principal quota accounting (Issue #3678) into the **same**
+/// lock that guards the global subscriber map makes "check global cap → check
+/// per-principal quota → insert → bump counters" one atomic critical section, so
+/// two concurrent subscribes for the same principal can never both observe
+/// `count-1` and over-admit (no TOCTOU / false-exhaustion). The per-principal
+/// limit config lives here too so a live [`ChangefeedBroadcaster::set_config`]
+/// updates it atomically with the counters.
+struct Registry {
+    /// Live subscriptions by id.
+    subscribers: HashMap<u64, Arc<SubscriberState>>,
+    /// Live subscription count per principal bucket (Issue #3678). An entry is
+    /// removed when its count reaches zero so the map never grows unbounded with
+    /// churned-through principals.
+    per_principal_counts: HashMap<String, usize>,
+    /// Default per-principal cap (Issue #3678).
+    max_per_principal: usize,
+    /// Per-principal cap overrides, keyed by principal id (Issue #3678).
+    per_principal_overrides: HashMap<String, usize>,
+}
+
+impl Registry {
+    /// The effective per-principal cap for `key` (its override, else the default).
+    fn limit_for(&self, key: &str) -> usize {
+        self.per_principal_overrides
+            .get(key)
+            .copied()
+            .unwrap_or(self.max_per_principal)
+    }
+}
+
 /// Fan-out hub for the push changefeed.
 ///
 /// Held as an `Arc` on the database; [`subscribe`](Self::subscribe) hands out
@@ -385,7 +513,7 @@ struct EmitSequencer {
 /// ([`reserve_emit_ticket`](Self::reserve_emit_ticket)) then submits each committed
 /// transaction's records through it (which releases them to subscribers in cursor order).
 pub struct ChangefeedBroadcaster {
-    subscribers: RwLock<HashMap<u64, Arc<SubscriberState>>>,
+    subscribers: RwLock<Registry>,
     next_id: AtomicU64,
     /// Lock-free fast-path gate: emit-related work is skipped entirely when this is zero, so
     /// the zero-subscriber write path pays only a single atomic load and reserves no ticket.
@@ -485,7 +613,12 @@ impl ChangefeedBroadcaster {
     /// Create a broadcaster with explicit caps.
     pub fn with_config(config: ChangefeedConfig) -> Self {
         ChangefeedBroadcaster {
-            subscribers: RwLock::new(HashMap::new()),
+            subscribers: RwLock::new(Registry {
+                subscribers: HashMap::new(),
+                per_principal_counts: HashMap::new(),
+                max_per_principal: config.max_subscriptions_per_principal.max(1),
+                per_principal_overrides: config.per_principal_overrides.clone(),
+            }),
             next_id: AtomicU64::new(1),
             subscriber_count: AtomicUsize::new(0),
             max_subscriptions: AtomicUsize::new(config.max_subscriptions.max(1)),
@@ -498,14 +631,19 @@ impl ChangefeedBroadcaster {
         }
     }
 
-    /// Update the caps. Affects the `max_subscriptions` check immediately and the
-    /// `buffer_capacity` of **future** subscriptions (existing ones keep the capacity they
-    /// were created with).
+    /// Update the caps. Affects the `max_subscriptions` and per-principal checks
+    /// immediately and the `buffer_capacity` of **future** subscriptions (existing
+    /// ones keep the capacity they were created with).
     pub fn set_config(&self, config: ChangefeedConfig) {
         self.max_subscriptions
             .store(config.max_subscriptions.max(1), Ordering::Relaxed);
         self.buffer_capacity
             .store(config.buffer_capacity.max(1), Ordering::Relaxed);
+        // Per-principal limits live under the registry lock so they update
+        // atomically with the counters they govern (Issue #3678).
+        let mut reg = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+        reg.max_per_principal = config.max_subscriptions_per_principal.max(1);
+        reg.per_principal_overrides = config.per_principal_overrides.clone();
     }
 
     /// Register a new subscription with the given filter.
@@ -540,21 +678,68 @@ impl ChangefeedBroadcaster {
         filter: ChangeFilter,
         baseline: Option<String>,
     ) -> Result<Subscription> {
-        let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+        self.subscribe_with_baseline_and_principal(filter, baseline, None)
+    }
+
+    /// Register a new subscription, seeding its resume `baseline` and accounting it
+    /// against the per-principal quota bucket `principal_key` (Issue #3678).
+    ///
+    /// When `principal_key` is `Some(key)` the per-principal cap is enforced
+    /// **atomically** with the global cap under one write lock — see [`Registry`].
+    /// On breach a [`StorageError::PrincipalQuotaExceeded`] is returned (mapping to
+    /// the MCP/HTTP `RESOURCE_EXHAUSTED` / `retriable:true` envelope). When
+    /// `principal_key` is `None` no per-principal accounting happens (the bare
+    /// embedded path), reproducing the pre-#3678 behavior exactly.
+    ///
+    /// The counter is incremented here and decremented **only** in
+    /// [`deregister`](Self::deregister) via the single [`Subscription`] `Drop`
+    /// hook, so a slot is released on every drop cause (unsubscribe, client
+    /// disconnect, long-poll return, expiry) with no leak.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::CapacityExceeded`] at the global cap, or
+    /// [`StorageError::PrincipalQuotaExceeded`] at the principal's cap.
+    pub fn subscribe_with_baseline_and_principal(
+        self: &Arc<Self>,
+        filter: ChangeFilter,
+        baseline: Option<String>,
+        principal_key: Option<String>,
+    ) -> Result<Subscription> {
+        let mut reg = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
         let max = self.max_subscriptions.load(Ordering::Relaxed);
-        if subs.len() >= max {
+        if reg.subscribers.len() >= max {
             return Err(StorageError::CapacityExceeded {
                 resource: "changefeed subscriptions".to_string(),
-                current: subs.len(),
+                current: reg.subscribers.len(),
                 limit: max,
             }
             .into());
+        }
+        // Per-principal fairness check, atomic with the global check above and the
+        // insert below (Issue #3678). Both caps are enforced; whichever binds
+        // first wins.
+        if let Some(key) = &principal_key {
+            let current = reg.per_principal_counts.get(key).copied().unwrap_or(0);
+            let limit = reg.limit_for(key);
+            if current >= limit {
+                drop(reg);
+                #[cfg(feature = "observability")]
+                crate::observability::METRICS.inc_changefeed_quota_rejection();
+                return Err(StorageError::PrincipalQuotaExceeded {
+                    principal: key.clone(),
+                    current,
+                    limit,
+                }
+                .into());
+            }
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let state = Arc::new(SubscriberState {
             id,
             filter,
             buffer_capacity: self.buffer_capacity.load(Ordering::Relaxed),
+            principal_key: principal_key.clone(),
             inner: Mutex::new(SubscriberInner {
                 queue: VecDeque::new(),
                 last_delivered: baseline,
@@ -562,10 +747,17 @@ impl ChangefeedBroadcaster {
             }),
             cvar: Condvar::new(),
         });
-        subs.insert(id, Arc::clone(&state));
+        reg.subscribers.insert(id, Arc::clone(&state));
+        if let Some(key) = principal_key {
+            *reg.per_principal_counts.entry(key).or_insert(0) += 1;
+        }
         // Release: publish the subscriber insertion before the count becomes visible, so a
         // subsequent commit's Acquire gate load observes this subscriber (review F10).
-        self.subscriber_count.store(subs.len(), Ordering::Release);
+        self.subscriber_count
+            .store(reg.subscribers.len(), Ordering::Release);
+        drop(reg);
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS.inc_changefeed_active();
         Ok(Subscription {
             state,
             broadcaster: Arc::downgrade(self),
@@ -592,8 +784,8 @@ impl ChangefeedBroadcaster {
     /// drain in [`submit_sequenced`](Self::submit_sequenced) (so per-subscriber delivery is
     /// cursor-ascending).
     fn push_to_subscribers(&self, records: &[ChangeRecord]) {
-        let subs = self.subscribers.read().unwrap_or_else(|e| e.into_inner());
-        for state in subs.values() {
+        let reg = self.subscribers.read().unwrap_or_else(|e| e.into_inner());
+        for state in reg.subscribers.values() {
             state.push_matching(records);
         }
     }
@@ -659,13 +851,79 @@ impl ChangefeedBroadcaster {
         self.subscribers
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .subscribers
             .len()
     }
 
+    /// The number of currently-live subscriptions held by `principal_key`
+    /// (Issue #3678). `0` for an unknown / fully-released principal.
+    pub fn principal_subscription_count(&self, principal_key: &str) -> usize {
+        self.subscribers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .per_principal_counts
+            .get(principal_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// A snapshot of live subscription counts per principal bucket, sorted by
+    /// principal id for stable output (Issue #3678). Feeds the authenticated
+    /// `database_stats` per-principal breakdown (never `/metrics`, which stays
+    /// bounded-label-only).
+    pub fn per_principal_counts(&self) -> Vec<(String, usize)> {
+        let reg = self.subscribers.read().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(String, usize)> = reg
+            .per_principal_counts
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// A coherent snapshot of the total live-subscription count and the
+    /// per-principal breakdown taken under a **single** `subscribers` read lock
+    /// (Issue #3678). Prevents the `database_stats` aggregate and per-principal
+    /// rows from straddling two instants under concurrent subscribe/deregister:
+    /// with separate `subscription_count()` + `per_principal_counts()` calls a
+    /// commit between them could make the total inconsistent with the rows.
+    /// The per-principal vec is sorted by principal id for stable output.
+    pub fn subscription_count_and_per_principal(&self) -> (usize, Vec<(String, usize)>) {
+        let reg = self.subscribers.read().unwrap_or_else(|e| e.into_inner());
+        let total = reg.subscribers.len();
+        let mut out: Vec<(String, usize)> = reg
+            .per_principal_counts
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        (total, out)
+    }
+
     fn deregister(&self, id: u64) {
-        let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
-        if subs.remove(&id).is_some() {
-            self.subscriber_count.store(subs.len(), Ordering::Release);
+        let mut reg = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = reg.subscribers.remove(&id) {
+            self.subscriber_count
+                .store(reg.subscribers.len(), Ordering::Release);
+            // Decrement the per-principal counter (Issue #3678). This is the ONLY
+            // decrement site — reached via the single `Subscription::Drop` hook for
+            // every release cause — so a slot can never leak. Written with the
+            // `is_some_and` combinator (not a `&&`-`let`-chain) to stay on stable
+            // combinators; the intermediate `let` also keeps clippy's
+            // `collapsible_if` from suggesting a re-collapse into a let-chain.
+            if let Some(key) = state.principal_key.as_ref() {
+                let released_to_zero = reg.per_principal_counts.get_mut(key).is_some_and(|count| {
+                    *count -= 1;
+                    *count == 0
+                });
+                if released_to_zero {
+                    reg.per_principal_counts.remove(key);
+                }
+            }
+            drop(reg);
+            #[cfg(feature = "observability")]
+            crate::observability::METRICS.dec_changefeed_active();
         }
     }
 }
@@ -869,6 +1127,7 @@ mod tests {
         let b = Arc::new(ChangefeedBroadcaster::with_config(ChangefeedConfig {
             max_subscriptions: 2,
             buffer_capacity: 16,
+            ..ChangefeedConfig::default()
         }));
         let _s1 = b.subscribe(ChangeFilter::all()).unwrap();
         let _s2 = b.subscribe(ChangeFilter::all()).unwrap();
@@ -910,6 +1169,7 @@ mod tests {
         let b = Arc::new(ChangefeedBroadcaster::with_config(ChangefeedConfig {
             max_subscriptions: 8,
             buffer_capacity: 2,
+            ..ChangefeedConfig::default()
         }));
         let sub = b.subscribe(ChangeFilter::all()).unwrap();
 
@@ -1083,8 +1343,326 @@ mod tests {
         b.set_config(ChangefeedConfig {
             max_subscriptions: 1,
             buffer_capacity: 4,
+            ..ChangefeedConfig::default()
         });
         let _s1 = b.subscribe(ChangeFilter::all()).unwrap();
         assert!(b.subscribe(ChangeFilter::all()).is_err());
+    }
+
+    // ── Per-principal subscription quota (Issue #3678) ────────────────────────
+
+    /// Subscribe with an explicit principal key.
+    fn sub_as(b: &Arc<ChangefeedBroadcaster>, principal: &str) -> Result<Subscription> {
+        b.subscribe_with_baseline_and_principal(
+            ChangeFilter::all(),
+            None,
+            Some(principal.to_string()),
+        )
+    }
+
+    fn quota_config(default_per_principal: usize, max_subscriptions: usize) -> ChangefeedConfig {
+        ChangefeedConfig {
+            max_subscriptions,
+            buffer_capacity: 16,
+            max_subscriptions_per_principal: default_per_principal,
+            per_principal_overrides: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn per_principal_cap_enforced_below_global() {
+        // default per-principal = 2, global far above: the 3rd subscribe for the
+        // SAME principal is refused with PrincipalQuotaExceeded even though the
+        // global cap is nowhere near.
+        let b = Arc::new(ChangefeedBroadcaster::with_config(quota_config(2, 100)));
+        let _a1 = sub_as(&b, "alice").unwrap();
+        let _a2 = sub_as(&b, "alice").unwrap();
+        let err = sub_as(&b, "alice").unwrap_err();
+        match err {
+            crate::core::error::Error::Storage(StorageError::PrincipalQuotaExceeded {
+                principal,
+                current,
+                limit,
+            }) => {
+                assert_eq!(principal, "alice");
+                assert_eq!(current, 2);
+                assert_eq!(limit, 2);
+            }
+            other => panic!("expected PrincipalQuotaExceeded, got {other:?}"),
+        }
+        assert_eq!(b.subscription_count(), 2, "the rejected sub is not counted");
+        assert_eq!(b.principal_subscription_count("alice"), 2);
+    }
+
+    #[test]
+    fn two_principals_isolated() {
+        // alice at her cap does not affect bob; counts are tracked independently.
+        let b = Arc::new(ChangefeedBroadcaster::with_config(quota_config(2, 100)));
+        let _a1 = sub_as(&b, "alice").unwrap();
+        let _a2 = sub_as(&b, "alice").unwrap();
+        assert!(sub_as(&b, "alice").is_err(), "alice at cap");
+        // bob is unaffected.
+        let _b1 = sub_as(&b, "bob").unwrap();
+        let _b2 = sub_as(&b, "bob").unwrap();
+        assert_eq!(b.principal_subscription_count("alice"), 2);
+        assert_eq!(b.principal_subscription_count("bob"), 2);
+    }
+
+    #[test]
+    fn per_principal_override_honored() {
+        // override {alice: 5} over default 2: alice reaches 5, bob still capped at 2.
+        let mut cfg = quota_config(2, 100);
+        cfg.per_principal_overrides.insert("alice".to_string(), 5);
+        let b = Arc::new(ChangefeedBroadcaster::with_config(cfg));
+        let mut alice_subs = Vec::new();
+        for _ in 0..5 {
+            alice_subs.push(sub_as(&b, "alice").unwrap());
+        }
+        assert!(sub_as(&b, "alice").is_err(), "alice capped at override 5");
+        assert_eq!(b.principal_subscription_count("alice"), 5);
+        let _b1 = sub_as(&b, "bob").unwrap();
+        let _b2 = sub_as(&b, "bob").unwrap();
+        assert!(sub_as(&b, "bob").is_err(), "bob still at default 2");
+    }
+
+    #[test]
+    fn drop_releases_per_principal_slot() {
+        let b = Arc::new(ChangefeedBroadcaster::with_config(quota_config(2, 100)));
+        let a1 = sub_as(&b, "alice").unwrap();
+        let _a2 = sub_as(&b, "alice").unwrap();
+        assert!(sub_as(&b, "alice").is_err());
+        assert_eq!(b.principal_subscription_count("alice"), 2);
+        drop(a1);
+        assert_eq!(b.principal_subscription_count("alice"), 1);
+        // A slot freed up: alice can subscribe again.
+        let _a3 = sub_as(&b, "alice").unwrap();
+        assert_eq!(b.principal_subscription_count("alice"), 2);
+    }
+
+    #[test]
+    fn deregister_decrements_correct_principal() {
+        let b = Arc::new(ChangefeedBroadcaster::with_config(quota_config(4, 100)));
+        let _a1 = sub_as(&b, "alice").unwrap();
+        let b1 = sub_as(&b, "bob").unwrap();
+        let _b2 = sub_as(&b, "bob").unwrap();
+        assert_eq!(b.principal_subscription_count("alice"), 1);
+        assert_eq!(b.principal_subscription_count("bob"), 2);
+        drop(b1);
+        assert_eq!(
+            b.principal_subscription_count("alice"),
+            1,
+            "alice untouched"
+        );
+        assert_eq!(b.principal_subscription_count("bob"), 1);
+    }
+
+    #[test]
+    fn global_cap_still_wins_when_lower() {
+        // global cap 1 below per-principal 10: the 2nd subscribe (any principal)
+        // hits the GLOBAL cap, preserving the existing global behavior.
+        let b = Arc::new(ChangefeedBroadcaster::with_config(quota_config(10, 1)));
+        let _a1 = sub_as(&b, "alice").unwrap();
+        let err = sub_as(&b, "bob").unwrap_err();
+        match err {
+            crate::core::error::Error::Storage(StorageError::CapacityExceeded {
+                resource,
+                limit,
+                ..
+            }) => {
+                assert_eq!(resource, "changefeed subscriptions");
+                assert_eq!(limit, 1);
+            }
+            other => panic!("expected global CapacityExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn none_principal_bypasses_quota() {
+        // The bare embedded path (no principal) is unaffected by the per-principal
+        // quota even below it (reproduces pre-#3678 behavior).
+        let b = Arc::new(ChangefeedBroadcaster::with_config(quota_config(1, 100)));
+        let _s1 = b.subscribe(ChangeFilter::all()).unwrap();
+        let _s2 = b.subscribe(ChangeFilter::all()).unwrap();
+        let _s3 = b.subscribe(ChangeFilter::all()).unwrap();
+        assert_eq!(b.subscription_count(), 3);
+        assert!(
+            b.per_principal_counts().is_empty(),
+            "no principal accounting for the bare path"
+        );
+    }
+
+    #[test]
+    fn rapid_connect_disconnect_churn_no_leak_no_false_exhaust() {
+        // The load-bearing race test (AC d). N threads each subscribe→immediately
+        // drop, many iterations, for one principal with cap k. Assert: (i) no
+        // iteration is spuriously rejected while fewer than k are concurrently
+        // live (no false-exhaustion), and (ii) after quiescence the principal's
+        // counter is exactly 0 and a fresh `cap` subscribes succeed (no leak).
+        use std::sync::Barrier;
+        const THREADS: usize = 8;
+        const ITERS: usize = 400;
+        const CAP: usize = THREADS; // each thread holds at most 1 at a time → never exceeds CAP
+
+        let b = Arc::new(ChangefeedBroadcaster::with_config(quota_config(
+            CAP, 10_000,
+        )));
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let b = Arc::clone(&b);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..ITERS {
+                    // With CAP == THREADS and each thread holding at most one live
+                    // subscription at a time, the principal's live count can never
+                    // exceed CAP, so a rejection here would be a FALSE exhaustion.
+                    let sub = sub_as(&b, "churn")
+                        .expect("subscribe within cap must not be falsely rejected");
+                    drop(sub);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // No leak: after quiescence the counter is exactly 0 (entry pruned).
+        assert_eq!(
+            b.principal_subscription_count("churn"),
+            0,
+            "no slot leaked after churn"
+        );
+        assert!(b.per_principal_counts().is_empty());
+        // A fresh `cap` subscribes succeed (the quota is fully released).
+        let mut fresh = Vec::new();
+        for _ in 0..CAP {
+            fresh.push(sub_as(&b, "churn").expect("fresh cap subscribes after churn"));
+        }
+        assert!(sub_as(&b, "churn").is_err(), "cap binds again after refill");
+    }
+
+    #[test]
+    fn per_principal_override_zero_always_blocks() {
+        // An override of 0 is an intentional per-principal deny switch: the very
+        // first subscribe is rejected (current=0, limit=0 → 0 >= 0), unlike the
+        // default which is floored at 1. Asymmetry documented on the field.
+        let mut cfg = quota_config(16, 1000);
+        cfg.per_principal_overrides.insert("blocked".to_string(), 0);
+        let b = Arc::new(ChangefeedBroadcaster::with_config(cfg));
+        let err = sub_as(&b, "blocked").unwrap_err();
+        match err {
+            crate::core::error::Error::Storage(StorageError::PrincipalQuotaExceeded {
+                principal,
+                current,
+                limit,
+            }) => {
+                assert_eq!(principal, "blocked");
+                assert_eq!(current, 0);
+                assert_eq!(limit, 0, "override 0 blocks even the first subscribe");
+            }
+            other => panic!("expected PrincipalQuotaExceeded, got {other:?}"),
+        }
+        assert_eq!(b.principal_subscription_count("blocked"), 0);
+        // A different principal is unaffected by another's 0 override.
+        let _ok = sub_as(&b, "allowed").expect("un-overridden principal still admitted");
+    }
+
+    #[test]
+    fn default_max_per_principal_is_16() {
+        // Pin the shipped default so a silent change to the constant fails CI
+        // (AC "default" as the shipped value, not just a mechanism).
+        assert_eq!(DEFAULT_MAX_PER_PRINCIPAL_SUBSCRIPTIONS, 16);
+        assert_eq!(
+            ChangefeedConfig::default().max_subscriptions_per_principal,
+            16
+        );
+        // And it is actually enforced at the default: a fresh broadcaster admits
+        // exactly 16 for one principal, rejecting the 17th.
+        let b = Arc::new(ChangefeedBroadcaster::new());
+        let mut held = Vec::new();
+        for _ in 0..16 {
+            held.push(sub_as(&b, "def").expect("first 16 admitted at the default cap"));
+        }
+        assert!(
+            sub_as(&b, "def").is_err(),
+            "17th rejected at default cap 16"
+        );
+    }
+
+    #[test]
+    fn concurrent_over_admit_exactly_cap_wins() {
+        // Over-admit direction under real contention (AC d complement): with a
+        // small cap and many threads each *holding* its subscription, exactly
+        // `CAP` subscribes win and every other gets PrincipalQuotaExceeded — the
+        // atomic critical section admits no `count > CAP`.
+        use std::sync::Barrier;
+        const CAP: usize = 4;
+        const THREADS: usize = 32;
+
+        let b = Arc::new(ChangefeedBroadcaster::with_config(quota_config(
+            CAP, 10_000,
+        )));
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let b = Arc::clone(&b);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || -> Result<Subscription> {
+                barrier.wait();
+                sub_as(&b, "contended")
+            }));
+        }
+        let mut winners = Vec::new();
+        let mut rejections = 0usize;
+        for h in handles {
+            match h.join().unwrap() {
+                Ok(sub) => winners.push(sub), // held alive → count stays at CAP
+                Err(crate::core::error::Error::Storage(StorageError::PrincipalQuotaExceeded {
+                    limit,
+                    ..
+                })) => {
+                    assert_eq!(limit, CAP);
+                    rejections += 1;
+                }
+                Err(other) => panic!("unexpected error under contention: {other:?}"),
+            }
+        }
+        assert_eq!(winners.len(), CAP, "exactly CAP subscribes admitted");
+        assert_eq!(
+            rejections,
+            THREADS - CAP,
+            "all others rejected, none over-admitted"
+        );
+        assert_eq!(b.principal_subscription_count("contended"), CAP);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn changefeed_config_serde_round_trip() {
+        // A config with a populated per-principal override map round-trips
+        // losslessly through JSON.
+        let mut cfg = ChangefeedConfig::default()
+            .with_max_subscriptions(200)
+            .with_buffer_capacity(64)
+            .with_max_subscriptions_per_principal(3);
+        cfg = cfg
+            .with_per_principal_override("vip", 10)
+            .with_per_principal_override("blocked", 0);
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: ChangefeedConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cfg, back);
+
+        // A legacy blob omitting the two #3678 fields back-fills the defaults via
+        // `#[serde(default)]` (not 0), so an old config keeps working.
+        let legacy = r#"{"max_subscriptions": 50, "buffer_capacity": 8}"#;
+        let filled: ChangefeedConfig = serde_json::from_str(legacy).expect("legacy deserialize");
+        assert_eq!(filled.max_subscriptions, 50);
+        assert_eq!(filled.buffer_capacity, 8);
+        assert_eq!(
+            filled.max_subscriptions_per_principal, DEFAULT_MAX_PER_PRINCIPAL_SUBSCRIPTIONS,
+            "missing per-principal cap defaults to 16, not 0"
+        );
+        assert!(filled.per_principal_overrides.is_empty());
     }
 }

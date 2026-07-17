@@ -1482,6 +1482,45 @@ mod changefeed_await_tests {
         );
     }
 
+    /// Issue #3678: the MCP `await_changes` surface enforces the per-principal
+    /// changefeed quota through the SAME `subscribe_changes_for_principal` funnel
+    /// as the HTTP surfaces. Anonymous-mode sessions share the `"anonymous"`
+    /// bucket, so a held subscription in that bucket at the cap makes the next
+    /// `await_changes` return the RESOURCE_EXHAUSTED / retriable:true envelope
+    /// with `details {principal, current, limit}`.
+    #[test]
+    fn await_changes_enforces_per_principal_quota() {
+        use crate::core::changefeed_subscription::ChangefeedConfig;
+
+        let server = create_test_server();
+        server.db().set_changefeed_config(ChangefeedConfig {
+            max_subscriptions: 100,
+            buffer_capacity: 16,
+            max_subscriptions_per_principal: 1,
+            ..ChangefeedConfig::default()
+        });
+        // Hold one subscription in the shared "anonymous" bucket (the key the
+        // anonymous-mode server resolves), saturating the per-principal cap of 1.
+        let _held = server
+            .db()
+            .subscribe_changes_for_principal(Some("anonymous"), crate::ChangeFilter::all())
+            .unwrap();
+
+        let response = server.await_changes(await_req());
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["error"]["code"],
+            serde_json::json!("RESOURCE_EXHAUSTED")
+        );
+        assert_eq!(value["error"]["retriable"], serde_json::json!(true));
+        assert_eq!(
+            value["error"]["details"]["principal"],
+            serde_json::json!("anonymous")
+        );
+        assert_eq!(value["error"]["details"]["current"], serde_json::json!(1));
+        assert_eq!(value["error"]["details"]["limit"], serde_json::json!(1));
+    }
+
     #[test]
     fn no_write_small_timeout_times_out_with_resume_token() {
         let server = create_test_server();
@@ -11292,12 +11331,21 @@ mod database_stats_tests {
             keys(&value),
             vec![
                 "chain",
+                "changefeed",
                 "cold_storage",
                 "current",
                 "historical",
                 "resource_limits",
                 "wal"
             ]
+        );
+        // Push-changefeed subscription block (Issue #3678): the scalar aggregate
+        // plus the per-principal breakdown. The embedded `new()` server is
+        // anonymous (admin-privileged), so the admin-gated `per_principal` key is
+        // present (empty here — no live subscriptions).
+        assert_eq!(
+            keys(&value["changefeed"]),
+            vec!["active_subscriptions", "per_principal"]
         );
         // Issue #3368 residue: the additive per-query resource-limit
         // termination counters are surfaced under a stable `resource_limits`
