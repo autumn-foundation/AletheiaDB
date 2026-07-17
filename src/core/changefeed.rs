@@ -340,9 +340,24 @@ pub(crate) fn build_raw_change(
 /// and can never reach the page.
 pub(crate) struct BoundedChanges {
     bound: usize,
-    /// Max-heap keyed by cursor: the current largest-cursor survivor sits at the top so it is the
-    /// one evicted once the heap exceeds `bound`.
-    heap: std::collections::BinaryHeap<ByCursor>,
+    inner: BoundedInner,
+}
+
+/// Upper limit on the heap capacity we pre-reserve, so a large `bound` (e.g. an MCP
+/// `limit = 10_000` catch-up) does not attempt a giant up-front allocation while still avoiding
+/// the handful of reallocations a `bound`-sized scan would otherwise incur.
+const HEAP_PRESIZE_CAP: usize = 4096;
+
+/// Storage strategy for [`BoundedChanges`], chosen once at construction from `bound`.
+enum BoundedInner {
+    /// Unbounded fast path (`bound == usize::MAX`): accumulate every offered change into a plain
+    /// `Vec` in `O(M)`. When nothing can ever be evicted (the common "drain everything" /
+    /// large-limit case) the max-heap's `O(M log M)` maintenance buys no memory benefit — it just
+    /// re-heapifies a set the caller sorts anyway — so we skip it entirely.
+    Unbounded(Vec<RawChange>),
+    /// Bounded path: max-heap keyed by cursor, so the current largest-cursor survivor sits at the
+    /// top and is the one evicted once the heap exceeds `bound`.
+    Bounded(std::collections::BinaryHeap<ByCursor>),
 }
 
 /// [`RawChange`] wrapper ordered solely by its [`ChangeCursor`] (which is unique per emitted
@@ -368,25 +383,43 @@ impl Ord for ByCursor {
 
 impl BoundedChanges {
     /// Create an accumulator that keeps at most `bound` (min 1) smallest-cursor changes.
+    ///
+    /// A `bound` of `usize::MAX` selects the unbounded fast path (plain `Vec`, no heap); any
+    /// finite `bound` selects the bounded max-heap, pre-sized to `bound` (capped by
+    /// [`HEAP_PRESIZE_CAP`]).
     pub(crate) fn new(bound: usize) -> Self {
-        BoundedChanges {
-            bound: bound.max(1),
-            heap: std::collections::BinaryHeap::new(),
-        }
+        let bound = bound.max(1);
+        let inner = if bound == usize::MAX {
+            BoundedInner::Unbounded(Vec::new())
+        } else {
+            BoundedInner::Bounded(std::collections::BinaryHeap::with_capacity(
+                bound.min(HEAP_PRESIZE_CAP),
+            ))
+        };
+        BoundedChanges { bound, inner }
     }
 
     /// Offer a change; the accumulator keeps only the `bound`-smallest by cursor seen so far.
     pub(crate) fn consider(&mut self, change: RawChange) {
-        self.heap.push(ByCursor(change));
-        if self.heap.len() > self.bound {
-            // Evict the current largest cursor — it cannot belong on any page of size < bound.
-            self.heap.pop();
+        match &mut self.inner {
+            // Unbounded: keep everything (no eviction is ever possible).
+            BoundedInner::Unbounded(v) => v.push(change),
+            BoundedInner::Bounded(heap) => {
+                heap.push(ByCursor(change));
+                if heap.len() > self.bound {
+                    // Evict the current largest cursor — it cannot belong on any page of size < bound.
+                    heap.pop();
+                }
+            }
         }
     }
 
     /// Consume the accumulator, returning the retained changes (unordered; the caller sorts).
     pub(crate) fn into_vec(self) -> Vec<RawChange> {
-        self.heap.into_iter().map(|w| w.0).collect()
+        match self.inner {
+            BoundedInner::Unbounded(v) => v,
+            BoundedInner::Bounded(heap) => heap.into_iter().map(|w| w.0).collect(),
+        }
     }
 }
 
@@ -421,7 +454,8 @@ pub(crate) fn consider_version(
         tx_window,
         valid_window,
         label_filter,
-    ) && resume_after.is_none_or(|c| rec.cursor > c)
+    )
+    .filter(|rec| resume_after.is_none_or(|c| rec.cursor > c))
     {
         acc.consider(rec);
     }

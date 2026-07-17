@@ -11,14 +11,22 @@ use crate::core::temporal::{TimeRange, Timestamp, time};
 use crate::db::AletheiaDB;
 use crate::query::{EntityHistory, VersionDiff};
 
-/// Test-only instrumentation: the number of candidate [`RawChange`] rows the most recent
-/// [`AletheiaDB::list_changes`] call held for pagination — i.e. the "materialize / refilter"
-/// working set the filter+limit pushdown is meant to bound. Parity and bench tests read this to
-/// assert the hot/cold pushdown actually shrinks the working set to `O(page)` instead of
-/// `O(total matches)`.
 #[cfg(test)]
-pub(crate) static LAST_LIST_CHANGES_CANDIDATES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// Test-only instrumentation: the number of candidate [`RawChange`] rows the most recent
+    /// [`AletheiaDB::list_changes`] call **on this thread** held for pagination — i.e. the
+    /// "materialize / refilter" working set the filter+limit pushdown is meant to bound. Parity
+    /// and bench tests read this to assert the hot/cold pushdown actually shrinks the working set
+    /// to `O(page)` instead of `O(total matches)`.
+    ///
+    /// It is **thread-local**, not a process-global static, on purpose: libtest runs each test on
+    /// its own thread and `list_changes` records the count synchronously on that same thread, so a
+    /// test reads exactly the count from its own call. A shared mutable global would race under
+    /// default `cargo test` parallelism (a concurrent test's call could clobber the value between
+    /// this test's production call and its read), producing both false reds and false greens.
+    pub(crate) static LAST_LIST_CHANGES_CANDIDATES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 impl AletheiaDB {
     /// Get outgoing edges from a node at a specific point in time.
@@ -615,9 +623,10 @@ impl AletheiaDB {
         }
 
         // Test-only: record the candidate working-set size before pagination bounds it. With the
-        // pushdown this is `O(page)` (<= 2 * (limit + 1)) rather than `O(total matches)`.
+        // pushdown this is `O(page)` (<= 2 * (limit + 1)) rather than `O(total matches)`. Recorded
+        // in a thread-local so parallel tests never clobber each other's readings.
         #[cfg(test)]
-        LAST_LIST_CHANGES_CANDIDATES.store(changes.len(), std::sync::atomic::Ordering::Relaxed);
+        LAST_LIST_CHANGES_CANDIDATES.with(|c| c.set(changes.len()));
 
         // The resume cursor was already applied inside each tier's scan, so no post-merge
         // `retain` is needed here.
@@ -1188,7 +1197,6 @@ mod changefeed_pushdown_tests {
     use crate::storage::redb_cold_storage::RedbColdStorage;
     use crate::storage::tiered_storage::TieredStorage;
     use std::sync::Arc;
-    use std::sync::atomic::Ordering as AtomicOrdering;
 
     fn props(name: &str) -> PropertyMap {
         PropertyMapBuilder::new().insert("name", name).build()
@@ -1322,7 +1330,8 @@ mod changefeed_pushdown_tests {
                     &tx_window,
                     valid,
                     label,
-                ) && seen.insert((rec.cursor.kind_ord, rec.cursor.version_id))
+                )
+                .filter(|rec| seen.insert((rec.cursor.kind_ord, rec.cursor.version_id)))
                 {
                     changes.push(rec);
                 }
@@ -1338,7 +1347,8 @@ mod changefeed_pushdown_tests {
                     &tx_window,
                     valid,
                     label,
-                ) && seen.insert((rec.cursor.kind_ord, rec.cursor.version_id))
+                )
+                .filter(|rec| seen.insert((rec.cursor.kind_ord, rec.cursor.version_id)))
                 {
                     changes.push(rec);
                 }
@@ -1464,12 +1474,9 @@ mod changefeed_pushdown_tests {
 
         let (from, to) = all();
         for limit in [1usize, 3, 10, 25, 100] {
-            let page = assert_parity(&db, &query(from, to, limit));
-            // Full drain: the dual-tier version appears exactly once across all pages.
-            if limit == 100 {
-                let _ = page;
-            }
+            assert_parity(&db, &query(from, to, limit));
         }
+        // Full drain: the dual-tier version appears exactly once across all pages.
         let drained = drain_all(&db, &query(from, to, 4));
         let dual_hits = drained
             .iter()
@@ -1581,9 +1588,13 @@ mod changefeed_pushdown_tests {
     // 8 -----------------------------------------------------------------------------------------
     #[test]
     fn resume_across_version_id_inversion() {
-        // Craft two cold versions where the SMALLER version_id carries the LARGER tx-time — the
-        // exact inversion a naive `version_id`-range early-stop would mis-handle. Correct behavior
-        // orders strictly by tx-time (ChangeCursor), never by version_id.
+        // Craft two cold versions where the SMALLER version_id carries the LARGER tx-time. This is
+        // a *static* reproduction of the on-disk state a version_id/tx-time inversion produces — a
+        // guard against a naive `version_id`-range early-stop implementation, not a live
+        // concurrent race (the production scan decodes every entry, so there is no early-stop for
+        // this to defeat; the test asserts scan/resume ordering follows tx-time via ChangeCursor,
+        // never version_id). A true concurrency test that drives two racing commits is a
+        // documented follow-up.
         let db = AletheiaDB::new().unwrap();
         let earlier_txn_bigger_vid = cold_node(500, 100, ts(1_000), "Cold"); // vid 500, tx 1000
         let later_txn_smaller_vid = cold_node(100, 200, ts(2_000), "Cold"); // vid 100, tx 2000
@@ -1770,7 +1781,7 @@ mod changefeed_pushdown_tests {
         let limit = 10usize;
         let page = assert_parity(&db, &query(from, to, limit));
         assert_eq!(page.changes.len(), limit);
-        let candidates = LAST_LIST_CHANGES_CANDIDATES.load(AtomicOrdering::Relaxed);
+        let candidates = LAST_LIST_CHANGES_CANDIDATES.with(|c| c.get());
         assert!(
             candidates <= limit + 1,
             "hot candidate working set must be bounded to limit+1, got {candidates}"
@@ -1795,10 +1806,128 @@ mod changefeed_pushdown_tests {
         let (from, to) = all();
         let limit = 10usize;
         assert_parity(&db, &query(from, to, limit));
-        let candidates = LAST_LIST_CHANGES_CANDIDATES.load(AtomicOrdering::Relaxed);
+        let candidates = LAST_LIST_CHANGES_CANDIDATES.with(|c| c.get());
         assert!(
             candidates <= 2 * (limit + 1),
             "merged candidate set must be bounded to 2*(limit+1), got {candidates}"
+        );
+    }
+
+    // 17 ----------------------------------------------------------------------------------------
+    /// Differentially validate the RESUME path against the oracle with a real mid-stream cursor.
+    ///
+    /// Every other `assert_parity` call site passes a cursor-less query, so the oracle's resume
+    /// branch (`if let Some(c) = cursor { changes.retain(|r| r.cursor > c) }`) would otherwise be
+    /// dead code. Here we walk the whole hot+cold stream page-by-page and `assert_parity` each
+    /// *resumed* page (cursor set to a genuine interior `next_cursor`), so the production in-scan
+    /// `> cursor` filter is checked against the independent post-merge-retain oracle.
+    #[test]
+    fn resume_parity_midstream() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..12 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("h{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let cold_nodes: Vec<_> = (0..12)
+            .map(|i| cold_node(4300 + i, 8300 + i, ts(60 + i as i64), "Cold"))
+            .collect();
+        let _dir = attach_cold(&db, &cold_nodes, &[]);
+
+        let (from, to) = all();
+        for page_size in [1usize, 3, 5] {
+            let mut cursor: Option<String> = None;
+            let mut resumed_pages = 0usize;
+            loop {
+                let mut q = query(from, to, page_size);
+                q.cursor = cursor.clone();
+                // Only interior (resumed) pages carry a cursor — parity-check those so the oracle's
+                // resume branch actually executes.
+                if cursor.is_some() {
+                    assert_parity(&db, &q);
+                    resumed_pages += 1;
+                }
+                let page = db.list_changes(&q).unwrap();
+                match page.next_cursor {
+                    Some(tok) => cursor = Some(tok),
+                    None => break,
+                }
+            }
+            assert!(
+                resumed_pages > 0,
+                "expected at least one mid-stream resumed page @page={page_size}"
+            );
+        }
+    }
+
+    // 18 ----------------------------------------------------------------------------------------
+    /// The tightest correctness case: a page that interleaves rows from BOTH tiers while BOTH
+    /// tiers individually hold far more matches than the bound (heavy eviction in each). This is
+    /// where the per-tier `bound = limit + 1` proof is load-bearing: if the bounded heap dropped a
+    /// true top-N row from one tier because the *other* tier also contributed to the page, the
+    /// paged result would diverge from the unbounded oracle. Asserts order-sensitive byte equality.
+    #[test]
+    fn parity_both_tiers_over_bound_interleaved() {
+        let db = AletheiaDB::new().unwrap();
+
+        // Insert 100 HOT node versions directly at controlled EVEN tx-times (ts 2,4,…,200). Real
+        // `db.write` commits cluster at `time::now()` and cannot be interleaved at the microsecond
+        // level with small synthetic cold timestamps, so we drive the low-level historical insert
+        // to place hot rows exactly between the cold ones.
+        let hot_label = GLOBAL_INTERNER.intern("Hot").unwrap();
+        {
+            let hist = db.__test_historical_storage();
+            let mut w = hist.write();
+            for i in 0..100u64 {
+                let t = ts(2 + (i as i64) * 2); // 2,4,…,200
+                w.add_node_version(
+                    NodeId::new(60_000 + i).unwrap(),
+                    VersionId::new(70_000 + i).unwrap(),
+                    t,
+                    t,
+                    hot_label,
+                    PropertyMap::new(),
+                    false,
+                )
+                .unwrap();
+            }
+        }
+
+        // 100 COLD node versions at controlled ODD tx-times (ts 1,3,…,199).
+        let cold_nodes: Vec<_> = (0..100u64)
+            .map(|i| cold_node(40_000 + i, 50_000 + i, ts(1 + (i as i64) * 2), "Cold"))
+            .collect();
+        let _dir = attach_cold(&db, &cold_nodes, &[]);
+
+        let (from, to) = all();
+        // Merged cursor order alternates cold(ts1), hot(ts2), cold(ts3), hot(ts4), … so any page of
+        // the smallest L (L < 100) interleaves both tiers, and with bound = L+1 ≪ 100 BOTH tiers
+        // evict heavily during their scans.
+        for limit in [2usize, 5, 10, 25, 50] {
+            let page = assert_parity(&db, &query(from, to, limit));
+            assert_eq!(page.changes.len(), limit);
+            let has_hot = page.changes.iter().any(|r| r.label == "Hot");
+            let has_cold = page.changes.iter().any(|r| r.label == "Cold");
+            assert!(
+                has_hot && has_cold,
+                "page must interleave BOTH tiers @limit={limit}"
+            );
+        }
+
+        // Paginated drain must equal the unbounded scan exactly (order-sensitive, no dup/gap).
+        let unbounded = db.list_changes(&query(from, to, 10_000)).unwrap();
+        let want: Vec<_> = unbounded
+            .changes
+            .iter()
+            .map(|r| (r.entity_id, r.kind.ord(), r.version_id))
+            .collect();
+        assert_eq!(want.len(), 200, "all 200 versions visible unbounded");
+        let drained = drain_all(&db, &query(from, to, 7));
+        assert_eq!(
+            drained, want,
+            "paged drain equals unbounded across both over-bound tiers"
         );
     }
 
@@ -1837,7 +1966,7 @@ mod changefeed_pushdown_tests {
             let _ = db.list_changes(&q).unwrap();
         }
         let new_elapsed = t1.elapsed() / iters;
-        let candidates = LAST_LIST_CHANGES_CANDIDATES.load(AtomicOrdering::Relaxed);
+        let candidates = LAST_LIST_CHANGES_CANDIDATES.with(|c| c.get());
 
         println!("=== list_changes pushdown bench ({n} hot versions, limit 10) ===");
         println!("reference (unbounded) : {ref_elapsed:?}/call");
