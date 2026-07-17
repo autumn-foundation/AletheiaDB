@@ -292,6 +292,15 @@ struct SubscriberState {
     principal_key: Option<String>,
     inner: Mutex<SubscriberInner>,
     cvar: Condvar,
+    /// Async-awaitable readiness signal (Issue #3673), present only when a tokio
+    /// runtime is compiled in (the changefeed HTTP/MCP surfaces). It mirrors
+    /// `cvar` for the *async* waiter [`Subscription::recv_async`]: a permit-storing
+    /// `Notify` so a wakeup that races the buffer check is never lost. The
+    /// synchronous [`Subscription::recv_timeout`] Condvar path is unchanged and
+    /// remains the only wait mechanism in `--no-default-features` (no-tokio)
+    /// builds, so embedded callers keep the dependency-free long-poll.
+    #[cfg(any(feature = "mcp-server", feature = "http-server"))]
+    notify: tokio::sync::Notify,
 }
 
 impl SubscriberState {
@@ -318,6 +327,7 @@ impl SubscriberState {
             return false;
         }
         let mut pushed = false;
+        let mut became_lagged = false;
         for record in records {
             if !self.filter.matches(record) {
                 continue;
@@ -325,6 +335,7 @@ impl SubscriberState {
             if inner.queue.len() >= self.buffer_capacity {
                 // Slow consumer: disconnect it rather than back-pressure the writer.
                 inner.lagged = true;
+                became_lagged = true;
                 break;
             }
             inner.queue.push_back(record.clone());
@@ -334,6 +345,17 @@ impl SubscriberState {
         if pushed {
             self.cvar.notify_all();
         }
+        // Wake the async waiter (Issue #3673) on new data OR on the lagged
+        // transition, so a lagged subscription's `recv_async` resolves promptly
+        // to its `RecvError::Lagged` instead of waiting out the whole timeout.
+        // The sync Condvar path above is left byte-identical (`if pushed`) so
+        // delivery semantics for embedded callers are unchanged.
+        #[cfg(any(feature = "mcp-server", feature = "http-server"))]
+        if pushed || became_lagged {
+            self.notify.notify_one();
+        }
+        #[cfg(not(any(feature = "mcp-server", feature = "http-server")))]
+        let _ = became_lagged;
         pushed
     }
 }
@@ -413,6 +435,81 @@ impl Subscription {
             inner = guard;
             if wait.timed_out() && inner.queue.is_empty() && !inner.lagged {
                 return Ok(Vec::new());
+            }
+        }
+    }
+
+    /// Event-driven async counterpart to [`recv_timeout`](Self::recv_timeout)
+    /// (Issue #3673).
+    ///
+    /// Awaits up to `timeout` for buffered events, parking on a
+    /// `tokio::sync::Notify` instead of a blocking `Condvar` wait, so a suspended
+    /// long-poll consumes **zero** runtime worker threads (fixing the
+    /// `block_in_place` / `spawn_blocking` worker-pin the MCP/HTTP changefeed
+    /// surfaces previously relied on). The drain, resume-token, timeout-empty, and
+    /// `RecvError::Lagged` semantics are **identical** to `recv_timeout` — only the
+    /// wait mechanism differs — and the surface owns the future, so dropping it on
+    /// client disconnect drops this `Subscription` immediately (prompt slot
+    /// release).
+    ///
+    /// Returns:
+    /// - `Ok(events)` with one or more events as soon as any are buffered;
+    /// - `Ok(vec![])` if the timeout elapses with nothing buffered;
+    /// - `Err(RecvError::Lagged { resume_token })` once the buffer has been drained
+    ///   and the subscription was disconnected for overflow.
+    #[cfg(any(feature = "mcp-server", feature = "http-server"))]
+    pub async fn recv_async(
+        &self,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<ChangeRecord>, RecvError> {
+        let deadline = Instant::now().checked_add(timeout);
+        loop {
+            // Create and REGISTER the wakeup future *before* inspecting the buffer.
+            // `Notified::enable()` arms the waiter (consuming an already-stored
+            // permit if one exists), so a `notify_one` racing the buffer check
+            // below is never lost — the permit-storing lost-wakeup guard.
+            let notified = self.state.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            // Drain / lagged check — identical to `recv_timeout`. The lock is
+            // released (scope end) before any `.await`, so the future stays `Send`
+            // and never holds the subscriber mutex across a suspension point.
+            {
+                let mut inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if !inner.queue.is_empty() {
+                    let drained: Vec<ChangeRecord> = inner.queue.drain(..).collect();
+                    if let Some(last) = drained.last() {
+                        inner.last_delivered = Some(last.cursor().encode());
+                    }
+                    return Ok(drained);
+                }
+                if inner.lagged {
+                    return Err(RecvError::Lagged {
+                        resume_token: inner.last_delivered.clone(),
+                    });
+                }
+            }
+
+            let remaining = match deadline {
+                Some(d) => d.saturating_duration_since(Instant::now()),
+                None => timeout,
+            };
+            if remaining.is_zero() {
+                return Ok(Vec::new());
+            }
+
+            tokio::select! {
+                // Woken by a push (or a lagged transition): loop to drain.
+                _ = notified => {}
+                // Deadline elapsed: re-check once; honestly time out only if still
+                // nothing buffered and not lagged.
+                _ = tokio::time::sleep(remaining) => {
+                    let inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    if inner.queue.is_empty() && !inner.lagged {
+                        return Ok(Vec::new());
+                    }
+                }
             }
         }
     }
@@ -746,6 +843,8 @@ impl ChangefeedBroadcaster {
                 lagged: false,
             }),
             cvar: Condvar::new(),
+            #[cfg(any(feature = "mcp-server", feature = "http-server"))]
+            notify: tokio::sync::Notify::new(),
         });
         reg.subscribers.insert(id, Arc::clone(&state));
         if let Some(key) = principal_key {
