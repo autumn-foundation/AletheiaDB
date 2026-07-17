@@ -10,7 +10,9 @@
 //! - Reconstruction walks backward to nearest anchor and applies deltas forward
 //! - TinyLFU cache reduces redundant delta chain traversals for concurrent reads
 
-use crate::core::changefeed::{EntityKind, RawChange, build_raw_change};
+use crate::core::changefeed::{
+    BoundedChanges, ChangeCursor, EntityKind, RawChange, build_raw_change, consider_version,
+};
 use crate::core::error::{Result, StorageError, TemporalError};
 use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
@@ -1989,35 +1991,43 @@ impl HistoricalStorage {
         }
     }
 
-    /// Collect changefeed records for every committed version that falls within the given
-    /// transaction-time window, optionally constrained by a valid-time window and/or a
-    /// node-label / edge-type filter (Issue #3216).
+    /// Collect changefeed records for the committed versions that fall within the given
+    /// transaction-time window, optionally constrained by a valid-time window, a node-label /
+    /// edge-type filter, a resume cursor, and a `bound` on how many smallest-cursor rows to
+    /// retain (Issue #3216; filter + limit pushdown, PR 2).
     ///
     /// This is a read-only scan over the in-memory version maps. Only committed versions are
     /// ever present in these maps (versions are inserted on the commit-apply path), so the
-    /// changefeed never surfaces uncommitted or rolled-back data. The result is unordered and
-    /// unpaginated; the caller is responsible for deterministic ordering and cursor/limit
-    /// pagination.
+    /// changefeed never surfaces uncommitted or rolled-back data. The result is unordered; the
+    /// caller is responsible for deterministic ordering and final page selection.
+    ///
+    /// The `resume_after` cursor (strict `> cursor`) and the `bound` are applied **during** the
+    /// scan via [`BoundedChanges`], so the working set held in memory is `O(bound)` rather than
+    /// `O(matches)` — no post-collection materialize-then-refilter. Pass `usize::MAX` as `bound`
+    /// (and `None` as `resume_after`) to recover an unbounded, unresumed collection.
     ///
     /// # Performance
     ///
-    /// This is an O(V) scan of all node and edge versions in the **hot** maps. It is adequate
-    /// for the bounded windows this API targets; a future optimization could maintain a
-    /// transaction-time index keyed by `(commit_timestamp, kind, id)` to make this
-    /// O(log V + page). To keep the historical lock hold short, this produces lightweight
-    /// [`RawChange`]s (no owned label `String`); label resolution is deferred to the query
-    /// layer for surviving rows only. Cold-tier versions are scanned separately by the caller
-    /// after the lock is released (see `tiered_storage_arc`).
+    /// The candidate enumeration is still an O(V) walk of the hot maps (a future
+    /// `(commit_timestamp, kind, id)` index could make this O(log V + page)), but only the
+    /// `bound`-smallest survivors are retained. To keep the historical lock hold short, this
+    /// produces lightweight [`RawChange`]s (no owned label `String`); label resolution is
+    /// deferred to the query layer for surviving rows only. Cold-tier versions are scanned
+    /// separately by the caller after the lock is released (see `tiered_storage_arc`).
     pub(crate) fn collect_changes(
         &self,
         tx_window: &TimeRange,
         valid_window: Option<&TimeRange>,
         label_filter: Option<&str>,
+        resume_after: Option<ChangeCursor>,
+        bound: usize,
     ) -> Vec<RawChange> {
-        let mut out = Vec::new();
+        let mut acc = BoundedChanges::new(bound);
 
         for v in self.node_versions.values() {
-            if let Some(rec) = build_raw_change(
+            consider_version(
+                &mut acc,
+                resume_after,
                 v.id.as_u64(),
                 v.node_id.as_u64(),
                 EntityKind::Node,
@@ -2027,13 +2037,13 @@ impl HistoricalStorage {
                 tx_window,
                 valid_window,
                 label_filter,
-            ) {
-                out.push(rec);
-            }
+            );
         }
 
         for v in self.edge_versions.values() {
-            if let Some(rec) = build_raw_change(
+            consider_version(
+                &mut acc,
+                resume_after,
                 v.id.as_u64(),
                 v.edge_id.as_u64(),
                 EntityKind::Edge,
@@ -2043,12 +2053,10 @@ impl HistoricalStorage {
                 tx_window,
                 valid_window,
                 label_filter,
-            ) {
-                out.push(rec);
-            }
+            );
         }
 
-        out
+        acc.into_vec()
     }
 
     /// Build changefeed [`RawChange`]s for a specific, known set of just-committed version
