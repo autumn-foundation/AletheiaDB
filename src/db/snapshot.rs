@@ -448,7 +448,7 @@ impl SnapshotRegistry {
         #[cfg(not(feature = "serde"))]
         {
             let _ = path;
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(feature = "serde")]

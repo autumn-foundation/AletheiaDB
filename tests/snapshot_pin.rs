@@ -4,12 +4,14 @@
 //! the resulting handle are deterministic and reproducible regardless of any
 //! writes that land afterward.
 
+#[cfg(feature = "simulation")]
+use aletheiadb::WriteOps;
 use aletheiadb::core::error::Error;
 use aletheiadb::core::graph::{Edge, Node};
 use aletheiadb::core::id::{EdgeId, NodeId};
 use aletheiadb::core::temporal::time;
 use aletheiadb::db::snapshot::Snapshot;
-use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use serde_json::json;
 
 /// The canonical durable config places the snapshot sidecar inside the index
