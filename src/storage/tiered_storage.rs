@@ -44,8 +44,10 @@
 //! let version = tiered.get_node_version(version_id)?;
 //! ```
 
+use crate::core::changefeed::{ChangeCursor, RawChange};
 use crate::core::error::Result;
 use crate::core::id::VersionId;
+use crate::core::temporal::TimeRange;
 use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
 use crate::storage::redb_cold_storage::{ColdStorageStats, RedbColdStorage};
 use parking_lot::Mutex;
@@ -414,6 +416,34 @@ impl TieredStorage {
     /// storage. See [`crate::storage::redb_cold_storage::RedbColdStorage::scan_edge_versions`].
     pub fn scan_edge_versions_cold(&self) -> Result<Vec<EdgeVersion>> {
         self.cold.scan_edge_versions()
+    }
+
+    /// Filter-during-decode changefeed scan of the cold tier, bounded to the `bound`-smallest
+    /// survivors by cursor (Issue #3216, PR 2).
+    ///
+    /// Delegates to
+    /// [`RedbColdStorage::collect_changes_filtered`](crate::storage::redb_cold_storage::RedbColdStorage::collect_changes_filtered),
+    /// which applies the changefeed predicate + resume cursor inline as each version is decoded
+    /// and returns only the retained [`RawChange`]s — replacing the full
+    /// `scan_node_versions_cold` / `scan_edge_versions_cold` materialize-then-refilter used by
+    /// `list_changes`. Cold I/O remains O(N) (see the correctness note on the delegate: the
+    /// `version_id` key is not transaction-time ordered, so no early-stop is sound).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn collect_cold_changes(
+        &self,
+        tx_window: &TimeRange,
+        valid_window: Option<&TimeRange>,
+        label_filter: Option<&str>,
+        resume_after: Option<ChangeCursor>,
+        bound: usize,
+    ) -> Result<Vec<RawChange>> {
+        self.cold.collect_changes_filtered(
+            tx_window,
+            valid_window,
+            label_filter,
+            resume_after,
+            bound,
+        )
     }
 
     /// Prefetch versions in a chain (up to prefetch_depth).

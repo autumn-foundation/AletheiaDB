@@ -190,8 +190,18 @@ async fn assert_reads_parity(mode: AuthMode, token: Option<&'static str>) {
     };
     let (s, autumn) = get(&client, "/database_stats", stats_token).await;
     assert_eq!(s, 200, "database_stats: {autumn}");
-    let legacy: Value = serde_json::from_str(&server.database_stats(DatabaseStatsRequest {}))
-        .expect("legacy database_stats json");
+    // `database_stats` is now role-sensitive (Issue #3678): the changefeed
+    // per-principal breakdown is admin-gated. The reference must be computed at
+    // the SAME visibility the HTTP route uses for the driving token — the
+    // metrics token is non-admin in Required mode, while anonymous mode's
+    // synthetic principal is admin — else the reference would carry a
+    // `per_principal` key the gated route omits.
+    let stats_include_per_principal = matches!(mode, AuthMode::Anonymous);
+    let legacy: Value = serde_json::from_str(
+        &server
+            .database_stats_with_visibility(DatabaseStatsRequest {}, stats_include_per_principal),
+    )
+    .expect("legacy database_stats json");
     assert_eq!(
         normalize(autumn),
         normalize(legacy),

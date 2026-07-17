@@ -84,6 +84,39 @@ pub struct DatabaseStats {
     /// skipped. PR3 removes this `skip` and updates the shape-stability test.
     #[cfg_attr(feature = "serde", serde(skip_serializing))]
     pub namespaces: Vec<crate::db::namespace_query::NamespaceCount>,
+    /// Push-changefeed subscription state, including the per-principal quota
+    /// breakdown (Issue #3678). This is the authenticated surface for the
+    /// per-principal detail deliberately kept OFF the bounded `/metrics`
+    /// exposition (which stays bounded-label-only).
+    pub changefeed: ChangefeedStats,
+}
+
+/// Push-changefeed subscription state for the `database_stats` snapshot
+/// (Issue #3678). Reads the broadcaster registry under a brief read lock —
+/// O(live subscriptions), not a version scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ChangefeedStats {
+    /// Total currently-live changefeed subscriptions across all principals and
+    /// the bare embedded path.
+    pub active_subscriptions: usize,
+    /// Per-principal live-subscription breakdown, sorted by principal id. Empty
+    /// when no principal-scoped subscriptions are live. This is the per-principal
+    /// quota visibility AC(e) surfaces on the authenticated JSON path rather than
+    /// as an unbounded `/metrics` label.
+    pub per_principal: Vec<PrincipalSubscriptionStat>,
+}
+
+/// One principal's live changefeed subscription count (Issue #3678).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct PrincipalSubscriptionStat {
+    /// The principal id (or the shared `"anonymous"` bucket).
+    pub principal: String,
+    /// The principal's currently-live subscription count.
+    pub active_subscriptions: usize,
 }
 
 /// Status of the opt-in provenance hash chain (Issue #3351).
@@ -392,6 +425,28 @@ impl AletheiaDB {
         // Per-namespace counts (Issue #3349): O(1) membership-index reads.
         let namespaces = self.namespace_counts();
 
+        // Changefeed subscription state (Issue #3678): a brief registry read,
+        // O(live subscriptions). The per-principal breakdown is the authenticated
+        // surface for the fairness quota — never a `/metrics` label, and its
+        // identity roster is admin-gated at the MCP/HTTP `database_stats`
+        // handlers. Both the aggregate total and the per-principal rows are read
+        // under a SINGLE registry read lock so the snapshot cannot straddle two
+        // instants under concurrent subscribe/deregister.
+        let (active_subscriptions, per_principal_counts) =
+            self.changefeed.subscription_count_and_per_principal();
+        let changefeed = ChangefeedStats {
+            active_subscriptions,
+            per_principal: per_principal_counts
+                .into_iter()
+                .map(
+                    |(principal, active_subscriptions)| PrincipalSubscriptionStat {
+                        principal,
+                        active_subscriptions,
+                    },
+                )
+                .collect(),
+        };
+
         DatabaseStats {
             current: CurrentStateStats {
                 node_count: current_stats.node_count,
@@ -402,6 +457,7 @@ impl AletheiaDB {
             wal,
             chain,
             namespaces,
+            changefeed,
         }
     }
 }

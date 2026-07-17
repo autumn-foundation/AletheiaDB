@@ -829,6 +829,12 @@ pub struct AletheiaDBConfig {
     /// default, so a database keeps byte-identical behavior and on-disk layout
     /// unless the chain is explicitly enabled.
     pub chain: crate::provenance_chain::ChainConfig,
+    /// Push-changefeed caps, including the per-principal subscription quota
+    /// (Issue #3678). Governs the global subscription cap, per-subscription
+    /// buffer, and the default + per-principal-override fairness limits enforced
+    /// by every changefeed surface (MCP `await_changes`, HTTP `/changes/await`
+    /// and `/changes/stream`).
+    pub changefeed: crate::core::changefeed_subscription::ChangefeedConfig,
 }
 
 /// Builder for unified database configuration.
@@ -888,6 +894,16 @@ impl AletheiaDBConfigBuilder {
     /// chain over its recorded history.
     pub fn chain(mut self, chain_config: crate::provenance_chain::ChainConfig) -> Self {
         self.config.chain = chain_config;
+        self
+    }
+
+    /// Set the push-changefeed configuration, including the per-principal
+    /// subscription quota (Issue #3678).
+    pub fn changefeed(
+        mut self,
+        changefeed_config: crate::core::changefeed_subscription::ChangefeedConfig,
+    ) -> Self {
+        self.config.changefeed = changefeed_config;
         self
     }
 

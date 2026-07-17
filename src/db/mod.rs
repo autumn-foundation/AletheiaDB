@@ -84,7 +84,8 @@ pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
 #[cfg(feature = "audit-export")]
 pub use crypto_shred::{
-    CryptoShredError, DesignationTarget, ErasureAttestation, SubjectId, SubjectKey,
+    CryptoShredError, DesignationTarget, ErasureAttestation, ShredStatus, ShredStatusMap,
+    SubjectId, SubjectKey,
 };
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
 pub use lineage::{FactStatus, LineageView, LineageViewEntry};
