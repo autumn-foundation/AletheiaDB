@@ -167,7 +167,7 @@
 //! - **Avoid large IN lists**: Large `IN [...]` clauses are converted to sequential
 //!   value checks; consider using joins for very large lists
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::core::NodeId;
@@ -491,6 +491,160 @@ pub enum ParameterValue {
     Value(PredicateValue),
 }
 
+/// Whether a relationship's depth spec denotes a single, fixed-length hop
+/// (exactly one edge), the only shape whose relationship variable can bind a
+/// single traversed edge for edge-property WHERE / ORDER BY (Issue #3622).
+fn is_simple_hop_depth(depth: &Option<DepthSpec>) -> bool {
+    matches!(depth, None | Some(DepthSpec::Exact(1)))
+}
+
+/// Per-query classification of a MATCH pattern's variables, used to scope AQL
+/// `WHERE` / `ORDER BY` leaves that reference the **relationship** variable to
+/// the row's traversed edge side channel (Issue #3622). Node-variable leaves are
+/// left untouched (node-scoped, byte-identical to prior behavior); a
+/// relationship-variable leaf in a shape that cannot bind a single edge
+/// (multi-hop or variable-length) is rejected with a structured error rather
+/// than silently applied to the wrong entity.
+///
+/// Lane scope / AQL-vs-Cypher differences (Issue #3622):
+/// - AQL rejects a cross-entity property-to-property comparison such as
+///   `r.since = b.age` (see [`AstConverter::convert_comparison`]); Cypher's
+///   multi-variable evaluator supports it.
+/// - The edge channel is wired only into `WHERE` / `ORDER BY`. AQL `RETURN r`
+///   still projects the traversal **target node**, not the edge (returning the
+///   edge as an entity is a deliberate follow-up); the edge is available to
+///   filtering and ordering only.
+#[derive(Default)]
+struct EdgeScope {
+    /// All relationship variable names declared across the MATCH patterns.
+    rel_vars: HashSet<String>,
+    /// All node variable names declared across the MATCH patterns.
+    node_vars: HashSet<String>,
+    /// The single relationship variable, iff the MATCH has exactly one
+    /// relationship and it is a simple single hop; `None` otherwise.
+    single_hop_rel: Option<String>,
+    /// True iff the MATCH declares more than one relationship (multi-hop).
+    multi_hop: bool,
+    /// True iff any relationship is variable-length / non-unit depth.
+    variable_depth: bool,
+    /// Whether variable classification is authoritative. `true` for a `MATCH`
+    /// source (every legitimate WHERE/ORDER BY variable is a declared node or
+    /// relationship variable, so an unrecognized one is a typo/unbound
+    /// reference and is rejected -- Issue #3622 F15). `false` for non-`MATCH`
+    /// sources (vector search), where the leaf-scoping machinery does not run.
+    match_source: bool,
+}
+
+impl EdgeScope {
+    /// Build the scope from a query's source clause. Non-`MATCH` sources (vector
+    /// search) carry no relationship variables (empty scope).
+    fn from_source(source: &SourceClause) -> Self {
+        let SourceClause::Match(patterns) = source else {
+            return Self::default();
+        };
+        let mut rel_vars = HashSet::new();
+        let mut node_vars = HashSet::new();
+        let mut rels: Vec<&RelationshipPattern> = Vec::new();
+        for pattern in patterns {
+            for el in &pattern.elements {
+                match el {
+                    PatternElement::Relationship(rel) => {
+                        rels.push(rel);
+                        if let Some(v) = &rel.variable {
+                            rel_vars.insert(v.clone());
+                        }
+                    }
+                    PatternElement::Node(node) => {
+                        if let Some(v) = &node.variable {
+                            node_vars.insert(v.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let multi_hop = rels.len() > 1;
+        let variable_depth = rels.iter().any(|r| !is_simple_hop_depth(&r.depth));
+        let single_hop_rel = if rels.len() == 1 && is_simple_hop_depth(&rels[0].depth) {
+            rels[0].variable.clone()
+        } else {
+            None
+        };
+        EdgeScope {
+            rel_vars,
+            node_vars,
+            single_hop_rel,
+            multi_hop,
+            variable_depth,
+            match_source: true,
+        }
+    }
+
+    /// Scope a WHERE leaf `leaf` (built for `var`.`prop`): wrap it in
+    /// [`Predicate::EdgeScoped`] when `var` is the single-hop relationship
+    /// variable, reject when `var` is a relationship variable in an unsupported
+    /// (multi-hop / variable-length) position, leave it unchanged (node-scoped,
+    /// prior behavior) for a declared node variable, and reject a genuinely
+    /// unknown variable (typo / unbound reference, Issue #3622 F15).
+    fn scope_leaf(&self, var: &str, leaf: Predicate) -> Result<Predicate> {
+        if self.rel_vars.contains(var) {
+            return match self.single_hop_rel.as_deref() {
+                Some(v) if v == var => Ok(Predicate::EdgeScoped(Box::new(leaf))),
+                _ => Err(self.reject(var)),
+            };
+        }
+        self.check_known_node_var(var)?;
+        Ok(leaf)
+    }
+
+    /// Whether `var` is a relationship variable that must be edge-scoped (a
+    /// single, fixed-length hop). Returns `Ok(true)` for the single-hop rel var,
+    /// `Ok(false)` for a declared node variable, and `Err` for a relationship
+    /// variable in an unsupported position or a genuinely unknown variable
+    /// (`ORDER BY` counterpart of [`scope_leaf`]).
+    fn is_edge_var(&self, var: &str) -> Result<bool> {
+        if self.rel_vars.contains(var) {
+            return match self.single_hop_rel.as_deref() {
+                Some(v) if v == var => Ok(true),
+                _ => Err(self.reject(var)),
+            };
+        }
+        self.check_known_node_var(var)?;
+        Ok(false)
+    }
+
+    /// Reject a WHERE/ORDER BY reference to a variable that is neither a declared
+    /// node nor relationship variable of the pattern (Issue #3622 F15). Known
+    /// node variables (including the non-terminal anchor) are left untouched to
+    /// preserve prior behavior.
+    fn check_known_node_var(&self, var: &str) -> Result<()> {
+        if !self.match_source || self.node_vars.contains(var) {
+            return Ok(());
+        }
+        Err(Error::Query(QueryError::SyntaxError {
+            message: format!(
+                "WHERE/ORDER BY references unknown variable '{var}' that is not bound by the \
+                 MATCH pattern"
+            ),
+        }))
+    }
+
+    fn reject(&self, var: &str) -> Error {
+        let reason = if self.variable_depth {
+            "a variable-length relationship"
+        } else if self.multi_hop {
+            "a multi-hop pattern"
+        } else {
+            "this relationship pattern"
+        };
+        Error::Query(QueryError::UnsupportedFeature {
+            feature: format!(
+                "predicate/ORDER BY on relationship variable '{var}' within {reason}: \
+                 edge-property WHERE/ORDER BY requires a single, fixed-length hop"
+            ),
+        })
+    }
+}
+
 impl AstConverter {
     /// Create a new converter with no parameter bindings.
     ///
@@ -622,9 +776,14 @@ impl AstConverter {
             });
         }
 
+        // Classify the MATCH pattern's variables so WHERE / ORDER BY leaves on
+        // the single-hop relationship variable scope to the traversed edge
+        // (Issue #3622). Empty for non-MATCH sources.
+        let edge_scope = EdgeScope::from_source(&ast.source);
+
         // 3. Convert WHERE clause to filter operations
         if let Some(ref where_clause) = ast.where_clause {
-            self.convert_where_clause(where_clause, &mut ops)?;
+            self.convert_where_clause(where_clause, &mut ops, &edge_scope)?;
         }
 
         // 4. Convert RANK BY SIMILARITY clause
@@ -639,7 +798,7 @@ impl AstConverter {
 
         // 6. Convert ORDER BY clause
         if let Some(ref order_clause) = ast.order {
-            self.convert_order_clause(order_clause, &mut ops)?;
+            self.convert_order_clause(order_clause, &mut ops, &edge_scope)?;
         }
 
         // 7. Convert SKIP and LIMIT
@@ -1192,8 +1351,9 @@ impl AstConverter {
         &self,
         where_clause: &super::ast::WhereClause,
         ops: &mut Vec<QueryOp>,
+        scope: &EdgeScope,
     ) -> Result<()> {
-        let predicate = self.convert_predicate(&where_clause.predicate)?;
+        let predicate = self.convert_predicate(&where_clause.predicate, scope)?;
         ops.push(QueryOp::Filter(predicate));
         Ok(())
     }
@@ -1468,14 +1628,24 @@ impl AstConverter {
     }
 
     /// Convert a predicate expression to IR Predicate.
-    fn convert_predicate(&self, expr: &PredicateExpr) -> Result<Predicate> {
+    ///
+    /// `scope` classifies the pattern's variables so a leaf on the single-hop
+    /// relationship variable scopes to the traversed edge (Issue #3622); node /
+    /// unknown variable leaves are unchanged.
+    fn convert_predicate(&self, expr: &PredicateExpr, scope: &EdgeScope) -> Result<Predicate> {
         match expr {
             PredicateExpr::Comparison { left, op, right } => {
-                self.convert_comparison(left, *op, right)
+                self.convert_comparison(left, *op, right, scope)
             }
-            PredicateExpr::Exists(prop) => Ok(Predicate::Exists(prop.property.clone())),
-            PredicateExpr::IsNull(prop) => Ok(Predicate::NotExists(prop.property.clone())),
-            PredicateExpr::IsNotNull(prop) => Ok(Predicate::Exists(prop.property.clone())),
+            PredicateExpr::Exists(prop) => {
+                scope.scope_leaf(&prop.variable, Predicate::Exists(prop.property.clone()))
+            }
+            PredicateExpr::IsNull(prop) => {
+                scope.scope_leaf(&prop.variable, Predicate::NotExists(prop.property.clone()))
+            }
+            PredicateExpr::IsNotNull(prop) => {
+                scope.scope_leaf(&prop.variable, Predicate::Exists(prop.property.clone()))
+            }
             PredicateExpr::ProvenanceIsNull { negated, .. } => {
                 Ok(Predicate::Provenance(ProvenancePredicate::IsNull {
                     negated: *negated,
@@ -1483,30 +1653,36 @@ impl AstConverter {
             }
             PredicateExpr::Contains { .. }
             | PredicateExpr::StartsWith { .. }
-            | PredicateExpr::EndsWith { .. } => self.convert_string_predicate(expr),
-            PredicateExpr::In { property, values } => self.convert_in_predicate(property, values),
-            PredicateExpr::And(_, _) | PredicateExpr::Or(_, _) | PredicateExpr::Not(_) => {
-                self.convert_logic_predicate(expr)
+            | PredicateExpr::EndsWith { .. } => self.convert_string_predicate(expr, scope),
+            PredicateExpr::In { property, values } => {
+                self.convert_in_predicate(property, values, scope)
             }
-            PredicateExpr::Grouped(inner) => self.convert_predicate(inner),
+            PredicateExpr::And(_, _) | PredicateExpr::Or(_, _) | PredicateExpr::Not(_) => {
+                self.convert_logic_predicate(expr, scope)
+            }
+            PredicateExpr::Grouped(inner) => self.convert_predicate(inner, scope),
         }
     }
 
     /// Convert logic predicates (AND, OR, NOT).
-    fn convert_logic_predicate(&self, expr: &PredicateExpr) -> Result<Predicate> {
+    fn convert_logic_predicate(
+        &self,
+        expr: &PredicateExpr,
+        scope: &EdgeScope,
+    ) -> Result<Predicate> {
         match expr {
             PredicateExpr::And(left, right) => {
-                let l = self.convert_predicate(left)?;
-                let r = self.convert_predicate(right)?;
+                let l = self.convert_predicate(left, scope)?;
+                let r = self.convert_predicate(right, scope)?;
                 Ok(l.and(r))
             }
             PredicateExpr::Or(left, right) => {
-                let l = self.convert_predicate(left)?;
-                let r = self.convert_predicate(right)?;
+                let l = self.convert_predicate(left, scope)?;
+                let r = self.convert_predicate(right, scope)?;
                 Ok(l.or(r))
             }
             PredicateExpr::Not(inner) => {
-                let p = self.convert_predicate(inner)?;
+                let p = self.convert_predicate(inner, scope)?;
                 Ok(!p)
             }
             _ => unreachable!("convert_logic_predicate called on non-logic expr"),
@@ -1514,23 +1690,36 @@ impl AstConverter {
     }
 
     /// Convert string predicates (CONTAINS, STARTS WITH, ENDS WITH).
-    fn convert_string_predicate(&self, expr: &PredicateExpr) -> Result<Predicate> {
+    fn convert_string_predicate(
+        &self,
+        expr: &PredicateExpr,
+        scope: &EdgeScope,
+    ) -> Result<Predicate> {
         match expr {
             PredicateExpr::Contains {
                 property,
                 substring,
-            } => Ok(Predicate::Contains {
-                key: property.property.clone(),
-                substring: substring.clone(),
-            }),
-            PredicateExpr::StartsWith { property, prefix } => Ok(Predicate::StartsWith {
-                key: property.property.clone(),
-                prefix: prefix.clone(),
-            }),
-            PredicateExpr::EndsWith { property, suffix } => Ok(Predicate::EndsWith {
-                key: property.property.clone(),
-                suffix: suffix.clone(),
-            }),
+            } => scope.scope_leaf(
+                &property.variable,
+                Predicate::Contains {
+                    key: property.property.clone(),
+                    substring: substring.clone(),
+                },
+            ),
+            PredicateExpr::StartsWith { property, prefix } => scope.scope_leaf(
+                &property.variable,
+                Predicate::StartsWith {
+                    key: property.property.clone(),
+                    prefix: prefix.clone(),
+                },
+            ),
+            PredicateExpr::EndsWith { property, suffix } => scope.scope_leaf(
+                &property.variable,
+                Predicate::EndsWith {
+                    key: property.property.clone(),
+                    suffix: suffix.clone(),
+                },
+            ),
             _ => unreachable!("convert_string_predicate called on non-string expr"),
         }
     }
@@ -1540,15 +1729,19 @@ impl AstConverter {
         &self,
         property: &super::ast::PropertyAccess,
         values: &[PropertyValue],
+        scope: &EdgeScope,
     ) -> Result<Predicate> {
         let pred_values: Result<Vec<PredicateValue>> = values
             .iter()
             .map(|v| self.convert_property_value(v))
             .collect();
-        Ok(Predicate::In {
-            key: property.property.clone(),
-            values: pred_values?,
-        })
+        scope.scope_leaf(
+            &property.variable,
+            Predicate::In {
+                key: property.property.clone(),
+                values: pred_values?,
+            },
+        )
     }
 
     /// Convert a comparison expression.
@@ -1557,6 +1750,7 @@ impl AstConverter {
         left: &Expression,
         op: ComparisonOp,
         right: &Expression,
+        scope: &EdgeScope,
     ) -> Result<Predicate> {
         // Provenance accessors (Issue #3354a): `source(x)`/`confidence(x)`/
         // `reason(x)` appear as function calls, never property accesses, so a
@@ -1582,19 +1776,34 @@ impl AstConverter {
             (None, None) => {}
         }
 
+        // Cross-entity property-to-property comparison, e.g. `r.since = b.age`
+        // (Issue #3622). AQL's single-entity + edge-channel model cannot join
+        // two live operands in one leaf (Cypher's multi-variable evaluator can),
+        // so reject it up front with a shape-naming structured error rather than
+        // the generic "expected literal or parameter" from the value path.
+        if matches!(left, Expression::Property(_)) && matches!(right, Expression::Property(_)) {
+            return Err(Error::Query(QueryError::UnsupportedFeature {
+                feature: "comparison between two property accesses (e.g. `r.since = b.age`) \
+                          is not supported in AQL WHERE; compare a property to a literal or \
+                          parameter (cross-entity comparison is a Cypher-only capability)"
+                    .to_string(),
+            }));
+        }
+
         // Try left side as property
         if let Expression::Property(prop) = left {
             let key = prop.property.clone();
             let value = self.expression_to_predicate_value(right)?;
 
-            return Ok(match op {
+            let leaf = match op {
                 ComparisonOp::Eq => Predicate::Eq { key, value },
                 ComparisonOp::Ne => Predicate::Ne { key, value },
                 ComparisonOp::Lt => Predicate::Lt { key, value },
                 ComparisonOp::Le => Predicate::Lte { key, value },
                 ComparisonOp::Gt => Predicate::Gt { key, value },
                 ComparisonOp::Ge => Predicate::Gte { key, value },
-            });
+            };
+            return scope.scope_leaf(&prop.variable, leaf);
         }
 
         // Try right side as property (swap operands)
@@ -1603,14 +1812,15 @@ impl AstConverter {
             let value = self.expression_to_predicate_value(left)?;
 
             // When swapping, we must flip inequalities
-            return Ok(match op {
+            let leaf = match op {
                 ComparisonOp::Eq => Predicate::Eq { key, value }, // Symmetric
                 ComparisonOp::Ne => Predicate::Ne { key, value }, // Symmetric
                 ComparisonOp::Lt => Predicate::Gt { key, value }, // < becomes >
                 ComparisonOp::Le => Predicate::Gte { key, value }, // <= becomes >=
                 ComparisonOp::Gt => Predicate::Lt { key, value }, // > becomes <
                 ComparisonOp::Ge => Predicate::Lte { key, value }, // >= becomes <=
-            });
+            };
+            return scope.scope_leaf(&prop.variable, leaf);
         }
 
         Err(Error::Query(QueryError::SyntaxError {
@@ -1817,9 +2027,17 @@ impl AstConverter {
         &self,
         order_clause: &OrderClause,
         ops: &mut Vec<QueryOp>,
+        scope: &EdgeScope,
     ) -> Result<()> {
         for item in &order_clause.items {
             let sort_key = match &item.expression {
+                // A property key on the single-hop relationship variable orders
+                // by the traversed edge (Issue #3622); a rel var in an
+                // unsupported position is rejected; node/unknown vars are
+                // node-scoped as before.
+                Expression::Property(prop) if scope.is_edge_var(&prop.variable)? => {
+                    SortKey::EdgeProperty(prop.property.clone())
+                }
                 Expression::Property(prop) => SortKey::Property(prop.property.clone()),
                 Expression::Identifier(name) => {
                     // Special identifiers for built-in sort keys
@@ -3169,7 +3387,7 @@ mod sentry_tests {
             variable: "n".to_string(),
             property: "prop".to_string(),
         });
-        let _ = converter.convert_logic_predicate(&expr);
+        let _ = converter.convert_logic_predicate(&expr, &EdgeScope::default());
     }
 
     #[test]
@@ -3180,6 +3398,6 @@ mod sentry_tests {
             variable: "n".to_string(),
             property: "prop".to_string(),
         });
-        let _ = converter.convert_string_predicate(&expr);
+        let _ = converter.convert_string_predicate(&expr, &EdgeScope::default());
     }
 }

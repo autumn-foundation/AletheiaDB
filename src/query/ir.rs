@@ -588,6 +588,15 @@ pub enum Direction {
 pub enum SortKey {
     /// Sort by a property value
     Property(String),
+    /// Sort by a property (or reserved structural field) of the row's
+    /// **traversed edge** (its [`edge`](crate::query::executor::QueryRow::edge)
+    /// side channel) rather than the node entity, for edge-property `ORDER BY`
+    /// in the AQL pipeline (Issue #3622). Reserved `type`/`label`/`source`/
+    /// `target`/`id` resolve structurally against the edge; a genuine user key
+    /// reads `edge.properties`. A row with no edge channel, or an absent key,
+    /// sorts as null (openCypher null placement). The edge is the one
+    /// reconstructed at the query's bi-temporal coordinate.
+    EdgeProperty(String),
     /// Sort by similarity score (for vector search results)
     Score,
     /// Sort by timestamp (for temporal queries)
@@ -701,6 +710,21 @@ pub enum Predicate {
 
     /// Logical NOT of a predicate
     Not(Box<Predicate>),
+
+    /// Evaluate the wrapped predicate against the row's **traversed edge**
+    /// (its [`edge`](crate::query::executor::QueryRow::edge) side channel)
+    /// instead of the row's node entity, for edge-property `WHERE` in the AQL
+    /// pipeline (Issue #3622). The AQL converter wraps each WHERE leaf that
+    /// references the single-hop relationship variable in this; node leaves stay
+    /// unwrapped and evaluate against the node entity as before. The inner
+    /// predicate is a plain property / structural / logical sub-tree (never
+    /// itself `EdgeScoped`), evaluated with the shared openCypher edge semantics
+    /// (`evaluate_edge_full`): reserved `type`/`label`/`source`/`target`/`id`
+    /// resolve structurally, `Ne` on an absent property includes, and the edge
+    /// is the one reconstructed at the query's bi-temporal coordinate. A row
+    /// with no edge channel (edge not valid at the coordinate) evaluates to
+    /// `false`.
+    EdgeScoped(Box<Predicate>),
 
     /// Filter on a version's write-time provenance (Issue #3354a).
     ///

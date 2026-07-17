@@ -190,6 +190,23 @@ pub struct QueryRow {
     /// [`entity`](Self::entity) is [`EntityResult::Null`]; the bound entities
     /// live here and any scalar projections live in [`columns`](Self::columns).
     pub bindings: Option<Vec<(String, EntityResult)>>,
+    /// The single graph edge traversed to reach this row's node entity, carried
+    /// on a dedicated side channel for edge-property `WHERE` / `ORDER BY` in the
+    /// AQL single-entity pipeline (Issue #3622).
+    ///
+    /// In AQL a `MATCH (a)-[r:KNOWS]->(b)` row has [`entity`](Self::entity) =
+    /// the target node `b`; the traversed edge `r` has nowhere else to live.
+    /// [`TraversalIterator`](super::iterators::TraversalIterator) attaches the
+    /// edge **reconstructed at the query's bi-temporal coordinate** here (only
+    /// when the plan references an edge variable), so a `Predicate::EdgeScoped`
+    /// leaf and a `SortKey::EdgeProperty` key evaluate against the edge as it
+    /// existed at that coordinate. It rides through the intervening `Project`
+    /// (which rewrites only [`entity`](Self::entity)) so a subsequent `ORDER BY`
+    /// still sees it even when the node was narrowed.
+    ///
+    /// `None` for the overwhelming common case (no edge variable referenced), so
+    /// those rows are byte-identical to their prior form.
+    pub edge: Option<Edge>,
 }
 
 impl QueryRow {
@@ -203,6 +220,7 @@ impl QueryRow {
             timestamp: None,
             columns: None,
             bindings: None,
+            edge: None,
         }
     }
 
@@ -233,6 +251,7 @@ impl QueryRow {
             timestamp: None,
             columns: Some(columns),
             bindings: None,
+            edge: None,
         }
     }
 
@@ -257,6 +276,7 @@ impl QueryRow {
             timestamp: None,
             columns,
             bindings: Some(bindings),
+            edge: None,
         }
     }
 
@@ -281,6 +301,7 @@ impl QueryRow {
             timestamp: None,
             columns: None,
             bindings: None,
+            edge: None,
         }
     }
 
@@ -294,6 +315,7 @@ impl QueryRow {
             timestamp: None,
             columns: None,
             bindings: None,
+            edge: None,
         }
     }
 
@@ -301,6 +323,15 @@ impl QueryRow {
     #[must_use]
     pub fn at_time(mut self, timestamp: Timestamp) -> Self {
         self.timestamp = Some(timestamp);
+        self
+    }
+
+    /// Attach the traversed edge (reconstructed at the query's bi-temporal
+    /// coordinate) to this row's [`edge`](Self::edge) side channel, for
+    /// edge-property `WHERE` / `ORDER BY` in the AQL pipeline (Issue #3622).
+    #[must_use]
+    pub fn with_edge_binding(mut self, edge: Edge) -> Self {
+        self.edge = Some(edge);
         self
     }
 
@@ -841,6 +872,7 @@ impl QueryResults {
                 timestamp,
                 columns: row_columns,
                 bindings: _,
+                edge: _,
             } = row;
 
             // Extract computed aggregation columns (padding rows without any
@@ -999,6 +1031,7 @@ impl QueryResults {
                 timestamp,
                 columns: _,
                 bindings: _,
+                edge: _,
             } = row;
 
             // Only edge-bearing rows contribute; node/null rows are dropped (edge-only,
