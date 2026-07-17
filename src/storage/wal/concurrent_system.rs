@@ -347,6 +347,21 @@ pub struct ConcurrentWalSystem {
     /// `writer` mutex, and the install stores into it inside the seal→reopen
     /// hand-off (see [`Self::install_wal_keyring`]).
     wal_keyring: Arc<ArcSwapOption<crate::encryption::wal_encryption::WalKeyring>>,
+    /// Serializes runtime keyring installs (Issue #3616 PR2) so two concurrent
+    /// installers cannot both observe the cell as `None`, both pass the presence
+    /// check, and both run seal->store->reopen -- the second silently replacing
+    /// the first keyring and producing an undecryptable segment. This mutex is
+    /// held for the entire [`Self::install_wal_keyring`] body (presence check +
+    /// seal + store + reopen) so a second concurrent installer blocks, then
+    /// observes `Some`, and returns the existing rejection `Err`.
+    ///
+    /// Why a dedicated field: it is a private LEAF, taken only at the very top of
+    /// install. The hot path (`append`/`flush`) never touches it, so it adds zero
+    /// steady-state overhead; and because install itself never calls into
+    /// `historical`/`current_timestamp`/cold, it is never held across any lock
+    /// ordered after `wal` -- it merely wraps the presence check and the
+    /// coordinator-`writer`-guarded seal->store->reopen hand-off.
+    install_lock: Mutex<()>,
 }
 
 impl ConcurrentWalSystem {
@@ -473,6 +488,7 @@ impl ConcurrentWalSystem {
             consecutive_flush_errors,
             tolerate_torn_tail: config.tolerate_torn_tail,
             wal_keyring,
+            install_lock: Mutex::new(()),
         })
     }
 
@@ -867,14 +883,28 @@ impl ConcurrentWalSystem {
     // the plaintext → encrypted enable engine landing in #3616 PR3. Until then the
     // only caller is the concurrency-test suite, so the non-test lib build sees it
     // as unused — allow that here rather than block the seam on its future driver.
+    // TODO(#3616 PR3): remove this allow once the enable engine calls install_wal_keyring.
     #[allow(dead_code)]
     pub(crate) fn install_wal_keyring(
         &self,
         keyring: crate::encryption::wal_encryption::WalKeyring,
     ) -> Result<()> {
+        // Serialize the ENTIRE install — presence check, seal, store, reopen —
+        // under a dedicated leaf mutex. Without it, the presence check below runs
+        // outside the coordinator `writer` mutex while the store happens inside the
+        // seal→reopen hand-off, so two concurrent installers could both observe
+        // `None`, both pass the check, and both run seal→store→reopen — the second
+        // silently replacing the first keyring and producing an undecryptable
+        // segment. Holding this guard for the whole body makes a second concurrent
+        // installer block here, then observe `Some`, and take the rejection path.
+        let _install_guard = self.install_lock.lock().unwrap_or_else(|e| e.into_inner());
+
         // Reject a double-install: presence is a one-way None → Some transition.
-        // Checked before the seal so an already-encrypted WAL is never re-rolled.
+        // Checked (under the install lock) before the seal so an already-encrypted
+        // WAL is never re-rolled.
         if self.wal_keyring.load().is_some() {
+            // TODO(#3616 PR3): when surfaced via MCP, map this precondition to
+            // FAILED_PRECONDITION rather than the default WalError→INTERNAL.
             return Err(Error::Storage(StorageError::WalError {
                 reason: "a WAL keyring is already installed; runtime install only \
                          supports the plaintext → encrypted (None → Some) transition \
@@ -1153,6 +1183,10 @@ mod tests {
 
     // ── Issue #3616 PR2: runtime WAL keyring install (plaintext → encrypted) ──
 
+    // NOTE: `seed` is a CIPHER SEED (distinguishes one test cipher's key bytes
+    // from another), NOT a key_version. `WalKeyring::single` always stamps
+    // INITIAL_WAL_KEY_VERSION (== 1) as the on-disk key_version regardless of the
+    // seed, which is why T3 asserts the post-install cohort is "key_version 1".
     fn wal_keyring(seed: u8) -> crate::encryption::wal_encryption::WalKeyring {
         crate::encryption::wal_encryption::WalKeyring::single(wal_test_cipher(seed))
     }
@@ -1258,6 +1292,9 @@ mod tests {
         wal.flush().unwrap();
 
         let total = threads * per_thread;
+        // In-process recovery via the live system's shared keyring cell (same
+        // in-process limitation as `append_hammer_across_force_roll_loses_nothing`
+        // — a full process-restart reopen is out of scope for this seam test).
         let entries = wal.read_from(LSN::initial()).unwrap();
         let mut ids = recovered_ids(&entries);
         ids.sort_unstable();
@@ -1307,12 +1344,113 @@ mod tests {
             "a mixed plaintext+encrypted directory is not wholly one key_version"
         );
 
+        // POSITIVE proof the install actually produced an encrypted (v16) segment
+        // on disk — not merely flipped the in-memory flag while still writing
+        // plaintext. `!all_segments_use_key_version(1)` above is satisfied by the
+        // surviving pre-install PLAINTEXT segments alone, so it cannot prove the
+        // "mixed-format" claim; the max stamped key_version across the directory
+        // being `Some(1)` requires at least one keyversioned v16 segment to exist.
+        assert_eq!(
+            crate::storage::wal::segment_reader::max_key_version_in_dir(dir.path()),
+            Some(1),
+            "the post-install cohort must be written as an encrypted v16 segment \
+             stamped key_version 1 (INITIAL_WAL_KEY_VERSION), proving the mixed format"
+        );
+
         let entries = wal.read_from(LSN::initial()).unwrap();
         assert_eq!(
             recovered_ids(&entries),
             (1..=10).collect::<Vec<_>>(),
             "both plaintext and encrypted cohorts recover in order"
         );
+    }
+
+    /// Encryption-at-rest negative control (FIX B, Issue #3616 PR2 review).
+    /// The five install tests before this one are all satisfied by the surviving
+    /// pre-install PLAINTEXT segments — none POSITIVELY assert that a post-install
+    /// segment is actually v16-encrypted on disk, so an install that flipped the
+    /// in-memory flag but kept writing plaintext (a future shared-cell desync)
+    /// would pass them all. This test closes that blind spot two ways:
+    ///
+    /// 1. POSITIVE: at least one on-disk segment header is
+    ///    `WAL_VERSION_ENCRYPTED_KEYVERSIONED` (v16), proven via the reader's own
+    ///    header-only scan (`max_key_version_in_dir` returns `Some(1)`).
+    /// 2. STRONGEST: re-reading the WAL directory with NO keyring must NOT recover
+    ///    the post-install cohort as plaintext (it is genuinely undecryptable),
+    ///    while the pre-install cohort still reads back as plaintext v13.
+    #[test]
+    fn install_keyring_post_install_segment_is_encrypted_at_rest() {
+        use crate::storage::wal::segment_reader::{
+            max_key_version_in_dir, read_entries_from_dir_with_keyring,
+        };
+
+        let dir = tempdir().unwrap();
+        let mut config = ConcurrentWalSystemConfig::new(dir.path());
+        config.durability_mode = DurabilityMode::Synchronous;
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        // Pre-install cohort → plaintext v13 segment(s).
+        for id in 1..=4 {
+            wal.append(create_test_operation(id)).unwrap();
+        }
+        wal.flush().unwrap();
+        assert_eq!(
+            max_key_version_in_dir(dir.path()),
+            None,
+            "before install, no segment carries a stamped key_version (all plaintext)"
+        );
+
+        wal.install_wal_keyring(wal_keyring(7)).unwrap();
+
+        // Post-install cohort → encrypted v16 segment(s).
+        for id in 5..=8 {
+            wal.append(create_test_operation(id)).unwrap();
+        }
+        wal.flush().unwrap();
+
+        // (1) POSITIVE v16-at-rest proof: a keyversioned segment now exists on
+        // disk, stamped INITIAL_WAL_KEY_VERSION (1). A desync that kept writing
+        // plaintext would leave this `None`.
+        assert_eq!(
+            max_key_version_in_dir(dir.path()),
+            Some(1),
+            "the post-install cohort must be an encrypted v16 segment on disk"
+        );
+
+        // Full recovery WITH the keyring reads every cohort back in order.
+        let entries = wal.read_from(LSN::initial()).unwrap();
+        assert_eq!(
+            recovered_ids(&entries),
+            (1..=8).collect::<Vec<_>>(),
+            "with the keyring, both plaintext and encrypted cohorts recover in order"
+        );
+
+        // (2) STRONGEST proof: re-read the SAME directory with NO keyring. The
+        // post-install (v16) cohort must NOT be recoverable-as-plaintext — either
+        // the read errors (undecryptable) or it returns only the plaintext prefix.
+        // The pre-install (v13) cohort is plaintext and reads transparently.
+        match read_entries_from_dir_with_keyring(dir.path(), LSN::initial(), None, true) {
+            Ok(no_key_entries) => {
+                let ids = recovered_ids(&no_key_entries);
+                for id in 1..=4 {
+                    assert!(
+                        ids.contains(&id),
+                        "pre-install plaintext record {id} must still read without a keyring"
+                    );
+                }
+                for id in 5..=8 {
+                    assert!(
+                        !ids.contains(&id),
+                        "post-install record {id} must NOT be recoverable as plaintext \
+                         without the keyring (it is encrypted at rest)"
+                    );
+                }
+            }
+            Err(_) => {
+                // Undecryptable without the keyring is itself proof of
+                // encryption-at-rest for the post-install cohort.
+            }
+        }
     }
 
     /// T4 — double install rejected. Installing a second keyring when one is
@@ -1374,30 +1512,144 @@ mod tests {
             let stop = Arc::clone(&stop);
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
+                // Per-thread record of which cell states this loader observed, so
+                // after join we can prove the None→Some store is actually seen
+                // across threads (not merely that a load never tore). The bare
+                // `k.current().is_some()` check alone can never fail, so it cannot
+                // catch a store that is never observed.
+                let mut saw_none = false;
+                let mut saw_some = false;
                 barrier.wait();
                 while !stop.load(AtOrd::Relaxed) {
-                    // Any observed keyring must be fully valid (never torn):
-                    // a Some always has a resolvable current generation.
-                    if let Some(k) = wal.wal_keyring() {
-                        assert!(
-                            k.current().is_some(),
-                            "a loaded keyring must be fully-constructed (current generation present)"
-                        );
+                    match wal.wal_keyring() {
+                        None => saw_none = true,
+                        Some(k) => {
+                            saw_some = true;
+                            // Any observed keyring must be fully valid (never
+                            // torn): a Some always has a resolvable current gen.
+                            assert!(
+                                k.current().is_some(),
+                                "a loaded keyring must be fully-constructed (current generation present)"
+                            );
+                        }
                     }
                 }
+                (saw_none, saw_some)
             }));
         }
 
         barrier.wait();
+        // Let the loaders spin on the pre-install `None` first, so that state is
+        // observed before the store flips it.
+        std::thread::sleep(std::time::Duration::from_millis(5));
         // Hammer the store against the concurrent loads.
         wal.install_wal_keyring(wal_keyring(7)).unwrap();
+        // Keep the loaders running long enough to observe the post-install `Some`.
+        std::thread::sleep(std::time::Duration::from_millis(5));
         stop.store(true, AtOrd::Relaxed);
+
+        let mut any_saw_none = false;
+        let mut any_saw_some = false;
         for h in handles {
-            h.join().unwrap();
+            let (saw_none, saw_some) = h.join().unwrap();
+            any_saw_none |= saw_none;
+            any_saw_some |= saw_some;
         }
+        assert!(
+            any_saw_none,
+            "loaders must have observed the pre-install None state"
+        );
+        assert!(
+            any_saw_some,
+            "loaders must have observed the post-install Some state \
+             (proving the store is seen across threads)"
+        );
         assert!(
             wal.wal_keyring().is_some(),
             "install must be visible after store"
+        );
+    }
+
+    /// FIX A (Issue #3616 PR2 review) — concurrent double-install TOCTOU. Two
+    /// threads race `install_wal_keyring` on the same system. Without the install
+    /// lock both could observe `None`, both pass the presence check, and both run
+    /// seal→store→reopen — the second silently replacing the first keyring and
+    /// producing an undecryptable segment. With the lock, EXACTLY one returns
+    /// `Ok` and one returns `Err`, no data is lost, and the survivor keyring
+    /// decrypts the post-install cohort (no undecryptable segment).
+    #[test]
+    fn install_keyring_concurrent_double_install_rejected() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
+
+        let dir = tempdir().unwrap();
+        let mut config = ConcurrentWalSystemConfig::new(dir.path());
+        config.durability_mode = DurabilityMode::Synchronous;
+        let wal = Arc::new(ConcurrentWalSystem::new(config).unwrap());
+
+        // A few acknowledged appends before the install (plaintext v13).
+        for id in 1..=3 {
+            wal.append(create_test_operation(id)).unwrap();
+        }
+        wal.flush().unwrap();
+
+        let ok_count = Arc::new(AtomicUsize::new(0));
+        let err_count = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for seed in [7u8, 9u8] {
+            let wal = Arc::clone(&wal);
+            let ok_count = Arc::clone(&ok_count);
+            let err_count = Arc::clone(&err_count);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                match wal.install_wal_keyring(wal_keyring(seed)) {
+                    Ok(()) => ok_count.fetch_add(1, AtOrd::Relaxed),
+                    Err(_) => err_count.fetch_add(1, AtOrd::Relaxed),
+                };
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Exactly one installer wins; the other is rejected (never a silent
+        // second seal→store→reopen).
+        assert_eq!(
+            ok_count.load(AtOrd::Relaxed),
+            1,
+            "exactly one concurrent install must succeed"
+        );
+        assert_eq!(
+            err_count.load(AtOrd::Relaxed),
+            1,
+            "exactly one concurrent install must be rejected"
+        );
+        assert!(wal.is_encrypted(), "the survivor keyring must be installed");
+
+        // Post-install cohort is written under the survivor keyring (encrypted
+        // v16 at rest).
+        for id in 4..=6 {
+            wal.append(create_test_operation(id)).unwrap();
+        }
+        wal.flush().unwrap();
+        assert_eq!(
+            crate::storage::wal::segment_reader::max_key_version_in_dir(dir.path()),
+            Some(1),
+            "the post-install cohort must be an encrypted v16 segment (survivor keyring), \
+             not an undecryptable segment from a double seal→store→reopen"
+        );
+
+        // Every acknowledged append recovers in order, and the survivor keyring
+        // decrypts the post-install cohort.
+        let entries = wal.read_from(LSN::initial()).unwrap();
+        assert_eq!(
+            recovered_ids(&entries),
+            (1..=6).collect::<Vec<_>>(),
+            "no acknowledged append is lost and the survivor keyring decrypts the \
+             post-install cohort"
         );
     }
 
