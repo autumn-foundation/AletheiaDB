@@ -751,6 +751,19 @@ impl MultiEval<'_> {
                 Ok(Tri::from_bool(self.eval_value(inner, binding)?.is_some()))
             }
             CypherExpr::In { expr, values } => {
+                // Edge-property IN (Issue #3622): definite node-semantics bool
+                // so `NOT (r.<absent> IN [...])` includes, matching AQL / SQL.
+                if let Some((edge, prop)) = edge_property_operand(expr, binding) {
+                    let candidates: Vec<Option<PropertyValue>> = values
+                        .iter()
+                        .map(|c| self.eval_value(c, binding))
+                        .collect::<Result<_, _>>()?;
+                    let result = match edge_leaf_value(edge, prop) {
+                        Some(v) => edge_leaf_in(&v, &candidates),
+                        None => false,
+                    };
+                    return Ok(Tri::from_bool(result));
+                }
                 // A null subject makes IN Null.
                 let Some(needle) = self.eval_value(expr, binding)? else {
                     return Ok(Tri::Null);
@@ -768,23 +781,42 @@ impl MultiEval<'_> {
                 }
                 Ok(if saw_null { Tri::Null } else { Tri::False })
             }
-            // String predicates with a null/non-string subject are Null.
+            // String predicates with a null/non-string subject are Null -- unless
+            // the subject is an edge property, which uses definite node-semantics
+            // (Issue #3622) so `NOT (r.<absent> CONTAINS 'x')` includes.
             CypherExpr::Contains { expr, substring } => {
+                if let Some((edge, prop)) = edge_property_operand(expr, binding) {
+                    return Ok(Tri::from_bool(edge_leaf_string_op(edge, prop, |s| {
+                        s.contains(substring.as_str())
+                    })));
+                }
                 Ok(match self.eval_string(expr, binding)? {
                     Some(s) => Tri::from_bool(s.contains(substring)),
                     None => Tri::Null,
                 })
             }
             CypherExpr::StartsWith { expr, prefix } => {
+                if let Some((edge, prop)) = edge_property_operand(expr, binding) {
+                    return Ok(Tri::from_bool(edge_leaf_string_op(edge, prop, |s| {
+                        s.starts_with(prefix.as_str())
+                    })));
+                }
                 Ok(match self.eval_string(expr, binding)? {
                     Some(s) => Tri::from_bool(s.starts_with(prefix)),
                     None => Tri::Null,
                 })
             }
-            CypherExpr::EndsWith { expr, suffix } => Ok(match self.eval_string(expr, binding)? {
-                Some(s) => Tri::from_bool(s.ends_with(suffix)),
-                None => Tri::Null,
-            }),
+            CypherExpr::EndsWith { expr, suffix } => {
+                if let Some((edge, prop)) = edge_property_operand(expr, binding) {
+                    return Ok(Tri::from_bool(edge_leaf_string_op(edge, prop, |s| {
+                        s.ends_with(suffix.as_str())
+                    })));
+                }
+                Ok(match self.eval_string(expr, binding)? {
+                    Some(s) => Tri::from_bool(s.ends_with(suffix)),
+                    None => Tri::Null,
+                })
+            }
             CypherExpr::Grouped(inner) => self.eval_predicate(inner, binding),
             CypherExpr::Value(CypherValue::Bool(b)) => Ok(Tri::from_bool(*b)),
             other => match self.eval_value(other, binding)? {
@@ -1134,13 +1166,38 @@ fn edge_leaf_compare(
     let Some(other) = other else {
         return false;
     };
-    let edge_val = crate::query::executor::iterators::edge_structural_value(edge, prop)
-        .or_else(|| edge.get_property(prop).cloned());
-    match edge_val {
+    match edge_leaf_value(edge, prop) {
         Some(v) => compare(&v, other, op),
         // Absent property: openCypher node-semantics -- `Ne` includes, all else
         // excludes.
         None => matches!(op, CypherCompOp::Ne),
+    }
+}
+
+/// Resolve an edge leaf's value (Issue #3622): reserved structural fields
+/// (`type`/`label`/`source`/`target`/`id`) shadow user props, otherwise the
+/// edge's own properties. Shared by every edge-leaf evaluator so the
+/// reserved-vs-user precedence is single-sourced.
+fn edge_leaf_value(edge: &Edge, prop: &str) -> Option<PropertyValue> {
+    crate::query::executor::iterators::edge_structural_value(edge, prop)
+        .or_else(|| edge.get_property(prop).cloned())
+}
+
+/// Evaluate `edge.prop IN candidates` with openCypher **node**-semantics
+/// (Issue #3622): an absent property is definite `false` (never three-valued
+/// Null), a present value matches iff it loosely-equals any non-null candidate.
+/// This keeps `NOT (r.<absent> IN [...])` == `true`, matching AQL / SQL.
+fn edge_leaf_in(v: &PropertyValue, candidates: &[Option<PropertyValue>]) -> bool {
+    candidates.iter().flatten().any(|cv| loosely_equal(v, cv))
+}
+
+/// Evaluate a string edge-leaf op (`CONTAINS`/`STARTS WITH`/`ENDS WITH`) with
+/// node-semantics (Issue #3622): a missing or non-string edge value is definite
+/// `false`, so `NOT (r.<absent> CONTAINS 'x')` == `true`, matching AQL / SQL.
+fn edge_leaf_string_op(edge: &Edge, prop: &str, f: impl FnOnce(&str) -> bool) -> bool {
+    match edge_leaf_value(edge, prop) {
+        Some(PropertyValue::String(ref s)) => f(s.as_ref()),
+        _ => false,
     }
 }
 

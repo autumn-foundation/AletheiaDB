@@ -1262,6 +1262,19 @@ fn is_missing_at_time(err: &crate::core::error::Error) -> bool {
     )
 }
 
+/// Whether an error from `get_node_at_time` means "this node is not visible at
+/// the coordinate" (so a temporal traversal should skip it, Issue #3622 F3)
+/// rather than a systemic failure. Covers the storage `NodeNotFound` /
+/// `VersionNotFound` that `get_node_at_time` raises plus the temporal variants.
+fn node_missing_at_time(err: &crate::core::error::Error) -> bool {
+    use crate::core::error::{Error, StorageError};
+    is_missing_at_time(err)
+        || matches!(
+            err,
+            Error::Storage(StorageError::NodeNotFound(_) | StorageError::VersionNotFound(_))
+        )
+}
+
 /// Iterator for valid-time range label scans (`BETWEEN ... AND ...`, Issue #552).
 ///
 /// # Semantics
@@ -1558,6 +1571,28 @@ impl TraversalIterator {
         }
     }
 
+    /// Fetch the traversal target node, reconstructed at the query's bi-temporal
+    /// coordinate under a temporal context (Issue #3622 F3), or current state
+    /// otherwise. `Ok(None)` means the node is not valid/visible at the
+    /// coordinate and the row must be skipped (openCypher #3225); other errors
+    /// propagate.
+    fn fetch_target_node(&self, node_id: NodeId) -> Result<Option<Node>> {
+        match self.temporal_context {
+            Some((valid_time, tx_time)) => {
+                match self
+                    .historical
+                    .read()
+                    .get_node_at_time(node_id, valid_time, tx_time)
+                {
+                    Ok(node) => Ok(Some(node)),
+                    Err(e) if node_missing_at_time(&e) => Ok(None),
+                    Err(e) => Err(e),
+                }
+            }
+            None => self.current.get_node(node_id).map(Some),
+        }
+    }
+
     /// Check if an edge existed at the specified temporal context using a pre-acquired lock guard.
     /// Returns true if no temporal context is set (current state query).
     #[inline]
@@ -1733,7 +1768,18 @@ impl ResultIterator for TraversalIterator {
                         // a target whose shortest path is below `min_depth` is
                         // marked visited here and never re-emitted deeper (see the
                         // struct-level docs).
-                        if self.visited.insert(target) {
+                        //
+                        // Relationship-distinct exception (Issue #3622): when an
+                        // edge variable is bound (`bind_edge`), emit ONE row per
+                        // traversed edge -- parallel edges to the same target (and
+                        // a self-loop) each surface with their own edge bound,
+                        // matching openCypher/Cypher per-edge semantics. This is
+                        // safe because `bind_edge` is only ever set on a single
+                        // fixed-length hop (the AQL converter rejects edge-var
+                        // refs on multi-hop / variable-length patterns), so the
+                        // depth-1 frontier never re-expands and cannot loop.
+                        let enqueue = self.visited.insert(target) || self.bind_edge;
+                        if enqueue {
                             // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
                             // We are adding exactly 2 elements (edge and node) to the current path length.
                             let mut new_path = Vec::with_capacity(path.len() + 2);
@@ -1752,25 +1798,33 @@ impl ResultIterator for TraversalIterator {
                     && current_depth >= self.min_depth
                     && current_depth <= self.depth
                 {
-                    match self.current.get_node(node_id) {
-                        Ok(node) => {
-                            let mut row = QueryRow::with_path(EntityResult::Node(node), path);
-                            // Edge-property WHERE / ORDER BY (Issue #3622): attach
-                            // the immediately-traversed edge (the last edge in the
-                            // path), reconstructed at the query coordinate. Only
-                            // when the plan referenced an edge variable.
-                            if self.bind_edge
-                                && let Some(edge_id) = last_edge_in_path(&row.path)
-                            {
-                                match self.reconstruct_bound_edge(edge_id) {
-                                    Ok(edge) => row = row.with_edge_binding(edge),
-                                    Err(e) => return Some(Err(e)),
-                                }
-                            }
-                            return Some(Ok(row));
-                        }
+                    // Reconstruct the target node at the query's bi-temporal
+                    // coordinate (Issue #3622 F3): under a temporal context the
+                    // node is read AS-OF the coordinate, symmetric with the
+                    // reconstructed edge -- so an edge predicate and a node
+                    // predicate in one WHERE see mutually consistent state. A
+                    // node not valid at the coordinate is excluded (openCypher
+                    // #3225: a node no longer valid there does not continue the
+                    // traversal). Current-state traversal is unchanged.
+                    let node = match self.fetch_target_node(node_id) {
+                        Ok(Some(node)) => node,
+                        Ok(None) => continue,
                         Err(e) => return Some(Err(e)),
+                    };
+                    let mut row = QueryRow::with_path(EntityResult::Node(node), path);
+                    // Edge-property WHERE / ORDER BY (Issue #3622): attach the
+                    // immediately-traversed edge (the last edge in the path),
+                    // reconstructed at the query coordinate. Only when the plan
+                    // referenced an edge variable.
+                    if self.bind_edge
+                        && let Some(edge_id) = last_edge_in_path(&row.path)
+                    {
+                        match self.reconstruct_bound_edge(edge_id) {
+                            Ok(edge) => row = row.with_edge_binding(edge),
+                            Err(e) => return Some(Err(e)),
+                        }
                     }
+                    return Some(Ok(row));
                 }
                 continue;
             }
@@ -1903,6 +1957,12 @@ impl FilterIterator {
                 preds.iter().any(Self::predicate_needs_provenance)
             }
             Predicate::Not(pred) => Self::predicate_needs_provenance(pred),
+            // An edge-scoped wrapper (Issue #3622) carries only edge
+            // property/structural leaves (never provenance) in this lane, so it
+            // contributes no node-provenance requirement. Explicit rather than
+            // folded into the wildcard so a future edge-provenance leaf is a
+            // deliberate decision here.
+            Predicate::EdgeScoped(_) => false,
             _ => false,
         }
     }
@@ -2050,6 +2110,15 @@ impl FilterIterator {
                 .any(|p| self.evaluate_edge_predicate(p, edge, prov_cache)),
             Predicate::Not(pred) => !self.evaluate_edge_predicate(pred, edge, prov_cache),
             Predicate::False => false,
+            // An edge-scoped wrapper (Issue #3622) does not occur on this
+            // edge-ROW pass-through path (the AQL converter only emits it over
+            // node rows carrying an edge side channel). Handle it correctly for
+            // robustness: evaluate the inner tree against the edge row itself,
+            // matching the deliberately-exhaustive style of `evaluate_edge_full`.
+            Predicate::EdgeScoped(inner) => match edge {
+                Some(e) => self.evaluate_edge_full(inner, e, prov_cache),
+                None => true,
+            },
             // Non-provenance leaves retain the pre-existing edge pass-through.
             _ => true,
         }

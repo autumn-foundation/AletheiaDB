@@ -812,8 +812,10 @@ fn plan_needs_edge_binding(op: &PhysicalOp) -> bool {
         | PhysicalOp::Count { input, .. }
         | PhysicalOp::Aggregate { input, .. }
         | PhysicalOp::VectorRerank { input, .. }
+        | PhysicalOp::TemporalTrack { input, .. }
         | PhysicalOp::TemporalWindowAggregate { input, .. }
         | PhysicalOp::TemporalAlign { input, .. }
+        | PhysicalOp::Materialize { input, .. }
         | PhysicalOp::OptionalApply { input, .. } => plan_needs_edge_binding(input),
         // Binary set operators: either branch may carry the reference.
         PhysicalOp::HashJoin { left, right, .. }
@@ -822,8 +824,23 @@ fn plan_needs_edge_binding(op: &PhysicalOp) -> bool {
         | PhysicalOp::Except { left, right, .. } => {
             plan_needs_edge_binding(left) || plan_needs_edge_binding(right)
         }
-        // Leaf scans and other operators never carry an edge-scoped reference.
-        _ => false,
+        // Leaf sources (scans, similarity source) carry no edge-scoped
+        // reference. Every input-bearing operator is enumerated above, so a
+        // future single-input op that could sit over a Filter/Sort will fail to
+        // compile-match here rather than silently defaulting to `false`
+        // (edge-scoped -> all-false / edge sort-key -> null: a silent-wrong
+        // hazard). Keep this list exhaustive with the enum.
+        PhysicalOp::Empty
+        | PhysicalOp::NodeLookup { .. }
+        | PhysicalOp::NodeScan { .. }
+        | PhysicalOp::EdgeScan { .. }
+        | PhysicalOp::HnswSearch { .. }
+        | PhysicalOp::TemporalNodeLookup { .. }
+        | PhysicalOp::TemporalVectorSearch { .. }
+        | PhysicalOp::TemporalNodeScan { .. }
+        | PhysicalOp::TemporalNodeRangeScan { .. }
+        | PhysicalOp::SimilarToNode { .. }
+        | PhysicalOp::PropertyScan { .. } => false,
     }
 }
 
@@ -1247,6 +1264,60 @@ mod tests {
             predicate: Predicate::True,
         };
         assert!(!subtree_yields_edges(&filter_over_nodes));
+    }
+
+    #[test]
+    fn test_plan_needs_edge_binding_detects_edge_var_references() {
+        use crate::query::ir::{Direction, Predicate, PredicateValue, SortKey};
+
+        let traversal = |input: PhysicalOp| PhysicalOp::IndexedTraversal {
+            input: Box::new(input),
+            direction: Direction::Outgoing,
+            label: Some("KNOWS".to_string()),
+            min_depth: 1,
+            depth: 1,
+            temporal_context: None,
+        };
+        let node_scan = || PhysicalOp::NodeScan {
+            label: Some("Person".to_string()),
+            estimated_rows: 0,
+        };
+
+        // Filter carrying an `EdgeScoped` leaf above a traversal -> needs binding.
+        let edge_where = PhysicalOp::Filter {
+            input: Box::new(traversal(node_scan())),
+            predicate: Predicate::EdgeScoped(Box::new(Predicate::Gt {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2020),
+            })),
+        };
+        assert!(plan_needs_edge_binding(&edge_where));
+
+        // Sort with an `EdgeProperty` key (even nested under a Project) -> needs binding.
+        let edge_order = PhysicalOp::Sort {
+            input: Box::new(PhysicalOp::Project {
+                input: Box::new(traversal(node_scan())),
+                properties: vec!["name".to_string()],
+            }),
+            keys: vec![(SortKey::EdgeProperty("since".to_string()), false)],
+        };
+        assert!(plan_needs_edge_binding(&edge_order));
+
+        // A node-only WHERE + ORDER BY over the same traversal -> no binding.
+        let node_only = PhysicalOp::Sort {
+            input: Box::new(PhysicalOp::Filter {
+                input: Box::new(traversal(node_scan())),
+                predicate: Predicate::Gt {
+                    key: "age".to_string(),
+                    value: PredicateValue::Int(18),
+                },
+            }),
+            keys: vec![(SortKey::Property("age".to_string()), false)],
+        };
+        assert!(!plan_needs_edge_binding(&node_only));
+
+        // A bare traversal references no edge var.
+        assert!(!plan_needs_edge_binding(&traversal(node_scan())));
     }
 
     /// Planner-invariant guard (Issue #3622 review fix): every `Filter`/`Sort`

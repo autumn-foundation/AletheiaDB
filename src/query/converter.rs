@@ -505,10 +505,21 @@ fn is_simple_hop_depth(depth: &Option<DepthSpec>) -> bool {
 /// relationship-variable leaf in a shape that cannot bind a single edge
 /// (multi-hop or variable-length) is rejected with a structured error rather
 /// than silently applied to the wrong entity.
+///
+/// Lane scope / AQL-vs-Cypher differences (Issue #3622):
+/// - AQL rejects a cross-entity property-to-property comparison such as
+///   `r.since = b.age` (see [`AstConverter::convert_comparison`]); Cypher's
+///   multi-variable evaluator supports it.
+/// - The edge channel is wired only into `WHERE` / `ORDER BY`. AQL `RETURN r`
+///   still projects the traversal **target node**, not the edge (returning the
+///   edge as an entity is a deliberate follow-up); the edge is available to
+///   filtering and ordering only.
 #[derive(Default)]
 struct EdgeScope {
     /// All relationship variable names declared across the MATCH patterns.
     rel_vars: HashSet<String>,
+    /// All node variable names declared across the MATCH patterns.
+    node_vars: HashSet<String>,
     /// The single relationship variable, iff the MATCH has exactly one
     /// relationship and it is a simple single hop; `None` otherwise.
     single_hop_rel: Option<String>,
@@ -516,6 +527,12 @@ struct EdgeScope {
     multi_hop: bool,
     /// True iff any relationship is variable-length / non-unit depth.
     variable_depth: bool,
+    /// Whether variable classification is authoritative. `true` for a `MATCH`
+    /// source (every legitimate WHERE/ORDER BY variable is a declared node or
+    /// relationship variable, so an unrecognized one is a typo/unbound
+    /// reference and is rejected -- Issue #3622 F15). `false` for non-`MATCH`
+    /// sources (vector search), where the leaf-scoping machinery does not run.
+    match_source: bool,
 }
 
 impl EdgeScope {
@@ -526,13 +543,21 @@ impl EdgeScope {
             return Self::default();
         };
         let mut rel_vars = HashSet::new();
+        let mut node_vars = HashSet::new();
         let mut rels: Vec<&RelationshipPattern> = Vec::new();
         for pattern in patterns {
             for el in &pattern.elements {
-                if let PatternElement::Relationship(rel) = el {
-                    rels.push(rel);
-                    if let Some(v) = &rel.variable {
-                        rel_vars.insert(v.clone());
+                match el {
+                    PatternElement::Relationship(rel) => {
+                        rels.push(rel);
+                        if let Some(v) = &rel.variable {
+                            rel_vars.insert(v.clone());
+                        }
+                    }
+                    PatternElement::Node(node) => {
+                        if let Some(v) = &node.variable {
+                            node_vars.insert(v.clone());
+                        }
                     }
                 }
             }
@@ -546,40 +571,61 @@ impl EdgeScope {
         };
         EdgeScope {
             rel_vars,
+            node_vars,
             single_hop_rel,
             multi_hop,
             variable_depth,
+            match_source: true,
         }
     }
 
-    /// Scope a WHERE leaf `leaf` (built for `var`.`prop`) : wrap it in
+    /// Scope a WHERE leaf `leaf` (built for `var`.`prop`): wrap it in
     /// [`Predicate::EdgeScoped`] when `var` is the single-hop relationship
     /// variable, reject when `var` is a relationship variable in an unsupported
-    /// (multi-hop / variable-length) position, and leave it unchanged (node- or
-    /// unknown-variable scoped, prior behavior) otherwise.
+    /// (multi-hop / variable-length) position, leave it unchanged (node-scoped,
+    /// prior behavior) for a declared node variable, and reject a genuinely
+    /// unknown variable (typo / unbound reference, Issue #3622 F15).
     fn scope_leaf(&self, var: &str, leaf: Predicate) -> Result<Predicate> {
-        if !self.rel_vars.contains(var) {
-            return Ok(leaf);
+        if self.rel_vars.contains(var) {
+            return match self.single_hop_rel.as_deref() {
+                Some(v) if v == var => Ok(Predicate::EdgeScoped(Box::new(leaf))),
+                _ => Err(self.reject(var)),
+            };
         }
-        match self.single_hop_rel.as_deref() {
-            Some(v) if v == var => Ok(Predicate::EdgeScoped(Box::new(leaf))),
-            _ => Err(self.reject(var)),
-        }
+        self.check_known_node_var(var)?;
+        Ok(leaf)
     }
 
     /// Whether `var` is a relationship variable that must be edge-scoped (a
     /// single, fixed-length hop). Returns `Ok(true)` for the single-hop rel var,
-    /// `Ok(false)` for a node/unknown variable, and `Err` for a relationship
-    /// variable in an unsupported position (`ORDER BY` counterpart of
-    /// [`scope_leaf`]).
+    /// `Ok(false)` for a declared node variable, and `Err` for a relationship
+    /// variable in an unsupported position or a genuinely unknown variable
+    /// (`ORDER BY` counterpart of [`scope_leaf`]).
     fn is_edge_var(&self, var: &str) -> Result<bool> {
-        if !self.rel_vars.contains(var) {
-            return Ok(false);
+        if self.rel_vars.contains(var) {
+            return match self.single_hop_rel.as_deref() {
+                Some(v) if v == var => Ok(true),
+                _ => Err(self.reject(var)),
+            };
         }
-        match self.single_hop_rel.as_deref() {
-            Some(v) if v == var => Ok(true),
-            _ => Err(self.reject(var)),
+        self.check_known_node_var(var)?;
+        Ok(false)
+    }
+
+    /// Reject a WHERE/ORDER BY reference to a variable that is neither a declared
+    /// node nor relationship variable of the pattern (Issue #3622 F15). Known
+    /// node variables (including the non-terminal anchor) are left untouched to
+    /// preserve prior behavior.
+    fn check_known_node_var(&self, var: &str) -> Result<()> {
+        if !self.match_source || self.node_vars.contains(var) {
+            return Ok(());
         }
+        Err(Error::Query(QueryError::SyntaxError {
+            message: format!(
+                "WHERE/ORDER BY references unknown variable '{var}' that is not bound by the \
+                 MATCH pattern"
+            ),
+        }))
     }
 
     fn reject(&self, var: &str) -> Error {
@@ -1728,6 +1774,20 @@ impl AstConverter {
                 return self.build_provenance_comparison(field, flip_comparison_op(op), left);
             }
             (None, None) => {}
+        }
+
+        // Cross-entity property-to-property comparison, e.g. `r.since = b.age`
+        // (Issue #3622). AQL's single-entity + edge-channel model cannot join
+        // two live operands in one leaf (Cypher's multi-variable evaluator can),
+        // so reject it up front with a shape-naming structured error rather than
+        // the generic "expected literal or parameter" from the value path.
+        if matches!(left, Expression::Property(_)) && matches!(right, Expression::Property(_)) {
+            return Err(Error::Query(QueryError::UnsupportedFeature {
+                feature: "comparison between two property accesses (e.g. `r.since = b.age`) \
+                          is not supported in AQL WHERE; compare a property to a literal or \
+                          parameter (cross-entity comparison is a Cypher-only capability)"
+                    .to_string(),
+            }));
         }
 
         // Try left side as property
