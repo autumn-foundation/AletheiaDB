@@ -701,6 +701,31 @@ impl MultiEval<'_> {
     fn eval_predicate(&self, expr: &CypherExpr, binding: &Binding) -> Result<Tri, CypherError> {
         match expr {
             CypherExpr::Comparison { left, op, right } => {
+                // Edge-property leaf (Issue #3622): when one side is a property
+                // access on a variable bound to an EDGE, evaluate with the shared
+                // openCypher **node**-semantics -- definite True/False (never the
+                // three-valued Null used for node leaves), `Ne` on an absent
+                // property includes, and reserved structural fields resolve
+                // against the edge struct. This makes SQL == AQL == Cypher for
+                // edge predicates. Node-variable leaves fall through unchanged.
+                if let Some((edge, prop)) = edge_property_operand(left, binding) {
+                    let rhs = self.eval_value(right, binding)?;
+                    return Ok(Tri::from_bool(edge_leaf_compare(
+                        edge,
+                        prop,
+                        rhs.as_ref(),
+                        *op,
+                    )));
+                }
+                if let Some((edge, prop)) = edge_property_operand(right, binding) {
+                    let lhs = self.eval_value(left, binding)?;
+                    return Ok(Tri::from_bool(edge_leaf_compare(
+                        edge,
+                        prop,
+                        lhs.as_ref(),
+                        flip_comp_op(*op),
+                    )));
+                }
                 let l = self.eval_value(left, binding)?;
                 let r = self.eval_value(right, binding)?;
                 match (l, r) {
@@ -942,10 +967,20 @@ fn entity_edge_id(entity: &EntityResult) -> Option<EdgeId> {
 }
 
 /// A property value of a bound entity (node or edge), cloned.
+///
+/// For an EDGE, reserved structural fields (`type`/`label`/`source`/`target`/
+/// `id`) resolve against the edge struct and **shadow** any user property of the
+/// same name (Issue #3622), matching the SQL/AQL edge lane -- so
+/// `ORDER BY r.type` / `WHERE r.target = ...` see the label / endpoint rather
+/// than a (usually absent) user property. A genuine user key falls through to
+/// the edge's properties.
 fn entity_property(entity: &EntityResult, property: &str) -> Option<PropertyValue> {
     match entity {
         EntityResult::Node(n) => n.get_property(property).cloned(),
-        EntityResult::Edge(e) => e.get_property(property).cloned(),
+        EntityResult::Edge(e) => {
+            crate::query::executor::iterators::edge_structural_value(e, property)
+                .or_else(|| e.get_property(property).cloned())
+        }
         _ => None,
     }
 }
@@ -1063,6 +1098,65 @@ fn partial_cmp(a: &PropertyValue, b: &PropertyValue) -> Option<Ordering> {
 }
 
 /// Evaluate a comparison operator over two scalar values.
+/// If `expr` is a property access on a variable bound to an EDGE, return the
+/// edge and property name (Issue #3622); otherwise `None`.
+fn edge_property_operand<'b>(
+    expr: &'b CypherExpr,
+    binding: &'b Binding,
+) -> Option<(&'b Edge, &'b str)> {
+    let CypherExpr::Property { variable, property } = expr else {
+        return None;
+    };
+    match lookup(binding, variable) {
+        Some(EntityResult::Edge(e)) => Some((e, property.as_str())),
+        _ => None,
+    }
+}
+
+/// Compare an edge property leaf `edge.prop <op> other` with openCypher
+/// **node**-semantics (Issue #3622): reserved structural fields shadow user
+/// props; an absent property makes `Ne` true and every other operator false
+/// (never the three-valued Null of the node-leaf path). A null right-hand
+/// operand makes the comparison not-true.
+///
+/// AQL/Cypher edge-predicate asymmetry: this Cypher multi-variable path rejects
+/// temporal `AS OF` for the *whole* clause (node and edge alike; see the module
+/// house rule), so an edge predicate here always evaluates the current-state
+/// edge. Point-in-time edge predicates (the edge reconstructed at an AS-OF
+/// coordinate) are an AQL capability via `Predicate::EdgeScoped`; the semantics
+/// on the edge value itself are identical across both languages and SQL.
+fn edge_leaf_compare(
+    edge: &Edge,
+    prop: &str,
+    other: Option<&PropertyValue>,
+    op: CypherCompOp,
+) -> bool {
+    let Some(other) = other else {
+        return false;
+    };
+    let edge_val = crate::query::executor::iterators::edge_structural_value(edge, prop)
+        .or_else(|| edge.get_property(prop).cloned());
+    match edge_val {
+        Some(v) => compare(&v, other, op),
+        // Absent property: openCypher node-semantics -- `Ne` includes, all else
+        // excludes.
+        None => matches!(op, CypherCompOp::Ne),
+    }
+}
+
+/// Flip a comparison operator so `value <op> edge.prop` can be evaluated as
+/// `edge.prop <flipped> value` (Issue #3622).
+fn flip_comp_op(op: CypherCompOp) -> CypherCompOp {
+    match op {
+        CypherCompOp::Eq => CypherCompOp::Eq,
+        CypherCompOp::Ne => CypherCompOp::Ne,
+        CypherCompOp::Lt => CypherCompOp::Gt,
+        CypherCompOp::Le => CypherCompOp::Ge,
+        CypherCompOp::Gt => CypherCompOp::Lt,
+        CypherCompOp::Ge => CypherCompOp::Le,
+    }
+}
+
 fn compare(a: &PropertyValue, b: &PropertyValue, op: CypherCompOp) -> bool {
     match op {
         CypherCompOp::Eq => loosely_equal(a, b),
