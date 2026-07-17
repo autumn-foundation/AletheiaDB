@@ -232,15 +232,15 @@ export interface BudgetOptions {
   /**
    * Property keys to protect first as the response degrades.
    *
-   * **POST-body reads only.** It is honored on the JSON-body reads
+   * Honored on both surfaces. The POST-body reads
    * ({@link AletheiaClient.findNodesAtTime}, {@link AletheiaClient.findSimilar},
-   * {@link AletheiaClient.hybridQuery}). It is **ignored on GET-query reads**
-   * (`getNode`/`listNodes`/`listEdges`/`getEdge`/`traverse`/adjacency/history):
-   * the server's GET query-string extractor (`serde_urlencoded`) cannot decode
-   * an array field, so this SDK does not place it on the query string (doing so
-   * would 400 the request). To prioritize properties on a GET read, use
-   * `maxResponseBytes`/`maxResponseTokens` and, if needed, fetch specific
-   * entities individually.
+   * {@link AletheiaClient.hybridQuery}) carry it as a JSON array. The eight
+   * budgetable GET reads
+   * (`getNode`/`listNodes`/`getEdge`/`listEdges`/`traverse`/`getNodeHistory`
+   * and the two adjacency reads) serialize it **comma-joined** onto the query
+   * string, which the server (PR #3638) splits on `,` server-side. An empty
+   * array is omitted. `getSchema` is not one of the eight — its options type
+   * does not offer this field.
    */
   priorityProperties?: string[];
 }
@@ -690,11 +690,10 @@ export interface QueryResponse {
  * Options for {@link AletheiaClient.getSchema}. `asOf*` switch to a bi-temporal
  * snapshot.
  *
- * Note: `getSchema` is a `GET`, and the server's query-string extractor
- * (`serde_urlencoded`) cannot decode a repeated key into a `Vec<String>`, so
- * `priorityProperties` is **not** offered here (it would 400 the request) — only
- * the scalar token/byte budget is honored on `GET /schema`. Use
- * `maxResponseBytes`/`maxResponseTokens` to bound the schema response.
+ * Note: `getSchema` is not one of the eight `priority_properties` GET reads, so
+ * `priorityProperties` is **not** offered here — only the scalar token/byte
+ * budget is honored on `GET /schema`. Use `maxResponseBytes`/`maxResponseTokens`
+ * to bound the schema response.
  */
 export interface GetSchemaOptions {
   asOfValidTime?: TimeInput;

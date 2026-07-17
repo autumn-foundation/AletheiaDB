@@ -662,9 +662,9 @@ export class AletheiaClient {
    * `GET /schema` — node labels, edge types, and property keys with counts
    * (optional bi-temporal via `asOf*`).
    *
-   * Only the scalar token/byte budget is sent — `priority_properties` is an
-   * array the `GET` query-string extractor cannot decode (see
-   * {@link budgetQuery} / {@link GetSchemaOptions}).
+   * Only the scalar token/byte budget is sent — `getSchema` is not one of the
+   * eight `priority_properties` GET reads, and its {@link GetSchemaOptions}
+   * type offers no `priorityProperties` (see {@link schemaBudgetQuery}).
    */
   getSchema(opts: GetSchemaOptions = {}): Promise<SchemaResponse> {
     return this.transport.request<SchemaResponse>({
@@ -673,7 +673,7 @@ export class AletheiaClient {
       query: {
         as_of_valid_time: optTime(opts.asOfValidTime),
         as_of_transaction_time: optTime(opts.asOfTransactionTime),
-        ...budgetQuery(opts),
+        ...schemaBudgetQuery(opts),
       },
     });
   }
@@ -752,25 +752,64 @@ function reqTime(t: TimeInput): string {
 }
 
 /**
- * Build the #3353 budget query fragment (query-string form) — **scalar params
- * only**.
+ * Comma-join `priorityProperties` for a GET query string, or `undefined` when
+ * there is nothing to send.
  *
- * `priority_properties` is deliberately NOT emitted on GET reads. The autumn
- * GET routes decode the query string with `axum::extract::Query`, i.e.
- * `serde_urlencoded` 0.7.1, whose value deserializer forwards `deserialize_seq`
- * to `deserialize_any` and visits a plain string
- * (`serde_urlencoded-0.7.1/src/de.rs:234-249`, the `Part` deserializer). A
- * `Vec<String>` field therefore cannot be produced from **any** query encoding
- * — a repeated key, a comma-joined single key, anything — every form is a
- * `serde` type error and the extractor returns 400. Emitting it here would turn
- * every budgeted GET read into a hard 400. The scalar `max_response_tokens` /
- * `max_response_bytes` (`u64`) parse fine.
+ * The server's GET routes (since PR #3638) accept `priority_properties` as a
+ * single **comma-separated** query param and split it on `,` server-side, so we
+ * join the array with a comma. The transport URL-encodes the joined value once
+ * (`,` → `%2C`), so it always rides as ONE param (never repeated keys, which
+ * `serde_urlencoded` still cannot decode into a `Vec`).
  *
- * Array budgeting (`priorityProperties`) is honored only on the POST-body reads
- * (`findNodesAtTime`, `findSimilar`, `hybridQuery`), whose JSON body is parsed
- * by `serde_json` — see {@link budgetBody}.
+ * An `undefined` or empty array yields `undefined` so the key is omitted
+ * entirely — never a bare `?priority_properties=`. (A property name that itself
+ * contains a comma is ambiguous under the server's comma-split contract; that
+ * is an inherent limitation of the wire format, shared with every
+ * comma-separated query param.)
+ */
+function joinPriority(priorityProperties?: string[]): string | undefined {
+  if (priorityProperties === undefined || priorityProperties.length === 0) {
+    return undefined;
+  }
+  return priorityProperties.join(',');
+}
+
+/**
+ * Build the #3353 budget query fragment (query-string form) for the eight
+ * budgetable GET reads (`getNode`, `listNodes`, `getEdge`, `listEdges`,
+ * `traverse`, `getNodeHistory`, and the two adjacency reads via
+ * {@link adjacencyQuery}).
+ *
+ * Emits the scalar `max_response_tokens` / `max_response_bytes` (`u64`) and,
+ * since server PR #3638, the comma-joined `priority_properties` (see
+ * {@link joinPriority}). The POST-body reads (`findNodesAtTime`, `findSimilar`,
+ * `hybridQuery`) carry the raw array instead — see {@link budgetBody}.
+ *
+ * Note: `getSchema` uses the scalar-only {@link schemaBudgetQuery} and is NOT
+ * one of the eight — its bespoke options type never offers
+ * `priorityProperties`.
  */
 function budgetQuery(opts: {
+  maxResponseTokens?: number;
+  maxResponseBytes?: number;
+  priorityProperties?: string[];
+}): Record<string, number | string | undefined> {
+  return {
+    max_response_tokens: opts.maxResponseTokens,
+    max_response_bytes: opts.maxResponseBytes,
+    priority_properties: joinPriority(opts.priorityProperties),
+  };
+}
+
+/**
+ * Build the scalar-only budget query fragment for `GET /schema`.
+ *
+ * `getSchema` is deliberately excluded from the eight `priority_properties`
+ * GET reads: its {@link GetSchemaOptions} type offers no `priorityProperties`,
+ * so this fragment carries only the scalar token/byte budget and never a
+ * `priority_properties` key.
+ */
+function schemaBudgetQuery(opts: {
   maxResponseTokens?: number;
   maxResponseBytes?: number;
 }): Record<string, number | undefined> {
