@@ -325,6 +325,108 @@ pub(crate) fn build_raw_change(
     })
 }
 
+/// A streaming, bounded-by-cursor accumulator of [`RawChange`]s (Issue #3216, PR 2).
+///
+/// Retains only the `bound`-smallest changes offered to it (by [`ChangeCursor`] order), so a
+/// windowed changefeed scan over a large tier holds `O(bound)` rows in memory instead of every
+/// match. This is the **limit pushdown** for `list_changes`: the query layer passes
+/// `page_limit + 1` as the bound (the `+1` lets it detect `has_more` without materializing the
+/// rest), and because the retained set always contains the true `bound`-smallest survivors, the
+/// page the query layer then selects is byte-identical to one produced by an unbounded scan.
+///
+/// Applying the bound **per tier** is sound because the page is the `page_limit`-smallest of the
+/// tiers' union: any survivor beyond a tier's `bound`-smallest has at least `bound` smaller
+/// survivors within that same tier — hence at least `page_limit` smaller survivors in the union —
+/// and can never reach the page.
+pub(crate) struct BoundedChanges {
+    bound: usize,
+    /// Max-heap keyed by cursor: the current largest-cursor survivor sits at the top so it is the
+    /// one evicted once the heap exceeds `bound`.
+    heap: std::collections::BinaryHeap<ByCursor>,
+}
+
+/// [`RawChange`] wrapper ordered solely by its [`ChangeCursor`] (which is unique per emitted
+/// version), so a [`std::collections::BinaryHeap`] evicts the largest-cursor survivor.
+struct ByCursor(RawChange);
+
+impl PartialEq for ByCursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.cursor == other.0.cursor
+    }
+}
+impl Eq for ByCursor {}
+impl PartialOrd for ByCursor {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ByCursor {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cursor.cmp(&other.0.cursor)
+    }
+}
+
+impl BoundedChanges {
+    /// Create an accumulator that keeps at most `bound` (min 1) smallest-cursor changes.
+    pub(crate) fn new(bound: usize) -> Self {
+        BoundedChanges {
+            bound: bound.max(1),
+            heap: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    /// Offer a change; the accumulator keeps only the `bound`-smallest by cursor seen so far.
+    pub(crate) fn consider(&mut self, change: RawChange) {
+        self.heap.push(ByCursor(change));
+        if self.heap.len() > self.bound {
+            // Evict the current largest cursor — it cannot belong on any page of size < bound.
+            self.heap.pop();
+        }
+    }
+
+    /// Consume the accumulator, returning the retained changes (unordered; the caller sorts).
+    pub(crate) fn into_vec(self) -> Vec<RawChange> {
+        self.heap.into_iter().map(|w| w.0).collect()
+    }
+}
+
+/// Build a [`RawChange`] for one version and, if it passes every filter **and** sorts strictly
+/// after `resume_after`, offer it to `acc` (Issue #3216, PR 2).
+///
+/// Shared verbatim by the hot ([`crate::storage::historical`]) and cold
+/// ([`crate::storage::redb_cold_storage`]) changefeed scans so their filtering, cursor-resume,
+/// and bounding are identical by construction — the guarantee that makes the pushed-down page
+/// byte-identical to the legacy unbounded merge.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn consider_version(
+    acc: &mut BoundedChanges,
+    resume_after: Option<ChangeCursor>,
+    version_id: u64,
+    entity_id: u64,
+    kind: EntityKind,
+    temporal: &BiTemporalInterval,
+    label_id: InternedString,
+    prev_is_none: bool,
+    tx_window: &TimeRange,
+    valid_window: Option<&TimeRange>,
+    label_filter: Option<&str>,
+) {
+    if let Some(rec) = build_raw_change(
+        version_id,
+        entity_id,
+        kind,
+        temporal,
+        label_id,
+        prev_is_none,
+        tx_window,
+        valid_window,
+        label_filter,
+    ) && resume_after.is_none_or(|c| rec.cursor > c)
+    {
+        acc.consider(rec);
+    }
+}
+
 /// Query options for [`crate::db::AletheiaDB::list_changes`].
 ///
 /// The transaction-time window is required; everything else is optional. An empty window

@@ -2,8 +2,7 @@
 //!
 //! Methods for querying historical states of the graph using valid and transaction times.
 use crate::core::changefeed::{
-    ChangeCursor, ChangeFeedPage, ChangeFeedQuery, ChangeRecord, EntityKind, RawChange,
-    build_raw_change,
+    ChangeCursor, ChangeFeedPage, ChangeFeedQuery, ChangeRecord, RawChange,
 };
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};
@@ -11,6 +10,15 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::temporal::{TimeRange, Timestamp, time};
 use crate::db::AletheiaDB;
 use crate::query::{EntityHistory, VersionDiff};
+
+/// Test-only instrumentation: the number of candidate [`RawChange`] rows the most recent
+/// [`AletheiaDB::list_changes`] call held for pagination — i.e. the "materialize / refilter"
+/// working set the filter+limit pushdown is meant to bound. Parity and bench tests read this to
+/// assert the hot/cold pushdown actually shrinks the working set to `O(page)` instead of
+/// `O(total matches)`.
+#[cfg(test)]
+pub(crate) static LAST_LIST_CHANGES_CANDIDATES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 impl AletheiaDB {
     /// Get outgoing edges from a node at a specific point in time.
@@ -561,69 +569,58 @@ impl AletheiaDB {
         let label = query.label.as_deref();
         let valid = valid_window.as_ref();
 
+        // A page must be able to carry a continuation cursor, so it can never be empty while more
+        // rows exist: treat limit 0 as 1. Computed up front so the filter + limit can be pushed
+        // down into both tiers' scans.
+        let limit = query.limit.max(1);
+
+        // Filter + limit pushdown (Issue #3216, PR 2): each tier applies the transaction-/valid-
+        // time window, label filter, and the strict `> cursor` resume *during* its scan, and
+        // retains only the `bound = limit + 1`-smallest survivors by cursor. The `+1` lets us
+        // detect `has_more` without materializing the rest. Bounding per tier is sound because
+        // the page is the `limit`-smallest of the union: a survivor beyond a tier's
+        // `limit + 1`-smallest has at least `limit` smaller survivors in the union and can never
+        // reach the page. The retained per-tier sets therefore always contain the true page, so
+        // the merged result below is byte-identical to an unbounded scan.
+        let bound = limit.saturating_add(1);
+
         // Scan the hot tier under the read lock, but keep the lock hold short: `collect_changes`
-        // returns lightweight `RawChange`s (no label allocation), and the cold-tier scan (disk
-        // I/O) happens after the lock is released using the cloned tiered handle.
+        // returns lightweight `RawChange`s (no label allocation), already filtered/resumed and
+        // bounded. The cold-tier scan (disk I/O) happens after the lock is released using the
+        // cloned tiered handle.
         let (mut changes, tiered) = {
             let hist = self.historical.read();
             (
-                hist.collect_changes(&tx_window, valid, label),
+                hist.collect_changes(&tx_window, valid, label, cursor, bound),
                 hist.tiered_storage_arc(),
             )
         };
 
         // Include versions that have migrated out of the hot maps into cold storage, so the feed
-        // is complete when tiered storage is enabled. Dedup against hot by (kind, version_id) in
-        // case a version is transiently present in both tiers during migration.
+        // is complete when tiered storage is enabled. The cold scan applies the same filter +
+        // resume + bound; dedup against hot by (kind, version_id) covers a version transiently
+        // present in both tiers during migration (its cursor is identical in both, so it survives
+        // in the smaller-cursor region of each bounded set and dedup keeps the hot copy).
         if let Some(tiered) = tiered {
             let mut seen: std::collections::HashSet<(u8, u64)> = changes
                 .iter()
                 .map(|r| (r.cursor.kind_ord, r.cursor.version_id))
                 .collect();
 
-            for v in tiered.scan_node_versions_cold()? {
-                if let Some(rec) = build_raw_change(
-                    v.id.as_u64(),
-                    v.node_id.as_u64(),
-                    EntityKind::Node,
-                    &v.temporal,
-                    v.label,
-                    v.prev_version.is_none(),
-                    &tx_window,
-                    valid,
-                    label,
-                ) && seen.insert((rec.cursor.kind_ord, rec.cursor.version_id))
-                {
-                    changes.push(rec);
-                }
-            }
-            for v in tiered.scan_edge_versions_cold()? {
-                if let Some(rec) = build_raw_change(
-                    v.id.as_u64(),
-                    v.edge_id.as_u64(),
-                    EntityKind::Edge,
-                    &v.temporal,
-                    v.label,
-                    v.prev_version.is_none(),
-                    &tx_window,
-                    valid,
-                    label,
-                ) && seen.insert((rec.cursor.kind_ord, rec.cursor.version_id))
-                {
+            for rec in tiered.collect_cold_changes(&tx_window, valid, label, cursor, bound)? {
+                if seen.insert((rec.cursor.kind_ord, rec.cursor.version_id)) {
                     changes.push(rec);
                 }
             }
         }
 
-        // A page must be able to carry a continuation cursor, so it can never be empty while more
-        // rows exist: treat limit 0 as 1.
-        let limit = query.limit.max(1);
+        // Test-only: record the candidate working-set size before pagination bounds it. With the
+        // pushdown this is `O(page)` (<= 2 * (limit + 1)) rather than `O(total matches)`.
+        #[cfg(test)]
+        LAST_LIST_CHANGES_CANDIDATES.store(changes.len(), std::sync::atomic::Ordering::Relaxed);
 
-        // Resume strictly after the cursor key (the precomputed `cursor` is a Copy field, so no
-        // per-element recomputation).
-        if let Some(c) = cursor {
-            changes.retain(|record| record.cursor > c);
-        }
+        // The resume cursor was already applied inside each tier's scan, so no post-merge
+        // `retain` is needed here.
 
         // Bound the page. When more rows remain than fit, select the `limit` smallest by cursor
         // in O(n) before sorting just that page, rather than fully sorting the whole scan.
@@ -1161,5 +1158,690 @@ mod changefeed_tests {
             page.changes.iter().any(|r| r.entity_id == 888_888),
             "cold-only version must be included in the feed"
         );
+    }
+}
+
+/// Parity + edge-case tests for the `list_changes` filter/limit pushdown (PR 2, Issue #3216).
+///
+/// Every scenario runs the same query through the production [`AletheiaDB::list_changes`] (the
+/// filter+limit-pushed-down path) and through [`list_changes_reference`] — a faithful copy of the
+/// pre-pushdown algorithm (unbounded hot collect + full cold scan + post-merge cursor retain +
+/// `select_nth` limit) — and asserts the two produce a byte-identical page (`changes` Vec +
+/// `next_cursor`). The reference is independent of the pushdown's bounding logic, so it is a
+/// genuine old-vs-new oracle rather than a restatement of the optimized code.
+#[cfg(test)]
+mod changefeed_pushdown_tests {
+    use super::LAST_LIST_CHANGES_CANDIDATES;
+    use crate::AletheiaDB;
+    use crate::api::WriteOps;
+    use crate::core::PropertyMap;
+    use crate::core::PropertyMapBuilder;
+    use crate::core::changefeed::{
+        ChangeCursor, ChangeFeedPage, ChangeFeedQuery, ChangeType, EntityKind, RawChange,
+        build_raw_change,
+    };
+    use crate::core::error::{Error, Result};
+    use crate::core::id::{EdgeId, NodeId, VersionId};
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp, time};
+    use crate::core::version::{EdgeVersion, NodeVersion};
+    use crate::storage::redb_cold_storage::RedbColdStorage;
+    use crate::storage::tiered_storage::TieredStorage;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    fn props(name: &str) -> PropertyMap {
+        PropertyMapBuilder::new().insert("name", name).build()
+    }
+
+    fn all() -> (Timestamp, Timestamp) {
+        (Timestamp::from(0), TIMESTAMP_MAX)
+    }
+
+    fn query(from: Timestamp, to: Timestamp, limit: usize) -> ChangeFeedQuery {
+        ChangeFeedQuery::new(from, to, limit)
+    }
+
+    fn ts(micros: i64) -> Timestamp {
+        Timestamp::from(micros)
+    }
+
+    /// A synthetic cold node "Created" anchor with a caller-chosen version id and tx-time.
+    fn cold_node(vid: u64, nid: u64, tx: Timestamp, label: &str) -> NodeVersion {
+        NodeVersion::new_anchor(
+            VersionId::new(vid).unwrap(),
+            NodeId::new(nid).unwrap(),
+            BiTemporalInterval::now(tx, tx),
+            GLOBAL_INTERNER.intern(label).unwrap(),
+            PropertyMap::new(),
+        )
+    }
+
+    /// A synthetic cold node tombstone (empty valid range `[v, v)`) committed at `tx`.
+    fn cold_node_tomb(vid: u64, nid: u64, tx: Timestamp, valid_instant: Timestamp) -> NodeVersion {
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(valid_instant, valid_instant).unwrap(),
+            TimeRange::from(tx),
+        );
+        NodeVersion::new_anchor(
+            VersionId::new(vid).unwrap(),
+            NodeId::new(nid).unwrap(),
+            interval,
+            GLOBAL_INTERNER.intern("Ghost").unwrap(),
+            PropertyMap::new(),
+        )
+    }
+
+    /// A synthetic cold edge "Created" anchor.
+    fn cold_edge(vid: u64, eid: u64, tx: Timestamp, label: &str) -> EdgeVersion {
+        EdgeVersion::new_anchor(
+            VersionId::new(vid).unwrap(),
+            EdgeId::new(eid).unwrap(),
+            BiTemporalInterval::now(tx, tx),
+            GLOBAL_INTERNER.intern(label).unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMap::new(),
+        )
+    }
+
+    /// Attach a cold tier holding the given synthetic versions to `db`. Returns the tempdir,
+    /// which must be kept alive for the duration of the test.
+    fn attach_cold(
+        db: &AletheiaDB,
+        nodes: &[NodeVersion],
+        edges: &[EdgeVersion],
+    ) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let cold =
+            Arc::new(RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap());
+        for v in nodes {
+            cold.store_node_version(v).unwrap();
+        }
+        for v in edges {
+            cold.store_edge_version(v).unwrap();
+        }
+        let tiered = Arc::new(TieredStorage::with_default_config(cold));
+        db.__test_historical_storage()
+            .write()
+            .set_tiered_storage(tiered);
+        dir
+    }
+
+    /// Clone a node version out of the hot maps by version id (used to build a dual-tier version).
+    fn hot_node_version(db: &AletheiaDB, version_id: u64) -> NodeVersion {
+        db.__test_historical_storage()
+            .read()
+            .get_node_version(VersionId::new(version_id).unwrap())
+            .expect("hot version present")
+            .clone()
+    }
+
+    /// Faithful copy of the pre-pushdown `list_changes` algorithm — the parity oracle.
+    fn list_changes_reference(db: &AletheiaDB, query: &ChangeFeedQuery) -> Result<ChangeFeedPage> {
+        let tx_window = TimeRange::new(query.tx_from, query.tx_to)?;
+        let valid_window = match (query.valid_from, query.valid_to) {
+            (Some(from), Some(to)) => Some(TimeRange::new(from, to)?),
+            (None, None) => None,
+            _ => {
+                return Err(crate::core::error::QueryError::InvalidParameter {
+                    parameter: "valid_time".to_string(),
+                    reason: "valid_from and valid_to must be supplied together".to_string(),
+                }
+                .into());
+            }
+        };
+        let cursor = match &query.cursor {
+            Some(token) => Some(ChangeCursor::decode(token)?),
+            None => None,
+        };
+        let label = query.label.as_deref();
+        let valid = valid_window.as_ref();
+
+        let (mut changes, tiered) = {
+            let hist = db.__test_historical_storage().read();
+            (
+                hist.collect_changes(&tx_window, valid, label, None, usize::MAX),
+                hist.tiered_storage_arc(),
+            )
+        };
+
+        if let Some(tiered) = tiered {
+            let mut seen: std::collections::HashSet<(u8, u64)> = changes
+                .iter()
+                .map(|r| (r.cursor.kind_ord, r.cursor.version_id))
+                .collect();
+            for v in tiered.scan_node_versions_cold()? {
+                if let Some(rec) = build_raw_change(
+                    v.id.as_u64(),
+                    v.node_id.as_u64(),
+                    EntityKind::Node,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    &tx_window,
+                    valid,
+                    label,
+                ) && seen.insert((rec.cursor.kind_ord, rec.cursor.version_id))
+                {
+                    changes.push(rec);
+                }
+            }
+            for v in tiered.scan_edge_versions_cold()? {
+                if let Some(rec) = build_raw_change(
+                    v.id.as_u64(),
+                    v.edge_id.as_u64(),
+                    EntityKind::Edge,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    &tx_window,
+                    valid,
+                    label,
+                ) && seen.insert((rec.cursor.kind_ord, rec.cursor.version_id))
+                {
+                    changes.push(rec);
+                }
+            }
+        }
+
+        let limit = query.limit.max(1);
+        if let Some(c) = cursor {
+            changes.retain(|record| record.cursor > c);
+        }
+        let has_more = changes.len() > limit;
+        if has_more {
+            changes.select_nth_unstable_by_key(limit, |record| record.cursor);
+            changes.truncate(limit);
+        }
+        changes.sort_unstable_by_key(|record| record.cursor);
+        let next_cursor = if has_more {
+            changes.last().map(|record| record.cursor.encode())
+        } else {
+            None
+        };
+        let records: Vec<_> = changes.into_iter().map(RawChange::into_record).collect();
+        Ok(ChangeFeedPage {
+            changes: records,
+            next_cursor,
+        })
+    }
+
+    /// Assert the production path and the reference oracle produce byte-identical pages, and
+    /// return the production page for further assertions.
+    fn assert_parity(db: &AletheiaDB, query: &ChangeFeedQuery) -> ChangeFeedPage {
+        let got = db.list_changes(query).expect("list_changes ok");
+        let want = list_changes_reference(db, query).expect("reference ok");
+        assert_eq!(
+            got.changes, want.changes,
+            "page rows must be byte-identical"
+        );
+        assert_eq!(
+            got.next_cursor, want.next_cursor,
+            "next_cursor must be byte-identical"
+        );
+        got
+    }
+
+    /// Drain every page of a query (following `next_cursor`) into one ordered Vec.
+    fn drain_all(db: &AletheiaDB, base: &ChangeFeedQuery) -> Vec<(u64, u8, u64)> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut q = base.clone();
+            q.cursor = cursor.clone();
+            let page = db.list_changes(&q).unwrap();
+            for r in &page.changes {
+                out.push((r.entity_id, r.kind.ord(), r.version_id));
+            }
+            match page.next_cursor {
+                Some(tok) => cursor = Some(tok),
+                None => break,
+            }
+        }
+        out
+    }
+
+    // 1 -----------------------------------------------------------------------------------------
+    #[test]
+    fn parity_hot_only() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..50 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("n{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let (from, to) = all();
+        for limit in [1usize, 7, 10, 49, 50, 100] {
+            assert_parity(&db, &query(from, to, limit));
+        }
+    }
+
+    // 2 -----------------------------------------------------------------------------------------
+    #[test]
+    fn parity_cold_only() {
+        let db = AletheiaDB::new().unwrap();
+        let nodes: Vec<_> = (0..20)
+            .map(|i| cold_node(1000 + i, 5000 + i, ts(100 + i as i64), "ColdNode"))
+            .collect();
+        let edges: Vec<_> = (0..10)
+            .map(|i| cold_edge(2000 + i, 6000 + i, ts(200 + i as i64), "ColdEdge"))
+            .collect();
+        let _dir = attach_cold(&db, &nodes, &edges);
+
+        let (from, to) = all();
+        for limit in [1usize, 5, 15, 29, 30, 100] {
+            let page = assert_parity(&db, &query(from, to, limit));
+            assert!(page.changes.len() <= limit.max(1));
+        }
+    }
+
+    // 3 -----------------------------------------------------------------------------------------
+    #[test]
+    fn parity_mixed_tiers_dedup() {
+        let db = AletheiaDB::new().unwrap();
+        // Real hot writes.
+        for i in 0..15 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("hot{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        // Pick one hot version and mirror it into cold to create a *dual-tier* version.
+        let full = db.list_changes(&query(all().0, all().1, 1000)).unwrap();
+        let dual = &full.changes[3];
+        let dual_vid = dual.version_id;
+        let dual_entity = dual.entity_id;
+        let dual_version = hot_node_version(&db, dual_vid);
+
+        let mut cold_nodes = vec![dual_version];
+        cold_nodes
+            .extend((0..10).map(|i| cold_node(9000 + i, 7000 + i, ts(50 + i as i64), "Cold")));
+        let _dir = attach_cold(&db, &cold_nodes, &[]);
+
+        let (from, to) = all();
+        for limit in [1usize, 3, 10, 25, 100] {
+            let page = assert_parity(&db, &query(from, to, limit));
+            // Full drain: the dual-tier version appears exactly once across all pages.
+            if limit == 100 {
+                let _ = page;
+            }
+        }
+        let drained = drain_all(&db, &query(from, to, 4));
+        let dual_hits = drained
+            .iter()
+            .filter(|(eid, kind, vid)| {
+                *eid == dual_entity && *kind == EntityKind::Node.ord() && *vid == dual_vid
+            })
+            .count();
+        assert_eq!(dual_hits, 1, "dual-tier version must appear exactly once");
+    }
+
+    // 4 -----------------------------------------------------------------------------------------
+    #[test]
+    fn parity_empty_window() {
+        let db = AletheiaDB::new().unwrap();
+        db.write(|tx| {
+            tx.create_node("Person", props("a"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+        let _dir = attach_cold(&db, &[cold_node(1, 42, ts(5), "Cold")], &[]);
+        let now = time::now();
+        let page = assert_parity(&db, &query(now, now, 100));
+        assert!(page.changes.is_empty(), "empty window yields no rows");
+        assert!(page.next_cursor.is_none());
+    }
+
+    // 5 -----------------------------------------------------------------------------------------
+    #[test]
+    fn parity_limit_smaller_than_matches() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..50 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("n{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let (from, to) = all();
+        let page = assert_parity(&db, &query(from, to, 10));
+        assert_eq!(page.changes.len(), 10);
+        assert!(page.next_cursor.is_some(), "has_more page carries a cursor");
+    }
+
+    // 6 -----------------------------------------------------------------------------------------
+    #[test]
+    fn limit_spans_hot_cold_boundary() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..5 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("hot{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        // Cold versions interleaved in tx-time with the hot ones (hot commit near time::now()).
+        let cold_nodes: Vec<_> = (0..5)
+            .map(|i| cold_node(4000 + i, 8000 + i, ts(10 + i as i64), "Cold"))
+            .collect();
+        let _dir = attach_cold(&db, &cold_nodes, &[]);
+
+        let (from, to) = all();
+        // Sweep the page boundary across the whole merged sequence.
+        for limit in 1..=11 {
+            assert_parity(&db, &query(from, to, limit));
+        }
+        // Full drain has no dup / gap: exactly the unbounded row set.
+        let unbounded = db.list_changes(&query(from, to, 10_000)).unwrap();
+        let drained = drain_all(&db, &query(from, to, 3));
+        let want: Vec<_> = unbounded
+            .changes
+            .iter()
+            .map(|r| (r.entity_id, r.kind.ord(), r.version_id))
+            .collect();
+        assert_eq!(drained, want, "paged drain equals unbounded, no dup/gap");
+    }
+
+    // 7 -----------------------------------------------------------------------------------------
+    #[test]
+    fn cursor_resume_after_cold_page() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..8 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("h{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let cold_nodes: Vec<_> = (0..8)
+            .map(|i| cold_node(4100 + i, 8100 + i, ts(20 + i as i64), "Cold"))
+            .collect();
+        let _dir = attach_cold(&db, &cold_nodes, &[]);
+
+        let (from, to) = all();
+        let unbounded = db.list_changes(&query(from, to, 10_000)).unwrap();
+        let want: Vec<_> = unbounded
+            .changes
+            .iter()
+            .map(|r| (r.entity_id, r.kind.ord(), r.version_id))
+            .collect();
+        for page_size in [1usize, 2, 5, 7] {
+            let drained = drain_all(&db, &query(from, to, page_size));
+            assert_eq!(
+                drained, want,
+                "resume union equals unbounded @page={page_size}"
+            );
+        }
+    }
+
+    // 8 -----------------------------------------------------------------------------------------
+    #[test]
+    fn resume_across_version_id_inversion() {
+        // Craft two cold versions where the SMALLER version_id carries the LARGER tx-time — the
+        // exact inversion a naive `version_id`-range early-stop would mis-handle. Correct behavior
+        // orders strictly by tx-time (ChangeCursor), never by version_id.
+        let db = AletheiaDB::new().unwrap();
+        let earlier_txn_bigger_vid = cold_node(500, 100, ts(1_000), "Cold"); // vid 500, tx 1000
+        let later_txn_smaller_vid = cold_node(100, 200, ts(2_000), "Cold"); // vid 100, tx 2000
+        let _dir = attach_cold(&db, &[earlier_txn_bigger_vid, later_txn_smaller_vid], &[]);
+
+        let (from, to) = all();
+        // Parity at every page size.
+        for limit in [1usize, 2, 3] {
+            assert_parity(&db, &query(from, to, limit));
+        }
+        // Page-by-1 order must be tx-time ascending: entity 100 (tx 1000) then entity 200 (tx 2000).
+        let drained = drain_all(&db, &query(from, to, 1));
+        assert_eq!(
+            drained,
+            vec![
+                (100u64, EntityKind::Node.ord(), 500u64),
+                (200u64, EntityKind::Node.ord(), 100u64),
+            ],
+            "ordering follows tx-time, not version_id"
+        );
+    }
+
+    // 9 -----------------------------------------------------------------------------------------
+    #[test]
+    fn tombstone_valid_window_boundary() {
+        let db = AletheiaDB::new().unwrap();
+        // Deletion recorded at tx=1000, valid instant v=500.
+        let tomb = cold_node_tomb(700, 300, ts(1_000), ts(500));
+        let _dir = attach_cold(&db, &[tomb], &[]);
+
+        let (from, to) = all();
+        // Window [500, 501) contains v=500 -> deletion included.
+        let mut q_in = query(from, to, 100);
+        q_in.valid_from = Some(ts(500));
+        q_in.valid_to = Some(ts(501));
+        let page_in = assert_parity(&db, &q_in);
+        assert_eq!(page_in.changes.len(), 1);
+        assert_eq!(page_in.changes[0].change_type, ChangeType::Deleted);
+
+        // Window [499, 500) excludes v=500 (half-open) -> deletion excluded.
+        let mut q_out = query(from, to, 100);
+        q_out.valid_from = Some(ts(499));
+        q_out.valid_to = Some(ts(500));
+        let page_out = assert_parity(&db, &q_out);
+        assert!(
+            page_out.changes.is_empty(),
+            "tombstone excluded when window omits v"
+        );
+    }
+
+    // 10 ----------------------------------------------------------------------------------------
+    #[test]
+    fn half_open_tx_boundary() {
+        let db = AletheiaDB::new().unwrap();
+        let at_from = cold_node(810, 410, ts(1_000), "Cold");
+        let at_to = cold_node(820, 420, ts(2_000), "Cold");
+        let _dir = attach_cold(&db, &[at_from, at_to], &[]);
+
+        // Window [1000, 2000): includes the tx=1000 row, excludes the tx=2000 row.
+        let page = assert_parity(&db, &query(ts(1_000), ts(2_000), 100));
+        let ids: Vec<u64> = page.changes.iter().map(|r| r.entity_id).collect();
+        assert_eq!(ids, vec![410], "tx_from included, tx_to excluded");
+    }
+
+    // 11 ----------------------------------------------------------------------------------------
+    #[test]
+    fn empty_cold_tier() {
+        let db = AletheiaDB::new().unwrap();
+        db.write(|tx| {
+            tx.create_node("Person", props("a"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+        let _dir = attach_cold(&db, &[], &[]); // tiered enabled, nothing migrated
+        let (from, to) = all();
+        let page = assert_parity(&db, &query(from, to, 100));
+        assert_eq!(page.changes.len(), 1);
+    }
+
+    // 12 ----------------------------------------------------------------------------------------
+    #[test]
+    fn cold_disabled_config() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..5 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("n{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let (from, to) = all();
+        // No tiered storage attached -> cold branch skipped entirely.
+        for limit in [1usize, 3, 5, 100] {
+            assert_parity(&db, &query(from, to, limit));
+        }
+    }
+
+    // 13 ----------------------------------------------------------------------------------------
+    #[test]
+    fn limit_zero_floors_to_one() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..3 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("n{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let (from, to) = all();
+        let page = assert_parity(&db, &query(from, to, 0));
+        assert_eq!(page.changes.len(), 1, "limit 0 floors to 1 row");
+        assert!(
+            page.next_cursor.is_some(),
+            "cursor present since more remain"
+        );
+    }
+
+    // 14 ----------------------------------------------------------------------------------------
+    #[test]
+    fn label_filter_pushdown_parity() {
+        let db = AletheiaDB::new().unwrap();
+        db.write(|tx| {
+            tx.create_node("Person", props("p"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+        db.write(|tx| {
+            tx.create_node("Widget", props("w"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+        let cold_nodes = vec![
+            cold_node(3100, 9100, ts(30), "Person"),
+            cold_node(3101, 9101, ts(31), "Widget"),
+        ];
+        let cold_edges = vec![cold_edge(3200, 9200, ts(40), "KNOWS")];
+        let _dir = attach_cold(&db, &cold_nodes, &cold_edges);
+
+        let (from, to) = all();
+        for lbl in ["Person", "Widget", "KNOWS", "Nonexistent"] {
+            let mut q = query(from, to, 100);
+            q.label = Some(lbl.to_string());
+            let page = assert_parity(&db, &q);
+            assert!(
+                page.changes.iter().all(|r| r.label == lbl),
+                "only matching-label rows for {lbl}"
+            );
+        }
+    }
+
+    // 15 ----------------------------------------------------------------------------------------
+    #[test]
+    fn valid_window_pushdown_parity() {
+        let db = AletheiaDB::new().unwrap();
+        // Live node valid from t=100 (open), and a tombstone at valid instant 500.
+        let live = cold_node(3300, 9300, ts(100), "Cold");
+        let tomb = cold_node_tomb(3301, 9301, ts(1_000), ts(500));
+        let _dir = attach_cold(&db, &[live, tomb], &[]);
+
+        let (from, to) = all();
+        for (vf, vt) in [(50i64, 200i64), (400, 600), (600, 700), (0, 2_000)] {
+            let mut q = query(from, to, 100);
+            q.valid_from = Some(ts(vf));
+            q.valid_to = Some(ts(vt));
+            assert_parity(&db, &q);
+        }
+    }
+
+    // 16 ----------------------------------------------------------------------------------------
+    #[test]
+    fn candidate_set_is_bounded() {
+        // 500 hot matches, page limit 10. After the pushdown the candidate working set the query
+        // holds for pagination must be O(page) — not O(total matches). Before the pushdown this
+        // was 500 (the whole match set), which is the RED failure this asserts against.
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..500 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("n{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let (from, to) = all();
+        let limit = 10usize;
+        let page = assert_parity(&db, &query(from, to, limit));
+        assert_eq!(page.changes.len(), limit);
+        let candidates = LAST_LIST_CHANGES_CANDIDATES.load(AtomicOrdering::Relaxed);
+        assert!(
+            candidates <= limit + 1,
+            "hot candidate working set must be bounded to limit+1, got {candidates}"
+        );
+    }
+
+    // 16b: mixed-tier candidate bound (hot+cold each bounded to limit+1).
+    #[test]
+    fn candidate_set_is_bounded_mixed() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..200 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("n{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let cold_nodes: Vec<_> = (0..200)
+            .map(|i| cold_node(20_000 + i, 30_000 + i, ts(1 + i as i64), "Cold"))
+            .collect();
+        let _dir = attach_cold(&db, &cold_nodes, &[]);
+        let (from, to) = all();
+        let limit = 10usize;
+        assert_parity(&db, &query(from, to, limit));
+        let candidates = LAST_LIST_CHANGES_CANDIDATES.load(AtomicOrdering::Relaxed);
+        assert!(
+            candidates <= 2 * (limit + 1),
+            "merged candidate set must be bounded to 2*(limit+1), got {candidates}"
+        );
+    }
+
+    /// Bench-adjacent (honest): print the candidate working-set size and wall time of the
+    /// optimized path vs the unbounded reference oracle for a bounded/limited query over a large
+    /// hot history. Ignored by default; run with `--ignored --nocapture` to capture PR numbers.
+    #[test]
+    #[ignore = "bench-adjacent; run explicitly to capture numbers"]
+    fn bench_list_changes_pushdown() {
+        use std::time::Instant;
+        let db = AletheiaDB::new().unwrap();
+        let n = 20_000;
+        for i in 0..n {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("n{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let (from, to) = all();
+        let q = query(from, to, 10);
+
+        // Warm both paths once.
+        let _ = db.list_changes(&q).unwrap();
+        let _ = list_changes_reference(&db, &q).unwrap();
+
+        let iters = 50;
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let _ = list_changes_reference(&db, &q).unwrap();
+        }
+        let ref_elapsed = t0.elapsed() / iters;
+
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let _ = db.list_changes(&q).unwrap();
+        }
+        let new_elapsed = t1.elapsed() / iters;
+        let candidates = LAST_LIST_CHANGES_CANDIDATES.load(AtomicOrdering::Relaxed);
+
+        println!("=== list_changes pushdown bench ({n} hot versions, limit 10) ===");
+        println!("reference (unbounded) : {ref_elapsed:?}/call");
+        println!("pushed-down (new)     : {new_elapsed:?}/call");
+        println!("new-path candidate working set: {candidates} rows (was {n})");
     }
 }

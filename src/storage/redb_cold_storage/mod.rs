@@ -51,9 +51,12 @@
 //! # }
 //! ```
 
+use crate::core::changefeed::{
+    BoundedChanges, ChangeCursor, EntityKind, RawChange, consider_version,
+};
 use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
-use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
+use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion};
 use crate::storage::wal::LSN;
 use rayon::prelude::*;
@@ -1995,6 +1998,127 @@ impl RedbColdStorage {
     /// lookups for point reads. Used by the changefeed to include migrated history.
     pub fn scan_edge_versions(&self) -> Result<Vec<EdgeVersion>> {
         self.scan_entries_internal(decode_edge_version, EDGE_VERSIONS_TABLE)
+    }
+
+    /// Stream-decode a versions table, invoking `emit` on each decoded version.
+    ///
+    /// Like [`scan_entries_internal`](Self::scan_entries_internal) but never accumulates the
+    /// decoded versions into a `Vec` — the caller's `emit` closure decides what (if anything) to
+    /// keep. This is what lets the filtered changefeed scan hold only `O(bound)` survivors in
+    /// memory instead of the whole table.
+    fn scan_versions_into<V, D, E>(
+        &self,
+        table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+        decode_fn: D,
+        mut emit: E,
+    ) -> Result<()>
+    where
+        D: Fn(&[u8]) -> Result<V>,
+        E: FnMut(V),
+    {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+
+        let table = match read_txn.open_table(table_def) {
+            Ok(table) => table,
+            // A cold store that has never persisted this kind of version has no such table yet.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(e) => {
+                return Err(StorageError::io_error(format!(
+                    "Failed to open table '{}': {}",
+                    table_def.name(),
+                    e
+                ))
+                .into());
+            }
+        };
+
+        let iter = table
+            .iter()
+            .map_err(|e| StorageError::io_error(format!("Failed to iterate cold table: {}", e)))?;
+        for entry in iter {
+            let (_key, value) = entry
+                .map_err(|e| StorageError::io_error(format!("Failed to read cold entry: {}", e)))?;
+            let raw: &[u8] = value.value();
+            let compressed = self.decrypt_if_needed(raw)?;
+            let decompressed = self.decompress(&compressed)?;
+            emit(decode_fn(&decompressed)?);
+        }
+        Ok(())
+    }
+
+    /// Filter-during-decode changefeed scan of the cold tier (Issue #3216, PR 2).
+    ///
+    /// Runs the shared [`consider_version`] predicate (transaction-time window, optional
+    /// valid-time window, optional label filter, and the strict `> resume_after` cursor) inline
+    /// as each node then edge version is decoded, retaining only the `bound`-smallest survivors
+    /// by [`ChangeCursor`] order. It returns `Vec<RawChange>` directly — the caller no longer
+    /// materializes a full `Vec<NodeVersion>` / `Vec<EdgeVersion>` and re-filters it.
+    ///
+    /// # Correctness note — no `version_id` early-stop
+    ///
+    /// Cold storage is keyed by `VersionId`, but a version's id is allocated at transaction-build
+    /// time while its commit timestamp is assigned later, so `version_id` is **not** monotonic
+    /// with transaction time — two concurrent commits can invert the two orders. The changefeed
+    /// is ordered by transaction time (`ChangeCursor`), so an early-stop / `range()` on the
+    /// ascending `version_id` key would silently drop or misorder rows. This scan therefore
+    /// **decodes every entry** (I/O stays O(N)) and only the in-memory retention is bounded. A
+    /// true sub-linear cold pushdown needs a transaction-time-ordered directory (tracked
+    /// follow-up), not a `version_id` range.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn collect_changes_filtered(
+        &self,
+        tx_window: &TimeRange,
+        valid_window: Option<&TimeRange>,
+        label_filter: Option<&str>,
+        resume_after: Option<ChangeCursor>,
+        bound: usize,
+    ) -> Result<Vec<RawChange>> {
+        let mut acc = BoundedChanges::new(bound);
+
+        self.scan_versions_into(
+            NODE_VERSIONS_TABLE,
+            decode_node_version,
+            |v: NodeVersion| {
+                consider_version(
+                    &mut acc,
+                    resume_after,
+                    v.id.as_u64(),
+                    v.node_id.as_u64(),
+                    EntityKind::Node,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    tx_window,
+                    valid_window,
+                    label_filter,
+                );
+            },
+        )?;
+
+        self.scan_versions_into(
+            EDGE_VERSIONS_TABLE,
+            decode_edge_version,
+            |v: EdgeVersion| {
+                consider_version(
+                    &mut acc,
+                    resume_after,
+                    v.id.as_u64(),
+                    v.edge_id.as_u64(),
+                    EntityKind::Edge,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    tx_window,
+                    valid_window,
+                    label_filter,
+                );
+            },
+        )?;
+
+        Ok(acc.into_vec())
     }
 
     /// Store a single node version.
