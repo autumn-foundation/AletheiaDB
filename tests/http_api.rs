@@ -134,6 +134,60 @@ async fn error_cases_return_correct_status_codes() {
     assert_eq!(status, 400, "expected 400 for nested object property");
 }
 
+/// Issue #3629/#3234: a uniqueness violation raised on the legacy JSON-RPC
+/// write path (`create_node`) is classified into the unified nested envelope —
+/// `409 CONSTRAINT_VIOLATION`, `retriable: false`, and machine-readable
+/// `details.existing_node_id` — end-to-end through the full HTTP stack, instead
+/// of the pre-#3629 blanket `400 INVALID_ARGUMENT`.
+#[tokio::test]
+async fn create_node_unique_violation_maps_to_409_constraint_violation() {
+    let (client, db) = client_with_db();
+    db.unique_constraint("Person", "email")
+        .enable()
+        .expect("enable unique constraint");
+
+    // First Alice with a unique email — succeeds.
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "create_node",
+            "label": "Person",
+            "properties": { "name": "Alice", "email": "a@b.com" }
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "first create should succeed: {body}");
+    let alice_id = body["data"]["id"].as_u64().expect("alice id");
+
+    // Second node reusing the email — unique violation.
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "create_node",
+            "label": "Person",
+            "properties": { "name": "Bob", "email": "a@b.com" }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 409,
+        "duplicate email must be a 409 conflict: {body}"
+    );
+    // Nested #3629 envelope (no flat `success` field on errors).
+    assert!(body.get("success").is_none(), "flat success field dropped");
+    assert_eq!(body["error"]["code"], "CONSTRAINT_VIOLATION");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["label"], "Person");
+    assert_eq!(body["error"]["details"]["property"], "email");
+    assert_eq!(
+        body["error"]["details"]["existing_node_id"]
+            .as_u64()
+            .expect("existing_node_id"),
+        alice_id,
+        "details must name the node that already owns the value"
+    );
+}
+
 #[tokio::test]
 async fn pagination_and_neighbor_deduplication() {
     let (client, db) = client_with_db();
