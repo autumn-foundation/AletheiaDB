@@ -52,6 +52,7 @@ fn bench_commit_throughput(c: &mut Criterion) {
         db.set_changefeed_config(ChangefeedConfig {
             max_subscriptions: 256,
             buffer_capacity: 1024,
+            ..ChangefeedConfig::default()
         });
         let _subs: Vec<Subscription> = (0..100)
             .map(|_| db.subscribe_changes(ChangeFilter::all()).unwrap())
@@ -70,6 +71,7 @@ fn bench_commit_throughput(c: &mut Criterion) {
         db.set_changefeed_config(ChangefeedConfig {
             max_subscriptions: 256,
             buffer_capacity: 1024,
+            ..ChangefeedConfig::default()
         });
         let subs: Vec<Subscription> = (0..100)
             .map(|_| db.subscribe_changes(ChangeFilter::all()).unwrap())

@@ -151,6 +151,22 @@ pub enum AletheiaHttpError {
         cap: usize,
     },
 
+    /// A per-principal changefeed subscription quota was exceeded (Issue #3678).
+    /// Renders `429 RESOURCE_EXHAUSTED`, `retriable: true`, with
+    /// `details {principal, current, limit}` — byte-shape-identical to the MCP
+    /// surface's classification of [`StorageError::PrincipalQuotaExceeded`].
+    #[error(
+        "principal '{principal}' has reached its changefeed subscription quota (current={current}, limit={limit})"
+    )]
+    PrincipalQuotaExceeded {
+        /// The principal id whose quota was exceeded.
+        principal: String,
+        /// The principal's current live-subscription count.
+        current: usize,
+        /// The principal's configured maximum.
+        limit: usize,
+    },
+
     /// A schema-constraint violation surfaced from the db layer (Issue #3378),
     /// pre-classified into the unified #3234 envelope so the HTTP body carries
     /// the same `code`/`retriable`/`details` as the MCP surface. Built via
@@ -219,6 +235,8 @@ impl AletheiaHttpError {
             Self::SchemaConstraint { status, .. } => *status,
             // Transient overload → 503 Service Unavailable (retriable).
             Self::InFlightCapacityExceeded { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            // A per-principal quota breach → 429 Too Many Requests (retriable).
+            Self::PrincipalQuotaExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::ResourceLimitExceeded(e) => match e.dimension {
                 // Timeout is transient → 429 Too Many Requests.
                 LimitDimension::WallClockTimeout => StatusCode::TOO_MANY_REQUESTS,
@@ -245,6 +263,9 @@ impl AletheiaHttpError {
             Self::ResourceLimitExceeded(e) => e.retriable,
             // Transient overload: backing off and retrying can succeed.
             Self::InFlightCapacityExceeded { .. } => true,
+            // A fairness quota: another of this principal's subscriptions may
+            // drop, so a backed-off retry can succeed (Issue #3678).
+            Self::PrincipalQuotaExceeded { .. } => true,
             _ => false,
         }
     }
@@ -288,6 +309,15 @@ impl AletheiaHttpError {
                 "reason": "in_flight_query_cap",
                 "max_in_flight_queries": cap,
             })),
+            Self::PrincipalQuotaExceeded {
+                principal,
+                current,
+                limit,
+            } => Some(json!({
+                "principal": principal,
+                "current": current,
+                "limit": limit,
+            })),
             // A schema-constraint violation forwards the structured details
             // built by the shared core classifier (Issue #3378), so the HTTP
             // body is byte-shape-identical to the MCP surface.
@@ -311,6 +341,7 @@ impl AletheiaHttpError {
             Self::Unauthorized => "UNAUTHENTICATED",
             Self::PermissionDenied { .. } => "PERMISSION_DENIED",
             Self::ResourceLimitExceeded(_) => "RESOURCE_EXHAUSTED",
+            Self::PrincipalQuotaExceeded { .. } => "RESOURCE_EXHAUSTED",
             Self::InFlightCapacityExceeded { .. } => "UNAVAILABLE",
             // The #3234 code was fixed when the variant was classified.
             Self::SchemaConstraint { code, .. } => code,
@@ -363,8 +394,10 @@ impl AletheiaHttpError {
         if matches!(
             &self,
             Self::ResourceLimitExceeded(e) if e.dimension == LimitDimension::WallClockTimeout
-        ) || matches!(&self, Self::InFlightCapacityExceeded { .. })
-        {
+        ) || matches!(
+            &self,
+            Self::InFlightCapacityExceeded { .. } | Self::PrincipalQuotaExceeded { .. }
+        ) {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
@@ -531,6 +564,39 @@ mod tests {
                 .unwrap()
                 .contains("cap of 64")
         );
+    }
+
+    /// Issue #3678: a per-principal changefeed quota breach renders `429
+    /// RESOURCE_EXHAUSTED`, `retriable: true`, `Retry-After: 1`, and
+    /// `details {principal, current, limit}` — byte-shape-identical to the MCP
+    /// surface.
+    #[tokio::test]
+    async fn principal_quota_maps_to_429_resource_exhausted_retriable() {
+        let err = AletheiaHttpError::PrincipalQuotaExceeded {
+            principal: "alice".into(),
+            current: 2,
+            limit: 2,
+        };
+        let resp = err.into_response();
+        let status = resp.status();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1"),
+        );
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["retriable"], true);
+        assert_eq!(body["error"]["details"]["principal"], "alice");
+        assert_eq!(body["error"]["details"]["current"], 2);
+        assert_eq!(body["error"]["details"]["limit"], 2);
     }
 
     #[tokio::test]

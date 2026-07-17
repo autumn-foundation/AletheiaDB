@@ -175,6 +175,14 @@ pub struct Metrics {
 
     /// Total transaction commits.
     pub transaction_commits_total: AtomicU64,
+
+    /// Currently-live changefeed subscriptions across the process (Issue #3678).
+    /// A gauge: incremented on subscribe, decremented on drop/deregister.
+    pub changefeed_subscriptions_active: AtomicU64,
+
+    /// Total per-principal changefeed quota rejections (Issue #3678). A counter,
+    /// bumped whenever a subscribe is refused for exceeding a principal's quota.
+    pub changefeed_quota_rejections_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -200,7 +208,42 @@ impl Metrics {
             error_io_total: AtomicU64::new(0),
             error_other_total: AtomicU64::new(0),
             transaction_commits_total: AtomicU64::new(0),
+            changefeed_subscriptions_active: AtomicU64::new(0),
+            changefeed_quota_rejections_total: AtomicU64::new(0),
         }
+    }
+
+    /// Increment the live-changefeed-subscription gauge (Issue #3678).
+    pub fn inc_changefeed_active(&self) {
+        self.changefeed_subscriptions_active
+            .fetch_add(1, METRIC_WRITE_ORDERING);
+    }
+
+    /// Decrement the live-changefeed-subscription gauge (Issue #3678). Balanced
+    /// against [`inc_changefeed_active`](Self::inc_changefeed_active) by the
+    /// broadcaster's subscribe/deregister pairing, so it never underflows in
+    /// practice; guarded with a saturating compare-and-swap regardless.
+    pub fn dec_changefeed_active(&self) {
+        let mut cur = self
+            .changefeed_subscriptions_active
+            .load(METRIC_READ_ORDERING);
+        while cur > 0 {
+            match self.changefeed_subscriptions_active.compare_exchange_weak(
+                cur,
+                cur - 1,
+                METRIC_WRITE_ORDERING,
+                METRIC_READ_ORDERING,
+            ) {
+                Ok(_) => return,
+                Err(observed) => cur = observed,
+            }
+        }
+    }
+
+    /// Increment the per-principal changefeed quota-rejection counter (Issue #3678).
+    pub fn inc_changefeed_quota_rejection(&self) {
+        self.changefeed_quota_rejections_total
+            .fetch_add(1, METRIC_WRITE_ORDERING);
     }
 
     /// Capture a point-in-time snapshot.
@@ -219,6 +262,12 @@ impl Metrics {
             error_io_total: self.error_io_total.load(METRIC_READ_ORDERING),
             error_other_total: self.error_other_total.load(METRIC_READ_ORDERING),
             transaction_commits_total: self.transaction_commits_total.load(METRIC_READ_ORDERING),
+            changefeed_subscriptions_active: self
+                .changefeed_subscriptions_active
+                .load(METRIC_READ_ORDERING),
+            changefeed_quota_rejections_total: self
+                .changefeed_quota_rejections_total
+                .load(METRIC_READ_ORDERING),
         }
     }
 
@@ -237,6 +286,10 @@ impl Metrics {
         self.error_io_total.store(0, METRIC_WRITE_ORDERING);
         self.error_other_total.store(0, METRIC_WRITE_ORDERING);
         self.transaction_commits_total
+            .store(0, METRIC_WRITE_ORDERING);
+        self.changefeed_subscriptions_active
+            .store(0, METRIC_WRITE_ORDERING);
+        self.changefeed_quota_rejections_total
             .store(0, METRIC_WRITE_ORDERING);
     }
 }
@@ -318,6 +371,12 @@ pub struct MetricsSnapshot {
 
     /// Total transaction commits.
     pub transaction_commits_total: u64,
+
+    /// Currently-live changefeed subscriptions across the process (Issue #3678).
+    pub changefeed_subscriptions_active: u64,
+
+    /// Total per-principal changefeed quota rejections (Issue #3678).
+    pub changefeed_quota_rejections_total: u64,
 }
 
 impl MetricsSnapshot {
@@ -423,5 +482,29 @@ mod tests {
     fn global_metrics_singleton() {
         METRICS.record_critical_event(CriticalEvent::LockPoison);
         assert!(METRICS.snapshot().lock_poison_count >= 1);
+    }
+
+    #[test]
+    fn changefeed_active_gauge_rises_and_falls_and_rejection_counter_increments() {
+        // Issue #3678: the active-subscription gauge rises on subscribe and falls
+        // on drop; the quota-rejection counter only ever increments. Verified on a
+        // fresh, isolated `Metrics` so the assertions are deterministic.
+        let m = Metrics::new();
+        assert_eq!(m.snapshot().changefeed_subscriptions_active, 0);
+        m.inc_changefeed_active();
+        m.inc_changefeed_active();
+        assert_eq!(m.snapshot().changefeed_subscriptions_active, 2);
+        m.dec_changefeed_active();
+        assert_eq!(m.snapshot().changefeed_subscriptions_active, 1);
+        m.dec_changefeed_active();
+        assert_eq!(m.snapshot().changefeed_subscriptions_active, 0);
+        // Saturating: an extra decrement never underflows below zero.
+        m.dec_changefeed_active();
+        assert_eq!(m.snapshot().changefeed_subscriptions_active, 0);
+
+        assert_eq!(m.snapshot().changefeed_quota_rejections_total, 0);
+        m.inc_changefeed_quota_rejection();
+        m.inc_changefeed_quota_rejection();
+        assert_eq!(m.snapshot().changefeed_quota_rejections_total, 2);
     }
 }

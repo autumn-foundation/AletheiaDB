@@ -68,6 +68,49 @@ impl AletheiaDB {
             .subscribe_with_baseline(filter, Some(baseline))
     }
 
+    /// Subscribe to the push changefeed on behalf of an authenticated principal,
+    /// enforcing the per-principal subscription quota (Issue #3678).
+    ///
+    /// Identical to [`subscribe_changes`](Self::subscribe_changes) but accounts
+    /// the new subscription against `principal_key`'s quota bucket. The changefeed
+    /// surfaces (MCP `await_changes`, HTTP `/changes/await` and `/changes/stream`)
+    /// call this with the authenticated principal id, or the shared `"anonymous"`
+    /// bucket in anonymous mode, so no principal can exhaust the global cap and
+    /// starve others. Passing `None` reproduces the unquota'd
+    /// [`subscribe_changes`](Self::subscribe_changes) behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::CapacityExceeded`](crate::StorageError::CapacityExceeded)
+    /// at the global cap, or
+    /// [`StorageError::PrincipalQuotaExceeded`](crate::StorageError::PrincipalQuotaExceeded)
+    /// when `principal_key` already holds its maximum concurrent subscriptions
+    /// (mapping to the `RESOURCE_EXHAUSTED`, `retriable: true` envelope).
+    #[must_use = "the returned Subscription must be held to keep receiving changes"]
+    pub fn subscribe_changes_for_principal(
+        &self,
+        principal_key: Option<&str>,
+        filter: ChangeFilter,
+    ) -> Result<Subscription> {
+        let frontier = *self
+            .current_timestamp
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let baseline = crate::core::changefeed::ChangeCursor::baseline_after(frontier);
+        self.changefeed.subscribe_with_baseline_and_principal(
+            filter,
+            Some(baseline),
+            principal_key.map(str::to_string),
+        )
+    }
+
+    /// Live changefeed subscription counts per principal bucket (Issue #3678),
+    /// sorted by principal id. Powers the authenticated `database_stats`
+    /// per-principal breakdown; never exposed on the bounded `/metrics` surface.
+    pub fn changefeed_principal_counts(&self) -> Vec<(String, usize)> {
+        self.changefeed.per_principal_counts()
+    }
+
     /// Reconfigure the changefeed caps (max concurrent subscriptions and per-subscription
     /// buffer capacity). The subscription cap takes effect immediately; the buffer capacity
     /// applies to subscriptions created afterward (existing ones keep their capacity).

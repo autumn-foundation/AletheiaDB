@@ -224,6 +224,56 @@ lost**, given the two-part precondition: (1) ordered (cursor-ascending) live del
 lag/reconnect/restart. Duplicates arise only from an overlapping resume pull and are deduped by
 the stable cursor.
 
+## Per-principal subscription quota (Issue #3678)
+
+Two caps protect the changefeed. `max_subscriptions` (default **128**) bounds the *total*
+concurrently-live subscriptions across the broadcaster. `max_subscriptions_per_principal`
+(default **16**, `DEFAULT_MAX_PER_PRINCIPAL_SUBSCRIPTIONS`) bounds how many any one
+*authenticated principal* may hold, so a single principal cannot exhaust the global cap and
+starve others. Both are enforced atomically under one lock; whichever binds first wins. A
+principal can be given a different limit via `per_principal_overrides` (keyed by principal id),
+and the shared `"anonymous"` bucket — used by every caller in anonymous mode, so the quota is
+never a no-op locally — is tunable via the `"anonymous"` key.
+
+Configure both through the unified config:
+
+```rust
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::core::changefeed_subscription::ChangefeedConfig;
+use std::collections::HashMap;
+
+let mut overrides = HashMap::new();
+overrides.insert("ingest-service".to_string(), 64); // a trusted high-fan-out principal
+
+let config = AletheiaDBConfig::builder()
+    .changefeed(ChangefeedConfig {
+        max_subscriptions: 256,
+        buffer_capacity: 1024,
+        max_subscriptions_per_principal: 16,
+        per_principal_overrides: overrides,
+    })
+    .build();
+let db = AletheiaDB::with_unified_config(config)?;
+# Ok::<(), aletheiadb::Error>(())
+```
+
+Enforcement is identical across every subscription-creating surface — the MCP `await_changes`
+long-poll and the HTTP `POST /changes/await` + `GET /changes/stream` (SSE) all funnel through
+`AletheiaDB::subscribe_changes_for_principal`. A breach returns the structured
+`RESOURCE_EXHAUSTED` envelope with `retriable: true` and `details {principal, current, limit}`
+(it is a *fairness* limit — another of the principal's subscriptions may drop, so a backed-off
+retry can succeed). Slots release promptly on unsubscribe, client disconnect, long-poll return,
+and expiry, because the decrement lives only in the `Subscription` drop → `deregister` hook.
+
+The bare embedded `AletheiaDB::subscribe_changes` path carries no principal and is unaffected —
+omitting the principal reproduces the pre-#3678 behavior exactly.
+
+**Observability.** `/metrics` exposes only *bounded aggregates* — a
+`aletheiadb_changefeed_subscriptions_active` gauge and a
+`aletheiadb_changefeed_quota_rejections_total` counter (never a per-principal label, preserving
+the info-disclosure invariant). The per-principal breakdown is surfaced on the authenticated
+`database_stats` JSON under `changefeed.per_principal`.
+
 ## Performance
 
 The broadcast runs **after** the commit is durable, applied, and visible, and outside every

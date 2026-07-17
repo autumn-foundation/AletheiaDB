@@ -1116,8 +1116,25 @@ impl AletheiaMcpServer {
     /// #3353 token-budget / #3360 cursor wrappers — a long-poll is expected to
     /// block, so those cross-cutting read features would truncate or abort it.
     pub fn await_changes(&self, req: AwaitChangesRequest) -> String {
+        self.await_changes_for_principal(req, None)
+    }
+
+    /// Long-poll for changes on behalf of an explicit principal (Issue #3678).
+    ///
+    /// Used by the HTTP `/changes/await` projection, which authenticates the
+    /// caller at the route and threads that principal id here so the per-principal
+    /// changefeed quota is enforced on the HTTP surface too (the native stdio path
+    /// resolves the principal from the MCP session instead, via
+    /// [`session_principal`](Self::session_principal)). Passing `None` falls back
+    /// to the session principal (or the shared `"anonymous"` bucket).
+    pub fn await_changes_for_principal(
+        &self,
+        req: AwaitChangesRequest,
+        principal_key: Option<String>,
+    ) -> String {
         Self::extract_text(self.handle_await_changes(
             serde_json::to_value(req).expect("request serialization should not fail"),
+            principal_key,
         ))
     }
 
@@ -5611,11 +5628,23 @@ impl AletheiaMcpServer {
     /// mappings (Issue #3234): a lagged subscription → retriable
     /// `RESOURCE_EXHAUSTED` with `details.resume_token`; a subscribe cap breach →
     /// retriable `UNAVAILABLE`; a malformed `from_token` → `INVALID_ARGUMENT`.
-    fn handle_await_changes(&self, args: serde_json::Value) -> CallToolResult {
+    fn handle_await_changes(
+        &self,
+        args: serde_json::Value,
+        principal_override: Option<String>,
+    ) -> CallToolResult {
         let req: AwaitChangesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
+
+        // Resolve the per-principal quota bucket (Issue #3678): the surface-supplied
+        // override (HTTP route), else the authenticated MCP session principal, else
+        // the shared "anonymous" bucket — so every surface enforces the quota and no
+        // single (even anonymous) caller can exhaust the global cap and starve others.
+        let principal_key = principal_override
+            .or_else(|| self.session_principal().map(|p| p.id))
+            .unwrap_or_else(|| "anonymous".to_string());
 
         // Build the change filter (label/type/change-type dimensions).
         let mut filter = ChangeFilter::all();
@@ -5644,12 +5673,18 @@ impl AletheiaMcpServer {
         // subscription so the handler retains a copy to post-filter the catch-up
         // page with (the blocking leg is filtered by the subscription itself, so
         // the catch-up leg must apply the SAME predicate — Fix 1).
-        let sub = match self.db.subscribe_changes(filter.clone()) {
+        let sub = match self
+            .db
+            .subscribe_changes_for_principal(Some(&principal_key), filter.clone())
+        {
             Ok(s) => s,
             Err(e) => {
-                // A subscribe cap breach is transient (another consumer may
-                // disconnect): override the default FAILED_PRECONDITION with a
-                // retriable UNAVAILABLE carrying the capacity metadata.
+                // A per-principal quota breach (Issue #3678) falls through to
+                // `db_error`, which classifies it as a retriable RESOURCE_EXHAUSTED
+                // with `details {principal, current, limit}`. A GLOBAL cap breach is
+                // transient (another consumer may disconnect): override the default
+                // FAILED_PRECONDITION with a retriable UNAVAILABLE carrying the
+                // capacity metadata.
                 if let crate::core::error::Error::Storage(
                     crate::core::error::StorageError::CapacityExceeded {
                         resource,
@@ -7817,7 +7852,7 @@ impl AletheiaMcpServer {
             "get_edge_at_time" => self.handle_get_edge_at_time(args),
             "find_nodes_at_time" => self.handle_find_nodes_at_time(args),
             "list_changes" => self.handle_list_changes(args),
-            "await_changes" => self.handle_await_changes(args),
+            "await_changes" => self.handle_await_changes(args, None),
             "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
             "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
             "get_node_history" => self.handle_get_node_history(args),

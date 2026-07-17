@@ -56,6 +56,16 @@ const PROM_CRITICAL_EVENTS: &str = "aletheiadb_critical_events_total";
 /// [`aletheiadb::observability::METRIC_TRANSACTION_COMMITS`].
 const PROM_TRANSACTION_COMMITS: &str = "aletheiadb_transaction_commits_total";
 
+/// Prometheus gauge: currently-live changefeed subscriptions (Issue #3678). A
+/// process-wide **bounded aggregate** — deliberately unlabeled (no per-principal
+/// label) to preserve the info-disclosure invariant; the per-principal breakdown
+/// is surfaced via the authenticated `database_stats` JSON instead.
+const PROM_CHANGEFEED_ACTIVE: &str = "aletheiadb_changefeed_subscriptions_active";
+
+/// Prometheus counter: per-principal changefeed quota rejections (Issue #3678).
+/// Also an unlabeled process-wide aggregate.
+const PROM_CHANGEFEED_QUOTA_REJECTIONS: &str = "aletheiadb_changefeed_quota_rejections_total";
+
 /// A rendered Prometheus text exposition, wrapped so it serializes with the
 /// [`PROMETHEUS_CONTENT_TYPE`] content type rather than autumn's default JSON.
 #[derive(Debug, Clone)]
@@ -155,6 +165,30 @@ pub fn render_prometheus(snapshot: &MetricsSnapshot) -> String {
         snapshot.transaction_commits_total
     );
 
+    // ── changefeed_subscriptions_active (gauge) ──────────────────────────────
+    let _ = writeln!(
+        out,
+        "# HELP {PROM_CHANGEFEED_ACTIVE} Currently-live changefeed subscriptions (process-wide total)."
+    );
+    let _ = writeln!(out, "# TYPE {PROM_CHANGEFEED_ACTIVE} gauge");
+    let _ = writeln!(
+        out,
+        "{PROM_CHANGEFEED_ACTIVE} {}",
+        snapshot.changefeed_subscriptions_active
+    );
+
+    // ── changefeed_quota_rejections_total (counter) ──────────────────────────
+    let _ = writeln!(
+        out,
+        "# HELP {PROM_CHANGEFEED_QUOTA_REJECTIONS} Changefeed subscribes rejected by the per-caller fairness quota."
+    );
+    let _ = writeln!(out, "# TYPE {PROM_CHANGEFEED_QUOTA_REJECTIONS} counter");
+    let _ = writeln!(
+        out,
+        "{PROM_CHANGEFEED_QUOTA_REJECTIONS} {}",
+        snapshot.changefeed_quota_rejections_total
+    );
+
     out
 }
 
@@ -200,6 +234,8 @@ mod tests {
             error_io_total: 10,
             error_other_total: 11,
             transaction_commits_total: 12,
+            changefeed_subscriptions_active: 13,
+            changefeed_quota_rejections_total: 14,
         }
     }
 
@@ -218,16 +254,31 @@ mod tests {
             PROM_WRITE_CONFLICTS,
             PROM_CRITICAL_EVENTS,
             PROM_TRANSACTION_COMMITS,
+            PROM_CHANGEFEED_ACTIVE,
+            PROM_CHANGEFEED_QUOTA_REJECTIONS,
         ] {
             assert!(
                 body.contains(&format!("# HELP {name} ")),
                 "missing HELP for {name}"
             );
+        }
+        // Counters carry `# TYPE … counter`; the changefeed gauge carries gauge.
+        for name in [
+            PROM_ERRORS,
+            PROM_WRITE_CONFLICTS,
+            PROM_CRITICAL_EVENTS,
+            PROM_TRANSACTION_COMMITS,
+            PROM_CHANGEFEED_QUOTA_REJECTIONS,
+        ] {
             assert!(
                 body.contains(&format!("# TYPE {name} counter")),
                 "missing TYPE for {name}"
             );
         }
+        assert!(
+            body.contains(&format!("# TYPE {PROM_CHANGEFEED_ACTIVE} gauge")),
+            "changefeed active must be a gauge"
+        );
     }
 
     #[test]
@@ -257,6 +308,8 @@ mod tests {
         // unlabelled scalars
         assert!(body.contains(&format!("{PROM_WRITE_CONFLICTS} 4")));
         assert!(body.contains(&format!("{PROM_TRANSACTION_COMMITS} 12")));
+        assert!(body.contains(&format!("{PROM_CHANGEFEED_ACTIVE} 13")));
+        assert!(body.contains(&format!("{PROM_CHANGEFEED_QUOTA_REJECTIONS} 14")));
     }
 
     #[test]
@@ -292,10 +345,13 @@ mod tests {
 
         // Allowlist (stronger): parse the label KEYS off every sample line and
         // assert the set is a subset of the two bounded process-wide enums, and
-        // that the total series count is exactly 12 (7 error categories + 3
-        // critical events + 2 unlabeled scalars). A future edit that wires in an
+        // that the total series count is exactly 14 (7 error categories + 3
+        // critical events + 4 unlabeled scalars — write_conflicts,
+        // transaction_commits, and the two Issue #3678 changefeed aggregates). The
+        // changefeed aggregates are deliberately UNLABELED (no `principal` label),
+        // so the bounded-key allowlist is unchanged. A future edit that wires in an
         // extra label (e.g. the unused `METRIC_LABEL_DURABILITY_MODE` /
-        // `METRIC_LABEL_STATUS`) or a new series fails here.
+        // `METRIC_LABEL_STATUS`) fails here.
         let allowed: BTreeSet<&str> = ["category", "event"].into_iter().collect();
         let mut keys: BTreeSet<String> = BTreeSet::new();
         let mut series = 0usize;
@@ -320,8 +376,8 @@ mod tests {
             "emitted label keys {keys:?} must be a subset of {allowed:?}"
         );
         assert_eq!(
-            series, 12,
-            "render must emit exactly 12 time series (7 error categories + 3 critical events + 2 scalars)"
+            series, 14,
+            "render must emit exactly 14 time series (7 error categories + 3 critical events + 4 scalars)"
         );
     }
 }

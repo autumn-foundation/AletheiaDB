@@ -128,14 +128,28 @@ fn build_filter(q: &ChangesStreamQuery) -> Result<ChangeFilter, AletheiaHttpErro
     Ok(filter)
 }
 
-/// Map a `subscribe_changes` failure to an HTTP error. A subscription-cap breach
-/// (`CapacityExceeded`) is transient overload → 503 `UNAVAILABLE`, `retriable:
-/// true` (borrowing the in-flight-capacity envelope); anything else is 500.
+/// Map a `subscribe_changes` failure to an HTTP error. A GLOBAL subscription-cap
+/// breach (`CapacityExceeded`) is transient overload → 503 `UNAVAILABLE`,
+/// `retriable: true` (borrowing the in-flight-capacity envelope); a PER-PRINCIPAL
+/// quota breach (`PrincipalQuotaExceeded`, Issue #3678) → 429 `RESOURCE_EXHAUSTED`,
+/// `retriable: true`, with `details {principal, current, limit}`; anything else is
+/// 500.
 fn map_subscribe_err(e: Error) -> AletheiaHttpError {
-    if let Error::Storage(StorageError::CapacityExceeded { limit, .. }) = &e {
-        return AletheiaHttpError::InFlightCapacityExceeded { cap: *limit };
+    match &e {
+        Error::Storage(StorageError::CapacityExceeded { limit, .. }) => {
+            AletheiaHttpError::InFlightCapacityExceeded { cap: *limit }
+        }
+        Error::Storage(StorageError::PrincipalQuotaExceeded {
+            principal,
+            current,
+            limit,
+        }) => AletheiaHttpError::PrincipalQuotaExceeded {
+            principal: principal.clone(),
+            current: *current,
+            limit: *limit,
+        },
+        _ => AletheiaHttpError::Internal(e.to_string()),
     }
-    AletheiaHttpError::Internal(e.to_string())
 }
 
 /// `GET /changes/stream` — Server-Sent Events stream of committed changes
@@ -159,13 +173,18 @@ fn map_subscribe_err(e: Error) -> AletheiaHttpError {
 #[get("/changes/stream")]
 #[api_doc(description = "SSE stream of committed changes")]
 pub async fn changes_stream(
-    _auth: Authorized<ReadClass>,
+    auth: Authorized<ReadClass>,
     state: ServerState,
     Query(q): Query<ChangesStreamQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AletheiaHttpError> {
     let filter = build_filter(&q)?;
     let db = state.db_arc();
-    let sub = db.subscribe_changes(filter).map_err(map_subscribe_err)?;
+    // Enforce the per-principal changefeed quota (Issue #3678) keyed by the
+    // authenticated principal (or the shared "anonymous" bucket in anonymous mode).
+    let principal_id = auth.principal().id.clone();
+    let sub = db
+        .subscribe_changes_for_principal(Some(&principal_id), filter)
+        .map_err(map_subscribe_err)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(16);
     tokio::task::spawn_blocking(move || {
@@ -215,21 +234,31 @@ pub async fn changes_stream(
 /// the blocking long-poll is driven on a `spawn_blocking` worker so it does not
 /// starve the async runtime (the native stdio MCP tool has no such boundary and
 /// uses a `block_in_place` runtime bridge internally instead).
-pub async fn await_changes_impl(state: ServerState, req: AwaitChangesRequest) -> Json<Value> {
+pub async fn await_changes_impl(
+    state: ServerState,
+    req: AwaitChangesRequest,
+    principal_id: String,
+) -> Json<Value> {
     let server = state.mcp_server();
-    let out = tokio::task::spawn_blocking(move || server.await_changes(req))
-        .await
-        .unwrap_or_else(|_| {
-            // A panicked worker is an internal fault; surface the #3234 envelope.
-            json!({
-                "error": {
-                    "code": "INTERNAL",
-                    "message": "await_changes worker terminated unexpectedly",
-                    "retriable": false
-                }
-            })
-            .to_string()
-        });
+    // Thread the HTTP-authenticated principal into the quota bucket (Issue #3678):
+    // the shared embedded MCP server has no per-request session, so the route's
+    // principal must be passed explicitly or the quota would fall back to a single
+    // shared bucket for every HTTP caller.
+    let out = tokio::task::spawn_blocking(move || {
+        server.await_changes_for_principal(req, Some(principal_id))
+    })
+    .await
+    .unwrap_or_else(|_| {
+        // A panicked worker is an internal fault; surface the #3234 envelope.
+        json!({
+            "error": {
+                "code": "INTERNAL",
+                "message": "await_changes worker terminated unexpectedly",
+                "retriable": false
+            }
+        })
+        .to_string()
+    });
     tool_json(out)
 }
 
@@ -241,11 +270,12 @@ pub async fn await_changes_impl(state: ServerState, req: AwaitChangesRequest) ->
     mcp
 )]
 pub async fn await_changes(
-    _auth: Authorized<ReadClass>,
+    auth: Authorized<ReadClass>,
     state: ServerState,
     Json(req): Json<AwaitChangesRequest>,
 ) -> Json<Value> {
-    await_changes_impl(state, req).await
+    let principal_id = auth.principal().id.clone();
+    await_changes_impl(state, req, principal_id).await
 }
 
 #[cfg(test)]
