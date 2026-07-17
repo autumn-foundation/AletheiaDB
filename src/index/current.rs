@@ -619,8 +619,21 @@ impl CurrentIndexes {
         self.nodes.remove(&id).map(|(_, node)| {
             self.node_headers.remove(&id);
             // Drop the node from its namespace membership set (Issue #3349).
-            if let Some(members) = self.ns_nodes.get(&node.namespace()) {
-                members.remove(&id);
+            let ns = node.namespace();
+            let now_empty = match self.ns_nodes.get(&ns) {
+                Some(members) => {
+                    members.remove(&id);
+                    members.is_empty()
+                }
+                None => false,
+            };
+            // Reclaim a fully-drained namespace set so the outer DashMap does not
+            // retain empty entries (Issue #3349 A6). The read guard above is
+            // dropped before `remove_if`, which re-checks emptiness under the
+            // shard write lock — so a concurrent insert racing the reclaim never
+            // removes a set that has just become non-empty.
+            if now_empty {
+                self.ns_nodes.remove_if(&ns, |_, set| set.is_empty());
             }
             node
         })
@@ -673,8 +686,19 @@ impl CurrentIndexes {
             self.outgoing.delete(id);
             self.incoming.delete(id);
             // Drop the edge from its namespace membership set (Issue #3349).
-            if let Some(members) = self.ns_edges.get(&edge.namespace()) {
-                members.remove(&id);
+            let ns = edge.namespace();
+            let now_empty = match self.ns_edges.get(&ns) {
+                Some(members) => {
+                    members.remove(&id);
+                    members.is_empty()
+                }
+                None => false,
+            };
+            // Reclaim a fully-drained namespace set (Issue #3349 A6); the read
+            // guard is dropped before `remove_if`, which re-checks under the shard
+            // write lock so a concurrent insert never loses its set.
+            if now_empty {
+                self.ns_edges.remove_if(&ns, |_, set| set.is_empty());
             }
             edge
         })

@@ -223,32 +223,16 @@ impl QueryExecutor {
             let bind_edge = plan_needs_edge_binding(&plan.root);
             self.build_op(&plan.root, &mut None, 0, bind_edge)?
         };
-        let iterator = self.wrap_scope_filter(iterator);
+        // Namespace scope (Issue #3349, PR2) is enforced at the source operators
+        // during `build_op` (see `maybe_scope_source`), so everything downstream --
+        // LIMIT/SKIP, ORDER BY, aggregation, COUNT -- already sees only in-scope
+        // rows. No outermost post-filter is applied here.
         // Wrap with provenance filter to conditionally strip metadata
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
         ));
         Ok(QueryResults::new(filtered))
-    }
-
-    /// Wrap `iterator` in a namespace-scope entity filter (Issue #3349, PR2) when
-    /// a restricting scope is attached; otherwise return it unchanged so the
-    /// namespace-agnostic path pays nothing. This drops produced nodes/edges
-    /// whose namespace ∉ scope — the traversal boundary itself is enforced deeper
-    /// (in `TraversalIterator`) so an out-of-scope bridge node is never even
-    /// reached.
-    fn wrap_scope_filter(&self, iterator: Box<dyn ResultIterator>) -> Box<dyn ResultIterator> {
-        match &self.scope {
-            Some(scope) if self.scope_is_restricting() => {
-                Box::new(iterators::ScopeFilterIterator::new(
-                    iterator,
-                    Arc::clone(scope),
-                    Arc::clone(&self.current),
-                ))
-            }
-            _ => iterator,
-        }
     }
 
     /// Execute a physical plan with per-operator profiling instrumentation
@@ -271,7 +255,7 @@ impl QueryExecutor {
             let bind_edge = plan_needs_edge_binding(&plan.root);
             self.build_op(&plan.root, &mut registry, 0, bind_edge)?
         };
-        let iterator = self.wrap_scope_filter(iterator);
+        // Scope is applied at the source operators (see `maybe_scope_source`).
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
@@ -689,11 +673,51 @@ impl QueryExecutor {
                 }
             };
 
+        // Namespace scope (Issue #3349, PR2): push the scope filter down onto the
+        // SOURCE operators (scans, lookups, property/vector sources) rather than
+        // applying it as an outermost post-filter. Wrapping the leaf that produces
+        // entities guarantees every downstream operator -- LIMIT/SKIP, ORDER BY,
+        // DISTINCT, aggregation, and COUNT -- sees only in-scope rows, so a scoped
+        // `count()` reports the scoped cardinality (not the global one) and a
+        // scoped `LIMIT n` returns up to `n` *in-scope* rows (not `n` pre-filter
+        // rows of which some are then dropped). Graph traversal is deliberately
+        // NOT wrapped here: `IndexedTraversal` enforces the boundary at build time
+        // (never bridging an out-of-scope edge/node) and its own input source is
+        // wrapped by this same recursion, so its start node is scope-checked
+        // (Issue #3349 A4) and its emitted targets are already in-scope.
+        let iter = self.maybe_scope_source(op, iter);
+
         // Instrument this operator when profiling.
         Ok(match handle {
             Some(h) => Box::new(ProfilingIterator::new(iter, h)),
             None => iter,
         })
+    }
+
+    /// Wrap a **source-leaf** operator's iterator in the namespace-scope entity
+    /// filter (Issue #3349, PR2) when a restricting scope is attached; otherwise
+    /// return it unchanged so the namespace-agnostic path pays nothing.
+    ///
+    /// Only leaf operators that *produce* entities are wrapped (scans, id
+    /// lookups, property scans, and vector/temporal sources). Intermediate and
+    /// combining operators are never wrapped: their entity rows always originate
+    /// at a wrapped source (or at an already-boundary-filtered traversal), so
+    /// double-filtering is avoided. See [`is_scoped_source_leaf`].
+    fn maybe_scope_source(
+        &self,
+        op: &PhysicalOp,
+        iter: Box<dyn ResultIterator>,
+    ) -> Box<dyn ResultIterator> {
+        match &self.scope {
+            Some(scope) if self.scope_is_restricting() && is_scoped_source_leaf(op) => {
+                Box::new(iterators::ScopeFilterIterator::new(
+                    iter,
+                    Arc::clone(scope),
+                    Arc::clone(&self.current),
+                ))
+            }
+            _ => iter,
+        }
     }
 
     fn execute_hnsw_search(
@@ -815,6 +839,35 @@ impl QueryExecutor {
 /// including binary set ops, aggregation, and node/temporal scans -- is treated
 /// as not edge-typed, so the conservative default is the existing pass-through /
 /// node-only behavior.
+/// Whether `op` is a **source leaf** that produces entity rows directly from
+/// storage and therefore must have the namespace scope filter applied to it
+/// (Issue #3349, PR2). These are the scans, id lookups, property scans, and
+/// vector/temporal sources. Every entity row in a plan originates at one of
+/// these leaves (or at a boundary-filtered [`PhysicalOp::IndexedTraversal`],
+/// which is handled separately and is intentionally excluded here), so wrapping
+/// exactly these leaves pushes the scope filter below LIMIT/SKIP/ORDER BY/COUNT
+/// without any double-filtering.
+///
+/// `Empty` produces no rows, so it is not wrapped. `IndexedTraversal` is
+/// excluded (it enforces the boundary at build time and its own input source is
+/// wrapped by the recursion). Combining/intermediate operators are excluded
+/// because their inputs are already scoped.
+fn is_scoped_source_leaf(op: &PhysicalOp) -> bool {
+    matches!(
+        op,
+        PhysicalOp::NodeLookup { .. }
+            | PhysicalOp::NodeScan { .. }
+            | PhysicalOp::EdgeScan { .. }
+            | PhysicalOp::HnswSearch { .. }
+            | PhysicalOp::TemporalNodeLookup { .. }
+            | PhysicalOp::TemporalVectorSearch { .. }
+            | PhysicalOp::TemporalNodeScan { .. }
+            | PhysicalOp::TemporalNodeRangeScan { .. }
+            | PhysicalOp::SimilarToNode { .. }
+            | PhysicalOp::PropertyScan { .. }
+    )
+}
+
 fn subtree_yields_edges(op: &PhysicalOp) -> bool {
     match op {
         PhysicalOp::EdgeScan { .. } => true,

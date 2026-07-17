@@ -321,6 +321,11 @@ fn querybuilder_in_namespace_filters_start_node() {
     let a1 = db
         .create_node_in_namespace("Person", props("a1"), "agent:a")
         .unwrap();
+    // Register agent:b (auto-registered on write) so scoping to it is a valid,
+    // non-matching scope rather than an unknown-namespace NOT_FOUND (Issue #3349
+    // A3 — see `querybuilder_unknown_namespace_is_not_found` for that path).
+    db.create_node_in_namespace("Person", props("b1"), "agent:b")
+        .unwrap();
 
     // Starting from a1 but scoping to agent:b returns nothing (a1 ∉ b).
     let q = db.query().start(a1).in_namespace(ns("agent:b")).build();

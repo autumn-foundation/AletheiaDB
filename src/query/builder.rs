@@ -846,15 +846,21 @@ impl<S: QueryState> QueryBuilder<S> {
     /// Scope the query to the **union** of a non-empty list of namespaces
     /// (Issue #3349, PR2). See [`in_namespace`](Self::in_namespace).
     ///
-    /// An empty list is treated as "no scope" (namespace-agnostic), matching the
-    /// never-silently-empty contract: an empty union would otherwise match
-    /// nothing. Pass at least one namespace to actually scope.
+    /// An empty list is an **invalid** scope, not "no scope": an empty union
+    /// would silently match nothing, which the never-silently-wrong contract
+    /// forbids. Because the builder cannot surface an error, the empty-list
+    /// intent is preserved as an empty [`NamespaceScope::List`] and rejected with
+    /// `INVALID_ARGUMENT` when the query is executed
+    /// (`execute_query`/`execute_query_profiled` call `validate_scope`). It must
+    /// never silently degrade to the unscoped (all-namespaces) path.
     #[must_use]
     pub fn in_namespaces(mut self, namespaces: impl IntoIterator<Item = Namespace>) -> Self {
         let list: Vec<Namespace> = namespaces.into_iter().collect();
-        // An empty list is not a valid scope (it would silently match nothing),
-        // so `list()` errors and we leave the query unscoped.
-        self.scope = NamespaceScope::list(list).ok();
+        // Preserve the empty-list intent (do NOT collapse to `None`, which would
+        // mean "unscoped / all namespaces"). An empty `List` is a distinct,
+        // match-nothing scope that the execute path validates and rejects as
+        // INVALID_ARGUMENT (Issue #3349 A2).
+        self.scope = Some(NamespaceScope::List(list));
         self
     }
 

@@ -122,6 +122,15 @@ impl AletheiaDB {
             // query by value.
             let scope = query.scope.clone();
 
+            // Validate the scope before planning/executing (Issue #3349 A3):
+            // an unknown namespace is a `NOT_FOUND` (not a silently empty
+            // result), and an empty `List` scope built via
+            // `QueryBuilder::in_namespaces([])` is an `INVALID_ARGUMENT` (not a
+            // silent unscoped-all). `All`/omitted scope validate trivially.
+            if let Some(scope) = &scope {
+                self.validate_scope(scope)?;
+            }
+
             // Use cached statistics for cost-based optimization
             // Statistics are shared across all queries for this database instance
             let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));

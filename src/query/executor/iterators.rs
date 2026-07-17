@@ -1976,20 +1976,31 @@ impl ScopeFilterIterator {
     }
 
     /// Whether `row`'s entity is visible under the scope.
+    ///
+    /// Full `Node`/`Edge` rows carry their own (immutable) namespace, read
+    /// directly — this is temporally correct because every mainline source
+    /// (current *and* point-in-time: `TemporalNode*`/`VectorResult` iterators)
+    /// emits a fully reconstructed entity, and a reconstructed entity carries
+    /// exactly the namespace it held at that coordinate.
+    ///
+    /// The id-only (`NodeId`/`EdgeId`) branches resolve membership via the O(1)
+    /// current-state membership index (no whole-entity clone; Issue #3349 B2).
+    /// This is a **current-state** probe: it would wrongly drop a since-deleted
+    /// id-only row under an `AS OF` read. That is safe because no mainline source
+    /// emits an id-only row in a temporal context — every temporal source emits a
+    /// full reconstructed `Node`/`Edge`, which is handled by the branches above
+    /// (Issue #3349 A5). If a future id-only temporal source is added, resolve it
+    /// via the historical path here instead.
     fn row_in_scope(&self, row: &QueryRow) -> bool {
         match &row.entity {
             EntityResult::Node(node) => self.scope.contains(&node.namespace()),
             EntityResult::Edge(edge) => self.scope.contains(&edge.namespace()),
-            EntityResult::NodeId(id) => self
-                .current
-                .get_node(*id)
-                .map(|n| self.scope.contains(&n.namespace()))
-                .unwrap_or(false),
-            EntityResult::EdgeId(id) => self
-                .current
-                .get_edge(*id)
-                .map(|e| self.scope.contains(&e.namespace()))
-                .unwrap_or(false),
+            EntityResult::NodeId(id) => {
+                scope_contains_current_node(&self.current, *id, &self.scope)
+            }
+            EntityResult::EdgeId(id) => {
+                scope_contains_current_edge(&self.current, *id, &self.scope)
+            }
             // A null binding or a computed (aggregate / multi-variable) row has
             // no single scoped entity — pass it through unchanged.
             EntityResult::Null => true,
