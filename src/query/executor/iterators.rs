@@ -4392,10 +4392,19 @@ fn last_edge_in_path(path: &Option<Vec<EntityId>>) -> Option<crate::core::EdgeId
 /// channel (Issue #3622): reserved structural fields (via
 /// [`edge_structural_value`], shadowing user props) first, then the edge's own
 /// properties. `None` when the row has no edge channel or the key is absent, so
-/// the row sorts as a null value.
-fn edge_sort_value(row: &QueryRow, key: &str) -> Option<PropertyValue> {
+/// the row sorts as a null value. Returns a [`Cow`] so a user property is
+/// borrowed (no clone per comparison); only a synthesized structural value is
+/// owned.
+fn edge_sort_value<'a>(
+    row: &'a QueryRow,
+    key: &str,
+) -> Option<std::borrow::Cow<'a, PropertyValue>> {
+    use std::borrow::Cow;
     let edge = row.edge.as_ref()?;
-    edge_structural_value(edge, key).or_else(|| edge.properties.get(key).cloned())
+    if let Some(v) = edge_structural_value(edge, key) {
+        return Some(Cow::Owned(v));
+    }
+    edge.properties.get(key).map(Cow::Borrowed)
 }
 
 /// `ORDER BY` iterator: buffers the entire input and stably sorts it by one or
@@ -4642,7 +4651,7 @@ impl SortIterator {
             SortKey::EdgeProperty(prop) => {
                 let av = edge_sort_value(a, prop);
                 let bv = edge_sort_value(b, prop);
-                Self::cmp_optional(av.as_ref(), bv.as_ref(), descending)
+                Self::cmp_optional(av.as_deref(), bv.as_deref(), descending)
             }
             // Fallback on-the-fly resolution (Issue #3354). The hot path routes
             // provenance keys through `cmp_decorated` (resolve once per row), so
