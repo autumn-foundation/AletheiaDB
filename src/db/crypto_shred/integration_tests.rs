@@ -545,3 +545,572 @@ fn non_designated_write_read_is_unchanged() {
         }
     }
 }
+
+// ── helper: raw stored value bypassing the unseal hook ─────────────
+
+/// Read the RAW stored value of `key` on a node straight from the current tier,
+/// BYPASSING the crypto-shred unseal hook in [`AletheiaDB::get_node`]. On a cold
+/// reopen this is the **at-rest-decrypted but still crypto-shred-sealed** value,
+/// so asserting it is a `SUBJ` envelope proves sealing happened *independently*
+/// of at-rest encryption (the RAM current tier is not at-rest-encrypted; a cold
+/// reopen has already reversed the at-rest layer on load).
+fn raw_stored_node_value(
+    db: &AletheiaDB,
+    node_id: crate::core::NodeId,
+    key: &str,
+) -> Option<PropertyValue> {
+    let node = db.current.get_node(node_id).unwrap();
+    node.properties.get(key).cloned()
+}
+
+fn raw_stored_edge_value(
+    db: &AletheiaDB,
+    edge_id: crate::core::EdgeId,
+    key: &str,
+) -> Option<PropertyValue> {
+    let edge = db.current.get_edge(edge_id).unwrap();
+    edge.properties.get(key).cloned()
+}
+
+// ── M1: FAIL-CLOSED erase-vs-seal race ─────────────────────────────
+
+/// A write that reaches the seal hook carrying a property designated under a
+/// subject that was erased after the write was buffered must **abort** the
+/// commit (fail-closed) — sealing is impossible (DEK destroyed) and persisting
+/// plaintext of an erased subject is forbidden. Drives the exact `seal_map` code
+/// path deterministically: buffer a designated op, erase the subject mid-tx, then
+/// let the commit run the seal step.
+#[test]
+fn write_after_erasure_aborts_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(enc_db(dir.path()));
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("stage", "placeholder")
+                .build(),
+        )
+        .unwrap();
+    db.designate_subject("S", vec![DesignationTarget::WholeNode(node_id.as_u64())])
+        .unwrap();
+
+    // Buffer a write to the designated node, then erase S BEFORE the buffered
+    // write commits. The commit's seal step now sees S erased and must abort.
+    let db2 = Arc::clone(&db);
+    let result: Result<(), crate::core::error::Error> = db.write(|tx| {
+        use crate::api::WriteOps;
+        tx.replace_node(
+            node_id,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+        )?;
+        // Erase mid-transaction: the shared CryptoShredState flips S -> Erased,
+        // and its DEK is destroyed. (erase takes only the keyring lock + file
+        // I/O — no write-path lock — so there is no deadlock with the in-flight
+        // transaction.)
+        db2.erase_subject("S").expect("erase should succeed");
+        Ok(())
+    });
+
+    assert!(
+        result.is_err(),
+        "a write carrying a property covered only by an erased subject must ABORT (fail-closed)"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, crate::core::error::Error::FailedPrecondition(_)),
+        "fail-closed abort must be a FailedPrecondition (non-retriable), got {err:?}"
+    );
+
+    // No plaintext landed: current state is still the placeholder (the write was
+    // rolled back), and the designated value was never persisted as plaintext.
+    let raw = raw_stored_node_value(&db, node_id, "email");
+    assert_ne!(
+        raw,
+        Some(PropertyValue::from(SENTINEL.to_string())),
+        "aborted write must not persist the designated plaintext into current state"
+    );
+    // And the sentinel is absent from EVERY persisted artifact (nothing was
+    // sealed nor WAL-logged for the aborted tx).
+    assert_no_designated_plaintext(dir.path(), SENTINEL.as_bytes());
+}
+
+// ── M2: sentinel scan ISOLATES crypto-shred from at-rest encryption ─
+
+/// The recursive on-disk sentinel scan alone is not load-bearing under this
+/// suite's `enc_config`: at-rest encryption already turns every persisted byte
+/// into component-DEK ciphertext, so the raw scan would pass even if `seal_map`
+/// were a no-op. This test makes the guarantee load-bearing:
+///
+/// (a) POSITIVE: the designated property is stored as a `SUBJ` envelope, read
+///     through the storage path that reverses the at-rest layer but NOT the
+///     crypto-shred seal (`db.current.get_node`, bypassing the unseal hook) —
+///     proving **sealing**, not at-rest encryption, produced the ciphertext; and
+/// (b) the inner (at-rest-decrypted) envelope bytes do NOT contain the plaintext
+///     sentinel, pre- and post-erase — proving the seal payload is ciphertext.
+///
+/// The raw recursive scan is kept too, as a belt-and-suspenders check.
+#[test]
+fn sealing_isolated_from_at_rest_encryption() {
+    let dir = tempfile::tempdir().unwrap();
+    let node_id;
+    {
+        let db = enc_db(dir.path());
+        node_id = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new().insert("stage", "ph").build(),
+            )
+            .unwrap();
+        db.designate_subject("S", vec![DesignationTarget::WholeNode(node_id.as_u64())])
+            .unwrap();
+        db.replace_node(
+            node_id,
+            "Doc",
+            PropertyMapBuilder::new().insert("secret", SENTINEL).build(),
+        )
+        .unwrap();
+        drop(db);
+    }
+
+    // Cold reopen: index persistence has reversed the AT-REST layer on load, so
+    // `db.current.get_node` yields the stored-but-at-rest-decrypted value.
+    {
+        let db = enc_db(dir.path());
+        // (a) POSITIVE: the stored value is a SUBJ envelope (sealing happened).
+        let stored =
+            raw_stored_node_value(&db, node_id, "secret").expect("secret property must be present");
+        let PropertyValue::Bytes(ref env) = stored else {
+            panic!("designated property must be stored as sealed Bytes, got {stored:?}");
+        };
+        assert!(
+            super::envelope::is_envelope(env),
+            "designated property must be a SUBJ envelope on disk — proves crypto-shred SEALING, \
+             not merely at-rest encryption, is responsible for the ciphertext"
+        );
+        // (b) The inner (at-rest-decrypted) envelope bytes are ciphertext: they
+        // do NOT contain the plaintext sentinel. This makes the negative scan
+        // load-bearing (it decrypts the at-rest layer, then checks the payload).
+        assert!(
+            !env.windows(SENTINEL.len())
+                .any(|w| w == SENTINEL.as_bytes()),
+            "the at-rest-decrypted SUBJ envelope must NOT contain the plaintext sentinel \
+             (its payload is sealed ciphertext)"
+        );
+        // While active, the public read path unseals it back to plaintext.
+        let node = db.get_node(node_id).unwrap();
+        assert_eq!(
+            node.properties.get("secret"),
+            Some(&PropertyValue::from(SENTINEL.to_string()))
+        );
+        drop(db);
+    }
+
+    // Erase, cold reopen: the stored value is STILL a SUBJ envelope whose inner
+    // bytes never expose the plaintext.
+    {
+        let db = enc_db(dir.path());
+        db.erase_subject("S").unwrap();
+        drop(db);
+    }
+    {
+        let db = enc_db(dir.path());
+        let stored = raw_stored_node_value(&db, node_id, "secret").unwrap();
+        let PropertyValue::Bytes(ref env) = stored else {
+            panic!("post-erase value must remain sealed Bytes");
+        };
+        assert!(super::envelope::is_envelope(env));
+        assert!(
+            !env.windows(SENTINEL.len())
+                .any(|w| w == SENTINEL.as_bytes()),
+            "post-erase envelope payload must never contain the plaintext sentinel"
+        );
+        drop(db);
+    }
+
+    // Belt-and-suspenders: the raw (still at-rest-encrypted) scan is clean too.
+    assert_no_designated_plaintext(dir.path(), SENTINEL.as_bytes());
+}
+
+// ── M3: EDGE end-to-end (AC1 covers edges) ─────────────────────────
+
+/// AC1 designates whole entities AND/OR property keys for **edges** too. Seal a
+/// designated edge property at write, round-trip it as plaintext through a cold
+/// restart while the key is present, then erase and confirm the edge property
+/// reads as the erased marker (never the sentinel).
+#[test]
+fn edge_e2e_seal_unseal_survives_restart_then_erase() {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, tgt, edge_id);
+    {
+        let db = enc_db(dir.path());
+        src = db
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        tgt = db
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        // Placeholder edge -> designate -> replace so the sealed version carries
+        // the sentinel (robust to whatever edge id is assigned).
+        edge_id = db
+            .create_edge(
+                src,
+                tgt,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("stage", "ph").build(),
+            )
+            .unwrap();
+        db.designate_subject("EG", vec![DesignationTarget::WholeEdge(edge_id.as_u64())])
+            .unwrap();
+        db.replace_edge(
+            edge_id,
+            PropertyMapBuilder::new()
+                .insert("relnote", SENTINEL)
+                .build(),
+        )
+        .unwrap();
+        // Sealed on disk (bypass the unseal hook to observe the raw envelope).
+        let stored = raw_stored_edge_value(&db, edge_id, "relnote").unwrap();
+        assert!(
+            matches!(&stored, PropertyValue::Bytes(b) if super::envelope::is_envelope(b)),
+            "designated edge property must be sealed at write, got {stored:?}"
+        );
+        drop(db);
+    }
+
+    // Cold reopen, key present: the edge property reads back as plaintext.
+    {
+        let db = enc_db(dir.path());
+        let edge = db.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.properties.get("relnote"),
+            Some(&PropertyValue::from(SENTINEL.to_string())),
+            "cold reopen with key present must return edge plaintext"
+        );
+        drop(db);
+    }
+
+    // Erase, cold reopen: the edge property reads as the erased marker, never
+    // the sentinel — surfaced via the public edge_shred_status accessor.
+    {
+        let db = enc_db(dir.path());
+        db.erase_subject("EG").unwrap();
+        drop(db);
+    }
+    {
+        let db = enc_db(dir.path());
+        let edge = db.get_edge(edge_id).unwrap();
+        match edge.properties.get("relnote") {
+            Some(PropertyValue::Bytes(b)) => {
+                assert!(
+                    super::envelope::is_envelope(b),
+                    "erased edge value stays a SUBJ envelope"
+                );
+                assert_ne!(b.as_ref(), SENTINEL.as_bytes());
+            }
+            other => panic!("expected opaque sealed edge bytes after erase, got {other:?}"),
+        }
+        let status = db.edge_shred_status(edge_id).unwrap();
+        assert!(
+            matches!(
+                status.get("relnote"),
+                Some(super::ShredStatus::Erased { subject_id }) if subject_id == "EG"
+            ),
+            "public edge_shred_status must report Erased for the erased edge property"
+        );
+        drop(db);
+    }
+    assert_no_designated_plaintext(dir.path(), SENTINEL.as_bytes());
+}
+
+// ── M4: FIELD-LEVEL / MIXED designation (AC1 specific property keys) ─
+
+/// Designating only `email` under a subject must seal exactly that key: a
+/// sibling `name` stays cleartext, reads unaffected, and only `email` is erased
+/// after erasure — proving property-key-scoped designation end-to-end.
+#[test]
+fn field_level_designation_seals_only_named_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let node_id;
+    {
+        let db = enc_db(dir.path());
+        node_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("stage", "ph").build(),
+            )
+            .unwrap();
+        db.designate_subject(
+            "F",
+            vec![DesignationTarget::NodeProperties(
+                node_id.as_u64(),
+                vec!["email".to_string()],
+            )],
+        )
+        .unwrap();
+        db.replace_node(
+            node_id,
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("email", SENTINEL)
+                .insert("name", "plain-name")
+                .build(),
+        )
+        .unwrap();
+
+        // On disk: `email` is a SUBJ envelope; `name` is cleartext.
+        let stored_email = raw_stored_node_value(&db, node_id, "email").unwrap();
+        assert!(
+            matches!(&stored_email, PropertyValue::Bytes(b) if super::envelope::is_envelope(b)),
+            "designated `email` must be sealed, got {stored_email:?}"
+        );
+        assert_eq!(
+            raw_stored_node_value(&db, node_id, "name"),
+            Some(PropertyValue::from("plain-name".to_string())),
+            "undesignated sibling `name` must stay cleartext on disk"
+        );
+
+        // Read back: `email` unseals to the sentinel, `name` is plaintext.
+        let node = db.get_node(node_id).unwrap();
+        assert_eq!(
+            node.properties.get("email"),
+            Some(&PropertyValue::from(SENTINEL.to_string()))
+        );
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&PropertyValue::from("plain-name".to_string()))
+        );
+        // Active subject: shred status is empty (nothing erased yet).
+        assert!(db.node_shred_status(node_id).unwrap().is_empty());
+        drop(db);
+    }
+
+    // After erase: only `email` is erased-marked; `name` stays plaintext.
+    {
+        let db = enc_db(dir.path());
+        db.erase_subject("F").unwrap();
+        drop(db);
+    }
+    {
+        let db = enc_db(dir.path());
+        let status = db.node_shred_status(node_id).unwrap();
+        assert_eq!(status.len(), 1, "only the designated `email` key is erased");
+        assert!(matches!(
+            status.get("email"),
+            Some(super::ShredStatus::Erased { subject_id }) if subject_id == "F"
+        ));
+        assert!(!status.contains_key("name"), "`name` was never designated");
+        let node = db.get_node(node_id).unwrap();
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&PropertyValue::from("plain-name".to_string())),
+            "undesignated `name` stays plaintext after erasing `email`'s subject"
+        );
+        drop(db);
+    }
+}
+
+// ── M5: PUBLIC Rust erased-marker accessor ─────────────────────────
+
+/// The typed erased marker the design promised must be reachable through a
+/// PUBLIC Rust method — `AletheiaDB::node_shred_status` — not only the
+/// pub(crate) `materialize_shred`.
+#[test]
+fn public_node_shred_status_reports_erased_through_public_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = enc_db(dir.path());
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("stage", "ph").build(),
+        )
+        .unwrap();
+    db.designate_subject("P", vec![DesignationTarget::WholeNode(node_id.as_u64())])
+        .unwrap();
+    db.replace_node(
+        node_id,
+        "Person",
+        PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+    )
+    .unwrap();
+
+    // Active: public accessor reports nothing erased.
+    assert!(
+        db.node_shred_status(node_id).unwrap().is_empty(),
+        "active subject: public accessor reports no erased keys"
+    );
+
+    db.erase_subject("P").unwrap();
+
+    // Erased: public accessor surfaces the typed ShredStatus::Erased.
+    let status = db.node_shred_status(node_id).unwrap();
+    assert!(
+        matches!(
+            status.get("email"),
+            Some(super::ShredStatus::Erased { subject_id }) if subject_id == "P"
+        ),
+        "public node_shred_status must surface ShredStatus::Erased{{subject_id}}"
+    );
+}
+
+// ── m1: AS-OF read returns the erased marker (AC3 point-in-time) ────
+
+/// A point-in-time read (`get_node_at_time`) of an erased subject must surface
+/// the erased marker (opaque envelope), never the plaintext.
+#[test]
+fn as_of_read_returns_erased_marker() {
+    use crate::core::temporal::time;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = enc_db(dir.path());
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("stage", "ph").build(),
+        )
+        .unwrap();
+    db.designate_subject("T", vec![DesignationTarget::WholeNode(node_id.as_u64())])
+        .unwrap();
+    db.replace_node(
+        node_id,
+        "Person",
+        PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+    )
+    .unwrap();
+    db.erase_subject("T").unwrap();
+
+    let now = time::now();
+    let node = db.get_node_at_time(node_id, now, now).unwrap();
+    match node.properties.get("email") {
+        Some(PropertyValue::Bytes(b)) => {
+            assert!(
+                super::envelope::is_envelope(b),
+                "AS OF read of an erased subject must return the sealed envelope (erased marker)"
+            );
+            assert_ne!(
+                b.as_ref(),
+                SENTINEL.as_bytes(),
+                "AS OF read must never surface the plaintext of an erased subject"
+            );
+        }
+        other => panic!("expected opaque sealed bytes on AS OF read after erase, got {other:?}"),
+    }
+}
+
+// ── m2a: update of a designated property re-seals ──────────────────
+
+/// A PATCH update touching an already-designated property must re-seal the new
+/// value (the UpdateNode path runs through `seal_buffer` too).
+#[test]
+fn update_of_designated_property_reseals() {
+    const SENTINEL_V2: &str = "SENTINEL_GDPR_UPDATED_1b2c3d4e_PLAINTEXT_MUST_NOT_LEAK";
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = enc_db(dir.path());
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("stage", "ph").build(),
+        )
+        .unwrap();
+    db.designate_subject("U", vec![DesignationTarget::WholeNode(node_id.as_u64())])
+        .unwrap();
+    // Create with the designated property sealed.
+    db.replace_node(
+        node_id,
+        "Person",
+        PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+    )
+    .unwrap();
+
+    // PATCH update touching the designated property with a new value.
+    db.update_node_with_valid_time(
+        node_id,
+        PropertyMapBuilder::new()
+            .insert("email", SENTINEL_V2)
+            .build(),
+        None,
+    )
+    .unwrap();
+
+    // Still sealed on disk (the update re-sealed the new value).
+    let stored = raw_stored_node_value(&db, node_id, "email").unwrap();
+    assert!(
+        matches!(&stored, PropertyValue::Bytes(b) if super::envelope::is_envelope(b)),
+        "update of a designated property must re-seal, got {stored:?}"
+    );
+    // Read back: the new value unseals to plaintext.
+    let node = db.get_node(node_id).unwrap();
+    assert_eq!(
+        node.properties.get("email"),
+        Some(&PropertyValue::from(SENTINEL_V2.to_string()))
+    );
+    // Neither the old nor the new plaintext leaks to any artifact.
+    assert_no_designated_plaintext(dir.path(), SENTINEL.as_bytes());
+    assert_no_designated_plaintext(dir.path(), SENTINEL_V2.as_bytes());
+}
+
+// ── m2b: foreign SUBJ-looking bytes for an UNKNOWN subject pass through ─
+
+/// A `Bytes` value that merely *looks* like a `SUBJ` envelope but names a
+/// subject the keyring does not know must be passed through untouched on read —
+/// no panic, no false erased marker — even when the database has other active
+/// designations (so the unseal hook actually runs).
+#[test]
+fn foreign_subj_bytes_unknown_subject_pass_through() {
+    use crate::encryption::{Algorithm, create_cipher};
+    use zeroize::Zeroizing;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = enc_db(dir.path());
+
+    // Ensure the DB has an active designation on ANOTHER node, so the read hook
+    // is engaged (has_any_designations == true) rather than short-circuiting.
+    let other = db
+        .create_node("Person", PropertyMapBuilder::new().insert("s", "p").build())
+        .unwrap();
+    db.designate_subject("real", vec![DesignationTarget::WholeNode(other.as_u64())])
+        .unwrap();
+
+    // Craft a well-formed SUBJ envelope naming a subject we NEVER designate, so
+    // the read hook parses the header, finds no such subject, and passes it
+    // through as ordinary user bytes.
+    let cipher = create_cipher(Algorithm::Aes256Gcm, &Zeroizing::new([7u8; 32]));
+    let foreign = super::envelope::seal_property_value(
+        &PropertyValue::from("not-ours".to_string()),
+        "ghost-unknown-subject",
+        1,
+        b"ctx",
+        cipher.as_ref(),
+    )
+    .unwrap();
+    assert!(super::envelope::is_envelope(&foreign));
+
+    // Write it on an UNDESIGNATED node (so seal_buffer leaves it as-is).
+    let holder = db
+        .create_node(
+            "Blob",
+            PropertyMapBuilder::new()
+                .insert(
+                    "payload",
+                    PropertyValue::Bytes(std::sync::Arc::from(foreign.clone())),
+                )
+                .build(),
+        )
+        .unwrap();
+
+    // Read back: the foreign bytes are returned untouched (no panic, no unseal).
+    let node = db.get_node(holder).unwrap();
+    assert_eq!(
+        node.properties.get("payload"),
+        Some(&PropertyValue::Bytes(std::sync::Arc::from(foreign.clone()))),
+        "foreign SUBJ-looking bytes for an unknown subject must pass through untouched"
+    );
+    // And no false erased marker is fabricated for it.
+    let status = db.node_shred_status(holder).unwrap();
+    assert!(
+        !status.contains_key("payload"),
+        "unknown-subject bytes must not be reported as erased"
+    );
+}
