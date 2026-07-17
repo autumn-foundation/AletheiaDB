@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::core::error::Result;
-use crate::core::namespace::NamespaceScope;
+use crate::core::namespace::{NamespaceScope, ResolvedScope};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
@@ -129,6 +129,12 @@ pub struct QueryExecutor {
     /// the boundary into graph traversal. `Arc` so it can be cheaply shared into
     /// the traversal iterator. `None` ⇒ prior namespace-agnostic behavior.
     scope: Option<Arc<NamespaceScope>>,
+    /// The attached `scope` resolved to interned ids **once** (Issue #3349, PR2
+    /// hoist), computed in [`with_namespace_scope`](Self::with_namespace_scope)
+    /// and cheaply cloned into every source-leaf filter and the traversal
+    /// boundary so no per-source/per-hop probe re-derives ids or allocates.
+    /// [`ResolvedScope::All`] when no restricting scope is attached.
+    resolved_scope: ResolvedScope,
 }
 
 impl QueryExecutor {
@@ -139,6 +145,7 @@ impl QueryExecutor {
             historical,
             _config: ExecutionConfig::default(),
             scope: None,
+            resolved_scope: ResolvedScope::All,
         }
     }
 
@@ -153,6 +160,7 @@ impl QueryExecutor {
             historical,
             _config: config,
             scope: None,
+            resolved_scope: ResolvedScope::All,
         }
     }
 
@@ -162,6 +170,10 @@ impl QueryExecutor {
     /// is a no-op filter. See [`QueryBuilder::in_namespace`](crate::query::QueryBuilder::in_namespace).
     #[must_use]
     pub fn with_namespace_scope(mut self, scope: NamespaceScope) -> Self {
+        // Resolve the scope to interned ids ONCE here (Issue #3349, PR2 hoist),
+        // then thread cheap clones into each source-leaf filter and the traversal
+        // boundary, rather than re-resolving per source/per traversal.
+        self.resolved_scope = scope.resolve();
         self.scope = Some(Arc::new(scope));
         self
     }
@@ -489,7 +501,8 @@ impl QueryExecutor {
                     if self.scope_is_restricting()
                         && let Some(scope) = &self.scope
                     {
-                        traversal = traversal.with_namespace_scope(Arc::clone(scope));
+                        traversal = traversal
+                            .with_namespace_scope(Arc::clone(scope), self.resolved_scope.clone());
                     }
                     Box::new(traversal)
                 }
@@ -566,12 +579,30 @@ impl QueryExecutor {
 
                 PhysicalOp::OptionalApply { input, steps } => {
                     let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
-                    Box::new(iterators::OptionalApplyIterator::new(
-                        input_iter,
-                        steps.clone(),
-                        Arc::clone(&self.current),
-                        Arc::clone(&self.historical),
-                    ))
+                    // Namespace scope (Issue #3349, PR2): thread the scope into the
+                    // OPTIONAL MATCH sub-pipeline so its source leaf and traversal
+                    // hops are scope-bounded, matching the main pipeline (defense
+                    // in depth — unreachable until PR3 wires Cypher/AQL scope to
+                    // OPTIONAL MATCH, but never silently wrong). The unscoped path
+                    // uses the plain constructor and pays nothing.
+                    match (self.scope_is_restricting(), &self.scope) {
+                        (true, Some(scope)) => {
+                            Box::new(iterators::OptionalApplyIterator::with_namespace_scope(
+                                input_iter,
+                                steps.clone(),
+                                Arc::clone(&self.current),
+                                Arc::clone(&self.historical),
+                                Some(Arc::clone(scope)),
+                                self.resolved_scope.clone(),
+                            ))
+                        }
+                        _ => Box::new(iterators::OptionalApplyIterator::new(
+                            input_iter,
+                            steps.clone(),
+                            Arc::clone(&self.current),
+                            Arc::clone(&self.historical),
+                        )),
+                    }
                 }
 
                 PhysicalOp::Aggregate {
@@ -713,6 +744,7 @@ impl QueryExecutor {
                 Box::new(iterators::ScopeFilterIterator::new(
                     iter,
                     Arc::clone(scope),
+                    self.resolved_scope.clone(),
                     Arc::clone(&self.current),
                 ))
             }

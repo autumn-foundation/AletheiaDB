@@ -24,7 +24,7 @@
 use crate::core::error::{Error, Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
-use crate::core::namespace::{Namespace, NamespaceError, NamespaceId, NamespaceScope};
+use crate::core::namespace::{Namespace, NamespaceError, NamespaceScope, ResolvedScope};
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::db::ops::NodesAtTime;
@@ -76,37 +76,21 @@ impl AletheiaDB {
     }
 
     /// O(1) membership probe: is the current node `node_id` inside the
-    /// **pre-resolved** scope `resolved` (Issue #3349, PR2)? `None` = `All`
-    /// (matches everything). The scope is resolved to interned ids **once** per
-    /// query (via [`NamespaceScope::resolved_ids`]) and reused across every edge,
-    /// so the per-edge boundary check is an integer-hashed membership probe with
-    /// no property load, no `Namespace` allocation, and no string hashing.
-    fn scope_contains_current_node(
-        &self,
-        node_id: NodeId,
-        resolved: Option<&[NamespaceId]>,
-    ) -> bool {
-        match resolved {
-            None => true,
-            Some(ids) => ids
-                .iter()
-                .any(|id| self.current.node_in_namespace_id(node_id, *id)),
-        }
+    /// **pre-resolved** scope `resolved` (Issue #3349, PR2)?
+    /// [`ResolvedScope::All`] matches everything. The scope is resolved to
+    /// interned ids **once** per query (via [`NamespaceScope::resolve`]) and
+    /// reused across every edge, so the per-edge boundary check is an
+    /// integer-hashed membership probe with no property load, no `Namespace`
+    /// allocation, and no string hashing — and, for a single-namespace scope, a
+    /// single integer compare with no set scan.
+    fn scope_contains_current_node(&self, node_id: NodeId, resolved: &ResolvedScope) -> bool {
+        resolved.contains_by(|id| self.current.node_in_namespace_id(node_id, id))
     }
 
     /// O(1) membership probe for a current edge against the pre-resolved scope.
     /// See [`scope_contains_current_node`](Self::scope_contains_current_node).
-    fn scope_contains_current_edge(
-        &self,
-        edge_id: EdgeId,
-        resolved: Option<&[NamespaceId]>,
-    ) -> bool {
-        match resolved {
-            None => true,
-            Some(ids) => ids
-                .iter()
-                .any(|id| self.current.edge_in_namespace_id(edge_id, *id)),
-        }
+    fn scope_contains_current_edge(&self, edge_id: EdgeId, resolved: &ResolvedScope) -> bool {
+        resolved.contains_by(|id| self.current.edge_in_namespace_id(edge_id, id))
     }
 
     /// Get a node only if it is visible in `scope` (Issue #3349).
@@ -255,15 +239,15 @@ impl AletheiaDB {
     ) -> Result<Vec<NodeId>> {
         self.validate_scope(scope)?;
         // Resolve the scope to interned ids ONCE, then reuse across every edge —
-        // the per-edge probe is then an integer hash, not a string hash
-        // (Issue #3349, PR2 performance).
-        let resolved = scope.resolved_ids();
-        let resolved = resolved.as_deref();
+        // the per-edge probe is then an integer hash, not a string hash, and a
+        // single-namespace scope carries its one id inline for a single-compare
+        // check (Issue #3349, PR2 performance hoist).
+        let resolved = scope.resolve();
         // The traversal must start from an in-scope node; otherwise the caller
         // could probe out-of-scope adjacency. An out-of-scope (or non-existent)
         // start is reported as not-found, exactly like `get_node_scoped`. The
         // O(1) membership probe avoids loading the start node's properties.
-        if !self.scope_contains_current_node(start, resolved) {
+        if !self.scope_contains_current_node(start, &resolved) {
             return Err(StorageError::NodeNotFound(start).into());
         }
 
@@ -289,13 +273,13 @@ impl AletheiaDB {
                 // target node's namespace ∈ scope. Namespace is immutable, so the
                 // current-state membership index is authoritative for the
                 // (current-state) traversal.
-                if !self.scope_contains_current_edge(edge_id, resolved) {
+                if !self.scope_contains_current_edge(edge_id, &resolved) {
                     continue;
                 }
                 let Ok(target) = self.current.get_edge_target(edge_id) else {
                     continue;
                 };
-                if !self.scope_contains_current_node(target, resolved) {
+                if !self.scope_contains_current_node(target, &resolved) {
                     continue;
                 }
                 if seen.insert(target) {

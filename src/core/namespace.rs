@@ -315,6 +315,34 @@ impl NamespaceScope {
         }
     }
 
+    /// Resolve this scope to interned ids **once per query**, carrying the
+    /// single-namespace case inline (Issue #3349, PR2 performance hoist).
+    ///
+    /// Prefer this over [`resolved_ids`](Self::resolved_ids) on the scoped read
+    /// hot paths (traversal boundary, source-leaf filter): the result is built
+    /// once at the start of a scoped read and threaded down into every per-edge /
+    /// per-row membership check, so no probe re-derives ids (no interner string
+    /// lookup) or re-allocates. A [`Single`](Self::Single) scope — and a
+    /// one-element [`List`](Self::List) — resolves to
+    /// [`ResolvedScope::Single`], a single inline [`NamespaceId`] with no `Vec` /
+    /// `Arc` allocation, turning the per-edge check into a single integer
+    /// compare. An empty `List` (which `validate_scope` already rejects) resolves
+    /// to an empty [`ResolvedScope::List`], a match-nothing scope.
+    #[must_use]
+    pub fn resolve(&self) -> ResolvedScope {
+        match self {
+            NamespaceScope::All => ResolvedScope::All,
+            NamespaceScope::Single(ns) => ResolvedScope::Single(intern_namespace(ns)),
+            NamespaceScope::List(list) => match list.as_slice() {
+                // A one-element union takes the inline single-namespace fast path.
+                [one] => ResolvedScope::Single(intern_namespace(one)),
+                // Two or more (or the already-rejected empty) resolve to a shared
+                // id set scanned with `any`.
+                many => ResolvedScope::List(many.iter().map(intern_namespace).collect()),
+            },
+        }
+    }
+
     /// The concrete namespaces named by this scope, or `None` for
     /// [`All`](Self::All) (which names no finite set). Deduplicated iteration
     /// helper for callers that enumerate members per namespace.
@@ -430,6 +458,61 @@ pub fn resolve_namespace_id(id: NamespaceId) -> Option<Namespace> {
     NAMESPACE_INTERNER
         .resolve(id)
         .and_then(|s| Namespace::new(s.as_ref()).ok())
+}
+
+/// A [`NamespaceScope`] resolved to interned [`NamespaceId`]s **once per query**
+/// (Issue #3349, PR2 performance hoist).
+///
+/// Built once via [`NamespaceScope::resolve`] at the start of a scoped read and
+/// threaded down into every source-leaf filter and the traversal boundary, so
+/// the per-edge / per-row membership check never re-derives ids (no interner
+/// string lookup) nor allocates. The single-namespace case — a
+/// [`Single`](NamespaceScope::Single) scope or a one-element
+/// [`List`](NamespaceScope::List) — is carried **inline** as one
+/// [`NamespaceId`] (no `Vec` / `Arc` allocation), so its per-edge check is a
+/// single integer compare rather than a set scan.
+///
+/// Cloning is cheap: `All` is a unit, `Single` copies a `u32`, and `List`
+/// bumps an `Arc` refcount — so the executor can hand a fresh clone to every
+/// source-leaf iterator without re-resolving.
+#[derive(Clone, Debug)]
+pub enum ResolvedScope {
+    /// `All` — no filtering (matches every namespace).
+    All,
+    /// Exactly one namespace (from `Single` or a one-element `List`): the
+    /// per-edge check is a single integer compare.
+    Single(NamespaceId),
+    /// A union of two or more namespaces: membership is a scan over this small,
+    /// shareable id set. May be empty (the already-rejected empty `List`), in
+    /// which case it matches nothing.
+    List(Arc<[NamespaceId]>),
+}
+
+impl ResolvedScope {
+    /// Whether this resolved scope imposes no filter (i.e. is [`All`](Self::All)).
+    #[inline]
+    #[must_use]
+    pub fn is_all(&self) -> bool {
+        matches!(self, ResolvedScope::All)
+    }
+
+    /// Whether an entity is in scope, given a `probe` that answers "is the
+    /// entity a member of namespace `id`?".
+    ///
+    /// [`All`](Self::All) short-circuits to `true` without probing;
+    /// [`Single`](Self::Single) runs exactly one probe (the inlined
+    /// single-integer-compare fast path); [`List`](Self::List) scans its (small)
+    /// id set with `any`. A namespace is immutable and an entity lives in exactly
+    /// one, so a single positive probe is conclusive.
+    #[inline]
+    #[must_use]
+    pub fn contains_by<F: Fn(NamespaceId) -> bool>(&self, probe: F) -> bool {
+        match self {
+            ResolvedScope::All => true,
+            ResolvedScope::Single(id) => probe(*id),
+            ResolvedScope::List(ids) => ids.iter().any(|id| probe(*id)),
+        }
+    }
 }
 
 // ============================================================================

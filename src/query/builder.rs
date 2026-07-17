@@ -177,6 +177,17 @@ impl QueryBuilder<state::Initial> {
     ///
     /// Uses the default "embedding" property and Cosine distance.
     /// For custom properties or metrics, use [`find_similar_builder()`](Self::find_similar_builder).
+    ///
+    /// **Namespace scope caveat (Issue #3349, PR2):** when combined with
+    /// [`in_namespace`](Self::in_namespace)/[`in_namespaces`](Self::in_namespaces),
+    /// the executor performs the index k-NN first and then **post-filters** the
+    /// `k` results to the scope, so a scoped vector search here may return
+    /// **fewer than `k`** in-scope rows. For a filter-complete k-NN that
+    /// over-fetches to guarantee `k` genuinely in-scope results, use
+    /// [`AletheiaDB::find_similar_scoped`](crate::AletheiaDB::find_similar_scoped)
+    /// /
+    /// [`find_similar_by_embedding_scoped`](crate::AletheiaDB::find_similar_by_embedding_scoped)
+    /// instead.
     #[must_use]
     pub fn find_similar(
         self,
@@ -851,8 +862,9 @@ impl<S: QueryState> QueryBuilder<S> {
     /// forbids. Because the builder cannot surface an error, the empty-list
     /// intent is preserved as an empty [`NamespaceScope::List`] and rejected with
     /// `INVALID_ARGUMENT` when the query is executed
-    /// (`execute_query`/`execute_query_profiled` call `validate_scope`). It must
-    /// never silently degrade to the unscoped (all-namespaces) path.
+    /// ([`execute`](Self::execute) → `AletheiaDB::execute_query` calls
+    /// `validate_scope`). It must never silently degrade to the unscoped
+    /// (all-namespaces) path.
     #[must_use]
     pub fn in_namespaces(mut self, namespaces: impl IntoIterator<Item = Namespace>) -> Self {
         let list: Vec<Namespace> = namespaces.into_iter().collect();

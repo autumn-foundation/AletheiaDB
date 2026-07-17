@@ -14,7 +14,7 @@ use tracing;
 use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::namespace::{NamespaceId, NamespaceScope};
+use crate::core::namespace::{NamespaceScope, ResolvedScope};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::vector::DistanceMetric as VectorMetric;
@@ -1510,11 +1510,12 @@ pub struct TraversalIterator {
     /// namespace ∉ scope — so an out-of-scope node is never reached, emitted, or
     /// used as a bridge. `None` ⇒ prior namespace-agnostic behavior.
     scope: Option<Arc<NamespaceScope>>,
-    /// The attached scope resolved to interned ids once (Issue #3349, PR2), so
-    /// the current-state boundary check is a per-edge integer-hash membership
-    /// probe rather than a per-edge string hash. `None` when no restricting scope
-    /// is attached or the scope is `All`.
-    resolved_scope: Option<Vec<NamespaceId>>,
+    /// The attached scope resolved to interned ids **once** at execute start and
+    /// threaded in (Issue #3349, PR2), so the current-state boundary check is a
+    /// per-edge integer-hash membership probe (a single integer compare for a
+    /// single-namespace scope) rather than a per-edge string hash.
+    /// [`ResolvedScope::All`] (or no attached scope) is a no-op boundary.
+    resolved_scope: ResolvedScope,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
     visited: HashSet<NodeId>,
@@ -1550,7 +1551,7 @@ impl TraversalIterator {
             temporal_context,
             bind_edge: false,
             scope: None,
-            resolved_scope: None,
+            resolved_scope: ResolvedScope::All,
             frontier: VecDeque::new(),
             visited: HashSet::new(),
             input_exhausted: false,
@@ -1562,10 +1563,16 @@ impl TraversalIterator {
     /// target node whose namespace ∉ scope is never enqueued (so it is neither
     /// emitted nor used to bridge deeper). [`NamespaceScope::All`] is a no-op.
     #[must_use]
-    pub fn with_namespace_scope(mut self, scope: Arc<NamespaceScope>) -> Self {
-        // Pre-resolve to interned ids once so the current-state boundary check
-        // (Issue #3349, PR2) avoids per-edge string hashing.
-        self.resolved_scope = scope.resolved_ids();
+    pub fn with_namespace_scope(
+        mut self,
+        scope: Arc<NamespaceScope>,
+        resolved: ResolvedScope,
+    ) -> Self {
+        // The scope was already resolved to interned ids once at execute start
+        // (Issue #3349, PR2 hoist); we only store the pre-resolved handle here so
+        // the current-state boundary check avoids per-edge string hashing (and,
+        // for a single-namespace scope, is a single integer compare).
+        self.resolved_scope = resolved;
         self.scope = Some(scope);
         self
     }
@@ -1587,9 +1594,8 @@ impl TraversalIterator {
         // reconstruction. Two interned-id hash probes per edge (the scope was
         // resolved to ids once in `with_namespace_scope`).
         if self.temporal_context.is_none() {
-            let resolved = self.resolved_scope.as_deref();
-            return scope_contains_current_edge(&self.current, edge_id, resolved)
-                && scope_contains_current_node(&self.current, target, resolved);
+            return scope_contains_current_edge(&self.current, edge_id, &self.resolved_scope)
+                && scope_contains_current_node(&self.current, target, &self.resolved_scope);
         }
         // Temporal traversal: reconstruct the edge and target AS-OF the
         // coordinate so a since-deleted-but-then-valid edge is judged by its
@@ -1924,19 +1930,16 @@ impl ResultIterator for TraversalIterator {
 
 /// Whether the current edge `edge_id` is inside the **pre-resolved** scope
 /// `resolved` (Issue #3349, PR2), via O(1) interned-id membership probes.
-/// `None` = `All` (matches everything). Resolving the scope to ids once (per
-/// iterator / per traversal) and reusing them avoids per-edge string hashing.
+/// [`ResolvedScope::All`] matches everything. The scope is resolved to ids once
+/// at execute start (per query) and threaded down, so this per-edge check does
+/// no string hashing — and, for a single-namespace scope, is a single integer
+/// compare with no set scan.
 fn scope_contains_current_edge(
     current: &CurrentStorage,
     edge_id: EdgeId,
-    resolved: Option<&[NamespaceId]>,
+    resolved: &ResolvedScope,
 ) -> bool {
-    match resolved {
-        None => true,
-        Some(ids) => ids
-            .iter()
-            .any(|id| current.edge_in_namespace_id(edge_id, *id)),
-    }
+    resolved.contains_by(|id| current.edge_in_namespace_id(edge_id, id))
 }
 
 /// Whether the current node `node_id` is inside the pre-resolved scope
@@ -1944,25 +1947,21 @@ fn scope_contains_current_edge(
 fn scope_contains_current_node(
     current: &CurrentStorage,
     node_id: NodeId,
-    resolved: Option<&[NamespaceId]>,
+    resolved: &ResolvedScope,
 ) -> bool {
-    match resolved {
-        None => true,
-        Some(ids) => ids
-            .iter()
-            .any(|id| current.node_in_namespace_id(node_id, *id)),
-    }
+    resolved.contains_by(|id| current.node_in_namespace_id(node_id, id))
 }
 
 /// Namespace-scope entity filter (Issue #3349, PR2).
 ///
 /// Drops rows whose primary entity's (immutable) namespace ∉ scope, so a scoped
 /// [`QueryBuilder`](crate::query::QueryBuilder) query returns only in-scope
-/// entities. It is applied at the very end of the pipeline, over start nodes,
-/// traversal results, and ranked results alike. The traversal *boundary* (never
-/// bridging through an out-of-scope node) is enforced upstream in
-/// [`TraversalIterator`], so this filter only has to reject out-of-scope
-/// terminal entities.
+/// entities. It wraps the **source leaves** that produce entities (scans, id
+/// lookups, property/vector sources), so every downstream operator — LIMIT/SKIP,
+/// ORDER BY, DISTINCT, aggregation, COUNT — already sees only in-scope rows. The
+/// traversal *boundary* (never bridging through an out-of-scope node) is enforced
+/// separately in [`TraversalIterator`], so this filter only has to reject
+/// out-of-scope terminal entities.
 ///
 /// Rows that carry no single scoped entity — a null binding, or an aggregation /
 /// multi-variable computed row — pass through unchanged (namespace scoping of
@@ -1973,21 +1972,24 @@ pub struct ScopeFilterIterator {
     input: Box<dyn ResultIterator>,
     scope: Arc<NamespaceScope>,
     current: Arc<CurrentStorage>,
-    /// The scope resolved to interned ids once at construction (Issue #3349, PR2)
-    /// so the id-only branches probe by integer id without per-row string
-    /// hashing. `None` = `All` (no filter).
-    resolved: Option<Vec<NamespaceId>>,
+    /// The scope resolved to interned ids **once** at execute start and threaded
+    /// in (Issue #3349, PR2 hoist), so the id-only branches probe by integer id
+    /// without per-row string hashing — a single integer compare for a
+    /// single-namespace scope. [`ResolvedScope::All`] is a no-op filter.
+    resolved: ResolvedScope,
 }
 
 impl ScopeFilterIterator {
-    /// Wrap `input`, keeping only rows whose entity is in `scope`.
+    /// Wrap `input`, keeping only rows whose entity is in `scope`. `resolved` is
+    /// the scope pre-resolved to interned ids once at execute start (Issue #3349,
+    /// PR2 hoist) and shared into every source-leaf filter.
     #[must_use]
     pub fn new(
         input: Box<dyn ResultIterator>,
         scope: Arc<NamespaceScope>,
+        resolved: ResolvedScope,
         current: Arc<CurrentStorage>,
     ) -> Self {
-        let resolved = scope.resolved_ids();
         ScopeFilterIterator {
             input,
             scope,
@@ -2017,10 +2019,10 @@ impl ScopeFilterIterator {
             EntityResult::Node(node) => self.scope.contains(&node.namespace()),
             EntityResult::Edge(edge) => self.scope.contains(&edge.namespace()),
             EntityResult::NodeId(id) => {
-                scope_contains_current_node(&self.current, *id, self.resolved.as_deref())
+                scope_contains_current_node(&self.current, *id, &self.resolved)
             }
             EntityResult::EdgeId(id) => {
-                scope_contains_current_edge(&self.current, *id, self.resolved.as_deref())
+                scope_contains_current_edge(&self.current, *id, &self.resolved)
             }
             // A null binding or a computed (aggregate / multi-variable) row has
             // no single scoped entity — pass it through unchanged.
@@ -2769,6 +2771,18 @@ pub struct OptionalApplyIterator {
     steps: Vec<crate::query::planner::physical::OptionalPhysicalStep>,
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
+    /// Optional namespace scope (Issue #3349, PR2). Threaded from the executor so
+    /// the sub-pipeline built per seed row (its `Scan` source leaf and every
+    /// `Traverse` hop) honors the same scope boundary as the outer plan — else a
+    /// scoped `OPTIONAL MATCH` would leak cross-namespace bindings. `None` ⇒ prior
+    /// namespace-agnostic behavior. Unreachable until PR3 wires Cypher/AQL scope
+    /// to `OPTIONAL MATCH`, but wired here (defense in depth) so it can never be
+    /// silently wrong.
+    scope: Option<Arc<NamespaceScope>>,
+    /// The attached `scope` resolved to interned ids once (Issue #3349, PR2), so
+    /// the sub-pipeline's per-edge/per-row checks avoid re-resolving. `All` when
+    /// no restricting scope is attached.
+    resolved_scope: ResolvedScope,
     /// True when the first step is a Scan (leading OPTIONAL MATCH form).
     standalone: bool,
     /// The sub-pipeline currently being drained (one per seed row).
@@ -2791,6 +2805,24 @@ impl OptionalApplyIterator {
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
     ) -> Self {
+        Self::with_namespace_scope(input, steps, current, historical, None, ResolvedScope::All)
+    }
+
+    /// Create an OptionalApplyIterator whose sub-pipeline honors a namespace
+    /// scope (Issue #3349, PR2). `scope` is the outer plan's scope and `resolved`
+    /// its once-resolved interned-id form; both are threaded into the per-seed
+    /// sub-pipeline so its source leaf and traversal hops are scope-bounded. A
+    /// `None` / [`ResolvedScope::All`] scope reproduces the namespace-agnostic
+    /// behavior of [`new`](Self::new).
+    #[must_use]
+    pub fn with_namespace_scope(
+        input: Box<dyn ResultIterator>,
+        steps: Vec<crate::query::planner::physical::OptionalPhysicalStep>,
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        scope: Option<Arc<NamespaceScope>>,
+        resolved: ResolvedScope,
+    ) -> Self {
         use crate::query::planner::physical::OptionalPhysicalStep;
         let standalone = matches!(steps.first(), Some(OptionalPhysicalStep::Scan { .. }));
         Self {
@@ -2798,12 +2830,21 @@ impl OptionalApplyIterator {
             steps,
             current,
             historical,
+            scope,
+            resolved_scope: resolved,
             standalone,
             inner: None,
             inner_matched: false,
             done: false,
             current_seed: None,
         }
+    }
+
+    /// The attached scope only if it actually restricts (present and not `All`).
+    fn restricting_scope(&self) -> Option<&Arc<NamespaceScope>> {
+        self.scope
+            .as_ref()
+            .filter(|s| !matches!(s.as_ref(), NamespaceScope::All))
     }
 
     /// Build the optional sub-pipeline for one seed row (or, for the
@@ -2819,11 +2860,22 @@ impl OptionalApplyIterator {
         for step in &self.steps {
             iter = match step {
                 OptionalPhysicalStep::Scan { label } => {
-                    // Source step (standalone form): replaces the seed input.
-                    Box::new(NodeScanIterator::new(
+                    // Source step (standalone form): replaces the seed input. When
+                    // scoped (Issue #3349, PR2), wrap it in the source-leaf
+                    // namespace filter exactly as the main pipeline does.
+                    let mut scan: Box<dyn ResultIterator> = Box::new(NodeScanIterator::new(
                         label.clone(),
                         Arc::clone(&self.current),
-                    ))
+                    ));
+                    if let Some(scope) = self.restricting_scope() {
+                        scan = Box::new(ScopeFilterIterator::new(
+                            scan,
+                            Arc::clone(scope),
+                            self.resolved_scope.clone(),
+                            Arc::clone(&self.current),
+                        ));
+                    }
+                    scan
                 }
                 OptionalPhysicalStep::Traverse {
                     direction,
@@ -2831,16 +2883,25 @@ impl OptionalApplyIterator {
                     min_depth,
                     depth,
                     temporal_context,
-                } => Box::new(TraversalIterator::new(
-                    iter,
-                    *direction,
-                    label.clone(),
-                    *min_depth,
-                    *depth,
-                    Arc::clone(&self.current),
-                    Arc::clone(&self.historical),
-                    *temporal_context,
-                )),
+                } => {
+                    let mut traversal = TraversalIterator::new(
+                        iter,
+                        *direction,
+                        label.clone(),
+                        *min_depth,
+                        *depth,
+                        Arc::clone(&self.current),
+                        Arc::clone(&self.historical),
+                        *temporal_context,
+                    );
+                    // Namespace boundary (Issue #3349, PR2): a scoped optional
+                    // traversal never crosses an out-of-scope edge/node.
+                    if let Some(scope) = self.restricting_scope() {
+                        traversal = traversal
+                            .with_namespace_scope(Arc::clone(scope), self.resolved_scope.clone());
+                    }
+                    Box::new(traversal)
+                }
                 OptionalPhysicalStep::Filter(predicate) => {
                     Box::new(FilterIterator::with_historical(
                         iter,
