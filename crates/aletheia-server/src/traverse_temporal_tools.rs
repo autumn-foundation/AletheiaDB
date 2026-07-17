@@ -77,7 +77,7 @@
 //! `{"error":{"code":"NOT_FOUND",...}}`); we return that JSON verbatim with a
 //! 200, matching the MCP method's `String` return exactly.
 
-use crate::edge_tools::{insert_budget, insert_opt};
+use crate::edge_tools::{insert_budget, insert_opt, namespace_query_value};
 use crate::security::resource_limits::{check_byte_cap_of, run_with_timeout};
 use crate::security::{Authorized, ReadClass, ServerSecurityState};
 use crate::state::ServerState;
@@ -147,6 +147,13 @@ pub struct TraverseQuery {
     pub use_cursor: Option<bool>,
     /// #3360: opaque continuation token from a prior page (passed back alone).
     pub cursor: Option<String>,
+    /// #3349: namespace read scope — a single name, a comma-separated union
+    /// (`a,b`), or `all`. Omitted = the `default` namespace only
+    /// (isolated-by-default). Forwarded into dispatch so HTTP scopes identically
+    /// to the MCP twin (a narrowing scope is outgoing-only; incoming/both with a
+    /// narrowing scope is INVALID_ARGUMENT; a narrowing scope with `use_cursor`
+    /// fails closed).
+    pub namespace: Option<String>,
 }
 
 /// `traverse` — multi-hop graph traversal from a start node following edges of a
@@ -218,6 +225,11 @@ pub async fn traverse(
     );
     insert_opt(&mut args, "use_cursor", opts.use_cursor.map(Value::from));
     insert_opt(&mut args, "cursor", opts.cursor.map(Value::from));
+    insert_opt(
+        &mut args,
+        "namespace",
+        namespace_query_value(opts.namespace),
+    );
     let args = Value::Object(args);
 
     let out = run_with_timeout(limits.timeout, false, async move {
