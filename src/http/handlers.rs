@@ -748,7 +748,13 @@ async fn handle_bulk_delete_nodes(
                 }
                 Ok::<_, crate::core::error::Error>(node_ids.len())
             })
-            .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+            // Issue #3629/#3234: a delete that fails a precondition (e.g. the
+            // #3416 concurrent-orphan validation guard → FAILED_PRECONDITION) or
+            // loses a concurrency race (→ CONFLICT, retriable) is classified into
+            // the structured envelope, not blanket-collapsed to a 400. Genuine
+            // bad input (an invalid id) still maps to 400 via the classifier's
+            // BadRequest fallback.
+            .map_err(|e| AletheiaHttpError::from_db_error(&e))?;
 
         Ok(json!({
             "deleted_count": deleted_count,

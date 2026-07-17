@@ -14,7 +14,8 @@
       "shape": "{success:false, error:<string>, code?, retriable?, details?, trace_id?}",
       "additive_fields_note": "code/retriable/details are present ONLY for auth (401/403) and resource-limit (413/422/429) variants; plain 400/404/500 keep the minimal {success,error} shape.",
       "trace_id_note": "trace_id body field + x-trace-id header are populated only under the observability/otel features (pinned by tests/http_otel_tracing.rs). Absent otherwise.",
-      "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "UNAVAILABLE"],
+      "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "NOT_FOUND", "INTERNAL", "CONSTRAINT_VIOLATION", "FAILED_PRECONDITION", "CONFLICT", "UNAVAILABLE"],
+      "constraint_mapping_note": "Since #3629/#3234 the legacy JSON-RPC write path routes db-layer errors through AletheiaHttpError::from_db_error: schema/type/required-key/unique violations -> 409 CONSTRAINT_VIOLATION (with details); non-conforming/duplicate-on-enable and validation/CAS/invalid-state precondition failures -> 412 FAILED_PRECONDITION; serialization/write-conflict/abort -> 409 CONFLICT (retriable); clock skew -> 503 UNAVAILABLE (retriable). Genuine bad input still maps to 400 INVALID_ARGUMENT. Pinned by tests/http_api.rs::create_node_unique_violation_maps_to_409_constraint_violation and the src/http/error.rs from_db_error unit tests.",
       "vocabulary_asymmetry_vs_mcp": "Both surfaces use RESOURCE_EXHAUSTED for per-query resource-limit errors (Issue #3368: HTTP /query since #3446, MCP `query` tool since #3368-lane4). HTTP also emits UNAVAILABLE for the 503 in-flight-query-cap guard (Issue #3368 hardening of #3446); MCP has no such code. Remaining asymmetry: HTTP emits `code` only on auth+limit variants; MCP emits `code` on every error."
     },
     "routes": [
@@ -37,7 +38,7 @@
         "access_class": "per-operation (query_access_class): read for find_node/get_node/bulk_get_nodes/find_neighbors; write for create/bulk_create/bulk_update/bulk_delete; execute_query/bulk_execute_query read iff no mutating clause",
         "success_status": 200,
         "success_body": "{success:true, data?, truncated?}",
-        "error_statuses": [400, 401, 403, 404, 413, 422, 429, 500, 503],
+        "error_statuses": [400, 401, 403, 404, 409, 412, 413, 422, 429, 500, 503],
         "pinned_by": [
           "tests/parity_http.rs::query_success_envelope_shape",
           "tests/parity_http.rs::query_not_found_minimal_error_envelope",

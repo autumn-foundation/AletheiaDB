@@ -598,13 +598,13 @@ impl AletheiaDB {
                 crate::db::snapshot::registry_path_for(&config.persistence),
             )?);
 
-           // Namespace registry (Issue #3349): durable sidecar at
+            // Namespace registry (Issue #3349): durable sidecar at
             // `{data_dir}/namespaces.json` when index persistence is enabled,
             // in-memory-only otherwise. Loaded here so registrations survive restart.
             let namespaces = Arc::new(crate::db::namespace::NamespaceRegistry::open(
                 crate::db::namespace::registry_path_for(&config.persistence),
             )?);
-            
+
             // GDPR crypto-shred (Issue #3359): load the durable per-subject
             // keyring fail-closed and run breadcrumb crash-recovery. Co-located
             // with the schema-constraint sidecar in the data root `{D}`;
