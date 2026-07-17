@@ -35,7 +35,7 @@ const ALLOWED_LABEL_KEYS: &[&str] = &["category", "event"];
 /// 3 critical events + 2 unlabeled scalars (write_conflicts, transaction_commits).
 /// Pinning this count makes a future label/series addition fail loudly rather
 /// than silently widening the exposed surface.
-const EXPECTED_SERIES_COUNT: usize = 12;
+const EXPECTED_SERIES_COUNT: usize = 14;
 
 /// Parse every sample line's label KEYS (the identifiers left of each `=`) and
 /// count the total number of sample (time-series) lines. Comment/blank lines are
