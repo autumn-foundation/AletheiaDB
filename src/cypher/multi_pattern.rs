@@ -723,7 +723,7 @@ impl MultiEval<'_> {
                         edge,
                         prop,
                         lhs.as_ref(),
-                        flip_comp_op(*op),
+                        super::converter::flip_cypher_comp_op(*op),
                     )));
                 }
                 let l = self.eval_value(left, binding)?;
@@ -1177,10 +1177,15 @@ fn edge_leaf_compare(
 /// Resolve an edge leaf's value (Issue #3622): reserved structural fields
 /// (`type`/`label`/`source`/`target`/`id`) shadow user props, otherwise the
 /// edge's own properties. Shared by every edge-leaf evaluator so the
-/// reserved-vs-user precedence is single-sourced.
-fn edge_leaf_value(edge: &Edge, prop: &str) -> Option<PropertyValue> {
-    crate::query::executor::iterators::edge_structural_value(edge, prop)
-        .or_else(|| edge.get_property(prop).cloned())
+/// reserved-vs-user precedence is single-sourced. Returns a [`Cow`] so a user
+/// property is borrowed (no clone); only a synthesized structural value is
+/// owned.
+fn edge_leaf_value<'a>(edge: &'a Edge, prop: &str) -> Option<std::borrow::Cow<'a, PropertyValue>> {
+    use std::borrow::Cow;
+    if let Some(v) = crate::query::executor::iterators::edge_structural_value(edge, prop) {
+        return Some(Cow::Owned(v));
+    }
+    edge.get_property(prop).map(Cow::Borrowed)
 }
 
 /// Evaluate `edge.prop IN candidates` with openCypher **node**-semantics
@@ -1195,22 +1200,9 @@ fn edge_leaf_in(v: &PropertyValue, candidates: &[Option<PropertyValue>]) -> bool
 /// node-semantics (Issue #3622): a missing or non-string edge value is definite
 /// `false`, so `NOT (r.<absent> CONTAINS 'x')` == `true`, matching AQL / SQL.
 fn edge_leaf_string_op(edge: &Edge, prop: &str, f: impl FnOnce(&str) -> bool) -> bool {
-    match edge_leaf_value(edge, prop) {
-        Some(PropertyValue::String(ref s)) => f(s.as_ref()),
+    match edge_leaf_value(edge, prop).as_deref() {
+        Some(PropertyValue::String(s)) => f(s.as_ref()),
         _ => false,
-    }
-}
-
-/// Flip a comparison operator so `value <op> edge.prop` can be evaluated as
-/// `edge.prop <flipped> value` (Issue #3622).
-fn flip_comp_op(op: CypherCompOp) -> CypherCompOp {
-    match op {
-        CypherCompOp::Eq => CypherCompOp::Eq,
-        CypherCompOp::Ne => CypherCompOp::Ne,
-        CypherCompOp::Lt => CypherCompOp::Gt,
-        CypherCompOp::Le => CypherCompOp::Ge,
-        CypherCompOp::Gt => CypherCompOp::Lt,
-        CypherCompOp::Ge => CypherCompOp::Le,
     }
 }
 
