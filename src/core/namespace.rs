@@ -34,8 +34,14 @@
 //! **elided** from every user-facing property view and surfaced instead as a
 //! first-class `namespace` field.
 
+use crate::core::hasher::IdentityHasher;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+use dashmap::DashMap;
+use std::hash::BuildHasherDefault;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The engine-owned property key under which an entity's namespace rides along
 /// its property map. Reserved: rejected on user writes, elided from user-facing
@@ -293,6 +299,22 @@ impl NamespaceScope {
         }
     }
 
+    /// Resolve this scope to interned [`NamespaceId`]s for fast per-edge
+    /// membership probing (Issue #3349, PR2), or `None` for [`All`](Self::All)
+    /// (which is a no-op filter). Resolve **once per query** and reuse across all
+    /// edges/candidates so the interner's string lookup is paid once, not per
+    /// edge. An empty [`List`](Self::List) resolves to `Some(vec![])`, a
+    /// match-nothing scope (it should already have been rejected by
+    /// `validate_scope`).
+    #[must_use]
+    pub fn resolved_ids(&self) -> Option<Vec<NamespaceId>> {
+        match self {
+            NamespaceScope::All => None,
+            NamespaceScope::Single(ns) => Some(vec![intern_namespace(ns)]),
+            NamespaceScope::List(list) => Some(list.iter().map(intern_namespace).collect()),
+        }
+    }
+
     /// The concrete namespaces named by this scope, or `None` for
     /// [`All`](Self::All) (which names no finite set). Deduplicated iteration
     /// helper for callers that enumerate members per namespace.
@@ -313,6 +335,101 @@ impl NamespaceScope {
             }
         }
     }
+}
+
+// ============================================================================
+// Namespace interning (Issue #3349, PR2 — performance)
+// ============================================================================
+
+/// A small, copyable interned handle for a namespace name (Issue #3349, PR2).
+///
+/// Scoped reads probe the secondary membership index (`ns_nodes` / `ns_edges`)
+/// once per candidate edge/node. Keying that index by a `u32` id — hashed with
+/// [`IdentityHasher`] — turns each probe into an integer hash + shard lookup,
+/// eliminating the per-edge `String` hashing that keying by
+/// [`Namespace`] (a heap string) incurred. A scope is resolved to its ids
+/// **once** (via [`NamespaceScope::resolved_ids`]) and then reused across every
+/// edge of a traversal, so the interner's own string lookup is paid once per
+/// query, not once per edge.
+///
+/// The id is a pure in-memory acceleration handle: it is derived from the
+/// durable ride-along namespace string, never persisted, and stable within a
+/// process for a given name (the same name always interns to the same id
+/// regardless of the hydration path — write, WAL replay, index-persistence
+/// load, cold rehydration — because there is a single derivation site,
+/// [`intern_namespace`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct NamespaceId(u32);
+
+impl NamespaceId {
+    /// The raw interned id.
+    #[inline]
+    #[must_use]
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Process-global namespace interner: name ⇄ [`NamespaceId`]. Namespaces are few
+/// (one per agent/session), so no capacity cap is imposed.
+struct NamespaceInterner {
+    /// name → id
+    forward: DashMap<Box<str>, u32>,
+    /// id → name (for reverse resolution in cold paths, e.g. per-namespace stats)
+    reverse: DashMap<u32, Arc<str>, BuildHasherDefault<IdentityHasher>>,
+    next: AtomicU32,
+}
+
+impl NamespaceInterner {
+    fn new() -> Self {
+        NamespaceInterner {
+            forward: DashMap::new(),
+            reverse: DashMap::with_hasher(BuildHasherDefault::default()),
+            next: AtomicU32::new(0),
+        }
+    }
+
+    fn intern(&self, name: &str) -> NamespaceId {
+        // Fast path: already interned (no allocation).
+        if let Some(id) = self.forward.get(name) {
+            return NamespaceId(*id);
+        }
+        // Slow path: reserve an id under the entry write lock so two threads
+        // interning the same new name agree on one id.
+        use dashmap::mapref::entry::Entry;
+        match self.forward.entry(name.into()) {
+            Entry::Occupied(e) => NamespaceId(*e.get()),
+            Entry::Vacant(v) => {
+                let id = self.next.fetch_add(1, Ordering::Relaxed);
+                self.reverse.insert(id, Arc::from(name));
+                v.insert(id);
+                NamespaceId(id)
+            }
+        }
+    }
+
+    fn resolve(&self, id: NamespaceId) -> Option<Arc<str>> {
+        self.reverse.get(&id.0).map(|e| Arc::clone(e.value()))
+    }
+}
+
+static NAMESPACE_INTERNER: LazyLock<NamespaceInterner> = LazyLock::new(NamespaceInterner::new);
+
+/// Intern a namespace to its process-stable [`NamespaceId`] (Issue #3349, PR2).
+#[inline]
+#[must_use]
+pub fn intern_namespace(namespace: &Namespace) -> NamespaceId {
+    NAMESPACE_INTERNER.intern(namespace.as_str())
+}
+
+/// Resolve a [`NamespaceId`] back to its [`Namespace`] (cold path — used only by
+/// per-namespace stats/schema enumeration). Returns `None` for an id that was
+/// never interned in this process.
+#[must_use]
+pub fn resolve_namespace_id(id: NamespaceId) -> Option<Namespace> {
+    NAMESPACE_INTERNER
+        .resolve(id)
+        .and_then(|s| Namespace::new(s.as_ref()).ok())
 }
 
 // ============================================================================

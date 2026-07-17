@@ -5,15 +5,22 @@
 //! that must be extremely fast.
 
 use crate::core::graph::{Edge, Node, NodeHeader};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
-use crate::core::namespace::Namespace;
+use crate::core::namespace::{Namespace, NamespaceId, intern_namespace, resolve_namespace_id};
 use crate::index::adjacency::AdjacencyEntry;
 use crate::index::incremental_adjacency::{CompactionScheduler, IncrementalAdjacencyIndex};
 use dashmap::{DashMap, DashSet};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
+
+/// Hasher builder for the [`NamespaceId`]-keyed membership index. The key is a
+/// `u32`, so identity hashing (Issue #3349, PR2) avoids SipHash overhead on the
+/// per-edge scoped-read probe.
+type NsHasher = BuildHasherDefault<IdentityHasher>;
 
 // Note: AdjacencyGuard was removed in favor of MergedAdjacencyGuard from incremental_adjacency.
 // The new guard supports merging frozen CSR + delta buffer on-the-fly.
@@ -90,10 +97,16 @@ pub struct CurrentIndexes {
     /// of lock-free `DashSet`s, mutated only inside
     /// `insert_node`/`remove_node`, and it never calls back into `historical`,
     /// `wal`, or `current_timestamp`.
-    ns_nodes: DashMap<Namespace, DashSet<NodeId>>,
+    ///
+    /// Keyed by the interned [`NamespaceId`] (Issue #3349, PR2 performance) so
+    /// each per-edge scoped-read probe is an integer (identity) hash rather than
+    /// a heap-string hash. The inner member set is likewise identity-hashed (its
+    /// keys are `NodeId`s — already unique u64s), so the per-edge `contains`
+    /// probe is a plain integer hash, not SipHash.
+    ns_nodes: DashMap<NamespaceId, DashSet<NodeId, NsHasher>, NsHasher>,
     /// Secondary namespace → member-edge membership index (Issue #3349, PR2).
     /// The edge counterpart of [`ns_nodes`](Self::ns_nodes); see its docs.
-    ns_edges: DashMap<Namespace, DashSet<EdgeId>>,
+    ns_edges: DashMap<NamespaceId, DashSet<EdgeId, NsHasher>, NsHasher>,
 }
 
 impl CurrentIndexes {
@@ -111,8 +124,8 @@ impl CurrentIndexes {
             outgoing_compaction: None,
             incoming_compaction: None,
             max_node_id: AtomicU64::new(0),
-            ns_nodes: DashMap::new(),
-            ns_edges: DashMap::new(),
+            ns_nodes: DashMap::with_hasher(BuildHasherDefault::default()),
+            ns_edges: DashMap::with_hasher(BuildHasherDefault::default()),
         }
     }
 
@@ -141,8 +154,8 @@ impl CurrentIndexes {
             outgoing_compaction: Some((outgoing_scheduler, outgoing_handle)),
             incoming_compaction: Some((incoming_scheduler, incoming_handle)),
             max_node_id: AtomicU64::new(0),
-            ns_nodes: DashMap::new(),
-            ns_edges: DashMap::new(),
+            ns_nodes: DashMap::with_hasher(BuildHasherDefault::default()),
+            ns_edges: DashMap::with_hasher(BuildHasherDefault::default()),
         }
     }
 
@@ -203,10 +216,15 @@ impl CurrentIndexes {
         // idempotent, so re-inserting on an in-place update is a no-op (the
         // namespace is immutable for the life of the entity).
         let node_id = node.id;
-        let ns = node.namespace();
+        // Derive the interned namespace id from the node's durable ride-along
+        // string (Issue #3349, PR2). This is the single derivation site for the
+        // node membership index, so every hydration path (write, WAL replay,
+        // index-persistence load, cold rehydration) that funnels through
+        // `insert_node` produces the identical id for the same namespace.
+        let ns_id = intern_namespace(&node.namespace());
         self.nodes.insert(node.id, node);
         self.node_headers.insert(header.id, header);
-        self.ns_nodes.entry(ns).or_default().insert(node_id);
+        self.ns_nodes.entry(ns_id).or_default().insert(node_id);
     }
 
     /// Exclusive upper bound on the node id space: `max(id ever inserted) + 1`.
@@ -245,14 +263,16 @@ impl CurrentIndexes {
             }
             Entry::Vacant(e) => {
                 // New edge: insert into both edge map and adjacency
-                let ns = edge.namespace();
+                // Single derivation site for the edge membership index id
+                // (Issue #3349, PR2); see `insert_node`.
+                let ns_id = intern_namespace(&edge.namespace());
                 e.insert(edge);
                 self.outgoing
                     .insert(source, AdjacencyEntry::new(target, edge_id, label));
                 self.incoming
                     .insert(target, AdjacencyEntry::new(source, edge_id, label));
                 // Maintain the namespace membership index (Issue #3349).
-                self.ns_edges.entry(ns).or_default().insert(edge_id);
+                self.ns_edges.entry(ns_id).or_default().insert(edge_id);
             }
         }
     }
@@ -619,8 +639,8 @@ impl CurrentIndexes {
         self.nodes.remove(&id).map(|(_, node)| {
             self.node_headers.remove(&id);
             // Drop the node from its namespace membership set (Issue #3349).
-            let ns = node.namespace();
-            let now_empty = match self.ns_nodes.get(&ns) {
+            let ns_id = intern_namespace(&node.namespace());
+            let now_empty = match self.ns_nodes.get(&ns_id) {
                 Some(members) => {
                     members.remove(&id);
                     members.is_empty()
@@ -633,7 +653,7 @@ impl CurrentIndexes {
             // shard write lock — so a concurrent insert racing the reclaim never
             // removes a set that has just become non-empty.
             if now_empty {
-                self.ns_nodes.remove_if(&ns, |_, set| set.is_empty());
+                self.ns_nodes.remove_if(&ns_id, |_, set| set.is_empty());
             }
             node
         })
@@ -686,8 +706,8 @@ impl CurrentIndexes {
             self.outgoing.delete(id);
             self.incoming.delete(id);
             // Drop the edge from its namespace membership set (Issue #3349).
-            let ns = edge.namespace();
-            let now_empty = match self.ns_edges.get(&ns) {
+            let ns_id = intern_namespace(&edge.namespace());
+            let now_empty = match self.ns_edges.get(&ns_id) {
                 Some(members) => {
                     members.remove(&id);
                     members.is_empty()
@@ -698,7 +718,7 @@ impl CurrentIndexes {
             // guard is dropped before `remove_if`, which re-checks under the shard
             // write lock so a concurrent insert never loses its set.
             if now_empty {
-                self.ns_edges.remove_if(&ns, |_, set| set.is_empty());
+                self.ns_edges.remove_if(&ns_id, |_, set| set.is_empty());
             }
             edge
         })
@@ -721,7 +741,7 @@ impl CurrentIndexes {
     /// need determinism should sort.
     pub fn namespace_node_ids(&self, namespace: &Namespace) -> Vec<NodeId> {
         self.ns_nodes
-            .get(namespace)
+            .get(&intern_namespace(namespace))
             .map(|members| members.iter().map(|e| *e.key()).collect())
             .unwrap_or_default()
     }
@@ -729,20 +749,32 @@ impl CurrentIndexes {
     /// Edge ids currently in `namespace`, from the secondary membership index.
     pub fn namespace_edge_ids(&self, namespace: &Namespace) -> Vec<EdgeId> {
         self.ns_edges
-            .get(namespace)
+            .get(&intern_namespace(namespace))
             .map(|members| members.iter().map(|e| *e.key()).collect())
             .unwrap_or_default()
     }
 
     /// Whether `node_id` currently lives in `namespace` (Issue #3349, PR2).
     ///
-    /// O(1) membership test against the secondary index — no property load, no
-    /// `Namespace` allocation — so a scoped traversal's per-edge boundary check
-    /// is a hash probe rather than a full node reconstruction.
+    /// Convenience wrapper that interns `namespace` and delegates to
+    /// [`node_in_namespace_id`](Self::node_in_namespace_id). Hot loops that probe
+    /// the same scope repeatedly should intern once (via
+    /// [`NamespaceScope::resolved_ids`](crate::core::namespace::NamespaceScope::resolved_ids))
+    /// and call the `_id` form to avoid re-interning per candidate.
     #[inline]
     pub fn node_in_namespace(&self, node_id: NodeId, namespace: &Namespace) -> bool {
+        self.node_in_namespace_id(node_id, intern_namespace(namespace))
+    }
+
+    /// Whether `node_id` currently lives in the interned namespace `ns_id`
+    /// (Issue #3349, PR2). O(1): an identity-hashed outer probe plus a set
+    /// membership test — no property load, no `Namespace` allocation, no string
+    /// hashing — so a scoped traversal's per-edge boundary check is two integer
+    /// hash probes.
+    #[inline]
+    pub fn node_in_namespace_id(&self, node_id: NodeId, ns_id: NamespaceId) -> bool {
         self.ns_nodes
-            .get(namespace)
+            .get(&ns_id)
             .is_some_and(|members| members.contains(&node_id))
     }
 
@@ -750,8 +782,16 @@ impl CurrentIndexes {
     /// edge counterpart of [`node_in_namespace`](Self::node_in_namespace).
     #[inline]
     pub fn edge_in_namespace(&self, edge_id: EdgeId, namespace: &Namespace) -> bool {
+        self.edge_in_namespace_id(edge_id, intern_namespace(namespace))
+    }
+
+    /// Whether `edge_id` currently lives in the interned namespace `ns_id`
+    /// (Issue #3349, PR2). The edge counterpart of
+    /// [`node_in_namespace_id`](Self::node_in_namespace_id).
+    #[inline]
+    pub fn edge_in_namespace_id(&self, edge_id: EdgeId, ns_id: NamespaceId) -> bool {
         self.ns_edges
-            .get(namespace)
+            .get(&ns_id)
             .is_some_and(|members| members.contains(&edge_id))
     }
 
@@ -759,7 +799,7 @@ impl CurrentIndexes {
     #[inline]
     pub fn namespace_node_count(&self, namespace: &Namespace) -> usize {
         self.ns_nodes
-            .get(namespace)
+            .get(&intern_namespace(namespace))
             .map_or(0, |members| members.len())
     }
 
@@ -767,7 +807,7 @@ impl CurrentIndexes {
     #[inline]
     pub fn namespace_edge_count(&self, namespace: &Namespace) -> usize {
         self.ns_edges
-            .get(namespace)
+            .get(&intern_namespace(namespace))
             .map_or(0, |members| members.len())
     }
 
@@ -777,13 +817,17 @@ impl CurrentIndexes {
     pub fn populated_namespaces(&self) -> std::collections::BTreeSet<Namespace> {
         let mut out = std::collections::BTreeSet::new();
         for entry in self.ns_nodes.iter() {
-            if !entry.value().is_empty() {
-                out.insert(entry.key().clone());
+            if !entry.value().is_empty()
+                && let Some(ns) = resolve_namespace_id(*entry.key())
+            {
+                out.insert(ns);
             }
         }
         for entry in self.ns_edges.iter() {
-            if !entry.value().is_empty() {
-                out.insert(entry.key().clone());
+            if !entry.value().is_empty()
+                && let Some(ns) = resolve_namespace_id(*entry.key())
+            {
+                out.insert(ns);
             }
         }
         out

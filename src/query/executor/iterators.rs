@@ -14,7 +14,7 @@ use tracing;
 use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::namespace::NamespaceScope;
+use crate::core::namespace::{NamespaceId, NamespaceScope};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::vector::DistanceMetric as VectorMetric;
@@ -1510,6 +1510,11 @@ pub struct TraversalIterator {
     /// namespace ∉ scope — so an out-of-scope node is never reached, emitted, or
     /// used as a bridge. `None` ⇒ prior namespace-agnostic behavior.
     scope: Option<Arc<NamespaceScope>>,
+    /// The attached scope resolved to interned ids once (Issue #3349, PR2), so
+    /// the current-state boundary check is a per-edge integer-hash membership
+    /// probe rather than a per-edge string hash. `None` when no restricting scope
+    /// is attached or the scope is `All`.
+    resolved_scope: Option<Vec<NamespaceId>>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
     visited: HashSet<NodeId>,
@@ -1545,6 +1550,7 @@ impl TraversalIterator {
             temporal_context,
             bind_edge: false,
             scope: None,
+            resolved_scope: None,
             frontier: VecDeque::new(),
             visited: HashSet::new(),
             input_exhausted: false,
@@ -1557,6 +1563,9 @@ impl TraversalIterator {
     /// emitted nor used to bridge deeper). [`NamespaceScope::All`] is a no-op.
     #[must_use]
     pub fn with_namespace_scope(mut self, scope: Arc<NamespaceScope>) -> Self {
+        // Pre-resolve to interned ids once so the current-state boundary check
+        // (Issue #3349, PR2) avoids per-edge string hashing.
+        self.resolved_scope = scope.resolved_ids();
         self.scope = Some(scope);
         self
     }
@@ -1575,10 +1584,12 @@ impl TraversalIterator {
         }
         // Fast path (current-state traversal): namespace is immutable, so the
         // O(1) membership index is authoritative — no full edge/node
-        // reconstruction. Two hash probes per edge.
+        // reconstruction. Two interned-id hash probes per edge (the scope was
+        // resolved to ids once in `with_namespace_scope`).
         if self.temporal_context.is_none() {
-            return scope_contains_current_edge(&self.current, edge_id, scope)
-                && scope_contains_current_node(&self.current, target, scope);
+            let resolved = self.resolved_scope.as_deref();
+            return scope_contains_current_edge(&self.current, edge_id, resolved)
+                && scope_contains_current_node(&self.current, target, resolved);
         }
         // Temporal traversal: reconstruct the edge and target AS-OF the
         // coordinate so a since-deleted-but-then-valid edge is judged by its
@@ -1911,31 +1922,35 @@ impl ResultIterator for TraversalIterator {
     }
 }
 
-/// Whether the current edge `edge_id` is inside `scope`, via O(1) membership
-/// probes (Issue #3349, PR2). [`NamespaceScope::All`] matches everything.
+/// Whether the current edge `edge_id` is inside the **pre-resolved** scope
+/// `resolved` (Issue #3349, PR2), via O(1) interned-id membership probes.
+/// `None` = `All` (matches everything). Resolving the scope to ids once (per
+/// iterator / per traversal) and reusing them avoids per-edge string hashing.
 fn scope_contains_current_edge(
     current: &CurrentStorage,
     edge_id: EdgeId,
-    scope: &NamespaceScope,
+    resolved: Option<&[NamespaceId]>,
 ) -> bool {
-    match scope {
-        NamespaceScope::All => true,
-        NamespaceScope::Single(ns) => current.edge_in_namespace(edge_id, ns),
-        NamespaceScope::List(list) => list.iter().any(|ns| current.edge_in_namespace(edge_id, ns)),
+    match resolved {
+        None => true,
+        Some(ids) => ids
+            .iter()
+            .any(|id| current.edge_in_namespace_id(edge_id, *id)),
     }
 }
 
-/// Whether the current node `node_id` is inside `scope`, via O(1) membership
-/// probes (Issue #3349, PR2). See [`scope_contains_current_edge`].
+/// Whether the current node `node_id` is inside the pre-resolved scope
+/// `resolved` (Issue #3349, PR2). See [`scope_contains_current_edge`].
 fn scope_contains_current_node(
     current: &CurrentStorage,
     node_id: NodeId,
-    scope: &NamespaceScope,
+    resolved: Option<&[NamespaceId]>,
 ) -> bool {
-    match scope {
-        NamespaceScope::All => true,
-        NamespaceScope::Single(ns) => current.node_in_namespace(node_id, ns),
-        NamespaceScope::List(list) => list.iter().any(|ns| current.node_in_namespace(node_id, ns)),
+    match resolved {
+        None => true,
+        Some(ids) => ids
+            .iter()
+            .any(|id| current.node_in_namespace_id(node_id, *id)),
     }
 }
 
@@ -1958,6 +1973,10 @@ pub struct ScopeFilterIterator {
     input: Box<dyn ResultIterator>,
     scope: Arc<NamespaceScope>,
     current: Arc<CurrentStorage>,
+    /// The scope resolved to interned ids once at construction (Issue #3349, PR2)
+    /// so the id-only branches probe by integer id without per-row string
+    /// hashing. `None` = `All` (no filter).
+    resolved: Option<Vec<NamespaceId>>,
 }
 
 impl ScopeFilterIterator {
@@ -1968,10 +1987,12 @@ impl ScopeFilterIterator {
         scope: Arc<NamespaceScope>,
         current: Arc<CurrentStorage>,
     ) -> Self {
+        let resolved = scope.resolved_ids();
         ScopeFilterIterator {
             input,
             scope,
             current,
+            resolved,
         }
     }
 
@@ -1996,10 +2017,10 @@ impl ScopeFilterIterator {
             EntityResult::Node(node) => self.scope.contains(&node.namespace()),
             EntityResult::Edge(edge) => self.scope.contains(&edge.namespace()),
             EntityResult::NodeId(id) => {
-                scope_contains_current_node(&self.current, *id, &self.scope)
+                scope_contains_current_node(&self.current, *id, self.resolved.as_deref())
             }
             EntityResult::EdgeId(id) => {
-                scope_contains_current_edge(&self.current, *id, &self.scope)
+                scope_contains_current_edge(&self.current, *id, self.resolved.as_deref())
             }
             // A null binding or a computed (aggregate / multi-variable) row has
             // no single scoped entity — pass it through unchanged.

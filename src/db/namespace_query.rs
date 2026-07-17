@@ -24,7 +24,7 @@
 use crate::core::error::{Error, Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
-use crate::core::namespace::{Namespace, NamespaceError, NamespaceScope};
+use crate::core::namespace::{Namespace, NamespaceError, NamespaceId, NamespaceScope};
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::db::ops::NodesAtTime;
@@ -42,50 +42,70 @@ impl AletheiaDB {
     ///   ([`NamespaceScope::list`]); this method also rejects a `List` that
     ///   was built by other means and is empty.
     pub(crate) fn validate_scope(&self, scope: &NamespaceScope) -> Result<()> {
-        if let NamespaceScope::List(list) = scope
-            && list.is_empty()
-        {
-            return Err(Error::Namespace(NamespaceError::InvalidName {
-                name: String::new(),
-                reason: "namespace scope list must not be empty".to_string(),
-            }));
-        }
-        let Some(namespaces) = scope.explicit_namespaces() else {
-            return Ok(()); // `All` names no finite set — nothing to check.
-        };
-        for ns in namespaces {
-            if self.namespaces.get(ns.as_str()).is_none() {
-                return Err(Error::Namespace(NamespaceError::NotFound {
-                    namespace: ns.into_string(),
-                }));
+        // Allocation-free (Issue #3349, PR2 performance): probe the registry
+        // directly per named namespace rather than materializing (and cloning)
+        // the `explicit_namespaces()` vec on the scoped hot path.
+        match scope {
+            NamespaceScope::All => Ok(()),
+            NamespaceScope::Single(ns) => self.check_namespace_registered(ns),
+            NamespaceScope::List(list) => {
+                if list.is_empty() {
+                    return Err(Error::Namespace(NamespaceError::InvalidName {
+                        name: String::new(),
+                        reason: "namespace scope list must not be empty".to_string(),
+                    }));
+                }
+                for ns in list {
+                    self.check_namespace_registered(ns)?;
+                }
+                Ok(())
             }
+        }
+    }
+
+    /// Registry membership check for a single namespace. The implicit `default`
+    /// always resolves.
+    #[inline]
+    fn check_namespace_registered(&self, ns: &Namespace) -> Result<()> {
+        if self.namespaces.get(ns.as_str()).is_none() {
+            return Err(Error::Namespace(NamespaceError::NotFound {
+                namespace: ns.as_str().to_string(),
+            }));
         }
         Ok(())
     }
 
-    /// O(1) membership probe: is the current node `node_id` inside `scope`,
-    /// using the secondary membership index (no property load, no `Namespace`
-    /// allocation)? [`NamespaceScope::All`] matches everything. Used by the hot
-    /// scoped-traversal loop so a per-edge boundary check is a hash probe.
-    fn scope_contains_current_node(&self, node_id: NodeId, scope: &NamespaceScope) -> bool {
-        match scope {
-            NamespaceScope::All => true,
-            NamespaceScope::Single(ns) => self.current.node_in_namespace(node_id, ns),
-            NamespaceScope::List(list) => list
+    /// O(1) membership probe: is the current node `node_id` inside the
+    /// **pre-resolved** scope `resolved` (Issue #3349, PR2)? `None` = `All`
+    /// (matches everything). The scope is resolved to interned ids **once** per
+    /// query (via [`NamespaceScope::resolved_ids`]) and reused across every edge,
+    /// so the per-edge boundary check is an integer-hashed membership probe with
+    /// no property load, no `Namespace` allocation, and no string hashing.
+    fn scope_contains_current_node(
+        &self,
+        node_id: NodeId,
+        resolved: Option<&[NamespaceId]>,
+    ) -> bool {
+        match resolved {
+            None => true,
+            Some(ids) => ids
                 .iter()
-                .any(|ns| self.current.node_in_namespace(node_id, ns)),
+                .any(|id| self.current.node_in_namespace_id(node_id, *id)),
         }
     }
 
-    /// O(1) membership probe for a current edge. See
-    /// [`scope_contains_current_node`](Self::scope_contains_current_node).
-    fn scope_contains_current_edge(&self, edge_id: EdgeId, scope: &NamespaceScope) -> bool {
-        match scope {
-            NamespaceScope::All => true,
-            NamespaceScope::Single(ns) => self.current.edge_in_namespace(edge_id, ns),
-            NamespaceScope::List(list) => list
+    /// O(1) membership probe for a current edge against the pre-resolved scope.
+    /// See [`scope_contains_current_node`](Self::scope_contains_current_node).
+    fn scope_contains_current_edge(
+        &self,
+        edge_id: EdgeId,
+        resolved: Option<&[NamespaceId]>,
+    ) -> bool {
+        match resolved {
+            None => true,
+            Some(ids) => ids
                 .iter()
-                .any(|ns| self.current.edge_in_namespace(edge_id, ns)),
+                .any(|id| self.current.edge_in_namespace_id(edge_id, *id)),
         }
     }
 
@@ -192,12 +212,15 @@ impl AletheiaDB {
     ) -> Result<Vec<NodeId>> {
         self.validate_scope(scope)?;
         let mut ids = self.find_nodes_by_property(label, property_key, property_value);
-        // `All` names every namespace, so there is nothing to filter — skip the
-        // per-node load/clone entirely.
-        if !matches!(scope, NamespaceScope::All) {
-            ids.retain(|id| match self.get_node(*id) {
-                Ok(node) => scope.contains(&node.namespace()),
-                Err(_) => false,
+        // `All` (`resolved_ids() == None`) names every namespace, so there is
+        // nothing to filter. Otherwise filter via the O(1) interned-id membership
+        // probe rather than cloning a whole `Node` just to read its namespace
+        // (Issue #3349 B2).
+        if let Some(allowed) = scope.resolved_ids() {
+            ids.retain(|id| {
+                allowed
+                    .iter()
+                    .any(|ns_id| self.current.node_in_namespace_id(*id, *ns_id))
             });
         }
         ids.sort_unstable();
@@ -231,11 +254,16 @@ impl AletheiaDB {
         scope: &NamespaceScope,
     ) -> Result<Vec<NodeId>> {
         self.validate_scope(scope)?;
+        // Resolve the scope to interned ids ONCE, then reuse across every edge —
+        // the per-edge probe is then an integer hash, not a string hash
+        // (Issue #3349, PR2 performance).
+        let resolved = scope.resolved_ids();
+        let resolved = resolved.as_deref();
         // The traversal must start from an in-scope node; otherwise the caller
         // could probe out-of-scope adjacency. An out-of-scope (or non-existent)
         // start is reported as not-found, exactly like `get_node_scoped`. The
         // O(1) membership probe avoids loading the start node's properties.
-        if !self.scope_contains_current_node(start, scope) {
+        if !self.scope_contains_current_node(start, resolved) {
             return Err(StorageError::NodeNotFound(start).into());
         }
 
@@ -261,13 +289,13 @@ impl AletheiaDB {
                 // target node's namespace ∈ scope. Namespace is immutable, so the
                 // current-state membership index is authoritative for the
                 // (current-state) traversal.
-                if !self.scope_contains_current_edge(edge_id, scope) {
+                if !self.scope_contains_current_edge(edge_id, resolved) {
                     continue;
                 }
                 let Ok(target) = self.current.get_edge_target(edge_id) else {
                     continue;
                 };
-                if !self.scope_contains_current_node(target, scope) {
+                if !self.scope_contains_current_node(target, resolved) {
                     continue;
                 }
                 if seen.insert(target) {

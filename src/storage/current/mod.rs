@@ -1137,6 +1137,19 @@ impl CurrentStorage {
         self.indexes.node_in_namespace(node_id, namespace)
     }
 
+    /// Whether `node_id` currently lives in the interned namespace `ns_id`
+    /// (Issue #3349, PR2 performance). The pre-interned hot-path form of
+    /// [`node_in_namespace`](Self::node_in_namespace) — no per-call string
+    /// hashing.
+    #[inline]
+    pub fn node_in_namespace_id(
+        &self,
+        node_id: NodeId,
+        ns_id: crate::core::namespace::NamespaceId,
+    ) -> bool {
+        self.indexes.node_in_namespace_id(node_id, ns_id)
+    }
+
     /// Whether `edge_id` currently lives in `namespace` (Issue #3349, PR2). O(1)
     /// membership probe — no property load. See
     /// [`node_in_namespace`](Self::node_in_namespace).
@@ -1147,6 +1160,18 @@ impl CurrentStorage {
         namespace: &crate::core::namespace::Namespace,
     ) -> bool {
         self.indexes.edge_in_namespace(edge_id, namespace)
+    }
+
+    /// Whether `edge_id` currently lives in the interned namespace `ns_id`
+    /// (Issue #3349, PR2 performance). The pre-interned hot-path form of
+    /// [`edge_in_namespace`](Self::edge_in_namespace).
+    #[inline]
+    pub fn edge_in_namespace_id(
+        &self,
+        edge_id: EdgeId,
+        ns_id: crate::core::namespace::NamespaceId,
+    ) -> bool {
+        self.indexes.edge_in_namespace_id(edge_id, ns_id)
     }
 
     /// Number of nodes currently in `namespace` (O(1) membership-set read).
