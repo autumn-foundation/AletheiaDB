@@ -489,6 +489,20 @@ impl AletheiaDB {
         self.namespaces.remove(&ns)
     }
 
+    /// Idempotently register a namespace after a successful namespaced write
+    /// (Issue #3349, PR3a). A no-op for the implicit `default`. Called by the
+    /// MCP/HTTP write handlers **after** the entity commits, so a failed write
+    /// never leaves a durable phantom namespace (see
+    /// [`create_node_in_namespace`](Self::create_node_in_namespace)).
+    ///
+    /// # Errors
+    ///
+    /// Propagates a registry persist failure (fsync error).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn register_namespace_on_write(&self, namespace: &Namespace) -> Result<()> {
+        self.namespaces.ensure_registered(namespace)
+    }
+
     /// Create a node in the given namespace (Issue #3349).
     ///
     /// The namespace is validated, auto-registered if new, and stamped onto the

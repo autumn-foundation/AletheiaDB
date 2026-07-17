@@ -64,6 +64,7 @@ fn recovery_preserves_data_provenance_principal_and_key_store() {
         // bundle must compose the caller's `source` with the server-stamped
         // `principal`.
         let response = server.create_node(CreateNodeRequest {
+            namespace: None,
             derived_from: None,
             label: "Person".to_string(),
             properties: Some(
@@ -198,6 +199,7 @@ fn crash_recovery_via_wal_replay_preserves_provenance_principal_and_key_store() 
         );
 
         let response = server.create_node(CreateNodeRequest {
+            namespace: None,
             derived_from: None,
             label: "Person".to_string(),
             properties: Some(

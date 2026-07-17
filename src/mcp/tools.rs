@@ -188,6 +188,17 @@ pub struct CreateNodeRequest {
                        Omit for no lineage. Query it later via lineage_upstream/lineage_downstream."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace to create this node in (Issue #3349).
+    #[schemars(
+        description = "Optional namespace (agent/session scope) to create this node in, e.g. \
+                       'agent:planner'. Omit to use the default namespace ('default'), which is \
+                       byte-identical to pre-namespace behavior. An unknown namespace is \
+                       auto-registered. The namespace is fixed at creation and immutable \
+                       thereafter; it is surfaced back as the first-class `namespace` field on \
+                       reads and never as a user property. Charset [A-Za-z0-9._:/-], max 128 bytes."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to update an existing node's properties.
@@ -228,6 +239,16 @@ pub struct UpdateNodeRequest {
                        before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable after
+    /// creation, so supplying one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on an \
+                       update is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it; the node keeps its original namespace, echoed back as the \
+                       first-class `namespace` field."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to delete a node.
@@ -262,6 +283,15 @@ pub struct DeleteNodeRequest {
                        Transaction time is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on a \
+                       delete is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to retract a node: close its valid-time interval without
@@ -441,6 +471,17 @@ pub struct CreateEdgeRequest {
                        write with a structured error before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace to create this edge in (Issue #3349).
+    #[schemars(
+        description = "Optional namespace (agent/session scope) to create this edge in, e.g. \
+                       'agent:planner'. Omit to use the default namespace ('default'). An unknown \
+                       namespace is auto-registered. A cross-namespace edge (endpoints in other \
+                       namespaces) is legal; the edge's own namespace governs whether a scoped \
+                       traversal crosses it. Immutable after creation; echoed back as the \
+                       first-class `namespace` field. Charset [A-Za-z0-9._:/-], max 128 bytes."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to update an existing edge's properties.
@@ -481,6 +522,16 @@ pub struct UpdateEdgeRequest {
                        write before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on an \
+                       update is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it; the edge keeps its original namespace, echoed back as the \
+                       first-class `namespace` field."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to delete an edge.
@@ -499,6 +550,15 @@ pub struct DeleteEdgeRequest {
                        is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on a \
+                       delete is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to list edges with optional filtering.
@@ -1596,6 +1656,13 @@ pub struct NodeResponse {
     pub id: u64,
     pub label: String,
     pub properties: HashMap<String, serde_json::Value>,
+    /// The node's immutable namespace (Issue #3349), surfaced as a first-class
+    /// field (the ride-along property is elided). Omitted for `default`-namespace
+    /// entities so a single-agent (`default`-only) response stays byte-identical
+    /// to pre-namespace behavior (design AC1); present whenever the namespace is
+    /// non-default.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub namespace: Option<String>,
     /// The current version's write-time provenance bundle, if any. Omitted
     /// (never a fabricated `null`) when the version has none (Issue #3224).
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1615,6 +1682,13 @@ pub struct EdgeResponse {
     pub target_id: u64,
     pub label: String,
     pub properties: HashMap<String, serde_json::Value>,
+    /// The edge's immutable namespace (Issue #3349), surfaced as a first-class
+    /// field (the ride-along property is elided). Omitted for `default`-namespace
+    /// entities so a single-agent (`default`-only) response stays byte-identical
+    /// to pre-namespace behavior (design AC1); present whenever the namespace is
+    /// non-default.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub namespace: Option<String>,
     /// The current version's write-time provenance bundle, if any. Omitted
     /// (never a fabricated `null`) when the version has none (Issue #3224).
     #[serde(skip_serializing_if = "Option::is_none", default)]

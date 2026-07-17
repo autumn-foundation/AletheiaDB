@@ -147,6 +147,7 @@ async fn create_node_byte_parity_with_legacy_mcp() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).create_node(CreateNodeRequest {
+        namespace: None,
         label: "Person".to_string(),
         properties: Some(props(&[("name", json!("Alice")), ("age", json!(30))])),
         valid_time: None,
@@ -191,6 +192,7 @@ async fn create_node_backdated_valid_time_honored() {
     );
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).create_node(CreateNodeRequest {
+        namespace: None,
         label: "Person".to_string(),
         properties: Some(props(&[("name", json!("Alice"))])),
         valid_time: Some(vt.to_string()),
@@ -241,6 +243,7 @@ async fn create_node_anonymous_mode_parity() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).create_node(CreateNodeRequest {
+        namespace: None,
         label: "Person".to_string(),
         properties: Some(props(&[("name", json!("Alice"))])),
         valid_time: None,
@@ -284,6 +287,7 @@ async fn update_node_byte_parity_with_legacy_mcp() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).update_node(UpdateNodeRequest {
+        namespace: None,
         node_id: id_mcp.as_u64(),
         properties: props(&[("name", json!("Alice")), ("age", json!(31))]),
         valid_time: None,
@@ -337,6 +341,7 @@ async fn delete_node_refuses_without_detach_reports_connected_edges() {
     assert_eq!(http_body["success"], false);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).delete_node(DeleteNodeRequest {
+        namespace: None,
         node_id: alice_mcp.as_u64(),
         detach: None,
         valid_time: None,
@@ -382,6 +387,7 @@ async fn delete_node_detach_removes_edges() {
     assert_eq!(http_body["edges_removed"], 1);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).delete_node(DeleteNodeRequest {
+        namespace: None,
         node_id: alice_mcp.as_u64(),
         detach: Some(true),
         valid_time: None,
@@ -406,6 +412,7 @@ async fn delete_node_clean_when_no_edges() {
     assert_eq!(http_body["edges_removed"], 0);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).delete_node(DeleteNodeRequest {
+        namespace: None,
         node_id: id_mcp.as_u64(),
         detach: None,
         valid_time: None,

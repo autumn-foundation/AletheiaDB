@@ -644,6 +644,7 @@ impl AletheiaMcpServer {
     ///     valid_time: None,
     ///     provenance: None,
     ///     derived_from: None,
+    ///     namespace: None,
     /// };
     /// ```
     ///
@@ -1364,8 +1365,21 @@ impl AletheiaMcpServer {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
             properties: self.property_map_to_json(&node.properties, include_vectors),
+            namespace: Self::namespace_field(node.namespace()),
             provenance,
             temporal,
+        }
+    }
+
+    /// Render an entity's namespace as the first-class response field
+    /// (Issue #3349): `None` for the implicit `default` namespace — so a
+    /// single-agent (`default`-only) response stays byte-identical to
+    /// pre-namespace behavior — and `Some(name)` for any non-default namespace.
+    fn namespace_field(ns: crate::core::namespace::Namespace) -> Option<String> {
+        if ns.is_default() {
+            None
+        } else {
+            Some(ns.into_string())
         }
     }
 
@@ -1382,6 +1396,7 @@ impl AletheiaMcpServer {
             target_id: edge.target.as_u64(),
             label: self.interned_to_string(edge.label),
             properties: self.property_map_to_json(&edge.properties, include_vectors),
+            namespace: Self::namespace_field(edge.namespace()),
             provenance,
             temporal,
         }
@@ -1593,6 +1608,45 @@ impl AletheiaMcpServer {
             .map(|s| self.parse_timestamp(s))
             .transpose()
             .map_err(|e| self.invalid_argument(&format!("Invalid {label}: {e}")))
+    }
+
+    /// Parse an optional namespace **write** argument (Issue #3349, PR3a),
+    /// returning a structured `INVALID_ARGUMENT` error result on a malformed
+    /// name. `None`/absent ⇒ the default namespace (unchanged behavior). A
+    /// supplied `"default"` resolves to the default namespace (equivalent to
+    /// omitting it).
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp`.
+    #[allow(clippy::result_large_err)]
+    fn parse_opt_namespace(
+        &self,
+        value: &Option<String>,
+    ) -> std::result::Result<Option<crate::core::namespace::Namespace>, CallToolResult> {
+        match value.as_deref() {
+            None => Ok(None),
+            Some(s) => match crate::core::namespace::Namespace::new(s) {
+                Ok(ns) => Ok(Some(ns)),
+                Err(e) => Err(self.db_error(crate::core::error::Error::Namespace(e))),
+            },
+        }
+    }
+
+    /// Reject an explicit namespace supplied to a **non-create** write
+    /// (update / delete — Issue #3349, PR3a): a namespace is immutable after
+    /// creation, so supplying one is `INVALID_ARGUMENT`
+    /// ([`NamespaceError::Immutable`]) rather than a silent no-op. `None` ⇒ OK.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see above.
+    #[allow(clippy::result_large_err)]
+    fn reject_namespace_on_write_update(
+        &self,
+        value: &Option<String>,
+    ) -> std::result::Result<(), CallToolResult> {
+        if value.is_some() {
+            return Err(self.db_error(crate::core::error::Error::Namespace(
+                crate::core::namespace::NamespaceError::Immutable,
+            )));
+        }
+        Ok(())
     }
 
     /// Resolve a pair of independently-optional `as_of_valid_time` /
@@ -2526,12 +2580,20 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let namespace = match self.parse_opt_namespace(&req.namespace) {
+            Ok(ns) => ns,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
         if let Some(provenance) = provenance {
             options = options.with_provenance(provenance);
+        }
+        if let Some(ns) = namespace.clone() {
+            options = options.with_namespace(ns);
         }
 
         let created = if derived_from.is_empty() {
@@ -2547,6 +2609,15 @@ impl AletheiaMcpServer {
                 )
                 .map(|(node_id, _version)| node_id)
         };
+
+        // Auto-register the (non-default) namespace only AFTER a successful
+        // commit, mirroring `create_node_in_namespace` (a failed write must not
+        // leave a durable phantom namespace).
+        if let (Ok(_), Some(ns)) = (&created, &namespace)
+            && let Err(e) = self.db.register_namespace_on_write(ns)
+        {
+            return self.db_error(e);
+        }
 
         match created {
             Ok(node_id) => match self.db.get_node(node_id) {
@@ -2578,6 +2649,12 @@ impl AletheiaMcpServer {
             // regression vs pre-#3234 responses).
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
+
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on an update is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
 
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
@@ -2645,6 +2722,12 @@ impl AletheiaMcpServer {
             // regression vs pre-#3234 responses).
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
+
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on a delete is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
 
         let detach = req.detach.unwrap_or(false);
 
@@ -3360,12 +3443,20 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let namespace = match self.parse_opt_namespace(&req.namespace) {
+            Ok(ns) => ns,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
         if let Some(provenance) = provenance {
             options = options.with_provenance(provenance);
+        }
+        if let Some(ns) = namespace.clone() {
+            options = options.with_namespace(ns);
         }
 
         let created = if derived_from.is_empty() {
@@ -3383,6 +3474,14 @@ impl AletheiaMcpServer {
                 )
                 .map(|(edge_id, _version)| edge_id)
         };
+
+        // Auto-register the (non-default) namespace only AFTER a successful
+        // commit (see handle_create_node).
+        if let (Ok(_), Some(ns)) = (&created, &namespace)
+            && let Err(e) = self.db.register_namespace_on_write(ns)
+        {
+            return self.db_error(e);
+        }
 
         match created {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
@@ -3414,6 +3513,12 @@ impl AletheiaMcpServer {
             // regression vs pre-#3234 responses).
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
+
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on an update is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
 
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
@@ -3481,6 +3586,12 @@ impl AletheiaMcpServer {
             // regression vs pre-#3234 responses).
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
+
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on a delete is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
             Ok(v) => v,

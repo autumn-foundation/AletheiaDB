@@ -110,6 +110,7 @@ fn fixture() -> Fixture {
     // Second version of each entity so history/diff have two versions.
     let server = mcp_server(&db);
     let _ = server.update_node(UpdateNodeRequest {
+        namespace: None,
         node_id: alice,
         properties: [
             ("name".to_string(), json!("Alice")),
@@ -123,6 +124,7 @@ fn fixture() -> Fixture {
         derived_from: None,
     });
     let _ = server.update_edge(UpdateEdgeRequest {
+        namespace: None,
         edge_id: edge,
         properties: [("since".to_string(), json!(2021))].into_iter().collect(),
         valid_time: None,
