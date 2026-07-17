@@ -4,7 +4,7 @@
 //! The executor transforms physical operators into iterators that
 //! lazily produce results.
 
-mod iterators;
+pub(crate) mod iterators;
 mod profiling;
 mod results;
 
@@ -17,7 +17,6 @@ use crate::storage::historical::HistoricalStorage;
 
 use super::planner::physical::{PhysicalOp, PhysicalPlan};
 
-#[doc(hidden)]
 pub use iterators::EdgeScanIterator;
 #[doc(hidden)]
 pub use iterators::NodeScanIterator;
@@ -196,7 +195,10 @@ impl QueryExecutor {
     /// }
     /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
-        let iterator = self.build_op(&plan.root, &mut None, 0)?;
+        let iterator = {
+            let bind_edge = plan_needs_edge_binding(&plan.root);
+            self.build_op(&plan.root, &mut None, 0, bind_edge)?
+        };
         // Wrap with provenance filter to conditionally strip metadata
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
@@ -221,7 +223,10 @@ impl QueryExecutor {
     /// the registry.
     pub fn execute_profiled(&self, plan: &PhysicalPlan) -> Result<(QueryResults, ProfileRegistry)> {
         let mut registry: Option<ProfileRegistry> = Some(Vec::new());
-        let iterator = self.build_op(&plan.root, &mut registry, 0)?;
+        let iterator = {
+            let bind_edge = plan_needs_edge_binding(&plan.root);
+            self.build_op(&plan.root, &mut registry, 0, bind_edge)?
+        };
         let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
@@ -289,6 +294,11 @@ impl QueryExecutor {
         op: &PhysicalOp,
         profile: &mut Option<ProfileRegistry>,
         depth: usize,
+        // Whether the overall physical plan references an edge variable (a
+        // `Predicate::EdgeScoped` / `SortKey::EdgeProperty`), computed once at
+        // the plan root. When set, `IndexedTraversal` attaches the traversed
+        // edge to each row for edge-property WHERE / ORDER BY (Issue #3622).
+        bind_edge: bool,
     ) -> Result<Box<dyn ResultIterator>> {
         // Reserve this operator's profile slot *before* building its children so
         // the registry is in pre-order (the closure's mutable borrow of the
@@ -432,17 +442,20 @@ impl QueryExecutor {
                     depth: traversal_depth,
                     temporal_context,
                 } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
-                    Box::new(iterators::TraversalIterator::new(
-                        input_iter,
-                        *direction,
-                        label.clone(),
-                        *min_depth,
-                        *traversal_depth,
-                        Arc::clone(&self.current),
-                        Arc::clone(&self.historical),
-                        *temporal_context,
-                    ))
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    Box::new(
+                        iterators::TraversalIterator::new(
+                            input_iter,
+                            *direction,
+                            label.clone(),
+                            *min_depth,
+                            *traversal_depth,
+                            Arc::clone(&self.current),
+                            Arc::clone(&self.historical),
+                            *temporal_context,
+                        )
+                        .bind_edges(bind_edge),
+                    )
                 }
 
                 PhysicalOp::PropertyScan {
@@ -462,7 +475,7 @@ impl QueryExecutor {
                     // the AQL/Cypher single-entity pass-through. AQL/Cypher never
                     // emit `EdgeScan`, so this stays `false` there.
                     let edge_mode = subtree_yields_edges(input);
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     // Pass historical storage so a `Predicate::Provenance` leaf
                     // (Issue #3354a) can resolve each row entity's write-time
                     // provenance; property-only filters never touch it.
@@ -485,7 +498,7 @@ impl QueryExecutor {
                     threshold,
                     score_alias,
                 } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     Box::new(iterators::VectorRerankIterator::with_options(
                         input_iter,
                         embedding.clone(),
@@ -503,12 +516,12 @@ impl QueryExecutor {
                     count,
                     offset,
                 } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     Box::new(iterators::LimitIterator::new(input_iter, *offset, *count))
                 }
 
                 PhysicalOp::Project { input, properties } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     Box::new(iterators::ProjectIterator::new(
                         input_iter,
                         properties.clone(),
@@ -516,7 +529,7 @@ impl QueryExecutor {
                 }
 
                 PhysicalOp::OptionalApply { input, steps } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     Box::new(iterators::OptionalApplyIterator::new(
                         input_iter,
                         steps.clone(),
@@ -530,7 +543,7 @@ impl QueryExecutor {
                     group_keys,
                     aggregates,
                 } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     Box::new(iterators::AggregateIterator::new(
                         input_iter,
                         group_keys.clone(),
@@ -539,7 +552,7 @@ impl QueryExecutor {
                 }
 
                 PhysicalOp::TemporalWindowAggregate { input, spec } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     // Historical storage is required to reconstruct each matched
                     // entity's valid-time history per window (Issue #3363).
                     Box::new(iterators::TemporalWindowAggregateIterator::new(
@@ -550,7 +563,7 @@ impl QueryExecutor {
                 }
 
                 PhysicalOp::TemporalAlign { input, spec } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     // Historical storage is required to reconstruct each matched
                     // participant's valid-time history (and gating edge validity)
                     // at the alignment coordinates (Issue #3379).
@@ -562,7 +575,7 @@ impl QueryExecutor {
                 }
 
                 PhysicalOp::Distinct { input } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     Box::new(iterators::DistinctIterator::new(input_iter))
                 }
 
@@ -573,7 +586,7 @@ impl QueryExecutor {
                     // null. AQL/Cypher never emit `EdgeScan`, so this is `false`
                     // there and node-only sort-key extraction is unchanged.
                     let edge_mode = subtree_yields_edges(input);
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     // Pass historical storage so a `SortKey::Provenance` key
                     // (Issue #3354) can resolve each row entity's write-time
                     // provenance; property/score sorts never touch it.
@@ -588,7 +601,7 @@ impl QueryExecutor {
                 }
 
                 PhysicalOp::ProjectProvenance { input, projection } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     Box::new(iterators::ProvenanceProjectIterator::new(
                         input_iter,
                         projection.clone(),
@@ -597,7 +610,7 @@ impl QueryExecutor {
                 }
 
                 PhysicalOp::Count { input } => {
-                    let input_iter = self.build_op(input, profile, child_depth)?;
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
                     Box::new(iterators::CountIterator::new(input_iter))
                 }
 
@@ -759,6 +772,57 @@ fn subtree_yields_edges(op: &PhysicalOp) -> bool {
         | PhysicalOp::Project { input, .. }
         | PhysicalOp::Distinct { input, .. }
         | PhysicalOp::VectorRerank { input, .. } => subtree_yields_edges(input),
+        _ => false,
+    }
+}
+
+/// Whether the physical plan references an edge variable -- i.e. contains a
+/// [`Predicate::EdgeScoped`] leaf in any `Filter` or a [`SortKey::EdgeProperty`]
+/// key in any `Sort` (Issue #3622). Computed once at the plan root so the
+/// `IndexedTraversal` iterator only attaches the traversed edge to its rows
+/// (an extra reconstruct per row) when an edge-property `WHERE` / `ORDER BY`
+/// actually needs it; otherwise traversal behavior is byte-identical.
+fn plan_needs_edge_binding(op: &PhysicalOp) -> bool {
+    use crate::query::ir::{Predicate, SortKey};
+
+    fn predicate_has_edge_scoped(p: &Predicate) -> bool {
+        match p {
+            Predicate::EdgeScoped(_) => true,
+            Predicate::And(v) | Predicate::Or(v) => v.iter().any(predicate_has_edge_scoped),
+            Predicate::Not(inner) => predicate_has_edge_scoped(inner),
+            _ => false,
+        }
+    }
+
+    match op {
+        PhysicalOp::Filter { input, predicate } => {
+            predicate_has_edge_scoped(predicate) || plan_needs_edge_binding(input)
+        }
+        PhysicalOp::Sort { input, keys } => {
+            keys.iter()
+                .any(|(k, _)| matches!(k, SortKey::EdgeProperty(_)))
+                || plan_needs_edge_binding(input)
+        }
+        // Single-input pass-through operators: recurse into the child.
+        PhysicalOp::IndexedTraversal { input, .. }
+        | PhysicalOp::Limit { input, .. }
+        | PhysicalOp::Project { input, .. }
+        | PhysicalOp::ProjectProvenance { input, .. }
+        | PhysicalOp::Distinct { input, .. }
+        | PhysicalOp::Count { input, .. }
+        | PhysicalOp::Aggregate { input, .. }
+        | PhysicalOp::VectorRerank { input, .. }
+        | PhysicalOp::TemporalWindowAggregate { input, .. }
+        | PhysicalOp::TemporalAlign { input, .. }
+        | PhysicalOp::OptionalApply { input, .. } => plan_needs_edge_binding(input),
+        // Binary set operators: either branch may carry the reference.
+        PhysicalOp::HashJoin { left, right, .. }
+        | PhysicalOp::Union { left, right, .. }
+        | PhysicalOp::Intersect { left, right, .. }
+        | PhysicalOp::Except { left, right, .. } => {
+            plan_needs_edge_binding(left) || plan_needs_edge_binding(right)
+        }
+        // Leaf scans and other operators never carry an edge-scoped reference.
         _ => false,
     }
 }

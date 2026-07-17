@@ -1484,6 +1484,13 @@ pub struct TraversalIterator {
     /// Optional temporal context (valid_time, transaction_time) for edge filtering.
     /// When present, only edges that existed at the specified point in time are traversed.
     temporal_context: Option<(Timestamp, Timestamp)>,
+    /// When `true`, each emitted row carries the immediately-traversed edge
+    /// (reconstructed at `temporal_context`, or current-state) on its
+    /// [`QueryRow::edge`] side channel, for edge-property `WHERE` / `ORDER BY`
+    /// (Issue #3622). Set by the executor only when the physical plan references
+    /// an edge variable (a `Predicate::EdgeScoped` / `SortKey::EdgeProperty`),
+    /// so the overwhelming common case pays zero extra edge fetches.
+    bind_edge: bool,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
     visited: HashSet<NodeId>,
@@ -1517,9 +1524,37 @@ impl TraversalIterator {
             current,
             historical,
             temporal_context,
+            bind_edge: false,
             frontier: VecDeque::new(),
             visited: HashSet::new(),
             input_exhausted: false,
+        }
+    }
+
+    /// Enable attaching the immediately-traversed edge (reconstructed at the
+    /// query's bi-temporal coordinate) to each emitted row's
+    /// [`QueryRow::edge`] channel, for edge-property `WHERE` / `ORDER BY`
+    /// (Issue #3622). Defaults off, so ordinary traversals do no extra edge
+    /// work. Set by the executor only when the plan references an edge variable.
+    #[must_use]
+    pub fn bind_edges(mut self, enabled: bool) -> Self {
+        self.bind_edge = enabled;
+        self
+    }
+
+    /// Reconstruct the full edge `edge_id` as it exists at the traversal's
+    /// bi-temporal coordinate (or current state when none), for the
+    /// [`QueryRow::edge`] side channel (Issue #3622).
+    fn reconstruct_bound_edge(
+        &self,
+        edge_id: crate::core::EdgeId,
+    ) -> Result<crate::core::graph::Edge> {
+        match self.temporal_context {
+            Some((valid_time, tx_time)) => self
+                .historical
+                .read()
+                .get_edge_at_time(edge_id, valid_time, tx_time),
+            None => self.current.get_edge(edge_id),
         }
     }
 
@@ -1719,7 +1754,20 @@ impl ResultIterator for TraversalIterator {
                 {
                     match self.current.get_node(node_id) {
                         Ok(node) => {
-                            return Some(Ok(QueryRow::with_path(EntityResult::Node(node), path)));
+                            let mut row = QueryRow::with_path(EntityResult::Node(node), path);
+                            // Edge-property WHERE / ORDER BY (Issue #3622): attach
+                            // the immediately-traversed edge (the last edge in the
+                            // path), reconstructed at the query coordinate. Only
+                            // when the plan referenced an edge variable.
+                            if self.bind_edge
+                                && let Some(edge_id) = last_edge_in_path(&row.path)
+                            {
+                                match self.reconstruct_bound_edge(edge_id) {
+                                    Ok(edge) => row = row.with_edge_binding(edge),
+                                    Err(e) => return Some(Err(e)),
+                                }
+                            }
+                            return Some(Ok(row));
                         }
                         Err(e) => return Some(Err(e)),
                     }
@@ -1920,13 +1968,14 @@ impl FilterIterator {
     #[cfg(test)]
     fn evaluate(&self, node: &Node, prov: Option<&Provenance>) -> bool {
         let prov_cache: RefCell<Option<Option<Provenance>>> = RefCell::new(Some(prov.cloned()));
-        self.evaluate_predicate(&self.predicate, node, &prov_cache)
+        self.evaluate_predicate(&self.predicate, node, None, &prov_cache)
     }
 
     fn evaluate_predicate(
         &self,
         predicate: &Predicate,
         node: &Node,
+        edge: Option<&crate::core::graph::Edge>,
         prov_cache: &RefCell<Option<Option<Provenance>>>,
     ) -> bool {
         match predicate {
@@ -1950,6 +1999,14 @@ impl FilterIterator {
                 self.evaluate_ends_with(&node.properties, key, suffix)
             }
             Predicate::In { key, values } => self.evaluate_in(&node.properties, key, values),
+            // Edge-scoped leaf (Issue #3622): evaluate the wrapped sub-tree
+            // against the row's traversed edge with the shared openCypher edge
+            // semantics. A row whose edge is not valid at the query coordinate
+            // (no edge channel) fails the leaf.
+            Predicate::EdgeScoped(inner) => match edge {
+                Some(e) => self.evaluate_edge_full(inner, e, &RefCell::new(None)),
+                None => false,
+            },
             // Resolve provenance lazily so a cheaper conjunct that already
             // rejected the row short-circuits before any historical read.
             Predicate::Provenance(p) => {
@@ -1957,11 +2014,11 @@ impl FilterIterator {
             }
             Predicate::And(preds) => preds
                 .iter()
-                .all(|p| self.evaluate_predicate(p, node, prov_cache)),
+                .all(|p| self.evaluate_predicate(p, node, edge, prov_cache)),
             Predicate::Or(preds) => preds
                 .iter()
-                .any(|p| self.evaluate_predicate(p, node, prov_cache)),
-            Predicate::Not(pred) => !self.evaluate_predicate(pred, node, prov_cache),
+                .any(|p| self.evaluate_predicate(p, node, edge, prov_cache)),
+            Predicate::Not(pred) => !self.evaluate_predicate(pred, node, edge, prov_cache),
         }
     }
 
@@ -2095,10 +2152,13 @@ impl FilterIterator {
                 Some(self.evaluate_ends_with(props, key, suffix))
             }
             Predicate::In { key, values } => Some(self.evaluate_in(props, key, values)),
-            // Provenance / logical combinators need entity context.
-            Predicate::Provenance(_) | Predicate::And(_) | Predicate::Or(_) | Predicate::Not(_) => {
-                None
-            }
+            // Provenance / logical combinators / edge-scoped wrappers need
+            // entity context (resolved by the caller).
+            Predicate::Provenance(_)
+            | Predicate::And(_)
+            | Predicate::Or(_)
+            | Predicate::Not(_)
+            | Predicate::EdgeScoped(_) => None,
         }
     }
 
@@ -2140,6 +2200,10 @@ impl FilterIterator {
                 .iter()
                 .any(|p| self.evaluate_edge_full(p, edge, prov_cache)),
             Predicate::Not(pred) => !self.evaluate_edge_full(pred, edge, prov_cache),
+            // A nested edge-scoped wrapper (should not normally occur -- the AQL
+            // converter wraps leaves, not sub-trees) simply re-scopes to the
+            // same edge; unwrap and evaluate the inner tree.
+            Predicate::EdgeScoped(inner) => self.evaluate_edge_full(inner, edge, prov_cache),
             // Every property/structural leaf is resolved above; only provenance
             // leaves and logical combinators reach this match, and all four are
             // handled explicitly. A future `Predicate` variant that is neither
@@ -2312,6 +2376,9 @@ impl FilterIterator {
             | Predicate::Contains { .. }
             | Predicate::StartsWith { .. }
             | Predicate::EndsWith { .. } => false,
+            // A null OPTIONAL MATCH binding carries no traversed edge either, so
+            // an edge-scoped leaf is not-true (Issue #3622).
+            Predicate::EdgeScoped(_) => false,
             // A null OPTIONAL MATCH binding carries no entity and therefore no
             // provenance bundle: `provenance(x) IS NULL` is true, every other
             // provenance comparison is not-true (Issue #3354a).
@@ -2333,9 +2400,16 @@ impl ResultIterator for FilterIterator {
                         // and memoized per row, so an AND/OR of a property
                         // filter and a provenance filter shares one lookup and a
                         // cheaper conjunct's rejection skips the historical read
-                        // entirely (Issue #3354a).
+                        // entirely (Issue #3354a). A `Predicate::EdgeScoped` leaf
+                        // (Issue #3622) evaluates against the row's traversed
+                        // edge side channel.
                         let prov_cache: RefCell<Option<Option<Provenance>>> = RefCell::new(None);
-                        if self.evaluate_predicate(&self.predicate, node, &prov_cache) {
+                        if self.evaluate_predicate(
+                            &self.predicate,
+                            node,
+                            row.edge.as_ref(),
+                            &prov_cache,
+                        ) {
                             return Some(Ok(row));
                         }
                         // Filter didn't pass, continue to next
@@ -4222,7 +4296,10 @@ fn row_value<'a>(row: &'a QueryRow, key: &str) -> Option<&'a PropertyValue> {
 ///   `String`).
 /// - `source` / `target` -> the endpoint `NodeId` as its integer id.
 /// - `id` -> the edge's own `EdgeId` as its integer id.
-fn edge_structural_value(edge: &crate::core::graph::Edge, key: &str) -> Option<PropertyValue> {
+pub(crate) fn edge_structural_value(
+    edge: &crate::core::graph::Edge,
+    key: &str,
+) -> Option<PropertyValue> {
     match key {
         "type" | "label" => GLOBAL_INTERNER.resolve_with(edge.label, |s| PropertyValue::from(s)),
         "source" => Some(PropertyValue::Int(edge.source.as_u64() as i64)),
@@ -4230,6 +4307,26 @@ fn edge_structural_value(edge: &crate::core::graph::Edge, key: &str) -> Option<P
         "id" => Some(PropertyValue::Int(edge.id.as_u64() as i64)),
         _ => None,
     }
+}
+
+/// The id of the last edge in a traversal path (the edge that reached the
+/// path's final node), for attaching the single-hop traversed edge to a row
+/// (Issue #3622). `None` when the path is absent or contains no edge.
+fn last_edge_in_path(path: &Option<Vec<EntityId>>) -> Option<crate::core::EdgeId> {
+    path.as_ref()?.iter().rev().find_map(|e| match e {
+        EntityId::Edge(id) => Some(*id),
+        EntityId::Node(_) => None,
+    })
+}
+
+/// Resolve a [`SortKey::EdgeProperty`] key from a row's traversed edge side
+/// channel (Issue #3622): reserved structural fields (via
+/// [`edge_structural_value`], shadowing user props) first, then the edge's own
+/// properties. `None` when the row has no edge channel or the key is absent, so
+/// the row sorts as a null value.
+fn edge_sort_value(row: &QueryRow, key: &str) -> Option<PropertyValue> {
+    let edge = row.edge.as_ref()?;
+    edge_structural_value(edge, key).or_else(|| edge.properties.get(key).cloned())
 }
 
 /// `ORDER BY` iterator: buffers the entire input and stably sorts it by one or
@@ -4467,6 +4564,17 @@ impl SortIterator {
                 let bv = self.property_sort_value(b, prop);
                 Self::cmp_optional(av.as_deref(), bv.as_deref(), descending)
             }
+            // Edge-property ORDER BY (Issue #3622): resolve the key against the
+            // row's traversed edge side channel -- reserved structural fields
+            // (`type`/`label`/`source`/`target`/`id`) via `edge_structural_value`
+            // (shadowing user props), otherwise `edge.properties`. A row with no
+            // edge channel, or an absent key, sorts as null (openCypher null
+            // placement).
+            SortKey::EdgeProperty(prop) => {
+                let av = edge_sort_value(a, prop);
+                let bv = edge_sort_value(b, prop);
+                Self::cmp_optional(av.as_ref(), bv.as_ref(), descending)
+            }
             // Fallback on-the-fly resolution (Issue #3354). The hot path routes
             // provenance keys through `cmp_decorated` (resolve once per row), so
             // this arm is only a defensive fallback; it matches the WHERE-clause
@@ -4578,6 +4686,7 @@ impl ProvenanceProjectIterator {
             timestamp: row.timestamp,
             columns: Some(columns),
             bindings,
+            edge: row.edge,
         }
     }
 }
