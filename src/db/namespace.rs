@@ -498,6 +498,10 @@ impl AletheiaDB {
     /// # Errors
     ///
     /// Propagates a registry persist failure (fsync error).
+    // The only callers are the MCP write handlers (`src/mcp/server.rs`, gated on
+    // the `mcp-server` feature), so under `--no-default-features` this method is
+    // unused; keep the surface but silence the dead-code lint in that build.
+    #[cfg_attr(not(feature = "mcp-server"), allow(dead_code))]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub(crate) fn register_namespace_on_write(&self, namespace: &Namespace) -> Result<()> {
         self.namespaces.ensure_registered(namespace)

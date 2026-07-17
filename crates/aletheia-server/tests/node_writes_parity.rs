@@ -620,6 +620,7 @@ async fn find_nodes_at_time_byte_parity_and_elision() {
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).find_nodes_at_time(
         FindNodesAtTimeRequest {
+            namespace: None,
             label: "Person".to_string(),
             property_key: Some("name".to_string()),
             property_value: Some(json!("Alice")),
@@ -671,6 +672,7 @@ async fn find_nodes_at_time_include_vectors() {
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db_mcp).find_nodes_at_time(
         FindNodesAtTimeRequest {
+            namespace: None,
             label: "Person".to_string(),
             property_key: None,
             property_value: None,

@@ -284,6 +284,7 @@ async fn assert_all_twelve_parity(mode: AuthMode, token: Option<&'static str>) {
     )
     .await;
     let legacy: Value = serde_json::from_str(&server.get_node_at_time(GetNodeAtTimeRequest {
+        namespace: None,
         node_id: fx.alice,
         valid_time: FUTURE_VT.to_string(),
         transaction_time: None,
@@ -304,6 +305,7 @@ async fn assert_all_twelve_parity(mode: AuthMode, token: Option<&'static str>) {
     )
     .await;
     let legacy: Value = serde_json::from_str(&server.get_edge_at_time(GetEdgeAtTimeRequest {
+        namespace: None,
         edge_id: fx.edge,
         valid_time: FUTURE_VT.to_string(),
         transaction_time: None,

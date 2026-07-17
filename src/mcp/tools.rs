@@ -147,6 +147,16 @@ pub struct GetNodeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union — the read sees any of them), or the selector \"all\" (no \
+                       filter). Omit for the current, unscoped behavior. Out of scope, the node is \
+                       reported NOT_FOUND (indistinguishable from missing). An unknown namespace is \
+                       NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to create a new node.
@@ -395,6 +405,16 @@ pub struct ListNodesRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. When set, only nodes whose namespace is in scope are listed. An \
+                       unknown namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to count nodes.
@@ -423,6 +443,15 @@ pub struct GetEdgeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. Out of scope, the edge is reported NOT_FOUND. An unknown namespace \
+                       is NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to create a new edge between nodes.
@@ -583,6 +612,16 @@ pub struct ListEdgesRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). NOTE: list_edges does not enumerate \
+                       edges by namespace in v1; supplying a scope other than \"all\" returns a \
+                       structured INVALID_ARGUMENT rather than a silently-unscoped result. Use the \
+                       scoped adjacency/traversal reads instead."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to count edges.
@@ -711,6 +750,19 @@ pub struct TraverseRequest {
         description = "Optional transaction time (ISO 8601 or microseconds since epoch). Supplying this or as_of_valid_time switches to a bi-temporal, point-in-time traversal. If omitted while as_of_valid_time is set, defaults to the current time."
     )]
     pub as_of_transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       traversal. When set, an edge is crossed only if BOTH the edge's own \
+                       namespace AND the target node's namespace are in scope, so a scope can never \
+                       leak across the boundary. An unknown namespace is NOT_FOUND \
+                       (details.namespace); an empty array is INVALID_ARGUMENT. In v1 a scoped \
+                       traverse does not compose with the #3360 cursor / #3353 token-budget \
+                       shaping (offset paging still applies)."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -757,6 +809,17 @@ pub struct FindSimilarRequest {
                        is always returned in full regardless of this flag."
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       search. When set, the k-NN search is filter-complete: it over-fetches until \
+                       it has k genuinely in-scope results (never k-then-drop), with scores and \
+                       ordering unchanged. An unknown namespace is NOT_FOUND (details.namespace); \
+                       an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -993,6 +1056,17 @@ pub struct GetNodeAtTimeRequest {
         description = "Transaction time as ISO 8601 timestamp (when recorded). If not provided, uses current time."
     )]
     pub transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. The point-in-time reconstruction runs first, then the namespace \
+                       filter (immutable membership). Out of scope ⇒ NOT_FOUND. An unknown \
+                       namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to get an edge at a specific point in time.
@@ -1014,6 +1088,17 @@ pub struct GetEdgeAtTimeRequest {
         description = "Transaction time as ISO 8601 timestamp (when recorded). If not provided, uses current time."
     )]
     pub transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. The point-in-time reconstruction runs first, then the namespace \
+                       filter (immutable membership). Out of scope ⇒ NOT_FOUND. An unknown \
+                       namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to find nodes by label (and optional exact property match) as of
@@ -1071,6 +1156,16 @@ pub struct FindNodesAtTimeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. Each candidate is reconstructed at (valid_time, transaction_time) \
+                       first, then filtered by its immutable namespace. An unknown namespace is \
+                       NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to list graph-wide changes (node & edge versions) committed within a
@@ -1358,6 +1453,17 @@ pub struct HybridQueryRequest {
                        is always returned in full regardless of this flag."
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). NOTE: hybrid_query does not yet \
+                       compose a filter-complete namespace scope with its vector ranking in v1; \
+                       supplying a scope other than \"all\" returns a structured INVALID_ARGUMENT \
+                       rather than a silently-unscoped (or incorrectly post-filtered) result. Use \
+                       find_similar / traverse with a namespace scope instead."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -1405,6 +1511,17 @@ pub struct QueryRequest {
                        an unbounded ceiling)."
     )]
     pub limits: Option<super::limits::QueryLimitsOverride>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). NOTE: declarative (AQL/Cypher) \
+                       namespace scoping is a follow-up; supplying a scope other than \"all\" \
+                       returns a structured INVALID_ARGUMENT rather than a silently-unscoped \
+                       result. Use USE NAMESPACE in the query language when it lands, or the \
+                       structured scoped read tools."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================

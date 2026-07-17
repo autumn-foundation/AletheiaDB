@@ -321,6 +321,7 @@ async fn get_node_byte_parity_with_legacy_mcp() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db).get_node(GetNodeRequest {
+        namespace: None,
         node_id: node_id.as_u64(),
         include_vectors: None,
     }))
@@ -349,6 +350,7 @@ async fn get_node_include_vectors_parity() {
     )
     .await;
     let legacy: Value = serde_json::from_str(&mcp_server(&db).get_node(GetNodeRequest {
+        namespace: None,
         node_id: node_id.as_u64(),
         include_vectors: Some(true),
     }))
@@ -368,6 +370,7 @@ async fn get_node_anonymous_mode_parity() {
     let (status, body) = new_get(&client, &format!("/nodes/{}", node_id.as_u64()), None).await;
     assert_eq!(status, 200);
     let legacy: Value = serde_json::from_str(&mcp_server(&db).get_node(GetNodeRequest {
+        namespace: None,
         node_id: node_id.as_u64(),
         include_vectors: None,
     }))
@@ -395,6 +398,7 @@ async fn list_nodes_byte_parity_with_legacy_mcp() {
     let (status, body) = new_get(&client, "/nodes?label=Person", Some(READER_TOKEN)).await;
     assert_eq!(status, 200);
     let legacy: Value = serde_json::from_str(&mcp_server(&db).list_nodes(ListNodesRequest {
+        namespace: None,
         label: Some("Person".to_string()),
         property_key: None,
         property_value: None,

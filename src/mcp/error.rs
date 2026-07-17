@@ -205,7 +205,8 @@ impl McpError {
         let details = e
             .as_constraint()
             .and_then(|ce| ce.structured_details())
-            .or_else(|| principal_quota_details(e));
+            .or_else(|| principal_quota_details(e))
+            .or_else(|| namespace_details(e));
         Self {
             code,
             message: e.to_string(),
@@ -301,6 +302,26 @@ fn principal_quota_details(e: &Error) -> Option<serde_json::Value> {
         }))
     } else {
         None
+    }
+}
+
+/// Structured `details` for a namespace error (Issue #3349). An unknown
+/// namespace (`NOT_FOUND`) and a malformed / empty scope (`INVALID_ARGUMENT`)
+/// both carry the offending `namespace` value so a caller can self-correct
+/// without substring-parsing the message; the `InvalidName` case also carries
+/// the validation `reason`. Shared by the MCP and HTTP surfaces so both render
+/// byte-identical metadata under `error.details`. Returns `None` for every
+/// other error.
+fn namespace_details(e: &Error) -> Option<serde_json::Value> {
+    use crate::core::namespace::NamespaceError;
+    match e {
+        Error::Namespace(NamespaceError::NotFound { namespace }) => {
+            Some(serde_json::json!({ "namespace": namespace }))
+        }
+        Error::Namespace(NamespaceError::InvalidName { name, reason }) => {
+            Some(serde_json::json!({ "namespace": name, "reason": reason }))
+        }
+        _ => None,
     }
 }
 

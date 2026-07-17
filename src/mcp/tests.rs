@@ -178,6 +178,7 @@ mod node_tests {
 
         // Now get it
         let get_req = GetNodeRequest {
+            namespace: None,
             node_id: created.id,
             include_vectors: None,
         };
@@ -198,6 +199,7 @@ mod node_tests {
         let server = create_test_server();
 
         let req = GetNodeRequest {
+            namespace: None,
             node_id: 999999,
             include_vectors: None,
         };
@@ -286,6 +288,7 @@ mod node_tests {
 
         // Verify it's gone
         let get_req = GetNodeRequest {
+            namespace: None,
             node_id,
             include_vectors: None,
         };
@@ -329,6 +332,7 @@ mod node_tests {
 
         // The node must still exist (refused, not destroyed).
         let get_value: serde_json::Value = serde_json::from_str(&server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: source_id,
             include_vectors: None,
         }))
@@ -390,6 +394,7 @@ mod node_tests {
 
         // Node is gone.
         let get_value: serde_json::Value = serde_json::from_str(&server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: source_id,
             include_vectors: None,
         }))
@@ -473,6 +478,7 @@ mod node_tests {
 
         // List with label filter (required for listing nodes efficiently)
         let list_req = ListNodesRequest {
+            namespace: None,
             label: Some("ListTest".to_string()),
             property_key: None,
             property_value: None,
@@ -516,6 +522,7 @@ mod node_tests {
 
         // List only TypeA
         let list_req = ListNodesRequest {
+            namespace: None,
             label: Some("TypeA".to_string()),
             property_key: None,
             property_value: None,
@@ -551,6 +558,7 @@ mod node_tests {
 
         // Get first page (with label filter required for efficient listing)
         let page1_req = ListNodesRequest {
+            namespace: None,
             label: Some("Paginated".to_string()),
             property_key: None,
             property_value: None,
@@ -566,6 +574,7 @@ mod node_tests {
 
         // Get second page
         let page2_req = ListNodesRequest {
+            namespace: None,
             label: Some("Paginated".to_string()),
             property_key: None,
             property_value: None,
@@ -763,6 +772,7 @@ mod edge_tests {
         let created: EdgeResponse = parse_response(&create_response).unwrap();
 
         let get_response = server.get_edge(GetEdgeRequest {
+            namespace: None,
             edge_id: created.id,
             include_vectors: None,
         });
@@ -836,6 +846,7 @@ mod edge_tests {
 
         // Verify it's gone
         let get_response = server.get_edge(GetEdgeRequest {
+            namespace: None,
             edge_id: created.id,
             include_vectors: None,
         });
@@ -884,6 +895,7 @@ mod edge_tests {
         // Note: list_edges doesn't support listing all edges without a node
         // It returns a message indicating to use get_outgoing_edges or get_incoming_edges
         let list_response = server.list_edges(ListEdgesRequest {
+            namespace: None,
             label: None,
             limit: None,
             offset: None,
@@ -1077,6 +1089,7 @@ mod traversal_tests {
         let nodes = create_graph(&server);
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: nodes[0],
             edge_label: "NEXT".to_string(),
             direction: Some("outgoing".to_string()),
@@ -1100,6 +1113,7 @@ mod traversal_tests {
         let nodes = create_graph(&server);
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: nodes[0],
             edge_label: "NEXT".to_string(),
             direction: Some("outgoing".to_string()),
@@ -1124,6 +1138,7 @@ mod traversal_tests {
 
         // Traverse incoming from Node3 (should find Node2)
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: nodes[3],
             edge_label: "NEXT".to_string(),
             direction: Some("incoming".to_string()),
@@ -1146,6 +1161,7 @@ mod traversal_tests {
         let nodes = create_graph(&server);
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: nodes[0],
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -1213,6 +1229,7 @@ mod vector_tests {
         let server = create_test_server();
 
         let response = server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(5),
@@ -1261,6 +1278,7 @@ mod vector_tests {
 
         // Search for similar
         let response = server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
@@ -1298,6 +1316,7 @@ mod temporal_tests {
 
         // Try to get with invalid timestamp format
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: "invalid-timestamp".to_string(),
             transaction_time: None,
@@ -1333,6 +1352,7 @@ mod temporal_tests {
             .as_micros() as i64;
 
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: now_micros.to_string(),
             transaction_time: None,
@@ -1386,6 +1406,7 @@ mod temporal_tests {
             .as_micros() as i64;
 
         let response = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: now_micros.to_string(),
             transaction_time: None,
@@ -1909,6 +1930,7 @@ mod hybrid_tests {
 
         // Execute hybrid query starting from n1
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: Some(n1.id),
             traverse_edge: None,
             traverse_depth: None,
@@ -1955,6 +1977,7 @@ mod hybrid_tests {
 
         // Query only Person nodes
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: None,
             traverse_edge: None,
             traverse_depth: None,
@@ -1986,6 +2009,7 @@ mod hybrid_tests {
 
         // Query without any criteria should error
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: None,
             traverse_edge: None,
             traverse_depth: None,
@@ -2041,6 +2065,7 @@ mod hybrid_tests {
 
         // Query with traversal
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: Some(n1.id),
             traverse_edge: Some("KNOWS".to_string()),
             traverse_depth: Some(1),
@@ -2156,6 +2181,7 @@ mod coverage_tests {
 
         // Try to search with wrong dimensions (3 instead of 4)
         let response = server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3], // Wrong: 3 dimensions instead of 4
             k: Some(5),
@@ -2190,6 +2216,7 @@ mod coverage_tests {
 
         // Try hybrid query with wrong embedding dimensions
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: None,
             traverse_edge: None,
             traverse_depth: None,
@@ -2229,6 +2256,7 @@ mod coverage_tests {
 
         // Test with ISO 8601 timestamp format (with Z timezone)
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: "2024-01-15T10:30:00Z".to_string(),
             transaction_time: None,
@@ -2265,6 +2293,7 @@ mod coverage_tests {
 
         // Test with ISO 8601 timestamp without timezone (should assume UTC)
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: "2024-01-15T10:30:00".to_string(),
             transaction_time: None,
@@ -2299,6 +2328,7 @@ mod coverage_tests {
 
         // Get node at time without specifying transaction_time
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: "0".to_string(), // Use 0 for simplicity
             transaction_time: None,
@@ -2360,6 +2390,7 @@ mod coverage_tests {
 
         // Request with a very large offset (should be capped)
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("OffsetTest".to_string()),
             property_key: None,
             property_value: None,
@@ -2415,6 +2446,7 @@ mod coverage_tests {
 
         // Try to traverse with a very large depth (should be capped to MAX_TRAVERSAL_DEPTH)
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: 0,
             edge_label: "NEXT".to_string(),
             depth: Some(100), // Very large depth, should be capped
@@ -2517,6 +2549,7 @@ mod error_handling_tests {
         let server = create_test_server();
 
         let req = GetEdgeRequest {
+            namespace: None,
             edge_id: 999999,
             include_vectors: None,
         };
@@ -2714,6 +2747,7 @@ mod vector_distance_tests {
 
         // Try to request more than MAX_VECTOR_K results
         let response = server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(10000), // Much larger than MAX_VECTOR_K,
@@ -2765,6 +2799,7 @@ mod temporal_extended_tests {
 
         // Get node at time with explicit transaction time
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: now_micros.to_string(),
             transaction_time: Some(now_micros.to_string()),
@@ -2829,6 +2864,7 @@ mod temporal_extended_tests {
 
         // Get edge at time with explicit transaction time
         let response = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: now_micros.to_string(),
             transaction_time: Some(now_micros.to_string()),
@@ -2857,6 +2893,7 @@ mod temporal_extended_tests {
 
         // Try with invalid transaction time format
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: "0".to_string(),
             transaction_time: Some("not-a-valid-timestamp".to_string()),
@@ -2911,6 +2948,7 @@ mod temporal_extended_tests {
 
         // Try with invalid valid_time format
         let response = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: "invalid-time".to_string(),
             transaction_time: None,
@@ -2936,6 +2974,7 @@ mod temporal_extended_tests {
 
         // Test with offset timezone (+00:00)
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: "2024-01-15T10:30:00+00:00".to_string(),
             transaction_time: None,
@@ -3015,6 +3054,7 @@ mod traversal_extended_tests {
 
         // Traverse bidirectionally from middle node
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: nodes[1], // Middle node
             edge_label: "CONNECTED".to_string(),
             direction: Some("both".to_string()),
@@ -3082,6 +3122,7 @@ mod traversal_extended_tests {
         });
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: a,
             edge_label: "POINTS_AT".to_string(),
             direction: Some("both".to_string()),
@@ -3120,6 +3161,7 @@ mod traversal_extended_tests {
 
         // Traverse with non-existent edge label
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: node.id,
             edge_label: "NONEXISTENT".to_string(),
             direction: None,
@@ -3175,6 +3217,7 @@ mod traversal_extended_tests {
 
         // Traverse without specifying direction (should default to outgoing)
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: n1.id,
             edge_label: "NEXT".to_string(),
             direction: None, // Default to outgoing
@@ -3235,6 +3278,7 @@ mod traversal_extended_tests {
 
         // Traverse with limit
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: center.id,
             edge_label: "SPOKE".to_string(),
             direction: Some("outgoing".to_string()),
@@ -3285,6 +3329,7 @@ mod hybrid_extended_tests {
 
         // Query with both valid_time and transaction_time
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: Some(node.id),
             traverse_edge: None,
             traverse_depth: None,
@@ -3347,6 +3392,7 @@ mod hybrid_extended_tests {
 
         // Query with depth > 1
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: Some(nodes[0]),
             traverse_edge: Some("CHAIN".to_string()),
             traverse_depth: Some(3),
@@ -3383,6 +3429,7 @@ mod hybrid_extended_tests {
 
         // Query with invalid valid_time
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: Some(node.id),
             traverse_edge: None,
             traverse_depth: None,
@@ -3421,6 +3468,7 @@ mod hybrid_extended_tests {
 
         // Query with invalid transaction_time
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: Some(node.id),
             traverse_edge: None,
             traverse_depth: None,
@@ -3465,6 +3513,7 @@ mod hybrid_extended_tests {
 
         // Query with very large limit (should be capped internally)
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: None,
             traverse_edge: None,
             traverse_depth: None,
@@ -3492,6 +3541,7 @@ mod hybrid_extended_tests {
 
         // Try vector search without enabling index
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: None,
             traverse_edge: None,
             traverse_depth: None,
@@ -3571,6 +3621,7 @@ mod edge_extended_tests {
 
         // List edges with label filter
         let response = server.list_edges(ListEdgesRequest {
+            namespace: None,
             label: Some("KNOWS".to_string()),
             limit: None,
             offset: None,
@@ -3734,6 +3785,7 @@ mod list_nodes_extended_tests {
 
         // List nodes without label filter
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: None,
             property_key: None,
             property_value: None,
@@ -3773,6 +3825,7 @@ mod list_nodes_extended_tests {
 
         // Request with very large limit (should be capped to MAX_RESULT_LIMIT)
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("LimitCap".to_string()),
             property_key: None,
             property_value: None,
@@ -3837,6 +3890,7 @@ mod list_nodes_extended_tests {
 
         // Filter by property
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Person".to_string()),
             property_key: Some("name".to_string()),
             property_value: Some(serde_json::json!("Alice")),
@@ -3880,6 +3934,7 @@ mod list_nodes_extended_tests {
         });
 
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Sensor".to_string()),
             property_key: Some("reading".to_string()),
             property_value: Some(serde_json::json!(42)),
@@ -3915,6 +3970,7 @@ mod list_nodes_extended_tests {
         });
 
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Item".to_string()),
             property_key: Some("color".to_string()),
             property_value: Some(serde_json::json!("blue")),
@@ -3934,6 +3990,7 @@ mod list_nodes_extended_tests {
 
         // property_key without label should error
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: None,
             property_key: Some("name".to_string()),
             property_value: Some(serde_json::json!("Alice")),
@@ -3955,6 +4012,7 @@ mod list_nodes_extended_tests {
 
         // property_key without property_value should error
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Person".to_string()),
             property_key: Some("name".to_string()),
             property_value: None,
@@ -3992,6 +4050,7 @@ mod list_nodes_extended_tests {
 
         // Page 1: first 2
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Widget".to_string()),
             property_key: Some("status".to_string()),
             property_value: Some(serde_json::json!("active")),
@@ -4006,6 +4065,7 @@ mod list_nodes_extended_tests {
 
         // Page 2: next 2
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Widget".to_string()),
             property_key: Some("status".to_string()),
             property_value: Some(serde_json::json!("active")),
@@ -4020,6 +4080,7 @@ mod list_nodes_extended_tests {
 
         // Page 3: last 1
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Widget".to_string()),
             property_key: Some("status".to_string()),
             property_value: Some(serde_json::json!("active")),
@@ -4086,6 +4147,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "aql".to_string(),
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: None,
@@ -4129,6 +4191,7 @@ mod query_tool_tests {
             let value = run_query(
                 &server,
                 QueryRequest {
+                    namespace: None,
                     language: "cypher".to_string(),
                     query: stmt.to_string(),
                     params: None,
@@ -4162,6 +4225,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "aql".to_string(),
                 query: "this is not a valid query".to_string(),
                 params: None,
@@ -4182,6 +4246,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "sql".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 params: None,
@@ -4204,6 +4269,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "aql".to_string(),
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: Some(params),
@@ -4227,6 +4293,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "aql".to_string(),
                 query: "MATCH (n:Widget) RETURN n".to_string(),
                 params: None,
@@ -4253,6 +4320,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 params: None,
@@ -4275,6 +4343,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
                 params: None,
@@ -4303,6 +4372,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n:Person) RETURN count(*)".to_string(),
                 params: None,
@@ -4357,6 +4427,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n:Person) RETURN n.dept, count(*)".to_string(),
                 params: None,
@@ -4397,6 +4468,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n:Person) RETURN count(*) AS c".to_string(),
                 params: None,
@@ -4426,6 +4498,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
                 params: None,
@@ -4469,6 +4542,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (a:Person {name: 'Alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x"
                     .to_string(),
@@ -4495,6 +4569,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n:Person {name: $name}) RETURN n".to_string(),
                 params: Some(params),
@@ -4527,6 +4602,7 @@ mod query_tool_tests {
             let value = run_query(
                 &server,
                 QueryRequest {
+                    namespace: None,
                     language: "cypher".to_string(),
                     query: q.clone(),
                     params: None,
@@ -4559,6 +4635,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n:Person) AS OF TIMESTAMP 'not-a-timestamp' RETURN n".to_string(),
                 params: None,
@@ -4589,6 +4666,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "aql".to_string(),
                 // String literal `it\'s fine` — backslash-escaped quote inside single quotes.
                 query: "MATCH (n:Person {note: 'it\\'s fine'}) RETURN n".to_string(),
@@ -4620,6 +4698,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "aql".to_string(),
                 query: "this is not valid".to_string(),
                 params: None,
@@ -4646,6 +4725,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
@@ -4675,6 +4755,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n:Product) WHERE n.price < $threshold RETURN n".to_string(),
                 params: Some(params),
@@ -4703,6 +4784,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "aql".to_string(),
                 query: "// CREATE would mutate\nMATCH (n:Widget) RETURN n".to_string(),
                 params: None,
@@ -4733,6 +4815,7 @@ mod query_tool_tests {
             let value = run_query(
                 &server,
                 QueryRequest {
+                    namespace: None,
                     language: "aql".to_string(),
                     query: stmt.to_string(),
                     params: None,
@@ -4764,6 +4847,7 @@ mod query_tool_tests {
             let value = run_query(
                 &server,
                 QueryRequest {
+                    namespace: None,
                     language: "aql".to_string(),
                     query: stmt.to_string(),
                     params: None,
@@ -4795,6 +4879,7 @@ mod query_tool_tests {
             let value = run_query(
                 &server,
                 QueryRequest {
+                    namespace: None,
                     language: "aql".to_string(),
                     query: stmt.to_string(),
                     params: None,
@@ -4820,6 +4905,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n) WHERE n.x = $x RETURN n".to_string(),
                 params: Some(params),
@@ -4847,6 +4933,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n) WHERE n.flag = $flag AND n.count = $count RETURN n".to_string(),
                 params: Some(params),
@@ -4873,6 +4960,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
@@ -4898,6 +4986,7 @@ mod query_tool_tests {
         let value = run_query(
             &server,
             QueryRequest {
+                namespace: None,
                 language: "cypher".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 params: Some(params),
@@ -4922,6 +5011,7 @@ mod query_tool_tests {
     /// A `query` request with `limits` fields set on the override.
     fn query_req(language: &str, query: &str, limits: Option<QueryLimitsOverride>) -> QueryRequest {
         QueryRequest {
+            namespace: None,
             language: language.to_string(),
             query: query.to_string(),
             params: None,
@@ -5764,6 +5854,7 @@ mod vector_elision_tests {
         let (node_id, _embedding) = create_node_with_embedding(&server, 1536);
 
         let response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id,
             include_vectors: None,
         });
@@ -5787,6 +5878,7 @@ mod vector_elision_tests {
         let (node_id, embedding) = create_node_with_embedding(&server, 1536);
 
         let response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id,
             include_vectors: Some(true),
         });
@@ -5870,6 +5962,7 @@ mod vector_elision_tests {
         }
 
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Document".to_string()),
             property_key: None,
             property_value: None,
@@ -5890,6 +5983,7 @@ mod vector_elision_tests {
 
         // include_vectors: true restores the full arrays.
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Document".to_string()),
             property_key: None,
             property_value: None,
@@ -5945,6 +6039,7 @@ mod vector_elision_tests {
 
         // get_edge
         let response = server.get_edge(GetEdgeRequest {
+            namespace: None,
             edge_id: edge.id,
             include_vectors: None,
         });
@@ -5955,6 +6050,7 @@ mod vector_elision_tests {
         );
 
         let response = server.get_edge(GetEdgeRequest {
+            namespace: None,
             edge_id: edge.id,
             include_vectors: Some(true),
         });
@@ -6034,6 +6130,7 @@ mod vector_elision_tests {
         });
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: n1_id,
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -6053,6 +6150,7 @@ mod vector_elision_tests {
         );
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: n1_id,
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -6105,6 +6203,7 @@ mod vector_elision_tests {
         }
 
         let response = server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
@@ -6123,6 +6222,7 @@ mod vector_elision_tests {
         }
 
         let response = server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
@@ -6172,6 +6272,7 @@ mod vector_elision_tests {
         }
 
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: None,
             traverse_edge: None,
             traverse_depth: None,
@@ -6196,6 +6297,7 @@ mod vector_elision_tests {
         }
 
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: None,
             traverse_edge: None,
             traverse_depth: None,
@@ -6237,6 +6339,7 @@ mod vector_elision_tests {
         });
 
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: Some(n1_id),
             traverse_edge: Some("NEXT".to_string()),
             traverse_depth: Some(1),
@@ -6258,6 +6361,7 @@ mod vector_elision_tests {
         );
 
         let response = server.hybrid_query(HybridQueryRequest {
+            namespace: None,
             start_node_id: Some(n1_id),
             traverse_edge: Some("NEXT".to_string()),
             traverse_depth: Some(1),
@@ -6295,6 +6399,7 @@ mod vector_elision_tests {
             .expect("create node with sparse vector");
 
         let response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: node_id.as_u64(),
             include_vectors: None,
         });
@@ -6305,6 +6410,7 @@ mod vector_elision_tests {
         );
 
         let response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: node_id.as_u64(),
             include_vectors: Some(true),
         });
@@ -6400,6 +6506,7 @@ mod vector_elision_tests {
         let mut previous: Option<HashMap<String, serde_json::Value>> = None;
         for include_vectors in variants {
             let response = server.get_node(GetNodeRequest {
+                namespace: None,
                 node_id: node.id,
                 include_vectors,
             });
@@ -6484,6 +6591,7 @@ mod retraction_tests {
 
         // Gone from current state (structured NOT_FOUND).
         let after = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id,
             include_vectors: None,
         });
@@ -6510,6 +6618,7 @@ mod retraction_tests {
 
         // Still visible at a valid time strictly before T...
         let before = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id,
             valid_time: rfc3339_hours_ago(now, 2),
             transaction_time: None,
@@ -6519,6 +6628,7 @@ mod retraction_tests {
 
         // ...and not at/after T.
         let at = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id,
             valid_time: rfc3339_hours_ago(now, 1),
             transaction_time: None,
@@ -6530,6 +6640,7 @@ mod retraction_tests {
         );
 
         let after = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id,
             valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: None,
@@ -6581,6 +6692,7 @@ mod retraction_tests {
 
         // Never a success that strands edges: node is still present.
         let still_there = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: a,
             include_vectors: None,
         });
@@ -6622,6 +6734,7 @@ mod retraction_tests {
 
         // The co-retracted edge: queryable strictly before T, gone after.
         let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: rfc3339_hours_ago(now, 2),
             transaction_time: None,
@@ -6630,6 +6743,7 @@ mod retraction_tests {
         assert!(before.get("error").is_none(), "expected edge, got {before}");
 
         let after = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: None,
@@ -6705,6 +6819,7 @@ mod retraction_tests {
 
         // Nothing was retracted.
         let still_there = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id,
             include_vectors: None,
         });
@@ -6790,6 +6905,7 @@ mod retraction_tests {
 
         // History still shows the edge before the retraction instant.
         let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: rfc3339_hours_ago(now, 1),
             transaction_time: None,
@@ -6918,6 +7034,7 @@ mod retraction_tests {
         // Both edges: queryable strictly before T, gone at/after T.
         for edge_id in [e_out.id, e_in.id] {
             let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+                namespace: None,
                 edge_id,
                 valid_time: rfc3339_hours_ago(now, 2),
                 transaction_time: None,
@@ -6929,6 +7046,7 @@ mod retraction_tests {
             );
 
             let after = server.get_edge_at_time(GetEdgeAtTimeRequest {
+                namespace: None,
                 edge_id,
                 valid_time: rfc3339_hours_ago(now, 0),
                 transaction_time: None,
@@ -6940,6 +7058,7 @@ mod retraction_tests {
             );
 
             let current = server.get_edge(GetEdgeRequest {
+                namespace: None,
                 edge_id,
                 include_vectors: None,
             });
@@ -6985,6 +7104,7 @@ mod valid_time_write_tests {
 
         // Visible shortly after its valid_from.
         let visible = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: None,
@@ -6994,6 +7114,7 @@ mod valid_time_write_tests {
 
         // Invisible strictly before its valid_from.
         let invisible = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: rfc3339_hours_ago(now, 2),
             transaction_time: None,
@@ -7023,6 +7144,7 @@ mod valid_time_write_tests {
         assert_eq!(node.label, "Person");
 
         let now_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: Utc::now().to_rfc3339(),
             transaction_time: None,
@@ -7113,6 +7235,7 @@ mod valid_time_write_tests {
         let edge: EdgeResponse = parse_response(&response).expect("create_edge should succeed");
 
         let visible = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: None,
@@ -7121,6 +7244,7 @@ mod valid_time_write_tests {
         assert!(value.get("error").is_none(), "expected edge, got {value}");
 
         let invisible = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: rfc3339_hours_ago(now, 2),
             transaction_time: None,
@@ -7165,6 +7289,7 @@ mod valid_time_write_tests {
 
         // Visible from its own valid_from onward.
         let at_update = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: update_valid_time,
             transaction_time: None,
@@ -7230,6 +7355,7 @@ mod valid_time_write_tests {
         // had not happened yet -- the fact must not be retroactively knowable.
         let too_early_tx = (now - Duration::minutes(30)).to_rfc3339();
         let too_early = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: Some(too_early_tx),
@@ -7239,6 +7365,7 @@ mod valid_time_write_tests {
 
         // Omitting transaction_time defaults to now, where the write is visible.
         let now_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: None,
@@ -7303,6 +7430,7 @@ mod valid_time_write_tests {
         );
 
         let at_update = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: update_valid_time,
             transaction_time: None,
@@ -7411,6 +7539,7 @@ mod valid_time_write_tests {
 
         // No longer visible as of now.
         let gone = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: now.to_rfc3339(),
             transaction_time: None,
@@ -7482,6 +7611,7 @@ mod valid_time_write_tests {
 
         // No longer visible as of now.
         let gone = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: edge.id,
             valid_time: now.to_rfc3339(),
             transaction_time: None,
@@ -7540,6 +7670,7 @@ mod valid_time_write_tests {
 
         // Node and edge must be untouched by the rejected request.
         let get_value: serde_json::Value = serde_json::from_str(&server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: n1.id,
             include_vectors: None,
         }))
@@ -8008,6 +8139,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let fetched: NodeResponse = parse_response(&server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: node.id,
             include_vectors: None,
         }))
@@ -8030,6 +8162,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: node.id,
             include_vectors: None,
         });
@@ -8081,6 +8214,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("ListProvenanceTest".to_string()),
             property_key: None,
             property_value: None,
@@ -8135,6 +8269,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: start.id,
             edge_label: "KNOWS".to_string(),
             direction: Some("outgoing".to_string()),
@@ -8198,6 +8333,7 @@ mod provenance_write_tests {
         .unwrap();
 
         let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id: node.id,
             valid_time: as_of_micros.to_string(),
             transaction_time: Some(as_of_micros.to_string()),
@@ -8280,6 +8416,7 @@ mod traverse_as_of_tests {
         let (count_before, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8300,6 +8437,7 @@ mod traverse_as_of_tests {
         let (count_after, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8348,6 +8486,7 @@ mod traverse_as_of_tests {
         let (count_before_retirement, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8368,6 +8507,7 @@ mod traverse_as_of_tests {
         let (count_after_retirement, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8401,6 +8541,7 @@ mod traverse_as_of_tests {
         let (count_tx_gate_fails, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8423,6 +8564,7 @@ mod traverse_as_of_tests {
         let (count_vt_gate_fails, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8444,6 +8586,7 @@ mod traverse_as_of_tests {
         let (count_both_satisfied, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8474,6 +8617,7 @@ mod traverse_as_of_tests {
         let (count, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8497,6 +8641,7 @@ mod traverse_as_of_tests {
         let a = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: a,
             edge_label: "KNOWS".to_string(),
             direction: Some("outgoing".to_string()),
@@ -8524,6 +8669,7 @@ mod traverse_as_of_tests {
         let a = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
 
         let response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: a,
             edge_label: "KNOWS".to_string(),
             direction: Some("outgoing".to_string()),
@@ -8569,6 +8715,7 @@ mod traverse_as_of_tests {
         let (count, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: start,
                 edge_label: "NEXT".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8595,6 +8742,7 @@ mod traverse_as_of_tests {
         let (count_no_temporal, value_no_temporal) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8610,6 +8758,7 @@ mod traverse_as_of_tests {
         let (count_as_of_now, value_as_of_now) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8646,6 +8795,7 @@ mod traverse_as_of_tests {
         let (count, _) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8681,6 +8831,7 @@ mod traverse_as_of_tests {
         let (count, value) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "POINTS_AT".to_string(),
                 direction: Some("both".to_string()),
@@ -8729,6 +8880,7 @@ mod traverse_as_of_tests {
         let (count, value) = traverse_count(
             &server,
             TraverseRequest {
+                namespace: None,
                 start_node_id: a,
                 edge_label: "KNOWS".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -8798,6 +8950,7 @@ mod completeness_tests {
 
         // Page 1: full page, more remains.
         let page1 = parse(&server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("PersonHM".to_string()),
             property_key: None,
             property_value: None,
@@ -8819,6 +8972,7 @@ mod completeness_tests {
 
         // Page 2: full page, still more.
         let page2 = parse(&server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("PersonHM".to_string()),
             property_key: None,
             property_value: None,
@@ -8831,6 +8985,7 @@ mod completeness_tests {
 
         // Page 3: partial final page, no more.
         let page3 = parse(&server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("PersonHM".to_string()),
             property_key: None,
             property_value: None,
@@ -8855,6 +9010,7 @@ mod completeness_tests {
         seed_labeled(&server, "ScanHM", 5);
 
         let value = parse(&server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("ScanHM".to_string()),
             property_key: None,
             property_value: None,
@@ -8890,6 +9046,7 @@ mod completeness_tests {
         }
 
         let page1 = parse(&server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("WidgetHM".to_string()),
             property_key: Some("status".to_string()),
             property_value: Some(serde_json::json!("active")),
@@ -8907,6 +9064,7 @@ mod completeness_tests {
         assert_eq!(next_offset(&page1), Some(100));
 
         let page2 = parse(&server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("WidgetHM".to_string()),
             property_key: Some("status".to_string()),
             property_value: Some(serde_json::json!("active")),
@@ -8927,6 +9085,7 @@ mod completeness_tests {
         let server = create_test_server();
         seed_labeled(&server, "AnyHM", 3);
         let value = parse(&server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: None,
             property_key: None,
             property_value: None,
@@ -8946,6 +9105,7 @@ mod completeness_tests {
     fn test_list_edges_has_more_false() {
         let server = create_test_server();
         let value = parse(&server.list_edges(ListEdgesRequest {
+            namespace: None,
             label: None,
             limit: None,
             offset: None,
@@ -9114,6 +9274,7 @@ mod completeness_tests {
 
         // Truncate at 2 of the 5 reachable nodes.
         let truncated = parse(&server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: ids[0],
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -9134,6 +9295,7 @@ mod completeness_tests {
 
         // A limit above the reachable count exhausts the traversal.
         let complete = parse(&server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: ids[0],
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -9157,6 +9319,7 @@ mod completeness_tests {
         // Collect the ids returned across two offset pages of size 2 plus a
         // final page; the union must equal the single-shot full traversal.
         let full = parse(&server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: ids[0],
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -9171,6 +9334,7 @@ mod completeness_tests {
         assert_eq!(full_count, 5);
 
         let page2 = parse(&server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: ids[0],
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -9190,6 +9354,7 @@ mod completeness_tests {
         assert_eq!(next_offset(&page2), Some(4));
 
         let page3 = parse(&server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: ids[0],
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -9254,6 +9419,7 @@ mod completeness_tests {
 
         // k=2 of 5 available -> more remains.
         let page1 = parse(&server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: query.clone(),
             k: Some(2),
@@ -9266,6 +9432,7 @@ mod completeness_tests {
 
         // Offset into the middle.
         let page2 = parse(&server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: query.clone(),
             k: Some(2),
@@ -9278,6 +9445,7 @@ mod completeness_tests {
 
         // k beyond the available set exhausts it.
         let complete = parse(&server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: query,
             k: Some(50),
@@ -9301,6 +9469,7 @@ mod completeness_tests {
             (
                 "list_nodes(label)",
                 server.list_nodes(ListNodesRequest {
+                    namespace: None,
                     label: Some("Leaf".to_string()),
                     property_key: None,
                     property_value: None,
@@ -9312,6 +9481,7 @@ mod completeness_tests {
             (
                 "list_nodes(unfiltered)",
                 server.list_nodes(ListNodesRequest {
+                    namespace: None,
                     label: None,
                     property_key: None,
                     property_value: None,
@@ -9323,6 +9493,7 @@ mod completeness_tests {
             (
                 "list_edges",
                 server.list_edges(ListEdgesRequest {
+                    namespace: None,
                     label: None,
                     limit: None,
                     offset: None,
@@ -9348,6 +9519,7 @@ mod completeness_tests {
             (
                 "traverse",
                 server.traverse(TraverseRequest {
+                    namespace: None,
                     start_node_id: center,
                     edge_label: "LINK".to_string(),
                     direction: None,
@@ -9362,6 +9534,7 @@ mod completeness_tests {
             (
                 "find_similar",
                 server.find_similar(FindSimilarRequest {
+                    namespace: None,
                     property_name: "embedding".to_string(),
                     embedding: vec![0.1, 0.2, 0.3, 0.4],
                     k: Some(1),
@@ -9392,6 +9565,7 @@ mod completeness_tests {
         let server = create_test_server();
         seed_labeled(&server, "ClampHM", 3);
         let value = parse(&server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("ClampHM".to_string()),
             property_key: None,
             property_value: None,
@@ -9413,6 +9587,7 @@ mod completeness_tests {
         let server = create_test_server();
         let ids = seed_chain(&server, 3);
         let value = parse(&server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: ids[0],
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -9437,6 +9612,7 @@ mod completeness_tests {
         let server = create_test_server();
         seed_vectors(&server, 3);
         let value = parse(&server.find_similar(FindSimilarRequest {
+            namespace: None,
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(0),
@@ -9482,6 +9658,7 @@ mod completeness_tests {
         // reports uncertainty as has_more:true in O(1) extra work rather
         // than an O(dangling-chain-length) walk that still gets it wrong.
         let response = parse(&server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: ids[0],
             edge_label: "NEXT".to_string(),
             direction: None,
@@ -9526,6 +9703,7 @@ mod find_nodes_at_time_tests {
 
     fn base_req(label: &str, valid_time: &str) -> FindNodesAtTimeRequest {
         FindNodesAtTimeRequest {
+            namespace: None,
             label: label.to_string(),
             property_key: None,
             property_value: None,
@@ -9539,6 +9717,7 @@ mod find_nodes_at_time_tests {
 
     fn name_req(label: &str, name: &str, valid_time: &str) -> FindNodesAtTimeRequest {
         FindNodesAtTimeRequest {
+            namespace: None,
             property_key: Some("name".to_string()),
             property_value: Some(serde_json::json!(name)),
             ..base_req(label, valid_time)
@@ -9620,6 +9799,7 @@ mod find_nodes_at_time_tests {
     /// the guide).
     fn name_req_at(label: &str, name: &str, t: &str) -> FindNodesAtTimeRequest {
         FindNodesAtTimeRequest {
+            namespace: None,
             transaction_time: Some(t.to_string()),
             ..name_req(label, name, t)
         }
@@ -9704,6 +9884,7 @@ mod find_nodes_at_time_tests {
         let value = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 transaction_time: Some(t_before.clone()),
                 ..name_req("Person", "Alice", &t_before)
             },
@@ -9714,6 +9895,7 @@ mod find_nodes_at_time_tests {
         let value = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 transaction_time: Some(t_after.clone()),
                 ..name_req("Person", "Alice", &t_after)
             },
@@ -9734,6 +9916,7 @@ mod find_nodes_at_time_tests {
         let value = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 transaction_time: Some(t1.clone()),
                 ..base_req("Person", &t1)
             },
@@ -9743,6 +9926,7 @@ mod find_nodes_at_time_tests {
         let value = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 transaction_time: Some(t2.clone()),
                 ..base_req("Person", &t2)
             },
@@ -9760,6 +9944,7 @@ mod find_nodes_at_time_tests {
 
         let list_value: serde_json::Value =
             serde_json::from_str(&server.list_nodes(ListNodesRequest {
+                namespace: None,
                 label: Some("Person".to_string()),
                 property_key: Some("name".to_string()),
                 property_value: Some(serde_json::json!("Alice")),
@@ -9792,6 +9977,7 @@ mod find_nodes_at_time_tests {
         let page1 = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 limit: Some(1),
                 ..name_req("Person", "Alice", &now)
             },
@@ -9808,6 +9994,7 @@ mod find_nodes_at_time_tests {
         let page2 = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 limit: Some(1),
                 offset: Some(1),
                 ..name_req("Person", "Alice", &now)
@@ -9821,6 +10008,7 @@ mod find_nodes_at_time_tests {
         let page3 = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 limit: Some(1),
                 offset: Some(2),
                 ..name_req("Person", "Alice", &now)
@@ -9845,6 +10033,7 @@ mod find_nodes_at_time_tests {
         let value = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 limit: Some(0),
                 ..name_req("Person", "Alice", &now)
             },
@@ -9871,6 +10060,7 @@ mod find_nodes_at_time_tests {
         let value = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 limit: Some(1_000_000),
                 offset: Some(1_000_000),
                 ..name_req("Person", "Alice", &now)
@@ -9893,6 +10083,7 @@ mod find_nodes_at_time_tests {
         assert_invalid_argument(&response, "valid_time");
 
         let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            namespace: None,
             transaction_time: Some("not-a-timestamp".to_string()),
             ..base_req("Person", &Utc::now().to_rfc3339())
         });
@@ -9905,12 +10096,14 @@ mod find_nodes_at_time_tests {
         let now = Utc::now().to_rfc3339();
 
         let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            namespace: None,
             property_key: Some("name".to_string()),
             ..base_req("Person", &now)
         });
         assert_invalid_argument(&response, "property_key");
 
         let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            namespace: None,
             property_value: Some(serde_json::json!("Alice")),
             ..base_req("Person", &now)
         });
@@ -9921,6 +10114,7 @@ mod find_nodes_at_time_tests {
     fn unsupported_property_value_type_returns_structured_error() {
         let server = create_test_server();
         let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            namespace: None,
             property_key: Some("name".to_string()),
             property_value: Some(serde_json::json!({"nested": "object"})),
             ..base_req("Person", &Utc::now().to_rfc3339())
@@ -10011,6 +10205,7 @@ mod find_nodes_at_time_tests {
         let value = find(
             &server,
             FindNodesAtTimeRequest {
+                namespace: None,
                 include_vectors: Some(true),
                 ..base_req("Document", &now)
             },
@@ -11596,6 +11791,9 @@ mod database_stats_tests {
                 "cold_storage",
                 "current",
                 "historical",
+                // Per-namespace counts (Issue #3349, PR3a): serialized since the
+                // surface slice; empty array on a default-only database.
+                "namespaces",
                 "resource_limits",
                 "wal"
             ]
@@ -11866,6 +12064,7 @@ mod temporal_bounds_tests {
         assert_current_open_bounds(&temporal_of(&created));
 
         let get_response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: created["id"].as_u64().unwrap(),
             include_vectors: None,
         });
@@ -11893,6 +12092,7 @@ mod temporal_bounds_tests {
         assert_current_open_bounds(&temporal_of(&created));
 
         let get_response = server.get_edge(GetEdgeRequest {
+            namespace: None,
             edge_id: created["id"].as_u64().unwrap(),
             include_vectors: None,
         });
@@ -11908,6 +12108,7 @@ mod temporal_bounds_tests {
         // "now" so both dimensions anchor the same bi-temporal instant.
         let now = now_micros().to_string();
         let at_time_response = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            namespace: None,
             edge_id: created["id"].as_u64().unwrap(),
             valid_time: now.clone(),
             transaction_time: Some(now),
@@ -11929,6 +12130,7 @@ mod temporal_bounds_tests {
         create_knows_edge(&server, a, b);
 
         let list_response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some("Person".to_string()),
             property_key: None,
             property_value: None,
@@ -11944,6 +12146,7 @@ mod temporal_bounds_tests {
         }
 
         let traverse_response = server.traverse(TraverseRequest {
+            namespace: None,
             start_node_id: a,
             edge_label: "KNOWS".to_string(),
             direction: None,
@@ -12047,6 +12250,7 @@ mod temporal_bounds_tests {
         // (valid_to == null); only its transaction-time bound is closed by the
         // update. It is not current (its tx interval is closed).
         let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id,
             valid_time: anchor.to_string(),
             transaction_time: Some(anchor.to_string()),
@@ -12074,6 +12278,7 @@ mod temporal_bounds_tests {
         // A current read after the update shows the NEW version's bounds:
         // open-ended, current, and starting after the anchor.
         let current_response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id,
             include_vectors: None,
         });
@@ -12144,6 +12349,7 @@ mod temporal_bounds_tests {
             .expect("one current version");
 
         let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id,
             valid_time: anchor.to_string(),
             transaction_time: Some(anchor.to_string()),
@@ -12152,6 +12358,7 @@ mod temporal_bounds_tests {
         let superseded_temporal = temporal_of(&at_time["node"]);
 
         let current_response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id,
             include_vectors: None,
         });
@@ -12228,6 +12435,7 @@ mod temporal_bounds_tests {
         assert_future_not_current(&temporal_of(&created));
 
         let get_response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id: created["id"].as_u64().unwrap(),
             include_vectors: None,
         });
@@ -12306,6 +12514,7 @@ mod temporal_bounds_tests {
         // deletes -- the tombstone carries the valid-time closure -- so it is
         // deliberately not asserted here.)
         let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            namespace: None,
             node_id,
             valid_time: anchor.to_string(),
             transaction_time: Some(anchor.to_string()),
@@ -12524,6 +12733,7 @@ mod temporal_bounds_tests {
             .unwrap();
 
         let response = server.get_node(GetNodeRequest {
+            namespace: None,
             node_id,
             include_vectors: None,
         });
@@ -12569,6 +12779,7 @@ mod temporal_bounds_tests {
         server.db().current.update_edge_direct(stored).unwrap();
 
         let response = server.get_edge(GetEdgeRequest {
+            namespace: None,
             edge_id,
             include_vectors: None,
         });
@@ -14178,6 +14389,7 @@ mod per_request_now_tests {
     /// `temporal.is_current` flag, in response order.
     fn list_is_current_flags(server: &AletheiaMcpServer, label: &str) -> Vec<bool> {
         let response = server.list_nodes(ListNodesRequest {
+            namespace: None,
             label: Some(label.to_string()),
             property_key: None,
             property_value: None,
@@ -14372,6 +14584,7 @@ mod per_request_now_tests {
 
         let traverse = |start_node_id: u64| {
             server.traverse(TraverseRequest {
+                namespace: None,
                 start_node_id,
                 edge_label: "NEXT".to_string(),
                 direction: Some("outgoing".to_string()),
@@ -14497,6 +14710,7 @@ mod per_request_now_tests {
 
         let find = |k: usize| {
             server.find_similar(FindSimilarRequest {
+                namespace: None,
                 property_name: "embedding".to_string(),
                 embedding: vec![0.1, 0.2, 0.3, 0.4],
                 k: Some(k),
@@ -14524,6 +14738,7 @@ mod per_request_now_tests {
 
         let find = |label: &str| {
             server.find_nodes_at_time(FindNodesAtTimeRequest {
+                namespace: None,
                 label: label.to_string(),
                 property_key: None,
                 property_value: None,
@@ -14556,6 +14771,7 @@ mod per_request_now_tests {
 
         let query = |label: &str| {
             server.hybrid_query(HybridQueryRequest {
+                namespace: None,
                 start_node_id: None,
                 traverse_edge: None,
                 traverse_depth: None,
@@ -18270,5 +18486,306 @@ mod namespace_surface_sweep_tests {
             Some("INVALID_ARGUMENT"),
             "namespace on delete_edge must be INVALID_ARGUMENT: {del}"
         );
+    }
+
+    // ========================================================================
+    // BLOCK 2 (PR3a): read-tool namespace scope + per-ns counts
+    // ========================================================================
+
+    /// Seed two isolated namespaces: agent:planner {Alice,Bob KNOWS} and
+    /// agent:researcher {Carol}. Returns (server, alice, bob, carol) u64 ids.
+    fn seed_two_namespaces() -> (AletheiaMcpServer, u64, u64, u64) {
+        let (server, alice, bob) = seed_namespaced();
+        let carol = server
+            .db()
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+                "agent:researcher",
+            )
+            .expect("create carol")
+            .as_u64();
+        (server, alice, bob, carol)
+    }
+
+    #[test]
+    fn scoped_get_node_isolates_other_namespace() {
+        let (server, alice, _bob, carol) = seed_two_namespaces();
+        // Alice is visible when scoped to her namespace...
+        let ok = server.dispatch_tool_json(
+            "get_node",
+            serde_json::json!({ "node_id": alice, "namespace": "agent:planner" }),
+        );
+        assert_eq!(
+            as_json(&ok).get("namespace").and_then(|n| n.as_str()),
+            Some("agent:planner"),
+            "scoped get_node should return Alice: {ok}"
+        );
+        // ...but NOT when scoped to a different namespace (NOT_FOUND, never leaks).
+        let hidden = server.dispatch_tool_json(
+            "get_node",
+            serde_json::json!({ "node_id": alice, "namespace": "agent:researcher" }),
+        );
+        assert_eq!(
+            as_json(&hidden)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "Alice must be NOT_FOUND when scoped to another namespace: {hidden}"
+        );
+        // Carol visible only in her own namespace.
+        let carol_hidden = server.dispatch_tool_json(
+            "get_node",
+            serde_json::json!({ "node_id": carol, "namespace": "agent:planner" }),
+        );
+        assert_eq!(
+            as_json(&carol_hidden)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "Carol must be NOT_FOUND under agent:planner scope: {carol_hidden}"
+        );
+    }
+
+    #[test]
+    fn scoped_list_nodes_isolates_and_unions() {
+        let (server, _alice, _bob, _carol) = seed_two_namespaces();
+        // Scope to planner: only Alice + Bob.
+        let planner = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({ "label": "Person", "namespace": "agent:planner" }),
+        );
+        let pj = as_json(&planner);
+        assert_eq!(
+            pj.get("count").and_then(|c| c.as_u64()),
+            Some(2),
+            "{planner}"
+        );
+        assert!(planner.contains("Alice") && planner.contains("Bob"));
+        assert!(
+            !planner.contains("Carol"),
+            "planner scope leaked Carol: {planner}"
+        );
+        assert_no_reserved(&planner, "list_nodes(scoped)");
+        // Scope to researcher: only Carol.
+        let research = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({ "label": "Person", "namespace": "agent:researcher" }),
+        );
+        assert!(
+            research.contains("Carol") && !research.contains("Alice"),
+            "{research}"
+        );
+        // Union scope sees all three.
+        let both = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({
+                "label": "Person",
+                "namespace": ["agent:planner", "agent:researcher"]
+            }),
+        );
+        assert_eq!(
+            as_json(&both).get("count").and_then(|c| c.as_u64()),
+            Some(3),
+            "{both}"
+        );
+        // "all" selector: no filter.
+        let all = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({ "label": "Person", "namespace": "all" }),
+        );
+        assert_eq!(
+            as_json(&all).get("count").and_then(|c| c.as_u64()),
+            Some(3),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn scoped_traverse_respects_boundary() {
+        let (server, alice, _bob, _carol) = seed_two_namespaces();
+        // In-scope traversal reaches Bob (same namespace).
+        let ok = server.dispatch_tool_json(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": alice, "edge_label": "KNOWS",
+                "namespace": "agent:planner"
+            }),
+        );
+        assert!(ok.contains("Bob"), "scoped traverse should reach Bob: {ok}");
+        assert_no_reserved(&ok, "traverse(scoped)");
+        // Traversing scoped to a namespace Alice is NOT in ⇒ NOT_FOUND (the
+        // start node is out of scope).
+        let bad = server.dispatch_tool_json(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": alice, "edge_label": "KNOWS",
+                "namespace": "agent:researcher"
+            }),
+        );
+        assert_eq!(
+            as_json(&bad)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "start out of scope must be NOT_FOUND: {bad}"
+        );
+    }
+
+    #[test]
+    fn scoped_find_similar_isolates() {
+        let server = create_test_server();
+        server
+            .db()
+            .vector_index("embedding")
+            .hnsw(crate::index::vector::HnswConfig::new(
+                3,
+                crate::index::vector::DistanceMetric::Cosine,
+            ))
+            .enable()
+            .expect("enable vector index");
+        let mk = |ns: &str, name: &str, v: [f32; 3]| {
+            server
+                .db()
+                .create_node_in_namespace(
+                    "Doc",
+                    PropertyMapBuilder::new()
+                        .insert("name", name)
+                        .insert_vector("embedding", &v)
+                        .build(),
+                    ns,
+                )
+                .expect("create doc");
+        };
+        mk("agent:planner", "P1", [1.0, 0.0, 0.0]);
+        mk("agent:planner", "P2", [0.9, 0.1, 0.0]);
+        mk("agent:researcher", "R1", [1.0, 0.0, 0.0]);
+        let out = server.dispatch_tool_json(
+            "find_similar",
+            serde_json::json!({
+                "property_name": "embedding",
+                "embedding": [1.0, 0.0, 0.0],
+                "k": 5,
+                "namespace": "agent:planner"
+            }),
+        );
+        assert!(
+            out.contains("P1") || out.contains("P2"),
+            "expected planner docs: {out}"
+        );
+        assert!(
+            !out.contains("R1"),
+            "researcher doc leaked into scoped search: {out}"
+        );
+        assert_no_reserved(&out, "find_similar(scoped)");
+    }
+
+    #[test]
+    fn scoped_read_unknown_namespace_is_not_found_with_details() {
+        let (server, alice, _bob) = seed_namespaced();
+        let out = server.dispatch_tool_json(
+            "get_node",
+            serde_json::json!({ "node_id": alice, "namespace": "agent:nonexistent" }),
+        );
+        let v = as_json(&out);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "unknown namespace must be NOT_FOUND: {out}"
+        );
+        assert_eq!(
+            v.pointer("/error/details/namespace")
+                .and_then(|c| c.as_str()),
+            Some("agent:nonexistent"),
+            "NOT_FOUND must carry details.namespace: {out}"
+        );
+    }
+
+    #[test]
+    fn scoped_read_empty_array_is_invalid_argument() {
+        let (server, _alice, _bob) = seed_namespaced();
+        let out = server.dispatch_tool_json(
+            "list_nodes",
+            serde_json::json!({ "label": "Person", "namespace": [] }),
+        );
+        assert_eq!(
+            as_json(&out)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "empty namespace scope array must be INVALID_ARGUMENT: {out}"
+        );
+    }
+
+    #[test]
+    fn unsupported_scope_tools_reject_narrowing_scope() {
+        let (server, _a, _b) = seed_namespaced();
+        for tool in ["list_edges", "hybrid_query", "query"] {
+            let mut args = serde_json::json!({ "namespace": "agent:planner" });
+            if tool == "query" {
+                args["language"] = serde_json::json!("aql");
+                args["query"] = serde_json::json!("MATCH (n:Person) RETURN n");
+            }
+            let out = server.dispatch_tool_json(tool, args);
+            let v = as_json(&out);
+            let code = v
+                .pointer("/error/code")
+                .and_then(|c| c.as_str())
+                .or_else(|| v.pointer("/error/kind").and_then(|c| c.as_str()));
+            assert_eq!(
+                v.pointer("/error/code").and_then(|c| c.as_str()),
+                Some("INVALID_ARGUMENT"),
+                "{tool} must reject a narrowing scope with INVALID_ARGUMENT (code={code:?}): {out}"
+            );
+        }
+        // But "all" is accepted (no-op) by these tools.
+        let all_ok = server.dispatch_tool_json(
+            "hybrid_query",
+            serde_json::json!({ "filter_label": "Person", "namespace": "all" }),
+        );
+        assert!(
+            all_ok.get(0..1).is_some() && !all_ok.contains("\"error\""),
+            "hybrid_query with namespace:all should not error: {all_ok}"
+        );
+    }
+
+    #[test]
+    fn per_namespace_counts_in_database_stats() {
+        let (server, _alice, _bob, _carol) = seed_two_namespaces();
+        let out = server.dispatch_tool_json("database_stats", serde_json::json!({}));
+        let v = as_json(&out);
+        let namespaces = v
+            .get("namespaces")
+            .and_then(|n| n.as_array())
+            .expect("database_stats must carry a namespaces array");
+        let planner = namespaces
+            .iter()
+            .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("agent:planner"))
+            .unwrap_or_else(|| panic!("agent:planner missing from stats: {out}"));
+        assert_eq!(planner.get("node_count").and_then(|c| c.as_u64()), Some(2));
+        assert_eq!(planner.get("edge_count").and_then(|c| c.as_u64()), Some(1));
+        let research = namespaces
+            .iter()
+            .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("agent:researcher"))
+            .unwrap_or_else(|| panic!("agent:researcher missing from stats: {out}"));
+        assert_eq!(research.get("node_count").and_then(|c| c.as_u64()), Some(1));
+    }
+
+    #[test]
+    fn per_namespace_counts_in_get_schema() {
+        let (server, _alice, _bob, _carol) = seed_two_namespaces();
+        let out = server.dispatch_tool_json("get_schema", serde_json::json!({}));
+        let v = as_json(&out);
+        let namespaces = v
+            .get("namespaces")
+            .and_then(|n| n.as_array())
+            .expect("get_schema must carry a namespaces array");
+        assert!(
+            namespaces
+                .iter()
+                .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("agent:planner")),
+            "get_schema namespaces must include agent:planner: {out}"
+        );
+        assert_no_reserved(&out, "get_schema(counts)");
     }
 }
