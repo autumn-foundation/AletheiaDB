@@ -136,6 +136,13 @@ impl<'a> SchemaBuilder<'a> {
     fn observe(&mut self, props: &PropertyMap) {
         for (key, value) in props.iter() {
             let Some(name) = key_name(key) else { continue };
+            // Engine-reserved ride-along keys (the namespace marker, #3349, and
+            // the crypto-shred lane's keys) are never user data: elide them from
+            // the export entirely rather than leaking them into a typed or
+            // overflow column.
+            if crate::core::namespace::is_reserved_property_key(&name) {
+                continue;
+            }
             // A key colliding with a fixed column name is always overflow-routed so
             // the emitted schema stays unambiguous.
             let incoming = if self.reserved.contains(&name.as_str()) {

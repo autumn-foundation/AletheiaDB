@@ -42,6 +42,9 @@ pub enum Error {
     /// Derivation-lineage validation errors (Issue #3371).
     #[error("Lineage error: {0}")]
     Lineage(crate::core::lineage::LineageError),
+    /// Namespace validation / registry errors (Issue #3349).
+    #[error("Namespace error: {0}")]
+    Namespace(crate::core::namespace::NamespaceError),
     /// Query-related errors.
     #[error("Query error: {0}")]
     Query(QueryError),
@@ -93,6 +96,7 @@ impl Error {
                 Error::Temporal(_) => crate::observability::ErrorCategory::Temporal,
                 Error::Provenance(_) => crate::observability::ErrorCategory::Other,
                 Error::Lineage(_) => crate::observability::ErrorCategory::Other,
+                Error::Namespace(_) => crate::observability::ErrorCategory::Other,
                 Error::Query(_) => crate::observability::ErrorCategory::Query,
                 Error::Transaction(_) => crate::observability::ErrorCategory::Transaction,
                 Error::Vector(_) => crate::observability::ErrorCategory::Vector,
@@ -153,6 +157,12 @@ impl From<crate::core::provenance::ProvenanceError> for Error {
 impl From<crate::core::lineage::LineageError> for Error {
     fn from(e: crate::core::lineage::LineageError) -> Self {
         Error::Lineage(e)
+    }
+}
+
+impl From<crate::core::namespace::NamespaceError> for Error {
+    fn from(e: crate::core::namespace::NamespaceError) -> Self {
+        Error::Namespace(e)
     }
 }
 

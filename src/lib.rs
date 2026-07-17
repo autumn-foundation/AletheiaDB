@@ -126,9 +126,9 @@ pub use core::temporal::time;
 pub use core::{
     BiTemporalInterval, ChangeFeedPage, ChangeFeedQuery, ChangeFilter, ChangeRecord, ChangeType,
     ChangefeedBroadcaster, ChangefeedConfig, Edge, EdgeId, EntityId, EntityKind, GLOBAL_INTERNER,
-    InternedString, Node, NodeHeader, NodeId, PropertyKey, PropertyMap, PropertyMapBuilder,
-    PropertyValue, Provenance, RecvError, StringInterner, Subscription, TimeRange, Timestamp,
-    VersionId,
+    InternedString, NAMESPACE_KEY, Namespace, NamespaceError, Node, NodeHeader, NodeId,
+    PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, Provenance, RecvError,
+    StringInterner, Subscription, TimeRange, Timestamp, VersionId,
 };
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
@@ -138,8 +138,8 @@ pub use core::error::{
 pub use db::{
     AletheiaDB, BackupSummary, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats,
     DatabaseStats, EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent,
-    LabelSchema, LineageView, LineageViewEntry, PitrCoord, PitrPlan, PitrTarget, SchemaInstant,
-    SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds,
+    LabelSchema, LineageView, LineageViewEntry, NamespaceInfo, PitrCoord, PitrPlan, PitrTarget,
+    SchemaInstant, SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds,
     UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
 };
 pub use index::{

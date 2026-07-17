@@ -220,6 +220,7 @@ fn classify_db_error(e: &Error) -> (McpErrorCode, bool) {
         // A provenance bundle failing validation is a caller fault.
         Error::Provenance(_) => (McpErrorCode::InvalidArgument, false),
         Error::Lineage(le) => classify_lineage_error(le),
+        Error::Namespace(ne) => classify_namespace_error(ne),
         // A PITR (#3374) target outside the achievable window, or a window that
         // crosses a post-backup vocabulary change, is a caller-fault precondition
         // failure; each error's Display explains the remediation. All other
@@ -250,6 +251,21 @@ fn classify_lineage_error(e: &crate::core::lineage::LineageError) -> (McpErrorCo
             (McpErrorCode::InvalidArgument, false)
         }
         LineageError::AlreadyRecorded(_) => (McpErrorCode::FailedPrecondition, false),
+    }
+}
+
+/// Map a namespace error (Issue #3349). All are caller faults and never
+/// retriable: an invalid name or a forged engine-reserved property key is
+/// `INVALID_ARGUMENT`, an unknown namespace is `NOT_FOUND`, and a duplicate
+/// `create_namespace` is `CONFLICT`.
+fn classify_namespace_error(e: &crate::core::namespace::NamespaceError) -> (McpErrorCode, bool) {
+    use crate::core::namespace::NamespaceError;
+    match e {
+        NamespaceError::InvalidName { .. }
+        | NamespaceError::ReservedPropertyKey { .. }
+        | NamespaceError::Immutable => (McpErrorCode::InvalidArgument, false),
+        NamespaceError::NotFound { .. } => (McpErrorCode::NotFound, false),
+        NamespaceError::AlreadyExists { .. } => (McpErrorCode::Conflict, false),
     }
 }
 

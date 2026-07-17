@@ -294,7 +294,14 @@ fn build_schema(
         .into_iter()
         .map(|(label, (count, keys))| {
             total_nodes += count;
-            let mut property_keys: Vec<String> = keys.into_iter().map(resolve_label).collect();
+            // Elide engine-reserved ride-along keys (the namespace marker,
+            // #3349, and crypto-shred markers): they are not user property keys
+            // and must never surface in the schema.
+            let mut property_keys: Vec<String> = keys
+                .into_iter()
+                .map(resolve_label)
+                .filter(|k| !crate::core::namespace::is_reserved_property_key(k))
+                .collect();
             property_keys.sort_unstable();
             LabelSchema {
                 label: resolve_label(label),
@@ -312,7 +319,12 @@ fn build_schema(
         .into_iter()
         .map(|(edge_type, (count, keys))| {
             total_edges += count;
-            let mut property_keys: Vec<String> = keys.into_iter().map(resolve_label).collect();
+            // Elide engine-reserved ride-along keys (see the node branch).
+            let mut property_keys: Vec<String> = keys
+                .into_iter()
+                .map(resolve_label)
+                .filter(|k| !crate::core::namespace::is_reserved_property_key(k))
+                .collect();
             property_keys.sort_unstable();
             EdgeTypeSchema {
                 edge_type: resolve_label(edge_type),

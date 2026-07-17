@@ -37,6 +37,7 @@ pub mod hlc;
 pub mod id;
 pub mod interning;
 pub mod lineage;
+pub mod namespace;
 pub mod observer;
 pub mod property;
 pub mod provenance;
@@ -59,6 +60,7 @@ pub use lineage::{
     LineageClosure, LineageEntry, LineageError, LineageQueryOptions, LineageRecord, LineageRef,
     LineageStore,
 };
+pub use namespace::{NAMESPACE_KEY, Namespace, NamespaceError};
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use provenance::{
     Provenance, ProvenanceBuilder, ProvenanceError, ProvenanceFilter, ProvenanceFilterError,

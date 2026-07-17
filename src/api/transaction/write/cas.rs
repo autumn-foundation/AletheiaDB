@@ -62,6 +62,7 @@ use crate::api::transaction::{BufferedWrite, WriteRequestOptions};
 use crate::core::error::{Result, TransactionError};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
+use crate::core::namespace;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 use crate::core::temporal::Timestamp;
 
@@ -155,6 +156,16 @@ impl WriteTransaction {
             .into());
         }
 
+        // A namespace is immutable after creation: reject an explicit namespace
+        // on a CAS / lease-claim rather than silently ignoring it (#3349). This
+        // also covers `claim_with_lease_impl`, which routes through here.
+        namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
+        // Reject engine-reserved keys on the user-supplied replacement map
+        // (Issue #3349); the immutable namespace is re-stamped from the
+        // existing node below.
+        namespace::reject_reserved_keys(&properties)?;
+
         // Preserve the label; a full-replace changes only the property map.
         // Buffer-aware read (read-your-own-writes): a node created/updated
         // earlier in THIS transaction is a valid CAS target.
@@ -195,7 +206,8 @@ impl WriteTransaction {
             .map(std::sync::Arc::new);
 
         // Full REPLACE (no PATCH merge): the provided map becomes the node's
-        // entire property state.
+        // entire property state. Re-stamp the immutable namespace (#3349).
+        let properties = namespace::restamp_namespace(properties, &node.properties);
         self.buffer.add(BufferedWrite::UpdateNode {
             node_id,
             version_id,
@@ -232,6 +244,14 @@ impl WriteTransaction {
             .into());
         }
 
+        // A namespace is immutable after creation: reject an explicit namespace
+        // on an edge CAS rather than silently ignoring it (#3349).
+        namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
+        // Reject engine-reserved keys on the user-supplied replacement map
+        // (Issue #3349); the immutable namespace is re-stamped below.
+        namespace::reject_reserved_keys(&properties)?;
+
         let edge = match self.read_own_edge(edge_id) {
             Ok(edge) => edge,
             Err(_) => {
@@ -264,7 +284,9 @@ impl WriteTransaction {
             .filter(|p| !p.is_empty())
             .map(std::sync::Arc::new);
 
-        // Full REPLACE of properties; source/target/label preserved.
+        // Full REPLACE of properties; source/target/label preserved. Re-stamp
+        // the immutable namespace (#3349).
+        let properties = namespace::restamp_namespace(properties, &edge.properties);
         self.buffer.add(BufferedWrite::UpdateEdge {
             edge_id,
             version_id,

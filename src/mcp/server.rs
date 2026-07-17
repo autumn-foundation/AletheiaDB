@@ -1306,6 +1306,12 @@ impl AletheiaMcpServer {
         let mut result = HashMap::new();
         for (key, value) in props.iter() {
             let key_str = self.interned_to_string(*key);
+            // Elide engine-reserved ride-along keys (the namespace marker,
+            // #3349, and crypto-shred markers) — they are surfaced as
+            // first-class fields, never as user properties.
+            if crate::core::namespace::is_reserved_property_key(&key_str) {
+                continue;
+            }
             result.insert(key_str, self.property_value_to_json(value, include_vectors));
         }
         result

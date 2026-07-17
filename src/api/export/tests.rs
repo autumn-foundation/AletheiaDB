@@ -859,3 +859,72 @@ fn empty_edge_history_produces_valid_empty_file() {
     assert!(names.contains(&"source_key".to_string()));
     assert!(names.contains(&"valid_to".to_string()));
 }
+
+/// Assert no exported Parquet field name nor any Utf8 cell carries the
+/// engine-reserved namespace ride-along key (Issue #3349).
+fn assert_no_reserved_in_parquet(schema: &Schema, batches: &[RecordBatch]) {
+    for name in field_names(schema) {
+        assert!(
+            !name.contains("__aletheia_"),
+            "reserved ride-along key leaked into a Parquet column name: {name}"
+        );
+    }
+    for batch in batches {
+        for col in batch.columns() {
+            if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                for i in 0..arr.len() {
+                    if arr.is_valid(i) {
+                        assert!(
+                            !arr.value(i).contains("__aletheia_"),
+                            "reserved ride-along key leaked into a Parquet Utf8 cell: {}",
+                            arr.value(i)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn namespaced_export_elides_reserved_ride_along_key() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let a = db
+        .create_node_in_namespace(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            "agent:planner",
+        )
+        .unwrap();
+    let b = db
+        .create_node_in_namespace(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            "agent:planner",
+        )
+        .unwrap();
+    db.create_edge_in_namespace(
+        a,
+        b,
+        "KNOWS",
+        PropertyMapBuilder::new().insert("since", 2020i64).build(),
+        "agent:planner",
+    )
+    .unwrap();
+
+    let nodes_path = files.path().join("nodes.parquet");
+    let edges_path = files.path().join("edges.parquet");
+    let node_hist_path = files.path().join("node_hist.parquet");
+    db.export().nodes_to_parquet(&nodes_path).unwrap();
+    db.export().edges_to_parquet(&edges_path).unwrap();
+    db.export()
+        .node_history_to_parquet(&node_hist_path)
+        .unwrap();
+
+    for path in [&nodes_path, &edges_path, &node_hist_path] {
+        let (schema, batches) = read_parquet(path);
+        assert_no_reserved_in_parquet(&schema, &batches);
+    }
+}
