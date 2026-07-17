@@ -87,6 +87,27 @@ impl VersionSource for LockedDbVersionSource<'_> {
 /// from an already-locked historical store. Shared by the per-call
 /// [`DbVersionSource::fetch`] and the single-lock
 /// [`LockedDbVersionSource::fetch`] so both produce byte-identical leaves.
+///
+/// # GDPR crypto-shred invariant — DO NOT reroute through the unsealing boundary
+///
+/// Properties MUST be reconstructed via the **raw** `reconstruct_node_properties`
+/// / `reconstruct_edge_properties` storage path, which is crypto-shred-**unaware**
+/// and returns the bytes exactly as stored — for a designated property that is the
+/// sealed `PropertyValue::Bytes(SUBJ…)` envelope (ciphertext), never the plaintext.
+/// This is what makes the provenance-chain leaf **erasure-stable** (AC4, Issue
+/// #3359): the leaf binds the ciphertext, and `erase_subject` destroys only the
+/// subject key — never the stored envelope — so the recomputed leaf is unchanged
+/// and `verify_chain` still passes after a crypto-shred, while a tamper of the
+/// envelope bytes is still caught.
+///
+/// This function MUST NOT route through the db-API unsealing hooks
+/// (`materialize_shred` / `unseal_node_view` / `unseal_edge_view`,
+/// `src/db/crypto_shred/api.rs`). Doing so would make the leaf bind **plaintext**,
+/// which (1) breaks AC4 — a leaf over destroyed plaintext can no longer be
+/// recomputed after erasure, so `verify_chain` would spuriously fail — and (2)
+/// would defeat on-disk tamper detection for sealed values. Non-crypto-shred data
+/// is unaffected: with no designation, historical holds plaintext and the leaf
+/// binds it exactly as before.
 fn fetch_locked(
     historical: &HistoricalStorage,
     kind: EntityKind,
