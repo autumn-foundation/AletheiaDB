@@ -1055,7 +1055,7 @@ mod select_edges {
             "node B target sorts second descending"
         );
     }
-  
+
     #[test]
     fn select_edges_collect_structured_edges() {
         // Issue #3626: the edge-shaped structured projection. `SELECT * FROM edges`
