@@ -1267,6 +1267,67 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
             false,
             move |i| json!({"label": format!("UniqProbe{i}"), "property": "email"})
         ),
+        // ---- Namespace management (Issue #3349) — admin/read-class ----
+        // create_namespace is a write; a fresh unique name per iteration keeps
+        // every call a clean success (a duplicate name would be a tolerated
+        // tool-level CONFLICT, but unique names measure the success path).
+        s!(
+            "admin__create_namespace",
+            "create_namespace",
+            "admin",
+            "typical",
+            false,
+            move |i| json!({"name": format!("agent:bench_{i}"), "description": "round-trip bench namespace"})
+        ),
+        s!(
+            "admin__list_namespaces",
+            "list_namespaces",
+            "read",
+            "typical",
+            false,
+            |_| json!({})
+        ),
+        // describe_namespace on the implicit 'default' namespace always resolves.
+        s!(
+            "admin__describe_namespace",
+            "describe_namespace",
+            "read",
+            "typical",
+            false,
+            |_| json!({"name": "default"})
+        ),
+        // ---- GDPR crypto-shred admin tools (Issue #3359) ----
+        // The smoke build configures no encryption key material, so both tools
+        // return the structured FAILED_PRECONDITION unavailable response (a
+        // tool-level `isError`, NOT a JSON-RPC error), which `measure_scenario`
+        // tolerates. They are present to satisfy registry-completeness (AC2);
+        // they are non-gated and assert no success. Args are well-formed so the
+        // request deserializes cleanly (only malformed args trip a JSON-RPC
+        // error / `sample_response_ok`).
+        s!(
+            "admin__designate_subject",
+            "designate_subject",
+            "admin",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |i| {
+                    json!({
+                        "subject_id": format!("bench-subject-{i}"),
+                        "targets": [{"entity_kind": "node", "id": id}]
+                    })
+                }
+            }
+        ),
+        s!(
+            "admin__erase_subject",
+            "erase_subject",
+            "admin",
+            "typical",
+            false,
+            move |i| json!({"subject_id": format!("bench-subject-{i}")})
+        ),
         // ---- Provenance / audit ----
         s!(
             "provenance__verify_chain",
