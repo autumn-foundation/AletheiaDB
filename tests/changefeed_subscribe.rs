@@ -726,7 +726,7 @@ fn concurrent_writers_union_equals_ground_truth() {
 // ── Per-principal subscription quota (Issue #3678) ──────────────────────────
 
 use aletheiadb::StorageError;
-use aletheiadb::config::AletheiaDBConfig;
+use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
 use std::collections::HashMap;
 
 /// The DB-level `subscribe_changes_for_principal` funnel enforces the
@@ -777,7 +777,17 @@ fn per_principal_quota_enforced_via_db_api() {
 /// `database_stats`.
 #[test]
 fn changefeed_config_default_and_override_from_unified_config() {
+    // Isolate the WAL directory in a per-test tempdir. The default unified-config
+    // `wal_dir` is the CWD-relative `aletheiadb/wal`, which every such test in one
+    // `cargo test` process would otherwise share — a stray WAL segment from a
+    // sibling then corrupts this test's startup under parallel runs (Issue #3500).
+    let wal_home = tempfile::tempdir().unwrap();
     let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(wal_home.path().join("wal"))
+                .build(),
+        )
         .changefeed(
             ChangefeedConfig::default()
                 .with_max_subscriptions(100)
