@@ -56,6 +56,26 @@ pub const ALETHEIA_RESERVED_PREFIX: &str = "__aletheia_";
 /// writes carrying it are rejected here so the two lanes never collide.
 pub const SHRED_RESERVED_PREFIX: &str = "__shred_";
 
+/// The reserved **fail-closed sentinel** namespace value (Issue #3349, PR3c
+/// security fix).
+///
+/// A changefeed record is stamped with this namespace **only** when the engine
+/// genuinely cannot derive the affected entity's real namespace — e.g. a
+/// delta-chain reconstruction hard-failure ([`crate::core::error::TemporalError::MaxDepthExceeded`]
+/// / `MissingAnchor`). It is deliberately **not** a creatable namespace:
+/// [`Namespace::new`] rejects the `__aletheia_*` prefix, so no user scope can
+/// ever name it. Consequently [`NamespaceScope::contains`] returns `false` for
+/// it under `Single(_)` / `List(_)` / the default scope (it can never leak to a
+/// user-scoped read or subscriber) but `true` under [`NamespaceScope::All`] and
+/// for an unset scope (so an unscoped `list_changes` never silently drops it).
+///
+/// Deriving to this sentinel — **never** to [`Namespace::DEFAULT`] — on a
+/// derivation miss/failure is the security-critical contract: `default` is a
+/// real, subscribable namespace, so failing open to it would both leak a
+/// non-default entity's change to `default`-scoped subscribers and hide it from
+/// its real namespace's subscribers.
+pub const UNRESOLVED_NAMESPACE: &str = "__aletheia_unresolved";
+
 /// Maximum length of a namespace identifier, in bytes.
 pub const MAX_NAMESPACE_LEN: usize = 128;
 
@@ -168,6 +188,17 @@ impl Namespace {
     #[must_use]
     pub fn into_string(self) -> String {
         self.0
+    }
+
+    /// Construct the reserved [`UNRESOLVED_NAMESPACE`] fail-closed sentinel,
+    /// **bypassing** the prefix/charset validation [`Namespace::new`] enforces
+    /// (which rejects the `__aletheia_*` prefix). This is `pub(crate)` and is the
+    /// only sanctioned way to mint an engine-reserved namespace value: it must
+    /// never be exposed to user construction, or a caller could forge a scope
+    /// that matches the sentinel.
+    #[must_use]
+    pub(crate) fn unresolved() -> Self {
+        Namespace(UNRESOLVED_NAMESPACE.to_string())
     }
 }
 
@@ -463,14 +494,31 @@ pub fn intern_namespace(namespace: &Namespace) -> NamespaceId {
     NAMESPACE_INTERNER.intern(namespace.as_str())
 }
 
+/// The interned [`NamespaceId`] of the reserved [`UNRESOLVED_NAMESPACE`]
+/// fail-closed sentinel (Issue #3349, PR3c). Cheap: interning is a fast-path
+/// hash lookup after the first call. Used by the changefeed derivation paths to
+/// stamp a record whose real namespace cannot be derived, and to detect such
+/// records for tier-aware re-derivation.
+#[inline]
+#[must_use]
+pub(crate) fn unresolved_namespace_id() -> NamespaceId {
+    intern_namespace(&Namespace::unresolved())
+}
+
 /// Resolve a [`NamespaceId`] back to its [`Namespace`] (cold path — used only by
-/// per-namespace stats/schema enumeration). Returns `None` for an id that was
-/// never interned in this process.
+/// per-namespace stats/schema enumeration and changefeed record materialization).
+/// Returns `None` for an id that was never interned in this process.
+///
+/// The interner only ever holds validated names **or** engine-reserved sentinels
+/// (e.g. [`UNRESOLVED_NAMESPACE`]). For a sentinel, [`Namespace::new`] would
+/// reject the reserved prefix, so we fall back to the raw interned value rather
+/// than silently dropping it to `None` (which would let a caller degrade the
+/// sentinel to [`Namespace::DEFAULT`] and re-open the fail-open leak).
 #[must_use]
 pub fn resolve_namespace_id(id: NamespaceId) -> Option<Namespace> {
     NAMESPACE_INTERNER
         .resolve(id)
-        .and_then(|s| Namespace::new(s.as_ref()).ok())
+        .map(|s| Namespace::new(s.as_ref()).unwrap_or_else(|_| Namespace(s.to_string())))
 }
 
 /// A [`NamespaceScope`] resolved to interned [`NamespaceId`]s **once per query**
@@ -821,6 +869,37 @@ mod tests {
 
         let clean = PropertyMapBuilder::new().insert("name", "Alice").build();
         assert!(reject_reserved_keys(&clean).is_ok());
+    }
+
+    #[test]
+    fn unresolved_sentinel_is_fail_closed() {
+        // The sentinel is a reserved value users can never construct via `new`...
+        assert!(Namespace::new(UNRESOLVED_NAMESPACE).is_err());
+        // ...but the engine can mint it internally.
+        let sentinel = Namespace::unresolved();
+        assert_eq!(sentinel.as_str(), UNRESOLVED_NAMESPACE);
+        assert!(!sentinel.is_default());
+
+        // No user scope may match the sentinel (no leak to any user-scoped read /
+        // subscriber): Single(default), Single(agent:x), and a List all exclude it.
+        assert!(!NamespaceScope::Single(Namespace::default()).contains(&sentinel));
+        assert!(!NamespaceScope::Single(Namespace::new("agent:x").unwrap()).contains(&sentinel));
+        assert!(
+            !NamespaceScope::list(vec![
+                Namespace::new("agent:a").unwrap(),
+                Namespace::new("agent:b").unwrap(),
+            ])
+            .unwrap()
+            .contains(&sentinel)
+        );
+        // But `All` (and, at the filter layer, an unset scope) still sees it, so an
+        // unscoped `list_changes` never silently loses a genuinely-unresolvable change.
+        assert!(NamespaceScope::All.contains(&sentinel));
+
+        // The sentinel round-trips through the interner (resolve must NOT drop a
+        // reserved value to None / default).
+        let id = unresolved_namespace_id();
+        assert_eq!(resolve_namespace_id(id), Some(sentinel));
     }
 
     #[test]

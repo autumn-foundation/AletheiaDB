@@ -18,6 +18,9 @@ use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::core::namespace::{
+    NamespaceId, intern_namespace, namespace_of, unresolved_namespace_id,
+};
 use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::provenance::Provenance;
@@ -2037,6 +2040,9 @@ impl HistoricalStorage {
                 tx_window,
                 valid_window,
                 label_filter,
+                // Lazy (Issue #3349, PR3c): derived only for a candidate that
+                // passed the cheap tx/valid/label filters.
+                || self.node_version_namespace_id(v),
             );
         }
 
@@ -2053,10 +2059,122 @@ impl HistoricalStorage {
                 tx_window,
                 valid_window,
                 label_filter,
+                || self.edge_version_namespace_id(v),
             );
         }
 
         acc.into_vec()
+    }
+
+    /// Derive the interned [`NamespaceId`] of a node version (Issue #3349, PR3c).
+    ///
+    /// The namespace is immutable and rides along the property map under
+    /// [`crate::core::namespace::NAMESPACE_KEY`], stamped on every anchor. An
+    /// anchor carries it directly (cheap, no walk); a delta does not (the
+    /// immutable key never diffs), so it is recovered by reconstructing the
+    /// version's properties (cached, and correct across the anchor chain / cold
+    /// tier). A legacy / `default` entity has no key and resolves to the default
+    /// namespace.
+    ///
+    /// # Fail-closed on reconstruction failure (Issue #3349, PR3c security fix)
+    ///
+    /// If reconstructing a delta's properties hard-fails (a delta chain deeper
+    /// than `max_reconstruction_depth` → `MaxDepthExceeded`, or a `MissingAnchor`),
+    /// the namespace **cannot** be derived. It is stamped with the reserved
+    /// [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel — **never**
+    /// [`Namespace::default`](crate::core::namespace::Namespace::default): failing
+    /// open to `default` (a real, subscribable namespace) would leak a non-default
+    /// entity's change to `default`-scoped subscribers and hide it from its own
+    /// namespace. The sentinel matches no user scope, so the change is withheld
+    /// from every user-scoped read while still surfacing under an `All` / unset
+    /// scope.
+    fn node_version_namespace_id(&self, v: &NodeVersion) -> NamespaceId {
+        match &v.data {
+            VersionData::Anchor { properties, .. } => intern_namespace(&namespace_of(properties)),
+            VersionData::Delta { .. } => match self.reconstruct_node_properties(v.id) {
+                Ok(p) => intern_namespace(&namespace_of(&p)),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: changefeed namespace derivation failed for node version {} \
+                         ({e}); record scoped to the reserved '{}' namespace (fail-closed)",
+                        v.id,
+                        crate::core::namespace::UNRESOLVED_NAMESPACE
+                    );
+                    unresolved_namespace_id()
+                }
+            },
+        }
+    }
+
+    /// Edge counterpart of [`node_version_namespace_id`](Self::node_version_namespace_id).
+    /// Fail-closes to the [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel
+    /// on a reconstruction hard-failure (see that method).
+    fn edge_version_namespace_id(&self, v: &EdgeVersion) -> NamespaceId {
+        match &v.data {
+            VersionData::Anchor { properties, .. } => intern_namespace(&namespace_of(properties)),
+            VersionData::Delta { .. } => match self.reconstruct_edge_properties(v.id) {
+                Ok(p) => intern_namespace(&namespace_of(&p)),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: changefeed namespace derivation failed for edge version {} \
+                         ({e}); record scoped to the reserved '{}' namespace (fail-closed)",
+                        v.id,
+                        crate::core::namespace::UNRESOLVED_NAMESPACE
+                    );
+                    unresolved_namespace_id()
+                }
+            },
+        }
+    }
+
+    /// Re-derive the namespace of any changefeed [`RawChange`]s left **unresolved**
+    /// (stamped with the [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel)
+    /// by a fast-path derivation, using tier-aware reconstruction (Issue #3349,
+    /// PR3c security fix).
+    ///
+    /// The cold-tier scan derives a delta's namespace from a running anchor map it
+    /// builds **within the cold scan** (see
+    /// [`crate::storage::redb_cold_storage::RedbColdStorage::collect_changes_filtered`]).
+    /// That map necessarily misses a delta whose covering anchor is **not in the
+    /// cold tier** — the LRU anchor-split case: under `MigrationPolicy::aggressive()`
+    /// / `enable_lru`, a frequently-accessed anchor stays HOT while an older delta
+    /// migrates COLD. The cold scan cannot resolve such a delta (it cannot see the
+    /// hot tier), so it marks it with the sentinel and defers to this method, which
+    /// runs at the [`HistoricalStorage`] layer where **both** tiers are visible via
+    /// [`reconstruct_node_properties`](Self::reconstruct_node_properties) /
+    /// [`reconstruct_edge_properties`](Self::reconstruct_edge_properties).
+    ///
+    /// A record whose namespace is genuinely unresolvable even with both tiers
+    /// (reconstruction hard-fails) keeps the sentinel — fail-closed, never
+    /// `default`. Records not carrying the sentinel are left untouched, so this is a
+    /// cheap no-op on the overwhelmingly common fully-resolved page.
+    pub(crate) fn resolve_unresolved_namespaces(&self, changes: &mut [RawChange]) {
+        let sentinel = unresolved_namespace_id();
+        for rec in changes.iter_mut() {
+            if rec.namespace_id != sentinel {
+                continue;
+            }
+            let Ok(version_id) = VersionId::new(rec.cursor.version_id) else {
+                continue;
+            };
+            let derived = match EntityKind::from_ord(rec.cursor.kind_ord) {
+                EntityKind::Node => self.reconstruct_node_properties(version_id),
+                EntityKind::Edge => self.reconstruct_edge_properties(version_id),
+            };
+            match derived {
+                Ok(p) => rec.namespace_id = intern_namespace(&namespace_of(&p)),
+                Err(e) => {
+                    // Genuinely unresolvable across both tiers: keep the fail-closed
+                    // sentinel (never `default`).
+                    eprintln!(
+                        "Warning: changefeed namespace derivation failed for version {} \
+                         ({e}); record scoped to the reserved '{}' namespace (fail-closed)",
+                        rec.cursor.version_id,
+                        crate::core::namespace::UNRESOLVED_NAMESPACE
+                    );
+                }
+            }
+        }
     }
 
     /// Build changefeed [`RawChange`]s for a specific, known set of just-committed version
@@ -2096,6 +2214,7 @@ impl HistoricalStorage {
                     &tx_window,
                     None,
                     None,
+                    || self.node_version_namespace_id(v),
                 ) {
                     out.push(rec);
                 }
@@ -2115,6 +2234,7 @@ impl HistoricalStorage {
                     &tx_window,
                     None,
                     None,
+                    || self.edge_version_namespace_id(v),
                 ) {
                     out.push(rec);
                 }

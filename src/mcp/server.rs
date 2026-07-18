@@ -6630,6 +6630,7 @@ impl AletheiaMcpServer {
             "kind": record.kind.as_str(),
             "change_type": record.change_type.as_str(),
             "label": record.label,
+            "namespace": record.namespace.as_str(),
             "transaction_time": time::to_iso8601(record.transaction_time()),
             "transaction_time_range": {
                 "start": time::to_iso8601(record.transaction_time_range.start()),
@@ -6799,6 +6800,17 @@ impl AletheiaMcpServer {
             };
             filter = filter.with_change_types(parsed);
         }
+
+        // Namespace scope (Issue #3349, PR3c). An omitted scope resolves to the
+        // `default` namespace only (isolated-by-default, mirroring the PR3a read
+        // tools) via `.unwrap_or_default()`; `"all"` imposes no namespace filter.
+        // A malformed / empty scope is a structured INVALID_ARGUMENT (never a
+        // silently-unscoped subscription).
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(opt) => opt.unwrap_or_default(),
+            Err(result) => return AwaitChangesStep::Immediate(Box::new(result)),
+        };
+        filter = filter.with_namespace_scope(scope);
 
         let limit = req
             .limit
