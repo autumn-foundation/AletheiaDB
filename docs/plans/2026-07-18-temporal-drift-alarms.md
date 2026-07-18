@@ -105,6 +105,18 @@
 If `e_past` is missing (no version in-window) or `e_now` is missing, the entity does
 **not** fire.
 
+**Stage B1 clarification of the two endpoints.** Operationally, `e_now` is the
+*latest* embedding version inside the lookback window `[now − window, now]` (the
+current one) and `e_past` is the *earliest* version still inside that window. This is
+the concrete reading of `embedding(E, now − window)`: reconstructing literally at the
+instant `now − window` would sit *before* an entity's very first version, so the entity
+could never fire on its first genuine drift. `e_past` is therefore MISSING exactly when
+the window holds fewer than two versions (a single point has no past to compare
+against), matching "no version in-window → no fire". The versions are read through the
+bi-temporal node history (`get_node_history`), which yields both the embedding and the
+`VersionId` for each version, supplying the `from_version` / `to_version` refs the alarm
+record carries.
+
 **Label-centroid.** `centroid(t) =` the component-wise arithmetic mean over all
 entities carrying `M.label` that have the property at time `t` (iterated **sorted by
 node id**; entities missing the vector are **skipped**). For `Cosine` the mean is
