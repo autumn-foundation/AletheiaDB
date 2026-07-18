@@ -12,6 +12,14 @@
 //!    non-designated data (target **<2us single-hop**) and non-designated write
 //!    throughput matched against a crypto-shred-*disabled* baseline.
 //!
+//! A fourth group, `seal_overhead_isolated`, measures the incremental **crypto**
+//! cost a designated write adds (encode + AEAD seal) in a tight loop with fixed
+//! inputs prepared outside the timed closure and **no** disk / WAL / scheduler
+//! involvement. Its µs-scale delta is trustworthy even on a loaded shared host,
+//! where the full-path medians above are dominated by scheduling + WAL noise —
+//! so the designated-write overhead behind the >=90%-throughput target has a
+//! clean number regardless of host load.
+//!
 //! ## Timing notes
 //!
 //! All benches run against an **in-process** database configured with WAL in
@@ -32,11 +40,13 @@ use std::hint::black_box;
 use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::core::NodeId;
 use aletheiadb::db::DesignationTarget;
-use aletheiadb::encryption::{EncryptionConfig, FileKeyProvider};
+use aletheiadb::db::crypto_shred::envelope;
+use aletheiadb::encryption::{Aes256GcmCipher, Cipher, EncryptionConfig, FileKeyProvider};
 use aletheiadb::storage::wal::DurabilityMode;
-use aletheiadb::{AletheiaDB, PropertyMap, PropertyMapBuilder};
+use aletheiadb::{AletheiaDB, PropertyMap, PropertyMapBuilder, PropertyValue};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tempfile::TempDir;
+use zeroize::Zeroizing;
 
 /// A representative designated payload: a handful of string/int properties that
 /// a `WholeNode` designation seals on every write.
@@ -64,7 +74,11 @@ fn shred_capable_db() -> (AletheiaDB, TempDir) {
             WalConfigBuilder::new()
                 .wal_dir(dir.path().join("wal"))
                 .durability_mode(DurabilityMode::Async {
-                    flush_interval_ms: 1000,
+                    // 1h: these benches are ephemeral/in-process, so no periodic
+                    // durability flush is needed; a long interval keeps a
+                    // background WAL flush from firing inside the measurement
+                    // window, for more stable, reproducible timings.
+                    flush_interval_ms: 3_600_000,
                 })
                 .build(),
         )
@@ -88,7 +102,10 @@ fn disabled_baseline_db() -> (AletheiaDB, TempDir) {
             WalConfigBuilder::new()
                 .wal_dir(dir.path().join("wal"))
                 .durability_mode(DurabilityMode::Async {
-                    flush_interval_ms: 1000,
+                    // 1h: see the note in `shred_capable_db` — a long flush
+                    // interval keeps a background WAL flush out of the
+                    // measurement window for reproducible timings.
+                    flush_interval_ms: 3_600_000,
                 })
                 .build(),
         )
@@ -307,10 +324,112 @@ fn bench_non_designated_single_hop(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Group 4: isolated per-seal crypto overhead (host-noise-robust) ─────────
+
+/// The designated properties one `WholeNode` write seals: the non-reserved
+/// values of [`sealed_payload`]. Returned as owned `PropertyValue`s so the
+/// timed closures below never touch the DB, WAL, or scheduler — only the
+/// encode + AEAD-seal work that a designated write layers on top of a plain
+/// write. Mirrors `sealed_payload(1)` so the isolated cost lines up with the
+/// full-path `designated_write` bench.
+fn designated_values() -> Vec<PropertyValue> {
+    vec![
+        PropertyValue::String("alice.example.person@example-corp.test".into()),
+        PropertyValue::String("Alice Q. Example".into()),
+        PropertyValue::String("123-45-6789".into()),
+        PropertyValue::Int(1),
+    ]
+}
+
+/// AC8.1 (isolated): the incremental **crypto** cost a designated write adds,
+/// measured with zero disk / WAL / scheduler involvement so it is trustworthy
+/// even when the shared sandbox is loaded (unlike the full-path medians, whose
+/// absolute values are dominated by host noise).
+///
+/// The AEAD cipher, subject id, key version, write-site context, and the fixed
+/// property values are all prepared **outside** the timed closures, so each
+/// iteration times only `serialize` (plain path) or `seal_property_value`
+/// (designated path). The delta between the two is the per-property seal
+/// overhead; summed over a `WholeNode` payload it is the crypto cost of one
+/// designated write. Compare this µs figure against the plain per-write cost
+/// from `designated_vs_plain_node_write` to reason about the >=90%-throughput
+/// target directly, without the host-noise floor.
+fn bench_seal_overhead_isolated(c: &mut Criterion) {
+    let mut group = c.benchmark_group("seal_overhead_isolated");
+
+    // Fixed, deterministic subject cipher + AAD binding, built once.
+    let key = Zeroizing::new([0x5Au8; 32]);
+    let cipher = Aes256GcmCipher::new(&key);
+    let cipher_ref: &dyn Cipher = &cipher;
+    let subject_id = "bench-subject";
+    let key_version: u32 = 1;
+    // Representative write-site context (`entity_id` LE || property-key bytes),
+    // shaped like the real seal-site binding; its length barely moves AEAD cost.
+    let context: &[u8] = b"\x01\x00\x00\x00\x00\x00\x00\x00email";
+
+    let values = designated_values();
+    let single = values[0].clone(); // one representative string property
+
+    // Plain path: encode a single property value (what a non-designated write
+    // persists) — no AEAD.
+    group.bench_function("plain_encode_property", |b| {
+        b.iter(|| {
+            let bytes = black_box(&single).serialize().expect("encode");
+            black_box(bytes)
+        })
+    });
+
+    // Designated path: encode + AEAD-seal a single property value. The delta
+    // over `plain_encode_property` is the per-property seal overhead.
+    group.bench_function("seal_property", |b| {
+        b.iter(|| {
+            let env = envelope::seal_property_value(
+                black_box(&single),
+                subject_id,
+                key_version,
+                context,
+                cipher_ref,
+            )
+            .expect("seal");
+            black_box(env)
+        })
+    });
+
+    // Plain path over a whole `WholeNode` payload: encode every designated value.
+    group.bench_function("plain_encode_payload", |b| {
+        b.iter(|| {
+            for v in &values {
+                black_box(black_box(v).serialize().expect("encode"));
+            }
+        })
+    });
+
+    // Designated path over a whole `WholeNode` payload: seal every value. This
+    // is the crypto work one designated write does on top of a plain write.
+    group.bench_function("seal_payload", |b| {
+        b.iter(|| {
+            for v in &values {
+                let env = envelope::seal_property_value(
+                    black_box(v),
+                    subject_id,
+                    key_version,
+                    context,
+                    cipher_ref,
+                )
+                .expect("seal");
+                black_box(env);
+            }
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_designated_vs_plain_node_write,
     bench_mixed_workload_designation_ratio,
     bench_non_designated_single_hop,
+    bench_seal_overhead_isolated,
 );
 criterion_main!(benches);
