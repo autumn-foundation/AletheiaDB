@@ -142,7 +142,6 @@ impl SimilarityQuery {
     /// [`AletheiaDB::similarity_search`](crate::AletheiaDB::similarity_search)
     /// ignores it, so setting it never changes pure-similarity results (AC2).
     #[cfg(feature = "semantic-retrieval-fusion")]
-    #[must_use]
     pub fn fusion(mut self, policy: crate::db::fusion::FusionPolicy) -> Self {
         self.fusion = Some(policy);
         self

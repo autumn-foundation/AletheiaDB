@@ -94,9 +94,7 @@ pub use crypto_shred::{
 };
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
 #[cfg(feature = "semantic-retrieval-fusion")]
-pub use fusion::{
-    FusedHit, FusionBreakdown, FusionPolicy, FusionPolicyBuilder, FusionPolicyError,
-};
+pub use fusion::{FusedHit, FusionBreakdown, FusionPolicy, FusionPolicyBuilder, FusionPolicyError};
 pub use lineage::{FactStatus, LineageView, LineageViewEntry};
 pub use namespace::NamespaceInfo;
 pub use namespace_query::NamespaceCount;

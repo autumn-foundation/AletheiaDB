@@ -56,8 +56,11 @@ fn make_doc(
 }
 
 fn cosine_index(db: &AletheiaDB) {
-    db.enable_vector_index("embedding", HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(256))
-        .expect("enable vector index");
+    db.enable_vector_index(
+        "embedding",
+        HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(256),
+    )
+    .expect("enable vector index");
 }
 
 /// AC4 — true fused top-k, NOT a re-sort of a similarity shortlist.
@@ -74,7 +77,13 @@ fn fused_topk_surfaces_high_trust_far_candidate_below_3k_by_similarity() {
     // low-confidence and stale.
     for i in 0..12 {
         let jitter = 0.01 + (i as f32) * 0.003;
-        make_doc(&db, &format!("distractor{i}"), &[1.0, jitter, 0.0], Some(0.02), stale);
+        make_doc(
+            &db,
+            &format!("distractor{i}"),
+            &[1.0, jitter, 0.0],
+            Some(0.02),
+            stale,
+        );
     }
 
     // The target: orthogonal to the query (cosine similarity 0 -> ranked last),
@@ -184,7 +193,10 @@ fn plain_similarity_search_ignores_attached_policy() {
         .similarity_search(SimilarityQuery::from_embedding(query).k(10).fusion(policy))
         .unwrap();
 
-    assert_eq!(baseline, with_policy, "policy must not affect plain search (AC2)");
+    assert_eq!(
+        baseline, with_policy,
+        "policy must not affect plain search (AC2)"
+    );
     // Pure-similarity order: near before far.
     let order: Vec<NodeId> = baseline.iter().map(|(id, _)| *id).collect();
     assert_eq!(order.first(), Some(&near));

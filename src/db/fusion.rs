@@ -239,7 +239,9 @@ impl FusionPolicy {
     /// to `age = 0` and therefore `r = 1`. Supplying an `AS OF` coordinate as
     /// `reference_now_micros` makes recency deterministic under replay (AC6).
     pub fn recency(&self, reference_now_micros: i64, valid_from_micros: i64) -> f64 {
-        let age_micros = reference_now_micros.saturating_sub(valid_from_micros).max(0);
+        let age_micros = reference_now_micros
+            .saturating_sub(valid_from_micros)
+            .max(0);
         let age_secs = age_micros as f64 / 1_000_000.0;
         (-std::f64::consts::LN_2 * age_secs / self.recency_half_life_secs).exp()
     }
@@ -309,7 +311,105 @@ impl FusedHit {
 /// Clamp a value to `[0, 1]`, mapping any non-finite input to `0.0` so the
 /// fused-score sort is a total order.
 fn clamp_unit(x: f64) -> f64 {
-    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
+    if x.is_finite() {
+        x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+impl AletheiaDB {
+    /// Provenance-weighted k-NN: return the **true** fused top-k under the
+    /// query's [`FusionPolicy`] (Issue #3372).
+    ///
+    /// The query must carry a policy set with
+    /// [`SimilarityQuery::fusion`](crate::SimilarityQuery::fusion); otherwise an
+    /// error is returned. A wide horizon of candidates is over-fetched from the
+    /// vector index (so a geometrically-far but high-trust candidate can still
+    /// win — AC4), each candidate's confidence and validity are read from its
+    /// current version, the fused score is computed, and the horizon is sorted
+    /// by fused score (descending, with a stable node-id tie-break) before being
+    /// truncated to `k`.
+    ///
+    /// Recency is evaluated against the query's `at_time` coordinate when set,
+    /// else the current wallclock. Candidates with no recorded confidence are
+    /// scored at the policy's `neutral_confidence`, never dropped (AC5).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn similarity_search_fused(&self, query: SimilarityQuery) -> Result<Vec<FusedHit>> {
+        let policy = query.fusion_policy().cloned().ok_or_else(|| {
+            Error::Vector(VectorError::IndexError(
+                "similarity_search_fused requires a fusion policy; set one with \
+                 SimilarityQuery::fusion(..)"
+                    .to_string(),
+            ))
+        })?;
+
+        let k = query.limit();
+        // Recency is evaluated against the query's AS OF coordinate when set
+        // (AC6), otherwise the current wallclock, captured once for the whole
+        // request so every candidate is scored against the same instant.
+        let reference_now = query
+            .timestamp()
+            .map(|ts| ts.wallclock())
+            .unwrap_or_else(|| crate::core::temporal::time::now().wallclock());
+
+        // Over-fetch a wide horizon so a geometrically-far but high-trust
+        // candidate can still win (AC4). `similarity_search` ignores the fusion
+        // policy, so re-using the query here is a pure similarity search.
+        let horizon = k.max(FUSION_OVERFETCH_HORIZON);
+        let candidates = self.similarity_search(query.k(horizon))?;
+
+        let mut hits: Vec<FusedHit> = Vec::with_capacity(candidates.len());
+        for (node_id, similarity) in candidates {
+            let Some((confidence, valid_from_micros)) =
+                self.node_fusion_metadata(node_id, reference_now)?
+            else {
+                // The node disappeared between the index read and the metadata
+                // read; drop it rather than fabricating a score.
+                continue;
+            };
+            let recency = policy.recency(reference_now, valid_from_micros);
+            let breakdown = policy.fuse(f64::from(similarity), confidence, recency);
+            hits.push(FusedHit { node_id, breakdown });
+        }
+
+        // Total-order sort by fused score (descending), with a stable node-id
+        // tie-break so the ranking is deterministic.
+        hits.sort_by(|a, b| {
+            b.breakdown
+                .fused
+                .partial_cmp(&a.breakdown.fused)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
+        hits.truncate(k);
+        Ok(hits)
+    }
+
+    /// Read a candidate node's confidence (if recorded) and validity start from
+    /// its current version, for fusion scoring.
+    ///
+    /// Returns `Ok(None)` when the node no longer exists. When the version
+    /// metadata cannot be loaded, recency is treated as "now" (`valid_from =
+    /// reference_now`, i.e. recency 1) rather than dropping the candidate.
+    fn node_fusion_metadata(
+        &self,
+        node_id: NodeId,
+        reference_now: i64,
+    ) -> Result<Option<(Option<f64>, i64)>> {
+        let node = match self.get_node(node_id) {
+            Ok(node) => node,
+            Err(_) => return Ok(None),
+        };
+        match self.get_node_version_read_metadata(node.current_version)? {
+            Some((provenance, interval)) => {
+                let confidence = provenance.and_then(|p| p.confidence());
+                let valid_from = interval.valid_time().start().wallclock();
+                Ok(Some((confidence, valid_from)))
+            }
+            None => Ok(Some((None, reference_now))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -319,17 +419,25 @@ mod tests {
     const MICROS_PER_SEC: i64 = 1_000_000;
 
     fn policy() -> FusionPolicy {
-        FusionPolicy::builder().build().expect("default policy is valid")
+        FusionPolicy::builder()
+            .build()
+            .expect("default policy is valid")
     }
 
     // ---- AC7: invalid parameters rejected -------------------------------
 
     #[test]
     fn invalid_negative_weight_rejected() {
-        let err = FusionPolicy::builder().w_confidence(-0.1).build().unwrap_err();
+        let err = FusionPolicy::builder()
+            .w_confidence(-0.1)
+            .build()
+            .unwrap_err();
         assert_eq!(
             err,
-            FusionPolicyError::InvalidWeight { field: "w_confidence", value: -0.1 }
+            FusionPolicyError::InvalidWeight {
+                field: "w_confidence",
+                value: -0.1
+            }
         );
     }
 
@@ -346,30 +454,48 @@ mod tests {
 
     #[test]
     fn invalid_nan_weight_rejected() {
-        let err = FusionPolicy::builder().w_similarity(f64::NAN).build().unwrap_err();
+        let err = FusionPolicy::builder()
+            .w_similarity(f64::NAN)
+            .build()
+            .unwrap_err();
         assert!(matches!(
             err,
-            FusionPolicyError::InvalidWeight { field: "w_similarity", .. }
+            FusionPolicyError::InvalidWeight {
+                field: "w_similarity",
+                ..
+            }
         ));
     }
 
     #[test]
     fn invalid_infinite_weight_rejected() {
-        let err = FusionPolicy::builder().w_recency(f64::INFINITY).build().unwrap_err();
+        let err = FusionPolicy::builder()
+            .w_recency(f64::INFINITY)
+            .build()
+            .unwrap_err();
         assert!(matches!(
             err,
-            FusionPolicyError::InvalidWeight { field: "w_recency", .. }
+            FusionPolicyError::InvalidWeight {
+                field: "w_recency",
+                ..
+            }
         ));
     }
 
     #[test]
     fn invalid_neutral_confidence_rejected() {
         assert!(matches!(
-            FusionPolicy::builder().neutral_confidence(1.5).build().unwrap_err(),
+            FusionPolicy::builder()
+                .neutral_confidence(1.5)
+                .build()
+                .unwrap_err(),
             FusionPolicyError::InvalidNeutralConfidence { .. }
         ));
         assert!(matches!(
-            FusionPolicy::builder().neutral_confidence(-0.01).build().unwrap_err(),
+            FusionPolicy::builder()
+                .neutral_confidence(-0.01)
+                .build()
+                .unwrap_err(),
             FusionPolicyError::InvalidNeutralConfidence { .. }
         ));
     }
@@ -377,11 +503,17 @@ mod tests {
     #[test]
     fn invalid_half_life_rejected() {
         assert!(matches!(
-            FusionPolicy::builder().recency_half_life_secs(0.0).build().unwrap_err(),
+            FusionPolicy::builder()
+                .recency_half_life_secs(0.0)
+                .build()
+                .unwrap_err(),
             FusionPolicyError::InvalidHalfLife { .. }
         ));
         assert!(matches!(
-            FusionPolicy::builder().recency_half_life_secs(-5.0).build().unwrap_err(),
+            FusionPolicy::builder()
+                .recency_half_life_secs(-5.0)
+                .build()
+                .unwrap_err(),
             FusionPolicyError::InvalidHalfLife { .. }
         ));
     }
@@ -429,7 +561,10 @@ mod tests {
 
     #[test]
     fn missing_provenance_uses_neutral_not_dropped() {
-        let p = FusionPolicy::builder().neutral_confidence(0.42).build().unwrap();
+        let p = FusionPolicy::builder()
+            .neutral_confidence(0.42)
+            .build()
+            .unwrap();
         let b = p.fuse(0.5, None, 0.5);
         assert_eq!(b.confidence, 0.42);
         assert!(b.confidence_defaulted);
@@ -530,99 +665,5 @@ mod tests {
         // valid_from in the future => age clamped to 0 => recency == 1.
         let r = p.recency(now, now + 10_000 * MICROS_PER_SEC);
         assert!((r - 1.0).abs() < 1e-12);
-    }
-}
-
-impl AletheiaDB {
-    /// Provenance-weighted k-NN: return the **true** fused top-k under the
-    /// query's [`FusionPolicy`] (Issue #3372).
-    ///
-    /// The query must carry a policy set with
-    /// [`SimilarityQuery::fusion`](crate::SimilarityQuery::fusion); otherwise an
-    /// error is returned. A wide horizon of candidates is over-fetched from the
-    /// vector index (so a geometrically-far but high-trust candidate can still
-    /// win — AC4), each candidate's confidence and validity are read from its
-    /// current version, the fused score is computed, and the horizon is sorted
-    /// by fused score (descending, with a stable node-id tie-break) before being
-    /// truncated to `k`.
-    ///
-    /// Recency is evaluated against the query's `at_time` coordinate when set,
-    /// else the current wallclock. Candidates with no recorded confidence are
-    /// scored at the policy's `neutral_confidence`, never dropped (AC5).
-    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
-    pub fn similarity_search_fused(&self, query: SimilarityQuery) -> Result<Vec<FusedHit>> {
-        let policy = query.fusion_policy().cloned().ok_or_else(|| {
-            Error::Vector(VectorError::IndexError(
-                "similarity_search_fused requires a fusion policy; set one with \
-                 SimilarityQuery::fusion(..)"
-                    .to_string(),
-            ))
-        })?;
-
-        let k = query.limit();
-        // Recency is evaluated against the query's AS OF coordinate when set
-        // (AC6), otherwise the current wallclock, captured once for the whole
-        // request so every candidate is scored against the same instant.
-        let reference_now = query
-            .timestamp()
-            .map(|ts| ts.wallclock())
-            .unwrap_or_else(|| crate::core::temporal::time::now().wallclock());
-
-        // Over-fetch a wide horizon so a geometrically-far but high-trust
-        // candidate can still win (AC4). `similarity_search` ignores the fusion
-        // policy, so re-using the query here is a pure similarity search.
-        let horizon = k.max(FUSION_OVERFETCH_HORIZON);
-        let candidates = self.similarity_search(query.k(horizon))?;
-
-        let mut hits: Vec<FusedHit> = Vec::with_capacity(candidates.len());
-        for (node_id, similarity) in candidates {
-            let Some((confidence, valid_from_micros)) =
-                self.node_fusion_metadata(node_id, reference_now)?
-            else {
-                // The node disappeared between the index read and the metadata
-                // read; drop it rather than fabricating a score.
-                continue;
-            };
-            let recency = policy.recency(reference_now, valid_from_micros);
-            let breakdown = policy.fuse(f64::from(similarity), confidence, recency);
-            hits.push(FusedHit { node_id, breakdown });
-        }
-
-        // Total-order sort by fused score (descending), with a stable node-id
-        // tie-break so the ranking is deterministic.
-        hits.sort_by(|a, b| {
-            b.breakdown
-                .fused
-                .partial_cmp(&a.breakdown.fused)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.node_id.cmp(&b.node_id))
-        });
-        hits.truncate(k);
-        Ok(hits)
-    }
-
-    /// Read a candidate node's confidence (if recorded) and validity start from
-    /// its current version, for fusion scoring.
-    ///
-    /// Returns `Ok(None)` when the node no longer exists. When the version
-    /// metadata cannot be loaded, recency is treated as "now" (`valid_from =
-    /// reference_now`, i.e. recency 1) rather than dropping the candidate.
-    fn node_fusion_metadata(
-        &self,
-        node_id: NodeId,
-        reference_now: i64,
-    ) -> Result<Option<(Option<f64>, i64)>> {
-        let node = match self.get_node(node_id) {
-            Ok(node) => node,
-            Err(_) => return Ok(None),
-        };
-        match self.get_node_version_read_metadata(node.current_version)? {
-            Some((provenance, interval)) => {
-                let confidence = provenance.and_then(|p| p.confidence());
-                let valid_from = interval.valid_time().start().wallclock();
-                Ok(Some((confidence, valid_from)))
-            }
-            None => Ok(Some((None, reference_now))),
-        }
     }
 }
