@@ -955,7 +955,11 @@ a documented *proxy*, not true allocation accounting), a per-call
 `max_query_memory_bytes` override, true engine-level cooperative cancellation,
 the Rust builder API, a benchmark-gated fast-path proof, a concurrency soak, HTTP
 in-flight parity (#3446), and incremental (vs post-hoc) byte-cap enforcement for
-these read tools.
+these read tools. Note also that the memory dimension covers **only** these
+wrapped read tools, **not** the `query` tool itself — `query` keeps its own
+per-call `limits`/error builders (`timeout_ms`/`max_response_bytes`, no memory
+knob); extending a memory budget to `query` under uniform coverage is a possible
+follow-up.
 
 Over-limit terminations are counted per dimension in-process
 (`AletheiaMcpServer::limit_termination_counts()`) **and surfaced through
@@ -995,17 +999,44 @@ where `MEMORY_WORKING_SET_EXPANSION = 4`. The in-RAM materialized representation
 that produced the response (parsed graph entities, `PropertyMap` hashmaps,
 `Vec<f32>` embeddings, `String` keys, plus capacity slack and hashmap/enum
 overhead) is empirically a small multiple of the compact serialized JSON that
-leaves the dispatch seam; `4×` is the conservative v1 estimate. This is
+leaves the dispatch seam; `4×` is the v1 estimate of that multiple. It is
 **distinct from `result_bytes`**: that cap governs *wire/output* size (a
 transport/context concern), while this dimension models *RAM working set* (a
-resource-exhaustion concern); the two caps are set independently, breach
-independently, and carry different `dimension` tokens.
+resource-exhaustion concern); the two carry different `dimension` tokens and
+different retriable semantics.
 
-**Honest limitations** (mirroring how `result_bytes` is itself post-hoc): it is
-a proxy, not measured allocation; it is checked **post-hoc** on the fully
-serialized response (no early abort mid-evaluation — the computation runs to
-completion, then the estimate is rejected if over budget); and the expansion
-factor is a fixed constant, not response-shape adaptive.
+**The two caps are NOT independent — the memory control is often a dead no-op.**
+Both `result_bytes` and this memory estimate are deterministic functions of the
+*same* `serialized_response_len`, so they do not "breach independently": the
+memory dimension can only ever bind when
+
+```
+max_query_memory_bytes  <  4 × max_response_bytes
+```
+
+If you leave a memory budget above `4×` the effective byte cap (and the default
+byte cap is 8 MiB when engaged), the memory control **can never fire** — the
+byte cap always trips first (it runs first in the pipeline; see the ordering
+below). Set `max_query_memory_bytes` *below* `4 ×` your byte cap for it to be an
+effective, distinct guard; otherwise you have set a memory guard that is
+silently inert.
+
+**Honest limitations** (mirroring how `result_bytes` is itself post-hoc):
+
+- **A proxy, not measured allocation** — no per-task allocation accounting.
+- **Post-hoc** on the fully serialized response (no early abort mid-evaluation —
+  the computation runs to completion, then the estimate is rejected if over
+  budget).
+- **Fixed constant**, not response-shape adaptive.
+- **It bounds output materialization, not scan/frontier working set — and so
+  materially *under*-counts small-output/large-frontier tools.** Because the
+  estimate is `4×` the *output* size, it does not see peak working set that
+  never reaches the response: `find_similar` (k over ~1M vectors),
+  `hybrid_query`, and the semantic scans can hold large HNSW candidate heaps and
+  distance buffers while returning a tiny serialized result, so the proxy is
+  **not** a conservative upper bound for those tools. It is a coarse guard on
+  output materialization only; a scan/frontier-aware budget is a Lane-2
+  follow-up.
 
 **What a breach returns.** When `estimated_working_bytes` exceeds the configured
 budget the response fails closed with the tool-agnostic #3234 envelope (no

@@ -11469,7 +11469,108 @@ mod server_unit_tests {
             Some(true),
             "default config must not engage the memory budget"
         );
+        // Self-evidently a non-trivial response (the five LINK leaves are
+        // present) — so "a response that would exceed a small cap" needs no
+        // cross-reference to the sibling fails-closed test.
+        let text = AletheiaMcpServer::extract_text(result);
+        assert!(
+            text.contains("Leaf"),
+            "response must carry the traversed leaf nodes: {text}"
+        );
         assert_eq!(server.limit_termination_counts().memory_bytes, 0);
+    }
+
+    /// Pins the ×4 expansion factor itself (the actual novel arithmetic).
+    ///
+    /// `enforce_memory_budget` is fed a synthetic success response of a *known*
+    /// text length N with a cap set STRICTLY BETWEEN N and N×4, so the budget
+    /// can only trip because of the expansion multiply: the raw serialized size
+    /// (N) is within cap, but the estimated working set (N×4) is not. The
+    /// assertions lock `consumed == N×4` and `limit == cap` to the literal
+    /// values, so this test goes red if the factor is changed to anything other
+    /// than 4 (e.g. 1 leaves the estimate within cap and no error is produced at
+    /// all; 2 or 3 likewise fail the strict-between trip; any factor still emits
+    /// a `consumed` that no longer equals 400).
+    #[test]
+    fn memory_budget_pins_expansion_factor() {
+        // N = 100 raw bytes; cap = 250 is strictly between 100 and 100×4 = 400.
+        const N: usize = 100;
+        const CAP: usize = 250;
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+
+        let synthetic = CallToolResult::success(vec![Content::text("a".repeat(N))]);
+        assert_eq!(server.limit_termination_counts().memory_bytes, 0);
+
+        let result = server.enforce_memory_budget("traverse", synthetic, CAP);
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "N×4 must exceed the strictly-between cap"
+        );
+        let val = parse(result);
+        let details = &val["error"]["details"];
+        assert_eq!(details["dimension"].as_str(), Some("memory_bytes"), "{val}");
+        // The load-bearing assertion: consumed is EXACTLY N×4, locking factor 4.
+        assert_eq!(details["consumed"].as_u64(), Some(400), "{val}");
+        assert_eq!(details["limit"].as_u64(), Some(250), "{val}");
+        assert_eq!(server.limit_termination_counts().memory_bytes, 1);
+
+        // Control: the same response under a cap >= N×4 passes through untouched
+        // (proves the trip above is the multiply, not an always-on rejection).
+        let ok = server.enforce_memory_budget(
+            "traverse",
+            CallToolResult::success(vec![Content::text("a".repeat(N))]),
+            N * super::MEMORY_WORKING_SET_EXPANSION,
+        );
+        assert_ne!(ok.is_error, Some(true), "estimate == cap must not trip");
+        assert_eq!(server.limit_termination_counts().memory_bytes, 1);
+    }
+
+    /// Ordering + no-double-count invariant: when a single response would trip
+    /// BOTH the result-byte cap AND the memory budget, the byte cap runs first
+    /// (its error response short-circuits `enforce_memory_budget` via the
+    /// `is_error` guard), so the caller sees `dimension == "result_bytes"`, the
+    /// byte-cap counter increments, and the memory counter stays 0 — never
+    /// double-counted. Guards against a future reorder or guard-drop.
+    #[test]
+    fn byte_cap_precedes_memory_budget_no_double_count() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 0,              // inline path (no timeout race)
+            default_max_response_bytes: 64,     // byte cap trips (runs first)
+            max_response_bytes: 0,              // no ceiling to interfere
+            default_max_query_memory_bytes: 64, // memory budget would ALSO trip
+            max_query_memory_bytes: 0,          // no ceiling to interfere
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().result_bytes, 0);
+        assert_eq!(server.limit_termination_counts().memory_bytes, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 100,
+            }),
+        );
+        assert_eq!(result.is_error, Some(true), "both caps would trip");
+        let val = parse(result);
+        assert_eq!(
+            val["error"]["details"]["dimension"].as_str(),
+            Some("result_bytes"),
+            "byte cap runs first and wins: {val}"
+        );
+        // Exactly one termination recorded, on the byte-cap dimension only.
+        assert_eq!(server.limit_termination_counts().result_bytes, 1, "{val}");
+        assert_eq!(
+            server.limit_termination_counts().memory_bytes,
+            0,
+            "memory budget must not double-count after the byte cap fired: {val}"
+        );
     }
 
     /// Fast path: with limits disabled (unlimited timeout + no byte cap) the
