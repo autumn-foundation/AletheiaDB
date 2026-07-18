@@ -257,11 +257,23 @@ semantic-diagnostics = []
 # Depends on semantic-temporal (graph_context uses temporal_narrative).
 semantic-characterization = ["semantic-temporal"]
 
+# Experimental: provenance-weighted retrieval (Issue #3372).
+# Fuses vector similarity, provenance confidence, and temporal recency into a
+# single tunable, monotone, explainable ranking. Empty deps: fusion needs only
+# always-compiled `core::provenance` + the vector path. Graduates INTO
+# `semantic-search` (the retrieval cohort) once the #3366 eval-harness
+# precision@10 gate and latency/explainability targets are met -- see
+# docs/plans/2026-07-18-3372-provenance-weighted-retrieval.md. NOT folded into
+# the stable `semantic-search` flag on day one (ADR-0050 graduation pattern).
+semantic-retrieval-fusion = []
+
 # Experimental "Nova" R&D umbrella.
 # Enables every semantic-* cohort that is still marked experimental. Removing a
 # cohort from this list is how we "graduate" it — the flag itself stays, so
 # downstream callers opting into the cohort directly keep working.
-# The graduated `semantic-search` cohort is NOT included.
+# The graduated `semantic-search` cohort is NOT included. `semantic-retrieval-fusion`
+# is also deliberately excluded: it graduates INTO `semantic-search` (the retrieval
+# cohort), not into any of the experimental Nova cohorts, so it does not belong here.
 nova = [
     "semantic-reasoning",
     "semantic-temporal",
@@ -489,6 +501,15 @@ name = "schema_constraints"
 harness = false
 path = "benches/schema_constraints.rs"
 required-features = []
+
+# Provenance-weighted fusion scoring micro-bench (Issue #3372): the pure
+# `FusionPolicy::fuse()` core over a synthetic candidate pool. The full
+# p99<20ms @ 1M-vector gate rides with the #3366 eval harness (not in-tree yet).
+[[bench]]
+name = "fusion_scoring"
+harness = false
+path = "benches/fusion_scoring.rs"
+required-features = ["semantic-retrieval-fusion"]
 
 # Temporal aggregation windows (Issue #3363): 12-window monthly aggregation
 # over ~1,000 historical versions, targeting < 50ms end-to-end.

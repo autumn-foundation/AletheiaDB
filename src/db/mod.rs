@@ -44,6 +44,9 @@ pub mod encryption_enable;
 pub(crate) mod encryption_state;
 /// Queryable bi-temporal extent of the dataset (Issue #3238).
 pub mod extent;
+/// Provenance-weighted retrieval fusion (Issue #3372).
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub mod fusion;
 /// GraphView implementation.
 pub mod graph_view;
 /// Fact-to-fact derivation lineage API (Issue #3371).
@@ -90,6 +93,10 @@ pub use crypto_shred::{
     SubjectId, SubjectKey,
 };
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub use fusion::{
+    FusedHit, FusionBreakdown, FusionError, FusionPolicy, FusionPolicyBuilder, FusionPolicyError,
+};
 pub use lineage::{FactStatus, LineageView, LineageViewEntry};
 pub use namespace::NamespaceInfo;
 pub use namespace_query::NamespaceCount;
