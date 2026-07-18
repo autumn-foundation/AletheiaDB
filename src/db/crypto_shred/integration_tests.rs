@@ -1114,3 +1114,321 @@ fn foreign_subj_bytes_unknown_subject_pass_through() {
         "unknown-subject bytes must not be reported as erased"
     );
 }
+
+// ── Issue #3665: keyring + designation registry fold into `.albk` ──────
+//
+// These exercise the v7 archive: designations, erased-state, `erased_at`, and
+// attestations travel INSIDE the backup, so an active subject's designated
+// property is readable after restore while an erased subject stays erased and
+// its DEK is physically absent from the archive.
+
+/// Reopen a durable database at `data_dir` (canonical durable layout) with
+/// encryption keyed by `key_file`, so restored designated properties can be
+/// unsealed with the same MEK the source used.
+fn reopen_encrypted(data_dir: &Path, key_file: &Path) -> AletheiaDB {
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(data_dir.join("wal"))
+                .build(),
+        )
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: data_dir.join("indexes"),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .encryption(EncryptionConfig::file_based(key_file))
+        .build();
+    AletheiaDB::with_unified_config(config).unwrap()
+}
+
+/// T1: an ACTIVE subject's designated property is readable again after a
+/// backup→restore, because its wrapped DEK travels in the v7 archive.
+#[test]
+fn active_subject_designated_property_readable_after_restore() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let key_file = src.path().join("mek.key");
+    let albk = src.path().join("backup.albk");
+
+    let node_id;
+    {
+        let db = enc_db(src.path());
+        node_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("stage", "placeholder")
+                    .build(),
+            )
+            .unwrap();
+        db.designate_subject(
+            "subject-A",
+            vec![DesignationTarget::WholeNode(node_id.as_u64())],
+        )
+        .unwrap();
+        db.replace_node(
+            node_id,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+        )
+        .unwrap();
+        db.backup(&albk).unwrap();
+        drop(db);
+    }
+
+    // Restore materializes indexes + keyring into `dst`; its own reopen is
+    // unencrypted (cannot unseal), so drop it and reopen WITH the MEK.
+    let restored = AletheiaDB::restore_to_data_dir(&albk, dst.path()).unwrap();
+    drop(restored);
+
+    // The keyring sidecar landed in the data dir (parent of the WAL dir).
+    assert!(
+        dst.path().join("subject_keyring.dat").exists(),
+        "restore must write subject_keyring.dat into the data dir"
+    );
+
+    let db = reopen_encrypted(dst.path(), &key_file);
+    assert!(
+        db.crypto_shred.is_active("subject-A"),
+        "subject-A must restore as Active"
+    );
+    let node = db.get_node(node_id).unwrap();
+    assert_eq!(
+        node.properties.get("email"),
+        Some(&PropertyValue::from(SENTINEL.to_string())),
+        "active subject's designated property must be readable after restore"
+    );
+}
+
+/// T2: an ERASED subject stays erased after restore — its designated property
+/// is not readable, and `erased_at` + attestation survive.
+#[test]
+fn erased_subject_stays_erased_after_restore() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let key_file = src.path().join("mek.key");
+    let albk = src.path().join("backup.albk");
+
+    let node_id;
+    let erased_at;
+    {
+        let db = enc_db(src.path());
+        node_id = db
+            .create_node("Person", PropertyMapBuilder::new().insert("s", "p").build())
+            .unwrap();
+        db.designate_subject(
+            "subject-E",
+            vec![DesignationTarget::WholeNode(node_id.as_u64())],
+        )
+        .unwrap();
+        db.replace_node(
+            node_id,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+        )
+        .unwrap();
+        db.erase_subject("subject-E").unwrap();
+        erased_at = db.crypto_shred.subject_erased_at("subject-E");
+        assert!(erased_at.is_some(), "source erase must record erased_at");
+        // Back up AFTER erase.
+        db.backup(&albk).unwrap();
+        drop(db);
+    }
+
+    let restored = AletheiaDB::restore_to_data_dir(&albk, dst.path()).unwrap();
+    drop(restored);
+
+    let db = reopen_encrypted(dst.path(), &key_file);
+    assert!(
+        db.crypto_shred.is_erased("subject-E"),
+        "subject-E must restore as Erased"
+    );
+    // erased_at survives the round-trip.
+    assert_eq!(
+        db.crypto_shred.subject_erased_at("subject-E"),
+        erased_at,
+        "erased_at must survive backup→restore"
+    );
+    // The designated property is NOT readable — it stays an opaque envelope,
+    // never the plaintext sentinel.
+    let node = db.get_node(node_id).unwrap();
+    match node.properties.get("email") {
+        Some(PropertyValue::Bytes(b)) => {
+            assert!(
+                super::envelope::is_envelope(b),
+                "erased value stays a SUBJ envelope after restore"
+            );
+            assert_ne!(
+                b.as_ref(),
+                SENTINEL.as_bytes(),
+                "erased read must never surface the plaintext sentinel"
+            );
+        }
+        other => panic!("expected opaque sealed bytes after restore, got {other:?}"),
+    }
+    // Attestation survives (re-erase returns the recorded one).
+    let attestation = db.erase_subject("subject-E").unwrap();
+    assert_eq!(attestation.subject_id, "subject-E");
+}
+
+/// T3: the erased subject's attestation verifies after restore.
+#[test]
+fn attestation_survives_restore_and_verifies() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let key_file = src.path().join("mek.key");
+    let albk = src.path().join("backup.albk");
+
+    {
+        let db = enc_db(src.path());
+        let node_id = db
+            .create_node("Person", PropertyMapBuilder::new().insert("s", "p").build())
+            .unwrap();
+        db.designate_subject(
+            "subject-V",
+            vec![DesignationTarget::WholeNode(node_id.as_u64())],
+        )
+        .unwrap();
+        db.replace_node(
+            node_id,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+        )
+        .unwrap();
+        db.erase_subject("subject-V").unwrap();
+        db.backup(&albk).unwrap();
+        drop(db);
+    }
+
+    let restored = AletheiaDB::restore_to_data_dir(&albk, dst.path()).unwrap();
+    drop(restored);
+
+    let db = reopen_encrypted(dst.path(), &key_file);
+    // The recorded attestation comes back via the idempotent re-erase and
+    // verifies against its own embedded signer public key.
+    let attestation = db.erase_subject("subject-V").unwrap();
+    assert!(
+        attestation.verify(),
+        "restored erasure attestation must verify against its embedded public key"
+    );
+}
+
+/// T4: the pre-erasure wrapped-DEK ciphertext is ABSENT from the v7 archive.
+#[test]
+fn erased_dek_bytes_absent_from_v7_archive() {
+    let src = tempfile::tempdir().unwrap();
+    let albk = src.path().join("backup.albk");
+
+    // Capture the wrapped-DEK ciphertext BEFORE erasing (never printed).
+    let wrapped_dek;
+    {
+        let db = enc_db(src.path());
+        let node_id = db
+            .create_node("Person", PropertyMapBuilder::new().insert("s", "p").build())
+            .unwrap();
+        db.designate_subject(
+            "subject-D",
+            vec![DesignationTarget::WholeNode(node_id.as_u64())],
+        )
+        .unwrap();
+        db.replace_node(
+            node_id,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+        )
+        .unwrap();
+        wrapped_dek = db
+            .crypto_shred
+            .subject_wrapped_dek_for_test("subject-D")
+            .expect("active subject must have a wrapped DEK before erase");
+        assert!(!wrapped_dek.is_empty());
+        db.erase_subject("subject-D").unwrap();
+        db.backup(&albk).unwrap();
+        drop(db);
+    }
+
+    // The wrapped-DEK ciphertext must not appear anywhere in the raw archive.
+    let archive = std::fs::read(&albk).unwrap();
+    let present = archive
+        .windows(wrapped_dek.len())
+        .any(|w| w == wrapped_dek.as_slice());
+    assert!(
+        !present,
+        "erased subject's wrapped-DEK ciphertext must be absent from the v7 archive"
+    );
+}
+
+/// T5: a designate→erase→backup leaves zero designated plaintext in the `.albk`
+/// artifact (the sentinel scan reaches into the backup file).
+#[test]
+fn sentinel_scan_albk_zero_designated_plaintext() {
+    let src = tempfile::tempdir().unwrap();
+    // Put the backup in its own dir so the scan targets the artifact directly.
+    let backup_dir = tempfile::tempdir().unwrap();
+    let albk = backup_dir.path().join("backup.albk");
+
+    {
+        let db = enc_db(src.path());
+        let node_id = db
+            .create_node("Person", PropertyMapBuilder::new().insert("s", "p").build())
+            .unwrap();
+        db.designate_subject(
+            "subject-S",
+            vec![DesignationTarget::WholeNode(node_id.as_u64())],
+        )
+        .unwrap();
+        db.replace_node(
+            node_id,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+        )
+        .unwrap();
+        db.erase_subject("subject-S").unwrap();
+        db.backup(&albk).unwrap();
+        drop(db);
+    }
+
+    // The `.albk` artifact holds no designated plaintext.
+    assert_no_designated_plaintext(backup_dir.path(), SENTINEL.as_bytes());
+    // And neither does the (encrypted) source tree.
+    assert_no_designated_plaintext(src.path(), SENTINEL.as_bytes());
+}
+
+/// T7: a plain (no crypto-shred) database round-trips through backup→restore
+/// with an empty keyring — no `subject_keyring.dat` is written and the reopen
+/// has no crypto-shred state.
+#[test]
+fn no_cryptoshred_db_v7_roundtrip() {
+    let dst = tempfile::tempdir().unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    let albk = backup_dir.path().join("plain.albk");
+
+    let node_id = {
+        let db = AletheiaDB::new().unwrap();
+        let id = db
+            .create_node("Doc", PropertyMapBuilder::new().insert("k", "v").build())
+            .unwrap();
+        db.backup(&albk).unwrap();
+        id
+    };
+
+    let db = AletheiaDB::restore_to_data_dir(&albk, dst.path()).unwrap();
+    // No keyring sidecar written for a crypto-shred-free backup.
+    assert!(
+        !dst.path().join("subject_keyring.dat").exists(),
+        "a plain-DB restore must not write subject_keyring.dat"
+    );
+    // Reopen has no crypto-shred state.
+    assert!(
+        !db.crypto_shred.has_any_designations(),
+        "restored plain DB must have no designations"
+    );
+    // The plain node round-trips.
+    let node = db.get_node(node_id).unwrap();
+    assert_eq!(
+        node.properties.get("k"),
+        Some(&PropertyValue::from("v".to_string()))
+    );
+}

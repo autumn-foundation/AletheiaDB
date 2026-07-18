@@ -85,14 +85,36 @@ Restores into a **durable** directory at `data_dir`.
 | Offset | Size | Description |
 |---|---|---|
 | 0 | 4 B | Magic: `ALBK` |
-| 4 | 2 B | Format version (little-endian `u16`), currently `1` |
+| 4 | 2 B | Format version (little-endian `u16`), currently `7` |
 | 6 | N B | Zstd-compressed bitcode payload |
+
+Older format versions (1–6) still restore; `read_artifact` upgrades each frozen
+legacy shape to the current one. See `BACKUP_FORMAT_VERSION`'s version history
+in `src/storage/backup/mod.rs`.
 
 The payload is a `BackupPayload` struct containing:
 - `StringInternerData` — the complete string interner table
 - `GraphIndexData` — current-state nodes and edges
 - `TemporalIndexData` — all node/edge versions with bi-temporal intervals
+- `schema_constraints` — declared property-type / required-key constraints (#3378)
+- `unique_constraints` — declared uniqueness constraints (#3218)
+- `keyring_sidecar` — the crypto-shred subject keyring / designation registry
+  (#3665): designations, wrapped per-subject DEKs, erased-state, `erased_at`,
+  and attestations. Empty when crypto-shred is unused. **A v7 archive that
+  carries a keyring is key-bearing** (the wrapped DEKs are MEK-encrypted) — see
+  the security note below.
 - Metadata: `created_at_micros`, `source_lsn`, version counts
+
+> **Security — a v7 `.albk` may be key-bearing.** When the source database used
+> crypto-shred, the archive embeds the subject keyring: wrapped per-subject DEKs
+> (encrypted under the MEK) plus the designation registry. The MEK itself is
+> **never** in the archive, so the wrapped DEKs are useless without the separate
+> key file — but you must still protect the archive like key material. An
+> **erased** subject's wrapped DEK is `None` and thus physically absent from the
+> archive, so erasure survives backup→restore. A backup taken **before** a
+> subject was erased still contains that subject's (recoverable) wrapped DEK —
+> the standard crypto-shred pre-erasure caveat (AC7): track and destroy stale
+> pre-erasure archives.
 
 ## Error Types
 

@@ -59,10 +59,17 @@ pub const BACKUP_MAGIC: [u8; 4] = *b"ALBK";
 ///   (declared uniqueness constraints; previously only WAL-persisted and thus
 ///   silently dropped by a fresh-WAL restore).
 ///
+/// - **6 -> 7** (Issue #3665): the payload gained `keyring_sidecar` (the
+///   crypto-shred subject-keyring / designation-registry sidecar bytes, so
+///   designations, erased-state, `erased_at`, and attestations travel inside
+///   the archive). This makes a v7 `.albk` **key-bearing** (wrapped DEKs
+///   encrypted under the MEK); the field is empty when crypto-shred is unused
+///   or the `audit-export` feature is off.
+///
 /// Older artifacts are still restorable -- see [`BackupPayloadV1`],
 /// [`BackupPayloadV2`], [`BackupPayloadV3`], [`BackupPayloadV4`],
-/// [`BackupPayloadV5`] and `read_artifact`.
-pub const BACKUP_FORMAT_VERSION: u16 = 6;
+/// [`BackupPayloadV5`], [`BackupPayloadV6`] and `read_artifact`.
+pub const BACKUP_FORMAT_VERSION: u16 = 7;
 
 /// Maximum allowed decompressed payload size (5 GiB).
 ///
@@ -214,6 +221,13 @@ pub(crate) struct BackupPayload {
     /// re-declared on restore (which rebuilds the reservation index and writes
     /// a durable WAL record into the restored database).
     pub unique_constraints: Vec<crate::core::constraint::UniqueConstraintDescriptor>,
+    /// CRC-wrapped `SubjectKeyringSidecar` bytes (crypto-shred keyring +
+    /// designation registry, Issue #3665 fold). Empty when crypto-shred is
+    /// unused or the `audit-export` feature is off. Opaque here (raw
+    /// `encode_sidecar_with_crc` wire bytes) to keep `BackupPayload`
+    /// feature-independent — the crypto-shred types live behind
+    /// `#[cfg(feature = "audit-export")]` but this struct is always compiled.
+    pub keyring_sidecar: Vec<u8>,
 }
 
 /// Pre-provenance (Issue #3224) `BackupPayload` shape, i.e. `BACKUP_FORMAT_VERSION == 1`.
@@ -257,6 +271,7 @@ impl From<BackupPayloadV1> for BackupPayload {
             temporal: v1.temporal.into(),
             schema_constraints: Vec::new(),
             unique_constraints: Vec::new(),
+            keyring_sidecar: Vec::new(),
         }
     }
 }
@@ -309,6 +324,7 @@ impl From<BackupPayloadV2> for BackupPayload {
             temporal: v2.temporal.into(),
             schema_constraints: Vec::new(),
             unique_constraints: Vec::new(),
+            keyring_sidecar: Vec::new(),
         }
     }
 }
@@ -363,6 +379,7 @@ impl From<BackupPayloadV3> for BackupPayload {
             temporal: v3.temporal.into(),
             schema_constraints: Vec::new(),
             unique_constraints: Vec::new(),
+            keyring_sidecar: Vec::new(),
         }
     }
 }
@@ -410,6 +427,7 @@ impl From<BackupPayloadV4> for BackupPayload {
             temporal: v4.temporal,
             schema_constraints: Vec::new(),
             unique_constraints: Vec::new(),
+            keyring_sidecar: Vec::new(),
         }
     }
 }
@@ -459,6 +477,61 @@ impl From<BackupPayloadV5> for BackupPayload {
             temporal: v5.temporal,
             schema_constraints: v5.schema_constraints,
             unique_constraints: Vec::new(),
+            keyring_sidecar: Vec::new(),
+        }
+    }
+}
+
+/// Pre-keyring-fold (Issue #3665) `BackupPayload` shape, i.e.
+/// `BACKUP_FORMAT_VERSION == 6`.
+///
+/// Identical to [`BackupPayload`] but without the `keyring_sidecar` field
+/// (it uses the LIVE `TemporalIndexData`, unchanged since v4). Kept only so
+/// `read_artifact` can restore version-6 artifacts; the `From` impl defaults
+/// the keyring sidecar to empty — a v5/v6 archive predates the crypto-shred
+/// keyring fold, so any designated properties it holds restore
+/// sealed-unreadable (see the restore-path backward-compat warning).
+#[derive(Debug, Clone, Encode, Decode)]
+pub(crate) struct BackupPayloadV6 {
+    /// Unix timestamp (microseconds) when the backup was created.
+    pub created_at_micros: i64,
+    /// WAL LSN at which the consistent snapshot was taken.
+    pub source_lsn: u64,
+    /// Number of current nodes.
+    pub current_node_count: u64,
+    /// Number of current edges.
+    pub current_edge_count: u64,
+    /// Number of node versions (hot + cold).
+    pub node_version_count: u64,
+    /// Number of edge versions (hot + cold).
+    pub edge_version_count: u64,
+    /// String interner state.
+    pub interner: StringInternerData,
+    /// Current graph state (nodes and edges).
+    pub graph: GraphIndexData,
+    /// Complete temporal version history.
+    pub temporal: TemporalIndexData,
+    /// Declared property-type / required-key schema constraints (Issue #3378).
+    pub schema_constraints: Vec<crate::core::constraint::SchemaConstraintDescriptor>,
+    /// Declared uniqueness constraints (Issue #3218).
+    pub unique_constraints: Vec<crate::core::constraint::UniqueConstraintDescriptor>,
+}
+
+impl From<BackupPayloadV6> for BackupPayload {
+    fn from(v6: BackupPayloadV6) -> Self {
+        BackupPayload {
+            created_at_micros: v6.created_at_micros,
+            source_lsn: v6.source_lsn,
+            current_node_count: v6.current_node_count,
+            current_edge_count: v6.current_edge_count,
+            node_version_count: v6.node_version_count,
+            edge_version_count: v6.edge_version_count,
+            interner: v6.interner,
+            graph: v6.graph,
+            temporal: v6.temporal,
+            schema_constraints: v6.schema_constraints,
+            unique_constraints: v6.unique_constraints,
+            keyring_sidecar: Vec::new(),
         }
     }
 }
@@ -750,6 +823,12 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
             })?;
             Ok(legacy.into())
         }
+        6 => {
+            let legacy: BackupPayloadV6 = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(legacy.into())
+        }
         v if v == BACKUP_FORMAT_VERSION => {
             let payload: BackupPayload = bitcode::decode(&decoded_bytes).map_err(|e| {
                 BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
@@ -865,6 +944,7 @@ pub(crate) fn build_payload(
     created_at_micros: i64,
     schema_constraints: Vec<crate::core::constraint::SchemaConstraintDescriptor>,
     unique_constraints: Vec<crate::core::constraint::UniqueConstraintDescriptor>,
+    keyring_sidecar: Vec<u8>,
 ) -> Result<BackupPayload, BackupError> {
     let current_node_count = current_snapshot.node_count() as u64;
     let current_edge_count = current_snapshot.edge_count() as u64;
@@ -889,6 +969,7 @@ pub(crate) fn build_payload(
         temporal,
         schema_constraints,
         unique_constraints,
+        keyring_sidecar,
     })
 }
 
@@ -1088,6 +1169,7 @@ mod tests {
             },
             schema_constraints: vec![],
             unique_constraints: vec![],
+            keyring_sidecar: vec![],
         }
     }
 
@@ -1576,6 +1658,84 @@ mod tests {
         assert!(
             restored.unique_constraints.is_empty(),
             "v5 artifact must restore with empty unique constraints"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Version-6 (pre-keyring-fold, Issue #3665) backup compatibility
+    // -----------------------------------------------------------------------
+
+    /// Encode a version-6 artifact byte-for-byte the way a pre-#3665 AletheiaDB
+    /// would have: `[MAGIC][version=6][zstd(bitcode(BackupPayloadV6))]`.
+    fn encode_artifact_v6(payload: &BackupPayloadV6) -> Vec<u8> {
+        let encoded = bitcode::encode(payload);
+        let compressed = zstd::encode_all(encoded.as_slice(), 3).unwrap();
+        let mut out = Vec::with_capacity(6 + compressed.len());
+        out.extend_from_slice(&BACKUP_MAGIC);
+        out.extend_from_slice(&6u16.to_le_bytes());
+        out.extend_from_slice(&compressed);
+        out
+    }
+
+    /// T6: a version-6 (Issue #3218 era, pre-#3665) artifact -- the immediately
+    /// prior backup format this PR bumps -- must restore with `keyring_sidecar`
+    /// defaulting to empty (the field the v6 shape lacks), while its
+    /// `schema_constraints` and `unique_constraints` are preserved verbatim.
+    #[test]
+    fn read_artifact_accepts_legacy_v6_format() {
+        use crate::core::constraint::{
+            PropertyConstraintDescriptor, SchemaConstraintDescriptor, UniqueConstraintDescriptor,
+        };
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy_v6.albk");
+
+        // The v6 shape uses the LIVE temporal/interner/graph structs (unchanged
+        // since v4), so reuse the current empty payload's members.
+        let empty = empty_payload();
+        let payload = BackupPayloadV6 {
+            created_at_micros: 77,
+            source_lsn: 17,
+            current_node_count: 0,
+            current_edge_count: 0,
+            node_version_count: 0,
+            edge_version_count: 0,
+            interner: empty.interner,
+            graph: empty.graph,
+            temporal: empty.temporal,
+            schema_constraints: vec![SchemaConstraintDescriptor {
+                entity_kind: "node".to_string(),
+                label: "Person".to_string(),
+                properties: vec![PropertyConstraintDescriptor {
+                    property: "name".to_string(),
+                    declared_type: None,
+                    required: true,
+                    nullable: true,
+                }],
+            }],
+            unique_constraints: vec![UniqueConstraintDescriptor {
+                label: "Person".to_string(),
+                property: "email".to_string(),
+            }],
+        };
+
+        std::fs::write(&path, encode_artifact_v6(&payload)).unwrap();
+
+        let restored = read_artifact(&path).unwrap();
+
+        assert_eq!(restored.source_lsn, 17);
+        assert_eq!(restored.created_at_micros, 77);
+        // Schema + uniqueness constraints survive the v6 -> v7 upgrade verbatim.
+        assert_eq!(restored.schema_constraints.len(), 1);
+        assert_eq!(restored.schema_constraints[0].label, "Person");
+        assert_eq!(restored.unique_constraints.len(), 1);
+        assert_eq!(restored.unique_constraints[0].property, "email");
+        // The pre-#3665 artifact carries no keyring; the upgrade From impl
+        // defaults it to empty (designated properties, if any, restore
+        // sealed-unreadable).
+        assert!(
+            restored.keyring_sidecar.is_empty(),
+            "v6 artifact must restore with an empty keyring sidecar"
         );
     }
 

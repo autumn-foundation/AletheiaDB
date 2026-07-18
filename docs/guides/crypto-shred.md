@@ -136,6 +136,24 @@ Understand these boundaries before relying on it for compliance.
    Operational procedure — tracking and destroying stale artifacts — is
    required for full compliance.
 
+   **Keyring fold — v7 `.albk` (Issue #3665).** As of archive format v7 the
+   `.albk` backup embeds the crypto-shred **subject keyring / designation
+   registry** (designations, wrapped per-subject DEKs, erased-state,
+   `erased_at`, attestations), so a backup→restore no longer over-erases:
+   an **active** subject's designated properties are readable again after
+   restore, while an **erased** subject stays erased — its wrapped DEK is
+   `None` and therefore physically absent from the archive. Consequences:
+   - A v7 archive carrying a keyring is **key-bearing** (the wrapped DEKs are
+     MEK-encrypted; the MEK itself is never in the archive). **Protect `.albk`
+     files like key material.**
+   - A backup taken **before** an erase still carries that subject's
+     recoverable wrapped DEK — the pre-erasure caveat above applies verbatim to
+     v7 archives. Take a fresh backup **after** erasing, and destroy stale
+     pre-erasure archives.
+   - Restoring a **pre-v7** archive (v5/v6) that held designated properties
+     recovers no keyring, so those properties come back **sealed-unreadable**;
+     restore emits a loud one-time warning in that case.
+
 3. **Topology and structure are not erased.** Which entities and edges exist,
    their labels, and their temporal coordinates persist after erasure. Only the
    designated **property payload** (and designated embeddings) become
