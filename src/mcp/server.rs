@@ -4532,18 +4532,18 @@ impl AletheiaMcpServer {
         // (Issue #3391).
         let now = time::now();
 
-        // Issue #3349 (FIX2): resolve an omitted scope to the `default`
+        // Issue #3349 (FIX2 / PR3d): resolve an omitted scope to the `default`
         // namespace only (isolated-by-default). An explicit *non-default*
-        // narrowing scope routes through the boundary-enforcing scoped BFS (an
-        // edge is crossed only if the edge's own namespace AND the target node's
+        // narrowing scope routes through the boundary-enforcing scoped BFS (a hop
+        // is crossed only if the edge's own namespace AND the far node's
         // namespace are in scope, so a scope cannot leak via transit through an
-        // out-of-scope node; outgoing-only in v1). The `default` scope — whether
-        // omitted or explicit — and the `all` selector run the full unscoped DFS
-        // below, which preserves the path/depth result shape and every traversal
-        // direction; the `default` case then drops any non-default node from the
-        // returned page so an omitted read stays default-isolated (a
-        // pre-namespace database is all `default`, so nothing is dropped and the
-        // result is byte-identical).
+        // out-of-scope node) — now for all three directions (outgoing, incoming,
+        // both; PR3d). The `default` scope — whether omitted or explicit — and
+        // the `all` selector run the full unscoped DFS below, which preserves the
+        // path/depth result shape and every traversal direction; the `default`
+        // case then drops any non-default node from the returned page so an
+        // omitted read stays default-isolated (a pre-namespace database is all
+        // `default`, so nothing is dropped and the result is byte-identical).
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
@@ -4593,11 +4593,13 @@ impl AletheiaMcpServer {
         // the page (its response carries `Some(namespace)`; the default
         // namespace is elided to `None`). `page_window` above is the pre-filter
         // DFS page size, so `next_offset` still advances over the unfiltered DFS
-        // order (gap-free/dup-free), exactly like the provenance filter. v1
-        // caveat: this filters returned nodes, not the crossed edges, so it does
-        // not enforce the full scoped traversal boundary for incoming/both — the
-        // outgoing scoped BFS (explicit narrowing scope) does; this is a
-        // documented follow-up.
+        // order (gap-free/dup-free), exactly like the provenance filter.
+        // Semantics note (#3349): this `default` path filters returned nodes, not
+        // the crossed edges, so it preserves the path/depth DFS result shape for
+        // every direction. An explicit narrowing scope instead routes through the
+        // boundary-enforcing scoped BFS above (all directions, PR3d), which never
+        // crosses an out-of-scope edge/node; the two paths differ in shape by
+        // design (see `handle_traverse_scoped`).
         if default_only {
             results.retain(|r| r.node.namespace.is_none());
         }
@@ -4631,12 +4633,14 @@ impl AletheiaMcpServer {
     /// node's namespace are in scope — a scope can never leak across the
     /// boundary or via transit through an out-of-scope node.
     ///
-    /// v1 scope limitations vs the unscoped DFS: only `direction: "outgoing"` is
-    /// supported (incoming/both ⇒ `INVALID_ARGUMENT`); the scoped BFS returns
-    /// the reachable in-scope node set (sorted by id), so each result carries
-    /// its `node` (and `depth`/`path` are omitted — the boundary-correct set,
-    /// not per-path detail); it does not compose with the #3360 cursor /
-    /// #3353 token-budget shaping (offset paging applies).
+    /// All three directions (`outgoing`, `incoming`, `both`) are supported and
+    /// boundary-scoped (Issue #3349, PR3d): the boundary rule (edge.ns ∧
+    /// far-node.ns ∈ scope) applies symmetrically. The scoped BFS returns the
+    /// reachable in-scope node **set** (sorted by id), so each result carries its
+    /// `node` while `depth`/`path` are omitted — the boundary-correct set, not
+    /// per-path detail (unchanged from the shipped outgoing scoped path). It does
+    /// not compose with the #3360 cursor / #3353 token-budget shaping (offset
+    /// paging applies).
     #[allow(clippy::too_many_arguments)]
     fn handle_traverse_scoped(
         &self,
@@ -4651,20 +4655,40 @@ impl AletheiaMcpServer {
         prov_filter: Option<&crate::core::ProvenanceFilter>,
         now: Timestamp,
     ) -> CallToolResult {
-        if direction != "outgoing" {
-            return self.invalid_argument(
-                "namespace-scoped traverse supports only direction \"outgoing\" in v1; an \
-                 incoming/both scoped traversal is a follow-up.",
-            );
-        }
+        // Issue #3349 (PR3d): all three traversal directions are boundary-scoped.
+        // The boundary rule (edge.ns ∧ far-node.ns ∈ scope) applies symmetrically
+        // for outgoing (→ target), incoming (source →), and both.
+        let traverse_direction = match direction {
+            "outgoing" => crate::db::namespace_query::TraverseDirection::Outgoing,
+            "incoming" => crate::db::namespace_query::TraverseDirection::Incoming,
+            "both" => crate::db::namespace_query::TraverseDirection::Both,
+            other => {
+                return self.invalid_argument(&format!(
+                    "invalid traverse direction {other:?}; expected \"outgoing\", \"incoming\", \
+                     or \"both\""
+                ));
+            }
+        };
         // The scoped BFS takes an optional edge label; the MCP tool always
         // supplies one (a required field), so restrict to that relationship.
         let edge_label = Some(req.edge_label.as_str());
         let reachable = match temporal {
-            Some((vt, tt)) => self
-                .db
-                .traverse_scoped_as_of(start_id, edge_label, depth, vt, tt, scope),
-            None => self.db.traverse_scoped(start_id, edge_label, depth, scope),
+            Some((vt, tt)) => self.db.traverse_scoped_as_of_directed(
+                start_id,
+                edge_label,
+                traverse_direction,
+                depth,
+                vt,
+                tt,
+                scope,
+            ),
+            None => self.db.traverse_scoped_directed(
+                start_id,
+                edge_label,
+                traverse_direction,
+                depth,
+                scope,
+            ),
         };
         let reachable = match reachable {
             Ok(ids) => ids,
@@ -7883,18 +7907,40 @@ impl AletheiaMcpServer {
         self.failed_precondition(&e.to_string())
     }
 
-    fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
-        // Issue #3349: a filter-complete namespace scope over the vector ranking
-        // is not implemented for hybrid_query in v1; a narrowing scope is
-        // INVALID_ARGUMENT (never silently unscoped / incorrectly post-filtered).
-        if let Err(result) = self.reject_unsupported_scope(
-            &args.get("namespace").cloned(),
-            "hybrid_query does not support a namespace scope in v1 (a filter-complete scope over \
-             vector ranking is a follow-up). Use find_similar or traverse with a namespace scope \
-             instead, or \"all\".",
-        ) {
-            return result;
+    /// Thread a namespace read scope into a [`QueryBuilder`] (Issue #3349, PR3d).
+    ///
+    /// `All` becomes the explicit no-op `in_all_namespaces` (identical to the
+    /// pre-scope path); a single/union scope threads through
+    /// `in_namespace`/`in_namespaces` so the executor applies the source-leaf
+    /// filter + traversal boundary. Generic over the builder state so it composes
+    /// at any point in the fluent chain.
+    fn scoped_builder<S: crate::query::builder::QueryState>(
+        builder: crate::query::QueryBuilder<S>,
+        scope: &crate::core::namespace::NamespaceScope,
+    ) -> crate::query::QueryBuilder<S> {
+        use crate::core::namespace::NamespaceScope;
+        match scope {
+            NamespaceScope::All => builder.in_all_namespaces(),
+            NamespaceScope::Single(ns) => builder.in_namespace(ns.clone()),
+            NamespaceScope::List(list) => builder.in_namespaces(list.iter().cloned()),
         }
+    }
+
+    fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
+        // Issue #3349 (PR3d): real namespace scoping. Parse the optional
+        // `namespace` read scope (omitted ⇒ `default`-only, `"all"` ⇒ no filter),
+        // then validate it up front so unknown ns ⇒ NOT_FOUND / empty list ⇒
+        // INVALID_ARGUMENT is returned even on the single-node paths that don't
+        // route through the scope-validating executor.
+        let scope = match self.parse_opt_scope(&args.get("namespace").cloned()) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        if let Err(e) = self.db.validate_scope(&scope) {
+            return self.db_error(e);
+        }
+        let scope_is_restricting = !matches!(scope, crate::core::namespace::NamespaceScope::All);
 
         // Issue #3348: parse the optional provenance filter before consuming args.
         let prov_filter = match self.parse_provenance_filter(&args) {
@@ -7991,13 +8037,17 @@ impl AletheiaMcpServer {
                 // Temporal query for a single node
                 return match self.db.get_node_at_time(node_id, vt, tt) {
                     Ok(node) => {
+                        // Issue #3349 (PR3d): a start node outside the read scope
+                        // is filtered out (empty result), never leaked.
+                        let in_scope = !scope_is_restricting || scope.contains(&node.namespace());
                         let response = self.node_to_response(&node, include_vectors, now);
                         // Issue #3348: apply the provenance filter (evaluated on
                         // the version resolved at this coordinate) to the single
                         // result; a fail yields an empty result set, never a
                         // fabricated row.
-                        let results: Vec<HybridQueryResult> = if prov_filter_ref
-                            .is_none_or(|f| f.matches(response.provenance.as_ref()))
+                        let results: Vec<HybridQueryResult> = if in_scope
+                            && prov_filter_ref
+                                .is_none_or(|f| f.matches(response.provenance.as_ref()))
                         {
                             vec![HybridQueryResult {
                                 node: response,
@@ -8034,10 +8084,13 @@ impl AletheiaMcpServer {
                 // Just return the start node
                 return match self.db.get_node(node_id) {
                     Ok(node) => {
+                        // Issue #3349 (PR3d): filter an out-of-scope start node.
+                        let in_scope = !scope_is_restricting || scope.contains(&node.namespace());
                         let response = self.node_to_response(&node, include_vectors, now);
                         // Issue #3348: filter the single start node.
-                        let results: Vec<HybridQueryResult> = if prov_filter_ref
-                            .is_none_or(|f| f.matches(response.provenance.as_ref()))
+                        let results: Vec<HybridQueryResult> = if in_scope
+                            && prov_filter_ref
+                                .is_none_or(|f| f.matches(response.provenance.as_ref()))
                         {
                             vec![HybridQueryResult {
                                 node: response,
@@ -8057,7 +8110,11 @@ impl AletheiaMcpServer {
                 };
             };
 
-            // Execute and collect results
+            // Execute and collect results. Issue #3349 (PR3d): thread the read
+            // scope through the executor (source-leaf filter + traversal
+            // boundary) so a graph-first hybrid never crosses an out-of-scope
+            // edge/node.
+            let builder = Self::scoped_builder(builder, &scope);
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
@@ -8089,17 +8146,23 @@ impl AletheiaMcpServer {
                 return self.invalid_argument(&e);
             }
 
-            // Issue #3348 (AC6): with a provenance filter, over-fetch the
-            // candidate horizon so the returned top rows are all
-            // filter-passing rather than a short post-truncation. Ranked order
-            // is preserved; the page is truncated back to `limit` after
-            // filtering.
-            let (fetch_k, fetch_limit) = if prov_filter.is_some() {
+            // Issue #3348 (AC6) / #3349 (PR3d): with a provenance filter OR a
+            // restricting namespace scope, over-fetch the candidate horizon so
+            // the returned top rows are all filter-passing (filter-complete)
+            // rather than a short post-truncation — mirroring
+            // `find_similar_scoped`. Ranked order is preserved; the page is
+            // truncated back to `limit` after filtering. The namespace filter is
+            // applied by the executor (source-leaf scope filter) and stays
+            // ignorant of *why* a vector is absent (e.g. a crypto-shredded
+            // embedding is simply never a candidate), composing with GDPR HNSW
+            // exclusion.
+            let (fetch_k, fetch_limit) = if prov_filter.is_some() || scope_is_restricting {
                 (MAX_VECTOR_K, MAX_VECTOR_K)
             } else {
                 (k, limit)
             };
             let builder = crate::query::QueryBuilder::new().find_similar(embedding, fetch_k);
+            let builder = Self::scoped_builder(builder, &scope);
 
             match builder.limit(fetch_limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
@@ -8117,8 +8180,9 @@ impl AletheiaMcpServer {
                 Err(e) => self.db_error(e),
             }
         } else if let Some(ref label) = req.filter_label {
-            // Label scan query
+            // Label scan query. Issue #3349 (PR3d): thread the read scope.
             let builder = crate::query::QueryBuilder::new().scan_label(label);
+            let builder = Self::scoped_builder(builder, &scope);
 
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
@@ -8225,9 +8289,37 @@ impl AletheiaMcpServer {
     /// Map an engine error from query execution into a structured query-tool error.
     fn map_query_error(&self, error: crate::core::error::Error, language: &str) -> CallToolResult {
         use crate::core::error::{Error, QueryError};
+        use crate::core::namespace::NamespaceError;
         match error {
             Error::Query(QueryError::SyntaxError { message }) => {
                 self.query_error("parse_error", &message, None, Some(language))
+            }
+            // Issue #3349 (PR3d): a namespace scope error surfaces through the
+            // query envelope carrying `details.namespace` (the offending name),
+            // so a caller self-corrects exactly as on the structured scoped read
+            // tools. All namespace errors are caller faults (non-retriable).
+            Error::Namespace(ns_err) => {
+                let (kind, code, details) = match &ns_err {
+                    NamespaceError::NotFound { namespace } => (
+                        "runtime_error",
+                        McpErrorCode::NotFound,
+                        json!({ "namespace": namespace }),
+                    ),
+                    NamespaceError::InvalidName { name, .. } => (
+                        "invalid_params",
+                        McpErrorCode::InvalidArgument,
+                        json!({ "namespace": name }),
+                    ),
+                    NamespaceError::AlreadyExists { .. }
+                    | NamespaceError::ReservedPropertyKey { .. }
+                    | NamespaceError::Immutable => (
+                        "invalid_params",
+                        McpErrorCode::InvalidArgument,
+                        serde_json::Value::Null,
+                    ),
+                };
+                let message = Error::Namespace(ns_err).to_string();
+                self.query_error_with_details(kind, code, false, &message, Some(language), details)
             }
             Error::Query(QueryError::UnsupportedFeature { feature }) => self.query_error(
                 "unsupported_construct",
@@ -8440,17 +8532,17 @@ impl AletheiaMcpServer {
         // (Issue #3360); captured before `args` is consumed by deserialization.
         let cursor_requested = Self::cursor_requested(&args);
 
-        // Issue #3349: declarative (AQL/Cypher) namespace scoping is a follow-up;
-        // a narrowing scope is rejected (never silently unscoped). Captured
-        // before `args` is consumed by deserialization.
-        if let Err(result) = self.reject_unsupported_scope(
-            &args.get("namespace").cloned(),
-            "declarative (AQL/Cypher) namespace scoping is not supported by the query tool in v1; \
-             use USE NAMESPACE in the query language when it lands, or the structured scoped read \
-             tools. Pass \"all\" to run unscoped.",
-        ) {
-            return result;
+        // Issue #3349 (PR3d): real declarative (AQL/Cypher) namespace scoping.
+        // Parse the optional `namespace` read scope; an omitted scope resolves to
+        // the `default` namespace only (isolated-by-default, consistent with the
+        // structured scoped read tools), `"all"` imposes no filter. Captured
+        // before `args` is consumed by deserialization; validated (unknown ns ⇒
+        // NOT_FOUND, empty list ⇒ INVALID_ARGUMENT) inside the scoped executor.
+        let scope = match self.parse_opt_scope(&args.get("namespace").cloned()) {
+            Ok(s) => s,
+            Err(result) => return result,
         }
+        .unwrap_or_default();
 
         let req: QueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -8554,7 +8646,7 @@ impl AletheiaMcpServer {
             requested
         };
 
-        self.run_query_under_timeout(effective, language, req, row_limit)
+        self.run_query_under_timeout(effective, language, req, row_limit, scope)
     }
 
     /// Run the `query` tool's execution under the effective wall-clock timeout
@@ -8576,11 +8668,12 @@ impl AletheiaMcpServer {
         language: String,
         req: QueryRequest,
         row_limit: usize,
+        scope: crate::core::namespace::NamespaceScope,
     ) -> CallToolResult {
         if effective.timeout_ms == 0 {
             // Inline (unlimited-timeout) path: no worker thread is spawned, so
             // the in-flight guard does not apply (Issue #3368).
-            return self.execute_query_core(effective, &language, &req, row_limit);
+            return self.execute_query_core(effective, &language, &req, row_limit, &scope);
         }
 
         // Bounded in-flight-query DoS guard (Issue #3368): the timeout race
@@ -8597,7 +8690,7 @@ impl AletheiaMcpServer {
         let server = self.clone();
         let lang = language.clone();
         let outcome = self.race_deadline(effective.timeout_ms, guard, move || {
-            server.execute_query_core(effective, &lang, &req, row_limit)
+            server.execute_query_core(effective, &lang, &req, row_limit, &scope)
         });
         match outcome {
             RaceOutcome::Completed(result) => result,
@@ -8756,9 +8849,14 @@ impl AletheiaMcpServer {
         language: &str,
         req: &QueryRequest,
         row_limit: usize,
+        scope: &crate::core::namespace::NamespaceScope,
     ) -> CallToolResult {
         let has_params = req.params.as_ref().is_some_and(|p| !p.is_empty());
 
+        // Issue #3349 (PR3d): the query executes under the parsed namespace read
+        // scope (omitted ⇒ `default`-only, `"all"` ⇒ no filter). The scope rides
+        // the `Query` IR into the same executor source-leaf filter + traversal
+        // boundary the Rust builder uses.
         let execution = match language {
             "aql" => {
                 if has_params {
@@ -8770,14 +8868,20 @@ impl AletheiaMcpServer {
                         Some("aql"),
                     );
                 }
-                self.db.execute_aql(&req.query)
+                self.db.execute_aql_scoped(&req.query, scope.clone())
             }
             "cypher" => {
                 #[cfg(feature = "cypher")]
                 {
                     match self.json_to_cypher_params(req.params.as_ref()) {
-                        Ok(params) if params.is_empty() => self.db.execute_cypher(&req.query),
-                        Ok(params) => self.db.execute_cypher_with_params(&req.query, params),
+                        Ok(params) if params.is_empty() => {
+                            self.db.execute_cypher_scoped(&req.query, scope.clone())
+                        }
+                        Ok(params) => self.db.execute_cypher_with_params_scoped(
+                            &req.query,
+                            params,
+                            scope.clone(),
+                        ),
                         Err((parameter, reason)) => {
                             return self.query_error(
                                 "invalid_params",
