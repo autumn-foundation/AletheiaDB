@@ -900,9 +900,11 @@ impl ConcurrentWalSystem {
         // Checked (under the install lock) before the seal so an already-encrypted
         // WAL is never re-rolled.
         if self.wal_keyring.load().is_some() {
-            // TODO(#3616 PR3): when surfaced via MCP, map this precondition to
-            // FAILED_PRECONDITION rather than the default WalError→INTERNAL.
-            return Err(Error::Storage(StorageError::WalError {
+            // A DISTINGUISHABLE precondition variant (not a generic `WalError`) so
+            // the enable engine's `map_wal_install_err` maps ONLY this to
+            // FAILED_PRECONDITION and leaves genuine WAL I/O / seal faults as
+            // INTERNAL (Issue #3616 PR3). MCP classifies it as FAILED_PRECONDITION.
+            return Err(Error::Storage(StorageError::WalKeyringAlreadyInstalled {
                 reason: "a WAL keyring is already installed; runtime install only \
                          supports the plaintext → encrypted (None → Some) transition \
                          (key rotation is a separate operation)"

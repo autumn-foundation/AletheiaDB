@@ -1000,10 +1000,29 @@ impl AletheiaDB {
                 )?;
             }
 
-            // Start background persistence thread if enabled
+            // Start background persistence thread if enabled.
+            //
+            // Issue #3616 PR3 (NIT-2) load-bearing invariant: on an interrupted-enable
+            // resume this worker is spawned HERE, BEFORE `resume_pending_enable_cold`
+            // runs the cold wrap (below). That is safe ONLY because both at-rest layers
+            // were built under the enable-resume ciphers on this path — the index
+            // manager under `enable_resume.index` (so a persist writes `AEIX`, never
+            // plaintext over the freshly-wrapped files) and the cold store under
+            // `enable_resume.cold` (so a hot→cold migration writes `ACV1`, and the wrap
+            // pass is idempotent). A future refactor that built either layer PLAINTEXT
+            // on the resume path would reintroduce a plaintext/bare-over-encrypted race
+            // with this running worker: the worker must NEVER run with a plaintext
+            // manager while an enable ledger is pending. The `index_cipher`
+            // (config.rs) and cold `with_cipher_versioned` (below) wiring enforce this.
             if let Some(ref tracker) = persistence_tracker
                 && let Some(ref manager) = persistence_manager
             {
+                debug_assert!(
+                    enable_resume.is_none() || manager.keyring().is_some(),
+                    "enable-resume must build the index manager under the enable index \
+                     DEK; a plaintext manager with a pending enable ledger would let this \
+                     worker persist plaintext over encrypted index files (Issue #3616 PR3)"
+                );
                 let handle = spawn_background_persistence_thread(
                     Arc::clone(&db.current),
                     Arc::clone(&db.historical),
@@ -1104,6 +1123,15 @@ impl AletheiaDB {
                 // A guarded no-op when no enable migration with a cold layer is
                 // pending.
                 db.resume_pending_enable_cold()?;
+            } else {
+                // Issue #3616 PR3: this open() did NOT build a cold tier
+                // (enable_cold_storage disabled or no cold path). If an interrupted
+                // enable recorded a cold layer as Pending, `resume_pending_enable_cold`
+                // (with its fail-closed guard) never runs — so the ledger would wedge
+                // forever (authority never flips, no diagnostic). Fail LOUDLY here
+                // with the same actionable "reopen with the cold tier enabled" error
+                // instead of silently stranding the migration.
+                db.fail_if_pending_enable_cold_without_tier()?;
             }
 
             seed_startup_current_timestamp(&db)?;

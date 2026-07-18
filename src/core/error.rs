@@ -398,6 +398,17 @@ pub enum StorageError {
         /// The error reason
         reason: String,
     },
+    /// A runtime WAL keyring install was attempted while one is already present
+    /// (Issue #3616 PR3). Distinct from the generic [`WalError`](Self::WalError)
+    /// so the enable engine can classify this **precondition** failure as
+    /// `FAILED_PRECONDITION` (a caller cannot enable an already-encrypted WAL)
+    /// while genuine WAL I/O / seal-and-reopen faults keep falling through to
+    /// `INTERNAL`.
+    #[error("WAL keyring already installed: {reason}")]
+    WalKeyringAlreadyInstalled {
+        /// The rejection reason.
+        reason: String,
+    },
     /// Checkpoint error.
     #[error("Checkpoint error: {reason}")]
     CheckpointError {

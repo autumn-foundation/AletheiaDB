@@ -47,6 +47,26 @@
 //! Deferred (NOT migrated by v1): `.albk` backups, `snapshots.json`, auth
 //! `keys.json`, `schema_constraints.dat`.
 //!
+//! # Security caveats (defense-in-depth, documented)
+//!
+//! * **In-place overwrite does not shred freed plaintext blocks.** The index wrap
+//!   writes ciphertext to a temp file and `rename`s it over the plaintext file, and
+//!   the cold wrap `insert`s over the bare redb value; in both cases the OLD
+//!   plaintext data blocks are merely *freed*, not zeroed (redb is copy-on-write and
+//!   is not compacted here). Enable protects against the "logical FS read / stolen
+//!   disk image" threat model, but it is NOT a plaintext-shredding operation:
+//!   forensic recovery of freed blocks can still resurrect pre-enable plaintext. A
+//!   compaction/vacuum step is a follow-up for callers that require shredding.
+//! * **Coarse AEAD associated-data binding (inherited formats).** The `AEIX` format
+//!   binds only its 10-byte header as AAD; the `ACV1` cold wrapper uses empty AAD
+//!   (the `key_version` in the wrapper is not authenticated). Neither binds the
+//!   ciphertext to its file identity / redb key / entity id, so wrapped blobs are
+//!   *relocatable* by an attacker with write access (confidentiality and per-blob
+//!   integrity still hold; only cross-entity placement is unauthenticated). This is
+//!   a property of the reused #481/#3617 formats, not introduced here; binding file
+//!   id / redb key (and the `key_version`) into the AAD is a defense-in-depth
+//!   follow-up.
+//!
 //! # Crash resume
 //!
 //! An interrupted enable has NOT yet flipped the authority, so
@@ -97,15 +117,22 @@ pub struct EnableReport {
     pub key_source: KeyProviderConfig,
 }
 
-/// Map the WAL seam's double-install rejection (a `WalError`, which would default
-/// to an `INTERNAL`-class error) to a `FailedPrecondition` — enabling an
-/// already-encrypted WAL is a caller precondition failure, not an internal fault
-/// (honors the PR2 `install_wal_keyring` TODO).
+/// Map the WAL seam's **double-install** rejection to a `FailedPrecondition` —
+/// enabling an already-encrypted WAL is a caller precondition failure, not an
+/// internal fault (honors the PR2 `install_wal_keyring` TODO).
+///
+/// Only the distinguishable [`StorageError::WalKeyringAlreadyInstalled`] variant
+/// is reclassified. A genuine WAL I/O / seal-and-reopen fault (a plain
+/// [`StorageError::WalError`], or anything else) is a real internal failure and
+/// is passed through UNCHANGED so it keeps its `INTERNAL` classification — it must
+/// never be mislabeled as the non-retriable "already encrypted" precondition.
 fn map_wal_install_err(e: Error) -> Error {
     match &e {
-        Error::Storage(StorageError::WalError { reason }) => Error::FailedPrecondition(format!(
-            "cannot enable encryption: the WAL is already encrypted ({reason})"
-        )),
+        Error::Storage(StorageError::WalKeyringAlreadyInstalled { reason }) => {
+            Error::FailedPrecondition(format!(
+                "cannot enable encryption: the WAL is already encrypted ({reason})"
+            ))
+        }
         _ => e,
     }
 }
@@ -146,17 +173,28 @@ impl AletheiaDB {
     ///   only by the mandatory **reopen** (a fresh manager built with the index
     ///   keyring), which is where "stop → migrate → respawn" completes.
     ///
-    /// ## The quiesced window
+    /// ## The quiesced window — NO persistence is permitted through this handle
     ///
-    /// Between this call returning and the reopen, the handle does not perform
-    /// periodic index/checkpoint/cold persistence. Continuing to WRITE through the
-    /// returned handle is **not supported** in v1 (index mutations would not be
-    /// persisted by this handle; they survive only via the encrypted WAL until
-    /// reopen). **You MUST reopen the database** (drop this handle and call
-    /// [`AletheiaDB::open`]) to get a fully-operational encrypted instance: the
-    /// next `open()` reads the flipped [`encryption.state`](crate::db::encryption_state)
-    /// authority, brings every layer up under the cipher, and restarts the
-    /// background persistence thread.
+    /// Between this call returning and the reopen, this handle must perform **no
+    /// index/checkpoint/cold persistence at all** — neither the background thread
+    /// (stopped + joined as step 1, not restarted) nor an **explicit
+    /// [`persist_indexes`](AletheiaDB::persist_indexes) call**. The reason is
+    /// structural: the live WAL is now encrypted, but this handle's index manager
+    /// still carries a **plaintext** keyring (there is no live `None → Some`
+    /// index-keyring install). A persist would therefore write **plaintext** index
+    /// files over the freshly-wrapped `AEIX` snapshot — the exact corruption this
+    /// engine prevents. To make that impossible rather than merely discouraged,
+    /// [`persist_indexes`](AletheiaDB::persist_indexes) is **fail-closed** on a
+    /// post-enable handle (it returns a `FailedPrecondition` telling you to reopen)
+    /// so no code path can silently corrupt the encrypted snapshot.
+    ///
+    /// Continuing to WRITE through the returned handle is likewise **not
+    /// supported** in v1 (index mutations would not be persisted by this handle;
+    /// they survive only via the encrypted WAL until reopen). **You MUST reopen the
+    /// database** (drop this handle and call [`AletheiaDB::open`]) to get a
+    /// fully-operational encrypted instance: the next `open()` reads the flipped
+    /// [`encryption.state`](crate::db::encryption_state) authority, brings every
+    /// layer up under the cipher, and restarts the background persistence thread.
     ///
     /// # Errors
     ///
@@ -433,6 +471,37 @@ impl AletheiaDB {
         clear_rotation_state(manager);
         Ok(())
     }
+
+    /// Fail LOUDLY at startup when an interrupted enable recorded a cold layer as
+    /// `Pending` but this `open()` will NOT construct a cold tier (Issue #3616 PR3).
+    ///
+    /// [`resume_pending_enable_cold`](Self::resume_pending_enable_cold)'s own
+    /// fail-closed guard only runs when the cold-init block is entered. If the
+    /// operator reopens with the cold tier disabled or dropped (a trimmed config, a
+    /// moved cold path), that block is skipped and the guard is **unreachable**, so
+    /// the enable ledger would otherwise wedge forever — `resume_pending_enable`
+    /// defers (cold still `Pending` → `non_wal_layers_settled() == false`), the
+    /// authority is never flipped, and nothing tells the operator the enable is
+    /// stuck. This converts that silent limbo into the same actionable
+    /// `FailedPrecondition` the in-block guard emits. Called on the startup branch
+    /// that does NOT build a cold tier. A guarded no-op when no pending-enable
+    /// ledger exists or its cold layer is not `Pending`.
+    pub(crate) fn fail_if_pending_enable_cold_without_tier(&self) -> Result<()> {
+        let Some(manager) = self.persistence_manager.as_ref() else {
+            return Ok(());
+        };
+        let Some(view) = read_enable_ledger(manager)? else {
+            return Ok(());
+        };
+        if view.cold_pending {
+            return Err(Error::FailedPrecondition(
+                "pending enable ledger records a cold layer, but no cold tier is configured on \
+                 this open(); reopen with the cold tier enabled so the migration can complete"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -665,6 +734,43 @@ mod tests {
         ));
     }
 
+    /// A1: `map_wal_install_err` reclassifies ONLY the distinguishable
+    /// double-install rejection to `FailedPrecondition`; a genuine WAL I/O fault
+    /// (a plain `WalError`) is passed through unchanged and is NEVER mislabeled as
+    /// the non-retriable "already encrypted" precondition.
+    #[test]
+    fn map_wal_install_err_distinguishes_double_install_from_io_fault() {
+        use crate::core::error::{Error, StorageError};
+
+        // The seam's double-install rejection → FailedPrecondition ("already encrypted").
+        let double_install = Error::Storage(StorageError::WalKeyringAlreadyInstalled {
+            reason: "a WAL keyring is already installed".to_string(),
+        });
+        let mapped = super::map_wal_install_err(double_install);
+        match mapped {
+            Error::FailedPrecondition(msg) => {
+                assert!(
+                    msg.contains("already encrypted"),
+                    "double-install maps to the already-encrypted precondition, got: {msg}"
+                );
+            }
+            other => panic!("expected FailedPrecondition, got: {other:?}"),
+        }
+
+        // A genuine WAL I/O / seal fault must fall through UNCHANGED (INTERNAL-class),
+        // never becoming a false "already encrypted" precondition.
+        let io_fault = Error::Storage(StorageError::WalError {
+            reason: "failed to fsync sealed segment: disk full".to_string(),
+        });
+        let mapped = super::map_wal_install_err(io_fault);
+        match mapped {
+            Error::Storage(StorageError::WalError { reason }) => {
+                assert!(reason.contains("disk full"), "genuine I/O fault preserved");
+            }
+            other => panic!("I/O WalError must not be reclassified, got: {other:?}"),
+        }
+    }
+
     /// C0: a crash BEFORE the ledger is written (no ledger, no authority) reopens
     /// as a plain plaintext database — resume is a true no-op.
     #[test]
@@ -684,31 +790,55 @@ mod tests {
         assert_eq!(node_count_after_reopen(dir.path()), 1);
     }
 
-    /// C1: crash AFTER the ledger (wal=Pending) but BEFORE the WAL roll — the WAL
-    /// is still plaintext. Reopen must resume: install the keyring, roll, flip the
-    /// authority, clear the ledger.
+    /// C1: crash AFTER the ledger but BEFORE the WAL roll — the WAL is still
+    /// plaintext AND the index dir is still plaintext. This models the REAL ledger
+    /// shape a durable enable writes: `wal=Pending` **and** `index=Pending`
+    /// simultaneously (a durable enable always records `index_in_scope=true`, config
+    /// line 242). Reopen must resume BOTH layers: install+roll the WAL, wrap the
+    /// still-plaintext index dir to `AEIX`, and only THEN flip the authority + clear
+    /// the ledger — never flipping over a plaintext index under an "encrypted"
+    /// authority.
     #[test]
     fn enable_crash_after_ledger_before_wal_resumes() {
         let dir = tempfile::tempdir().unwrap();
         let key = key_source_at(dir.path());
         let indexes = dir.path().join("indexes");
+        let idx_dir = index_files_dir(dir.path());
         {
             let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
             db.create_node("N", PropertyMapBuilder::new().build())
                 .unwrap();
+            // Force a plaintext index snapshot to disk so the index dir is a genuine
+            // plaintext layer the resume must wrap.
+            db.persist_indexes().unwrap();
         }
-        // Simulate the interrupted state: an enable ledger present, WAL untouched.
-        write_enable_ledger(&manager_for(dir.path()), &key, false, false).unwrap();
+        // Precondition: index dir is plaintext (no AEIX yet), WAL untouched.
+        let (total, plain, aeix) = classify_index_files(&idx_dir);
+        assert!(total > 0, "expected a persisted plaintext index snapshot");
+        assert_eq!(aeix, 0, "index starts fully plaintext");
+        assert_eq!(plain, total);
+
+        // Simulate the interrupted state with the REAL shape: wal=Pending AND
+        // index=Pending (index_in_scope=true), WAL + index bytes still plaintext.
+        write_enable_ledger(&manager_for(dir.path()), &key, true, false).unwrap();
         assert!(indexes.join("rotation.state").exists());
 
-        // Reopen: resume completes the enable.
+        // Reopen: resume completes BOTH the WAL roll and the index wrap.
         {
             let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
             assert_eq!(db.node_count(), 1);
             assert!(db.wal.is_encrypted(), "resume rolled the WAL to encrypted");
         }
+        // The still-plaintext index dir was wrapped to AEIX by the combined-pending
+        // resume (authority is only flipped AFTER the index is fully wrapped).
+        let (total2, plain2, aeix2) = classify_index_files(&idx_dir);
+        assert_eq!(plain2, 0, "resume wrapped every plaintext index file");
+        assert!(
+            aeix2 > 0 && aeix2 == total2,
+            "index dir is fully AEIX after resume"
+        );
         let state = read_encryption_state(&indexes).unwrap().unwrap();
-        assert!(state.enabled);
+        assert!(state.enabled, "authority flipped only after index wrapped");
         assert!(!indexes.join("rotation.state").exists(), "ledger cleared");
     }
 
@@ -736,7 +866,10 @@ mod tests {
         assert!(read_encryption_state(&indexes).unwrap().is_none());
         {
             let mgr = manager_for(dir.path());
-            write_enable_ledger(&mgr, &key, false, false).unwrap();
+            // Real durable shape: index_in_scope=true (index=Pending); the index is
+            // already AEIX on disk from block-1, so the resume wrap is an idempotent
+            // skip, but the ledger shape matches what a durable enable actually writes.
+            write_enable_ledger(&mgr, &key, true, false).unwrap();
             // Force wal=Complete to mirror the real crash point.
             crate::db::rotation::mark_wal_complete(&mgr).unwrap();
         }
@@ -768,10 +901,11 @@ mod tests {
                 .unwrap();
             db.enable_encryption(key.clone()).unwrap();
         }
-        // Re-lay a settled (wal=Complete) ledger, leaving the authority ENABLED.
+        // Re-lay a settled (wal=Complete, index=Pending) ledger matching the real
+        // durable shape (index_in_scope=true), leaving the authority ENABLED.
         {
             let mgr = manager_for(dir.path());
-            write_enable_ledger(&mgr, &key, false, false).unwrap();
+            write_enable_ledger(&mgr, &key, true, false).unwrap();
             crate::db::rotation::mark_wal_complete(&mgr).unwrap();
         }
         assert!(indexes.join("rotation.state").exists());
@@ -858,6 +992,67 @@ mod tests {
             assert_eq!(db.node_count(), 2, "nodes survive reopen via AEIX index");
             assert!(db.wal.is_encrypted());
         }
+        let (_, plain3, aeix3) = classify_index_files(&idx_dir);
+        assert!(
+            aeix3 > 0 && plain3 == 0,
+            "index dir remains AEIX after reopen"
+        );
+    }
+
+    /// AC(i) NEGATIVE reopen-contract test: an explicit `persist_indexes()` on the
+    /// QUIESCED post-enable handle is fail-closed and does NOT corrupt the
+    /// encrypted (`AEIX`) snapshot with plaintext. Proves the documented v1
+    /// limitation is enforced, not merely described.
+    #[test]
+    fn persist_on_quiesced_post_enable_handle_is_refused_and_preserves_aeix() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let idx_dir = index_files_dir(dir.path());
+
+        let mut db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("n", "alice").build(),
+        )
+        .unwrap();
+        db.persist_indexes().unwrap();
+
+        db.enable_encryption(key.clone()).unwrap();
+        // Post-enable: every index file is AEIX.
+        let (total, plain, aeix) = classify_index_files(&idx_dir);
+        assert!(total > 0);
+        assert_eq!(plain, 0, "index files are AEIX after enable");
+        assert_eq!(aeix, total);
+
+        // The fail-closed guard: an explicit persist through the quiesced handle is
+        // REFUSED rather than silently writing plaintext over the AEIX snapshot.
+        let err = db.persist_indexes().unwrap_err();
+        assert!(
+            matches!(err, crate::core::error::Error::FailedPrecondition(_)),
+            "persist on a post-enable quiesced handle must be fail-closed, got: {err:?}"
+        );
+
+        // The snapshot is untouched: still every-file-AEIX, zero plaintext.
+        let (total2, plain2, aeix2) = classify_index_files(&idx_dir);
+        assert_eq!(
+            total2, total,
+            "no file added/removed by the refused persist"
+        );
+        assert_eq!(
+            plain2, 0,
+            "no plaintext index file was written over the AEIX snapshot"
+        );
+        assert_eq!(aeix2, total);
+
+        drop(db);
+        // Reopen: data intact, snapshot still AEIX (never corrupted).
+        let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+        assert_eq!(
+            db.node_count(),
+            1,
+            "data survives; snapshot was not corrupted"
+        );
+        assert!(db.wal.is_encrypted());
         let (_, plain3, aeix3) = classify_index_files(&idx_dir);
         assert!(
             aeix3 > 0 && plain3 == 0,
@@ -1145,6 +1340,127 @@ mod tests {
         }
         let state = read_encryption_state(&indexes).unwrap().unwrap();
         assert!(state.enabled, "authority flipped by cold resume");
+        assert!(!indexes.join("rotation.state").exists(), "ledger cleared");
+    }
+
+    /// A5: an interrupted enable with `cold=Pending`, reopened with the cold tier
+    /// DISABLED in config, must FAIL LOUDLY (not silently wedge). The in-block
+    /// `resume_pending_enable_cold` guard is unreachable when no cold tier is built,
+    /// so the startup else-branch guard converts the silent limbo into an actionable
+    /// `FailedPrecondition`.
+    #[test]
+    fn enable_cold_pending_reopened_without_cold_tier_fails_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+
+        // Block 1: a FULL enable over a cold tier, giving a consistent migrated state.
+        {
+            let mut db =
+                AletheiaDB::with_unified_config(plaintext_durable_config_with_cold(dir.path()))
+                    .unwrap();
+            db.create_node("Hot", PropertyMapBuilder::new().insert("h", "1").build())
+                .unwrap();
+            seed_bare_cold_node(&db, 9201u64, 601, "Dan");
+            db.persist_indexes().unwrap();
+            db.enable_encryption(key.clone()).unwrap();
+        }
+
+        // Rewind to "wal/index=Complete, cold=Pending": remove the authority and
+        // re-lay a cold-in-scope ledger with only the cold layer still Pending.
+        std::fs::remove_file(encryption_state_path(&indexes)).unwrap();
+        {
+            let mgr = manager_for(dir.path());
+            write_enable_ledger(&mgr, &key, true, true).unwrap();
+            crate::db::rotation::mark_wal_complete(&mgr).unwrap();
+            crate::db::rotation::mark_index_complete(&mgr).unwrap();
+        }
+
+        // Reopen WITHOUT the cold tier: the enable ledger's cold layer is Pending but
+        // no cold tier will be built → open() must FAIL LOUDLY rather than wedge.
+        let err = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path()))
+            .expect_err("reopen without the cold tier must fail loudly, not wedge silently");
+        assert!(
+            matches!(err, crate::core::error::Error::FailedPrecondition(_)),
+            "cold-Pending without a cold tier is a FailedPrecondition, got: {err:?}"
+        );
+
+        // The ledger is still present (never cleared) and the authority never flipped
+        // — the migration is recoverable by reopening WITH the cold tier.
+        assert!(indexes.join("rotation.state").exists(), "ledger preserved");
+        assert!(
+            read_encryption_state(&indexes).unwrap().is_none(),
+            "authority not flipped"
+        );
+
+        // Reopening WITH the cold tier completes the migration (proves recoverability).
+        {
+            let db =
+                AletheiaDB::with_unified_config(plaintext_durable_config_with_cold(dir.path()))
+                    .unwrap();
+            assert!(db.wal.is_encrypted());
+        }
+        assert!(read_encryption_state(&indexes).unwrap().unwrap().enabled);
+        assert!(
+            !indexes.join("rotation.state").exists(),
+            "ledger cleared after cold resume"
+        );
+    }
+
+    /// A6/F3 crash-point: all layers `Complete` (including cold) but the authority
+    /// still OFF (the window between `mark_cold_complete` and the authority flip).
+    /// Reopen must flip + clear via `resume_pending_enable`'s phase-1 path (this
+    /// happens BEFORE the cold store is even built, since every cold value is already
+    /// ACV1 and `non_wal_layers_settled()` is true).
+    #[test]
+    fn enable_crash_all_layers_complete_cold_authority_off_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+        let cold_vid = 9301u64;
+
+        // Block 1: a FULL enable over a cold tier (all layers migrated).
+        {
+            let mut db =
+                AletheiaDB::with_unified_config(plaintext_durable_config_with_cold(dir.path()))
+                    .unwrap();
+            db.create_node("Hot", PropertyMapBuilder::new().insert("h", "1").build())
+                .unwrap();
+            seed_bare_cold_node(&db, cold_vid, 610, "Erin");
+            db.persist_indexes().unwrap();
+            db.enable_encryption(key.clone()).unwrap();
+        }
+
+        // Rewind to "all layers Complete, authority OFF": remove the authority and
+        // re-lay a ledger with every in-scope layer marked Complete (cold values are
+        // already ACV1 on disk from block 1).
+        std::fs::remove_file(encryption_state_path(&indexes)).unwrap();
+        {
+            let mgr = manager_for(dir.path());
+            write_enable_ledger(&mgr, &key, true, true).unwrap();
+            crate::db::rotation::mark_wal_complete(&mgr).unwrap();
+            crate::db::rotation::mark_index_complete(&mgr).unwrap();
+            crate::db::rotation::mark_cold_complete(&mgr).unwrap();
+        }
+        assert!(indexes.join("rotation.state").exists());
+        assert!(read_encryption_state(&indexes).unwrap().is_none());
+
+        // Reopen WITH the cold tier: phase-1 resume flips + clears (all settled).
+        {
+            let db =
+                AletheiaDB::with_unified_config(plaintext_durable_config_with_cold(dir.path()))
+                    .unwrap();
+            assert!(db.wal.is_encrypted());
+            let tiered = db.historical.read().tiered_storage_arc().unwrap();
+            assert!(
+                tiered
+                    .cold_storage()
+                    .raw_node_value_is_acv1_for_test(cold_vid),
+                "cold value stays ACV1"
+            );
+        }
+        let state = read_encryption_state(&indexes).unwrap().unwrap();
+        assert!(state.enabled, "authority flipped by phase-1 resume");
         assert!(!indexes.join("rotation.state").exists(), "ledger cleared");
     }
 }

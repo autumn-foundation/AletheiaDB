@@ -1839,11 +1839,19 @@ impl RedbColdStorage {
                     // legacy ciphertext). Either way the SAME compressed bytes are
                     // re-wrapped: no record is decoded, so temporal bounds cannot
                     // change.
-                    let compressed = match source_mode {
-                        ColdSourceMode::Rekey => self.decrypt_if_needed(value)?,
-                        ColdSourceMode::WrapPlaintext => value.clone(),
+                    // `Rekey` owns a freshly decrypted buffer; `WrapPlaintext` (enable)
+                    // encrypts the bare value in place with no extra allocation (the
+                    // bare value already IS the plaintext — CLAUDE.md "avoid
+                    // allocations": no per-value clone on the enable path).
+                    let decrypted;
+                    let compressed: &[u8] = match source_mode {
+                        ColdSourceMode::Rekey => {
+                            decrypted = self.decrypt_if_needed(value)?;
+                            &decrypted
+                        }
+                        ColdSourceMode::WrapPlaintext => value.as_slice(),
                     };
-                    let ciphertext = target_cipher.encrypt(&compressed, &[]).map_err(
+                    let ciphertext = target_cipher.encrypt(compressed, &[]).map_err(
                         |e| -> crate::core::error::Error {
                             StorageError::Encryption(format!(
                                 "Cold storage re-encryption failed: {e}"
