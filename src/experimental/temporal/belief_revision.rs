@@ -512,3 +512,756 @@ impl AletheiaDB {
         BeliefRevisions::new(self).audit(entity, options)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::PropertyMapBuilder;
+    use crate::core::id::NodeId;
+    use crate::core::property::PropertyMap;
+    use crate::core::temporal::{BiTemporalInterval, TimeRange};
+
+    // ---- fixture builders --------------------------------------------------
+
+    fn ts(micros: i64) -> Timestamp {
+        Timestamp::new(micros, 0).expect("valid timestamp")
+    }
+
+    fn vid(n: u64) -> VersionId {
+        VersionId::new(n).expect("valid version id")
+    }
+
+    fn status_props(status: &str) -> PropertyMap {
+        PropertyMapBuilder::new()
+            .insert("status", status)
+            .insert("n", "1")
+            .build()
+    }
+
+    fn prov(source: &str, confidence: Option<f64>) -> Provenance {
+        let mut b = Provenance::builder().source(source);
+        if let Some(c) = confidence {
+            b = b.confidence(c);
+        }
+        b.build().expect("valid provenance")
+    }
+
+    /// A version with an **open** valid interval `[valid_from, ∞)`.
+    fn open_version(
+        num: u64,
+        valid_from: i64,
+        tx: i64,
+        props: PropertyMap,
+        provenance: Option<Provenance>,
+    ) -> VersionInfo {
+        VersionInfo {
+            version_number: num,
+            version_id: vid(num),
+            temporal: BiTemporalInterval::with_valid_time(ts(valid_from), ts(tx)),
+            properties: props,
+            label: "Person".to_string(),
+            provenance,
+        }
+    }
+
+    /// A version with a **closed** valid interval `[valid_from, valid_to)`
+    /// (a #3230 retraction, or a delete tombstone when `valid_to == valid_from`).
+    fn closed_version(
+        num: u64,
+        valid_from: i64,
+        valid_to: i64,
+        tx: i64,
+        props: PropertyMap,
+        provenance: Option<Provenance>,
+    ) -> VersionInfo {
+        let valid = TimeRange::between(ts(valid_from), ts(valid_to)).expect("valid range");
+        VersionInfo {
+            version_number: num,
+            version_id: vid(num),
+            temporal: BiTemporalInterval::new(valid, TimeRange::from(ts(tx))),
+            properties: props,
+            label: "Person".to_string(),
+            provenance,
+        }
+    }
+
+    fn history(versions: Vec<VersionInfo>) -> EntityHistory {
+        EntityHistory { versions }
+    }
+
+    fn node_entity() -> EntityId {
+        EntityId::Node(NodeId::new(1).unwrap())
+    }
+
+    fn audit_history(h: &EntityHistory, opts: &RevisionOptions) -> BeliefRevisionLog {
+        let limit = resolve_limit(opts.limit).expect("limit ok");
+        build_log(node_entity(), h, opts, limit)
+    }
+
+    // ---- pure classifier unit tests (AC2) ----------------------------------
+
+    #[test]
+    fn classify_first_version_is_initial_assertion() {
+        let v = open_version(1, 1000, 100, status_props("a"), None);
+        assert_eq!(classify(0, &v, None, None), RevisionClass::InitialAssertion);
+    }
+
+    #[test]
+    fn classify_same_valid_from_is_correction() {
+        let pred = open_version(1, 1000, 100, status_props("a"), None);
+        let v = open_version(2, 1000, 200, status_props("b"), None);
+        // max prior valid_from == 1000, new == 1000 (not >) => correction.
+        assert_eq!(
+            classify(1, &v, Some(&pred), Some(ts(1000))),
+            RevisionClass::Correction
+        );
+    }
+
+    #[test]
+    fn classify_earlier_valid_from_is_correction() {
+        let pred = open_version(1, 2000, 100, status_props("a"), None);
+        let v = open_version(2, 1500, 200, status_props("b"), None);
+        assert_eq!(
+            classify(1, &v, Some(&pred), Some(ts(2000))),
+            RevisionClass::Correction
+        );
+    }
+
+    #[test]
+    fn classify_advanced_valid_from_is_world_change() {
+        let pred = open_version(1, 1000, 100, status_props("a"), None);
+        let v = open_version(2, 2000, 200, status_props("b"), None);
+        assert_eq!(
+            classify(1, &v, Some(&pred), Some(ts(1000))),
+            RevisionClass::WorldChange
+        );
+    }
+
+    #[test]
+    fn classify_no_value_change_is_reaffirmation() {
+        let pred = open_version(1, 1000, 100, status_props("a"), Some(prov("s1", None)));
+        let v = open_version(2, 1000, 200, status_props("a"), Some(prov("s2", None)));
+        assert_eq!(
+            classify(1, &v, Some(&pred), Some(ts(1000))),
+            RevisionClass::Reaffirmation
+        );
+    }
+
+    #[test]
+    fn classify_closed_interval_is_retraction_even_with_value_change() {
+        let pred = open_version(1, 1000, 100, status_props("a"), None);
+        // Closed valid interval AND a value change: retraction wins (precedence).
+        let v = closed_version(2, 1000, 1500, 200, status_props("b"), None);
+        assert_eq!(
+            classify(1, &v, Some(&pred), Some(ts(1000))),
+            RevisionClass::Retraction
+        );
+    }
+
+    #[test]
+    fn classify_delete_tombstone_is_retraction() {
+        let pred = open_version(1, 1000, 100, status_props("a"), None);
+        // Empty valid interval [t, t) == delete tombstone.
+        let v = closed_version(2, 2000, 2000, 200, status_props("a"), None);
+        assert_eq!(
+            classify(1, &v, Some(&pred), Some(ts(1000))),
+            RevisionClass::Retraction
+        );
+    }
+
+    // ---- 20-write scripted fixture: 100% classification accuracy (AC2) -----
+
+    /// Build the canonical 20-version fixture and its expected classes.
+    fn fixture_20() -> (EntityHistory, Vec<RevisionClass>) {
+        use RevisionClass::*;
+        // (num, valid_from, valid_to(None=open), tx, status, source, expected)
+        let versions = vec![
+            open_version(
+                1,
+                1000,
+                100,
+                status_props("a1"),
+                Some(prov("src-a", Some(0.5))),
+            ),
+            open_version(
+                2,
+                1000,
+                200,
+                status_props("a2"),
+                Some(prov("src-a", Some(0.6))),
+            ),
+            open_version(
+                3,
+                2000,
+                300,
+                status_props("a3"),
+                Some(prov("src-b", Some(0.7))),
+            ),
+            open_version(
+                4,
+                2000,
+                400,
+                status_props("a3"),
+                Some(prov("src-c", Some(0.8))),
+            ),
+            open_version(5, 1500, 500, status_props("a4"), Some(prov("src-a", None))),
+            open_version(
+                6,
+                3000,
+                600,
+                status_props("a5"),
+                Some(prov("src-b", Some(0.9))),
+            ),
+            closed_version(
+                7,
+                3000,
+                3500,
+                700,
+                status_props("a5"),
+                Some(prov("src-b", None)),
+            ),
+            open_version(
+                8,
+                4000,
+                800,
+                status_props("a6"),
+                Some(prov("src-a", Some(0.4))),
+            ),
+            open_version(
+                9,
+                4000,
+                900,
+                status_props("a6"),
+                Some(prov("src-d", Some(0.4))),
+            ),
+            open_version(10, 2500, 1000, status_props("a7"), None),
+            open_version(
+                11,
+                5000,
+                1100,
+                status_props("a8"),
+                Some(prov("src-a", Some(0.55))),
+            ),
+            open_version(
+                12,
+                5000,
+                1200,
+                status_props("a9"),
+                Some(prov("src-a", Some(0.55))),
+            ),
+            open_version(
+                13,
+                5000,
+                1300,
+                status_props("a9"),
+                Some(prov("src-e", Some(0.55))),
+            ),
+            open_version(
+                14,
+                6000,
+                1400,
+                status_props("a10"),
+                Some(prov("src-b", Some(0.6))),
+            ),
+            open_version(
+                15,
+                100,
+                1500,
+                status_props("a11"),
+                Some(prov("src-a", None)),
+            ),
+            closed_version(16, 6000, 6100, 1600, status_props("a11"), None),
+            open_version(
+                17,
+                7000,
+                1700,
+                status_props("a12"),
+                Some(prov("src-b", Some(0.95))),
+            ),
+            open_version(
+                18,
+                7000,
+                1800,
+                status_props("a12"),
+                Some(prov("src-f", Some(0.95))),
+            ),
+            open_version(
+                19,
+                7000,
+                1900,
+                status_props("a13"),
+                Some(prov("src-a", Some(0.3))),
+            ),
+            closed_version(20, 8000, 8000, 2000, status_props("a13"), None),
+        ];
+        let expected = vec![
+            InitialAssertion, // 1
+            Correction,       // 2
+            WorldChange,      // 3
+            Reaffirmation,    // 4
+            Correction,       // 5
+            WorldChange,      // 6
+            Retraction,       // 7
+            WorldChange,      // 8
+            Reaffirmation,    // 9
+            Correction,       // 10
+            WorldChange,      // 11
+            Correction,       // 12
+            Reaffirmation,    // 13
+            WorldChange,      // 14
+            Correction,       // 15
+            Retraction,       // 16
+            WorldChange,      // 17
+            Reaffirmation,    // 18
+            Correction,       // 19
+            Retraction,       // 20
+        ];
+        (history(versions), expected)
+    }
+
+    #[test]
+    fn scripted_20_write_fixture_100pct() {
+        let (h, expected) = fixture_20();
+        let log = audit_history(&h, &RevisionOptions::default());
+        assert_eq!(log.revisions.len(), 20, "one revision per version");
+        for (i, (rev, want)) in log.revisions.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                rev.class,
+                *want,
+                "version {} (#{}) classified {:?}, expected {:?}",
+                i + 1,
+                rev.version_number,
+                rev.class,
+                want
+            );
+        }
+        // All five categories are exercised.
+        use std::collections::HashSet;
+        let seen: HashSet<_> = log.revisions.iter().map(|r| r.class).collect();
+        assert_eq!(seen.len(), 5, "all five classification categories present");
+    }
+
+    // ---- AC1: revision sequence shape --------------------------------------
+
+    #[test]
+    fn revision_sequence_carries_expected_fields() {
+        let h = history(vec![
+            open_version(
+                1,
+                1000,
+                100,
+                status_props("a1"),
+                Some(prov("src", Some(0.5))),
+            ),
+            open_version(
+                2,
+                1000,
+                200,
+                status_props("a2"),
+                Some(prov("src", Some(0.9))),
+            ),
+        ]);
+        let log = audit_history(&h, &RevisionOptions::default());
+        assert_eq!(log.revisions.len(), 2);
+        let r0 = &log.revisions[0];
+        assert_eq!(r0.class, RevisionClass::InitialAssertion);
+        assert_eq!(r0.version_number, 1);
+        assert_eq!(r0.transaction_time, ts(100));
+        assert_eq!(r0.valid_from, ts(1000));
+        assert_eq!(r0.valid_to, None);
+        // Initial assertion records all keys as additions.
+        assert!(
+            r0.changes
+                .iter()
+                .any(|c| c.key == "status" && c.prior.is_none())
+        );
+        let r1 = &log.revisions[1];
+        assert_eq!(r1.class, RevisionClass::Correction);
+        // Modified key carries prior + new.
+        let status = r1.changes.iter().find(|c| c.key == "status").unwrap();
+        assert!(status.prior.is_some() && status.new.is_some());
+        assert_eq!(r1.confidence, Some(0.9));
+    }
+
+    // ---- AC3: confidence trajectory with explicit nulls --------------------
+
+    #[test]
+    fn confidence_trajectory_surfaces_nulls() {
+        let h = history(vec![
+            // provenance present, confidence present
+            open_version(1, 1000, 100, status_props("a"), Some(prov("s", Some(0.5)))),
+            // provenance present, confidence ABSENT -> null
+            open_version(2, 1000, 200, status_props("b"), Some(prov("s", None))),
+            // provenance ABSENT entirely -> null
+            open_version(3, 1000, 300, status_props("c"), None),
+        ]);
+        let log = audit_history(&h, &RevisionOptions::default());
+        assert_eq!(
+            log.confidence_trajectory(),
+            vec![Some(0.5), None, None],
+            "both 'no provenance' and 'provenance without confidence' surface as null"
+        );
+    }
+
+    // ---- AC4: pure read, byte-identical on repeat --------------------------
+
+    #[test]
+    fn audit_is_byte_identical() {
+        let (h, _) = fixture_20();
+        let a = audit_history(&h, &RevisionOptions::default());
+        let b = audit_history(&h, &RevisionOptions::default());
+        assert_eq!(a, b, "structural equality");
+        assert_eq!(
+            format!("{a:?}"),
+            format!("{b:?}"),
+            "byte-identical debug rendering"
+        );
+        #[cfg(feature = "serde")]
+        {
+            // Where serde is enabled, the class tokens serialize deterministically too.
+            let ja: Vec<_> = a.revisions.iter().map(|r| r.class).collect();
+            let jb: Vec<_> = b.revisions.iter().map(|r| r.class).collect();
+            assert_eq!(
+                serde_json::to_string(&ja).unwrap(),
+                serde_json::to_string(&jb).unwrap()
+            );
+        }
+    }
+
+    // ---- AC5: as_of_transaction_time time-travel ---------------------------
+
+    #[test]
+    fn as_of_scopes_history() {
+        let h = history(vec![
+            open_version(
+                1,
+                1000,
+                100,
+                status_props("married"),
+                Some(prov("s", Some(0.9))),
+            ),
+            // A correction recorded at tx=500.
+            open_version(
+                2,
+                1000,
+                500,
+                status_props("single"),
+                Some(prov("s2", Some(0.8))),
+            ),
+        ]);
+        // Before the correction (as_of=200): only the initial assertion is visible.
+        let before = audit_history(
+            &h,
+            &RevisionOptions::new().with_as_of_transaction_time(ts(200)),
+        );
+        assert_eq!(before.revisions.len(), 1);
+        assert_eq!(before.revisions[0].class, RevisionClass::InitialAssertion);
+        // After (as_of=600): both visible, the second is a correction.
+        let after = audit_history(
+            &h,
+            &RevisionOptions::new().with_as_of_transaction_time(ts(600)),
+        );
+        assert_eq!(after.revisions.len(), 2);
+        assert_eq!(after.revisions[1].class, RevisionClass::Correction);
+        // Byte-identical on repeat at the same coordinate (AC4 + AC5).
+        let after2 = audit_history(
+            &h,
+            &RevisionOptions::new().with_as_of_transaction_time(ts(600)),
+        );
+        assert_eq!(format!("{after:?}"), format!("{after2:?}"));
+    }
+
+    // ---- AC7: bounded limit + completeness signaling -----------------------
+
+    #[test]
+    fn limit_bounds_and_has_more() {
+        let (h, _) = fixture_20();
+        let log = audit_history(&h, &RevisionOptions::new().with_limit(5));
+        assert_eq!(log.revisions.len(), 5);
+        assert!(log.has_more, "20 revisions truncated to 5 => has_more");
+
+        let full = audit_history(&h, &RevisionOptions::new().with_limit(20));
+        assert_eq!(full.revisions.len(), 20);
+        assert!(!full.has_more, "limit == count => no has_more");
+    }
+
+    #[test]
+    fn limit_zero_rejected() {
+        let err = resolve_limit(Some(0)).unwrap_err();
+        assert!(
+            matches!(err, Error::Query(QueryError::InvalidParameter { .. })),
+            "limit 0 must be INVALID_ARGUMENT, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn limit_above_max_is_clamped() {
+        assert_eq!(
+            resolve_limit(Some(MAX_REVISION_LIMIT + 100)).unwrap(),
+            MAX_REVISION_LIMIT
+        );
+        assert_eq!(resolve_limit(None).unwrap(), DEFAULT_REVISION_LIMIT);
+    }
+
+    // ---- AC6: property scope validation ------------------------------------
+
+    #[test]
+    fn property_scope_unknown_key_rejected() {
+        let h = history(vec![open_version(1, 1000, 100, status_props("a"), None)]);
+        assert!(!history_contains_key(&h, "never_here"));
+        assert!(history_contains_key(&h, "status"));
+    }
+
+    #[test]
+    fn property_scope_filters_to_key() {
+        let h = history(vec![
+            open_version(
+                1,
+                1000,
+                100,
+                PropertyMapBuilder::new()
+                    .insert("status", "a")
+                    .insert("age", 30)
+                    .build(),
+                None,
+            ),
+            // change only `age`
+            open_version(
+                2,
+                1000,
+                200,
+                PropertyMapBuilder::new()
+                    .insert("status", "a")
+                    .insert("age", 31)
+                    .build(),
+                None,
+            ),
+            // change only `status`
+            open_version(
+                3,
+                1000,
+                300,
+                PropertyMapBuilder::new()
+                    .insert("status", "b")
+                    .insert("age", 31)
+                    .build(),
+                None,
+            ),
+        ]);
+        let log = audit_history(&h, &RevisionOptions::new().with_property_key("age"));
+        // v1 (initial has age), v2 (age changed) emit; v3 (only status changed) is skipped.
+        assert_eq!(log.revisions.len(), 2);
+        assert_eq!(log.revisions[0].version_number, 1);
+        assert_eq!(log.revisions[1].version_number, 2);
+        for rev in &log.revisions {
+            assert!(rev.changes.iter().all(|c| c.key == "age"));
+        }
+    }
+
+    // ---- determinism of changes ordering -----------------------------------
+
+    #[test]
+    fn changes_are_sorted_by_key() {
+        let h = history(vec![open_version(
+            1,
+            1000,
+            100,
+            PropertyMapBuilder::new()
+                .insert("zeta", 1)
+                .insert("alpha", 2)
+                .insert("mid", 3)
+                .build(),
+            None,
+        )]);
+        let log = audit_history(&h, &RevisionOptions::default());
+        let keys: Vec<&str> = log.revisions[0]
+            .changes
+            .iter()
+            .map(|c| c.key.as_str())
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            keys, sorted,
+            "changes must be sorted by key for determinism"
+        );
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    //! End-to-end tests exercising the real write path + `db.belief_revisions`.
+    use super::*;
+    use crate::core::PropertyMapBuilder;
+    use crate::core::id::NodeId;
+
+    #[test]
+    fn single_version_is_initial() {
+        let db = AletheiaDB::new().unwrap();
+        let id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let log = db
+            .belief_revisions(EntityId::Node(id), &RevisionOptions::default())
+            .unwrap();
+        assert_eq!(log.revisions.len(), 1);
+        assert_eq!(log.revisions[0].class, RevisionClass::InitialAssertion);
+        assert!(!log.has_more);
+    }
+
+    #[test]
+    fn unknown_entity_not_found() {
+        let db = AletheiaDB::new().unwrap();
+        let missing = EntityId::Node(NodeId::new(999_999).unwrap());
+        let err = db
+            .belief_revisions(missing, &RevisionOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Storage(_)),
+            "unknown entity must be a storage NOT_FOUND, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_property_key_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        let id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let err = db
+            .belief_revisions(
+                EntityId::Node(id),
+                &RevisionOptions::new().with_property_key("nonexistent"),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Query(QueryError::InvalidParameter { .. })),
+            "unknown property key must be INVALID_ARGUMENT, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn end_to_end_correction_and_world_change() {
+        use crate::api::transaction::WriteRequestOptions;
+        let db = AletheiaDB::new().unwrap();
+        // Capture a single base so the "correction" write reuses the *exact*
+        // same valid_from as the create (equal valid_from => correction).
+        let base = crate::core::temporal::time::now().wallclock();
+        let vt_early = Timestamp::new(base - 10_000_000, 0).unwrap();
+        let vt_late = Timestamp::new(base - 1_000_000, 0).unwrap();
+        // Initial assertion, valid from an early real-world time.
+        let id = db
+            .create_node_with_options(
+                "Person",
+                PropertyMapBuilder::new().insert("city", "Paris").build(),
+                WriteRequestOptions::new().with_valid_from(vt_early),
+            )
+            .unwrap();
+        // Correction: same valid_from, fix the recorded value later in tx-time.
+        db.update_node_with_options(
+            id,
+            PropertyMapBuilder::new().insert("city", "Lyon").build(),
+            WriteRequestOptions::new().with_valid_from(vt_early),
+        )
+        .unwrap();
+        // World-change: a later valid_from (the fact changed).
+        db.update_node_with_options(
+            id,
+            PropertyMapBuilder::new().insert("city", "Nice").build(),
+            WriteRequestOptions::new().with_valid_from(vt_late),
+        )
+        .unwrap();
+
+        let log = db
+            .belief_revisions(EntityId::Node(id), &RevisionOptions::default())
+            .unwrap();
+        assert_eq!(log.revisions.len(), 3);
+        assert_eq!(log.revisions[0].class, RevisionClass::InitialAssertion);
+        assert_eq!(log.revisions[1].class, RevisionClass::Correction);
+        assert_eq!(log.revisions[2].class, RevisionClass::WorldChange);
+    }
+
+    #[test]
+    fn end_to_end_retraction() {
+        let db = AletheiaDB::new().unwrap();
+        let id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        // Retract (close valid time) — Bob has no edges.
+        db.retract_node(id, crate::core::temporal::time::now())
+            .unwrap();
+        let log = db
+            .belief_revisions(EntityId::Node(id), &RevisionOptions::default())
+            .unwrap();
+        assert!(log.revisions.len() >= 2);
+        assert_eq!(
+            log.revisions.last().unwrap().class,
+            RevisionClass::Retraction
+        );
+    }
+
+    #[test]
+    fn reretraction_no_extra_revision() {
+        let db = AletheiaDB::new().unwrap();
+        let id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Cara").build(),
+            )
+            .unwrap();
+        let t = crate::core::temporal::time::now();
+        db.retract_node(id, t).unwrap();
+        let after_first = db
+            .belief_revisions(EntityId::Node(id), &RevisionOptions::default())
+            .unwrap()
+            .revisions
+            .len();
+        // Idempotent re-retraction: no new version appended.
+        db.retract_node(id, t).unwrap();
+        let after_second = db
+            .belief_revisions(EntityId::Node(id), &RevisionOptions::default())
+            .unwrap()
+            .revisions
+            .len();
+        assert_eq!(after_first, after_second, "re-retraction adds no revision");
+    }
+
+    #[test]
+    fn edge_belief_revisions() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        let b = db
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        let e = db
+            .create_edge(
+                a,
+                b,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2020).build(),
+            )
+            .unwrap();
+        db.update_edge_with_valid_time(
+            e,
+            PropertyMapBuilder::new().insert("since", 2021).build(),
+            None,
+        )
+        .unwrap();
+        let log = db
+            .belief_revisions(EntityId::Edge(e), &RevisionOptions::default())
+            .unwrap();
+        assert!(log.revisions.len() >= 2);
+        assert_eq!(log.revisions[0].class, RevisionClass::InitialAssertion);
+    }
+}
