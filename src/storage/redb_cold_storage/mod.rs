@@ -1840,6 +1840,43 @@ impl RedbColdStorage {
                     // Idempotency backstop: a value with no `ACV1` wrapper is
                     // already bare plaintext → skip (a prior partial run, or the
                     // post-enable invariant this pass inverts).
+                    //
+                    // FAIL-CLOSED INVARIANT (Issue #3616 PR4 review): treating a
+                    // no-wrapper value as bare plaintext is only correct because
+                    // this pass runs EXCLUSIVELY over an ENABLE-engine-created
+                    // store, where every encrypted cold value carries an `ACV1`
+                    // wrapper. That invariant is enforced upstream by construction,
+                    // not merely assumed here:
+                    //   * the normal encrypted write path (`encrypt_if_needed`)
+                    //     ALWAYS `ACV1`-wraps (`wrap_cold_value`) when a keyring is
+                    //     present, and
+                    //   * `enable`'s `wrap_plaintext_cold_values` converts every
+                    //     pre-existing bare value bare → `ACV1` and unconditionally
+                    //     stamps the terminal `COLD_VALUE_FORMAT_KEY` marker (even
+                    //     for an empty store).
+                    // So a disable-able store's encrypted cold values are uniformly
+                    // `ACV1`-wrapped, and the ONLY no-wrapper values reaching here
+                    // are genuinely bare (a completed prior batch/run). LEGACY
+                    // pre-#3617 bare-ciphertext (encrypted, no `ACV1` wrapper), which
+                    // `decrypt_if_needed` still supports on the read path, is OUT OF
+                    // SCOPE: it predates both the `ACV1` scheme and the durable
+                    // encryption authority the disable engine requires, so it never
+                    // reaches this pass.
+                    //
+                    // A marker-based fail-closed guard was evaluated and deliberately
+                    // NOT added: the `COLD_VALUE_FORMAT_KEY` marker cannot represent
+                    // the legacy-encrypted state distinctly — it is ABSENT for a
+                    // legacy store, a never-encrypted plaintext store, AND a store
+                    // whose disable already cleared it and is being re-driven by the
+                    // post-clear resume window (a crash between
+                    // `unwrap_encrypted_cold_values` clearing the marker and
+                    // `mark_cold_complete` legitimately re-runs this pass over an
+                    // all-bare, marker-absent, keyring-present store). Refusing on
+                    // "marker absent" would therefore break that legitimate
+                    // idempotent resume rather than catch a real defect, and refusing
+                    // for enable-engine stores is impossible (their marker is always
+                    // set). The safe guard is the upstream construction invariant
+                    // above, so this skip stays.
                     if parse_cold_wrapper(value).is_none() {
                         stats.values_skipped += 1;
                         continue;

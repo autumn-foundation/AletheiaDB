@@ -92,17 +92,34 @@ impl AletheiaDB {
             // database (a plaintext WAL over an encrypted index — the sole config in
             // which an index-only key rotation is safe) has the identical shape and
             // MUST keep persisting normally. So this rare ambiguous branch is
-            // disambiguated by the durable authority: only a database whose authority
-            // records `disabled` (what `disable_encryption` flips it to) is a
-            // post-disable quiesced handle. A DB with no authority, or one recording
-            // `enabled`, is the legitimate index-only-encrypted case and is allowed.
-            // The extra authority read happens ONLY in this branch (never entered by a
-            // normal plaintext DB — keyring `None`, or a normal encrypted DB — WAL
-            // encrypted), so it adds no hot-path cost.
+            // disambiguated by TWO durable signals, EITHER of which marks a
+            // post-disable quiesced handle:
+            //
+            //   (a) the authority records `disabled` — the terminal state a
+            //       SUCCESSFUL `disable_encryption` flips it to; and
+            //   (b) a pending `direction=disable` rotation ledger is present — the
+            //       breadcrumb a disable writes BEFORE it flips the authority.
+            //
+            // Signal (b) closes a real gap: a disable that FAILS at the cold-unwrap
+            // step (index already unwrapped to plaintext, WAL already plaintext, but
+            // the authority not yet flipped) returns Err leaving WAL plaintext +
+            // keyring `Some` + authority STILL `enabled` + a pending disable ledger.
+            // On that errored handle, gating on the authority alone would read
+            // `enabled` and WRONGLY allow a persist that rewrites `AEIX` over the
+            // already-plaintext index snapshot. Also firing on the disable ledger
+            // fails closed in that window. This does NOT reintroduce the
+            // index-only-encrypted false positive: that config runs an index key
+            // ROTATION whose ledger is `direction=rotate/enable`, and
+            // `read_disable_ledger` filters to `direction=disable` only (returning
+            // `None` for a rotation/enable ledger or no ledger), so the legitimate
+            // index-only case still persists normally. The extra reads happen ONLY in
+            // this branch (never entered by a normal plaintext DB — keyring `None`, or
+            // a normal encrypted DB — WAL encrypted), so they add no hot-path cost.
             if !self.wal.is_encrypted()
                 && manager.keyring().is_some()
-                && crate::db::encryption_state::read_encryption_state(manager.base_path())?
+                && (crate::db::encryption_state::read_encryption_state(manager.base_path())?
                     .is_some_and(|state| !state.enabled)
+                    || crate::db::rotation::read_disable_ledger(manager)?.is_some())
             {
                 return Err(crate::core::error::Error::FailedPrecondition(
                     "cannot persist indexes on a post-disable quiesced handle: the WAL is \

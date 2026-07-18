@@ -1118,4 +1118,297 @@ mod tests {
             "persist on a post-disable quiesced handle must be fail-closed, got: {err:?}"
         );
     }
+
+    /// FIX 1 (Issue #3616 PR4 review): a disable that FAILS at the cold-unwrap step
+    /// leaves the handle QUIESCED with WAL plaintext + index-manager keyring `Some` +
+    /// index files ALREADY plaintext on disk + authority STILL `enabled` (never
+    /// flipped) + a pending `direction=disable` ledger. On that errored handle a
+    /// persist gated on the authority ALONE reads `enabled` and would WRONGLY rewrite
+    /// `AEIX` over the plaintext snapshot. The guard must ALSO fail-close on the
+    /// pending disable ledger — this test proves it does.
+    #[test]
+    fn persist_on_failed_disable_authority_still_enabled_is_refused() {
+        use crate::db::encryption_state::{EncryptionState, write_encryption_state_durable};
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+        let idx_dir = index_files_dir(dir.path());
+
+        let mut db =
+            AletheiaDB::with_unified_config(encrypted_durable_config(dir.path(), &key)).unwrap();
+        db.create_node("N", PropertyMapBuilder::new().insert("n", "x").build())
+            .unwrap();
+
+        // A real disable unwraps the index to PLAINTEXT on disk and leaves this handle
+        // quiesced (WAL plaintext live, manager keyring still `Some`). This is the
+        // simplest faithful way to reach a plaintext-index-on-disk + keyring-`Some`
+        // handle; we then rewind the durable state to the errored PRE-flip shape.
+        db.disable_encryption().unwrap();
+        let (total, plain, aeix) = classify_index_files(&idx_dir);
+        assert!(
+            total > 0 && aeix == 0 && plain == total,
+            "index is fully plaintext on disk after the real disable"
+        );
+
+        // Rewind to the errored PRE-flip state: authority STILL `enabled` (exactly as
+        // it is when the cold-unwrap step fails before the commit-point flip) and a
+        // pending disable ledger with cold still Pending. Writing `enabled` DEFEATS the
+        // old authority-only clause (`is_some_and(|s| !s.enabled)` is false), so ONLY
+        // the new disable-ledger clause can fail-close here.
+        write_encryption_state_durable(&indexes, &EncryptionState::enabled(key.clone())).unwrap();
+        assert!(
+            read_encryption_state(&indexes).unwrap().unwrap().enabled,
+            "authority is enabled again (the errored pre-flip shape)"
+        );
+        write_disable_ledger(
+            &manager_for(dir.path()),
+            &key,
+            crate::db::rotation::ENABLE_KEY_VERSION,
+            true, // index in scope
+            true, // cold in scope, still Pending (mirrors a cold-unwrap failure)
+        )
+        .unwrap();
+        assert!(
+            indexes.join("rotation.state").exists(),
+            "disable ledger present"
+        );
+
+        // Persist through the errored handle is REFUSED (fail-closed on the disable
+        // ledger, despite the authority reading `enabled`).
+        let err = db.persist_indexes().unwrap_err();
+        assert!(
+            matches!(err, crate::core::error::Error::FailedPrecondition(_)),
+            "persist on a failed-disable handle (authority still enabled + pending \
+             disable ledger) must be fail-closed, got: {err:?}"
+        );
+
+        // And it wrote NO `AEIX` over the plaintext snapshot.
+        let (total2, plain2, aeix2) = classify_index_files(&idx_dir);
+        assert_eq!(aeix2, 0, "refused persist wrote no AEIX index file");
+        assert_eq!(plain2, total2, "index dir stays fully plaintext");
+        assert!(total2 >= total, "no index file was lost");
+    }
+
+    /// T1 (Issue #3616 PR4 review): end-to-end disable over a DB with EDGES and a
+    /// VECTOR INDEX — the likeliest real-world data-loss surface, since adjacency
+    /// bytes and usearch bytes must round-trip through the encrypted→plaintext
+    /// migration. A reopen must read back every node, every edge, a traversal, AND
+    /// `find_similar` as plaintext, with no `AEIX` index file or encrypted WAL segment
+    /// surviving.
+    #[test]
+    fn disable_preserves_edges_and_vector_index_end_to_end() {
+        use crate::db::similarity_query::SimilarityQuery;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let idx_dir = index_files_dir(dir.path());
+        let wal_dir = dir.path().join("wal");
+
+        // Clearly separated directions so cosine ordering is unambiguous: n1 is near
+        // n0, n2 is orthogonal to n0.
+        let emb_n0 = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let emb_n1 = vec![0.95f32, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let emb_n2 = vec![0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+
+        let (n0, n1, n2);
+        {
+            let mut db =
+                AletheiaDB::with_unified_config(encrypted_durable_config(dir.path(), &key))
+                    .unwrap();
+            assert!(db.wal.is_encrypted(), "starts encrypted");
+
+            db.vector_index("embedding")
+                .hnsw(HnswConfig::new(8, DistanceMetric::Cosine))
+                .enable()
+                .unwrap();
+
+            n0 = db
+                .create_node(
+                    "Doc",
+                    PropertyMapBuilder::new()
+                        .insert("t", "rust")
+                        .insert_vector("embedding", &emb_n0)
+                        .build(),
+                )
+                .unwrap();
+            n1 = db
+                .create_node(
+                    "Doc",
+                    PropertyMapBuilder::new()
+                        .insert("t", "python")
+                        .insert_vector("embedding", &emb_n1)
+                        .build(),
+                )
+                .unwrap();
+            n2 = db
+                .create_node(
+                    "Doc",
+                    PropertyMapBuilder::new()
+                        .insert("t", "go")
+                        .insert_vector("embedding", &emb_n2)
+                        .build(),
+                )
+                .unwrap();
+
+            db.create_edge(
+                n0,
+                n1,
+                "LINKS",
+                PropertyMapBuilder::new().insert("w", "1").build(),
+            )
+            .unwrap();
+            db.create_edge(n1, n2, "LINKS", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            assert_eq!(db.node_count(), 3);
+            assert_eq!(db.edge_count(), 2);
+            assert!(
+                !db.similarity_search(SimilarityQuery::from_node(n0).k(2))
+                    .unwrap()
+                    .is_empty(),
+                "vector search works before disable (baseline)"
+            );
+
+            let report = db.disable_encryption().unwrap();
+            assert!(report.wal_migrated && report.index_migrated);
+            assert!(!db.wal.is_encrypted(), "WAL live-plaintext after disable");
+        }
+
+        // No `AEIX` index file, no encrypted WAL segment survives.
+        let (total, plain, aeix) = classify_index_files(&idx_dir);
+        assert!(total > 0, "disable persisted an index snapshot");
+        assert_eq!(aeix, 0, "no AEIX index file survives disable");
+        assert_eq!(plain, total, "every index file is plaintext");
+        assert!(
+            !any_encrypted_wal_segment(&wal_dir),
+            "no encrypted WAL segment survives disable"
+        );
+
+        // Reopen under the flipped authority: graph + vector index survive as plaintext.
+        let db =
+            AletheiaDB::with_unified_config(encrypted_durable_config(dir.path(), &key)).unwrap();
+        assert!(
+            !db.wal.is_encrypted(),
+            "reopen honors the disabled authority"
+        );
+        assert_eq!(db.node_count(), 3, "nodes survive reopen");
+        assert_eq!(db.edge_count(), 2, "edges survive reopen");
+
+        // Traversal (adjacency) survives the round-trip.
+        let out0 = db.get_outgoing_edges(n0);
+        assert_eq!(out0.len(), 1, "n0 keeps its single outgoing edge");
+        let e = db.get_edge(out0[0]).unwrap();
+        assert_eq!(e.source, n0, "edge source preserved");
+        assert_eq!(e.target, n1, "edge target preserved");
+        assert_eq!(
+            db.get_outgoing_edges(n1).len(),
+            1,
+            "n1 keeps its single outgoing edge"
+        );
+
+        // Vector index restored + `find_similar` works as plaintext, with the correct
+        // nearest neighbor (proving the usearch bytes round-tripped, not just that the
+        // index exists).
+        assert!(
+            db.is_vector_index_enabled_for("embedding"),
+            "vector index restored on reopen"
+        );
+        let similar = db
+            .similarity_search(SimilarityQuery::from_node(n0).k(2))
+            .unwrap();
+        assert!(
+            !similar.is_empty(),
+            "similarity_search works after disable + reopen"
+        );
+        // `from_node` excludes the query node, so the top hit is the true nearest
+        // neighbor — proving the usearch bytes round-tripped, not just that the index
+        // exists.
+        assert_eq!(
+            similar[0].0, n1,
+            "nearest neighbor preserved through the plaintext round-trip"
+        );
+    }
+
+    /// T2 (Issue #3616 PR4 review): `disable_encryption` refuses a secret-backed key
+    /// source (Passphrase/KMS/Vault) up front — the ledger can only persist a
+    /// non-secret File/Env reference, so a resumed disable could not rebuild the
+    /// decrypt cipher. The refusal must be a `FailedPrecondition` that writes NO
+    /// ledger (it precedes `write_disable_ledger`).
+    #[test]
+    fn disable_refuses_secret_backed_key_source_without_writing_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+
+        let mut db =
+            AletheiaDB::with_unified_config(encrypted_durable_config(dir.path(), &key)).unwrap();
+        db.create_node("N", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Swap the retained key-source reference to a secret-backed (Passphrase)
+        // config. The refusal is provider-type-agnostic (any non-File/Env) and fires
+        // BEFORE any provider is constructed, so no passphrase infrastructure is
+        // needed — only the config value.
+        let mut enc_cfg = db.encryption_config.clone().unwrap();
+        enc_cfg.key_provider = KeyProviderConfig::PassphraseFile {
+            path: dir.path().join("wrapped.key"),
+            passphrase_env: "ALETHEIA_TEST_PASSPHRASE".to_string(),
+        };
+        db.encryption_config = Some(enc_cfg);
+
+        let err = db.disable_encryption().unwrap_err();
+        assert!(
+            matches!(err, crate::core::error::Error::FailedPrecondition(_)),
+            "secret-backed key source must be refused, got: {err:?}"
+        );
+        assert!(
+            !indexes.join("rotation.state").exists(),
+            "the refusal precedes the ledger write — no disable ledger is left behind"
+        );
+    }
+
+    /// T3 (Issue #3616 PR4 review): the loud
+    /// [`fail_if_pending_disable_cold_without_tier`] guard. A pending disable ledger
+    /// records a `cold=Pending` layer, but a reopen configures NO cold tier — this
+    /// would otherwise wedge (authority never flips, no diagnostic). The reopen must
+    /// instead fail with an actionable `FailedPrecondition`.
+    #[test]
+    fn disable_pending_cold_without_tier_fails_loudly_not_wedged() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+
+        {
+            let db = AletheiaDB::with_unified_config(encrypted_durable_config(dir.path(), &key))
+                .unwrap();
+            db.create_node("N", PropertyMapBuilder::new().insert("n", "x").build())
+                .unwrap();
+            db.persist_indexes().unwrap();
+        }
+        // Lay a disable ledger recording a cold layer as Pending (cold_in_scope=true),
+        // simulating an interrupted disable of a cold-tier DB.
+        write_disable_ledger(
+            &manager_for(dir.path()),
+            &key,
+            crate::db::rotation::ENABLE_KEY_VERSION,
+            true, // index in scope
+            true, // cold in scope → Pending
+        )
+        .unwrap();
+        assert!(indexes.join("rotation.state").exists());
+
+        // Reopen WITHOUT a cold tier configured: the guard converts the silent-wedge
+        // case into an actionable FailedPrecondition.
+        let err = AletheiaDB::with_unified_config(encrypted_durable_config(dir.path(), &key))
+            .expect_err("reopen with a pending cold-disable ledger but no cold tier must fail");
+        match err {
+            crate::core::error::Error::FailedPrecondition(msg) => {
+                assert!(
+                    msg.contains("cold tier"),
+                    "error names the missing cold tier, got: {msg}"
+                );
+            }
+            other => panic!("expected FailedPrecondition, got: {other:?}"),
+        }
+    }
 }
