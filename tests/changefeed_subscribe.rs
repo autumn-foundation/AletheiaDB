@@ -726,7 +726,7 @@ fn concurrent_writers_union_equals_ground_truth() {
 // ── Per-principal subscription quota (Issue #3678) ──────────────────────────
 
 use aletheiadb::StorageError;
-use aletheiadb::config::AletheiaDBConfig;
+
 use std::collections::HashMap;
 
 /// The DB-level `subscribe_changes_for_principal` funnel enforces the
@@ -777,15 +777,15 @@ fn per_principal_quota_enforced_via_db_api() {
 /// `database_stats`.
 #[test]
 fn changefeed_config_default_and_override_from_unified_config() {
-    let config = AletheiaDBConfig::builder()
-        .changefeed(
-            ChangefeedConfig::default()
-                .with_max_subscriptions(100)
-                .with_buffer_capacity(16)
-                .with_max_subscriptions_per_principal(1)
-                .with_per_principal_override("vip", 4),
-        )
-        .build();
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = aletheiadb::config::AletheiaDBConfig::default();
+    config.wal.wal_dir = temp.path().to_path_buf();
+    config.changefeed = ChangefeedConfig::default()
+        .with_max_subscriptions(100)
+        .with_buffer_capacity(16)
+        .with_max_subscriptions_per_principal(1)
+        .with_per_principal_override("vip", 4);
+
     let db = AletheiaDB::with_unified_config(config).unwrap();
 
     // Default of 1 applies to an un-overridden principal.
