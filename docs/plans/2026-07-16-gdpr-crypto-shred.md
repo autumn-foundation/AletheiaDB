@@ -239,10 +239,14 @@ data path — no `src/encryption/`, `rotation.rs`, `wal_encryption.rs`, or
   recovery, and emitting it from `erase()` would take `historical`/`wal` while
   the keyring `Mutex` is held, inverting the lock order (seams §6). The durable
   keyring Erased record IS the erasure record for now.
-- **Cold-tier + `.albk` sentinel completeness** → **slice 3** (the PR-1b
-  sentinel byte-scan covers only the in-scope hot tiers: WAL segments,
-  index-persistence files incl. usearch `.bin`, current-tier persisted files,
-  checkpoint if present — NOT cold redb or `.albk`).
+- **Cold-tier + `.albk` sentinel completeness** → the PR-1b sentinel byte-scan
+  covered only the in-scope hot tiers (WAL segments, index-persistence files
+  incl. usearch `.bin`, current-tier persisted files, checkpoint if present).
+  **`.albk` is now covered (slice 3, Issue #3665):** the keyring +
+  designation-registry fold into the v7 archive lands with a sentinel scan over
+  the `.albk` artifact (zero designated plaintext) plus a wrapped-DEK-absence
+  byte scan and an active-readable / erased-stays-erased round-trip. Cold redb
+  sentinel completeness remains a slice-3 follow-up.
 - **Chain-leaf ciphertext binding (AC4)** → **slice 2**.
 - **Exhaustive every-query-path unseal** → the Rust unseal hook covers the
   primary single-entity boundaries (`get_node`, `get_edge`,
