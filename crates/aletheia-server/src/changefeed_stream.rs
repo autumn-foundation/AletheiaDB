@@ -35,7 +35,10 @@ use std::time::Duration;
 
 use aletheiadb::http::AletheiaHttpError;
 use aletheiadb::mcp::AwaitChangesRequest;
-use aletheiadb::{ChangeFilter, ChangeRecord, ChangeType, Error, RecvError, StorageError, time};
+use aletheiadb::{
+    ChangeFilter, ChangeRecord, ChangeType, Error, Namespace, NamespaceScope, RecvError,
+    StorageError, time,
+};
 use autumn_web::prelude::{Json, Query, get, post};
 use autumn_web::sse::{Event, Sse, keep_alive};
 use serde::Deserialize;
@@ -69,6 +72,7 @@ fn change_record_json(r: &ChangeRecord) -> Value {
         "kind": r.kind.as_str(),
         "change_type": r.change_type.as_str(),
         "label": r.label,
+        "namespace": r.namespace.as_str(),
         "transaction_time": time::to_iso8601(r.transaction_time()),
         "transaction_time_range": {
             "start": time::to_iso8601(r.transaction_time_range.start()),
@@ -101,6 +105,11 @@ pub struct ChangesStreamQuery {
     pub edge_types: Option<String>,
     /// Change types to match (comma-separated): `created` / `modified` / `deleted`.
     pub change_types: Option<String>,
+    /// Namespace scope (Issue #3349, PR3c): a single namespace name, a
+    /// comma-separated union (`agent:planner,shared`), or `all`. Omitted (or empty)
+    /// scopes to the `default` namespace only (isolated-by-default), mirroring the
+    /// PR3a HTTP read routes; `all` imposes no namespace filter.
+    pub namespace: Option<String>,
 }
 
 /// Map a single change-type token to its [`ChangeType`], rejecting unknowns with
@@ -114,6 +123,40 @@ fn parse_change_type(token: &str) -> Result<ChangeType, AletheiaHttpError> {
             "Invalid change_type '{other}': expected one of created, modified, deleted"
         ))),
     }
+}
+
+/// Parse the `?namespace=` query value into a [`NamespaceScope`] (Issue #3349, PR3c),
+/// scoping identically to the PR3a HTTP read routes: a single name → `Single`, a
+/// comma-separated union → `List`, `all` → `All`, and an absent / all-empty value →
+/// the `default` namespace only (isolated-by-default). The namespace charset excludes
+/// `,`, so it is an unambiguous separator. A malformed / unlisted-`all` name is a 400
+/// `INVALID_ARGUMENT` (never a silently-unscoped stream).
+fn parse_namespace_scope(raw: Option<&str>) -> Result<NamespaceScope, AletheiaHttpError> {
+    let Some(raw) = raw else {
+        return Ok(NamespaceScope::default());
+    };
+    if raw.trim() == "all" {
+        return Ok(NamespaceScope::All);
+    }
+    let to_bad = |e: aletheiadb::NamespaceError| AletheiaHttpError::BadRequest(e.to_string());
+    if raw.contains(',') {
+        let mut names = Vec::new();
+        for tok in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            names.push(Namespace::new(tok).map_err(to_bad)?);
+        }
+        // All-empty (`,,`) collapses to the default-only scope, never an empty union.
+        if names.is_empty() {
+            return Ok(NamespaceScope::default());
+        }
+        return NamespaceScope::list(names).map_err(to_bad);
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(NamespaceScope::default());
+    }
+    Ok(NamespaceScope::Single(
+        Namespace::new(trimmed).map_err(to_bad)?,
+    ))
 }
 
 /// Build a [`ChangeFilter`] from the stream query params.
@@ -132,6 +175,8 @@ fn build_filter(q: &ChangesStreamQuery) -> Result<ChangeFilter, AletheiaHttpErro
             .collect::<Result<Vec<_>, _>>()?;
         filter = filter.with_change_types(parsed);
     }
+    // Namespace scope (Issue #3349, PR3c): omitted → default-only, `all` → no filter.
+    filter = filter.with_namespace_scope(parse_namespace_scope(q.namespace.as_deref())?);
     Ok(filter)
 }
 
@@ -312,11 +357,65 @@ mod tests {
     }
 
     #[test]
+    fn parse_namespace_scope_variants() {
+        // Omitted / empty → default-only (isolated-by-default).
+        assert_eq!(
+            parse_namespace_scope(None).unwrap(),
+            NamespaceScope::default()
+        );
+        assert_eq!(
+            parse_namespace_scope(Some("")).unwrap(),
+            NamespaceScope::default()
+        );
+        assert_eq!(
+            parse_namespace_scope(Some(",,")).unwrap(),
+            NamespaceScope::default()
+        );
+        // "all" → no filter.
+        assert!(matches!(
+            parse_namespace_scope(Some("all")).unwrap(),
+            NamespaceScope::All
+        ));
+        // Single name.
+        assert_eq!(
+            parse_namespace_scope(Some("agent:planner")).unwrap(),
+            NamespaceScope::Single(Namespace::new("agent:planner").unwrap())
+        );
+        // Comma-union.
+        assert_eq!(
+            parse_namespace_scope(Some("agent:planner, shared")).unwrap(),
+            NamespaceScope::list(vec![
+                Namespace::new("agent:planner").unwrap(),
+                Namespace::new("shared").unwrap(),
+            ])
+            .unwrap()
+        );
+        // Malformed name → 400.
+        assert!(parse_namespace_scope(Some("bad name")).is_err());
+    }
+
+    #[test]
+    fn build_filter_threads_namespace_scope() {
+        let q = ChangesStreamQuery {
+            node_labels: None,
+            edge_types: None,
+            change_types: None,
+            namespace: Some("agent:a".to_string()),
+        };
+        let filter = build_filter(&q).unwrap();
+        assert_eq!(
+            filter.namespace_scope(),
+            Some(&NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
     fn build_filter_rejects_bad_change_type() {
         let q = ChangesStreamQuery {
             node_labels: None,
             edge_types: None,
             change_types: Some("created,bogus".to_string()),
+            namespace: None,
         };
         assert!(build_filter(&q).is_err());
     }
