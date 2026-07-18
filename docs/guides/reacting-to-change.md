@@ -285,6 +285,18 @@ accounting (the slots really are still live), it is `retriable: true`, and it se
 the reap window — but **size the per-principal cap with headroom over `expected reconnect rate ×
 reap window`** so normal reconnect churn never trips it.
 
+**Operator note — the native stdio transport releases an `await_changes` slot only at
+timeout.** The prompt disconnect-release above applies to the HTTP `/changes/await` +
+`GET /changes/stream` (SSE) surfaces, where a dropped connection is reaped by future-drop and
+many concurrent sessions make it matter. The **native MCP stdio transport** exposes no per-call
+connection-closed signal to react to, so a client that disconnects mid-wait leaves its
+long-poll slot held until the call reaches its own timeout (default `timeout_ms` 25s, hard cap
+60s) rather than promptly on disconnect. The worker-pin fix still applies — a suspended await
+pins no worker thread — so this is a **bounded slot-lingering window, not a resource leak**.
+It is **by design** and low-impact because stdio is single-session / process-lifetime (one
+client), where a slot lingering for at most the timeout window has negligible effect. If it
+ever matters operationally on stdio, use a shorter await `timeout_ms`.
+
 **Operator note — anonymous mode shares one bucket.** In anonymous mode every caller maps to the
 single shared `"anonymous"` principal, so the *whole deployment* is capped at
 `max_subscriptions_per_principal` concurrent changefeed subscriptions (default 16) across all
