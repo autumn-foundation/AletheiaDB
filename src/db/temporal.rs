@@ -1198,12 +1198,12 @@ mod changefeed_pushdown_tests {
     use crate::core::PropertyMap;
     use crate::core::PropertyMapBuilder;
     use crate::core::changefeed::{
-        ChangeCursor, ChangeFeedPage, ChangeFeedQuery, ChangeType, EntityKind, RawChange,
-        build_raw_change,
+        ChangeCursor, ChangeFeedPage, ChangeFeedQuery, ChangeRecord, ChangeType, EntityKind,
+        RawChange, build_raw_change,
     };
     use crate::core::error::{Error, Result};
     use crate::core::id::{EdgeId, NodeId, VersionId};
-    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::interning::{GLOBAL_INTERNER, InternedString};
     use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp, time};
     use crate::core::version::{EdgeVersion, NodeVersion};
     use crate::storage::redb_cold_storage::RedbColdStorage;
@@ -1422,6 +1422,294 @@ mod changefeed_pushdown_tests {
             }
         }
         out
+    }
+
+    /// A **second**, fully independent reference implementation of `list_changes` that shares
+    /// none of the production changefeed machinery — it does not call `collect_changes`,
+    /// `consider_version`, `build_raw_change`, or `BoundedChanges`. Instead it walks every hot
+    /// version (`visit_node_versions`/`visit_edge_versions`) and every cold version
+    /// (`scan_node_versions_cold`/`scan_edge_versions_cold`), and re-derives the filter,
+    /// classification, sort key, dedup, resume, and pagination from scratch here in the test.
+    ///
+    /// This discharges the #3685 deferred follow-up: the existing `list_changes_reference`
+    /// oracle reuses `collect_changes`/`build_raw_change`, so it is only a *partial* differential
+    /// (it cannot catch a bug living inside those shared helpers). This one is a genuine
+    /// hand-rolled cross-check. The semantics replicated below are those of `build_raw_change`
+    /// (`src/core/changefeed.rs`): half-open tx-window `contains(tx_start)`; valid-window
+    /// intersection with the tombstone-point (`contains(start)`) vs live-overlap (`overlaps`)
+    /// distinction; label equality; Created/Modified/Deleted classification; the
+    /// `(tx_wallclock, tx_logical, kind_ord, entity_id, version_id)` sort key; strict
+    /// `> resume_after`; cross-tier dedup by `(kind_ord, version_id)` keeping the hot copy.
+    fn list_changes_reference_independent(
+        db: &AletheiaDB,
+        query: &ChangeFeedQuery,
+    ) -> Result<ChangeFeedPage> {
+        // Validate the windows exactly as production does.
+        let tx_window = TimeRange::new(query.tx_from, query.tx_to)?;
+        let valid_window = match (query.valid_from, query.valid_to) {
+            (Some(from), Some(to)) => Some(TimeRange::new(from, to)?),
+            (None, None) => None,
+            _ => {
+                return Err(crate::core::error::QueryError::InvalidParameter {
+                    parameter: "valid_time".to_string(),
+                    reason: "valid_from and valid_to must be supplied together".to_string(),
+                }
+                .into());
+            }
+        };
+        let cursor = match &query.cursor {
+            Some(token) => Some(ChangeCursor::decode(token)?),
+            None => None,
+        };
+        let label = query.label.as_deref();
+        let valid = valid_window.as_ref();
+
+        // Inline, from-scratch filter + classification. Returns the row iff it survives every
+        // filter and the strict `> cursor` resume. No production helper is consulted.
+        let consider = |version_id: u64,
+                        entity_id: u64,
+                        kind: EntityKind,
+                        temporal: &crate::core::temporal::BiTemporalInterval,
+                        label_id: InternedString,
+                        prev_is_none: bool|
+         -> Option<ChangeRecord> {
+            let tx_range = temporal.transaction_time();
+            // Half-open transaction-time window [t1, t2).
+            if !tx_window.contains(tx_range.start()) {
+                return None;
+            }
+
+            let valid_range = temporal.valid_time();
+            let is_deletion = valid_range.is_empty();
+
+            if let Some(vw) = valid {
+                // Tombstone is a degenerate point at its instant; a live version is a range.
+                let intersects = if is_deletion {
+                    vw.contains(valid_range.start())
+                } else {
+                    valid_range.overlaps(vw)
+                };
+                if !intersects {
+                    return None;
+                }
+            }
+
+            if let Some(filter) = label
+                && GLOBAL_INTERNER.resolve_with(label_id, |s| s == filter) != Some(true)
+            {
+                return None;
+            }
+
+            let change_type = if is_deletion {
+                ChangeType::Deleted
+            } else if prev_is_none {
+                ChangeType::Created
+            } else {
+                ChangeType::Modified
+            };
+
+            let label_str = GLOBAL_INTERNER
+                .resolve_with(label_id, |s| s.to_string())
+                .unwrap_or_default();
+            let record = ChangeRecord {
+                entity_id,
+                version_id,
+                kind,
+                change_type,
+                label: label_str,
+                transaction_time_range: tx_range,
+                valid_time_range: valid_range,
+            };
+
+            // Strict `> resume_after` on the derived sort key.
+            if let Some(c) = cursor
+                && record.cursor() <= c
+            {
+                return None;
+            }
+            Some(record)
+        };
+
+        let mut rows: Vec<ChangeRecord> = Vec::new();
+        let mut seen: std::collections::HashSet<(u8, u64)> = std::collections::HashSet::new();
+
+        // Hot tier: dedup wins go to the hot copy, so ingest it first.
+        let tiered = {
+            let hist = db.__test_historical_storage().read();
+            hist.visit_node_versions(|v| {
+                if let Some(rec) = consider(
+                    v.id.as_u64(),
+                    v.node_id.as_u64(),
+                    EntityKind::Node,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                ) && seen.insert((rec.kind.ord(), rec.version_id))
+                {
+                    rows.push(rec);
+                }
+            });
+            hist.visit_edge_versions(|v| {
+                if let Some(rec) = consider(
+                    v.id.as_u64(),
+                    v.edge_id.as_u64(),
+                    EntityKind::Edge,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                ) && seen.insert((rec.kind.ord(), rec.version_id))
+                {
+                    rows.push(rec);
+                }
+            });
+            hist.tiered_storage_arc()
+        };
+
+        // Cold tier (full scan; skip versions already delivered by the hot tier).
+        if let Some(tiered) = tiered {
+            for v in tiered.scan_node_versions_cold()? {
+                if let Some(rec) = consider(
+                    v.id.as_u64(),
+                    v.node_id.as_u64(),
+                    EntityKind::Node,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                ) && seen.insert((rec.kind.ord(), rec.version_id))
+                {
+                    rows.push(rec);
+                }
+            }
+            for v in tiered.scan_edge_versions_cold()? {
+                if let Some(rec) = consider(
+                    v.id.as_u64(),
+                    v.edge_id.as_u64(),
+                    EntityKind::Edge,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                ) && seen.insert((rec.kind.ord(), rec.version_id))
+                {
+                    rows.push(rec);
+                }
+            }
+        }
+
+        // Deterministic order, then bound to the page and compute the continuation cursor.
+        let limit = query.limit.max(1);
+        rows.sort_by_key(|r| r.cursor());
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let next_cursor = if has_more {
+            rows.last().map(|r| r.cursor().encode())
+        } else {
+            None
+        };
+
+        Ok(ChangeFeedPage {
+            changes: rows,
+            next_cursor,
+        })
+    }
+
+    /// Assert the production path and the **independent** hand-rolled oracle produce a
+    /// byte-identical page (`changes` Vec + `next_cursor`). Returns the production page.
+    fn assert_parity_independent(db: &AletheiaDB, query: &ChangeFeedQuery) -> ChangeFeedPage {
+        let got = db.list_changes(query).expect("list_changes ok");
+        let want = list_changes_reference_independent(db, query).expect("independent reference ok");
+        assert_eq!(
+            got.changes, want.changes,
+            "page rows must match the independent oracle"
+        );
+        assert_eq!(
+            got.next_cursor, want.next_cursor,
+            "next_cursor must match the independent oracle"
+        );
+        got
+    }
+
+    // Defense-in-depth: the independent (non-shared-helper) oracle agrees with production over a
+    // mixed hot+cold fixture. This is expected to PASS — production is already correct; it guards
+    // against a latent bug hiding inside the shared `build_raw_change`/`collect_changes` helpers
+    // that the first `list_changes_reference` oracle cannot see (#3685).
+    #[test]
+    fn independent_oracle_matches_production_mixed_tiers() {
+        let db = AletheiaDB::new().unwrap();
+        // Hot tier: a handful of real committed node versions (create + modify).
+        let (hid, _t) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("hot-alice")))
+            .unwrap();
+        db.write(|tx| {
+            tx.update_node(hid, props("hot-alice-v2"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+        db.write(|tx| {
+            tx.create_node("Company", props("hot-acme"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+
+        // Cold tier: synthetic node + edge versions (distinct high ids so no dual-tier overlap),
+        // including a tombstone to exercise the Deleted classification path.
+        let nodes = vec![
+            cold_node(1000, 1000, ts(50), "Person"),
+            cold_node(1001, 1001, ts(60), "Company"),
+            cold_node_tomb(1002, 1003, ts(70), ts(65)),
+        ];
+        let edges = vec![
+            cold_edge(2000, 2000, ts(55), "KNOWS"),
+            cold_edge(2001, 2001, ts(80), "WORKS_AT"),
+        ];
+        let _dir = attach_cold(&db, &nodes, &edges);
+
+        let (from, to) = all();
+        // Whole-timeline scans at several limits (exercise pagination + next_cursor).
+        for limit in [1usize, 2, 3, 5, 100] {
+            assert_parity_independent(&db, &query(from, to, limit));
+        }
+        // Label-filtered scan.
+        let mut q = query(from, to, 100);
+        q.label = Some("Person".to_string());
+        assert_parity_independent(&db, &q);
+        // Narrow cold-only tx window.
+        assert_parity_independent(&db, &query(ts(40), ts(90), 100));
+    }
+
+    // RED: fails until the ColdChangeDirectory pushdown lands (#3677).
+    //
+    // AC1 measurement: a bounded, narrowly-windowed `list_changes` over a large cold tier must
+    // decode only the handful of versions in the window, not every cold version. Today the cold
+    // scan decodes all 200 (see the "no `version_id` early-stop" correctness note in
+    // `redb_cold_storage`), so this asserts the target the green phase must reach.
+    #[test]
+    fn cold_directory_decodes_only_window() {
+        let db = AletheiaDB::new().unwrap();
+
+        // 200 cold node versions spread across a wide tx-time range (tx = i * 1000 µs).
+        let nodes: Vec<_> = (1..=200u64)
+            .map(|i| cold_node(i, i, ts((i as i64) * 1000), "Person"))
+            .collect();
+        let _dir = attach_cold(&db, &nodes, &[]);
+
+        // A narrow, recent tx-window matching only versions i in {196,197,198,199,200}.
+        let q = query(ts(195_500), ts(201_000), 5);
+
+        crate::storage::redb_cold_storage::reset_cold_decode_counter();
+        let page = db.list_changes(&q).unwrap();
+        let decoded = crate::storage::redb_cold_storage::cold_decode_count();
+
+        // Sanity: the window really does match only a small set.
+        assert_eq!(
+            page.changes.len(),
+            5,
+            "window should surface exactly 5 rows"
+        );
+
+        assert!(
+            decoded <= 20,
+            "expected windowed query to decode only window candidates, decoded {decoded} of 200"
+        );
     }
 
     // 1 -----------------------------------------------------------------------------------------

@@ -87,6 +87,35 @@ const METADATA_TABLE: redb::TableDefinition<'static, &'static str, &'static [u8]
 /// Metadata keys stored in the metadata table.
 const FLUSHED_LSN_KEY: &str = "flushed_lsn";
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only instrumentation: the number of cold versions **actually decoded**
+    /// (decompressed + deserialized) on this thread since the last
+    /// [`reset_cold_decode_counter`]. Incremented once at every point a cold
+    /// `NodeVersion`/`EdgeVersion` is materialized from disk — inside
+    /// [`RedbColdStorage::scan_versions_into`] (the full-scan changefeed path) and inside
+    /// [`RedbColdStorage::get_entry_internal`] (single-version point reads).
+    ///
+    /// Used by the `#3677` changefeed pushdown tests to assert that a windowed
+    /// `list_changes` decodes only window candidates rather than every cold version. It is
+    /// **thread-local**, not a process-global static, on purpose: libtest runs each test on
+    /// its own thread and the decode happens synchronously on that same thread, so a test
+    /// reads exactly the count from its own call without racing concurrent tests.
+    static COLD_VERSIONS_DECODED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: reset this thread's cold-version decode counter to zero.
+#[cfg(test)]
+pub(crate) fn reset_cold_decode_counter() {
+    COLD_VERSIONS_DECODED.with(|c| c.set(0));
+}
+
+/// Test-only: read this thread's cold-version decode counter.
+#[cfg(test)]
+pub(crate) fn cold_decode_count() -> u64 {
+    COLD_VERSIONS_DECODED.with(std::cell::Cell::get)
+}
+
 /// Metadata key for the persisted cold-tier bi-temporal extent (Issue #3389).
 const TEMPORAL_EXTENT_KEY: &str = "temporal_extent";
 
@@ -2011,6 +2040,8 @@ impl RedbColdStorage {
                     .fetch_add(decompressed.len() as u64, Ordering::Relaxed);
 
                 let version = decode_fn(&decompressed)?;
+                #[cfg(test)]
+                COLD_VERSIONS_DECODED.with(|c| c.set(c.get() + 1));
                 Ok(Some(version))
             }
             Ok(None) => Ok(None),
@@ -2125,7 +2156,10 @@ impl RedbColdStorage {
             let raw: &[u8] = value.value();
             let compressed = self.decrypt_if_needed(raw)?;
             let decompressed = self.decompress(&compressed)?;
-            emit(decode_fn(&decompressed)?);
+            let decoded = decode_fn(&decompressed)?;
+            #[cfg(test)]
+            COLD_VERSIONS_DECODED.with(|c| c.set(c.get() + 1));
+            emit(decoded);
         }
         Ok(())
     }

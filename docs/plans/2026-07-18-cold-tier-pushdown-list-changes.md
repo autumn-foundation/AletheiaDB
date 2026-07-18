@@ -144,6 +144,30 @@ The result feeds the identical merge / cross-tier dedup / `select_nth` / sort /
   instead of all-or-nothing.
 - Blue (process): design-first → red tests → green → 4-lens review → AC evidence.
 
+### Considered and rejected: backward early-stopping startup scan
+
+A reviewer suggested making the startup directory rebuild sub-linear by scanning cold
+**backwards** (descending `version_id`) and stopping once `max_entries` have been collected,
+allowing a bounded "inversion window" (e.g. the last 5 minutes of tx-time) past the stopping
+point to absorb reordering — nominally `O(max_entries)` startup instead of `O(N_cold)`.
+
+**Rejected for correctness.** `version_id` is **not** co-monotonic with transaction time, and
+there is **no hard upper bound** on the tx-time inversion window: concurrent-commit reordering
+and HLC clock skew are not capped at any fixed wall-clock duration. A version allocated an early
+(low) `version_id` can commit at an arbitrarily *later* transaction time, so a backward,
+early-stopping scan bounded by any finite inversion window can silently drop a recent-tx-time
+version that happens to carry a low `version_id` — reintroducing the exact unsoundness #3677
+exists to eliminate (the directory would be missing a row it must serve, and the query would
+never fall back to a full scan because the directory believes it covers the window). Any fixed
+inversion-window guess is an unbacked assumption about clock behavior, not a proof.
+
+The sound way to make startup sub-linear is a **persisted**, tx-time-ordered directory that
+survives restart without re-deriving order from `version_id` — but that is an on-disk format
+change explicitly out of scope for #3677 (tracked as a follow-up, see approach (A)). v1
+therefore keeps the honest `O(N_cold)` rebuild on startup (decode every cold version once to
+seed the in-memory directory), measured and reported rather than hidden behind an unsound
+early-stop.
+
 ## Risks / edge cases as test cases (red phase)
 
 1. `cold_directory_parity_hot_only` / `_cold_only` / `_mixed_tiers` — byte-identical
