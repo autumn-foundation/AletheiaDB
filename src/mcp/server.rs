@@ -274,6 +274,14 @@ pub(crate) fn split_text_into_chunks(text: &str, chunk_size_chars: usize) -> Vec
 /// rejection per the #3226 completeness convention.
 pub(crate) const DEFAULT_MAX_BATCH_OPERATIONS: usize = 1000;
 
+/// Default maximum number of designation targets accepted by a single
+/// `designate_subject` call (Issue #3701 hardening). Mirrors the `apply_batch`
+/// cap: an over-cap request is rejected up front with `INVALID_ARGUMENT`
+/// (limit echoed per the #3226 convention) before any registry mutation, so an
+/// unbounded `targets` array cannot be used as a DoS vector. Configurable per
+/// server via [`AletheiaMcpServer::with_max_designate_targets`].
+pub(crate) const DEFAULT_MAX_DESIGNATE_TARGETS: usize = 1000;
+
 /// AletheiaDB MCP Server.
 ///
 /// Exposes AletheiaDB's graph, vector, and temporal capabilities through the Model Context Protocol.
@@ -295,6 +303,10 @@ pub struct AletheiaMcpServer {
     db: Arc<AletheiaDB>,
     /// Maximum operations accepted by one `apply_batch` call (Issue #3231).
     pub(crate) max_batch_operations: usize,
+    /// Maximum number of designation targets accepted by one
+    /// `designate_subject` call (Issue #3701 hardening). An over-cap request is
+    /// rejected up front with `INVALID_ARGUMENT` before any registry mutation.
+    pub(crate) max_designate_targets: usize,
     /// Maximum number of entries accepted in a `priority_properties` budget
     /// array (Issue #3583). Bounds the one-time cost of building the protected-
     /// key set; an over-cap array is rejected with `INVALID_ARGUMENT`.
@@ -411,6 +423,7 @@ impl AletheiaMcpServer {
         Self {
             db,
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
+            max_designate_targets: DEFAULT_MAX_DESIGNATE_TARGETS,
             max_priority_properties: budget::DEFAULT_MAX_PRIORITY_PROPERTIES,
             auth: SessionAuth::Anonymous,
             cursors: Arc::new(CursorManager::new()),
@@ -487,6 +500,21 @@ impl AletheiaMcpServer {
         self
     }
 
+    /// Override the maximum number of designation targets accepted by a single
+    /// `designate_subject` call (default: 1000, Issue #3701). An over-limit
+    /// request is rejected before any registry mutation, with the limit echoed
+    /// in the structured error's `details` (per the #3226 completeness
+    /// convention).
+    ///
+    /// The cap is an MCP-surface payload bound mirroring
+    /// [`with_max_batch_operations`](Self::with_max_batch_operations), guarding
+    /// against an unbounded `targets` array being used as a DoS vector.
+    #[must_use]
+    pub fn with_max_designate_targets(mut self, max_designate_targets: usize) -> Self {
+        self.max_designate_targets = max_designate_targets;
+        self
+    }
+
     /// Override the maximum number of entries accepted in a `priority_properties`
     /// token-budget array (default: 1024, Issue #3583).
     ///
@@ -538,6 +566,7 @@ impl AletheiaMcpServer {
         Self {
             db,
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
+            max_designate_targets: DEFAULT_MAX_DESIGNATE_TARGETS,
             max_priority_properties: budget::DEFAULT_MAX_PRIORITY_PROPERTIES,
             auth: SessionAuth::from(auth),
             cursors: Arc::new(CursorManager::new()),
@@ -3192,6 +3221,29 @@ impl AletheiaMcpServer {
     /// (Issue #3359, Slice 4b).
     fn handle_designate_subject(&self, args: serde_json::Value) -> CallToolResult {
         use crate::db::DesignationTarget;
+
+        // DoS guard: reject an over-cap `targets` array up front, on the RAW
+        // JSON value BEFORE `serde_json::from_value` deserializes/allocates the
+        // typed Vec, mirroring the `apply_batch` cap (limit echoed per the #3226
+        // convention).
+        if let Some(arr) = args.get("targets").and_then(|t| t.as_array())
+            && arr.len() > self.max_designate_targets
+        {
+            return self.error_result(
+                McpError::new(
+                    McpErrorCode::InvalidArgument,
+                    format!(
+                        "designate targets length {} exceeds maximum of {}",
+                        arr.len(),
+                        self.max_designate_targets
+                    ),
+                )
+                .details(json!({
+                    "limit": self.max_designate_targets,
+                    "submitted": arr.len(),
+                })),
+            );
+        }
 
         let req: DesignateSubjectRequest = match serde_json::from_value(args) {
             Ok(r) => r,
