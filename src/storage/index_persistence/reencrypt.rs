@@ -574,6 +574,87 @@ pub(crate) fn wrap_plaintext_index_dir(
     Ok(progress)
 }
 
+/// Progress of an `AEIX` → plaintext unwrap pass (Issue #3616 PR4 disable).
+///
+/// Shipped ahead of its production consumer: the disable-engine driver
+/// (`disable_encryption` + `resume_pending_disable`) that calls
+/// [`unwrap_encrypted_index_dir`] lands in a later PR4 slice. Until then only the
+/// round-trip tests exercise it, so the lib build sees it as dead — mirror the
+/// repo's seam-ahead-of-consumer pattern (see `disable_scope` in `db/rotation.rs`).
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnwrapProgress {
+    /// Total files considered under the indexes dir (`AEIX` + already-plaintext).
+    pub files_total: usize,
+    /// `AEIX` files freshly decrypted back to bare plaintext this pass.
+    pub files_unwrapped: usize,
+    /// Files already bare (no `AEIX` header), left untouched (idempotency).
+    pub files_skipped: usize,
+}
+
+/// Unwrap every **`AEIX`-encrypted** index file under `indexes_dir` back to bare
+/// plaintext, decrypting under `cipher` (Issue #3616 PR4 — the encrypted →
+/// plaintext *disable* migration; the exact inverse of
+/// [`wrap_plaintext_index_dir`]).
+///
+/// This is the counterpart the `disable` engine needs and the mirror of the
+/// enable engine's [`wrap_plaintext_index_dir`]: enable takes each bare file and
+/// produces an `AEIX` file; disable takes each `AEIX` file and produces the bare
+/// plaintext body it wraps. The wrap is byte-preserving
+/// (`[header][AEAD(whole_file, aad=header)]` decrypts back to the identical
+/// original `[bitcode_body][crc32:4]` bytes — see
+/// [`save_encoded_encrypted`](super::common::save_encoded_encrypted)), so a
+/// checkpoint / native-`usearch` / any index file round-trips regardless of its
+/// internal shape and the resulting file is byte-identical to the pre-enable
+/// plaintext. Every non-header index file is republished atomically (temp-write +
+/// rename), exactly as the wrap pass does.
+///
+/// The decrypt `cipher` is passed explicitly (mirroring the wrap's explicit
+/// encrypt cipher): the disable driver derives it once from the recorded key
+/// source. A single cipher decrypts every file the enable wrap stamped, since the
+/// stamped `key_version` is authenticated as AAD but the key itself is the sole
+/// index DEK a disable retires.
+///
+/// **Idempotent / resumable / crash-safe.** A file already bare (no `AEIX`
+/// header) is skipped, so a re-run after a crash mid-pass converges (each file is
+/// published atomically, so a crash leaves either the intact `AEIX` file or the
+/// intact plaintext file, never a torn one). Control-plane files
+/// (`rotation.state` / `encryption.state`) live one level up in the manager's
+/// base dir and are never enumerated here.
+///
+/// # Errors
+///
+/// Returns an error if a file cannot be read, decrypted (a genuine wrong/absent
+/// key — surfaced loudly, never silently left encrypted), or atomically written.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn unwrap_encrypted_index_dir(
+    indexes_dir: &Path,
+    cipher: &Arc<dyn Cipher>,
+) -> Result<UnwrapProgress, RotationError> {
+    let mut files = Vec::new();
+    if indexes_dir.exists() {
+        collect_all_files(indexes_dir, &mut files)?;
+    }
+    files.sort();
+
+    let mut progress = UnwrapProgress {
+        files_total: files.len(),
+        ..Default::default()
+    };
+    for path in files {
+        let bytes = std::fs::read(&path)?;
+        if !is_encrypted_index(&bytes) {
+            // Already bare (a resumed pass, or a never-encrypted file).
+            progress.files_skipped += 1;
+            continue;
+        }
+        let plaintext = decrypt_index_bytes(&bytes, &path, Some(cipher))?;
+        atomic_write(&path, &plaintext)?;
+        progress.files_unwrapped += 1;
+    }
+    Ok(progress)
+}
+
 /// A temp/scratch file the rotation engine must never treat as an index file.
 fn is_scratch_file(name: &str) -> bool {
     name.ends_with(".tmp") || name.contains(".tmp.") || name.starts_with(".aeix-usearch-tmp-")
@@ -1235,5 +1316,168 @@ mod tests {
             );
         }
         assert_eq!(nonces.len(), paths.len());
+    }
+
+    // ── #3616 PR4 disable: AEIX → plaintext unwrap (inverse of the enable wrap) ──
+
+    /// Lay down a realistic set of BARE (plaintext) index files under `indexes/`,
+    /// returning (path, plaintext) pairs — the plaintext-at-rest an enable wraps.
+    fn seed_plain_files(indexes: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let files = vec![
+            (indexes.join("manifest.idx"), b"MANIFEST-payload-0".to_vec()),
+            (
+                indexes.join("strings").join("interner.idx"),
+                b"interner-payload-1".to_vec(),
+            ),
+            (
+                indexes.join("graph").join("adjacency.idx"),
+                b"graph-payload-2".to_vec(),
+            ),
+            (
+                indexes.join("temporal").join("versions.idx"),
+                b"temporal-payload-3".to_vec(),
+            ),
+            (
+                indexes.join("vector").join("emb").join("meta.idx"),
+                b"vector-meta-4".to_vec(),
+            ),
+            (
+                indexes.join("vector").join("emb").join("current.usearch"),
+                b"native-usearch-bytes-5".to_vec(),
+            ),
+        ];
+        for (p, pt) in &files {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            atomic_write(p, pt).unwrap();
+        }
+        files
+    }
+
+    /// The exact enable→disable round-trip: wrap a bare index dir to `AEIX`, then
+    /// unwrap back to plaintext, and assert every file is byte-identical to the
+    /// original AND no longer carries the `AEIX` header.
+    #[test]
+    fn unwrap_restores_byte_identical_plaintext_after_wrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let cipher = cipher_from_seed(0x5A);
+        let files = seed_plain_files(&indexes);
+
+        // Forward: bare → AEIX (the enable wrap pass).
+        let wrap = wrap_plaintext_index_dir(&indexes, &cipher, OLD_V).unwrap();
+        assert_eq!(wrap.files_total, files.len());
+        assert_eq!(wrap.files_wrapped, files.len());
+        for (p, _) in &files {
+            assert!(
+                is_encrypted_index(&std::fs::read(p).unwrap()),
+                "every file is AEIX after wrap: {p:?}"
+            );
+        }
+
+        // Inverse: AEIX → bare (the disable unwrap pass).
+        let unwrap = unwrap_encrypted_index_dir(&indexes, &cipher).unwrap();
+        assert_eq!(unwrap.files_total, files.len());
+        assert_eq!(
+            unwrap.files_unwrapped,
+            files.len(),
+            "every AEIX file unwrapped"
+        );
+        assert_eq!(unwrap.files_skipped, 0);
+
+        for (p, original) in &files {
+            let after = std::fs::read(p).unwrap();
+            assert!(
+                !is_encrypted_index(&after),
+                "AEIX header flips false after unwrap: {p:?}"
+            );
+            assert_eq!(
+                &after, original,
+                "byte-identical plaintext round-trip: {p:?}"
+            );
+        }
+    }
+
+    /// An empty / nonexistent indexes dir is a clean no-op (mirrors the wrap side).
+    #[test]
+    fn unwrap_empty_dir_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cipher = cipher_from_seed(0x01);
+
+        // Nonexistent dir.
+        let missing = dir.path().join("does-not-exist");
+        let prog = unwrap_encrypted_index_dir(&missing, &cipher).unwrap();
+        assert_eq!(prog, UnwrapProgress::default());
+
+        // Existent but empty dir.
+        let empty = dir.path().join("indexes");
+        std::fs::create_dir_all(&empty).unwrap();
+        let prog = unwrap_encrypted_index_dir(&empty, &cipher).unwrap();
+        assert_eq!(prog, UnwrapProgress::default());
+    }
+
+    /// A dir that is ALREADY plaintext: unwrap skips every file, rewrites nothing,
+    /// and leaves the bytes untouched (idempotent / already-disabled).
+    #[test]
+    fn unwrap_already_plaintext_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let cipher = cipher_from_seed(0x02);
+        let files = seed_plain_files(&indexes);
+
+        let prog = unwrap_encrypted_index_dir(&indexes, &cipher).unwrap();
+        assert_eq!(prog.files_total, files.len());
+        assert_eq!(prog.files_unwrapped, 0, "nothing to unwrap");
+        assert_eq!(prog.files_skipped, files.len(), "every bare file skipped");
+
+        for (p, original) in &files {
+            assert_eq!(
+                &std::fs::read(p).unwrap(),
+                original,
+                "bytes untouched: {p:?}"
+            );
+        }
+    }
+
+    /// A genuine MIX of AEIX + bare files (a resumed / partial pass): unwrap
+    /// decrypts only the AEIX files, skips the already-bare ones, and every file
+    /// ends up plaintext.
+    #[test]
+    fn unwrap_mixed_only_touches_encrypted() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let cipher = cipher_from_seed(0x03);
+        let files = seed_plain_files(&indexes);
+
+        // Wrap the WHOLE dir, then roll TWO files back to bare to fake a partial
+        // (interrupted) unwrap — a genuine mix on disk.
+        wrap_plaintext_index_dir(&indexes, &cipher, OLD_V).unwrap();
+        let bare_again: Vec<&(PathBuf, Vec<u8>)> = files.iter().take(2).collect();
+        for (p, original) in &bare_again {
+            atomic_write(p, original).unwrap();
+            assert!(!is_encrypted_index(&std::fs::read(p).unwrap()));
+        }
+
+        let prog = unwrap_encrypted_index_dir(&indexes, &cipher).unwrap();
+        assert_eq!(prog.files_total, files.len());
+        assert_eq!(
+            prog.files_unwrapped,
+            files.len() - 2,
+            "only the still-AEIX files are unwrapped"
+        );
+        assert_eq!(
+            prog.files_skipped, 2,
+            "the two already-bare files are skipped"
+        );
+
+        for (p, original) in &files {
+            let after = std::fs::read(p).unwrap();
+            assert!(
+                !is_encrypted_index(&after),
+                "all plaintext after unwrap: {p:?}"
+            );
+            assert_eq!(&after, original, "byte-identical: {p:?}");
+        }
     }
 }

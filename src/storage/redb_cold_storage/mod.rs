@@ -219,6 +219,21 @@ pub struct ColdReencryptStats {
     pub batches_committed: usize,
 }
 
+/// Statistics returned by a cold `ACV1` → bare unwrap pass (Issue #3616 PR4
+/// disable — the inverse of [`wrap_plaintext_cold_values`]).
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColdUnwrapStats {
+    /// Values decrypted out of their `ACV1` wrapper and rewritten BARE.
+    pub values_unwrapped: usize,
+    /// Values skipped because they were already bare (idempotent re-run /
+    /// resumed pass).
+    pub values_skipped: usize,
+    /// Number of redb write transactions committed across the whole pass, one
+    /// per non-empty batch (bounded by [`RedbConfig::reencrypt_batch_size`]).
+    pub batches_committed: usize,
+}
+
 /// Layout version tag for the persisted extent record. Records with an
 /// unrecognized version are treated as absent, so an older binary that cannot
 /// understand a newer layout simply falls back to hot-tier-only bounds rather
@@ -1699,6 +1714,159 @@ impl RedbColdStorage {
         target_version: u32,
     ) -> Result<ColdReencryptStats> {
         self.migrate_cold_values(target_version, target_cipher, ColdSourceMode::WrapPlaintext)
+    }
+
+    /// Unwrap every **`ACV1`-wrapped** cold value back to bare plaintext (the
+    /// exact inverse of [`wrap_plaintext_cold_values`]; Issue #3616 PR4 disable).
+    ///
+    /// Each `ACV1` value is decrypted under its stamped generation (via the live
+    /// keyring, exactly as a normal read does) and rewritten BARE — the same
+    /// compressed bytes a never-encrypted value carries — so a uniformly-encrypted
+    /// cold store becomes a plaintext one the cold reader dispatches as bare. This
+    /// is the cold counterpart the disable engine needs: the enable engine wrapped
+    /// bare → `ACV1`, so a disable takes each `ACV1` value and produces the
+    /// compressed plaintext it wraps. No record is ever decoded (the same
+    /// compressed bytes are unwrapped in place), so temporal bounds cannot change;
+    /// only `node_versions`/`edge_versions` VALUES are touched, never `flushed_lsn`
+    /// / `temporal_extent`. On completion the durable [`COLD_VALUE_FORMAT_KEY`]
+    /// marker is cleared (the store is plaintext, `cold_value_format_version`
+    /// reports `None`).
+    ///
+    /// **Idempotent / resumable / crash-safe** WITHOUT a version cursor: each
+    /// batch's rewrites commit in one redb transaction, and a re-run after a crash
+    /// skips the already-bare values a prior partial run produced (a bare value is
+    /// its own completion marker — the mirror of the wrap pass's already-wrapped
+    /// skip). A value carrying no `ACV1` wrapper is treated as already-bare
+    /// plaintext (the post-enable invariant this pass inverts; the enable wrap
+    /// produces uniformly `ACV1`-wrapped values, so no pre-#3617 legacy
+    /// bare-ciphertext value is in scope).
+    ///
+    /// # Errors
+    ///
+    /// * the store is not encrypted (no keyring to decrypt with);
+    /// * a value fails to decrypt (a genuine wrong/absent key — surfaced loudly,
+    ///   never silently left encrypted) or a redb transaction fails.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn unwrap_encrypted_cold_values(&self) -> Result<ColdUnwrapStats> {
+        if self.keyring.is_none() {
+            return Err(StorageError::InconsistentState {
+                reason: "cold storage is not encrypted; nothing to unwrap".to_string(),
+            }
+            .into());
+        }
+
+        let mut stats = ColdUnwrapStats::default();
+        for table in [ColdTableKind::Node, ColdTableKind::Edge] {
+            self.unwrap_one_table(table, &mut stats)?;
+        }
+
+        // Terminal marker: the whole store is now plaintext; drop the format
+        // marker (so `cold_value_format_version` reports `None`) and any stale
+        // rotation cursor, in one transaction.
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+        {
+            let mut meta = write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to open metadata table"))?;
+            meta.remove(COLD_VALUE_FORMAT_KEY)
+                .map_err(map_storage_error("Failed to clear cold_value_format"))?;
+            meta.remove(COLD_ROTATION_CURSOR_KEY)
+                .map_err(map_storage_error("Failed to clear cold_rotation cursor"))?;
+        }
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit cold unwrap completion"))?;
+
+        Ok(stats)
+    }
+
+    /// Unwrap one value-bearing table's `ACV1` values back to bare, in bounded
+    /// per-transaction batches (Issue #3616 PR4 disable). Mirrors
+    /// [`reencrypt_one_table`](Self::reencrypt_one_table) but writes the decrypted
+    /// compressed bytes BARE (no wrapper) instead of re-wrapping, and relies on
+    /// the natural "bare == done" idempotency rather than a version cursor.
+    fn unwrap_one_table(
+        &self,
+        table_kind: ColdTableKind,
+        stats: &mut ColdUnwrapStats,
+    ) -> Result<()> {
+        use std::ops::Bound;
+        let table_def = table_kind.table();
+        let batch_size = self.config.reencrypt_batch_size.max(1);
+        let mut resume_after: Option<u64> = None;
+        loop {
+            let write_txn = self
+                .db
+                .begin_write()
+                .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+            let batch_len;
+            let mut last_key = resume_after;
+            {
+                let mut table = write_txn
+                    .open_table(table_def)
+                    .map_err(map_table_error("Failed to open versions table"))?;
+
+                // Collect a bounded slice into owned buffers FIRST — the redb
+                // iterator borrows the table immutably and cannot be held across
+                // the `insert` calls below (which need `&mut table`).
+                let collected: Vec<(u64, Vec<u8>)> = {
+                    let lower = match resume_after {
+                        Some(k) => Bound::Excluded(k),
+                        None => Bound::Unbounded,
+                    };
+                    let range = table
+                        .range::<u64>((lower, Bound::Unbounded))
+                        .map_err(map_storage_error("Failed to range cold table"))?;
+                    let mut v = Vec::with_capacity(batch_size);
+                    for entry in range.take(batch_size) {
+                        let (k, val) =
+                            entry.map_err(map_storage_error("Failed to read cold entry"))?;
+                        v.push((k.value(), val.value().to_vec()));
+                    }
+                    v
+                };
+
+                batch_len = collected.len();
+                if batch_len == 0 {
+                    drop(table);
+                    drop(write_txn);
+                    break;
+                }
+
+                for (key, value) in &collected {
+                    last_key = Some(*key);
+                    // Idempotency backstop: a value with no `ACV1` wrapper is
+                    // already bare plaintext → skip (a prior partial run, or the
+                    // post-enable invariant this pass inverts).
+                    if parse_cold_wrapper(value).is_none() {
+                        stats.values_skipped += 1;
+                        continue;
+                    }
+                    // Decrypt the wrapped value under its stamped generation,
+                    // yielding the compressed plaintext bytes a bare value holds.
+                    let bare = self.decrypt_if_needed(value)?;
+                    table
+                        .insert(*key, bare.as_slice())
+                        .map_err(map_storage_error("Failed to rewrite cold value"))?;
+                    stats.values_unwrapped += 1;
+                }
+            }
+
+            write_txn
+                .commit()
+                .map_err(map_commit_error("Failed to commit cold unwrap batch"))?;
+            stats.batches_committed += 1;
+
+            resume_after = last_key;
+            if batch_len < batch_size {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Shared driver for the cold value-migration passes (Issue #3617 PR3 rekey /
