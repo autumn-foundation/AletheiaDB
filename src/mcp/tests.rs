@@ -14393,6 +14393,127 @@ mod apply_batch_tests {
         assert_eq!(db.node_count(), 0, "failed batch must leave no trace");
         assert_eq!(db.edge_count(), 0);
     }
+
+    /// Issue #3723: a property-KEY interner-cap breach inside an `apply_batch`
+    /// op must render the SAME structured `FAILED_PRECONDITION` envelope as the
+    /// single-op `create_node`/HTTP surfaces (post #3716) — actionable message
+    /// naming `persistence.max_interned_strings`, `retriable: false`, and
+    /// `details.{resource, current, limit}` — NOT the generic `INVALID_ARGUMENT`
+    /// the batch previously flattened it to. The breach lands in Phase 1 static
+    /// pre-validation (before any transaction opens), so it carries the op's
+    /// `failed_op_index` (not `null`) and leaves ZERO writes.
+    ///
+    /// Lowers the process-global interner cap, so it runs in a SUBPROCESS to
+    /// isolate the mutation from concurrent tests (mirrors the create_node
+    /// counterpart in `mcp::server`).
+    #[test]
+    fn apply_batch_interner_cap_property_key_breach_is_failed_precondition_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "mcp::tests::apply_batch_tests::apply_batch_interner_cap_property_key_breach_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for apply_batch interner-cap test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(
+                        status.success(),
+                        "apply_batch interner-cap property-key helper failed"
+                    );
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("apply_batch interner-cap property-key helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn apply_batch_interner_cap_property_key_breach_helper() {
+        use crate::core::interning::GLOBAL_INTERNER;
+
+        let server = create_test_server();
+
+        // Pin the cap exactly at the live interner size, so the NEXT new intern —
+        // the fresh property KEY on op index 1 below, interned by
+        // `json_to_property_map` during Phase 1 static pre-validation — tips it
+        // over. (No capacity rollbacks have occurred in this fresh subprocess,
+        // so next_id == len().)
+        let base = GLOBAL_INTERNER.len();
+        GLOBAL_INTERNER.set_max_capacity(base);
+
+        // Two ops; the breaching op is at index 1 so we prove the reported
+        // failed_op_index is the op's real index, not a hardcoded 0.
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "delete_node", "node_id": 999_999_999u64},
+                {"op": "create_node", "label": "TipLabel",
+                 "properties": {"uniq_batch_property_key_that_tips_the_interner_over": "v"}},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+
+        let error = &value["error"];
+        // Byte-for-byte alignment with the #3716 create_node/HTTP envelope.
+        assert_eq!(error["code"], "FAILED_PRECONDITION", "got: {value}");
+        assert_eq!(error["retriable"], false, "got: {value}");
+        assert_eq!(
+            error["details"]["resource"], "string interner",
+            "details must name the interner resource: {value}"
+        );
+        assert!(
+            error["details"]["limit"].is_number(),
+            "details must carry a numeric limit: {value}"
+        );
+        assert!(
+            error["details"]["current"].is_number(),
+            "details must carry a numeric current: {value}"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("persistence.max_interned_strings"),
+            "message must name the knob: {value}"
+        );
+        // Static-phase failure carries the breaching op's real index, not null.
+        assert_eq!(
+            error["details"]["failed_op_index"],
+            json!(1),
+            "failed_op_index must be the breaching op's index: {value}"
+        );
+
+        // All-or-nothing: the breach is in Phase 1, before any transaction
+        // opens, so ZERO writes take effect.
+        assert_eq!(
+            server.db().node_count(),
+            0,
+            "a cap-breaching batch must leave zero nodes: {value}"
+        );
+        assert_eq!(
+            server.db().edge_count(),
+            0,
+            "a cap-breaching batch must leave zero edges: {value}"
+        );
+    }
 }
 
 // ============================================================================
