@@ -733,7 +733,7 @@ object of this shape (Issue #3234):
 | `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
 | `UNAUTHENTICATED` | No valid session credential in `required` auth mode (Issue #3350) — missing, unknown, or revoked; deliberately indistinguishable, and returned for *every* tool including unknown tool names (no inventory leak). Never carries `details`, never echoes the credential | `false` | Supply a valid `ALETHEIADB_MCP_API_KEY` (or bootstrap key) and restart the session; retrying with the same credential cannot succeed |
 | `PERMISSION_DENIED` | Authenticated, but the principal's role does not allow the tool's access class (Issue #3350). `details` carries `required_class` and `principal_role` | `false` | Use a credential whose role allows the class (see [docs/guides/access-control-matrix.md](access-control-matrix.md)); do not retry with the same key |
-| `RESOURCE_EXHAUSTED` | A per-query resource limit was exceeded on the `query` tool or a wrapped read tool (`traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time`) (Issue #3368): the wall-clock timeout elapsed, or the result exceeded the response-byte cap. `details` carries `dimension` (`wall_clock_timeout`/`result_bytes`), `limit`, and (for byte caps) `consumed` | timeout: `true` (read-only, so a tightened retry is sound); byte cap: `false` | Narrow the request (smaller depth/`LIMIT`/`top_k`/time window, fewer returned properties) or, on the `query` tool, raise the matching `limits.*` override (up to the operator ceiling) |
+| `RESOURCE_EXHAUSTED` | A per-query resource limit was exceeded on the `query` tool or a wrapped read tool (`traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time`) (Issue #3368): the wall-clock timeout elapsed, the result exceeded the response-byte cap, or (when an operator opts into the default-off memory budget) the estimated working-memory proxy exceeded it. `details` carries `dimension` (`wall_clock_timeout`/`result_bytes`/`memory_bytes`), `limit`, and (for byte/memory caps) `consumed` | timeout: `true` (read-only, so a tightened retry is sound); byte/memory cap: `false` | Narrow the request (smaller depth/`LIMIT`/`top_k`/time window, fewer returned properties) or, on the `query` tool, raise the matching `limits.*` override (up to the operator ceiling) |
 
 Codes may be **added** over time; existing codes never change. Treat an
 unrecognized code as non-retriable. `UNAUTHENTICATED` and
@@ -946,11 +946,16 @@ there is deliberately no row-termination counter.
 | MCP `traverse` / `hybrid_query` / `find_similar` / `get_node_at_time` / `get_edge_at_time` / `find_nodes_at_time` | ✅ (thread-race, read-only) | ✅ via `limit`/`top_k` (disclosed) | ✅ fail-closed, **post-hoc** (v1) | ⚠️ server defaults only — no per-call override yet (Lane-2) |
 | Rust query builder | ⚠️ builder-level limit options are a Lane-2 follow-up (embedders hold the `Arc<AletheiaDB>` and can bound work directly) | — | — | — |
 
-**Deferred to Lane-2 (explicitly out of this residue):** the memory-budget
-dimension (spill / per-operator accounting), true engine-level cooperative
-cancellation, the Rust builder API, a benchmark-gated fast-path proof, a
-concurrency soak, HTTP in-flight parity (#3446), and incremental (vs post-hoc)
-byte-cap enforcement for the six read tools.
+A **default-off memory-budget dimension** now also governs these read tools —
+see [Memory-budget dimension](#memory-budget-dimension-issue-3368) below.
+
+**Deferred to Lane-2 (explicitly out of this residue):** true engine-level
+memory accounting (spill / per-operator budgets — the landed memory dimension is
+a documented *proxy*, not true allocation accounting), a per-call
+`max_query_memory_bytes` override, true engine-level cooperative cancellation,
+the Rust builder API, a benchmark-gated fast-path proof, a concurrency soak, HTTP
+in-flight parity (#3446), and incremental (vs post-hoc) byte-cap enforcement for
+these read tools.
 
 Over-limit terminations are counted per dimension in-process
 (`AletheiaMcpServer::limit_termination_counts()`) **and surfaced through
@@ -963,6 +968,63 @@ rejecting it. The row-count ceiling remains the independent bound on how many
 rows are ever built. True engine-level **memory** accounting (spill, per-operator
 budgets) is a separate query-executor follow-up.
 
+### Memory-budget dimension (Issue #3368)
+
+The third #3368 dimension — a per-query **memory budget** — is now enforced on
+the wrapped read tools (`traverse`, `hybrid_query`, `find_similar`,
+`get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time`, and the enrolled
+#2907 semantic-search analysis tools) as an additive, **default-off** control.
+It is engaged only when an operator sets a non-zero
+`QueryLimitsConfig::default_max_query_memory_bytes` (optionally bounded by the
+`max_query_memory_bytes` ceiling) on the
+`AletheiaMcpServer::with_query_limits(...)` path. Omitting it — including under
+the default config — leaves the dimension unlimited, so **behavior is unchanged
+unless you opt in**. There is no per-call `limits.max_query_memory_bytes`
+override in v1 (server defaults only, mirroring the residue read tools), so no
+tool input schema changes.
+
+**What "working memory" means here — a documented proxy, not true accounting.**
+Rust has no free per-task allocation accounting, so — exactly like the `result_bytes`
+cap is honestly *post-hoc* — the memory dimension is a **documented proxy**:
+
+```
+estimated_working_bytes = serialized_response_len × MEMORY_WORKING_SET_EXPANSION
+```
+
+where `MEMORY_WORKING_SET_EXPANSION = 4`. The in-RAM materialized representation
+that produced the response (parsed graph entities, `PropertyMap` hashmaps,
+`Vec<f32>` embeddings, `String` keys, plus capacity slack and hashmap/enum
+overhead) is empirically a small multiple of the compact serialized JSON that
+leaves the dispatch seam; `4×` is the conservative v1 estimate. This is
+**distinct from `result_bytes`**: that cap governs *wire/output* size (a
+transport/context concern), while this dimension models *RAM working set* (a
+resource-exhaustion concern); the two caps are set independently, breach
+independently, and carry different `dimension` tokens.
+
+**Honest limitations** (mirroring how `result_bytes` is itself post-hoc): it is
+a proxy, not measured allocation; it is checked **post-hoc** on the fully
+serialized response (no early abort mid-evaluation — the computation runs to
+completion, then the estimate is rejected if over budget); and the expansion
+factor is a fixed constant, not response-shape adaptive.
+
+**What a breach returns.** When `estimated_working_bytes` exceeds the configured
+budget the response fails closed with the tool-agnostic #3234 envelope (no
+`kind`, no `language`):
+
+```jsonc
+{ "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "Tool 'traverse' estimated working memory of 40960 bytes exceeded the 8192-byte memory budget; narrow the request (smaller depth/limit/k) and retry.",
+    "retriable": false,
+    "details": { "dimension": "memory_bytes", "limit": 8192, "consumed": 40960 }
+} }
+```
+
+It is `retriable: false` (caller-fault: the same request materializes the same
+estimate, so the caller must narrow it — unlike a timeout). The ordering is
+`cursor (#3360) → result-byte cap → memory budget → token budget (#3353)`; an
+error from an earlier stage passes through untouched.
+
 ### Resource-limit counters in `database_stats`
 
 `database_stats` (no arguments) additively carries a `resource_limits` block so
@@ -974,6 +1036,7 @@ an operator or LLM can spot chronic offenders in one call:
   "resource_limits": {
     "timeout_terminations": 3,   // responses terminated by the wall-clock timeout
     "byte_cap_terminations": 1,  // responses rejected by the result-byte cap
+    "memory_terminations": 0,    // responses rejected by the (default-off) memory budget
     "override_rejections": 0     // per-call `query` overrides rejected over a ceiling
   }
 }

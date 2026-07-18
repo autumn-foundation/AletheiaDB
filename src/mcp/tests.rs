@@ -11813,6 +11813,9 @@ mod database_stats_tests {
             keys(&value["resource_limits"]),
             vec![
                 "byte_cap_terminations",
+                // Issue #3368 memory-budget dimension (default-off): additive
+                // counter, present even when the budget is never engaged.
+                "memory_terminations",
                 "override_rejections",
                 "timeout_terminations",
             ]

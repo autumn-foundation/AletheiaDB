@@ -34,6 +34,20 @@ pub const DEFAULT_MAX_RESULT_ROWS_CEILING: usize = 100_000;
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Operator hard ceiling for a per-call `max_response_bytes` override (64 MiB).
 pub const DEFAULT_MAX_RESPONSE_BYTES_CEILING: usize = 64 * 1024 * 1024;
+/// Default cap on a query's estimated working memory, in bytes (Issue #3368
+/// memory-budget dimension).
+///
+/// `0` = unlimited. This is **default-off**: unlike the timeout / row / byte
+/// dimensions, the memory budget is not engaged under the default config, so an
+/// operator must explicitly opt in. See the documented proxy definition in
+/// `docs/guides/mcp-query-tool.md` — the "working memory attributable to a
+/// query's evaluation" is a *proxy* (serialized response length scaled by an
+/// in-memory expansion factor), honestly post-hoc exactly like the byte cap, not
+/// true per-task allocation accounting.
+pub const DEFAULT_MAX_QUERY_MEMORY_BYTES: usize = 0;
+/// Operator hard ceiling for the memory budget (`0` = no ceiling). Default-off:
+/// no ceiling in v1 (there is no per-call memory override to bound).
+pub const DEFAULT_MAX_QUERY_MEMORY_BYTES_CEILING: usize = 0;
 /// Default cap on the number of `query` calls concurrently occupying a
 /// timeout-race worker thread (Issue #3368 DoS guard).
 ///
@@ -59,6 +73,9 @@ pub enum LimitDimension {
     ResultRows,
     /// The serialized byte size of the result (working-memory proxy).
     ResultBytes,
+    /// The estimated working-set memory consumed materializing the result
+    /// (Issue #3368 memory-budget dimension; a documented proxy, default-off).
+    Memory,
 }
 
 impl LimitDimension {
@@ -69,6 +86,7 @@ impl LimitDimension {
             Self::WallClockTimeout => "wall_clock_timeout",
             Self::ResultRows => "result_rows",
             Self::ResultBytes => "result_bytes",
+            Self::Memory => "memory_bytes",
         }
     }
 }
@@ -141,6 +159,9 @@ pub struct EffectiveQueryLimits {
     pub max_result_rows: usize,
     /// Maximum serialized response bytes (`0` = unlimited).
     pub max_response_bytes: usize,
+    /// Maximum estimated working-set memory in bytes (`0` = unlimited; Issue
+    /// #3368 memory-budget dimension, default-off).
+    pub max_query_memory_bytes: usize,
 }
 
 impl EffectiveQueryLimits {
@@ -151,6 +172,7 @@ impl EffectiveQueryLimits {
             timeout_ms: 0,
             max_result_rows: 0,
             max_response_bytes: 0,
+            max_query_memory_bytes: 0,
         }
     }
 }
@@ -219,6 +241,15 @@ pub struct QueryLimitsConfig {
     pub default_max_response_bytes: usize,
     /// Operator ceiling for a per-call byte override (`0` = no ceiling).
     pub max_response_bytes: usize,
+    /// Default cap on a query's estimated working memory in bytes (`0` =
+    /// unlimited; Issue #3368 memory-budget dimension, default-off).
+    ///
+    /// There is no per-call memory override in v1, so this default (clamped by
+    /// [`max_query_memory_bytes`](Self::max_query_memory_bytes)) is the only
+    /// value that ever applies.
+    pub default_max_query_memory_bytes: usize,
+    /// Operator ceiling for the memory budget (`0` = no ceiling; Issue #3368).
+    pub max_query_memory_bytes: usize,
     /// Cap on the number of `query` calls concurrently occupying a
     /// timeout-race worker thread (Issue #3368 DoS guard; `0` = unbounded).
     ///
@@ -242,6 +273,8 @@ impl QueryLimitsConfig {
             max_result_rows: 0,
             default_max_response_bytes: 0,
             max_response_bytes: 0,
+            default_max_query_memory_bytes: 0,
+            max_query_memory_bytes: 0,
             max_in_flight_queries: 0,
         }
     }
@@ -282,10 +315,20 @@ impl QueryLimitsConfig {
             ov.and_then(|o| o.max_response_bytes).map(|v| v as u64),
             LimitDimension::ResultBytes,
         )? as usize;
+        // Memory budget has no per-call override in v1 (default-off, server
+        // defaults only), so it is folded with `None` — only the default,
+        // clamped down to a finite ceiling, ever applies.
+        let max_query_memory_bytes = merge_dimension(
+            self.default_max_query_memory_bytes as u64,
+            self.max_query_memory_bytes as u64,
+            None,
+            LimitDimension::Memory,
+        )? as usize;
         Ok(EffectiveQueryLimits {
             timeout_ms,
             max_result_rows,
             max_response_bytes,
+            max_query_memory_bytes,
         })
     }
 }
@@ -302,6 +345,10 @@ impl Default for QueryLimitsConfig {
             max_result_rows: DEFAULT_MAX_RESULT_ROWS_CEILING,
             default_max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES_CEILING,
+            // Memory budget is default-off (unlimited) even under the default
+            // config: an operator must explicitly opt in (Issue #3368).
+            default_max_query_memory_bytes: DEFAULT_MAX_QUERY_MEMORY_BYTES,
+            max_query_memory_bytes: DEFAULT_MAX_QUERY_MEMORY_BYTES_CEILING,
             max_in_flight_queries: DEFAULT_MAX_IN_FLIGHT_QUERIES,
         }
     }
@@ -318,6 +365,9 @@ pub struct LimitCounters {
     pub wall_clock_timeout: std::sync::atomic::AtomicU64,
     /// Responses rejected for exceeding the result-byte cap.
     pub result_bytes: std::sync::atomic::AtomicU64,
+    /// Responses rejected for exceeding the estimated-memory budget (Issue
+    /// #3368 memory-budget dimension).
+    pub memory_bytes: std::sync::atomic::AtomicU64,
     /// Per-call overrides rejected for exceeding an operator ceiling.
     pub override_rejected: std::sync::atomic::AtomicU64,
 }
@@ -329,6 +379,9 @@ pub struct LimitCountsSnapshot {
     pub wall_clock_timeout: u64,
     /// Responses rejected for exceeding the result-byte cap.
     pub result_bytes: u64,
+    /// Responses rejected for exceeding the estimated-memory budget (Issue
+    /// #3368 memory-budget dimension).
+    pub memory_bytes: u64,
     /// Per-call overrides rejected for exceeding an operator ceiling.
     pub override_rejected: u64,
 }
@@ -343,6 +396,9 @@ impl LimitCounters {
             }
             LimitDimension::ResultBytes => {
                 self.result_bytes.fetch_add(1, Ordering::Relaxed);
+            }
+            LimitDimension::Memory => {
+                self.memory_bytes.fetch_add(1, Ordering::Relaxed);
             }
             // Row-cap breaches degrade to a disclosed truncation, not a
             // termination, so they are not counted here.
@@ -363,6 +419,7 @@ impl LimitCounters {
         LimitCountsSnapshot {
             wall_clock_timeout: self.wall_clock_timeout.load(Ordering::Relaxed),
             result_bytes: self.result_bytes.load(Ordering::Relaxed),
+            memory_bytes: self.memory_bytes.load(Ordering::Relaxed),
             override_rejected: self.override_rejected.load(Ordering::Relaxed),
         }
     }
@@ -502,10 +559,56 @@ mod tests {
         c.record_termination(LimitDimension::ResultBytes);
         c.record_termination(LimitDimension::ResultBytes);
         c.record_termination(LimitDimension::ResultRows); // not counted
+        c.record_termination(LimitDimension::Memory);
         c.record_override_rejected();
         let s = c.snapshot();
         assert_eq!(s.wall_clock_timeout, 1);
         assert_eq!(s.result_bytes, 2);
+        assert_eq!(s.memory_bytes, 1);
         assert_eq!(s.override_rejected, 1);
+    }
+
+    #[test]
+    fn memory_dimension_token_is_stable() {
+        assert_eq!(LimitDimension::Memory.as_str(), "memory_bytes");
+    }
+
+    #[test]
+    fn memory_budget_is_off_under_default_and_disabled() {
+        // Default-off: even the (enabled) default config leaves the memory
+        // dimension unlimited, so no existing behavior changes.
+        assert_eq!(
+            QueryLimitsConfig::default()
+                .effective(None)
+                .unwrap()
+                .max_query_memory_bytes,
+            0
+        );
+        assert_eq!(
+            QueryLimitsConfig::disabled()
+                .effective(None)
+                .unwrap()
+                .max_query_memory_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn memory_default_is_applied_when_opted_in() {
+        let cfg = QueryLimitsConfig {
+            default_max_query_memory_bytes: 4096,
+            ..QueryLimitsConfig::default()
+        };
+        assert_eq!(cfg.effective(None).unwrap().max_query_memory_bytes, 4096);
+    }
+
+    #[test]
+    fn memory_default_above_ceiling_is_clamped_to_ceiling() {
+        let cfg = QueryLimitsConfig {
+            default_max_query_memory_bytes: 1_000_000,
+            max_query_memory_bytes: 4096, // finite ceiling
+            ..QueryLimitsConfig::default()
+        };
+        assert_eq!(cfg.effective(None).unwrap().max_query_memory_bytes, 4096);
     }
 }
