@@ -8,6 +8,9 @@
 
 pub mod ariadne;
 pub mod aura;
+/// Belief-revision audit: classify *when and why* an entity's stored facts
+/// changed (correction / world-change / retraction / reaffirmation) — Issue #3362.
+pub mod belief_revision;
 pub mod chronos;
 pub mod echo;
 pub mod kairos;

@@ -563,6 +563,14 @@ harness = false
 path = "benches/snapshot_pin.rs"
 required-features = []
 
+# Belief-revision audit (Issue #3362): full audit over a ~100-version history,
+# targeting < 10ms (temporal-reconstruction target). Gated on semantic-temporal.
+[[bench]]
+name = "belief_revision"
+harness = false
+path = "benches/belief_revision.rs"
+required-features = ["semantic-temporal"]
+
 # High-level API - includes transaction overhead and API layer
 [[bench]]
 name = "aletheiadb"
