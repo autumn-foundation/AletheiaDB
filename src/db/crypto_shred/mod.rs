@@ -358,6 +358,51 @@ impl CryptoShredState {
         self.keyring_path.as_deref()
     }
 
+    /// Export the durable keyring/designation-registry as CRC-wrapped sidecar
+    /// bytes for folding into an `.albk` backup (Issue #3665).
+    ///
+    /// Returns the exact [`keyring::encode_sidecar_with_crc`] wire form — the
+    /// same bytes the durable `subject_keyring.dat` holds — so the restore path
+    /// can write them back verbatim and have the fail-closed loader accept
+    /// them. Returns an **empty** `Vec` when the keyring has no entries (nothing
+    /// to fold, so a crypto-shred-free database keeps its `.albk` non-key-bearing).
+    ///
+    /// Wrapped DEKs are already MEK-encrypted; still, an **erased** subject's
+    /// entry carries `wrapped_key = None`, so its DEK ciphertext is physically
+    /// absent from the exported bytes (crypto-shred erasure survives the fold).
+    #[must_use]
+    pub(crate) fn export_sidecar_bytes(&self) -> Vec<u8> {
+        let guard = self.lock_keyring();
+        if guard.is_empty() {
+            return Vec::new();
+        }
+        keyring::encode_sidecar_with_crc(&guard.to_sidecar())
+    }
+
+    /// Microseconds-since-epoch when `subject_id` was erased, or `None` if the
+    /// subject is unknown or still active (test/introspection).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn subject_erased_at(&self, subject_id: &str) -> Option<i64> {
+        self.lock_keyring()
+            .get(subject_id)
+            .and_then(|e| e.erased_at_micros)
+    }
+
+    /// A clone of a subject's wrapped-DEK ciphertext, if present (test-only,
+    /// Issue #3665 T4). Returns `None` once the subject is erased (the wrapped
+    /// blob is physically removed). The returned bytes are AEAD ciphertext
+    /// (never raw key material) and are used only to assert their ABSENCE from
+    /// an archive — they are never logged.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn subject_wrapped_dek_for_test(&self, subject_id: &str) -> Option<Vec<u8>> {
+        self.lock_keyring()
+            .get(subject_id)
+            .and_then(|e| e.wrapped_key.as_ref())
+            .map(|w| w.wrapped.clone())
+    }
+
     /// The breadcrumb path, if any.
     fn breadcrumb_path(&self) -> Option<&Path> {
         self.breadcrumb_path.as_deref()

@@ -284,7 +284,7 @@ impl SubjectKeyring {
 /// [`crate::storage::index_persistence::common::load_encoded_with_crc`] reads,
 /// so encoding here + writing through `write_durable` round-trips through the
 /// standard loader.
-fn encode_sidecar_with_crc(sidecar: &SubjectKeyringSidecar) -> Vec<u8> {
+pub(crate) fn encode_sidecar_with_crc(sidecar: &SubjectKeyringSidecar) -> Vec<u8> {
     let encoded = bitcode::encode(sidecar);
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&encoded);
@@ -303,6 +303,23 @@ pub fn save_keyring(path: &Path, keyring: &SubjectKeyring) -> Result<(), CryptoS
     let bytes = encode_sidecar_with_crc(&keyring.to_sidecar());
     crate::db::rotation::write_durable(path, &bytes)
         .map_err(|e| CryptoShredError::Io(format!("keyring write failed: {e}")))
+}
+
+/// Write already-CRC-wrapped keyring sidecar `bytes` verbatim to `path`
+/// durably (temp -> `sync_all` -> rename -> parent-dir fsync via
+/// `write_durable`).
+///
+/// Used by the `.albk` restore path (Issue #3665): the payload's
+/// `keyring_sidecar` is the exact [`encode_sidecar_with_crc`] wire form, so it
+/// is written byte-for-byte to `{data_dir}/subject_keyring.dat` and then loaded
+/// by the fail-closed [`load_keyring`] on the subsequent reopen. The caller
+/// no-ops on empty `bytes` (nothing to restore).
+///
+/// # Errors
+/// [`CryptoShredError::Io`] on any durable-write failure.
+pub(crate) fn save_sidecar_bytes(path: &Path, bytes: &[u8]) -> Result<(), CryptoShredError> {
+    crate::db::rotation::write_durable(path, bytes)
+        .map_err(|e| CryptoShredError::Io(format!("keyring sidecar write failed: {e}")))
 }
 
 /// Load a keyring from `path`, **fail-closed**.

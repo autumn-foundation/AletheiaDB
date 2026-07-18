@@ -94,6 +94,18 @@ impl AletheiaDB {
         let schema_constraints = self.constraint_registry.export_schema_constraints();
         let unique_constraints = self.constraint_registry.export_unique_constraints();
 
+        // Capture the crypto-shred subject keyring / designation registry
+        // (Issue #3665) so designations, erased-state, `erased_at`, and
+        // attestations travel inside the archive. The exported bytes are the
+        // exact CRC-wrapped sidecar wire form (empty when crypto-shred is
+        // unused). An erased subject's wrapped DEK is already absent from these
+        // bytes, so a post-erasure backup stays erased. When the `audit-export`
+        // feature is off there is no crypto-shred state, so the field is empty.
+        #[cfg(feature = "audit-export")]
+        let keyring_sidecar = self.crypto_shred.export_sidecar_bytes();
+        #[cfg(not(feature = "audit-export"))]
+        let keyring_sidecar = Vec::new();
+
         let payload = build_payload(
             current_snapshot,
             historical_snapshot,
@@ -103,6 +115,7 @@ impl AletheiaDB {
             created_at_micros,
             schema_constraints,
             unique_constraints,
+            keyring_sidecar,
         )
         .map_err(Error::Backup)?;
 
@@ -149,6 +162,13 @@ impl AletheiaDB {
             tmp.path(),
             &payload.schema_constraints,
         )?;
+
+        // Restore the crypto-shred subject keyring / designation registry
+        // (Issue #3665) into the SAME data dir the schema-constraint sidecar
+        // went to (the parent of the reopen WAL dir = tmp root), so the reopen
+        // below loads it via the fail-closed `CryptoShredState::open` path.
+        #[cfg(feature = "audit-export")]
+        restore_keyring_sidecar(tmp.path(), &payload)?;
 
         // Use an isolated WAL dir inside the temp dir to avoid cross-test contamination
         // from the default "aletheiadb/wal" path.
@@ -211,6 +231,12 @@ impl AletheiaDB {
             &payload.schema_constraints,
         )?;
 
+        // Restore the crypto-shred subject keyring / designation registry
+        // (Issue #3665) into `data_dir` (the parent of the durable reopen WAL
+        // dir, where `CryptoShredState::open` looks), NOT the index root.
+        #[cfg(feature = "audit-export")]
+        restore_keyring_sidecar(data_dir, &payload)?;
+
         // Reopen through the canonical durable config so the layout written above
         // is exactly the layout `open`/`open_from_env` will read on restart.
         let config = crate::config::durable_config_for_data_dir(data_dir);
@@ -242,6 +268,58 @@ fn reapply_unique_constraints(
         db.enable_unique_constraint(&d.label, &d.property)?;
     }
     Ok(())
+}
+
+/// Write the crypto-shred subject keyring / designation registry (Issue #3665)
+/// from a restored payload into `data_dir` as `subject_keyring.dat`.
+///
+/// The payload's `keyring_sidecar` is the exact CRC-wrapped sidecar wire form,
+/// so it is written verbatim; the subsequent reopen loads it via the
+/// fail-closed `CryptoShredState::open`. No-op on an empty sidecar.
+///
+/// **Backward-compat (v5/v6 archives):** an archive taken before the keyring
+/// fold carries no keyring, yet may hold designated (SUBJ-sealed) property
+/// bytes. Those restore **sealed-unreadable** — without the keyring the
+/// per-subject DEKs are gone. We emit a single loud warning in that case so an
+/// operator is never silently surprised by unreadable designated properties.
+#[cfg(feature = "audit-export")]
+fn restore_keyring_sidecar(
+    data_dir: &Path,
+    payload: &crate::storage::backup::BackupPayload,
+) -> Result<()> {
+    if !payload.keyring_sidecar.is_empty() {
+        let path = data_dir.join(crate::db::crypto_shred::keyring::KEYRING_FILENAME);
+        crate::db::crypto_shred::keyring::save_sidecar_bytes(&path, &payload.keyring_sidecar)
+            .map_err(|e| Error::Backup(BackupError::Io(e.to_string())))?;
+    } else if payload_has_sealed_properties(payload) {
+        let message = "crypto-shred: restoring a pre-v7 backup that contains \
+                       designated (sealed) properties but no subject keyring — \
+                       those properties will be sealed-unreadable (the archive \
+                       predates the Issue #3665 keyring fold). Restore from a v7 \
+                       (or newer) backup to recover them.";
+        #[cfg(feature = "observability")]
+        tracing::warn!("{message}");
+        #[cfg(not(feature = "observability"))]
+        eprintln!("WARNING: {message}");
+    }
+    Ok(())
+}
+
+/// Whether a restored payload's current-state graph holds any SUBJ-sealed
+/// (crypto-shred envelope) property value. Feature-independent scan by the
+/// public `SUBJ` envelope magic, used only to decide whether to warn on a
+/// keyring-less restore.
+#[cfg(feature = "audit-export")]
+fn payload_has_sealed_properties(payload: &crate::storage::backup::BackupPayload) -> bool {
+    use crate::storage::index_persistence::formats::PersistedPropertyValue;
+    let is_sealed = |props: &crate::storage::index_persistence::formats::PersistedPropertyMap| {
+        props.entries.iter().any(|(_, v)| {
+            matches!(v, PersistedPropertyValue::Bytes(b)
+                if crate::db::crypto_shred::envelope::is_envelope(b))
+        })
+    };
+    payload.graph.nodes.iter().any(|n| is_sealed(&n.properties))
+        || payload.graph.edges.iter().any(|e| is_sealed(&e.properties))
 }
 
 /// The index-persistence base directory under a durable data root.
