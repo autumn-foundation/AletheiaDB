@@ -28,6 +28,12 @@ fn test_cipher(byte: u8) -> Box<dyn crate::encryption::Cipher> {
     create_cipher(Algorithm::Aes256Gcm, &Zeroizing::new([byte; 32]))
 }
 
+/// `test_cipher` as an `Arc<dyn Cipher>` — the shape `rewrap_keyring` now takes
+/// for its NEW wrapping cipher (Slice 5 FIX 1: the memo is refreshed to it).
+fn test_cipher_arc(byte: u8) -> Arc<dyn crate::encryption::Cipher> {
+    Arc::from(test_cipher(byte))
+}
+
 /// Build a persistent, encrypted config rooted at `root` (keyring lands at
 /// `root/subject_keyring.dat`).
 fn enc_config(root: &Path) -> AletheiaDBConfig {
@@ -687,7 +693,7 @@ fn rewrap_keyring_advances_version_and_preserves_dek() {
     let path = dir.path().join(keyring::KEYRING_FILENAME);
     let state = CryptoShredState::open(Some(path)).unwrap();
     let c_old = test_cipher(1);
-    let c_new = test_cipher(2);
+    let c_new = test_cipher_arc(2);
     let subj = SubjectId::new("s1").unwrap();
     state
         .designate(&subj, vec![DesignationTarget::WholeNode(1)], c_old.as_ref())
@@ -697,9 +703,7 @@ fn rewrap_keyring_advances_version_and_preserves_dek() {
     let dek_before = recover_dek(&state, "s1", c_old.as_ref(), 1);
     assert!(state.keyring_has_stale_wrapped_entries(2));
 
-    let n = state
-        .rewrap_keyring(c_old.as_ref(), c_new.as_ref(), 2)
-        .unwrap();
+    let n = state.rewrap_keyring(c_old.as_ref(), &c_new, 2).unwrap();
     assert_eq!(n, 1, "one entry re-wrapped");
 
     // Now the DEK unwraps under the NEW cipher at v2, byte-identical.
@@ -714,31 +718,74 @@ fn rewrap_keyring_advances_version_and_preserves_dek() {
     );
 }
 
+/// T-multi: one `rewrap_keyring` pass over MULTIPLE active stale subjects
+/// advances every one of them (count == subjects), preserving each random DEK
+/// and leaving each recoverable under the NEW cipher at the new version.
+#[test]
+fn rewrap_keyring_advances_all_stale_subjects_in_one_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(keyring::KEYRING_FILENAME);
+    let state = CryptoShredState::open(Some(path)).unwrap();
+    let c_old = test_cipher(1);
+    let c_new = test_cipher_arc(2);
+
+    const SUBJECTS: [&str; 3] = ["s1", "s2", "s3"];
+    for (i, s) in SUBJECTS.iter().enumerate() {
+        state
+            .designate(
+                &SubjectId::new(*s).unwrap(),
+                vec![DesignationTarget::WholeNode(i as u64 + 1)],
+                c_old.as_ref(),
+            )
+            .unwrap();
+    }
+    // Each DEK as wrapped under the OLD cipher at v1.
+    let before: Vec<Vec<u8>> = SUBJECTS
+        .iter()
+        .map(|s| recover_dek(&state, s, c_old.as_ref(), 1))
+        .collect();
+    assert!(state.keyring_has_stale_wrapped_entries(2));
+
+    let n = state.rewrap_keyring(c_old.as_ref(), &c_new, 2).unwrap();
+    assert_eq!(n, SUBJECTS.len(), "every active stale subject re-wrapped");
+    assert!(n >= 2, "multi-subject pass covers >= 2 subjects");
+
+    for (s, dek_before) in SUBJECTS.iter().zip(before) {
+        let dek_after = recover_dek(&state, s, c_new.as_ref(), 2);
+        assert_eq!(
+            dek_before, dek_after,
+            "the random DEK for {s} is preserved, only the wrapping changed"
+        );
+        assert_eq!(
+            state.subject_wrapped_key_version_for_test(s),
+            Some(2),
+            "{s} advanced to the new generation"
+        );
+    }
+    assert!(
+        !state.keyring_has_stale_wrapped_entries(2),
+        "no stale entries remain after the multi-subject pass"
+    );
+}
+
 #[test]
 fn rewrap_keyring_is_idempotent_no_op_on_rerun() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(keyring::KEYRING_FILENAME);
     let state = CryptoShredState::open(Some(path)).unwrap();
     let c_old = test_cipher(1);
-    let c_new = test_cipher(2);
+    let c_new = test_cipher_arc(2);
     let subj = SubjectId::new("s1").unwrap();
     state
         .designate(&subj, vec![DesignationTarget::WholeNode(1)], c_old.as_ref())
         .unwrap();
 
-    assert_eq!(
-        state
-            .rewrap_keyring(c_old.as_ref(), c_new.as_ref(), 2)
-            .unwrap(),
-        1
-    );
+    assert_eq!(state.rewrap_keyring(c_old.as_ref(), &c_new, 2).unwrap(), 1);
     // Second run to the SAME target: every entry is already at v2 -> 0 re-wrapped,
     // no error (the old cipher is never even consulted).
     let c_bogus = test_cipher(9);
     assert_eq!(
-        state
-            .rewrap_keyring(c_bogus.as_ref(), c_new.as_ref(), 2)
-            .unwrap(),
+        state.rewrap_keyring(c_bogus.as_ref(), &c_new, 2).unwrap(),
         0,
         "idempotent re-run re-wraps zero entries"
     );
@@ -752,8 +799,8 @@ fn rewrap_keyring_tolerates_mixed_versions_and_advances_only_stale() {
     let path = dir.path().join(keyring::KEYRING_FILENAME);
     let state = CryptoShredState::open(Some(path)).unwrap();
     let c1 = test_cipher(1);
-    let c2 = test_cipher(2);
-    let c3 = test_cipher(3);
+    let c2 = test_cipher_arc(2);
+    let c3 = test_cipher_arc(3);
 
     // s1 designated under c1 (v1), then advanced to v2 under c2.
     state
@@ -763,10 +810,7 @@ fn rewrap_keyring_tolerates_mixed_versions_and_advances_only_stale() {
             c1.as_ref(),
         )
         .unwrap();
-    assert_eq!(
-        state.rewrap_keyring(c1.as_ref(), c2.as_ref(), 2).unwrap(),
-        1
-    );
+    assert_eq!(state.rewrap_keyring(c1.as_ref(), &c2, 2).unwrap(), 1);
     // s2 designated AFTER the rotation, so it starts at v1 wrapped under c2.
     state
         .designate(
@@ -777,7 +821,7 @@ fn rewrap_keyring_tolerates_mixed_versions_and_advances_only_stale() {
         .unwrap();
 
     // Mixed: s1@v2, s2@v1. Re-wrap to target v2 advances ONLY the stale s2.
-    let n = state.rewrap_keyring(c2.as_ref(), c3.as_ref(), 2).unwrap();
+    let n = state.rewrap_keyring(c2.as_ref(), &c3, 2).unwrap();
     assert_eq!(n, 1, "only the stale (v1) entry is advanced");
     // s1 still at v2 under c2 (untouched); s2 now at v2 under c3.
     recover_dek(&state, "s1", c2.as_ref(), 2);
@@ -790,7 +834,7 @@ fn rewrap_keyring_skips_erased_subject_and_never_resurrects_key() {
     let path = dir.path().join(keyring::KEYRING_FILENAME);
     let state = CryptoShredState::open(Some(path)).unwrap();
     let c_old = test_cipher(1);
-    let c_new = test_cipher(2);
+    let c_new = test_cipher_arc(2);
     state
         .designate(
             &SubjectId::new("gone").unwrap(),
@@ -805,9 +849,7 @@ fn rewrap_keyring_skips_erased_subject_and_never_resurrects_key() {
     );
 
     // Re-wrap must skip the erased subject and never re-introduce a wrapped key.
-    let n = state
-        .rewrap_keyring(c_old.as_ref(), c_new.as_ref(), 2)
-        .unwrap();
+    let n = state.rewrap_keyring(c_old.as_ref(), &c_new, 2).unwrap();
     assert_eq!(n, 0, "erased subject is not re-wrapped");
     assert!(
         state.subject_wrapped_dek_for_test("gone").is_none(),
@@ -828,12 +870,12 @@ fn keyring_has_stale_wrapped_entries_false_when_empty() {
 }
 
 #[test]
-fn rewrap_keyring_invalidates_memoized_wrap_cipher() {
+fn rewrap_keyring_refreshes_memoized_wrap_cipher_to_new(/* Slice 5 FIX 1 */) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(keyring::KEYRING_FILENAME);
     let state = CryptoShredState::open(Some(path)).unwrap();
     let c_old = test_cipher(1);
-    let c_new = test_cipher(2);
+    let c_new = test_cipher_arc(2);
     state
         .designate(
             &SubjectId::new("s1").unwrap(),
@@ -842,19 +884,23 @@ fn rewrap_keyring_invalidates_memoized_wrap_cipher() {
         )
         .unwrap();
 
-    // Populate the memoized wrap cipher (as a seal/unseal would).
+    // Populate the memoized wrap cipher with the OLD-MEK cipher (as a
+    // seal/unseal would have before the rotation).
     state.cached_wrap_cipher(|| Ok(test_cipher(1))).unwrap();
     assert!(
         state.wrap_cipher_cached_for_test(),
         "wrap cipher is memoized"
     );
 
-    // Re-wrap invalidates the memoized cipher so the next seal/unseal rebuilds it.
-    state
-        .rewrap_keyring(c_old.as_ref(), c_new.as_ref(), 2)
-        .unwrap();
+    // FIX 1: re-wrap REFRESHES the memo to the exact NEW cipher (not clears it),
+    // so a live uncached seal/unseal in the post-rotation window uses the new
+    // MEK immediately. Assert the cached Arc IS the one we handed in.
+    state.rewrap_keyring(c_old.as_ref(), &c_new, 2).unwrap();
+    let cached = state
+        .wrap_cipher_cached_arc_for_test()
+        .expect("re-wrap must leave the memo populated (refreshed, not cleared)");
     assert!(
-        !state.wrap_cipher_cached_for_test(),
-        "re-wrap must invalidate the memoized wrap cipher"
+        Arc::ptr_eq(&cached, &c_new),
+        "re-wrap must refresh the memoized wrap cipher to the NEW cipher"
     );
 }

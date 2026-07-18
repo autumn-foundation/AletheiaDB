@@ -242,6 +242,19 @@ silent wrong data); recovery is lossless — reopen once under the old key so th
 resume finishes re-wrapping every entry, after which the new key alone unwraps
 everything.
 
+**Live cache is refreshed — no reopen needed for correctness.** When the
+re-wrap pass completes it **refreshes** the in-process memoized `subject-wrap`
+cipher to the **new** one (it does not merely drop it). So the *running*
+process immediately serves reads for a subject whose DEK was not already cached
+— and seals *new* values for existing subjects — under the **new** MEK, with no
+reopen required. (Before this, the memo was cleared and the next seal/unseal
+rebuilt the cipher from the still-old `encryption` config, so an uncached read
+or a post-rotation write would transiently fail closed / seal under the stale
+key until a reopen.) A reopen is still **recommended** operationally, but only
+to complete the key-provider **config swap** (point the running config at the
+new key and drop the old one per the crash contract above), not for read/write
+correctness.
+
 **v1 durability bound (save-once).** The re-wrap persists the keyring a single
 time after re-wrapping **all** entries (one atomic, durable write), not per
 entry. For very large subject counts this means a crash mid-pass redoes the

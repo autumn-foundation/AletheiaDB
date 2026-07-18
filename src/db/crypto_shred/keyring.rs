@@ -207,9 +207,10 @@ impl SubjectKeyring {
     /// destroyed key. The caller (`CryptoShredState::rewrap_keyring`) already
     /// skips such entries; this guard is defense in depth.
     pub fn set_wrapped_key(&mut self, subject_id: &str, wrapped: WrappedKey) {
-        if let Some(entry) = self.entries.get_mut(subject_id)
-            && entry.state == SubjectState::Active
-            && entry.wrapped_key.is_some()
+        if let Some(entry) = self
+            .entries
+            .get_mut(subject_id)
+            .filter(|e| e.state == SubjectState::Active && e.wrapped_key.is_some())
         {
             entry.wrapped_key = Some(wrapped);
         }

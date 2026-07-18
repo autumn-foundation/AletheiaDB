@@ -1162,14 +1162,30 @@ impl AletheiaDB {
             // MEK to still be the configured key source (reopen-under-old-key
             // contract). Gated on `audit-export` (the crypto-shred feature).
             #[cfg(feature = "audit-export")]
-            if let Some(ref manager) = persistence_manager
-                && config.encryption.enabled
+            if let Some(manager) = persistence_manager
+                .as_ref()
+                .filter(|_| config.encryption.enabled)
             {
                 crate::db::rotation::finalize_resumed_subject_keyring_rotation(
                     manager,
                     &config.encryption,
                     db.crypto_shred.as_ref(),
                 )?;
+            }
+
+            // Fail-closed counterpart (Slice 5 review 4b): when THIS binary was
+            // built WITHOUT the crypto-shred (`audit-export`) feature there is no
+            // finalizer for a subject-keyring re-wrap left `Pending` by a crash.
+            // Rather than wedge the rotation ledger `Pending` forever with no
+            // diagnostic, surface an actionable `FailedPrecondition` telling the
+            // operator to reopen with the crypto-shred feature enabled. A guarded
+            // no-op when no such pending re-wrap exists.
+            #[cfg(not(feature = "audit-export"))]
+            if let Some(manager) = persistence_manager
+                .as_ref()
+                .filter(|_| config.encryption.enabled)
+            {
+                crate::db::rotation::fail_if_pending_subject_keyring_without_crypto_shred(manager)?;
             }
 
             seed_startup_current_timestamp(&db)?;

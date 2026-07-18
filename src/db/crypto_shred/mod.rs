@@ -217,8 +217,10 @@ pub struct CryptoShredState {
     /// process lifetime. Safe to cache because the subject-wrapping DEK is a
     /// deterministic `HKDF(MEK, "subject-wrap")`. On a full-MEK rotation the
     /// derived cipher changes, so [`CryptoShredState::rewrap_keyring`] (Slice 5)
-    /// **invalidates this cache** (sets it back to `None`) after re-wrapping the
-    /// keyring, so the next seal/unseal rebuilds it under the new MEK.
+    /// **refreshes this cache** to the NEW subject-wrapping cipher after
+    /// re-wrapping the keyring — so a live uncached unseal, and a live
+    /// `designate` in the post-rotation window, immediately use the new-MEK
+    /// cipher without waiting for a reopen.
     wrap_cipher: Mutex<Option<Arc<dyn Cipher>>>,
 }
 
@@ -431,6 +433,20 @@ impl CryptoShredState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some()
+    }
+
+    /// A clone of the memoized subject-wrapping cipher `Arc`, if present
+    /// (test-only, Slice 5). Lets a test assert — via [`Arc::ptr_eq`] — that
+    /// [`rewrap_keyring`](Self::rewrap_keyring) refreshed the memo to the exact
+    /// NEW cipher it was handed (FIX 1), not merely that some cipher is cached.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn wrap_cipher_cached_arc_for_test(&self) -> Option<Arc<dyn Cipher>> {
+        self.wrap_cipher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone)
     }
 
     /// Reference to the attestation signing key.
@@ -745,8 +761,20 @@ impl CryptoShredState {
     ///   safe no-op.
     ///
     /// After the pass the keyring is persisted **once** (atomic, durable) and
-    /// the memoized `wrap_cipher` is invalidated so the next seal/unseal rebuilds
-    /// it under the new MEK. Returns the number of entries re-wrapped.
+    /// the memoized `wrap_cipher` is refreshed to `new_wrap_cipher` so a live
+    /// uncached unseal (and a live `designate`) in the post-rotation window
+    /// wraps/unwraps under the new MEK immediately, without waiting for a
+    /// reopen. Returns the number of entries re-wrapped.
+    ///
+    /// # Transactional (all-or-nothing)
+    /// The re-wrap is planned and computed **before** the keyring is mutated:
+    /// every stale DEK is unwrapped under `old_wrap_cipher` and re-wrapped under
+    /// `new_wrap_cipher` into a local `updates` buffer first. Only if EVERY
+    /// entry succeeds are the new blobs applied, persisted once, and the cache
+    /// refreshed. If ANY unwrap / re-wrap / length-check fails, the function
+    /// returns `Err` having mutated NOTHING — not the in-memory keyring, not the
+    /// on-disk file, and not the memoized cipher — so a mid-pass failure never
+    /// leaves a partially re-wrapped keyring or a stale/invalid cache.
     ///
     /// # Durability (v1 save-once)
     /// The keyring is saved a single time after all entries are re-wrapped, not
@@ -765,7 +793,7 @@ impl CryptoShredState {
     pub(crate) fn rewrap_keyring(
         &self,
         old_wrap_cipher: &dyn Cipher,
-        new_wrap_cipher: &dyn Cipher,
+        new_wrap_cipher: &Arc<dyn Cipher>,
         new_version: u32,
     ) -> Result<usize, CryptoShredError> {
         use keyring::{SubjectState, WrappedKey};
@@ -798,7 +826,12 @@ impl CryptoShredState {
             });
         }
 
-        let mut rewrapped = 0usize;
+        // Phase 1: decrypt every stale DEK under the OLD cipher and re-encrypt
+        // it under the NEW cipher into a local `updates` buffer, WITHOUT
+        // mutating the keyring. If ANY entry fails to unwrap / re-wrap / pass
+        // the length check, return `Err` with ZERO mutation and ZERO cache
+        // change — the re-wrap is all-or-nothing.
+        let mut updates: Vec<(String, WrappedKey)> = Vec::with_capacity(plan.len());
         for item in &plan {
             // Unwrap the DEK under the OLD wrapping cipher, binding the entry's
             // own current key version as AAD (mirrors `dek_from_guard`). The
@@ -819,34 +852,41 @@ impl CryptoShredState {
             let new_blob = new_wrap_cipher
                 .encrypt(&raw, &new_aad)
                 .map_err(|e| CryptoShredError::Crypto(e.to_string()))?;
-            guard.set_wrapped_key(
-                &item.subject_id,
+            updates.push((
+                item.subject_id.clone(),
                 WrappedKey {
                     key_version: new_version,
                     wrapped: new_blob,
                 },
-            );
-            rewrapped += 1;
+            ));
+        }
+
+        // Phase 2 (every entry succeeded): apply the re-wraps, then persist
+        // once. A partial-failure path can never reach here.
+        let rewrapped = updates.len();
+        for (subject_id, wrapped_key) in updates {
+            guard.set_wrapped_key(&subject_id, wrapped_key);
         }
 
         // v1 save-once: one atomic, durable write after re-wrapping all entries.
-        if rewrapped > 0
-            && let Some(path) = self.keyring_path()
-        {
+        if let Some(path) = self.keyring_path().filter(|_| rewrapped > 0) {
             keyring::save_keyring(path, &guard)?;
         }
         drop(guard);
 
-        // Invalidate the memoized subject-wrapping cipher so the next seal/unseal
-        // rebuilds it under the new MEK (the cached one was derived from the old
-        // MEK). Done unconditionally: even a zero-re-wrap pass (idempotent resume)
-        // may have run because the live MEK changed.
+        // Refresh the memoized subject-wrapping cipher to the NEW cipher so a
+        // live uncached seal/unseal — and a live `designate` in the
+        // post-rotation window — uses the new-MEK cipher immediately, no reopen
+        // required (the cached one was derived from the old MEK). Done
+        // unconditionally: even a zero-re-wrap pass (idempotent resume) reaches
+        // here only after Phase 1 proved the new cipher is the live one, so
+        // caching it is always correct.
         {
             let mut wc = self
                 .wrap_cipher
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *wc = None;
+            *wc = Some(Arc::clone(new_wrap_cipher));
         }
 
         Ok(rewrapped)
