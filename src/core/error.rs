@@ -347,6 +347,9 @@ impl From<&crate::storage::index_persistence::IndexPersistenceError> for Persist
             }
             crate::storage::index_persistence::IndexPersistenceError::SizeLimitExceeded {
                 ..
+            }
+            | crate::storage::index_persistence::IndexPersistenceError::InternerCapacityExceeded {
+                ..
             } => PersistenceErrorKind::SizeLimitExceeded,
             crate::storage::index_persistence::IndexPersistenceError::Io(_) => {
                 PersistenceErrorKind::Io

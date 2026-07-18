@@ -1593,16 +1593,41 @@ impl AletheiaMcpServer {
     pub(crate) fn json_to_property_map(
         &self,
         json: &HashMap<String, serde_json::Value>,
-    ) -> Result<PropertyMap, String> {
+    ) -> Result<PropertyMap, crate::core::error::Error> {
         let mut builder = PropertyMapBuilder::new();
         for (key, value) in json {
             if let Some(pv) = self.json_to_property_value(value) {
-                builder = builder
-                    .try_insert(key.as_str(), pv)
-                    .map_err(|e| e.to_string())?;
+                // `try_insert` interns the property KEY. A capacity exhaustion
+                // there is a TYPED `StorageError::CapacityExceeded` that must
+                // survive to the call site so it renders as an actionable
+                // FAILED_PRECONDITION (configurable interner cap), NOT a generic
+                // INVALID_ARGUMENT. Propagate the typed error verbatim.
+                builder = builder.try_insert(key.as_str(), pv)?;
             }
         }
         Ok(builder.build())
+    }
+
+    /// Render a property-map construction error to a `CallToolResult`.
+    ///
+    /// A string-interner capacity exhaustion (a property-KEY interning breach,
+    /// configurable interner cap) routes through [`Self::db_error`] so it
+    /// surfaces as an actionable `FAILED_PRECONDITION` naming
+    /// `persistence.max_interned_strings` with structured
+    /// `{resource, current, limit}` details — the same envelope the node-LABEL
+    /// path already produces. Every other property error (bad value, recursion
+    /// depth) stays a caller-fault `INVALID_ARGUMENT`, preserving prior behavior.
+    pub(crate) fn property_map_error(&self, e: crate::core::error::Error) -> CallToolResult {
+        if matches!(
+            &e,
+            crate::core::error::Error::Storage(
+                crate::core::error::StorageError::CapacityExceeded { .. }
+            )
+        ) {
+            self.db_error(e)
+        } else {
+            self.invalid_argument(&format!("Invalid properties: {}", e))
+        }
     }
 
     fn json_to_property_value(&self, value: &serde_json::Value) -> Option<PropertyValue> {
@@ -2739,7 +2764,7 @@ impl AletheiaMcpServer {
         let properties = match req.properties {
             Some(p) => match self.json_to_property_map(&p) {
                 Ok(map) => map,
-                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+                Err(e) => return self.property_map_error(e),
             },
             None => PropertyMap::default(),
         };
@@ -2836,7 +2861,7 @@ impl AletheiaMcpServer {
 
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
-            Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+            Err(e) => return self.property_map_error(e),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
@@ -3932,7 +3957,7 @@ impl AletheiaMcpServer {
         let properties = match req.properties {
             Some(p) => match self.json_to_property_map(&p) {
                 Ok(map) => map,
-                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+                Err(e) => return self.property_map_error(e),
             },
             None => PropertyMap::default(),
         };
@@ -4030,7 +4055,7 @@ impl AletheiaMcpServer {
 
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
-            Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+            Err(e) => return self.property_map_error(e),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
@@ -5886,7 +5911,7 @@ impl AletheiaMcpServer {
         let base = match &req.properties {
             Some(p) => match self.json_to_property_map(p) {
                 Ok(map) => map,
-                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+                Err(e) => return self.property_map_error(e),
             },
             None => PropertyMap::default(),
         };
@@ -10435,6 +10460,107 @@ mod server_unit_tests {
 
     fn make_server() -> AletheiaMcpServer {
         AletheiaMcpServer::new(Arc::new(AletheiaDB::new().expect("db init")))
+    }
+
+    /// Configurable interner cap (finding 1): a REAL `create_node` whose property
+    /// KEY tips the interner over must render as an actionable
+    /// `FAILED_PRECONDITION` with `{resource,current,limit}` details naming
+    /// `persistence.max_interned_strings` — NOT a generic `INVALID_ARGUMENT`.
+    ///
+    /// Lowers the process-global interner cap, so it runs in a SUBPROCESS to
+    /// isolate the mutation from concurrent tests.
+    #[test]
+    fn interner_cap_property_key_breach_is_failed_precondition_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "mcp::server::server_unit_tests::interner_cap_property_key_breach_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for interner-cap property-key test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "interner-cap property-key helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("interner-cap property-key helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn interner_cap_property_key_breach_helper() {
+        use super::CreateNodeRequest;
+        use crate::core::GLOBAL_INTERNER;
+        use std::collections::HashMap;
+
+        let server = make_server();
+
+        // Pin the cap exactly at the live interner size, so the NEXT new intern —
+        // the fresh property KEY below, interned by `json_to_property_map` before
+        // the node label — tips it over. (No capacity rollbacks have occurred in
+        // this fresh subprocess, so next_id == len().)
+        let base = GLOBAL_INTERNER.len();
+        GLOBAL_INTERNER.set_max_capacity(base);
+
+        let mut props = HashMap::new();
+        props.insert(
+            "uniq_property_key_that_tips_the_interner_over".to_string(),
+            serde_json::json!("some_value"),
+        );
+        let req = CreateNodeRequest {
+            label: "TipLabel".to_string(),
+            properties: Some(props),
+            valid_time: None,
+            provenance: None,
+            derived_from: None,
+            namespace: None,
+        };
+
+        let resp = server.create_node(req);
+        let val: serde_json::Value =
+            serde_json::from_str(&resp).expect("create_node must return JSON");
+
+        // AFTER the fix: FAILED_PRECONDITION with structured details + actionable
+        // message. (BEFORE the fix this was INVALID_ARGUMENT with no details.)
+        assert_eq!(
+            val["error"]["code"], "FAILED_PRECONDITION",
+            "property-KEY interner breach must be FAILED_PRECONDITION, got: {resp}"
+        );
+        assert_eq!(val["error"]["retriable"], false);
+        assert_eq!(val["error"]["details"]["resource"], "string interner");
+        assert!(
+            val["error"]["details"]["limit"].is_number(),
+            "details must carry a numeric limit, got: {resp}"
+        );
+        assert!(
+            val["error"]["details"]["current"].is_number(),
+            "details must carry a numeric current, got: {resp}"
+        );
+        assert!(
+            val["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("persistence.max_interned_strings"),
+            "message must name the knob, got: {resp}"
+        );
     }
 
     fn error_kind(server: &AletheiaMcpServer, err: Error) -> String {

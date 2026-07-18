@@ -153,16 +153,26 @@ fn property_value_to_json_recursive(
 /// # Returns
 ///
 /// * `Ok(PropertyMap)` - The converted property map.
-/// * `Err(String)` - If conversion fails (e.g., unsupported types or recursion limit).
+/// * `Err(Error)` - If conversion fails. A bad value (unsupported type, recursion
+///   limit) is an [`Error::other`](crate::core::error::Error::other) that the
+///   handler renders as `400 INVALID_ARGUMENT`; a property-KEY interner capacity
+///   breach is a typed `StorageError::CapacityExceeded` rendered as `412
+///   FAILED_PRECONDITION` (configurable interner cap).
 pub fn json_to_property_map(
     json: &HashMap<String, serde_json::Value>,
-) -> Result<PropertyMap, String> {
+) -> Result<PropertyMap, crate::core::error::Error> {
     let mut builder = PropertyMapBuilder::new();
     for (key, value) in json {
-        let pv = json_to_property_value(value)?;
-        builder = builder
-            .try_insert(key.as_str(), pv)
-            .map_err(|e| e.to_string())?;
+        // A value-conversion failure (unsupported type, recursion depth, oversized
+        // array) is genuine bad input: preserve it as an `Error::other` so the
+        // handler still renders it as `400 INVALID_ARGUMENT` via `from_db_error`.
+        let pv = json_to_property_value(value).map_err(crate::core::error::Error::other)?;
+        // `try_insert` interns the property KEY. A capacity exhaustion there is a
+        // TYPED `StorageError::CapacityExceeded` that must survive to the handler
+        // so it renders as an actionable `FAILED_PRECONDITION` (412) naming
+        // `persistence.max_interned_strings`, NOT a generic 400 (configurable
+        // interner cap). Propagate the typed error verbatim.
+        builder = builder.try_insert(key.as_str(), pv)?;
     }
     Ok(builder.build())
 }

@@ -206,10 +206,15 @@ impl McpError {
             .as_constraint()
             .and_then(|ce| ce.structured_details())
             .or_else(|| principal_quota_details(e))
-            .or_else(|| namespace_details(e));
+            .or_else(|| namespace_details(e))
+            .or_else(|| capacity_exceeded_details(e));
+        // A string-interner capacity exhaustion (configurable interner cap) gets
+        // an actionable message naming the knob and the restart requirement, so a
+        // caller/LLM can resolve it without parsing the raw Display text.
+        let message = interner_capacity_message(e).unwrap_or_else(|| e.to_string());
         Self {
             code,
-            message: e.to_string(),
+            message,
             retriable,
             details,
         }
@@ -303,6 +308,49 @@ fn principal_quota_details(e: &Error) -> Option<serde_json::Value> {
     } else {
         None
     }
+}
+
+/// Structured `details` for a storage capacity exhaustion (configurable
+/// interner cap): `{resource, current, limit}`. Shared by the MCP and HTTP
+/// surfaces so both render byte-identical metadata under `error.details`.
+/// Returns `None` for every other error.
+fn capacity_exceeded_details(e: &Error) -> Option<serde_json::Value> {
+    if let Error::Storage(StorageError::CapacityExceeded {
+        resource,
+        current,
+        limit,
+    }) = e
+    {
+        Some(serde_json::json!({
+            "resource": resource,
+            "current": current,
+            "limit": limit,
+        }))
+    } else {
+        None
+    }
+}
+
+/// Actionable replacement message for a **string-interner** capacity exhaustion
+/// (configurable interner cap). Names the `persistence.max_interned_strings`
+/// knob and the restart requirement. Returns `None` for any other error
+/// (including non-interner `CapacityExceeded` resources), preserving their
+/// Display text.
+fn interner_capacity_message(e: &Error) -> Option<String> {
+    if let Error::Storage(StorageError::CapacityExceeded {
+        resource,
+        current,
+        limit,
+    }) = e
+        && resource.contains("interner")
+    {
+        return Some(format!(
+            "String interner at capacity ({current}/{limit}). Raise \
+             `persistence.max_interned_strings` above {limit} and restart to intern more \
+             unique strings. No data is lost — the WAL is the source of truth."
+        ));
+    }
+    None
 }
 
 /// Structured `details` for a namespace error (Issue #3349). An unknown
@@ -559,6 +607,33 @@ mod tests {
             .details(serde_json::json!({"connected_edges": 3}));
         let json = with_details.to_json();
         assert_eq!(json["details"]["connected_edges"], 3);
+    }
+
+    #[test]
+    fn interner_capacity_exceeded_maps_to_actionable_failed_precondition() {
+        // Configurable interner cap: a string-interner CapacityExceeded must
+        // surface as a structured FAILED_PRECONDITION (non-retriable) whose
+        // message names `persistence.max_interned_strings` and whose details
+        // carry {resource, current, limit} — NOT a panic/INTERNAL.
+        let e: Error = StorageError::CapacityExceeded {
+            resource: "string interner".into(),
+            current: 200,
+            limit: 200,
+        }
+        .into();
+        let err = McpError::from_db_error(&e);
+        assert_eq!(err.code(), McpErrorCode::FailedPrecondition);
+        assert!(!err.is_retriable());
+        assert!(
+            err.message().contains("persistence.max_interned_strings"),
+            "message must name the knob, got: {}",
+            err.message()
+        );
+        let json = err.to_json();
+        assert_eq!(json["code"], "FAILED_PRECONDITION");
+        assert_eq!(json["details"]["resource"], "string interner");
+        assert_eq!(json["details"]["current"], 200);
+        assert_eq!(json["details"]["limit"], 200);
     }
 
     #[test]

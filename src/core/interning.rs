@@ -14,10 +14,25 @@ use dashmap::DashMap;
 use std::fmt;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-/// Default maximum number of interned strings (DoS protection)
-pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
+/// Default maximum number of interned strings (DoS protection).
+///
+/// Raised from 100_000 to 10_000_000 (Issue: configurable interner cap): a
+/// legitimately large dataset (e.g. a code graph with high-cardinality file
+/// paths / symbol names as property values) can intern well past 100K unique
+/// strings. This is a **COUNT** cap, not a memory cap: at ~100 bytes of
+/// map/pointer overhead per entry plus the string's own bytes, 10M *short*
+/// entries sit around ~1–1.6 GB (typical case), but the true worst case is
+/// `count × (overhead + string bytes)`, with string bytes bounded only by the
+/// per-string [`crate::storage::index_persistence::MAX_STRING_LENGTH`] (10 MB) —
+/// so it is paired with that per-string cap rather than being a hard memory
+/// ceiling. It remains near-impossible to hit for realistic workloads. The cap
+/// is configurable at runtime via
+/// [`StringInterner::set_max_capacity`] (driven from
+/// `persistence.max_interned_strings`) and via the
+/// [`MAX_INTERNED_STRINGS_ENV`] environment variable.
+pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 10_000_000;
 
 /// Maximum spin iterations in get_all_strings() before assuming deadlock.
 const MAX_SPIN_WAIT_ITERATIONS: usize = 100_000;
@@ -107,8 +122,14 @@ pub struct StringInterner {
     id_to_string: DashMap<InternedString, Arc<str>, BuildHasherDefault<IdentityHasher>>,
     /// Next ID to assign.
     next_id: AtomicU32,
-    /// Maximum number of strings to intern (DoS protection)
-    max_capacity: usize,
+    /// Maximum number of strings to intern (DoS protection).
+    ///
+    /// Atomic so it can be reconfigured at database `open()` time via
+    /// [`Self::set_max_capacity`] (driven from `persistence.max_interned_strings`)
+    /// without rebuilding the process-global interner. Read only on the slow
+    /// (new-id) intern path, so the atomic load stays off the already-interned
+    /// fast path.
+    max_capacity: AtomicUsize,
 }
 
 impl StringInterner {
@@ -123,8 +144,24 @@ impl StringInterner {
             string_to_id: DashMap::new(),
             id_to_string: DashMap::with_hasher(BuildHasherDefault::default()),
             next_id: AtomicU32::new(0),
-            max_capacity,
+            max_capacity: AtomicUsize::new(max_capacity),
         }
+    }
+
+    /// Reconfigure the maximum number of strings this interner will hold.
+    ///
+    /// Called at database `open()` time to drive the process-global
+    /// [`GLOBAL_INTERNER`] from `persistence.max_interned_strings`. This only
+    /// changes the threshold for interning *new* strings; it never evicts or
+    /// renumbers already-interned strings, so raising the cap is always safe and
+    /// lowering it merely refuses new interns past the lower bound.
+    pub(crate) fn set_max_capacity(&self, max_capacity: usize) {
+        self.max_capacity.store(max_capacity, Ordering::Relaxed);
+    }
+
+    /// The current maximum number of strings this interner will hold.
+    pub fn max_capacity(&self) -> usize {
+        self.max_capacity.load(Ordering::Relaxed)
     }
 
     /// Intern a string, returning its ID.
@@ -160,8 +197,16 @@ impl StringInterner {
                 // Atomically reserve an ID first to prevent capacity check race
                 let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-                // Check if we exceeded capacity AFTER reserving ID
-                if id_value >= self.max_capacity as u32 {
+                // Load the (possibly reconfigured) capacity on the slow path only.
+                let max_capacity = self.max_capacity.load(Ordering::Relaxed);
+
+                // Check if we exceeded capacity AFTER reserving ID. `id_value` is
+                // a `u32` (the id space is `AtomicU32`), so any configured cap at
+                // or above `u32::MAX` is unreachable by construction — the id
+                // generator saturates first. Callers clamp the configured cap to
+                // `u32::MAX` at `open()` so the effective cap is honest. Compare in
+                // usize so no truncation occurs at the boundary.
+                if id_value as usize >= max_capacity {
                     // Best effort: undo the reservation
                     self.next_id.fetch_sub(1, Ordering::Relaxed);
 
@@ -169,7 +214,7 @@ impl StringInterner {
                         crate::core::error::StorageError::CapacityExceeded {
                             resource: "string interner".to_string(),
                             current: id_value as usize,
-                            limit: self.max_capacity,
+                            limit: max_capacity,
                         },
                     ));
                 }
@@ -503,7 +548,10 @@ use std::sync::LazyLock;
 
 /// Environment variable to configure the maximum number of interned strings.
 ///
-/// Set `ALETHEIADB_MAX_INTERNED_STRINGS` to override the default limit of 100,000.
+/// Set `ALETHEIADB_MAX_INTERNED_STRINGS` to override the default limit of
+/// 10,000,000. This seeds the process-global interner for embedded users who
+/// never open a database; when a database is opened, `open()` reconfigures the
+/// cap from `persistence.max_interned_strings` (which wins).
 /// This is useful for large knowledge graphs with many unique labels or property keys.
 ///
 /// Example: `ALETHEIADB_MAX_INTERNED_STRINGS=1000000`
@@ -521,7 +569,8 @@ pub const MAX_INTERNED_STRINGS_ENV: &str = "ALETHEIADB_MAX_INTERNED_STRINGS";
 /// ## Configuration
 ///
 /// The maximum capacity can be configured via the `ALETHEIADB_MAX_INTERNED_STRINGS`
-/// environment variable. If not set, defaults to 100,000.
+/// environment variable. If not set, defaults to 10,000,000. Opening a database
+/// further reconfigures it from `persistence.max_interned_strings`.
 pub static GLOBAL_INTERNER: LazyLock<StringInterner> = LazyLock::new(|| {
     let max_capacity = std::env::var(MAX_INTERNED_STRINGS_ENV)
         .ok()
@@ -887,6 +936,43 @@ mod tests {
     }
 
     #[test]
+    fn test_default_max_interned_strings_is_ten_million() {
+        // Regression (configurable interner cap): the default cap was raised
+        // from 100_000 to 10_000_000 so a legitimately large dataset does not
+        // hit the cap during normal operation.
+        assert_eq!(DEFAULT_MAX_INTERNED_STRINGS, 10_000_000);
+    }
+
+    #[test]
+    fn test_set_max_capacity_raises_and_lowers_bound() {
+        // A fresh interner honors a raised cap set at runtime, and a lowered cap
+        // refuses new interns past the lower bound without evicting existing ones.
+        let interner = StringInterner::with_max_capacity(2);
+        assert_eq!(interner.max_capacity(), 2);
+
+        interner.intern("a").unwrap();
+        interner.intern("b").unwrap();
+        // At the cap: the third intern fails.
+        assert!(interner.intern("c").is_err());
+
+        // Raise the cap: interning now proceeds past the old bound.
+        interner.set_max_capacity(10);
+        assert_eq!(interner.max_capacity(), 10);
+        let id_c = interner.intern("c").unwrap();
+        assert_eq!(
+            id_c.as_u32(),
+            2,
+            "existing ids are untouched by a raised cap"
+        );
+
+        // Lower the cap below the current size: existing strings resolve, new
+        // ones are refused.
+        interner.set_max_capacity(3);
+        assert_eq!(interner.get_id("a").unwrap().as_u32(), 0);
+        assert!(interner.intern("d").is_err());
+    }
+
+    #[test]
     fn test_intern_concurrent_capacity_race() {
         use std::sync::{Arc, Barrier};
         use std::thread;
@@ -1214,7 +1300,7 @@ mod mutant_kill_tests {
     #[ignore]
     fn test_with_max_capacity_subprocess_helper() {
         let interner = StringInterner::with_max_capacity(3);
-        assert_eq!(interner.max_capacity, 3);
+        assert_eq!(interner.max_capacity(), 3);
 
         interner.intern("a").unwrap();
         interner.intern("b").unwrap();

@@ -22,6 +22,25 @@ use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Validate and clamp a configured `persistence.max_interned_strings` value
+/// before it drives the process-global interner cap (configurable interner cap).
+///
+/// - `0` is **rejected** with a clear error: a zero cap would refuse every
+///   string intern, bricking all writes and `open()` itself. It must never be
+///   pushed into `GLOBAL_INTERNER.set_max_capacity`.
+/// - Any value at or above `u32::MAX` is **clamped** to `u32::MAX`: interner ids
+///   are `AtomicU32`, so a higher cap is unreachable and would only mislead.
+fn validate_interner_cap(configured: usize) -> Result<usize> {
+    if configured == 0 {
+        return Err(crate::core::error::Error::FailedPrecondition(
+            "persistence.max_interned_strings must be at least 1; a cap of 0 would reject all \
+             string interning and make every write (and open) fail"
+                .to_string(),
+        ));
+    }
+    Ok(configured.min(u32::MAX as usize))
+}
+
 fn bootstrap_timestamp(
     current: &CurrentStorage,
     historical: &RwLock<HistoricalStorage>,
@@ -387,6 +406,22 @@ impl AletheiaDB {
             // (Issue #3616) can override `config.encryption` below.
             let mut config = config;
             let durability_mode = config.wal.durability_mode;
+
+            // Reconfigure the process-global string-interner cap from
+            // `persistence.max_interned_strings` BEFORE any WAL bootstrap
+            // deserialization (which interns property keys) or index load (which
+            // re-interns persisted strings and validates the persisted count
+            // against this cap). Doing it here guarantees both the runtime
+            // intern cap and the load-validation cap reflect the configured
+            // value for the rest of open(). Configurable interner cap fix.
+            //
+            // A cap of 0 would reject ALL interning and brick every write and
+            // open(); reject it with a clear error instead of silently bricking
+            // the DB. A cap above `u32::MAX` is unreachable (ids are `AtomicU32`),
+            // so it is clamped so the effective cap is honest.
+            let effective_interner_cap =
+                validate_interner_cap(config.persistence.max_interned_strings)?;
+            crate::core::GLOBAL_INTERNER.set_max_capacity(effective_interner_cap);
 
             // Capture provenance-chain settings before `config.wal.wal_dir` is
             // moved into the WAL system config. The chain lives under the data
@@ -1315,6 +1350,145 @@ impl AletheiaDB {
 mod ephemeral_tests {
     use super::*;
 
+    /// Configurable interner cap bounds (finding 2): `0` is rejected (it would
+    /// brick all writes/open), and any value at/above `u32::MAX` is clamped to
+    /// `u32::MAX` (ids are `AtomicU32`, so a higher cap is unreachable). Pure,
+    /// deterministic — does NOT touch the process-global interner, so it cannot
+    /// race concurrent tests.
+    #[test]
+    fn validate_interner_cap_rejects_zero_and_clamps_above_u32_max() {
+        // Zero is refused with a clear, actionable error.
+        let err = validate_interner_cap(0).expect_err("cap of 0 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_interned_strings"),
+            "error must name the config field, got: {msg}"
+        );
+
+        // Ordinary values pass through unchanged.
+        assert_eq!(validate_interner_cap(1).unwrap(), 1);
+        assert_eq!(validate_interner_cap(10_000_000).unwrap(), 10_000_000);
+        assert_eq!(
+            validate_interner_cap(u32::MAX as usize).unwrap(),
+            u32::MAX as usize
+        );
+
+        // Anything above u32::MAX is clamped down (unreachable otherwise).
+        assert_eq!(
+            validate_interner_cap(u32::MAX as usize + 1).unwrap(),
+            u32::MAX as usize
+        );
+        assert_eq!(
+            validate_interner_cap(usize::MAX).unwrap(),
+            u32::MAX as usize
+        );
+    }
+
+    /// `with_unified_config` rejects a zero interner cap up front (before it
+    /// touches the process-global interner) rather than bricking the DB. This is
+    /// race-free: the error is returned before any `set_max_capacity`.
+    #[test]
+    fn with_unified_config_rejects_zero_interner_cap() {
+        use crate::config::AletheiaDBConfig;
+        use crate::storage::index_persistence::PersistenceConfig;
+
+        let config = AletheiaDBConfig::builder()
+            .persistence(PersistenceConfig {
+                max_interned_strings: 0,
+                ..Default::default()
+            })
+            .build();
+        let err = match AletheiaDB::with_unified_config(config) {
+            Ok(_) => panic!("a zero interner cap must fail open(), not brick the DB"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("max_interned_strings"),
+            "error must name the config field, got: {err}"
+        );
+    }
+
+    /// Precedence (finding 10): on the `open()`/`with_unified_config` path the
+    /// config field authoritatively sets the interner cap — it OVERRIDES the
+    /// `ALETHEIADB_MAX_INTERNED_STRINGS` env seed (which only ever seeds the
+    /// `GLOBAL_INTERNER` LazyLock for embedded users who never open a DB).
+    ///
+    /// Runs in a SUBPROCESS with the env var injected by the parent, so the seed
+    /// is present from process start and the process-global mutation is isolated.
+    #[test]
+    fn config_interner_cap_overrides_env_on_open_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .env("ALETHEIADB_MAX_INTERNED_STRINGS", "12345")
+            .args([
+                "--ignored",
+                "--exact",
+                "db::config::ephemeral_tests::config_interner_cap_overrides_env_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for config-vs-env precedence test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "config-vs-env precedence helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("config-vs-env precedence helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn config_interner_cap_overrides_env_helper() {
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use tempfile::tempdir;
+
+        // First access initializes the LazyLock interner from the injected env
+        // seed (12345). This is the embedded/`new()`-only precedence.
+        assert_eq!(
+            crate::core::GLOBAL_INTERNER.max_capacity(),
+            12345,
+            "the env var must seed the interner before any DB is opened"
+        );
+
+        // Open a DB with an explicit, DIFFERENT config cap: the config field wins.
+        // Use an isolated tempdir WAL so the fully-default WAL dir (a shared,
+        // cwd-relative path) can't collide with stale data from another run.
+        let scratch = tempdir().unwrap();
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(scratch.path().join("wal"))
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                max_interned_strings: 777_000,
+                ..Default::default()
+            })
+            .build();
+        let _db = AletheiaDB::with_unified_config(config).expect("open must succeed");
+        assert_eq!(
+            crate::core::GLOBAL_INTERNER.max_capacity(),
+            777_000,
+            "the config field must override the env seed on the open() path"
+        );
+    }
+
     #[test]
     fn new_uses_a_unique_tempdir_per_call() {
         let db1 = AletheiaDB::new().expect("new should succeed");
@@ -1523,6 +1697,160 @@ mod ephemeral_tests {
             );
             db.create_node("P", PropertyMapBuilder::new().insert("k", "a").build())
                 .expect_err("constraint must survive WAL+persistence restart");
+        }
+    }
+
+    /// Prod-upgrade regression (configurable interner cap): a durable database
+    /// opened under a LOW `max_interned_strings`, populated, and then REOPENED
+    /// under a HIGHER cap must (a) load its existing data cleanly FROM DISK, (b)
+    /// intern past the old cap, and (c) hit no migration/format error.
+    ///
+    /// The string interner is a process-global singleton and this test lowers
+    /// its cap, so it runs in a SUBPROCESS to isolate the mutation from other
+    /// tests running concurrently (mirrors the interning.rs mutant-kill pattern).
+    ///
+    /// Cold-load fidelity (finding 7): sessions 1 and 2 share one process, so the
+    /// helper CLEARS + re-warms the process-global interner between them —
+    /// reproducing a fresh-process cold start where the interner holds only the
+    /// warmed common strings and every other string MUST be repopulated from the
+    /// on-disk interner file. Without the clear, session 1's residual in-memory
+    /// strings would mask a broken disk→interner load. The helper asserts the
+    /// interner is genuinely empty of session-1 data BEFORE reopen and repopulated
+    /// FROM DISK after, and crosses ~1000 strings so the load path is real.
+    #[test]
+    fn interner_cap_reopen_with_higher_cap_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "db::config::ephemeral_tests::interner_cap_reopen_with_higher_cap_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for interner-cap reopen test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "interner-cap reopen helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("interner-cap reopen helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn interner_cap_reopen_with_higher_cap_helper() {
+        use crate::PropertyMapBuilder;
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use crate::storage::wal::DurabilityMode;
+        use tempfile::tempdir;
+
+        let scratch = tempdir().unwrap();
+        let db_path = scratch.path().to_path_buf();
+
+        let make_config = |cap: usize| {
+            AletheiaDBConfig::builder()
+                .wal(
+                    WalConfigBuilder::new()
+                        .wal_dir(db_path.join("wal"))
+                        .durability_mode(DurabilityMode::Synchronous)
+                        .build(),
+                )
+                .persistence(PersistenceConfig {
+                    enabled: true,
+                    data_dir: db_path.join("indexes"),
+                    load_on_startup: true,
+                    max_interned_strings: cap,
+                    ..Default::default()
+                })
+                .build()
+        };
+
+        // Session 1: LOW cap (3000). Intern ~1000 distinct labels + ~1000 distinct
+        // property VALUES (interned at persist time) — a real load-path workload,
+        // still comfortably under the cap — then persist and close.
+        const N: usize = 1000;
+        let probe_label = "LowCapLabel_500";
+        let created = {
+            let db = AletheiaDB::with_unified_config(make_config(3000)).unwrap();
+            assert_eq!(crate::core::GLOBAL_INTERNER.max_capacity(), 3000);
+
+            let mut ids = Vec::new();
+            for i in 0..N {
+                let label = format!("LowCapLabel_{i}");
+                let id = db
+                    .create_node(
+                        &label,
+                        PropertyMapBuilder::new()
+                            .insert("k", format!("v{i}"))
+                            .build(),
+                    )
+                    .unwrap();
+                ids.push(id);
+            }
+            db.persist_indexes().unwrap();
+            ids.len()
+        };
+        assert_eq!(created, N);
+
+        // Between sessions: reproduce a FRESH-PROCESS cold start. Dropping the
+        // session-1 db does not clear the process-global interner, so clear it and
+        // re-warm only the common strings — exactly the state a brand-new process's
+        // LazyLock interner would hold. Now session-1's labels/values live ONLY on
+        // disk; if the disk→interner load is broken, session 2 cannot resolve them.
+        crate::core::GLOBAL_INTERNER.clear();
+        crate::core::GLOBAL_INTERNER.warm_common_strings();
+        assert!(
+            crate::core::GLOBAL_INTERNER.get_id(probe_label).is_none(),
+            "precondition: after clear+warm the interner must NOT hold session-1 data \
+             (proving the reopen genuinely cold-loads from disk)"
+        );
+
+        // Session 2: HIGHER cap (10_000). Existing data must load clean FROM DISK
+        // and interning must proceed past the old cap without any format error.
+        {
+            let db = AletheiaDB::with_unified_config(make_config(10_000)).unwrap();
+            assert_eq!(crate::core::GLOBAL_INTERNER.max_capacity(), 10_000);
+            assert_eq!(
+                db.node_count(),
+                created,
+                "existing nodes must reload cleanly from disk after cap raise"
+            );
+            // The disk interner file repopulated the (previously cleared) interner:
+            // a session-1 label we did NOT recreate now resolves again.
+            assert!(
+                crate::core::GLOBAL_INTERNER.get_id(probe_label).is_some(),
+                "the on-disk interner file must repopulate the cold interner on reopen"
+            );
+
+            // Intern well past the old cap: 500 more distinct labels succeed.
+            for i in 0..500 {
+                let label = format!("HighCapLabel_{i}");
+                db.create_node(
+                    &label,
+                    PropertyMapBuilder::new()
+                        .insert("k", format!("w{i}"))
+                        .build(),
+                )
+                .expect("interning must proceed past the old cap under the raised limit");
+            }
+            assert_eq!(db.node_count(), created + 500);
         }
     }
 
