@@ -504,6 +504,11 @@ impl TieredStorage {
         }
     }
 
+    /// Test-only: access the cold-change directory for white-box assertions (Issue #3677).
+    #[cfg(test)]
+    pub(crate) fn cold_change_directory(&self) -> &ColdChangeDirectory {
+        &self.cold_change_directory
+    }
 
     /// Prefetch versions in a chain (up to prefetch_depth).
     fn prefetch_chain<V, F>(&self, start: &V, cache: &Cache<VersionId, Arc<V>>, fetch_fn: &F)

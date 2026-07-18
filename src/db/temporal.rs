@@ -2231,6 +2231,412 @@ mod changefeed_pushdown_tests {
         );
     }
 
+    // ==========================================================================================
+    // Issue #3677: cold-tier directory pushdown — green-phase coverage.
+    //
+    // These run with the ColdChangeDirectory active (it is always on for an attached cold tier),
+    // so they double as the parity regression guard for the pushdown. `attach_cold_with_max` lets
+    // a test force a tiny directory budget (eviction) and reach the directory for white-box
+    // eligibility probes.
+    // ==========================================================================================
+
+    /// Like [`attach_cold`], but with a caller-chosen directory budget; returns the tiered handle
+    /// so a test can probe the directory (`eligible_candidates`, `len`, `is_complete`).
+    fn attach_cold_with_max(
+        db: &AletheiaDB,
+        nodes: &[NodeVersion],
+        edges: &[EdgeVersion],
+        max_entries: usize,
+    ) -> (tempfile::TempDir, Arc<TieredStorage>) {
+        let dir = tempfile::tempdir().unwrap();
+        let cold =
+            Arc::new(RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap());
+        for v in nodes {
+            cold.store_node_version(v).unwrap();
+        }
+        for v in edges {
+            cold.store_edge_version(v).unwrap();
+        }
+        let config = crate::storage::tiered_storage::TieredStorageConfig {
+            cold_change_directory_max_entries: max_entries,
+            ..Default::default()
+        };
+        let tiered = Arc::new(TieredStorage::new(config, cold));
+        db.__test_historical_storage()
+            .write()
+            .set_tiered_storage(tiered.clone());
+        (dir, tiered)
+    }
+
+    // D1 --------------------------------------------------------------------------------------
+    #[test]
+    fn cold_directory_parity_hot_only() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..40 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("h{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        // Empty cold tier still activates the directory-backed cold path.
+        let _dir = attach_cold(&db, &[], &[]);
+        let (from, to) = all();
+        for limit in [1usize, 5, 10, 40, 100] {
+            assert_parity(&db, &query(from, to, limit));
+            assert_parity_independent(&db, &query(from, to, limit));
+        }
+    }
+
+    // D2 --------------------------------------------------------------------------------------
+    #[test]
+    fn cold_directory_parity_cold_only() {
+        let db = AletheiaDB::new().unwrap();
+        let nodes: Vec<_> = (0..20)
+            .map(|i| cold_node(1_000 + i, 5_000 + i, ts(100 + i as i64), "ColdNode"))
+            .collect();
+        let edges: Vec<_> = (0..10)
+            .map(|i| cold_edge(2_000 + i, 6_000 + i, ts(200 + i as i64), "ColdEdge"))
+            .collect();
+        let _dir = attach_cold(&db, &nodes, &edges);
+        let (from, to) = all();
+        for limit in [1usize, 5, 15, 29, 30, 100] {
+            assert_parity(&db, &query(from, to, limit));
+            assert_parity_independent(&db, &query(from, to, limit));
+        }
+    }
+
+    // D3 --------------------------------------------------------------------------------------
+    #[test]
+    fn cold_directory_parity_mixed_tiers() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..15 {
+            db.write(|tx| {
+                tx.create_node("Person", props(&format!("hot{i}")))?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        }
+        let nodes = vec![
+            cold_node(1_000, 1_000, ts(50), "Person"),
+            cold_node(1_001, 1_001, ts(60), "Company"),
+            cold_node_tomb(1_002, 1_003, ts(70), ts(65)),
+        ];
+        let edges = vec![
+            cold_edge(2_000, 2_000, ts(55), "KNOWS"),
+            cold_edge(2_001, 2_001, ts(80), "WORKS_AT"),
+        ];
+        let _dir = attach_cold(&db, &nodes, &edges);
+        let (from, to) = all();
+        for limit in [1usize, 2, 3, 5, 100] {
+            assert_parity(&db, &query(from, to, limit));
+            assert_parity_independent(&db, &query(from, to, limit));
+        }
+        // Cold-only narrow window through the directory.
+        assert_parity_independent(&db, &query(ts(40), ts(90), 100));
+    }
+
+    // D4 --------------------------------------------------------------------------------------
+    /// Directory ordering follows tx-time (`ChangeCursor`), never `version_id`: a smaller
+    /// version_id carrying a larger tx-time still pages after. Byte-parity + a small decode count
+    /// (only the two window candidates are point-read).
+    #[test]
+    fn cold_directory_version_id_inversion_parity() {
+        let db = AletheiaDB::new().unwrap();
+        let earlier_txn_bigger_vid = cold_node(500, 100, ts(1_000), "Cold"); // vid 500, tx 1000
+        let later_txn_smaller_vid = cold_node(100, 200, ts(2_000), "Cold"); // vid 100, tx 2000
+        let _dir = attach_cold(&db, &[earlier_txn_bigger_vid, later_txn_smaller_vid], &[]);
+
+        let (from, to) = all();
+        for limit in [1usize, 2, 3] {
+            assert_parity(&db, &query(from, to, limit));
+        }
+        let drained = drain_all(&db, &query(from, to, 1));
+        assert_eq!(
+            drained,
+            vec![
+                (100u64, EntityKind::Node.ord(), 500u64),
+                (200u64, EntityKind::Node.ord(), 100u64),
+            ],
+            "ordering follows tx-time, not version_id"
+        );
+
+        // Only the two in-window versions are decoded (point reads), not a full scan.
+        crate::storage::redb_cold_storage::reset_cold_decode_counter();
+        let _ = db.list_changes(&query(from, to, 10)).unwrap();
+        let decoded = crate::storage::redb_cold_storage::cold_decode_count();
+        assert!(
+            decoded <= 4,
+            "expected only window candidates decoded, got {decoded}"
+        );
+    }
+
+    // D5 --------------------------------------------------------------------------------------
+    /// A bounded query early-stops the ascending point-read walk after `bound` survivors, decoding
+    /// only ~`bound` versions even though the window matches all 200.
+    #[test]
+    fn cold_directory_early_stop_bound() {
+        let db = AletheiaDB::new().unwrap();
+        let nodes: Vec<_> = (1..=200u64)
+            .map(|i| cold_node(i, i, ts((i as i64) * 1_000), "Person"))
+            .collect();
+        let _dir = attach_cold(&db, &nodes, &[]);
+
+        // Whole-timeline window (all 200 match), small limit -> bound = limit + 1.
+        let (from, to) = all();
+        let limit = 5usize;
+        crate::storage::redb_cold_storage::reset_cold_decode_counter();
+        let page = db.list_changes(&query(from, to, limit)).unwrap();
+        let decoded = crate::storage::redb_cold_storage::cold_decode_count();
+        assert_eq!(page.changes.len(), limit);
+        assert!(
+            decoded <= (limit as u64) + 2,
+            "bounded walk must early-stop near bound, decoded {decoded} of 200"
+        );
+        // And it is still byte-identical to the oracle.
+        assert_parity(&db, &query(from, to, limit));
+    }
+
+    // D6 --------------------------------------------------------------------------------------
+    /// Under a tiny budget a *recent* window (above the eviction watermark) stays on the fast
+    /// path: byte-parity and only the window candidates decoded.
+    #[test]
+    fn cold_directory_partial_coverage_recent_window() {
+        let db = AletheiaDB::new().unwrap();
+        let nodes: Vec<_> = (1..=200u64)
+            .map(|i| cold_node(i, i, ts((i as i64) * 1_000), "Person"))
+            .collect();
+        // Budget 10 -> newest 10 retained (i = 191..=200), i = 1..=190 evicted.
+        let (_dir, tiered) = attach_cold_with_max(&db, &nodes, &[], 10);
+        assert!(!tiered.cold_change_directory().is_complete());
+        assert_eq!(tiered.cold_change_directory().len(), 10);
+
+        // Recent window matching i in {196..=200}, entirely above the watermark.
+        let q = query(ts(195_500), ts(201_000), 5);
+        assert!(
+            tiered
+                .cold_change_directory()
+                .eligible_candidates(&TimeRange::new(ts(195_500), ts(201_000)).unwrap(), None)
+                .is_some(),
+            "recent window must remain eligible under eviction"
+        );
+
+        crate::storage::redb_cold_storage::reset_cold_decode_counter();
+        let page = db.list_changes(&q).unwrap();
+        let decoded = crate::storage::redb_cold_storage::cold_decode_count();
+        assert_eq!(page.changes.len(), 5);
+        assert!(
+            decoded <= 20,
+            "recent-window query stays windowed under a tiny budget, decoded {decoded}"
+        );
+        assert_parity(&db, &q);
+    }
+
+    // D7 --------------------------------------------------------------------------------------
+    /// Under the same tiny budget an *old* window (below the watermark) degrades to the full scan:
+    /// still byte-correct, and confirmed to have taken the scan path (all versions decoded, and
+    /// `eligible_candidates` returns `None`).
+    #[test]
+    fn cold_directory_degrade_over_budget_parity() {
+        let db = AletheiaDB::new().unwrap();
+        let nodes: Vec<_> = (1..=200u64)
+            .map(|i| cold_node(i, i, ts((i as i64) * 1_000), "Person"))
+            .collect();
+        let (_dir, tiered) = attach_cold_with_max(&db, &nodes, &[], 10);
+
+        // Old window matching i in {1..=5}, below the eviction watermark -> must degrade.
+        let old_window = TimeRange::new(ts(500), ts(5_500)).unwrap();
+        assert!(
+            tiered
+                .cold_change_directory()
+                .eligible_candidates(&old_window, None)
+                .is_none(),
+            "old window below watermark must degrade to scan"
+        );
+
+        let q = query(ts(500), ts(5_500), 100);
+        crate::storage::redb_cold_storage::reset_cold_decode_counter();
+        let page = db.list_changes(&q).unwrap();
+        let decoded = crate::storage::redb_cold_storage::cold_decode_count();
+        assert_eq!(
+            page.changes.len(),
+            5,
+            "window matches exactly 5 old versions"
+        );
+        assert!(
+            decoded >= 200,
+            "degrade path performs the full cold scan, decoded {decoded}"
+        );
+        assert_parity(&db, &q);
+    }
+
+    // D8 --------------------------------------------------------------------------------------
+    /// The directory is seeded from the cold tier on construction (startup / attach), so a
+    /// freshly-built `TieredStorage` over a populated cold store answers with parity.
+    #[test]
+    fn cold_directory_startup_rebuild_parity() {
+        let db = AletheiaDB::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cold =
+            Arc::new(RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap());
+        let nodes: Vec<_> = (0..25)
+            .map(|i| cold_node(3_000 + i, 7_000 + i, ts(10 + i as i64), "Cold"))
+            .collect();
+        let edges: Vec<_> = (0..15)
+            .map(|i| cold_edge(4_000 + i, 8_000 + i, ts(300 + i as i64), "ColdEdge"))
+            .collect();
+        for v in &nodes {
+            cold.store_node_version(v).unwrap();
+        }
+        for v in &edges {
+            cold.store_edge_version(v).unwrap();
+        }
+
+        // Fresh construction over the already-populated cold Arc: `new` rebuilds the directory.
+        let tiered = Arc::new(TieredStorage::with_default_config(cold));
+        assert_eq!(
+            tiered.cold_change_directory().len(),
+            nodes.len() + edges.len(),
+            "directory seeded from cold on construction"
+        );
+        assert!(tiered.cold_change_directory().is_complete());
+        db.__test_historical_storage()
+            .write()
+            .set_tiered_storage(tiered);
+
+        let (from, to) = all();
+        for limit in [1usize, 5, 20, 40, 100] {
+            assert_parity(&db, &query(from, to, limit));
+            assert_parity_independent(&db, &query(from, to, limit));
+        }
+        drop(dir);
+    }
+
+    // D9 --------------------------------------------------------------------------------------
+    /// Directory correctness under concurrent hot→cold migration (AC4): writers create+update
+    /// nodes, a migrator loops `migrate_to_cold`, and a reader pages `list_changes` — all
+    /// concurrently. Each concurrent drain is duplicate-free, and after quiescence the paged drain
+    /// equals the unbounded ground truth (no gap, no dup).
+    #[test]
+    fn cold_directory_concurrent_migration_stress() {
+        use crate::storage::migration::{MigrationPolicy, MigrationService};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let cold =
+            Arc::new(RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap());
+        let tiered = Arc::new(TieredStorage::with_default_config(cold.clone()));
+        db.__test_historical_storage()
+            .write()
+            .set_tiered_storage(tiered);
+        // age_threshold 0 => every non-head version is a migration candidate immediately.
+        let policy = MigrationPolicy::builder()
+            .age_threshold(Duration::ZERO)
+            .min_hot_versions(1)
+            .batch_size(1_000)
+            .enabled(true)
+            .build();
+        let service = Arc::new(MigrationService::new(cold, policy));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers_done = Arc::new(AtomicBool::new(false));
+
+        const WRITERS: u64 = 2;
+        const PER_WRITER: u64 = 60;
+
+        // Writers: create + update each node (2 versions; the anchor becomes migratable).
+        let mut writer_handles = Vec::new();
+        for w in 0..WRITERS {
+            let db = db.clone();
+            writer_handles.push(std::thread::spawn(move || {
+                for i in 0..PER_WRITER {
+                    let name = format!("w{w}n{i}");
+                    let (id, _t) = db
+                        .write_with_timestamp(|tx| tx.create_node("Person", props(&name)))
+                        .unwrap();
+                    db.write(|tx| {
+                        tx.update_node(id, props(&format!("{name}-v2")))?;
+                        Ok::<_, Error>(())
+                    })
+                    .unwrap();
+                }
+            }));
+        }
+
+        // Migrator: loop migrate_to_cold until told to stop.
+        let migrator = {
+            let db = db.clone();
+            let service = service.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = db
+                        .__test_historical_storage()
+                        .write()
+                        .migrate_to_cold(&service);
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            })
+        };
+
+        // Reader: drain repeatedly, concurrent with writes + migration; each drain is dup-free.
+        let (from, to) = all();
+        let reader = {
+            let db = db.clone();
+            let writers_done = writers_done.clone();
+            std::thread::spawn(move || {
+                let mut rounds = 0usize;
+                loop {
+                    let drained = drain_all(&db, &query(from, to, 7));
+                    let mut seen = std::collections::HashSet::new();
+                    for k in &drained {
+                        assert!(
+                            seen.insert(*k),
+                            "duplicate (entity,kind,version) within one concurrent drain: {k:?}"
+                        );
+                    }
+                    rounds += 1;
+                    if writers_done.load(Ordering::Relaxed) && rounds > 3 {
+                        break;
+                    }
+                }
+            })
+        };
+
+        for h in writer_handles {
+            h.join().unwrap();
+        }
+        writers_done.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        migrator.join().unwrap();
+
+        // Quiesce: migrate everything possible, then compare a paged drain to the unbounded truth.
+        let _ = db
+            .__test_historical_storage()
+            .write()
+            .migrate_to_cold(&service);
+        let unbounded = db.list_changes(&query(from, to, 1_000_000)).unwrap();
+        let want: Vec<_> = unbounded
+            .changes
+            .iter()
+            .map(|r| (r.entity_id, r.kind.ord(), r.version_id))
+            .collect();
+        assert_eq!(
+            want.len() as u64,
+            WRITERS * PER_WRITER * 2,
+            "every created + modified version is visible exactly once"
+        );
+        let drained = drain_all(&db, &query(from, to, 11));
+        assert_eq!(
+            drained, want,
+            "paged drain equals unbounded across concurrent migration (no gap, no dup)"
+        );
+        drop(dir);
+    }
+
     /// Bench-adjacent (honest): print the candidate working-set size and wall time of the
     /// optimized path vs the unbounded reference oracle for a bounded/limited query over a large
     /// hot history. Ignored by default; run with `--ignored --nocapture` to capture PR numbers.
