@@ -1010,6 +1010,14 @@ enum RotationDirection {
     /// old→new generation, gated on `encryption.enabled`) never touch an enable
     /// ledger — the enable engine's own `resume_pending_enable` drives it.
     Enable,
+    /// An encrypted → plaintext **disable** migration (Issue #3616 PR4) — the
+    /// mirror of [`Enable`](RotationDirection::Enable). Recorded on the same
+    /// cross-layer ledger, but distinguished by this direction so the rotation
+    /// resume paths (which assume an already-encrypted old→new generation) never
+    /// touch a disable ledger — the disable engine's own resume drives it. On a
+    /// disable ledger `new_version` / `new_source` name the CURRENT (to-be-retired)
+    /// key coordinates, i.e. the key a resumed disable uses to DECRYPT each layer.
+    Disable,
 }
 
 impl RotationDirection {
@@ -1018,6 +1026,7 @@ impl RotationDirection {
             RotationDirection::Forward => "forward",
             RotationDirection::Cancel => "cancel",
             RotationDirection::Enable => "enable",
+            RotationDirection::Disable => "disable",
         }
     }
 }
@@ -1170,6 +1179,57 @@ impl RotationLedger {
             // Retire the pre-enable plaintext WAL only when there is an index
             // snapshot to durably hold the pre-enable state first (index in scope).
             // With no snapshot, retiring plaintext WAL could lose data, so Skip it.
+            wal_retire: scope(index_in_scope),
+        }
+    }
+
+    /// The encrypted → plaintext **disable** plan (Issue #3616 PR4) — the exact
+    /// mirror of [`enable_scope`](RotationLedger::enable_scope).
+    ///
+    /// The WAL is ALWAYS `Pending` (a disable's whole point is to strip the live
+    /// WAL's encryption). Index / checkpoint / cold are `Pending` only when there
+    /// are encrypted bytes of that layer to UNWRAP back to plaintext
+    /// (`*_in_scope`), else `Skipped`. `new_version` / `new_source` carry the
+    /// CURRENT (to-be-retired) key coordinates so a resumed disable can rebuild the
+    /// DECRYPT cipher from the same recorded source.
+    ///
+    /// Callers and the resumer MUST drive off each per-field [`LayerStatus`] BY
+    /// NAME — never a positional index or a count of layers — so a future layer
+    /// added the same by-name way (e.g. the GDPR `subject_keyring` layer) composes
+    /// without editing the disable path.
+    //
+    // Shipped ahead of its production consumer: the disable-engine driver
+    // (`disable_encryption` + its `write_disable_ledger`/`resume_pending_disable`)
+    // lands in the next PR4 slice and is what constructs this in a non-test build.
+    // Until then only the ledger round-trip tests exercise it, so the lib build
+    // sees it as dead — mirror the repo's seam-ahead-of-consumer pattern rather
+    // than gate the whole engine behind one commit.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn disable_scope(
+        current_version: u32,
+        current_source: KeyProviderConfig,
+        index_in_scope: bool,
+        cold_in_scope: bool,
+    ) -> Self {
+        let scope = |in_scope: bool| {
+            if in_scope {
+                LayerStatus::Pending
+            } else {
+                LayerStatus::Skipped
+            }
+        };
+        Self {
+            direction: RotationDirection::Disable,
+            new_version: current_version,
+            new_source: current_source,
+            index: scope(index_in_scope),
+            checkpoint: scope(index_in_scope),
+            wal: LayerStatus::Pending,
+            cold: scope(cold_in_scope),
+            // Retire the pre-disable ENCRYPTED WAL only when there is an index
+            // snapshot to durably hold the decrypted state first (index in scope) —
+            // the mirror of the enable retire guard. With no snapshot, retiring the
+            // encrypted WAL could lose data, so Skip it.
             wal_retire: scope(index_in_scope),
         }
     }
@@ -1362,6 +1422,7 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
                     "forward" => RotationDirection::Forward,
                     "cancel" => RotationDirection::Cancel,
                     "enable" => RotationDirection::Enable,
+                    "disable" => RotationDirection::Disable,
                     other => return Err(corrupt(&format!("unknown direction {other:?}"))),
                 }
             }
@@ -1513,7 +1574,10 @@ pub fn install_pending_wal_generations(
     // A plaintext → encrypted ENABLE ledger (Issue #3616 PR3) is driven by the
     // enable engine's own pre-read hook + `resume_pending_enable`, never by the
     // rotation resume paths (which assume an already-encrypted old→new gen).
-    if matches!(ledger.direction, RotationDirection::Enable) {
+    if matches!(
+        ledger.direction,
+        RotationDirection::Enable | RotationDirection::Disable
+    ) {
         return Ok(());
     }
     if !matches!(ledger.wal, LayerStatus::Pending) {
@@ -1863,7 +1927,10 @@ pub fn resume_pending_rotation(
     };
     // An ENABLE ledger (Issue #3616 PR3) is not a rotation — leave it for
     // `resume_pending_enable`, never resume it as an old→new-generation rotation.
-    if matches!(ledger.direction, RotationDirection::Enable) {
+    if matches!(
+        ledger.direction,
+        RotationDirection::Enable | RotationDirection::Disable
+    ) {
         return Ok(None);
     }
     let Some(keyring) = manager.keyring().cloned() else {
@@ -2042,11 +2109,12 @@ pub fn resume_pending_rotation(
                 duration_ms: started.elapsed().as_millis() as u64,
             }
         }
-        // A `direction=enable` ledger is short-circuited to `Ok(None)` at the top
-        // of this function (the rotation resume paths never drive an enable), so
-        // it can never reach this match.
-        RotationDirection::Enable => {
-            unreachable!("enable ledgers are skipped before rotation resume")
+        // A `direction=enable` (or `direction=disable`, Issue #3616 PR4) ledger is
+        // short-circuited to `Ok(None)` at the top of this function (the rotation
+        // resume paths never drive a migration engine), so it can never reach this
+        // match.
+        RotationDirection::Enable | RotationDirection::Disable => {
+            unreachable!("enable/disable ledgers are skipped before rotation resume")
         }
     };
 
@@ -2097,7 +2165,10 @@ pub fn finalize_resumed_wal_rotation(
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(());
     };
-    if matches!(ledger.direction, RotationDirection::Enable) {
+    if matches!(
+        ledger.direction,
+        RotationDirection::Enable | RotationDirection::Disable
+    ) {
         return Ok(());
     }
     if !matches!(ledger.wal, LayerStatus::Pending) {
@@ -2193,7 +2264,10 @@ pub fn finalize_resumed_cold_rotation(
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(());
     };
-    if matches!(ledger.direction, RotationDirection::Enable) {
+    if matches!(
+        ledger.direction,
+        RotationDirection::Enable | RotationDirection::Disable
+    ) {
         return Ok(());
     }
     if !matches!(ledger.cold, LayerStatus::Pending) {
@@ -3553,6 +3627,97 @@ mod tests {
             })
             .collect();
         assert!(leftover.is_empty(), "durable write left a temp file behind");
+    }
+
+    // ── #3616 PR4: encrypted → plaintext DISABLE direction (mirror of Enable) ─
+
+    #[test]
+    fn disable_scope_ledger_round_trips_by_name() {
+        // The encrypted → plaintext DISABLE plan (Issue #3616 PR4) is recorded on
+        // the SAME v2 cross-layer ledger as a rotation/enable, discriminated by
+        // `direction=disable`. Every per-layer status is addressed BY NAME (no
+        // positional/count assumption), so a future layer added the same by-name
+        // way (e.g. GDPR `subject_keyring`) composes without editing this path.
+        //
+        // Semantics are the inverse of `enable_scope`: the WAL is ALWAYS `Pending`
+        // (a disable's whole point is to strip the live WAL's encryption); index /
+        // checkpoint / cold are `Pending` only when there are encrypted bytes of
+        // that layer to unwrap, else `Skipped`.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            None,
+        ));
+
+        // Retiring the CURRENT key (version 7); the recorded source is the current
+        // key needed to build the DECRYPT cipher during a resumed disable.
+        let ledger = super::RotationLedger::disable_scope(
+            7,
+            KeyProviderConfig::Env {
+                variable: "CURRENT_MEK".to_string(),
+            },
+            /* index_in_scope */ true,
+            /* cold_in_scope */ false,
+        );
+        assert_eq!(ledger.direction, super::RotationDirection::Disable);
+        assert_eq!(
+            ledger.wal,
+            super::LayerStatus::Pending,
+            "WAL always in scope"
+        );
+        assert_eq!(ledger.index, super::LayerStatus::Pending);
+        assert_eq!(ledger.checkpoint, super::LayerStatus::Pending);
+        assert_eq!(ledger.cold, super::LayerStatus::Skipped, "no cold tier");
+        assert_eq!(ledger.wal_retire, super::LayerStatus::Pending);
+
+        super::write_ledger(&manager, &ledger).unwrap();
+
+        let read = super::read_rotation_state(&manager)
+            .unwrap()
+            .expect("ledger present");
+        assert_eq!(read, ledger, "every disable-ledger field must round-trip");
+
+        let body = std::fs::read_to_string(root.join("data").join("rotation.state")).unwrap();
+        assert!(body.contains("version=2"), "expected v2 format: {body}");
+        assert!(body.contains("direction=disable"), "direction: {body}");
+        assert!(body.contains("layer.wal=pending"));
+        assert!(body.contains("layer.index=pending"));
+        assert!(body.contains("layer.cold=skipped"));
+        // Source REFERENCE only (env var NAME), never key bytes.
+        assert!(body.contains("new_source_kind=env") && body.contains("CURRENT_MEK"));
+    }
+
+    #[test]
+    fn disable_ledger_is_skipped_by_rotation_resume() {
+        // A `direction=disable` ledger must NEVER be driven by the rotation resume
+        // paths (which assume an already-encrypted old→new generation). It is the
+        // disable engine's own resume that completes it — exactly as an `enable`
+        // ledger is skipped. Proven here by the direct classification helpers so
+        // the guard is regression-locked without standing up a full DB.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let manager =
+            std::sync::Arc::new(IndexPersistenceManager::with_cipher(data_dir.clone(), None));
+        let ledger = super::RotationLedger::disable_scope(
+            3,
+            KeyProviderConfig::File {
+                path: root.join("mek.key"),
+            },
+            true,
+            false,
+        );
+        super::write_ledger(&manager, &ledger).unwrap();
+
+        let read = super::read_rotation_state(&manager)
+            .unwrap()
+            .expect("ledger present");
+        assert!(
+            matches!(read.direction, super::RotationDirection::Disable),
+            "a disable ledger must parse back as Disable, never a rotation"
+        );
     }
 
     #[test]
