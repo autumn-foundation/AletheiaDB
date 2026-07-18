@@ -1633,16 +1633,15 @@ fn oversized_keyring_sidecar_rejected_on_restore() {
         result.is_err(),
         "an over-cap keyring sidecar must be rejected on restore"
     );
-    // No oversized keyring was written to the target data dir.
+    // The over-cap sidecar is rejected BEFORE any write, so no
+    // `subject_keyring.dat` may exist in the target data dir at all.
     let written = dst
         .path()
         .join(crate::db::crypto_shred::keyring::KEYRING_FILENAME);
-    if let Ok(meta) = std::fs::metadata(&written) {
-        assert!(
-            meta.len() <= MAX_KEYRING_BYTES,
-            "no oversized subject_keyring.dat may be written"
-        );
-    }
+    assert!(
+        !written.exists(),
+        "no subject_keyring.dat may be written when an over-cap sidecar is rejected"
+    );
 }
 
 /// R2 cold clause (Issue #3665 hardening, best-effort): a sealed designated

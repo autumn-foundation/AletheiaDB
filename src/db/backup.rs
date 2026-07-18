@@ -315,13 +315,17 @@ fn restore_keyring_sidecar(
     } else {
         // Keyless restore: drop any stale keyring left in the target so the
         // restored (empty-crypto-shred) state wins over pre-existing state.
+        // Attempt the delete directly and ignore only NotFound — this avoids the
+        // redundant `exists()` check and the TOCTOU window it opens.
         let stale = data_dir.join(keyring::KEYRING_FILENAME);
-        if stale.exists() {
-            std::fs::remove_file(&stale).map_err(|e| {
-                Error::Backup(BackupError::Io(format!(
+        match std::fs::remove_file(&stale) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Error::Backup(BackupError::Io(format!(
                     "failed to remove stale keyring sidecar: {e}"
-                )))
-            })?;
+                ))));
+            }
         }
         if payload_has_sealed_properties(payload) {
             let message = "crypto-shred: restoring a pre-v7 backup that contains \
