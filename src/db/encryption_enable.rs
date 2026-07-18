@@ -761,6 +761,31 @@ mod tests {
         let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
         assert_eq!(db.node_count(), 1, "node survives reopen via encrypted WAL");
         assert!(db.wal.is_encrypted(), "reopen honors the durable authority");
+        drop(db);
+
+        // Whole-directory sweep: complementing the per-file round-trip magic asserts
+        // elsewhere, sweep the ENTIRE index data dir and assert NOT ONE persisted
+        // index file (bitcode manifest/interner/graph/temporal/temporal_adjacency/
+        // vector-meta + native usearch files) still begins with plaintext bytes —
+        // every one carries the `AEIX` header. This is the guard against a future
+        // NEW persist path that uses the plaintext writer instead of the cipher-aware
+        // one: such a path compiles fine and silently writes PLAINTEXT, and only a
+        // full-dir scan (not a targeted round-trip on the files we happen to know
+        // about) catches it.
+        let idx_dir = index_files_dir(dir.path());
+        let (total, plain, aeix) = classify_index_files(&idx_dir);
+        assert!(
+            total > 0,
+            "enable + reopen persisted an encrypted index snapshot to sweep"
+        );
+        assert_eq!(
+            plain, 0,
+            "no plaintext index file survives enable (whole-dir sweep)"
+        );
+        assert_eq!(
+            aeix, total,
+            "every persisted index file is AEIX after enable"
+        );
     }
 
     /// Enabling an ephemeral (in-memory) database is refused.
