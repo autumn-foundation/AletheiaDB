@@ -87,7 +87,23 @@ pub fn persist_property_value(value: &PropertyValue) -> Result<PersistedProperty
         PropertyValue::Float(f) => PersistedPropertyValue::Float(*f),
         PropertyValue::String(s) => {
             let interned = GLOBAL_INTERNER.intern(s.as_ref()).map_err(|e| {
-                IndexPersistenceError::Serialization(format!("Failed to intern string: {}", e))
+                // Preserve a STRUCTURED interner-capacity signal (configurable
+                // interner cap) so the background-persist worker suspends the
+                // affected index deterministically instead of scraping Display
+                // text. A capacity exhaustion here is exactly the "egregore hang"
+                // trigger: high-cardinality property VALUES interned lazily at
+                // persist time. Any other intern error keeps the generic wrap.
+                match e {
+                    crate::core::error::Error::Storage(
+                        crate::core::error::StorageError::CapacityExceeded {
+                            current, limit, ..
+                        },
+                    ) => IndexPersistenceError::InternerCapacityExceeded { current, limit },
+                    other => IndexPersistenceError::Serialization(format!(
+                        "Failed to intern string: {}",
+                        other
+                    )),
+                }
             })?;
             PersistedPropertyValue::String(interned.as_u32())
         }

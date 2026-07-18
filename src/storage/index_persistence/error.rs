@@ -59,6 +59,22 @@ pub enum IndexPersistenceError {
         message: String,
     },
 
+    /// The process-global string interner is at capacity while serializing a
+    /// property VALUE at persist time (configurable interner cap).
+    ///
+    /// A **structured** signal (as opposed to a `Serialization(String)` wrap of
+    /// the interner's `CapacityExceeded` Display) so the background-persist
+    /// worker can classify this failure as *deterministic* — suspend the affected
+    /// index until the process restarts with a raised
+    /// `persistence.max_interned_strings` — without brittle Display-text matching.
+    #[error("String interner at capacity ({current}/{limit}) while persisting a property value")]
+    InternerCapacityExceeded {
+        /// The interner id that could not be admitted (== the size at the breach).
+        current: usize,
+        /// The configured cap that was hit.
+        limit: usize,
+    },
+
     /// IO error during persistence operations
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -81,6 +97,35 @@ impl IndexPersistenceError {
             self,
             IndexPersistenceError::Io(e) if e.kind() == std::io::ErrorKind::NotFound
         )
+    }
+
+    /// Convert this persistence error into a core [`Error`](crate::core::error::Error)
+    /// for the write/persist path, PRESERVING a structured interner-capacity
+    /// signal (configurable interner cap).
+    ///
+    /// [`IndexPersistenceError::InternerCapacityExceeded`] becomes a typed
+    /// [`StorageError::CapacityExceeded`](crate::core::error::StorageError::CapacityExceeded)
+    /// so the background-persist worker classifies it as *deterministic* (suspend
+    /// until restart) by matching the variant — never by scraping Display text.
+    /// Every other variant is wrapped as a `PersistenceError(String)` carrying
+    /// `context` (a transient I/O failure, a not-yet-supported property kind),
+    /// exactly as before, so those stay on the normal retry cadence.
+    pub(crate) fn into_persist_storage_error(
+        self,
+        context: &str,
+    ) -> crate::core::error::StorageError {
+        match self {
+            IndexPersistenceError::InternerCapacityExceeded { current, limit } => {
+                crate::core::error::StorageError::CapacityExceeded {
+                    resource: "string interner".to_string(),
+                    current,
+                    limit,
+                }
+            }
+            other => {
+                crate::core::error::StorageError::PersistenceError(format!("{context}: {other}"))
+            }
+        }
     }
 }
 

@@ -44,6 +44,7 @@
 
 use crate::core::changefeed::{ChangeRecord, ChangeType, EntityKind};
 use crate::core::error::{Result, StorageError};
+use crate::core::namespace::NamespaceScope;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
@@ -177,6 +178,11 @@ impl ChangefeedConfig {
 ///   matching edge changes (nodes excluded). Set both to receive both kinds.
 /// - `change_types`, if set, is an independent AND: the record's [`ChangeType`] must be in
 ///   the set, regardless of kind.
+/// - `namespace`, if set, is an independent AND on the ownership axis (Issue #3349, PR3c):
+///   the record's entity namespace must fall inside the [`NamespaceScope`]. Unset (`None`)
+///   matches **every** namespace — exact back-compat — as does an explicit
+///   [`NamespaceScope::All`]. A subscriber scoped to namespace `A` therefore never receives
+///   `B`'s changes, while an unscoped subscriber sees all.
 ///
 /// Label / edge-type matching is **exact string** match, mirroring #3216's `label` filter.
 #[derive(Debug, Clone, Default)]
@@ -184,6 +190,7 @@ pub struct ChangeFilter {
     node_labels: Option<HashSet<String>>,
     edge_types: Option<HashSet<String>>,
     change_types: Option<HashSet<ChangeType>>,
+    namespace: Option<NamespaceScope>,
 }
 
 impl ChangeFilter {
@@ -224,10 +231,36 @@ impl ChangeFilter {
         self
     }
 
+    /// Restrict to changes whose entity lives inside `scope` (Issue #3349, PR3c).
+    ///
+    /// A [`NamespaceScope::Single`] scopes to one namespace, a
+    /// [`NamespaceScope::List`] to their union, and [`NamespaceScope::All`] imposes
+    /// no filter (equivalent to omitting it). Independent AND with the
+    /// label/type/change-type axes; omitting it matches every namespace.
+    #[must_use]
+    pub fn with_namespace_scope(mut self, scope: NamespaceScope) -> Self {
+        self.namespace = Some(scope);
+        self
+    }
+
+    /// The namespace scope this filter restricts to, if any (Issue #3349, PR3c).
+    #[must_use]
+    pub fn namespace_scope(&self) -> Option<&NamespaceScope> {
+        self.namespace.as_ref()
+    }
+
     /// Whether `record` passes this filter (see the type-level semantics).
     pub fn matches(&self, record: &ChangeRecord) -> bool {
         if let Some(cts) = &self.change_types
             && !cts.contains(&record.change_type)
+        {
+            return false;
+        }
+
+        // Namespace axis (Issue #3349, PR3c): an independent AND. `All` / unset
+        // impose no filter; otherwise the entity's namespace must be in scope.
+        if let Some(scope) = &self.namespace
+            && !scope.contains(&record.namespace)
         {
             return false;
         }
@@ -1065,6 +1098,7 @@ mod tests {
             label: label.to_string(),
             transaction_time_range: tx_range,
             valid_time_range: valid_range,
+            namespace: crate::core::namespace::Namespace::default(),
         }
     }
 
@@ -1207,6 +1241,173 @@ mod tests {
             ChangeType::Created,
             "Company",
             10
+        )));
+    }
+
+    fn record_ns(
+        entity_id: u64,
+        kind: EntityKind,
+        change_type: ChangeType,
+        label: &str,
+        tx: i64,
+        namespace: &str,
+    ) -> ChangeRecord {
+        let mut r = record(entity_id, entity_id, kind, change_type, label, tx);
+        r.namespace = crate::core::namespace::Namespace::new(namespace).unwrap();
+        r
+    }
+
+    #[test]
+    fn no_namespace_filter_matches_every_namespace() {
+        // Back-compat (Issue #3349, PR3c): an unset namespace axis matches all.
+        let f = ChangeFilter::all();
+        assert!(f.matches(&record_ns(
+            1,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            10,
+            "agent:a"
+        )));
+        assert!(f.matches(&record_ns(
+            2,
+            EntityKind::Edge,
+            ChangeType::Created,
+            "K",
+            11,
+            "agent:b"
+        )));
+        assert!(f.matches(&record(
+            3,
+            3,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            12
+        )));
+    }
+
+    #[test]
+    fn namespace_scope_isolates_single() {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let f = ChangeFilter::all()
+            .with_namespace_scope(NamespaceScope::Single(Namespace::new("agent:a").unwrap()));
+        // In scope.
+        assert!(f.matches(&record_ns(
+            1,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            10,
+            "agent:a"
+        )));
+        assert!(f.matches(&record_ns(
+            2,
+            EntityKind::Edge,
+            ChangeType::Deleted,
+            "K",
+            11,
+            "agent:a"
+        )));
+        // Out of scope — B's changes never match an A-scoped filter.
+        assert!(!f.matches(&record_ns(
+            3,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            12,
+            "agent:b"
+        )));
+        // Default is also out of scope for an explicit non-default single scope.
+        assert!(!f.matches(&record(
+            4,
+            4,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            13
+        )));
+    }
+
+    #[test]
+    fn namespace_scope_union_and_all() {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let union = ChangeFilter::all().with_namespace_scope(
+            NamespaceScope::list(vec![
+                Namespace::new("agent:a").unwrap(),
+                Namespace::new("shared").unwrap(),
+            ])
+            .unwrap(),
+        );
+        assert!(union.matches(&record_ns(
+            1,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            10,
+            "agent:a"
+        )));
+        assert!(union.matches(&record_ns(
+            2,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            11,
+            "shared"
+        )));
+        assert!(!union.matches(&record_ns(
+            3,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            12,
+            "agent:b"
+        )));
+
+        // `All` imposes no namespace filter.
+        let all = ChangeFilter::all().with_namespace_scope(NamespaceScope::All);
+        assert!(all.matches(&record_ns(
+            4,
+            EntityKind::Node,
+            ChangeType::Created,
+            "P",
+            13,
+            "agent:b"
+        )));
+    }
+
+    #[test]
+    fn namespace_axis_ands_with_label_and_change_type() {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let f = ChangeFilter::all()
+            .with_node_labels(["Person"])
+            .with_namespace_scope(NamespaceScope::Single(Namespace::new("agent:a").unwrap()));
+        // Right label, right namespace.
+        assert!(f.matches(&record_ns(
+            1,
+            EntityKind::Node,
+            ChangeType::Created,
+            "Person",
+            10,
+            "agent:a"
+        )));
+        // Right label, wrong namespace.
+        assert!(!f.matches(&record_ns(
+            2,
+            EntityKind::Node,
+            ChangeType::Created,
+            "Person",
+            11,
+            "agent:b"
+        )));
+        // Right namespace, wrong label.
+        assert!(!f.matches(&record_ns(
+            3,
+            EntityKind::Node,
+            ChangeType::Created,
+            "Company",
+            12,
+            "agent:a"
         )));
     }
 

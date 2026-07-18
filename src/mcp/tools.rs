@@ -1273,6 +1273,17 @@ pub struct AwaitChangesRequest {
                        10000)."
     )]
     pub limit: Option<usize>,
+
+    /// Optional namespace scope (Issue #3349): a single namespace name, an array
+    /// of names (union), or "all". Omit to receive changes from the default
+    /// namespace only (isolated-by-default); use "all" for every namespace.
+    #[schemars(
+        description = "Optional namespace scope: a single namespace name, an array of names \
+                       (union), or \"all\". Omit for the default namespace only; \"all\" for every \
+                       namespace. A subscription scoped to a namespace never receives another \
+                       namespace's changes."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to get a node at a specific valid time (independent dimension query).

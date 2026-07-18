@@ -1010,6 +1010,14 @@ enum RotationDirection {
     /// old→new generation, gated on `encryption.enabled`) never touch an enable
     /// ledger — the enable engine's own `resume_pending_enable` drives it.
     Enable,
+    /// An encrypted → plaintext **disable** migration (Issue #3616 PR4) — the
+    /// mirror of [`Enable`](RotationDirection::Enable). Recorded on the same
+    /// cross-layer ledger, but distinguished by this direction so the rotation
+    /// resume paths (which assume an already-encrypted old→new generation) never
+    /// touch a disable ledger — the disable engine's own resume drives it. On a
+    /// disable ledger `new_version` / `new_source` name the CURRENT (to-be-retired)
+    /// key coordinates, i.e. the key a resumed disable uses to DECRYPT each layer.
+    Disable,
 }
 
 impl RotationDirection {
@@ -1018,6 +1026,7 @@ impl RotationDirection {
             RotationDirection::Forward => "forward",
             RotationDirection::Cancel => "cancel",
             RotationDirection::Enable => "enable",
+            RotationDirection::Disable => "disable",
         }
     }
 }
@@ -1170,6 +1179,53 @@ impl RotationLedger {
             // Retire the pre-enable plaintext WAL only when there is an index
             // snapshot to durably hold the pre-enable state first (index in scope).
             // With no snapshot, retiring plaintext WAL could lose data, so Skip it.
+            wal_retire: scope(index_in_scope),
+        }
+    }
+
+    /// The encrypted → plaintext **disable** plan (Issue #3616 PR4) — the exact
+    /// mirror of [`enable_scope`](RotationLedger::enable_scope).
+    ///
+    /// The WAL is ALWAYS `Pending` (a disable's whole point is to strip the live
+    /// WAL's encryption). Index / checkpoint / cold are `Pending` only when there
+    /// are encrypted bytes of that layer to UNWRAP back to plaintext
+    /// (`*_in_scope`), else `Skipped`. `new_version` / `new_source` carry the
+    /// CURRENT (to-be-retired) key coordinates so a resumed disable can rebuild the
+    /// DECRYPT cipher from the same recorded source.
+    ///
+    /// Callers and the resumer MUST drive off each per-field [`LayerStatus`] BY
+    /// NAME — never a positional index or a count of layers — so a future layer
+    /// added the same by-name way (e.g. the GDPR `subject_keyring` layer) composes
+    /// without editing the disable path.
+    //
+    // Consumed in non-test builds by the disable-engine driver
+    // (`write_disable_ledger` → `disable_encryption` / `resume_pending_disable`,
+    // Issue #3616 PR4).
+    fn disable_scope(
+        current_version: u32,
+        current_source: KeyProviderConfig,
+        index_in_scope: bool,
+        cold_in_scope: bool,
+    ) -> Self {
+        let scope = |in_scope: bool| {
+            if in_scope {
+                LayerStatus::Pending
+            } else {
+                LayerStatus::Skipped
+            }
+        };
+        Self {
+            direction: RotationDirection::Disable,
+            new_version: current_version,
+            new_source: current_source,
+            index: scope(index_in_scope),
+            checkpoint: scope(index_in_scope),
+            wal: LayerStatus::Pending,
+            cold: scope(cold_in_scope),
+            // Retire the pre-disable ENCRYPTED WAL only when there is an index
+            // snapshot to durably hold the decrypted state first (index in scope) —
+            // the mirror of the enable retire guard. With no snapshot, retiring the
+            // encrypted WAL could lose data, so Skip it.
             wal_retire: scope(index_in_scope),
         }
     }
@@ -1362,6 +1418,7 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
                     "forward" => RotationDirection::Forward,
                     "cancel" => RotationDirection::Cancel,
                     "enable" => RotationDirection::Enable,
+                    "disable" => RotationDirection::Disable,
                     other => return Err(corrupt(&format!("unknown direction {other:?}"))),
                 }
             }
@@ -1446,16 +1503,30 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
 ///
 /// # Precedence
 ///
-/// 1. **Pending rotation ledger** — the currently CONFIGURED key still
-///    corresponds to the OLD generation (the provider switch happens only after
-///    a rotation COMPLETES), so we provision to `ledger.new_version - 1` (the
-///    old version, since `new_version = old_version + 1` by construction) and
-///    let startup [`resume_pending_rotation`] drive the keyring to the ledger
-///    target. Provisioning to the *max on-disk* here would instead be the
-///    target itself and would mis-label the configured (old) cipher as the new
-///    version, breaking resume; the ledger target is therefore the authority
-///    for the *final* `current_version` (reached via resume), not the build
-///    version. This holds for a `cancel` ledger too (old = target - 1).
+/// 1. **Pending rotation ledger** — the provisioned version is resolved
+///    per-direction, because `new_version` does NOT mean the same thing for
+///    every direction:
+///    * `Forward` / `Cancel` — the currently CONFIGURED key still corresponds
+///      to the OLD generation (the provider switch happens only after a
+///      rotation COMPLETES), and `new_version = old_version + 1` by
+///      construction, so we provision to `ledger.new_version - 1` (the old
+///      version) and let startup [`resume_pending_rotation`] drive the keyring
+///      to the ledger target. Provisioning to the *max on-disk* here would
+///      instead be the target itself and would mis-label the configured (old)
+///      cipher as the new version, breaking resume; the ledger target is
+///      therefore the authority for the *final* `current_version` (reached via
+///      resume), not the build version. This holds for a `cancel` ledger too
+///      (old = target - 1).
+///    * `Disable` — a `disable_scope` ledger records `new_version =
+///      current_version` (the key still protecting the on-disk ciphertext, the
+///      key a resumed disable DECRYPTS with — see [`RotationDirection::Disable`]),
+///      NOT `old + 1`. Subtracting 1 here would provision `current_version - 1`
+///      and leave startup unable to decrypt files stamped `current_version`
+///      after a mid-disable crash, so we provision to `ledger.new_version`
+///      verbatim.
+///    * `Enable` — a plaintext → encrypted ledger has `new_version == BASE`, so
+///      `new_version` (no subtraction) equals the base and matches the old
+///      formula's result; kept in the exhaustive match for clarity.
 /// 2. **No pending ledger** (a completed rotation, or never rotated) — provision
 ///    to the MAX stamped key version across BOTH persisted layers: index-file
 ///    `AEIX` headers folded with WAL segment headers. A never-rotated database
@@ -1471,7 +1542,16 @@ pub(crate) fn resolve_provisioned_key_version(
     // 1. A pending ledger is the authority for a mid-rotation-crash state.
     let ledger_path = rotation_state_dir.join("rotation.state");
     if let Some(ledger) = read_rotation_state_at(&ledger_path)? {
-        return Ok(ledger.new_version.saturating_sub(1).max(BASE));
+        let version = match ledger.direction {
+            RotationDirection::Forward | RotationDirection::Cancel => {
+                ledger.new_version.saturating_sub(1).max(BASE)
+            }
+            // A disable ledger's `new_version` is the CURRENT (to-be-retired)
+            // key version protecting on-disk ciphertext, not `old + 1`; an
+            // enable ledger's is `BASE`. Both provision to `new_version` as-is.
+            RotationDirection::Enable | RotationDirection::Disable => ledger.new_version,
+        };
+        return Ok(version);
     }
 
     // 2. Otherwise the max stamped version across the index and WAL layers.
@@ -1513,7 +1593,10 @@ pub fn install_pending_wal_generations(
     // A plaintext → encrypted ENABLE ledger (Issue #3616 PR3) is driven by the
     // enable engine's own pre-read hook + `resume_pending_enable`, never by the
     // rotation resume paths (which assume an already-encrypted old→new gen).
-    if matches!(ledger.direction, RotationDirection::Enable) {
+    if matches!(
+        ledger.direction,
+        RotationDirection::Enable | RotationDirection::Disable
+    ) {
         return Ok(());
     }
     if !matches!(ledger.wal, LayerStatus::Pending) {
@@ -1832,6 +1915,287 @@ pub(crate) fn enable_resume_ciphers(
     }))
 }
 
+// ── Encrypted → plaintext DISABLE engine ledger helpers (Issue #3616 PR4) ──────
+//
+// The exact mirror of the ENABLE helpers above. The disable engine reuses the
+// cross-layer rotation ledger + `LayerStatus`, but records `direction=disable`
+// (see [`RotationDirection::Disable`]) so the rotation resume paths never touch
+// it. On a disable ledger `new_version` / `new_source` name the CURRENT
+// (to-be-retired) key coordinates — the key a resumed disable DECRYPTS each layer
+// with. These `pub(crate)` helpers are the seam the engine in
+// `crate::db::encryption_disable` drives; all ledger internals stay private here.
+
+/// The keep-version sentinel a disable WAL retire passes to
+/// [`retire_old_generation_segments`](ConcurrentWalSystem::retire_old_generation_segments):
+/// `0` is never a real key generation (both index and WAL bases are `1`), so every
+/// keyversioned (encrypted) sealed segment classifies as "old generation" and is
+/// deleted, while the fresh PLAINTEXT active segment is kept by the retire's own
+/// current-segment protection. This is how disable retires the encrypted WAL tail
+/// while keeping the post-uninstall plaintext segment.
+const DISABLE_WAL_RETIRE_KEEP_VERSION: u32 = 0;
+
+/// Per-field view of an in-flight DISABLE ledger for the resume driver — the
+/// mirror of [`EnableLedgerView`], exposing the recorded (to-be-retired) key
+/// source + version and each layer's pending/complete state WITHOUT leaking the
+/// private [`RotationLedger`] / [`LayerStatus`] types.
+pub(crate) struct DisableLedgerView {
+    /// The File/Env key-source reference the on-disk ciphertext is protected by
+    /// (the key a resumed disable DECRYPTS with).
+    pub(crate) current_source: KeyProviderConfig,
+    /// The key version the on-disk encrypted bytes are stamped with (used to
+    /// build the decrypt WAL / cold keyrings at the correct generation).
+    pub(crate) current_version: u32,
+    /// `true` while the index layer still needs its `AEIX` → plaintext unwrap.
+    pub(crate) index_pending: bool,
+    /// `true` while the checkpoint layer is still pending.
+    pub(crate) checkpoint_pending: bool,
+    /// `true` while the cold layer still needs its `ACV1` → bare unwrap pass.
+    pub(crate) cold_pending: bool,
+    /// `true` while the pre-disable ENCRYPTED WAL segments still need retiring.
+    pub(crate) wal_retire_pending: bool,
+    /// `true` once the encrypted WAL segments have been retired — the signal that
+    /// the WAL is fully plaintext at rest and needs no decrypt keyring to replay.
+    pub(crate) wal_retire_complete: bool,
+}
+
+impl DisableLedgerView {
+    fn from_ledger(ledger: RotationLedger) -> Self {
+        Self {
+            current_version: ledger.new_version,
+            index_pending: matches!(ledger.index, LayerStatus::Pending),
+            checkpoint_pending: matches!(ledger.checkpoint, LayerStatus::Pending),
+            cold_pending: matches!(ledger.cold, LayerStatus::Pending),
+            wal_retire_pending: matches!(ledger.wal_retire, LayerStatus::Pending),
+            wal_retire_complete: matches!(ledger.wal_retire, LayerStatus::Complete),
+            current_source: ledger.new_source,
+        }
+    }
+
+    /// Every non-WAL layer is settled (none still `Pending`), so the only
+    /// remaining disable work is the authority flip + ledger clear. The mirror of
+    /// [`EnableLedgerView::non_wal_layers_settled`]: the index + checkpoint unwrap
+    /// runs inline in `resume_pending_disable` (before the index dir is read back),
+    /// while cold is completed in a later phase (`resume_pending_disable_cold`,
+    /// after the cold store is wired), so a cold-in-scope resume keeps the ledger
+    /// and defers the flip. `wal_retire` is included: the authority must not flip
+    /// until the encrypted WAL tail is retired.
+    pub(crate) fn non_wal_layers_settled(&self) -> bool {
+        !self.index_pending
+            && !self.checkpoint_pending
+            && !self.cold_pending
+            && !self.wal_retire_pending
+    }
+
+    /// Whether the on-disk WAL may still carry ENCRYPTED segments needing a
+    /// decrypt keyring for the startup replay read — true until the encrypted
+    /// tail has been retired. Once `wal_retire` is `Complete` the WAL is plaintext
+    /// at rest and installing a keyring would needlessly RE-ENCRYPT the fresh
+    /// active segment.
+    pub(crate) fn wal_encrypted_on_disk(&self) -> bool {
+        !self.wal_retire_complete
+    }
+}
+
+/// Read the in-flight DISABLE ledger for `manager`, if one is present. Returns
+/// `Ok(None)` when absent OR when a present ledger is a rotation / enable (not a
+/// disable) ledger. Fail-closed on a corrupt ledger (propagates the error).
+pub(crate) fn read_disable_ledger(
+    manager: &IndexPersistenceManager,
+) -> Result<Option<DisableLedgerView>> {
+    Ok(read_rotation_state(manager)?
+        .filter(|l| matches!(l.direction, RotationDirection::Disable))
+        .map(DisableLedgerView::from_ledger))
+}
+
+/// Path-based twin of [`read_disable_ledger`] for the pre-manager startup hook.
+pub(crate) fn read_disable_ledger_at(path: &std::path::Path) -> Result<Option<DisableLedgerView>> {
+    Ok(read_rotation_state_at(path)?
+        .filter(|l| matches!(l.direction, RotationDirection::Disable))
+        .map(DisableLedgerView::from_ledger))
+}
+
+/// Durably write the pending-disable ledger BEFORE any layer is touched (Issue
+/// #3616 PR4). WAL is always `Pending`; index/checkpoint/cold are `Pending` iff
+/// their `*_in_scope` bytes exist, else `Skipped`. `current_version` /
+/// `current_source` record the CURRENT (to-be-retired) key coordinates so a
+/// resumed disable can rebuild the decrypt cipher. Same crash-safe ordering as
+/// the enable ledger (temp → fsync → rename → parent-dir fsync).
+pub(crate) fn write_disable_ledger(
+    manager: &IndexPersistenceManager,
+    current_source: &KeyProviderConfig,
+    current_version: u32,
+    index_in_scope: bool,
+    cold_in_scope: bool,
+) -> Result<()> {
+    write_ledger(
+        manager,
+        &RotationLedger::disable_scope(
+            current_version,
+            current_source.clone(),
+            index_in_scope,
+            cold_in_scope,
+        ),
+    )
+}
+
+/// Build the WAL DEK keyring to install for a DISABLE resume — the DECRYPT keyring
+/// derived from the recorded (to-be-retired) key `source`, stamped at the recorded
+/// `version` so `read_from` decrypts each still-encrypted segment. No key material
+/// leaves `Zeroizing`. (The disable DRIVER does not need this — it strips the WAL
+/// via [`ConcurrentWalSystem::uninstall_wal_keyring`] on the live encrypted WAL —
+/// only the resume path, whose WAL was built plaintext, does.)
+pub(crate) fn build_disable_wal_keyring(
+    source: &KeyProviderConfig,
+    algorithm: Algorithm,
+    version: u32,
+) -> Result<WalKeyring> {
+    let wal_dek = derive_wal_dek(load_mek(source).map_err(rotation_err)?).map_err(rotation_err)?;
+    let cipher: Arc<dyn Cipher> = Arc::from(create_cipher(algorithm, &wal_dek));
+    Ok(WalKeyring::single_versioned(cipher, version))
+}
+
+/// Build the index DEK cipher for a disable, derived from the recorded key
+/// `source` — the cipher the `AEIX` → plaintext unwrap pass decrypts with (a
+/// single index DEK decrypts every version the enable wrap stamped; the version is
+/// authenticated as AAD, not used to select the key). Checkpoints ride this same
+/// DEK/format. Delegates to the shared derivation. No key material leaves
+/// `Zeroizing`.
+pub(crate) fn build_disable_index_cipher(
+    source: &KeyProviderConfig,
+    algorithm: Algorithm,
+) -> Result<Arc<dyn Cipher>> {
+    build_enable_index_cipher(source, algorithm)
+}
+
+/// Build the cold-storage DEK cipher for a disable, derived from the recorded key
+/// `source` — the cipher the cold store is built under so the `ACV1` → bare unwrap
+/// pass can decrypt each wrapped value. Delegates to the shared derivation. No key
+/// material leaves `Zeroizing`.
+pub(crate) fn build_disable_cold_cipher(
+    source: &KeyProviderConfig,
+    algorithm: Algorithm,
+) -> Result<Arc<dyn Cipher>> {
+    build_enable_cold_cipher(source, algorithm)
+}
+
+/// Install the DECRYPT WAL keyring for an INTERRUPTED disable BEFORE the startup
+/// replay read (Issue #3616 PR4) — the mirror of
+/// [`install_pending_enable_wal_keyring`].
+///
+/// A crash mid-disable leaves the authority STILL enabled, but `open()` builds the
+/// at-rest layers PLAINTEXT (the disable end state — see `db::config`), so the WAL
+/// is built with NO keyring and the replay read would hit the still-encrypted
+/// segments with no cipher and fail. This hook detects a pending DISABLE ledger
+/// whose encrypted WAL tail has not yet been retired and installs the keyring
+/// (derived from the ledger's recorded source + version) via the PR2
+/// `install_wal_keyring` seam, so the read decrypts. `resume_pending_disable` then
+/// uninstalls it back to plaintext + retires the encrypted tail. Idempotent /
+/// fail-closed: a no-op when no disable ledger is pending, the encrypted tail is
+/// already retired (installing would needlessly re-encrypt), or the WAL is already
+/// encrypted (double-install guard).
+pub(crate) fn install_pending_disable_wal_keyring(
+    wal: &ConcurrentWalSystem,
+    enc_cfg: &EncryptionConfig,
+    data_dir: &std::path::Path,
+) -> Result<()> {
+    let ledger_path = data_dir.join("rotation.state");
+    let Some(view) = read_disable_ledger_at(&ledger_path)? else {
+        return Ok(());
+    };
+    if !view.wal_encrypted_on_disk() || wal.is_encrypted() {
+        return Ok(());
+    }
+    let keyring = build_disable_wal_keyring(
+        &view.current_source,
+        enc_cfg.algorithm,
+        view.current_version,
+    )?;
+    wal.install_wal_keyring(keyring)
+}
+
+/// Retire the pre-disable ENCRYPTED WAL segments after the keyring has been
+/// uninstalled (Issue #3616 PR4) — the mirror of [`retire_enable_plaintext_wal`].
+///
+/// After [`uninstall_wal_keyring`](ConcurrentWalSystem::uninstall_wal_keyring) the
+/// WAL directory holds sealed ENCRYPTED (v16) segments plus one fresh PLAINTEXT
+/// (v13) active segment. This retires the encrypted tail (now undecryptable
+/// through the plaintext live cell, and no longer needed because the durable index
+/// snapshot holds every pre-disable record) while keeping the plaintext active
+/// segment (the retire protects the current segment by id). Idempotent: a re-run
+/// after a crash mid-retire removes any remaining encrypted segments.
+///
+/// # Safety (no data loss)
+///
+/// The caller MUST guarantee the durable index snapshot already holds every
+/// pre-disable record before calling this — the disable engine does a synchronous
+/// `persist_indexes()` while the WAL is still encrypted (capturing the `AEIX`
+/// snapshot) BEFORE writing the disable ledger, and the resume path additionally
+/// has the startup replay read every segment into memory first.
+pub(crate) fn retire_disable_encrypted_wal(wal: &ConcurrentWalSystem) -> Result<usize> {
+    wal.retire_old_generation_segments(DISABLE_WAL_RETIRE_KEEP_VERSION)
+}
+
+/// Run the `AEIX` → plaintext unwrap pass over the manager's `indexes/` directory
+/// for a disable (Issue #3616 PR4), decrypting under the index DEK derived from
+/// `source`. Idempotent / resumable: files already bare are skipped. Checkpoint
+/// files ride the index DEK/format and are covered by this same pass. The mirror
+/// of [`wrap_enable_index_files`].
+pub(crate) fn unwrap_disable_index_files(
+    manager: &IndexPersistenceManager,
+    source: &KeyProviderConfig,
+    algorithm: Algorithm,
+) -> Result<()> {
+    let cipher = build_disable_index_cipher(source, algorithm)?;
+    crate::storage::index_persistence::reencrypt::unwrap_encrypted_index_dir(
+        &manager.indexes_path(),
+        &cipher,
+    )
+    .map_err(rotation_err)?;
+    Ok(())
+}
+
+/// The at-rest DECRYPT ciphers an INTERRUPTED encrypted → plaintext disable must
+/// build its still-encrypted layers under on the resuming `open()` (Issue #3616
+/// PR4) — the mirror of [`EnableResumeCiphers`], inverted.
+///
+/// A crash mid-disable leaves the authority STILL enabled, so `open()` would
+/// normally build every layer ENCRYPTED — but the disable end state is PLAINTEXT,
+/// and a live encrypted index manager / cold store would RE-ENCRYPT over the
+/// freshly-unwrapped bytes on the next background persist / cold migration. So
+/// `db::config` forces the layers PLAINTEXT (the end state) when this resolves to
+/// `Some`, and uses these ciphers only for the transient read passes: the cold
+/// store is built under `cold` (at `version`) so its `ACV1` → bare unwrap can
+/// decrypt. (The index unwrap re-derives its cipher from the ledger's recorded
+/// source in [`unwrap_disable_index_files`], reading the `AEIX` files directly, so
+/// it needs no cipher threaded here; and the WAL is handled separately by
+/// [`install_pending_disable_wal_keyring`].)
+pub(crate) struct DisableResumeCiphers {
+    /// The cold-storage DEK cipher the cold store is built under to unwrap `ACV1`.
+    pub(crate) cold: Arc<dyn Cipher>,
+    /// The key version the on-disk ciphertext is stamped with (the cold keyring is
+    /// built at this generation).
+    pub(crate) version: u32,
+}
+
+/// Resolve the [`DisableResumeCiphers`] for a pending DISABLE ledger at `data_dir`,
+/// or `Ok(None)` when no disable migration is pending (the common path). Called on
+/// the encrypted-authority startup branch (authority not yet flipped to disabled)
+/// so `db::config` can force the layers plaintext and thread the decrypt cold
+/// cipher into the transient resume read pass. Fail-closed on a corrupt ledger.
+pub(crate) fn disable_resume_ciphers(
+    data_dir: &std::path::Path,
+    algorithm: Algorithm,
+) -> Result<Option<DisableResumeCiphers>> {
+    let ledger_path = data_dir.join("rotation.state");
+    let Some(view) = read_disable_ledger_at(&ledger_path)? else {
+        return Ok(None);
+    };
+    Ok(Some(DisableResumeCiphers {
+        cold: build_disable_cold_cipher(&view.current_source, algorithm)?,
+        version: view.current_version,
+    }))
+}
+
 /// Resume an interrupted index key rotation on startup (Issue #488).
 ///
 /// If a `rotation.state` breadcrumb is present, reconstruct the new generation
@@ -1863,7 +2227,10 @@ pub fn resume_pending_rotation(
     };
     // An ENABLE ledger (Issue #3616 PR3) is not a rotation — leave it for
     // `resume_pending_enable`, never resume it as an old→new-generation rotation.
-    if matches!(ledger.direction, RotationDirection::Enable) {
+    if matches!(
+        ledger.direction,
+        RotationDirection::Enable | RotationDirection::Disable
+    ) {
         return Ok(None);
     }
     let Some(keyring) = manager.keyring().cloned() else {
@@ -2042,11 +2409,12 @@ pub fn resume_pending_rotation(
                 duration_ms: started.elapsed().as_millis() as u64,
             }
         }
-        // A `direction=enable` ledger is short-circuited to `Ok(None)` at the top
-        // of this function (the rotation resume paths never drive an enable), so
-        // it can never reach this match.
-        RotationDirection::Enable => {
-            unreachable!("enable ledgers are skipped before rotation resume")
+        // A `direction=enable` (or `direction=disable`, Issue #3616 PR4) ledger is
+        // short-circuited to `Ok(None)` at the top of this function (the rotation
+        // resume paths never drive a migration engine), so it can never reach this
+        // match.
+        RotationDirection::Enable | RotationDirection::Disable => {
+            unreachable!("enable/disable ledgers are skipped before rotation resume")
         }
     };
 
@@ -2097,7 +2465,10 @@ pub fn finalize_resumed_wal_rotation(
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(());
     };
-    if matches!(ledger.direction, RotationDirection::Enable) {
+    if matches!(
+        ledger.direction,
+        RotationDirection::Enable | RotationDirection::Disable
+    ) {
         return Ok(());
     }
     if !matches!(ledger.wal, LayerStatus::Pending) {
@@ -2193,7 +2564,10 @@ pub fn finalize_resumed_cold_rotation(
     let Some(ledger) = read_rotation_state(manager)? else {
         return Ok(());
     };
-    if matches!(ledger.direction, RotationDirection::Enable) {
+    if matches!(
+        ledger.direction,
+        RotationDirection::Enable | RotationDirection::Disable
+    ) {
         return Ok(());
     }
     if !matches!(ledger.cold, LayerStatus::Pending) {
@@ -3553,6 +3927,177 @@ mod tests {
             })
             .collect();
         assert!(leftover.is_empty(), "durable write left a temp file behind");
+    }
+
+    // ── #3616 PR4: encrypted → plaintext DISABLE direction (mirror of Enable) ─
+
+    #[test]
+    fn disable_scope_ledger_round_trips_by_name() {
+        // The encrypted → plaintext DISABLE plan (Issue #3616 PR4) is recorded on
+        // the SAME v2 cross-layer ledger as a rotation/enable, discriminated by
+        // `direction=disable`. Every per-layer status is addressed BY NAME (no
+        // positional/count assumption), so a future layer added the same by-name
+        // way (e.g. GDPR `subject_keyring`) composes without editing this path.
+        //
+        // Semantics are the inverse of `enable_scope`: the WAL is ALWAYS `Pending`
+        // (a disable's whole point is to strip the live WAL's encryption); index /
+        // checkpoint / cold are `Pending` only when there are encrypted bytes of
+        // that layer to unwrap, else `Skipped`.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            None,
+        ));
+
+        // Retiring the CURRENT key (version 7); the recorded source is the current
+        // key needed to build the DECRYPT cipher during a resumed disable.
+        let ledger = super::RotationLedger::disable_scope(
+            7,
+            KeyProviderConfig::Env {
+                variable: "CURRENT_MEK".to_string(),
+            },
+            /* index_in_scope */ true,
+            /* cold_in_scope */ false,
+        );
+        assert_eq!(ledger.direction, super::RotationDirection::Disable);
+        assert_eq!(
+            ledger.wal,
+            super::LayerStatus::Pending,
+            "WAL always in scope"
+        );
+        assert_eq!(ledger.index, super::LayerStatus::Pending);
+        assert_eq!(ledger.checkpoint, super::LayerStatus::Pending);
+        assert_eq!(ledger.cold, super::LayerStatus::Skipped, "no cold tier");
+        assert_eq!(ledger.wal_retire, super::LayerStatus::Pending);
+
+        super::write_ledger(&manager, &ledger).unwrap();
+
+        let read = super::read_rotation_state(&manager)
+            .unwrap()
+            .expect("ledger present");
+        assert_eq!(read, ledger, "every disable-ledger field must round-trip");
+
+        let body = std::fs::read_to_string(root.join("data").join("rotation.state")).unwrap();
+        assert!(body.contains("version=2"), "expected v2 format: {body}");
+        assert!(body.contains("direction=disable"), "direction: {body}");
+        assert!(body.contains("layer.wal=pending"));
+        assert!(body.contains("layer.index=pending"));
+        assert!(body.contains("layer.cold=skipped"));
+        // Source REFERENCE only (env var NAME), never key bytes.
+        assert!(body.contains("new_source_kind=env") && body.contains("CURRENT_MEK"));
+    }
+
+    #[test]
+    fn disable_ledger_provisions_current_version_not_minus_one() {
+        // Crash-consistency regression (gemini HIGH): after a mid-disable crash the
+        // on-disk ciphertext is still stamped with the CURRENT key version, which a
+        // `disable_scope` ledger records verbatim as `new_version` (NOT `old + 1`).
+        // `resolve_provisioned_key_version` must therefore provision the keyring to
+        // `new_version` as-is for a disable ledger — the old uniform `new_version - 1`
+        // would provision `current - 1` and leave startup unable to decrypt files
+        // stamped `current`.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let indexes_dir = root.join("indexes");
+        let wal_dir = root.join("wal");
+
+        // Disable case: pending disable ledger recording current key version 7.
+        let disable_dir = root.join("disable_data");
+        let disable_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            disable_dir.clone(),
+            None,
+        ));
+        let disable_ledger = super::RotationLedger::disable_scope(
+            7,
+            KeyProviderConfig::File {
+                path: root.join("mek.key"),
+            },
+            /* index_in_scope */ true,
+            /* cold_in_scope */ false,
+        );
+        super::write_ledger(&disable_mgr, &disable_ledger).unwrap();
+        let resolved =
+            super::resolve_provisioned_key_version(&indexes_dir, &wal_dir, disable_mgr.base_path())
+                .unwrap();
+        assert_eq!(
+            resolved, 7,
+            "a disable ledger must provision to its recorded current version (7), not 7 - 1"
+        );
+
+        // Regression guard: the additive change must NOT alter the Forward path —
+        // a forward ledger with `new_version = old + 1` still resolves to `old`.
+        let fwd_dir = root.join("forward_data");
+        let fwd_mgr =
+            std::sync::Arc::new(IndexPersistenceManager::with_cipher(fwd_dir.clone(), None));
+        super::write_rotation_state(
+            &fwd_mgr,
+            6, // new_version = old(5) + 1
+            &KeyProviderConfig::File {
+                path: root.join("new.key"),
+            },
+            super::RotationDirection::Forward,
+        )
+        .unwrap();
+        let fwd_resolved =
+            super::resolve_provisioned_key_version(&indexes_dir, &wal_dir, fwd_mgr.base_path())
+                .unwrap();
+        assert_eq!(
+            fwd_resolved, 5,
+            "a forward ledger (new_version = old + 1) must still resolve to old (5)"
+        );
+    }
+
+    #[test]
+    fn disable_ledger_is_skipped_by_rotation_resume() {
+        // A `direction=disable` ledger must NEVER be driven by the rotation resume
+        // paths (which assume an already-encrypted old→new generation). It is the
+        // disable engine's own resume that completes it — exactly as an `enable`
+        // ledger is skipped. Proven by driving the ACTUAL rotation resume entry
+        // point (`resume_pending_rotation`) against a pending disable ledger and
+        // asserting it returns `Ok(None)` (skipped, breadcrumb untouched) rather
+        // than attempting to resume it as an old→new-generation rotation.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let key = root.join("mek.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key).unwrap();
+
+        let enc_cfg = EncryptionConfig::file_based(&key);
+        // A disable ledger only ever exists on an encrypted DB, so give the
+        // manager the real index cipher — a faithful encrypted-startup shape.
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let ledger = super::RotationLedger::disable_scope(
+            3,
+            KeyProviderConfig::File { path: key.clone() },
+            true,
+            false,
+        );
+        super::write_ledger(&manager, &ledger).unwrap();
+
+        // The real rotation resume entry point must SKIP a disable ledger.
+        let report = super::resume_pending_rotation(&manager, &enc_cfg, None, None)
+            .expect("resume must not error on a disable ledger");
+        assert!(
+            report.is_none(),
+            "rotation resume must skip a disable ledger (Ok(None)), never drive it"
+        );
+
+        // And it must leave the breadcrumb in place for the disable engine's own
+        // resume to complete — skipping must not clear or mutate the ledger.
+        let read = super::read_rotation_state(&manager)
+            .unwrap()
+            .expect("disable ledger must survive a skipping rotation-resume pass");
+        assert!(
+            matches!(read.direction, super::RotationDirection::Disable),
+            "a disable ledger must parse back as Disable, never a rotation"
+        );
     }
 
     #[test]

@@ -98,6 +98,7 @@ enabled = true
 data_dir = "data/production"
 load_on_startup = true
 use_mmap = true
+max_interned_strings = 10000000
 ```
 
 ```rust
@@ -217,7 +218,72 @@ max_batch_size = 1000
 | `data_dir` | PathBuf | "data" | Directory for index files (cwd-relative placeholder; always set explicitly when enabling) |
 | `load_on_startup` | bool | true | Load indexes on startup (only applies when enabled) |
 | `use_mmap` | bool | true | Use memory-mapped loading |
+| `max_interned_strings` | usize | 10000000 | Max unique interned strings (DoS bound); read at `open()`, so changing it requires a restart |
 | `policies` | PersistencePolicies | Default | Automatic persistence policies |
+
+> **String interner cap (`max_interned_strings`).** AletheiaDB interns every
+> distinct node/edge **label**, property **key**, and string property **value**
+> into a process-global table mapping each unique string to a compact `u32` id.
+> `max_interned_strings` bounds how many unique strings that table may hold —
+> a DoS guard against unbounded memory growth from adversarial or runaway
+> high-cardinality data.
+>
+> **It is a COUNT cap, not a memory cap.** It bounds the number of *entries*, not
+> bytes. Each entry costs roughly **~100 bytes** of map/pointer overhead **plus
+> the string's own bytes**, so for short identifiers the default of
+> **10,000,000** sits around **~1–1.6 GB** — but that is a *typical-case*
+> estimate, not a ceiling. Worst-case interner memory is
+> `count × (per-entry overhead + string bytes)`, and the string bytes are bounded
+> only by the per-string cap (`MAX_STRING_LENGTH`, 10 MB) and the persisted-file
+> size cap — so an adversarial worst case is `count × 10 MB`, far above ~1 GB.
+> The count cap is paired with those per-string and file-size caps; a precise
+> total-**byte** budget is a deliberate future alternative (deferred: it would add
+> a running-total atomic to the lock-free intern fast path).
+>
+> This one knob drives **both** the runtime intern cap and the persisted
+> interner's load-validation cap. Note the load-validation bound is a **floor**:
+> the effective load cap is `max(10M, max_interned_strings)`, so a configured cap
+> only ever **raises** the load bound above the 10M floor — a configured value
+> *below* 10M does not lower it (a grown database still reopens). It is read once
+> at **`open()`**, so **changing it requires a restart** (there is no hot-reload).
+> Valid range: at least **1** (a cap of `0` is rejected at `open()` — it would
+> refuse all interning and brick the database); values at or above `u32::MAX` are
+> clamped to `u32::MAX`, since interner ids are 32-bit and a higher cap is
+> unreachable.
+>
+> **Precedence.** The `ALETHEIADB_MAX_INTERNED_STRINGS` environment variable only
+> takes effect on the **embedded/ephemeral** path (`AletheiaDB::new()` or direct
+> `GLOBAL_INTERNER` use *without* opening a database): it seeds the process-global
+> interner at first access. On the `open()` / `with_unified_config` path the
+> **config field is authoritative** and effectively overrides the env var,
+> because the config field always carries a value (defaulting to 10M) and is
+> applied at `open()`. So the practical precedence is: on `open()`, config wins;
+> without `open()`, the env seed applies.
+>
+> **Multi-database caveat (process-global).** The interner and its cap are
+> **process-global**. In a process that opens multiple databases, the cap is
+> **last-open-wins**: a database opened *later* with a **lower** cap can refuse
+> new interns on an **earlier**-opened database whose data pushed the interner
+> past that lower bound. Existing ids are never evicted or renumbered (lowering
+> the cap only refuses *new* interns), but a shared low cap can starve a busy
+> earlier database. Prefer a single uniform cap across all databases in one
+> process.
+>
+> **When the cap is hit**, the write that would exceed it fails immediately with
+> a `FAILED_PRECONDITION` error (MCP and HTTP) whose message names
+> `persistence.max_interned_strings`; a background index-persist that hits it
+> logs one actionable line and **suspends** that index's background persistence
+> until restart. **No data is lost** in either case — the WAL is the source of
+> truth; only the on-disk index snapshot goes stale. To recover: raise
+> `persistence.max_interned_strings` above the reported limit and **restart**.
+>
+> ```toml
+> [persistence]
+> enabled = true
+> data_dir = "data/production"
+> # Raise the interner cap for a very large, high-cardinality dataset.
+> max_interned_strings = 50000000
+> ```
 
 > **Note (Issue #3388):** Index persistence is opt-in. Before this change,
 > `PersistenceConfig::default()` had `enabled: true` with the cwd-relative
