@@ -382,7 +382,7 @@ impl CryptoShredState {
     /// Microseconds-since-epoch when `subject_id` was erased, or `None` if the
     /// subject is unknown or still active (test/introspection).
     #[cfg(test)]
-    #[must_use]
+    #[must_use = "the erased-at timestamp is the observed value under test; discarding it makes the call a no-op"]
     pub(crate) fn subject_erased_at(&self, subject_id: &str) -> Option<i64> {
         self.lock_keyring()
             .get(subject_id)
@@ -395,7 +395,7 @@ impl CryptoShredState {
     /// (never raw key material) and are used only to assert their ABSENCE from
     /// an archive — they are never logged.
     #[cfg(test)]
-    #[must_use]
+    #[must_use = "the wrapped-DEK ciphertext is captured to assert its absence from an archive; discarding it makes the call a no-op"]
     pub(crate) fn subject_wrapped_dek_for_test(&self, subject_id: &str) -> Option<Vec<u8>> {
         self.lock_keyring()
             .get(subject_id)

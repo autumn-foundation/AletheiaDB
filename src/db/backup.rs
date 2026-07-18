@@ -282,25 +282,62 @@ fn reapply_unique_constraints(
 /// bytes. Those restore **sealed-unreadable** — without the keyring the
 /// per-subject DEKs are gone. We emit a single loud warning in that case so an
 /// operator is never silently surprised by unreadable designated properties.
+///
+/// **Write-side size cap (Issue #3665 hardening):** the payload's keyring
+/// sidecar is rejected here if it exceeds [`keyring::MAX_KEYRING_BYTES`], the
+/// same 64 MiB bound the fail-closed loader enforces. Without this symmetry a
+/// malicious v7 archive could force a multi-GiB `subject_keyring.dat` write
+/// before the loader ever rejects it (disk-exhaustion DoS).
+///
+/// **Stale-keyring removal (Issue #3665 hardening):** when the payload carries
+/// no keyring (a plain / keyless restore) but the target `data_dir` already
+/// holds a leftover `subject_keyring.dat`, that file is removed so the reopen
+/// adopts the restored state rather than the stale keyring.
 #[cfg(feature = "audit-export")]
 fn restore_keyring_sidecar(
     data_dir: &Path,
     payload: &crate::storage::backup::BackupPayload,
 ) -> Result<()> {
+    use crate::db::crypto_shred::keyring;
     if !payload.keyring_sidecar.is_empty() {
-        let path = data_dir.join(crate::db::crypto_shred::keyring::KEYRING_FILENAME);
-        crate::db::crypto_shred::keyring::save_sidecar_bytes(&path, &payload.keyring_sidecar)
+        // Reject an over-cap sidecar BEFORE writing anything to disk — symmetry
+        // with the 64 MiB load cap (`keyring::MAX_KEYRING_BYTES`).
+        if payload.keyring_sidecar.len() as u64 > keyring::MAX_KEYRING_BYTES {
+            return Err(Error::Backup(BackupError::Corrupt(format!(
+                "keyring sidecar in backup exceeds size limit ({} bytes > {} byte cap)",
+                payload.keyring_sidecar.len(),
+                keyring::MAX_KEYRING_BYTES
+            ))));
+        }
+        let path = data_dir.join(keyring::KEYRING_FILENAME);
+        keyring::save_sidecar_bytes(&path, &payload.keyring_sidecar)
             .map_err(|e| Error::Backup(BackupError::Io(e.to_string())))?;
-    } else if payload_has_sealed_properties(payload) {
-        let message = "crypto-shred: restoring a pre-v7 backup that contains \
-                       designated (sealed) properties but no subject keyring — \
-                       those properties will be sealed-unreadable (the archive \
-                       predates the Issue #3665 keyring fold). Restore from a v7 \
-                       (or newer) backup to recover them.";
-        #[cfg(feature = "observability")]
-        tracing::warn!("{message}");
-        #[cfg(not(feature = "observability"))]
-        eprintln!("WARNING: {message}");
+    } else {
+        // Keyless restore: drop any stale keyring left in the target so the
+        // restored (empty-crypto-shred) state wins over pre-existing state.
+        // Attempt the delete directly and ignore only NotFound — this avoids the
+        // redundant `exists()` check and the TOCTOU window it opens.
+        let stale = data_dir.join(keyring::KEYRING_FILENAME);
+        match std::fs::remove_file(&stale) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Error::Backup(BackupError::Io(format!(
+                    "failed to remove stale keyring sidecar: {e}"
+                ))));
+            }
+        }
+        if payload_has_sealed_properties(payload) {
+            let message = "crypto-shred: restoring a pre-v7 backup that contains \
+                           designated (sealed) properties but no subject keyring — \
+                           those properties will be sealed-unreadable (the archive \
+                           predates the Issue #3665 keyring fold). Restore from a v7 \
+                           (or newer) backup to recover them.";
+            #[cfg(feature = "observability")]
+            tracing::warn!("{message}");
+            #[cfg(not(feature = "observability"))]
+            eprintln!("WARNING: {message}");
+        }
     }
     Ok(())
 }
@@ -400,6 +437,103 @@ pub(crate) mod backup_test_hooks {
             .clone();
         if let Some(hook) = hook {
             hook(snapshot);
+        }
+    }
+}
+
+/// Unit tests for the crypto-shred backward-compat warning guard (Issue #3665
+/// hardening). Gated on `audit-export` because `payload_has_sealed_properties`
+/// lives behind that feature.
+#[cfg(all(test, feature = "audit-export"))]
+mod hardening_tests {
+    use super::*;
+    use crate::storage::backup::BackupPayload;
+    use crate::storage::index_persistence::formats::{
+        GraphIndexData, PersistedNode, PersistedPropertyMap, PersistedPropertyValue,
+        StringInternerData, TemporalIndexData,
+    };
+    use crate::storage::index_persistence::{
+        GRAPH_MAGIC, INTERNER_MAGIC, MANIFEST_VERSION, TEMPORAL_MAGIC,
+    };
+
+    /// Build a minimal payload whose single node carries `value` as its only
+    /// property. Only the graph is populated — `payload_has_sealed_properties`
+    /// inspects nothing else.
+    fn payload_with_node_property(value: PersistedPropertyValue) -> BackupPayload {
+        let node = PersistedNode {
+            id: 1,
+            label_idx: 0,
+            version_id: 1,
+            properties: PersistedPropertyMap {
+                entries: vec![(0, value)],
+            },
+        };
+        BackupPayload {
+            created_at_micros: 0,
+            source_lsn: 0,
+            current_node_count: 1,
+            current_edge_count: 0,
+            node_version_count: 0,
+            edge_version_count: 0,
+            interner: StringInternerData {
+                magic: INTERNER_MAGIC,
+                version: MANIFEST_VERSION,
+                string_count: 0,
+                strings: vec![],
+            },
+            graph: GraphIndexData {
+                magic: GRAPH_MAGIC,
+                version: MANIFEST_VERSION,
+                node_count: 1,
+                edge_count: 0,
+                nodes: vec![node],
+                edges: vec![],
+                outgoing_node_ids: vec![],
+                outgoing_offsets: vec![],
+                outgoing_neighbors: vec![],
+                incoming_node_ids: vec![],
+                incoming_offsets: vec![],
+                incoming_neighbors: vec![],
+            },
+            temporal: TemporalIndexData {
+                magic: TEMPORAL_MAGIC,
+                version: MANIFEST_VERSION,
+                node_versions: vec![],
+                node_anchors: vec![],
+                edge_versions: vec![],
+                edge_anchors: vec![],
+            },
+            schema_constraints: vec![],
+            unique_constraints: vec![],
+            keyring_sidecar: vec![],
+        }
+    }
+
+    #[test]
+    fn payload_has_sealed_properties_true_for_subj_envelope() {
+        // A `SUBJ`-prefixed Bytes value is a crypto-shred sealed envelope.
+        let mut sealed = b"SUBJ".to_vec();
+        sealed.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+        let payload = payload_with_node_property(PersistedPropertyValue::Bytes(sealed));
+        assert!(
+            payload_has_sealed_properties(&payload),
+            "a SUBJ-enveloped Bytes property must be detected as sealed"
+        );
+    }
+
+    #[test]
+    fn payload_has_sealed_properties_false_for_plain_values() {
+        // Plain (non-sealed) values must not trip the guard.
+        for value in [
+            PersistedPropertyValue::Int(42),
+            PersistedPropertyValue::Bool(true),
+            PersistedPropertyValue::Bytes(b"not-an-envelope".to_vec()),
+        ] {
+            let payload = payload_with_node_property(value);
+            assert!(
+                !payload_has_sealed_properties(&payload),
+                "a non-sealed property must not be detected as sealed"
+            );
         }
     }
 }
