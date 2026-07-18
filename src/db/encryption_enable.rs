@@ -86,8 +86,8 @@ use crate::db::encryption_state::{
 };
 use crate::db::rotation::{
     ENABLE_KEY_VERSION, build_enable_cold_cipher, build_enable_wal_keyring, clear_rotation_state,
-    mark_cold_complete, mark_index_complete, mark_wal_complete, read_enable_ledger,
-    wrap_enable_index_files, write_enable_ledger,
+    mark_cold_complete, mark_index_complete, mark_wal_complete, mark_wal_retire_complete,
+    read_enable_ledger, retire_enable_plaintext_wal, wrap_enable_index_files, write_enable_ledger,
 };
 use crate::encryption::config::KeyProviderConfig;
 use crate::encryption::factory::Algorithm;
@@ -278,6 +278,18 @@ impl AletheiaDB {
             let _ = handle.join();
         }
 
+        // === Step 1b: synchronous full persist while STILL PLAINTEXT =================
+        // Capture ALL pre-enable state (current + historical, as of the current WAL
+        // frontier) into the durable index snapshot NOW, before the WAL is sealed.
+        // The index wrap below turns this snapshot into `AEIX`, so afterwards the
+        // ENCRYPTED snapshot holds every pre-enable record — which is what makes it
+        // safe to RETIRE the pre-enable plaintext WAL segments (Step 2c) without any
+        // data loss (reopen reconstructs from the encrypted snapshot, not the deleted
+        // plaintext WAL). Runs while the WAL is still plaintext, so the fail-closed
+        // `persist_indexes` guard (post-enable handle) does not apply. This is a
+        // superset of the worker's shutdown final-persist above — belt-and-suspenders.
+        self.persist_indexes()?;
+
         // === Step 2: durable ledger (breadcrumb #1) then migrate every layer =========
         // WAL is always Pending; index + checkpoint are Pending (a durable database
         // always has an index dir to wrap); cold is Pending iff a cold tier exists.
@@ -297,6 +309,17 @@ impl AletheiaDB {
         // the index DEK, then record completion (breadcrumb #3).
         wrap_enable_index_files(&manager, &key_source, algorithm)?;
         mark_index_complete(&manager)?;
+
+        // WAL plaintext retire: now that the ENCRYPTED (`AEIX`) index snapshot durably
+        // holds every pre-enable record (Step 1b persist → this wrap), retire the
+        // sealed pre-enable PLAINTEXT (v13) WAL segments so no cleartext survives at
+        // rest (breadcrumb #3b). Idempotent + resumable: a crash mid-retire leaves
+        // `wal_retire=Pending` and the resume re-runs it. The fresh encrypted (v16)
+        // active segment is kept; reopen reconstructs pre-enable state from the
+        // encrypted snapshot. Only in scope when the index snapshot exists
+        // (`enable_scope` sets `wal_retire=Pending` iff index is in scope).
+        retire_enable_plaintext_wal(&self.wal)?;
+        mark_wal_retire_complete(&manager)?;
 
         // Cold: wrap every bare stored value into `ACV1` under the cold DEK on the
         // live (plaintext-keyring) cold store, then record completion (breadcrumb
@@ -397,6 +420,25 @@ impl AletheiaDB {
         if view.index_pending || view.checkpoint_pending {
             wrap_enable_index_files(manager, &view.new_source, self.enable_algorithm())?;
             mark_index_complete(manager)?;
+        }
+
+        // WAL plaintext retire (resume): retire the pre-enable PLAINTEXT (v13) WAL
+        // segments once the ENCRYPTED (`AEIX`) index snapshot holds the pre-enable
+        // state (index Complete). Lossless on resume: (a) the original enable ran a
+        // synchronous persist BEFORE writing this ledger, so the encrypted snapshot
+        // durably holds every pre-enable record, and (b) startup already read every
+        // WAL segment into memory (`startup_wal_entries`, before this runs), so the
+        // subsequent differential replay re-covers them regardless — deleting the
+        // segment FILES here cannot lose an in-memory entry. Gated on `index_complete`
+        // so a (synthetic) no-index-snapshot enable never deletes plaintext WAL.
+        // Idempotent: re-runs after a crash mid-retire. Re-read to observe the index
+        // completion just recorded.
+        if let Some(mid) = read_enable_ledger(manager)?
+            && mid.wal_retire_pending
+            && mid.index_complete
+        {
+            retire_enable_plaintext_wal(&self.wal)?;
+            mark_wal_retire_complete(manager)?;
         }
 
         // Re-read the ledger to reflect the index/checkpoint completions just
@@ -1371,6 +1413,121 @@ mod tests {
         }
         let state = read_encryption_state(&indexes).unwrap().unwrap();
         assert!(state.enabled, "authority flipped by cold resume");
+        assert!(!indexes.join("rotation.state").exists(), "ledger cleared");
+    }
+
+    /// C1 (data-at-rest): after enable on a NO-COLD database, NO pre-enable
+    /// PLAINTEXT (v13) WAL segment survives on disk, AND all pre-enable data still
+    /// reads back after reopen — proving the engine's synchronous persist captured
+    /// every record into the ENCRYPTED snapshot BEFORE the plaintext WAL was retired
+    /// (reopen reconstructs from the encrypted snapshot, not the deleted WAL).
+    /// Deliberately does NOT persist before enable, so the plaintext WAL is the only
+    /// pre-enable copy until the engine's own persist runs.
+    #[test]
+    fn enable_retires_plaintext_wal_and_reopen_reads_from_encrypted_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+
+        {
+            let mut db =
+                AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("n", "alice").build(),
+            )
+            .unwrap();
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("n", "bob").build(),
+            )
+            .unwrap();
+            assert!(!db.wal.is_encrypted(), "starts plaintext");
+
+            db.enable_encryption(key.clone()).unwrap();
+            assert!(db.wal.is_encrypted());
+            // The pre-enable plaintext (legacy) WAL segments are retired: every
+            // remaining segment is the encrypted (v16) enable generation.
+            assert!(
+                db.wal
+                    .all_segments_use_key_version(crate::db::rotation::ENABLE_KEY_VERSION),
+                "no pre-enable plaintext WAL segment remains after enable"
+            );
+        }
+
+        // Reopen: the two nodes reconstruct from the ENCRYPTED snapshot — the
+        // plaintext WAL that once held them is gone.
+        let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+        assert_eq!(
+            db.node_count(),
+            2,
+            "pre-enable data survives via the encrypted snapshot after plaintext WAL retire"
+        );
+        assert!(db.wal.is_encrypted());
+        assert!(
+            db.wal
+                .all_segments_use_key_version(crate::db::rotation::ENABLE_KEY_VERSION),
+            "still no plaintext WAL segment after reopen"
+        );
+    }
+
+    /// C2 (crash mid-retire): a crash after the WAL roll + index wrap but BEFORE the
+    /// pre-enable plaintext WAL is retired leaves a genuine sealed plaintext (v13)
+    /// segment plus a `wal_retire=Pending` ledger (authority off). Reopen must resume
+    /// — retire the remaining plaintext segment, flip the authority, clear the ledger
+    /// — losslessly (the encrypted snapshot + the startup replay both hold the data).
+    #[test]
+    fn enable_crash_mid_wal_retire_resumes() {
+        use crate::encryption::factory::Algorithm;
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+        let algorithm = Algorithm::default();
+
+        // Drive the enable up to JUST BEFORE the plaintext-WAL retire, leaving a real
+        // sealed plaintext segment on disk. The index wrap is done AFTER the db (and
+        // its plaintext background worker) is dropped, so no worker can race a
+        // plaintext persist over the AEIX files.
+        {
+            let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+            db.create_node("N", PropertyMapBuilder::new().insert("k", "v").build())
+                .unwrap();
+            db.persist_indexes().unwrap();
+
+            let mgr = manager_for(dir.path());
+            // Ledger: wal=Pending, index=Pending, wal_retire=Pending (index in scope).
+            write_enable_ledger(&mgr, &key, true, false).unwrap();
+            // Roll the WAL to encrypted: seal the plaintext v13 segment, open v16.
+            let keyring = crate::db::rotation::build_enable_wal_keyring(&key, algorithm).unwrap();
+            db.wal.install_wal_keyring(keyring).unwrap();
+            crate::db::rotation::mark_wal_complete(&mgr).unwrap();
+            assert!(
+                !db.wal
+                    .all_segments_use_key_version(crate::db::rotation::ENABLE_KEY_VERSION),
+                "a sealed plaintext segment still exists before retire"
+            );
+            // Drop the db (index still plaintext → the worker's final persist is a
+            // safe plaintext write, consistent with index=Pending).
+        }
+        // Wrap the index to AEIX standalone (no live worker to race), mark it complete.
+        crate::db::rotation::wrap_enable_index_files(&manager_for(dir.path()), &key, algorithm)
+            .unwrap();
+        crate::db::rotation::mark_index_complete(&manager_for(dir.path())).unwrap();
+        // CRASH POINT: sealed plaintext v13 on disk, AEIX snapshot, ledger
+        // {wal=Complete, index=Complete, wal_retire=Pending}, NO authority.
+
+        // Reopen: resume retires the plaintext segment, flips the authority, clears.
+        {
+            let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+            assert_eq!(db.node_count(), 1, "data intact after mid-retire resume");
+            assert!(db.wal.is_encrypted());
+            assert!(
+                db.wal
+                    .all_segments_use_key_version(crate::db::rotation::ENABLE_KEY_VERSION),
+                "resume retired the remaining plaintext WAL segment"
+            );
+        }
+        let state = read_encryption_state(&indexes).unwrap().unwrap();
+        assert!(state.enabled, "authority flipped by mid-retire resume");
         assert!(!indexes.join("rotation.state").exists(), "ledger cleared");
     }
 

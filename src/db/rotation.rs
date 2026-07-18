@@ -1073,6 +1073,16 @@ struct RotationLedger {
     checkpoint: LayerStatus,
     wal: LayerStatus,
     cold: LayerStatus,
+    /// The plaintext → encrypted **enable** WAL-cleanup step (Issue #3616 PR3):
+    /// after the WAL is rolled to encrypted AND the pre-enable state is durably in
+    /// the encrypted (`AEIX`) index snapshot, the sealed pre-enable *plaintext*
+    /// (v13) WAL segments are retired so no cleartext survives at rest. A distinct
+    /// per-field breadcrumb (never positional) so a crash mid-retire re-runs it.
+    /// Only ever `Pending` for an `enable` ledger with the index layer in scope
+    /// (there must be a durable snapshot holding the pre-enable state before any
+    /// plaintext WAL is deleted); `Skipped` for rotations and for an enable with no
+    /// index snapshot.
+    wal_retire: LayerStatus,
 }
 
 impl RotationLedger {
@@ -1092,6 +1102,7 @@ impl RotationLedger {
             checkpoint: LayerStatus::Pending,
             wal: LayerStatus::Skipped,
             cold: LayerStatus::Skipped,
+            wal_retire: LayerStatus::Skipped,
         }
     }
 
@@ -1121,6 +1132,8 @@ impl RotationLedger {
             checkpoint: LayerStatus::Pending,
             wal: scope(wal_in_scope),
             cold: scope(cold_in_scope),
+            // A key rotation never retires pre-enable plaintext WAL (there is none).
+            wal_retire: LayerStatus::Skipped,
         }
     }
 
@@ -1154,6 +1167,10 @@ impl RotationLedger {
             checkpoint: scope(index_in_scope),
             wal: LayerStatus::Pending,
             cold: scope(cold_in_scope),
+            // Retire the pre-enable plaintext WAL only when there is an index
+            // snapshot to durably hold the pre-enable state first (index in scope).
+            // With no snapshot, retiring plaintext WAL could lose data, so Skip it.
+            wal_retire: scope(index_in_scope),
         }
     }
 }
@@ -1208,13 +1225,14 @@ fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> R
         }
     };
     let body = format!(
-        "version=2\ndirection={}\ntarget_version={}\nnew_source_kind={kind}\nnew_source_value={value}\nlayer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\n",
+        "version=2\ndirection={}\ntarget_version={}\nnew_source_kind={kind}\nnew_source_value={value}\nlayer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\nlayer.wal_retire={}\n",
         ledger.direction.as_str(),
         ledger.new_version,
         ledger.index.as_str(),
         ledger.checkpoint.as_str(),
         ledger.wal.as_str(),
         ledger.cold.as_str(),
+        ledger.wal_retire.as_str(),
     );
     let base = manager.base_path();
     std::fs::create_dir_all(base)
@@ -1326,6 +1344,7 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
     let mut layer_checkpoint = None;
     let mut layer_wal = None;
     let mut layer_cold = None;
+    let mut layer_wal_retire = None;
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -1359,6 +1378,7 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
             "layer.checkpoint" => layer_checkpoint = Some(parse_layer(v, "layer.checkpoint")?),
             "layer.wal" => layer_wal = Some(parse_layer(v, "layer.wal")?),
             "layer.cold" => layer_cold = Some(parse_layer(v, "layer.cold")?),
+            "layer.wal_retire" => layer_wal_retire = Some(parse_layer(v, "layer.wal_retire")?),
             _ => {}
         }
     }
@@ -1401,6 +1421,10 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
         checkpoint: layer_checkpoint.unwrap_or(def_checkpoint),
         wal: layer_wal.unwrap_or(def_wal),
         cold: layer_cold.unwrap_or(def_cold),
+        // Absent `layer.wal_retire` (any legacy ledger, v1 or a pre-#3616-PR3 v2)
+        // defaults to `Skipped`: the plaintext-WAL-retire step did not exist, so a
+        // resume must NOT delete any WAL segment based on an ambiguous absent field.
+        wal_retire: layer_wal_retire.unwrap_or(LayerStatus::Skipped),
     }))
 }
 
@@ -1541,10 +1565,18 @@ pub(crate) struct EnableLedgerView {
     pub(crate) wal_complete: bool,
     /// `true` while the index layer still needs its plaintext→AEIX wrap pass.
     pub(crate) index_pending: bool,
+    /// `true` once the index layer's plaintext→AEIX wrap is durably complete —
+    /// i.e. the encrypted snapshot holds the pre-enable state, so it is safe to
+    /// retire the pre-enable plaintext WAL segments.
+    pub(crate) index_complete: bool,
     /// `true` while the checkpoint layer is still pending.
     pub(crate) checkpoint_pending: bool,
     /// `true` while the cold layer still needs its bare→ACV1 wrap pass.
     pub(crate) cold_pending: bool,
+    /// `true` while the pre-enable plaintext WAL segments still need retiring
+    /// (Issue #3616 PR3). Only ever set for an enable ledger whose index layer is
+    /// in scope (there is a durable snapshot to hold the pre-enable state first).
+    pub(crate) wal_retire_pending: bool,
 }
 
 impl EnableLedgerView {
@@ -1553,8 +1585,10 @@ impl EnableLedgerView {
             wal_pending: matches!(ledger.wal, LayerStatus::Pending),
             wal_complete: matches!(ledger.wal, LayerStatus::Complete),
             index_pending: matches!(ledger.index, LayerStatus::Pending),
+            index_complete: matches!(ledger.index, LayerStatus::Complete),
             checkpoint_pending: matches!(ledger.checkpoint, LayerStatus::Pending),
             cold_pending: matches!(ledger.cold, LayerStatus::Pending),
+            wal_retire_pending: matches!(ledger.wal_retire, LayerStatus::Pending),
             new_source: ledger.new_source,
         }
     }
@@ -1569,8 +1603,15 @@ impl EnableLedgerView {
     /// Cold is completed in a *later* phase (`resume_pending_enable_cold`, after
     /// the cold store is wired), so a cold-in-scope resume keeps the ledger and
     /// defers the flip until that phase.
+    ///
+    /// The plaintext-WAL-retire cleanup (`wal_retire`) is also included: the
+    /// authority must not flip until the pre-enable plaintext WAL is retired (the
+    /// retire runs inline in `resume_pending_enable`, right after the index wrap).
     pub(crate) fn non_wal_layers_settled(&self) -> bool {
-        !self.index_pending && !self.checkpoint_pending && !self.cold_pending
+        !self.index_pending
+            && !self.checkpoint_pending
+            && !self.cold_pending
+            && !self.wal_retire_pending
     }
 }
 
@@ -1717,6 +1758,42 @@ pub(crate) fn mark_index_complete(manager: &IndexPersistenceManager) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Rewrite the durable ledger flipping `layer.wal_retire=complete` (Issue #3616
+/// PR3), preserving every other field. Recorded AFTER the pre-enable plaintext WAL
+/// segments are retired, so a crash mid-retire leaves it `Pending` and the resume
+/// re-runs the (idempotent) retire. A no-op when no ledger is present.
+pub(crate) fn mark_wal_retire_complete(manager: &IndexPersistenceManager) -> Result<()> {
+    if let Some(mut ledger) = read_rotation_state(manager)?
+        && ledger.wal_retire != LayerStatus::Complete
+    {
+        ledger.wal_retire = LayerStatus::Complete;
+        write_ledger(manager, &ledger)?;
+    }
+    Ok(())
+}
+
+/// Retire the pre-enable **plaintext** (v13) WAL segments after an enable has
+/// rolled the WAL to encrypted AND durably captured the pre-enable state into the
+/// encrypted (`AEIX`) index snapshot (Issue #3616 PR3).
+///
+/// # Safety (no data loss)
+///
+/// The caller MUST guarantee the encrypted index snapshot already holds every
+/// pre-enable record (as of the seal LSN) before calling this — the enable engine
+/// does a synchronous `persist_indexes()` while the DB is still plaintext and then
+/// wraps that snapshot to `AEIX`, and the resume path relies on that same durable
+/// snapshot plus the startup replay having already read every segment into memory.
+/// [`retire_old_generation_segments`] keeps the active (fresh encrypted) segment
+/// and removes only the sealed legacy (`(_, None)`) plaintext segments, so no
+/// cleartext survives at rest while the reopen still reconstructs from the
+/// snapshot. Idempotent: a re-run after a crash mid-retire removes any remaining
+/// old-generation segments.
+///
+/// [`retire_old_generation_segments`]: crate::storage::wal::concurrent_system::ConcurrentWalSystem::retire_old_generation_segments
+pub(crate) fn retire_enable_plaintext_wal(wal: &ConcurrentWalSystem) -> Result<usize> {
+    wal.retire_old_generation_segments(ENABLE_KEY_VERSION)
 }
 
 /// The at-rest ciphers an INTERRUPTED plaintext → encrypted enable must build its
@@ -3449,6 +3526,7 @@ mod tests {
             checkpoint: super::LayerStatus::Complete,
             wal: super::LayerStatus::Skipped,
             cold: super::LayerStatus::Pending,
+            wal_retire: super::LayerStatus::Skipped,
         };
         super::write_ledger(&manager, &ledger).unwrap();
 
@@ -3945,6 +4023,7 @@ mod tests {
                 checkpoint: super::LayerStatus::Complete,
                 wal: super::LayerStatus::Skipped,
                 cold: super::LayerStatus::Skipped,
+                wal_retire: super::LayerStatus::Skipped,
             },
         )
         .unwrap();
@@ -4023,6 +4102,7 @@ mod tests {
                 checkpoint: super::LayerStatus::Complete,
                 wal: super::LayerStatus::Skipped,
                 cold: super::LayerStatus::Skipped,
+                wal_retire: super::LayerStatus::Skipped,
             },
         )
         .unwrap();
