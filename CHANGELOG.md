@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - 2026-07-18
 
-First crates.io release since 0.1.1 (2026-05-15). Versions 0.2.0 and 0.3.0
-were developed on trunk but never published to crates.io; this release ships
+First crates.io release since 0.1.1. Version 0.2.0
+was developed on trunk but never published to crates.io; this release ships
 the accumulated work as 0.3.0 (SemVer minor bumps are mandated by the breaking
 changes below; skipping 0.2.0 on crates.io is intentional and allowed). MSRV:
 Rust 1.92, edition 2024. License: MIT OR Apache-2.0.
@@ -94,8 +94,8 @@ Rust 1.92, edition 2024. License: MIT OR Apache-2.0.
   fail-closed erase-vs-seal race hardening and a public erased accessor.
 - Provenance-chain erasure stability (a shredded subject leaves the
   tamper-evident chain verifiable).
-- CLI support, plus MCP admin tools `designate_crypto_erasable` and
-  `crypto_erase_subject` (tool registry 61→63), with a 1000-target DoS cap on
+- CLI support, plus MCP admin tools `designate_subject` and
+  `erase_subject` (tool registry 61→63), with a 1000-target DoS cap on
   designation.
 - The keyring + designation registry are folded into `.albk` backups (format
   v7).
