@@ -247,17 +247,16 @@ impl AletheiaDB {
             ));
         }
 
-        // Only File/Env sources round-trip through the ledger + authority.
-        match &key_source {
-            KeyProviderConfig::File { .. } | KeyProviderConfig::Env { .. } => {}
-            other => {
-                let (provider_type, _) = other.describe();
-                return Err(Error::FailedPrecondition(format!(
-                    "enabling encryption with a {provider_type} key source is not supported \
-                     (only file/env references can be persisted without leaking a secret)"
-                )));
-            }
-        }
+        // Every key source now round-trips through the durable ledger (Issue
+        // #3620): the `version=3` ledger serializes the FULL, non-secret
+        // `KeyProviderConfig` (file paths, env-var NAMES, a KMS-wrapped blob, a
+        // Vault address — never a secret), and a resumed enable re-derives the MEK
+        // via `build_provider().get_mek()`. The former File/Env-only refusal is
+        // lifted here; a build without the `serde` feature still fails closed for
+        // secret-backed sources inside `write_ledger` (defense-in-depth). A
+        // passphrase/Vault source additionally requires its secret env var to be
+        // present at the resuming `open()` — the same precondition as opening the
+        // DB steady-state.
 
         // Is a cold tier in scope? Its bare values are wrapped to `ACV1` below.
         let cold_in_scope = self.historical.read().has_tiered_storage();
@@ -815,21 +814,61 @@ mod tests {
         ));
     }
 
-    /// A KMS/Vault/passphrase key source is refused up front.
+    /// Issue #3620: a passphrase (secret-backed) key source is NO LONGER refused
+    /// up front — the durable `version=3` ledger round-trips it. Enabling to a
+    /// valid passphrase source succeeds (the guard the origin #3602 finding G
+    /// introduced is lifted here); the durable authority records the DB encrypted.
     #[test]
-    fn enable_encryption_refuses_secret_backed_source() {
+    fn enable_encryption_to_passphrase_source_succeeds() {
         let dir = tempfile::tempdir().unwrap();
+        // A real passphrase-wrapped (`AEKF`) key file + its passphrase in a
+        // uniquely-named env var (parallel-test safe).
+        let pp_path = dir.path().join("mek.aekf");
+        crate::encryption::generate_passphrase_key_file(&pp_path, "correct horse", false).unwrap();
+        let var = format!("ALETHEIADB_TEST_ENABLE_PP_{}", std::process::id());
+        // SAFETY: test-only, unique var name prevents races.
+        unsafe { std::env::set_var(&var, "correct horse") };
+
+        let mut db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+        let result = db.enable_encryption(KeyProviderConfig::PassphraseFile {
+            path: pp_path,
+            passphrase_env: var.clone(),
+        });
+        // SAFETY: test-only cleanup.
+        unsafe { std::env::remove_var(&var) };
+
+        result.expect("enabling to a passphrase source must succeed after #3620");
+        assert!(
+            read_encryption_state(&dir.path().join("indexes"))
+                .unwrap()
+                .map(|s| s.enabled)
+                .unwrap_or(false),
+            "the durable authority must record the DB as encrypted"
+        );
+    }
+
+    /// Issue #3620: with the up-front variant refusal lifted, enabling to a
+    /// passphrase source whose secret is UNAVAILABLE fails LOUD (a provider error
+    /// naming the missing env var) — never the old "not supported (file/env only)"
+    /// precondition, and never a silent success.
+    #[test]
+    fn enable_encryption_to_passphrase_missing_secret_fails_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        let var = format!("ALETHEIADB_TEST_ENABLE_PP_MISSING_{}", std::process::id());
+        // SAFETY: test-only cleanup ensures the var is absent.
+        unsafe { std::env::remove_var(&var) };
         let mut db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
         let err = db
             .enable_encryption(KeyProviderConfig::PassphraseFile {
-                path: "/keys/mek.aekf".into(),
-                passphrase_env: "MEK_PASS".to_string(),
+                path: dir.path().join("mek.aekf"),
+                passphrase_env: var,
             })
             .unwrap_err();
-        assert!(matches!(
-            err,
-            crate::core::error::Error::FailedPrecondition(_)
-        ));
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("only file/env references"),
+            "the old File/Env-only refusal must be gone, got: {msg}"
+        );
     }
 
     /// A1: `map_wal_install_err` reclassifies ONLY the distinguishable

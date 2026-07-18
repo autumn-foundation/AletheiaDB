@@ -78,7 +78,6 @@ use crate::db::rotation::{
     mark_wal_retire_complete, read_disable_ledger, retire_disable_encrypted_wal,
     unwrap_disable_index_files, write_disable_ledger,
 };
-use crate::encryption::config::KeyProviderConfig;
 use crate::encryption::factory::Algorithm;
 
 /// Outcome of a completed encrypted → plaintext disable migration.
@@ -202,19 +201,15 @@ impl AletheiaDB {
             )
         })?;
         let current_source = enc_cfg.key_provider.clone();
-        // Only File/Env sources round-trip through the ledger (they name a
-        // reference, not a secret). A secret-backed source cannot be recorded, so a
-        // resumed disable could not rebuild the decrypt cipher — refuse up front.
-        match &current_source {
-            KeyProviderConfig::File { .. } | KeyProviderConfig::Env { .. } => {}
-            other => {
-                let (provider_type, _) = other.describe();
-                return Err(Error::FailedPrecondition(format!(
-                    "disabling encryption with a {provider_type} key source is not supported \
-                     (only file/env references can be persisted without leaking a secret)"
-                )));
-            }
-        }
+        // Every key source now round-trips through the durable ledger (Issue
+        // #3620): the `version=3` ledger serializes the FULL, non-secret
+        // `KeyProviderConfig`, and a resumed disable re-derives the CURRENT
+        // (to-be-retired) MEK via `build_provider().get_mek()` to rebuild the
+        // decrypt cipher. The former File/Env-only refusal is lifted; a build
+        // without the `serde` feature still fails closed for secret-backed sources
+        // inside `write_ledger` (defense-in-depth). A passphrase/Vault source
+        // additionally requires its secret env var present at the resuming
+        // `open()` — the same precondition as opening the DB steady-state.
 
         let algorithm = self.disable_algorithm();
         // The generation the on-disk ciphertext is stamped with (the WAL keyring's
@@ -1335,35 +1330,65 @@ mod tests {
     /// decrypt cipher. The refusal must be a `FailedPrecondition` that writes NO
     /// ledger (it precedes `write_disable_ledger`).
     #[test]
-    fn disable_refuses_secret_backed_key_source_without_writing_ledger() {
+    fn disable_from_passphrase_source_succeeds() {
+        // Issue #3620: a DB encrypted under a passphrase (secret-backed) source
+        // can now be DISABLED — the durable `version=3` ledger records the full
+        // config so a resumed disable can rebuild the decrypt cipher via
+        // `build_provider().get_mek()`. (The origin #3602 finding-G refusal is
+        // lifted.)
         let dir = tempfile::tempdir().unwrap();
-        let key = key_source_at(dir.path());
         let indexes = dir.path().join("indexes");
+        let pp_path = dir.path().join("mek.aekf");
+        crate::encryption::generate_passphrase_key_file(&pp_path, "correct horse", false).unwrap();
+        let var = format!("ALETHEIADB_TEST_DISABLE_PP_{}", std::process::id());
+        // SAFETY: test-only, unique var name prevents races.
+        unsafe { std::env::set_var(&var, "correct horse") };
 
-        let mut db =
-            AletheiaDB::with_unified_config(encrypted_durable_config(dir.path(), &key)).unwrap();
-        db.create_node("N", PropertyMapBuilder::new().build())
-            .unwrap();
-
-        // Swap the retained key-source reference to a secret-backed (Passphrase)
-        // config. The refusal is provider-type-agnostic (any non-File/Env) and fires
-        // BEFORE any provider is constructed, so no passphrase infrastructure is
-        // needed — only the config value.
-        let mut enc_cfg = db.encryption_config.clone().unwrap();
-        enc_cfg.key_provider = KeyProviderConfig::PassphraseFile {
-            path: dir.path().join("wrapped.key"),
-            passphrase_env: "ALETHEIA_TEST_PASSPHRASE".to_string(),
+        let pp_source = KeyProviderConfig::PassphraseFile {
+            path: pp_path,
+            passphrase_env: var.clone(),
         };
-        db.encryption_config = Some(enc_cfg);
+        let cfg = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.path().join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_delay_ms: 10,
+                        max_batch_size: 200,
+                    })
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: indexes.clone(),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .encryption(EncryptionConfig {
+                enabled: true,
+                algorithm: crate::encryption::factory::Algorithm::default(),
+                key_provider: pp_source,
+                ..Default::default()
+            })
+            .build();
 
-        let err = db.disable_encryption().unwrap_err();
+        let result = (|| {
+            let mut db = AletheiaDB::with_unified_config(cfg)?;
+            db.create_node("N", PropertyMapBuilder::new().insert("n", "x").build())?;
+            db.persist_indexes()?;
+            db.disable_encryption()?;
+            crate::core::error::Result::Ok(())
+        })();
+        // SAFETY: test-only cleanup.
+        unsafe { std::env::remove_var(&var) };
+
+        result.expect("disabling a passphrase-encrypted DB must succeed after #3620");
         assert!(
-            matches!(err, crate::core::error::Error::FailedPrecondition(_)),
-            "secret-backed key source must be refused, got: {err:?}"
-        );
-        assert!(
-            !indexes.join("rotation.state").exists(),
-            "the refusal precedes the ledger write — no disable ledger is left behind"
+            read_encryption_state(&indexes)
+                .unwrap()
+                .map(|s| !s.enabled)
+                .unwrap_or(true),
+            "the durable authority must record the DB as no longer encrypted"
         );
     }
 

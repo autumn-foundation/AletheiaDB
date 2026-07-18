@@ -135,27 +135,130 @@ fn load_mek(cfg: &KeyProviderConfig) -> std::result::Result<Zeroizing<[u8; 32]>,
 }
 
 /// Statically refuse rotating TO a key source the durable breadcrumb cannot
-/// round-trip (passphrase/KMS/Vault), on the *variant alone* — BEFORE any
-/// `load_mek`/network call (Issue #3587).
+/// round-trip on this build (Issue #3587, relaxed by Issue #3620).
 ///
-/// Without this, rotating to an unreachable KMS/Vault endpoint would surface a
-/// network/transport error from `load_mek` instead of the clean "not yet
-/// supported" refusal. `write_rotation_state` performs the same check as
-/// defense-in-depth; this one fails fast and offline. Fail-closed: only
-/// file/env sources proceed.
+/// Since #3620 the `version=3` ledger serializes the FULL (non-secret)
+/// [`KeyProviderConfig`] via serde, so passphrase/KMS/Vault sources DO
+/// round-trip and resume — they are accepted here. The refusal is retained
+/// **only** for a build compiled WITHOUT the `serde` feature, whose ledger can
+/// still only persist the two-string File/Env reference: there, a secret-backed
+/// source is refused fail-closed on its variant alone, BEFORE any
+/// `load_mek`/network call, so an unreachable KMS/Vault surfaces the clean
+/// refusal rather than a transport error. (Every gate/CI config — default and
+/// `--all-features` — compiles serde in, so the relaxed path is the real one.)
 fn refuse_unsupported_new_source(new_source: &KeyProviderConfig) -> Result<()> {
     match new_source {
         KeyProviderConfig::File { .. } | KeyProviderConfig::Env { .. } => Ok(()),
         KeyProviderConfig::PassphraseFile { .. }
         | KeyProviderConfig::Kms { .. }
         | KeyProviderConfig::Vault { .. } => {
-            let (provider_type, _) = new_source.describe();
-            Err(StorageError::PersistenceError(format!(
-                "index key rotation to a {provider_type} key source is not yet supported"
-            ))
-            .into())
+            #[cfg(feature = "serde")]
+            {
+                // The v3 ledger round-trips the full config; resume re-derives
+                // the MEK via `build_provider().get_mek()`. Accept it.
+                Ok(())
+            }
+            #[cfg(not(feature = "serde"))]
+            {
+                let (provider_type, _) = new_source.describe();
+                Err(StorageError::PersistenceError(format!(
+                    "index key rotation to a {provider_type} key source requires the serde \
+                     feature (the durable rotation ledger cannot round-trip it otherwise)"
+                ))
+                .into())
+            }
         }
     }
+}
+
+/// Compute a MEK key-check value (KCV, Issue #3620 Approach C).
+///
+/// Returns the first 8 bytes of an HKDF-SHA256 subkey derived from the MEK under
+/// a dedicated domain-separated context (`rotation-kcv`), rendered as lowercase
+/// hex. This is a standard, non-secret KCV: HKDF is one-way, so it reveals
+/// nothing about the MEK, yet two identical MEKs always yield the same value.
+/// It uses only the codebase's existing [`KeyDerivation`] primitive — no new
+/// crypto. The MEK never leaves `Zeroizing`.
+fn compute_mek_kcv(mek: &Zeroizing<[u8; 32]>) -> Result<String> {
+    let subkey = KeyDerivation::new(mek.clone())
+        .derive_dek("rotation-kcv")
+        .map_err(|e| rotation_err(RotationError::KeyProvider(e.to_string())))?;
+    Ok(subkey.as_ref()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Verify a resumed rotation's re-derived MEK against the ledger's recorded KCV
+/// (Issue #3620 Approach C). A no-op when the ledger carries no KCV (legacy
+/// v1/v2 ledgers, non-serde builds, index-scope/cancel markers).
+///
+/// On mismatch — the source (passphrase/Vault/KMS value) yielded a DIFFERENT but
+/// otherwise valid key than the rotation was started with — returns a precise,
+/// actionable fail-closed error. Because this runs before any `clear_rotation_state`,
+/// the ledger is retained: a later `open()` with the correct/restored secret
+/// resumes losslessly.
+fn verify_mek_kcv(ledger: &RotationLedger, mek: &Zeroizing<[u8; 32]>) -> Result<()> {
+    let Some(expected) = ledger.mek_kcv.as_deref() else {
+        return Ok(());
+    };
+    let actual = compute_mek_kcv(mek)?;
+    let matches =
+        actual.len() == expected.len() && bool::from(actual.as_bytes().ct_eq(expected.as_bytes()));
+    if !matches {
+        return Err(StorageError::InconsistentState {
+            reason: "rotation.state key-check value (KCV) mismatch: the key obtained from the \
+                     recorded key source does not match the key this rotation was started with. \
+                     The source's secret appears to have changed out-of-band (verify the \
+                     passphrase / Vault value / KMS key is unchanged). The rotation ledger is \
+                     retained; re-open with the original key to resume."
+                .to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Re-derive the MEK recorded in a ledger's `new_source` AND verify it against
+/// the ledger's KCV (Issue #3620). Every resume seam re-derives the MEK through
+/// this, so a wrong/changed source key is caught precisely and fail-closed at
+/// the first re-derivation — with the ledger retained (loud and resumable).
+/// Identical to a bare `load_mek(&ledger.new_source)` when the ledger has no KCV
+/// (legacy v1/v2 ledgers, index-scope/cancel markers), preserving prior behavior.
+fn load_mek_checked(ledger: &RotationLedger) -> Result<Zeroizing<[u8; 32]>> {
+    let mek = load_mek(&ledger.new_source).map_err(rotation_err)?;
+    verify_mek_kcv(ledger, &mek)?;
+    Ok(mek)
+}
+
+/// Attach a freshly-computed KCV to a ledger from an already-loaded MEK. A no-op
+/// on a non-serde build (the two-string v2 format has no KCV field).
+fn attach_kcv_from_mek(ledger: &mut RotationLedger, mek: &Zeroizing<[u8; 32]>) -> Result<()> {
+    #[cfg(feature = "serde")]
+    {
+        ledger.mek_kcv = Some(compute_mek_kcv(mek)?);
+    }
+    #[cfg(not(feature = "serde"))]
+    {
+        let _ = (&mut *ledger, mek);
+    }
+    Ok(())
+}
+
+/// Attach a KCV to a ledger by sourcing the MEK once from `source` (used by the
+/// enable/disable engines, which hold the source rather than a loaded MEK). A
+/// no-op on a non-serde build.
+fn attach_kcv_from_source(ledger: &mut RotationLedger, source: &KeyProviderConfig) -> Result<()> {
+    #[cfg(feature = "serde")]
+    {
+        let mek = load_mek(source).map_err(rotation_err)?;
+        ledger.mek_kcv = Some(compute_mek_kcv(&mek)?);
+    }
+    #[cfg(not(feature = "serde"))]
+    {
+        let _ = (&mut *ledger, source);
+    }
+    Ok(())
 }
 
 /// Derive the index DEK for a MEK using the shared HKDF context.
@@ -820,15 +923,16 @@ impl AletheiaDB {
             self.persist_indexes()?;
         }
 
-        write_ledger(
-            manager,
-            &RotationLedger::forward_scope(
-                new_version,
-                new_key_source.clone(),
-                wal_in_scope,
-                cold_in_scope,
-            ),
-        )?;
+        let mut forward_ledger = RotationLedger::forward_scope(
+            new_version,
+            new_key_source.clone(),
+            wal_in_scope,
+            cold_in_scope,
+        );
+        // Stamp the KCV of the new MEK (already loaded above) so a crash-resume
+        // can detect a wrong/changed key at the source precisely (Issue #3620).
+        attach_kcv_from_mek(&mut forward_ledger, &new_mek)?;
+        write_ledger(manager, &forward_ledger)?;
         self.emit_rotation_audit(&AuditEvent::RotationStarted {
             old_version,
             new_version,
@@ -1092,6 +1196,21 @@ struct RotationLedger {
     /// plaintext WAL is deleted); `Skipped` for rotations and for an enable with no
     /// index snapshot.
     wal_retire: LayerStatus,
+    /// MEK key-check value (Issue #3620, Approach C): a short, non-secret
+    /// one-way check value of the NEW/current MEK this rotation targets.
+    ///
+    /// Computed as the first 8 bytes of an HKDF subkey derived from the MEK
+    /// (`compute_mek_kcv`) rendered as lowercase hex. It reveals nothing about
+    /// the key (HKDF is one-way) yet lets a crash-resume detect a *wrong-key*
+    /// source (a passphrase/Vault/KMS value that changed out-of-band between
+    /// rotation start and resume) and surface a precise, actionable error
+    /// instead of a cryptic downstream AEAD failure.
+    ///
+    /// Persisted only in the `version=3` (serde) ledger; `None` for legacy v1/v2
+    /// ledgers, for the two-string (non-serde) writer, and for the index-scope
+    /// (`write_rotation_state`) / cancel markers that carry no loaded MEK. A
+    /// `None` KCV makes resume verification a no-op, preserving prior behavior.
+    mek_kcv: Option<String>,
 }
 
 impl RotationLedger {
@@ -1112,6 +1231,7 @@ impl RotationLedger {
             wal: LayerStatus::Skipped,
             cold: LayerStatus::Skipped,
             wal_retire: LayerStatus::Skipped,
+            mek_kcv: None,
         }
     }
 
@@ -1143,6 +1263,7 @@ impl RotationLedger {
             cold: scope(cold_in_scope),
             // A key rotation never retires pre-enable plaintext WAL (there is none).
             wal_retire: LayerStatus::Skipped,
+            mek_kcv: None,
         }
     }
 
@@ -1180,6 +1301,7 @@ impl RotationLedger {
             // snapshot to durably hold the pre-enable state first (index in scope).
             // With no snapshot, retiring plaintext WAL could lose data, so Skip it.
             wal_retire: scope(index_in_scope),
+            mek_kcv: None,
         }
     }
 
@@ -1227,6 +1349,7 @@ impl RotationLedger {
             // the mirror of the enable retire guard. With no snapshot, retiring the
             // encrypted WAL could lose data, so Skip it.
             wal_retire: scope(index_in_scope),
+            mek_kcv: None,
         }
     }
 }
@@ -1257,16 +1380,66 @@ fn write_rotation_state(
     )
 }
 
-/// Durably write a cross-layer rotation ledger (Issue #3617, `version=2`).
+/// Durably write a cross-layer rotation ledger.
 ///
-/// Only file/env sources carry a single, non-secret identifying reference the
-/// ledger can persist and reconstruct on crash-resume. Rotating TO a
-/// passphrase/KMS/Vault source is a documented follow-up (Issue #3620): those
-/// carry secrets (passphrase/token env) or multi-field config that the simple
-/// line ledger cannot round-trip, so refuse fail-closed rather than write a
-/// ledger that would not resume. No key material is written — only the source
-/// reference, versions, direction, and per-layer status.
+/// **Format history:** `version=1` (#488, index-only), `version=2` (#3617,
+/// cross-layer, two-string `new_source_kind`/`new_source_value` reference —
+/// File/Env only), `version=3` (#3620, the FULL non-secret [`KeyProviderConfig`]
+/// serialized with serde_json on a single `new_source_json=` line, plus an
+/// optional `mek_kcv=` key-check value). v3 is what a serde-enabled build emits;
+/// it round-trips passphrase/KMS/Vault sources that the two-string form could
+/// not. No key material is ever written — the config carries file paths, env-var
+/// NAMES, a KMS-wrapped (CMK-useless) blob, or a Vault address, never a secret
+/// (verified by `ledger_v3_never_contains_plaintext_secret`).
+///
+/// A build compiled WITHOUT `serde` falls back to the `version=2` writer and
+/// still refuses secret-backed sources, exactly preserving prior behavior.
 fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> Result<()> {
+    let base = manager.base_path();
+    std::fs::create_dir_all(base)
+        .map_err(|e| StorageError::io_error(format!("Failed to create data dir: {e}")))?;
+    let body = serialize_ledger(ledger)?;
+    write_durable(&rotation_state_path(manager), body.as_bytes())
+}
+
+/// Serialize a ledger's on-disk body. `version=3` under serde (full config +
+/// optional KCV); `version=2` two-string form otherwise.
+#[cfg(feature = "serde")]
+fn serialize_ledger(ledger: &RotationLedger) -> Result<String> {
+    // Compact serde_json is single-line (string values escape newlines as `\n`
+    // literals, never a raw LF), so it is a newline-safe token in the line-based
+    // ledger. `split_once('=')` in the reader splits only the FIRST `=`, so any
+    // `=` inside the JSON (e.g. base64 `=` padding in a KMS blob) is preserved.
+    let new_source_json = serde_json::to_string(&ledger.new_source).map_err(|e| {
+        StorageError::PersistenceError(format!("failed to serialize rotation new_source: {e}"))
+    })?;
+    debug_assert!(
+        !new_source_json.contains('\n'),
+        "compact serde_json must be single-line"
+    );
+    let mut body = format!(
+        "version=3\ndirection={}\ntarget_version={}\nnew_source_json={new_source_json}\n",
+        ledger.direction.as_str(),
+        ledger.new_version,
+    );
+    if let Some(kcv) = &ledger.mek_kcv {
+        body.push_str(&format!("mek_kcv={kcv}\n"));
+    }
+    body.push_str(&format!(
+        "layer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\nlayer.wal_retire={}\n",
+        ledger.index.as_str(),
+        ledger.checkpoint.as_str(),
+        ledger.wal.as_str(),
+        ledger.cold.as_str(),
+        ledger.wal_retire.as_str(),
+    ));
+    Ok(body)
+}
+
+/// Non-serde fallback: the legacy `version=2` two-string writer. File/Env only;
+/// secret-backed sources are refused (they cannot round-trip without serde).
+#[cfg(not(feature = "serde"))]
+fn serialize_ledger(ledger: &RotationLedger) -> Result<String> {
     let (kind, value) = match &ledger.new_source {
         KeyProviderConfig::File { path } => ("file", path.to_string_lossy().into_owned()),
         KeyProviderConfig::Env { variable } => ("env", variable.clone()),
@@ -1275,12 +1448,12 @@ fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> R
         | KeyProviderConfig::Vault { .. } => {
             let (provider_type, _) = ledger.new_source.describe();
             return Err(StorageError::PersistenceError(format!(
-                "key rotation to a {provider_type} key source is not yet supported"
+                "key rotation to a {provider_type} key source requires the serde feature"
             ))
             .into());
         }
     };
-    let body = format!(
+    Ok(format!(
         "version=2\ndirection={}\ntarget_version={}\nnew_source_kind={kind}\nnew_source_value={value}\nlayer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\nlayer.wal_retire={}\n",
         ledger.direction.as_str(),
         ledger.new_version,
@@ -1289,11 +1462,7 @@ fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> R
         ledger.wal.as_str(),
         ledger.cold.as_str(),
         ledger.wal_retire.as_str(),
-    );
-    let base = manager.base_path();
-    std::fs::create_dir_all(base)
-        .map_err(|e| StorageError::io_error(format!("Failed to create data dir: {e}")))?;
-    write_durable(&rotation_state_path(manager), body.as_bytes())
+    ))
 }
 
 /// Durable, ordered file write: temp file → `sync_all` → atomic rename → fsync
@@ -1396,6 +1565,9 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
     let mut target_version = None;
     let mut kind = None;
     let mut value = None;
+    // v3 (#3620): full serde_json config + optional KCV.
+    let mut new_source_json = None;
+    let mut mek_kcv = None;
     let mut layer_index = None;
     let mut layer_checkpoint = None;
     let mut layer_wal = None;
@@ -1431,6 +1603,10 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
             }
             "new_source_kind" => kind = Some(v.to_string()),
             "new_source_value" => value = Some(v.to_string()),
+            // v3 (#3620): the value is the remainder of the line after the first
+            // `=`, i.e. the full compact JSON (internal `=` preserved).
+            "new_source_json" => new_source_json = Some(v.to_string()),
+            "mek_kcv" => mek_kcv = Some(v.to_string()),
             "layer.index" => layer_index = Some(parse_layer(v, "layer.index")?),
             "layer.checkpoint" => layer_checkpoint = Some(parse_layer(v, "layer.checkpoint")?),
             "layer.wal" => layer_wal = Some(parse_layer(v, "layer.wal")?),
@@ -1440,8 +1616,9 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
         }
     }
 
-    // Fail closed on an absent or unknown format version. v1 (index-only) and v2
-    // (cross-layer) are the only supported shapes.
+    // Fail closed on an absent or unknown format version. v1 (index-only), v2
+    // (cross-layer, two-string source) and v3 (#3620, serde source + KCV) are the
+    // only supported shapes.
     let version = version.ok_or_else(|| corrupt("missing version"))?;
     let (def_index, def_checkpoint, def_wal, def_cold) = match version {
         // Legacy #488: index takes the recorded direction; #3617's added layers
@@ -1452,8 +1629,11 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
             LayerStatus::Skipped,
             LayerStatus::Skipped,
         ),
-        // v2: an absent `layer.*` line defaults to Pending (forward-safe).
-        2 => (
+        // v2 / v3: an absent `layer.*` line defaults to Pending (forward-safe).
+        // v3 differs from v2 ONLY in how `new_source` is encoded (full serde JSON
+        // + optional KCV) — the per-layer semantics are identical, so they share
+        // these defaults.
+        2 | 3 => (
             LayerStatus::Pending,
             LayerStatus::Pending,
             LayerStatus::Pending,
@@ -1463,12 +1643,21 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
     };
 
     let new_version = target_version.ok_or_else(|| corrupt("missing target_version"))?;
-    let value = value.ok_or_else(|| corrupt("missing new_source_value"))?;
-    let new_source = match kind.as_deref() {
-        Some("file") => KeyProviderConfig::File { path: value.into() },
-        Some("env") => KeyProviderConfig::Env { variable: value },
-        Some(other) => return Err(corrupt(&format!("unknown new_source_kind {other:?}"))),
-        None => return Err(corrupt("missing new_source_kind")),
+    // Reconstruct the new-key SOURCE. Prefer the v3 full-config JSON when present
+    // (round-trips passphrase/KMS/Vault); fall back to the v1/v2 two-string
+    // File/Env reference otherwise. A `new_source_json` line on a build without
+    // serde fails closed (it cannot be deserialized) rather than silently
+    // dropping a real in-flight rotation.
+    let new_source = if let Some(json) = new_source_json {
+        reconstruct_new_source_json(&json, &corrupt)?
+    } else {
+        let value = value.ok_or_else(|| corrupt("missing new_source_value"))?;
+        match kind.as_deref() {
+            Some("file") => KeyProviderConfig::File { path: value.into() },
+            Some("env") => KeyProviderConfig::Env { variable: value },
+            Some(other) => return Err(corrupt(&format!("unknown new_source_kind {other:?}"))),
+            None => return Err(corrupt("missing new_source_kind")),
+        }
     };
     Ok(Some(RotationLedger {
         direction,
@@ -1482,7 +1671,31 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
         // defaults to `Skipped`: the plaintext-WAL-retire step did not exist, so a
         // resume must NOT delete any WAL segment based on an ambiguous absent field.
         wal_retire: layer_wal_retire.unwrap_or(LayerStatus::Skipped),
+        mek_kcv,
     }))
+}
+
+/// Deserialize a v3 `new_source_json` value back into a [`KeyProviderConfig`]
+/// (Issue #3620). Present-but-unparseable JSON fails closed as `corrupt`.
+#[cfg(feature = "serde")]
+fn reconstruct_new_source_json(
+    json: &str,
+    corrupt: &impl Fn(&str) -> Error,
+) -> Result<KeyProviderConfig> {
+    serde_json::from_str::<KeyProviderConfig>(json)
+        .map_err(|e| corrupt(&format!("unparseable new_source_json ({e})")))
+}
+
+/// Non-serde builds cannot deserialize a v3 ledger; fail closed rather than
+/// mis-resume. (A v3 ledger can only have been written by a serde build.)
+#[cfg(not(feature = "serde"))]
+fn reconstruct_new_source_json(
+    _json: &str,
+    corrupt: &impl Fn(&str) -> Error,
+) -> Result<KeyProviderConfig> {
+    Err(corrupt(
+        "version=3 rotation.state requires the serde feature to reconstruct new_source",
+    ))
 }
 
 /// Resolve the key version the index and WAL keyrings should be PROVISIONED to
@@ -1611,8 +1824,7 @@ pub fn install_pending_wal_generations(
     let Some((old_cipher, old_version)) = wal_keyring.current() else {
         return Ok(());
     };
-    let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
-        .map_err(rotation_err)?;
+    let new_wal_dek = derive_wal_dek(load_mek_checked(&ledger)?).map_err(rotation_err)?;
     let new_wal_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_wal_dek));
     // Re-assert the old generation (flips the keyring to strict per-version
     // dispatch) then add the new one, so legacy/old-kv segments resolve to the
@@ -1726,15 +1938,16 @@ pub(crate) fn write_enable_ledger(
     index_in_scope: bool,
     cold_in_scope: bool,
 ) -> Result<()> {
-    write_ledger(
-        manager,
-        &RotationLedger::enable_scope(
-            ENABLE_KEY_VERSION,
-            new_source.clone(),
-            index_in_scope,
-            cold_in_scope,
-        ),
-    )
+    let mut ledger = RotationLedger::enable_scope(
+        ENABLE_KEY_VERSION,
+        new_source.clone(),
+        index_in_scope,
+        cold_in_scope,
+    );
+    // Stamp the KCV of the new MEK so a crash-resume can detect a wrong/changed
+    // key at the source precisely (Issue #3620).
+    attach_kcv_from_source(&mut ledger, new_source)?;
+    write_ledger(manager, &ledger)
 }
 
 /// Build the WAL DEK keyring to install for an enable, derived from the recorded
@@ -2027,15 +2240,17 @@ pub(crate) fn write_disable_ledger(
     index_in_scope: bool,
     cold_in_scope: bool,
 ) -> Result<()> {
-    write_ledger(
-        manager,
-        &RotationLedger::disable_scope(
-            current_version,
-            current_source.clone(),
-            index_in_scope,
-            cold_in_scope,
-        ),
-    )
+    let mut ledger = RotationLedger::disable_scope(
+        current_version,
+        current_source.clone(),
+        index_in_scope,
+        cold_in_scope,
+    );
+    // Stamp the KCV of the CURRENT (to-be-retired) MEK so a resumed disable that
+    // re-derives the decrypt key from the recorded source can detect a changed
+    // key precisely (Issue #3620).
+    attach_kcv_from_source(&mut ledger, current_source)?;
+    write_ledger(manager, &ledger)
 }
 
 /// Build the WAL DEK keyring to install for a DISABLE resume — the DECRYPT keyring
@@ -2244,8 +2459,7 @@ pub fn resume_pending_rotation(
     let old_version = keyring.current_version();
 
     // Index DEK (index + checkpoint ride it). PR3 will add the cold DEK here.
-    let new_dek = derive_index_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
-        .map_err(rotation_err)?;
+    let new_dek = derive_index_dek(load_mek_checked(&ledger)?).map_err(rotation_err)?;
     let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
 
     keyring.add_generation(ledger.new_version, Arc::clone(&new_cipher));
@@ -2296,8 +2510,7 @@ pub fn resume_pending_rotation(
     {
         // Always install BOTH generations so a half-rotated directory replays
         // correctly regardless of which mode drives retirement.
-        let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
-            .map_err(rotation_err)?;
+        let new_wal_dek = derive_wal_dek(load_mek_checked(&ledger)?).map_err(rotation_err)?;
         let new_wal_cipher: Arc<dyn Cipher> =
             Arc::from(create_cipher(enc_cfg.algorithm, &new_wal_dek));
         // The startup keyring is `single(old_wal_dek)`; adding the new generation
@@ -2480,8 +2693,7 @@ pub fn finalize_resumed_wal_rotation(
 
     // Re-derive + re-install the new WAL generation (idempotent: it was already
     // installed by `resume_pending_rotation` / `install_pending_wal_generations`).
-    let new_wal_dek = derive_wal_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
-        .map_err(rotation_err)?;
+    let new_wal_dek = derive_wal_dek(load_mek_checked(&ledger)?).map_err(rotation_err)?;
     let new_wal_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_wal_dek));
     wal_keyring.add_generation(ledger.new_version, Arc::clone(&new_wal_cipher));
 
@@ -2580,8 +2792,7 @@ pub fn finalize_resumed_cold_rotation(
     // Re-derive + install the new cold generation (idempotent: a re-run replaces
     // the same-version generation). The old generation is the cold store's
     // provisioned single generation, still live for reading old-DEK values.
-    let new_cold_dek = derive_cold_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
-        .map_err(rotation_err)?;
+    let new_cold_dek = derive_cold_dek(load_mek_checked(&ledger)?).map_err(rotation_err)?;
     let new_cold_cipher: Arc<dyn Cipher> =
         Arc::from(create_cipher(enc_cfg.algorithm, &new_cold_dek));
     cold.install_cold_generation(ledger.new_version, new_cold_cipher)?;
@@ -2889,11 +3100,14 @@ mod tests {
     }
 
     #[test]
-    fn rotate_to_remote_source_refuses_without_reaching_endpoint() {
-        // Rotating TO a KMS/Vault/passphrase source must return the clean
-        // "not yet supported" refusal on the variant alone — BEFORE any network
-        // call — so an unreachable endpoint never turns the refusal into a
-        // transport error (Issue #3587). Index-only DB so we reach run_rotation.
+    fn rotate_to_remote_source_fails_loud_and_writes_no_ledger() {
+        // Issue #3620 (supersedes the #3602 finding-G refusal): rotating TO a
+        // KMS/Vault source is no longer refused on the variant alone — the v3
+        // ledger round-trips it. When the source is unavailable at rotation start
+        // (Vault token env unset, KMS endpoint unreachable / not compiled), the
+        // rotation fails LOUD — but crucially NOT with the old "not yet supported"
+        // refusal — and writes NO breadcrumb (load_mek(new) fails before the
+        // ledger write). Index-only DB so we reach run_rotation.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let old_key = root.join("old.key");
@@ -2902,11 +3116,15 @@ mod tests {
         let db = build_db_index_only(root, &old_key);
         seed(&db);
 
-        // Vault pointed at an unreachable address: must NOT be dialed.
+        // Vault with an unset token env: build_provider fails reading the token
+        // BEFORE dialing — loud, no ledger, and NOT the old variant refusal.
+        let vault_var = unique_var("VAULT_ROT_NOPE");
+        // SAFETY: ensure absent.
+        unsafe { std::env::remove_var(&vault_var) };
         let err = db
             .rotate_index_keys(KeyProviderConfig::Vault {
                 address: "https://127.0.0.1:1".to_string(),
-                token_env: "NOPE_TOKEN".to_string(),
+                token_env: vault_var,
                 mount: "secret".to_string(),
                 path: "app/mek".to_string(),
                 key_field: "key".to_string(),
@@ -2915,25 +3133,25 @@ mod tests {
             })
             .unwrap_err();
         assert!(
-            err.to_string().contains("not yet supported") && err.to_string().contains("vault"),
-            "expected clean vault refusal, got: {err}"
+            !err.to_string().contains("not yet supported"),
+            "the old variant-only refusal must be gone, got: {err}"
         );
-        // And no breadcrumb was written by the refused rotation.
         assert!(!root.join("data").join("rotation.state").exists());
 
-        // KMS is refused the same way (no endpoint contacted).
+        // KMS at an unreachable endpoint (or not compiled) fails the same way.
         let err = db
             .rotate_index_keys(KeyProviderConfig::Kms {
                 key_id: "alias/prod".to_string(),
-                encrypted_data_key: "AAAA".to_string(),
+                encrypted_data_key: "QUFBQQ==".to_string(),
                 region: None,
                 endpoint_url: Some("http://127.0.0.1:1".to_string()),
             })
             .unwrap_err();
         assert!(
-            err.to_string().contains("not yet supported") && err.to_string().contains("kms"),
-            "expected clean kms refusal, got: {err}"
+            !err.to_string().contains("not yet supported"),
+            "the old variant-only refusal must be gone, got: {err}"
         );
+        assert!(!root.join("data").join("rotation.state").exists());
     }
 
     #[test]
@@ -3901,6 +4119,7 @@ mod tests {
             wal: super::LayerStatus::Skipped,
             cold: super::LayerStatus::Pending,
             wal_retire: super::LayerStatus::Skipped,
+            mek_kcv: None,
         };
         super::write_ledger(&manager, &ledger).unwrap();
 
@@ -3910,12 +4129,16 @@ mod tests {
         assert_eq!(read, ledger, "every ledger field must round-trip");
 
         let body = std::fs::read_to_string(root.join("data").join("rotation.state")).unwrap();
-        assert!(body.contains("version=2"), "expected v2 format: {body}");
+        // Since #3620 a serde build emits the v3 format (full JSON source).
+        assert!(body.contains("version=3"), "expected v3 format: {body}");
         assert!(body.contains("target_version=3"));
         assert!(body.contains("layer.index=complete"));
         assert!(body.contains("layer.cold=pending"));
         // Source REFERENCE only (env var NAME), never key bytes.
-        assert!(body.contains("new_source_kind=env") && body.contains("MEK_VAR"));
+        assert!(
+            body.contains("new_source_json=") && body.contains("MEK_VAR"),
+            "v3 serializes the full config as JSON with the env NAME: {body}"
+        );
 
         let leftover: Vec<_> = std::fs::read_dir(root.join("data"))
             .unwrap()
@@ -3979,13 +4202,17 @@ mod tests {
         assert_eq!(read, ledger, "every disable-ledger field must round-trip");
 
         let body = std::fs::read_to_string(root.join("data").join("rotation.state")).unwrap();
-        assert!(body.contains("version=2"), "expected v2 format: {body}");
+        // Since #3620 a serde build emits the v3 format (full JSON source).
+        assert!(body.contains("version=3"), "expected v3 format: {body}");
         assert!(body.contains("direction=disable"), "direction: {body}");
         assert!(body.contains("layer.wal=pending"));
         assert!(body.contains("layer.index=pending"));
         assert!(body.contains("layer.cold=skipped"));
         // Source REFERENCE only (env var NAME), never key bytes.
-        assert!(body.contains("new_source_kind=env") && body.contains("CURRENT_MEK"));
+        assert!(
+            body.contains("new_source_json=") && body.contains("CURRENT_MEK"),
+            "v3 serializes the full config as JSON with the env NAME: {body}"
+        );
     }
 
     #[test]
@@ -4195,8 +4422,8 @@ mod tests {
         );
         let body = std::fs::read_to_string(&state).unwrap();
         assert!(
-            body.contains("version=2") && body.contains("layer.index=pending"),
-            "expected a v2 ledger: {body}"
+            body.contains("version=3") && body.contains("layer.index=pending"),
+            "expected a v3 ledger: {body}"
         );
         // No index file has been re-stamped to v2 yet (keyring not flipped).
         let mut v2 = 0;
@@ -4346,8 +4573,8 @@ mod tests {
         // The planted ledger is v2 with the index layer pending.
         let body = std::fs::read_to_string(root.join("data").join("rotation.state")).unwrap();
         assert!(
-            body.contains("version=2") && body.contains("layer.index=pending"),
-            "expected a v2 ledger on disk: {body}"
+            body.contains("version=3") && body.contains("layer.index=pending"),
+            "expected a v3 ledger on disk: {body}"
         );
 
         let engine = IndexKeyRotation::new(
@@ -4569,6 +4796,7 @@ mod tests {
                 wal: super::LayerStatus::Skipped,
                 cold: super::LayerStatus::Skipped,
                 wal_retire: super::LayerStatus::Skipped,
+                mek_kcv: None,
             },
         )
         .unwrap();
@@ -4648,6 +4876,7 @@ mod tests {
                 wal: super::LayerStatus::Skipped,
                 cold: super::LayerStatus::Skipped,
                 wal_retire: super::LayerStatus::Skipped,
+                mek_kcv: None,
             },
         )
         .unwrap();
@@ -4685,9 +4914,9 @@ mod tests {
 
     #[test]
     fn unknown_ledger_format_version_is_corrupt() {
-        // A ledger with an UNKNOWN format version (here v3) must fail closed as
-        // corrupt/unsupported, never be silently accepted — v1 and v2 are the
-        // only shapes this reader understands. The rest of the ledger is
+        // A ledger with an UNKNOWN format version (here v4) must fail closed as
+        // corrupt/unsupported, never be silently accepted — v1, v2 and v3 (#3620)
+        // are the only shapes this reader understands. The rest of the ledger is
         // otherwise well-formed, proving it is the version dispatch that
         // rejects, not a missing field.
         let tmp = TempDir::new().unwrap();
@@ -4699,7 +4928,7 @@ mod tests {
 
         std::fs::write(
             data_dir.join("rotation.state"),
-            b"version=3\ndirection=forward\ntarget_version=4\nnew_source_kind=file\nnew_source_value=/etc/aletheia/new.key\nlayer.index=pending\n",
+            b"version=4\ndirection=forward\ntarget_version=4\nnew_source_kind=file\nnew_source_value=/etc/aletheia/new.key\nlayer.index=pending\n",
         )
         .unwrap();
 
@@ -5085,5 +5314,699 @@ mod tests {
              install, a half-rotated WAL loses every write whose only durable copy is a \
              new-DEK segment."
         );
+    }
+
+    // ── Issue #3620: durable rotation to passphrase/KMS/Vault key sources ──────
+    //
+    // The `version=3` ledger serializes the FULL (non-secret) KeyProviderConfig
+    // via serde_json so remote/derived sources round-trip and crash-resume, plus
+    // a MEK key-check value (KCV) for precise wrong-key detection at resume.
+
+    /// Process-unique env-var name for parallel-test safety.
+    fn unique_var(tag: &str) -> String {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        format!(
+            "ALETHEIADB_TEST_ROT3620_{tag}_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// Build a ledger with explicit fields for serialization round-trip tests.
+    fn mk_ledger(
+        direction: RotationDirection,
+        new_source: KeyProviderConfig,
+        kcv: Option<String>,
+    ) -> RotationLedger {
+        RotationLedger {
+            direction,
+            new_version: 2,
+            new_source,
+            index: LayerStatus::Pending,
+            checkpoint: LayerStatus::Pending,
+            wal: LayerStatus::Skipped,
+            cold: LayerStatus::Skipped,
+            wal_retire: LayerStatus::Skipped,
+            mek_kcv: kcv,
+        }
+    }
+
+    /// Serialize `ledger` to a temp `rotation.state` and read it straight back.
+    fn ledger_roundtrip(ledger: &RotationLedger) -> RotationLedger {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rotation.state");
+        let body = super::serialize_ledger(ledger).unwrap();
+        std::fs::write(&path, body.as_bytes()).unwrap();
+        super::read_rotation_state_at(&path)
+            .unwrap()
+            .expect("ledger must parse back")
+    }
+
+    #[test]
+    fn ledger_v3_roundtrips_kms_config() {
+        // A KMS source with all four fields, incl. a base64 blob with `=` padding
+        // (exercises the reader's split_once('=') robustness).
+        let src = KeyProviderConfig::Kms {
+            key_id: "alias/prod-mek".to_string(),
+            encrypted_data_key: "QUJDRA==".to_string(), // base64 with padding
+            region: Some("eu-west-1".to_string()),
+            endpoint_url: Some("https://kms.eu-west-1.amazonaws.com".to_string()),
+        };
+        let ledger = mk_ledger(RotationDirection::Forward, src.clone(), None);
+        let got = ledger_roundtrip(&ledger);
+        assert_eq!(got, ledger);
+        assert_eq!(got.new_source, src);
+    }
+
+    #[test]
+    fn ledger_v3_roundtrips_vault_config() {
+        // All seven Vault fields, incl. namespace: None and a ca_cert path.
+        let src = KeyProviderConfig::Vault {
+            address: "https://vault.example.com:8200".to_string(),
+            token_env: "VAULT_TOKEN".to_string(),
+            mount: "secret".to_string(),
+            path: "mek/aletheia".to_string(),
+            key_field: "key".to_string(),
+            namespace: None,
+            ca_cert: Some("/etc/ssl/vault-ca.pem".into()),
+        };
+        let ledger = mk_ledger(RotationDirection::Disable, src.clone(), None);
+        let got = ledger_roundtrip(&ledger);
+        assert_eq!(got, ledger);
+        assert_eq!(got.new_source, src);
+    }
+
+    #[test]
+    fn ledger_v3_roundtrips_passphrase_config() {
+        let src = KeyProviderConfig::PassphraseFile {
+            path: "/keys/mek.aekf".into(),
+            passphrase_env: "MEK_PASSPHRASE".to_string(),
+        };
+        let ledger = mk_ledger(RotationDirection::Enable, src.clone(), None);
+        let got = ledger_roundtrip(&ledger);
+        assert_eq!(got, ledger);
+    }
+
+    #[test]
+    fn ledger_v3_roundtrips_file_and_env() {
+        for src in [
+            KeyProviderConfig::File {
+                path: "/keys/mek.key".into(),
+            },
+            KeyProviderConfig::Env {
+                variable: "ALETHEIADB_MEK".to_string(),
+            },
+        ] {
+            let ledger = mk_ledger(RotationDirection::Forward, src.clone(), None);
+            assert_eq!(ledger_roundtrip(&ledger), ledger);
+        }
+    }
+
+    #[test]
+    fn ledger_v3_roundtrips_with_kcv() {
+        let src = KeyProviderConfig::File {
+            path: "/k.key".into(),
+        };
+        let ledger = mk_ledger(
+            RotationDirection::Forward,
+            src,
+            Some("0123456789abcdef".to_string()),
+        );
+        let got = ledger_roundtrip(&ledger);
+        assert_eq!(got.mek_kcv.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(got, ledger);
+    }
+
+    #[test]
+    fn ledger_v3_is_version_3_and_uses_json_source() {
+        let src = KeyProviderConfig::Kms {
+            key_id: "alias/k".to_string(),
+            encrypted_data_key: "QQ==".to_string(),
+            region: None,
+            endpoint_url: None,
+        };
+        let body =
+            super::serialize_ledger(&mk_ledger(RotationDirection::Forward, src, None)).unwrap();
+        assert!(
+            body.starts_with("version=3\n"),
+            "must emit version=3: {body}"
+        );
+        assert!(
+            body.contains("new_source_json="),
+            "must use JSON source: {body}"
+        );
+        assert!(
+            !body.contains("new_source_kind="),
+            "v3 must NOT emit the legacy two-string form: {body}"
+        );
+        // Single-line JSON: exactly one `new_source_json=` line, no stray newline.
+        assert_eq!(body.matches("new_source_json=").count(), 1);
+    }
+
+    #[test]
+    fn ledger_v3_never_contains_plaintext_secret() {
+        // The env-var NAMES appear in the ledger; the SECRET VALUES they point at
+        // must NEVER be serialized (the config holds names, not secrets).
+        let pass_var = unique_var("SECRET_PASS");
+        let token_var = unique_var("SECRET_TOKEN");
+        let sentinel_pass = "SUPER-SECRET-PASSPHRASE-VALUE-8f2a";
+        let sentinel_token = "hvs.SUPER-SECRET-VAULT-TOKEN-9c1b";
+        // SAFETY: test-only, unique names.
+        unsafe {
+            std::env::set_var(&pass_var, sentinel_pass);
+            std::env::set_var(&token_var, sentinel_token);
+        }
+
+        for src in [
+            KeyProviderConfig::PassphraseFile {
+                path: "/keys/mek.aekf".into(),
+                passphrase_env: pass_var.clone(),
+            },
+            KeyProviderConfig::Vault {
+                address: "https://vault:8200".to_string(),
+                token_env: token_var.clone(),
+                mount: "secret".to_string(),
+                path: "mek".to_string(),
+                key_field: "key".to_string(),
+                namespace: None,
+                ca_cert: None,
+            },
+        ] {
+            let body =
+                super::serialize_ledger(&mk_ledger(RotationDirection::Forward, src, None)).unwrap();
+            assert!(
+                !body.contains(sentinel_pass) && !body.contains(sentinel_token),
+                "a plaintext secret leaked into the ledger bytes: {body}"
+            );
+        }
+        // The var NAME is present (it is not a secret).
+        let body = super::serialize_ledger(&mk_ledger(
+            RotationDirection::Forward,
+            KeyProviderConfig::PassphraseFile {
+                path: "/k.aekf".into(),
+                passphrase_env: pass_var.clone(),
+            },
+            None,
+        ))
+        .unwrap();
+        assert!(body.contains(&pass_var), "the env-var NAME should appear");
+
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var(&pass_var);
+            std::env::remove_var(&token_var);
+        }
+    }
+
+    #[test]
+    fn ledger_v1_still_parses() {
+        // A legacy #488 v1 breadcrumb: no layer.* lines, `new_version`, two-string
+        // File source. Must resume its index pass (index Pending, rest Skipped).
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rotation.state");
+        std::fs::write(
+            &path,
+            "version=1\ndirection=forward\nnew_version=2\nnew_source_kind=file\nnew_source_value=/keys/new.key\n",
+        )
+        .unwrap();
+        let got = super::read_rotation_state_at(&path).unwrap().unwrap();
+        assert_eq!(
+            got.new_source,
+            KeyProviderConfig::File {
+                path: "/keys/new.key".into()
+            }
+        );
+        assert_eq!(got.index, LayerStatus::Pending);
+        assert_eq!(got.checkpoint, LayerStatus::Skipped);
+        assert_eq!(got.wal, LayerStatus::Skipped);
+        assert_eq!(got.cold, LayerStatus::Skipped);
+        assert_eq!(got.mek_kcv, None);
+    }
+
+    #[test]
+    fn ledger_v2_still_parses() {
+        // A v2 cross-layer ledger with the two-string Env source and layer lines.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rotation.state");
+        std::fs::write(
+            &path,
+            "version=2\ndirection=enable\ntarget_version=1\nnew_source_kind=env\nnew_source_value=ALETHEIADB_MEK\nlayer.index=complete\nlayer.checkpoint=complete\nlayer.wal=pending\nlayer.cold=skipped\nlayer.wal_retire=pending\n",
+        )
+        .unwrap();
+        let got = super::read_rotation_state_at(&path).unwrap().unwrap();
+        assert_eq!(
+            got.new_source,
+            KeyProviderConfig::Env {
+                variable: "ALETHEIADB_MEK".to_string()
+            }
+        );
+        assert_eq!(got.direction, RotationDirection::Enable);
+        assert_eq!(got.index, LayerStatus::Complete);
+        assert_eq!(got.wal, LayerStatus::Pending);
+        assert_eq!(got.cold, LayerStatus::Skipped);
+        assert_eq!(got.wal_retire, LayerStatus::Pending);
+        assert_eq!(got.mek_kcv, None);
+    }
+
+    #[test]
+    fn ledger_v3_corrupt_json_fails_closed() {
+        // A present-but-garbled JSON source must fail closed (InconsistentState),
+        // never be silently treated as "no rotation".
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rotation.state");
+        std::fs::write(
+            &path,
+            "version=3\ndirection=forward\ntarget_version=2\nnew_source_json={\"type\":\"kms\",\"key_id\":\nlayer.index=pending\n",
+        )
+        .unwrap();
+        let err = super::read_rotation_state_at(&path).unwrap_err();
+        assert!(
+            matches!(err, Error::Storage(StorageError::InconsistentState { .. })),
+            "corrupt v3 JSON must fail closed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn ledger_v3_unknown_version_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rotation.state");
+        std::fs::write(
+            &path,
+            "version=9\ndirection=forward\ntarget_version=2\nnew_source_json={\"type\":\"file\",\"path\":\"/k\"}\n",
+        )
+        .unwrap();
+        assert!(super::read_rotation_state_at(&path).is_err());
+    }
+
+    #[test]
+    fn ledger_v3_tolerates_extra_subject_keyring_layer_line() {
+        // Forward-compat with slice 5 (#3721), which adds a by-name
+        // `layer.subject_keyring` field to the ledger. A v3 ledger carrying BOTH my
+        // #3620 additions (new_source_json + mek_kcv) AND an (unknown-to-this-build)
+        // `layer.subject_keyring=pending` line must still parse: the new_source/KCV
+        // and known layers reconstruct correctly and the unknown line is ignored
+        // gracefully (not fail-closed). By-line/by-name handling makes this compose.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rotation.state");
+        std::fs::write(
+            &path,
+            "version=3\ndirection=forward\ntarget_version=2\nnew_source_json={\"type\":\"vault\",\"address\":\"https://v:8200\",\"token_env\":\"VT\",\"mount\":\"secret\",\"path\":\"mek\",\"key_field\":\"key\",\"namespace\":null,\"ca_cert\":null}\nmek_kcv=00112233aabbccdd\nlayer.index=pending\nlayer.checkpoint=pending\nlayer.wal=complete\nlayer.cold=skipped\nlayer.wal_retire=skipped\nlayer.subject_keyring=pending\n",
+        )
+        .unwrap();
+        let got = super::read_rotation_state_at(&path).unwrap().unwrap();
+        assert!(matches!(got.new_source, KeyProviderConfig::Vault { .. }));
+        assert_eq!(got.mek_kcv.as_deref(), Some("00112233aabbccdd"));
+        assert_eq!(got.wal, LayerStatus::Complete);
+        assert_eq!(got.cold, LayerStatus::Skipped);
+    }
+
+    #[test]
+    fn kcv_is_deterministic_and_key_dependent() {
+        let mek_a = Zeroizing::new([7u8; 32]);
+        let mut b = [7u8; 32];
+        b[0] = 8;
+        let mek_b = Zeroizing::new(b);
+        let kcv_a1 = super::compute_mek_kcv(&mek_a).unwrap();
+        let kcv_a2 = super::compute_mek_kcv(&mek_a).unwrap();
+        let kcv_b = super::compute_mek_kcv(&mek_b).unwrap();
+        assert_eq!(kcv_a1, kcv_a2, "KCV must be deterministic for one MEK");
+        assert_ne!(kcv_a1, kcv_b, "different MEKs must yield different KCVs");
+        assert_eq!(kcv_a1.len(), 16, "8-byte KCV rendered as 16 hex chars");
+        // The KCV must not equal any prefix of the raw key material (one-way).
+        assert!(!kcv_a1.contains("07070707"));
+    }
+
+    // ── Crash-resume through build_provider (PassphraseFile is fully local) ────
+
+    /// Build a `version=3` ledger + partial re-encrypt to simulate a crash
+    /// mid-rotation to `pp_source` (whose MEK is `mek_new`), then return the root.
+    fn passphrase_source(
+        dir: &Path,
+        passphrase: &str,
+        var: &str,
+    ) -> (KeyProviderConfig, Zeroizing<[u8; 32]>) {
+        let pp_path = dir.join("mek.aekf");
+        let mek =
+            crate::encryption::generate_passphrase_key_file(&pp_path, passphrase, true).unwrap();
+        (
+            KeyProviderConfig::PassphraseFile {
+                path: pp_path,
+                passphrase_env: var.to_string(),
+            },
+            mek,
+        )
+    }
+
+    fn index_cipher_for_source(src: &KeyProviderConfig) -> Arc<dyn Cipher> {
+        Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig {
+                enabled: true,
+                algorithm: Algorithm::default(),
+                key_provider: src.clone(),
+                ..Default::default()
+            })
+            .unwrap()
+            .index_cipher(),
+        )
+    }
+
+    #[test]
+    fn crash_resume_to_passphrase_source_reunwraps_aekf() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+        let var = unique_var("RESUME_PP");
+        // SAFETY: test-only, unique var.
+        unsafe { std::env::set_var(&var, "correct horse battery") };
+        let (pp_source, mek_new) = passphrase_source(root, "correct horse battery", &var);
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let keyring = manager.keyring().cloned().unwrap();
+        let new_index_cipher = index_cipher_for_source(&pp_source);
+        keyring.add_generation(2, Arc::clone(&new_index_cipher));
+
+        // Ledger carries the KCV of the new (passphrase) MEK.
+        let mut ledger =
+            RotationLedger::index_scope(RotationDirection::Forward, 2, pp_source.clone());
+        ledger.mek_kcv = Some(super::compute_mek_kcv(&mek_new).unwrap());
+        super::write_ledger(&manager, &ledger).unwrap();
+
+        let engine = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring,
+            1,
+            Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            ),
+            2,
+            new_index_cipher,
+        );
+        let mut n = 0;
+        engine
+            .re_encrypt(&mut |_| {
+                n += 1;
+                n < 2
+            })
+            .unwrap();
+        assert!(root.join("data").join("rotation.state").exists());
+
+        // Resume: re-unwraps the AEKF via the passphrase env, KCV matches, finishes.
+        let resume_mgr = Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let report = resume_pending_rotation(&resume_mgr, &enc_cfg, None, None);
+        // SAFETY: test-only cleanup.
+        unsafe { std::env::remove_var(&var) };
+        let report = report.unwrap().expect("a pending rotation should resume");
+        assert_eq!(report.new_version, 2);
+        assert!(!root.join("data").join("rotation.state").exists());
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+    }
+
+    #[test]
+    fn resume_wrong_passphrase_fails_loud_keeps_ledger() {
+        // The env holds the WRONG passphrase → AEKF unwrap fails at load_mek →
+        // resume errors loud, ledger retained for a later correct-secret retry.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+        let var = unique_var("RESUME_WRONGPP");
+        // Generate the AEKF (wrapping mek_new) under the RIGHT passphrase, stamp the
+        // ledger KCV, then point the env at the WRONG passphrase before resuming.
+        let (pp_source, mek_new) = passphrase_source(root, "the-right-one", &var);
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        // Resume fails at load_mek (AEKF unwrap) before any new-generation cipher is
+        // used, so no gen-2 seeding is needed. Stamp the ledger, then set the wrong
+        // passphrase.
+        let mut ledger = RotationLedger::index_scope(RotationDirection::Forward, 2, pp_source);
+        ledger.mek_kcv = Some(super::compute_mek_kcv(&mek_new).unwrap());
+        super::write_ledger(&manager, &ledger).unwrap();
+        // SAFETY: test-only — set the WRONG passphrase for the resume.
+        unsafe { std::env::set_var(&var, "the-WRONG-one") };
+
+        let err = resume_pending_rotation(&manager, &enc_cfg, None, None);
+        // SAFETY: cleanup.
+        unsafe { std::env::remove_var(&var) };
+        assert!(err.is_err(), "wrong passphrase must fail loud");
+        assert!(
+            root.join("data").join("rotation.state").exists(),
+            "ledger must be retained after a loud failure"
+        );
+    }
+
+    #[test]
+    fn resume_source_key_changed_kcv_mismatch_precise_error() {
+        // The source yields a DIFFERENT but valid key than at rotation start (the
+        // AEKF was replaced out-of-band — the Vault-value-changed scenario) → the
+        // KCV catches it with a precise, actionable error, ledger retained.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+        let var = unique_var("RESUME_KCV");
+        // SAFETY: test-only.
+        unsafe { std::env::set_var(&var, "stable-pass") };
+        // MEK-A at rotation start; ledger KCV stamped from MEK-A.
+        let (pp_source, mek_a) = passphrase_source(root, "stable-pass", &var);
+
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let keyring = manager.keyring().cloned().unwrap();
+        keyring.add_generation(2, index_cipher_for_source(&pp_source));
+        let mut ledger =
+            RotationLedger::index_scope(RotationDirection::Forward, 2, pp_source.clone());
+        ledger.mek_kcv = Some(super::compute_mek_kcv(&mek_a).unwrap());
+        super::write_ledger(&manager, &ledger).unwrap();
+
+        // Out-of-band: replace the AEKF with one wrapping a DIFFERENT MEK-B under
+        // the same passphrase.
+        let (_pp_source_b, _mek_b) = passphrase_source(root, "stable-pass", &var);
+
+        let err = resume_pending_rotation(&manager, &enc_cfg, None, None);
+        // SAFETY: cleanup.
+        unsafe { std::env::remove_var(&var) };
+        let err = err.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("KCV") && msg.to_lowercase().contains("does not match"),
+            "expected a precise KCV-mismatch error, got: {msg}"
+        );
+        assert!(
+            root.join("data").join("rotation.state").exists(),
+            "ledger must be retained after a KCV mismatch"
+        );
+    }
+
+    // ── KMS / Vault loud-and-resumable failure paths (no network needed) ───────
+
+    #[test]
+    fn resume_to_kms_unreachable_fails_loud_keeps_ledger() {
+        // Resume to a KMS source whose endpoint is unreachable (a closed local
+        // port). Whether or not `encryption-aws-kms` is compiled in, the resume
+        // must fail LOUD (transport error, or Unavailable "not compiled in") and
+        // RETAIN the ledger — never silently drop the rotation.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let kms = KeyProviderConfig::Kms {
+            key_id: "alias/test".to_string(),
+            encrypted_data_key: "QUJDRA==".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some("http://127.0.0.1:1".to_string()),
+        };
+        super::write_ledger(
+            &manager,
+            &RotationLedger::index_scope(RotationDirection::Forward, 2, kms),
+        )
+        .unwrap();
+        assert!(resume_pending_rotation(&manager, &enc_cfg, None, None).is_err());
+        assert!(
+            root.join("data").join("rotation.state").exists(),
+            "ledger must be retained so a later reachable-endpoint reopen resumes"
+        );
+    }
+
+    #[test]
+    fn resume_to_vault_token_env_missing_fails_loud_keeps_ledger() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        {
+            let db = build_db(root, &old_key);
+            seed(&db);
+        }
+        let var = unique_var("VAULT_MISSING");
+        // SAFETY: ensure the token var is absent.
+        unsafe { std::env::remove_var(&var) };
+        let enc_cfg = EncryptionConfig::file_based(&old_key);
+        let manager = Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
+        let vault = KeyProviderConfig::Vault {
+            address: "https://127.0.0.1:1".to_string(),
+            token_env: var,
+            mount: "secret".to_string(),
+            path: "mek".to_string(),
+            key_field: "key".to_string(),
+            namespace: None,
+            ca_cert: None,
+        };
+        super::write_ledger(
+            &manager,
+            &RotationLedger::index_scope(RotationDirection::Forward, 2, vault),
+        )
+        .unwrap();
+        assert!(resume_pending_rotation(&manager, &enc_cfg, None, None).is_err());
+        assert!(root.join("data").join("rotation.state").exists());
+    }
+
+    // ── Guard-lift / forward-rotation to a secret-backed source ───────────────
+
+    #[test]
+    fn rotate_index_keys_to_passphrase_source_succeeds() {
+        // The whole point of #3620 at the rotation surface: rotating TO a
+        // passphrase source is no longer refused fail-closed — it completes and
+        // writes a v3 ledger that would resume.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+        let db = build_db_index_only(root, &old_key);
+        seed(&db);
+        assert!(assert_all_at_version(&indexes_dir, 1) > 0);
+
+        let var = unique_var("ROT_PP");
+        // SAFETY: test-only.
+        unsafe { std::env::set_var(&var, "rotate-pass") };
+        let (pp_source, _mek) = passphrase_source(root, "rotate-pass", &var);
+        let report = db.rotate_index_keys(pp_source);
+        // SAFETY: cleanup.
+        unsafe { std::env::remove_var(&var) };
+
+        let report = report.expect("rotation to a passphrase source must succeed after #3620");
+        assert_eq!(report.new_version, 2);
+        assert!(report.files_reencrypted > 0);
+        assert!(db.index_rotation_status().unwrap().is_fully_rotated());
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+    }
+
+    #[test]
+    fn rotate_index_keys_to_kms_unreachable_is_loud_not_the_old_refusal() {
+        // Guard-lift proof at the forward surface: rotating to a KMS source no
+        // longer returns the "not yet supported" refusal on the variant alone; it
+        // now attempts the source and fails LOUD (transport / not-compiled), and
+        // writes NO ledger (load_mek(new) fails before the ledger write).
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        let db = build_db_index_only(root, &old_key);
+        seed(&db);
+        let kms = KeyProviderConfig::Kms {
+            key_id: "alias/test".to_string(),
+            encrypted_data_key: "QUJDRA==".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some("http://127.0.0.1:1".to_string()),
+        };
+        let err = db.rotate_index_keys(kms).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("not yet supported"),
+            "the old variant-only refusal must be gone, got: {msg}"
+        );
+        assert!(
+            !root.join("data").join("rotation.state").exists(),
+            "a failed pre-ledger source load must leave no breadcrumb"
+        );
+    }
+
+    /// Feature-gate: with `encryption-aws-kms` NOT compiled in, a KMS new source
+    /// surfaces `build_provider`'s Unavailable as a clean pre-flight error (no
+    /// panic) and writes no ledger.
+    #[cfg(not(feature = "encryption-aws-kms"))]
+    #[test]
+    fn rotate_to_kms_without_feature_refuses_cleanly() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        let db = build_db_index_only(root, &old_key);
+        seed(&db);
+        let kms = KeyProviderConfig::Kms {
+            key_id: "alias/test".to_string(),
+            encrypted_data_key: "QUJDRA==".to_string(),
+            region: None,
+            endpoint_url: None,
+        };
+        assert!(db.rotate_index_keys(kms).is_err());
+        assert!(!root.join("data").join("rotation.state").exists());
     }
 }
