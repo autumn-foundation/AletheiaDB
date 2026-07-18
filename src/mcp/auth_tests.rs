@@ -1492,3 +1492,31 @@ fn crypto_shred_over_cap_targets_are_invalid_argument() {
         "{value}"
     );
 }
+
+/// The designate-targets cap is configurable via
+/// `with_max_designate_targets`: a server built with a cap of 2 rejects a
+/// 3-target request with `INVALID_ARGUMENT`, echoing the CONFIGURED limit
+/// (not the default 1000) in `details` (Issue #3701 hardening).
+#[test]
+fn crypto_shred_configured_cap_rejects_over_configured_limit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = encrypted_db(tmp.path());
+    let server = server_over_db_with_role(db, Role::Admin).with_max_designate_targets(2);
+
+    let targets: Vec<serde_json::Value> = (0..3)
+        .map(|i| json!({ "entity_kind": "node", "id": i }))
+        .collect();
+    let (value, is_error) = dispatch(
+        &server,
+        "designate_subject",
+        json!({ "subject_id": "s", "targets": targets }),
+    );
+    assert!(
+        is_error,
+        "over-configured-cap targets must be rejected: {value}"
+    );
+    assert_eq!(error_code(&value), Some("INVALID_ARGUMENT"), "{value}");
+    assert_eq!(value["error"]["retriable"], false, "{value}");
+    assert_eq!(value["error"]["details"]["limit"], json!(2), "{value}");
+    assert_eq!(value["error"]["details"]["submitted"], json!(3), "{value}");
+}

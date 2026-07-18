@@ -502,6 +502,7 @@ untrusted callers. All have safe defaults and are optional.
 | Knob | Default | Purpose |
 |------|---------|---------|
 | `with_max_batch_operations(n)` | 1000 | Max operations accepted by one `apply_batch` call (Issue #3231). |
+| `with_max_designate_targets(n)` | 1000 | Max targets accepted by one `designate_subject` call (Issue #3701). |
 | `with_cursor_config(ttl, max_live_cursors)` | 5 min, 128 | Continuation-cursor TTL and per-connection live-cursor cap (Issue #3360). |
 | `with_max_priority_properties(n)` | 1024 | Max entries in a token-budget `priority_properties` array (Issue #3583). |
 
