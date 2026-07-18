@@ -2662,6 +2662,104 @@ mod changefeed_pushdown_tests {
         drop(dir);
     }
 
+    // D9b -------------------------------------------------------------------------------------
+    /// Directory correctness for cold-migrated **edges** (Issue #3677). The concurrent-migration
+    /// stress (D9) creates only nodes, so `migrate_to_cold`'s edge cursor-recording branch never
+    /// runs there. This test drives real node AND edge versions through `migrate_to_cold` so the
+    /// edge `record_cold_cursors` path executes, then asserts `list_changes` byte-parity (both
+    /// oracles) over a window spanning the cold-migrated edges — confirming the directory indexes
+    /// cold edges just as it does cold nodes.
+    #[test]
+    fn cold_directory_migrated_edge_cursor_recording_parity() {
+        use crate::storage::migration::{MigrationPolicy, MigrationService};
+        use std::time::Duration;
+
+        let db = AletheiaDB::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cold =
+            Arc::new(RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap());
+        let tiered = Arc::new(TieredStorage::with_default_config(cold.clone()));
+        db.__test_historical_storage()
+            .write()
+            .set_tiered_storage(tiered);
+
+        // Build a small graph: two Person nodes plus a chain of edges between them. Each entity
+        // gets a second version (update) so its anchor becomes a migration candidate while the
+        // head stays hot.
+        let (a, _t) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("alice")))
+            .unwrap();
+        let (b, _t) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("bob")))
+            .unwrap();
+        db.write(|tx| {
+            tx.update_node(a, props("alice-v2"))?;
+            tx.update_node(b, props("bob-v2"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+
+        let mut edge_ids = Vec::new();
+        for i in 0..4u64 {
+            let (eid, _t) = db
+                .write_with_timestamp(|tx| {
+                    tx.create_edge(a, b, "KNOWS", props(&format!("edge-{i}")))
+                })
+                .unwrap();
+            edge_ids.push(eid);
+        }
+        // Update each edge so its Created anchor becomes migratable (the head delta stays hot).
+        db.write(|tx| {
+            for (i, eid) in edge_ids.iter().enumerate() {
+                tx.update_edge(*eid, props(&format!("edge-{i}-v2")))?;
+            }
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+
+        // age_threshold 0 + min_hot_versions 1 => every non-head version migrates immediately,
+        // for BOTH nodes and edges.
+        let policy = MigrationPolicy::builder()
+            .age_threshold(Duration::ZERO)
+            .min_hot_versions(1)
+            .batch_size(1_000)
+            .enabled(true)
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let migrated = db
+            .__test_historical_storage()
+            .write()
+            .migrate_to_cold(&service)
+            .unwrap();
+        assert!(
+            migrated >= edge_ids.len(),
+            "at least each edge's anchor must migrate to cold (migrated={migrated})"
+        );
+
+        // The edge anchors now live in cold and were recorded in the ColdChangeDirectory by the
+        // edge `record_cold_cursors` branch; the edge head deltas remain hot. A full-window
+        // `list_changes` must therefore stitch the cold Created edges and hot Modified edges
+        // together byte-identically to both oracles.
+        let (from, to) = all();
+        for limit in [1usize, 3, 5, 20, 100] {
+            assert_parity(&db, &query(from, to, limit));
+            assert_parity_independent(&db, &query(from, to, limit));
+        }
+        // Edge-type-filtered scan: only the cold-migrated + hot edges survive.
+        let mut q = query(from, to, 100);
+        q.label = Some("KNOWS".to_string());
+        let page = assert_parity(&db, &q);
+        assert_parity_independent(&db, &q);
+        assert!(
+            page.changes
+                .iter()
+                .any(|r| r.kind == EntityKind::Edge && r.change_type == ChangeType::Created),
+            "a cold-migrated Created edge must appear in the KNOWS-filtered feed"
+        );
+        drop(dir);
+    }
+
     // D10 -------------------------------------------------------------------------------------
     /// FIX 1 regression (Issue #3677): a **failed** directory seed over a populated cold store must
     /// degrade to the full cold scan, never serve an empty-but-"complete" directory that silently
