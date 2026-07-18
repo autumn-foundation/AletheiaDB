@@ -12,6 +12,7 @@
 
 use crate::core::error::{Error, QueryError};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::core::namespace::{Namespace, NamespaceId, resolve_namespace_id};
 use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
 
 /// Whether a change record refers to a node or an edge.
@@ -97,6 +98,15 @@ pub struct ChangeRecord {
     pub transaction_time_range: TimeRange,
     /// Full valid-time range of the version (an empty range denotes a deletion).
     pub valid_time_range: TimeRange,
+    /// The namespace the affected entity belongs to (Issue #3349, PR3c).
+    ///
+    /// Derived from the entity's immutable ride-along namespace
+    /// ([`crate::core::namespace::NAMESPACE_KEY`]); a legacy / default entity
+    /// resolves to [`Namespace::default`]. Surfaced as a first-class field so the
+    /// reserved ride-along key never leaks into a changefeed payload, and used by
+    /// [`crate::core::changefeed_subscription::ChangeFilter`] to scope a
+    /// subscription to a namespace.
+    pub namespace: Namespace,
 }
 
 impl ChangeRecord {
@@ -229,16 +239,25 @@ pub(crate) struct RawChange {
     pub cursor: ChangeCursor,
     pub change_type: ChangeType,
     pub label_id: InternedString,
+    /// Interned namespace id of the affected entity (Issue #3349, PR3c). Kept as a
+    /// `Copy` [`NamespaceId`] (not an owned [`Namespace`]) so, like `label_id`, the
+    /// name resolution is deferred to [`RawChange::into_record`] and paid only for
+    /// rows that survive cursor filtering and the page `limit`.
+    pub namespace_id: NamespaceId,
     pub transaction_time_range: TimeRange,
     pub valid_time_range: TimeRange,
 }
 
 impl RawChange {
-    /// Resolve the label and materialize a public [`ChangeRecord`].
+    /// Resolve the label and namespace and materialize a public [`ChangeRecord`].
     pub(crate) fn into_record(self) -> ChangeRecord {
         let label = GLOBAL_INTERNER
             .resolve_with(self.label_id, |s| s.to_string())
             .unwrap_or_default();
+        // A namespace id is interned at derivation time, so it always resolves; the
+        // `unwrap_or_default` is defensive (a `default`-namespace entity resolves to
+        // the default namespace either way).
+        let namespace = resolve_namespace_id(self.namespace_id).unwrap_or_default();
         ChangeRecord {
             entity_id: self.cursor.entity_id,
             version_id: self.cursor.version_id,
@@ -247,6 +266,7 @@ impl RawChange {
             label,
             transaction_time_range: self.transaction_time_range,
             valid_time_range: self.valid_time_range,
+            namespace,
         }
     }
 }
@@ -263,6 +283,13 @@ impl RawChange {
 /// the deletion instant `v` — so it intersects the half-open window iff the window contains
 /// that single instant. The two predicates are the same intersection rule applied to a range
 /// vs. a point.
+///
+/// `namespace_fn` derives the affected entity's interned [`NamespaceId`] (Issue #3349,
+/// PR3c). It is invoked **lazily** — only after every cheap filter (transaction-time
+/// window, valid-time window, label) has passed — so a candidate that will be discarded
+/// never pays the namespace derivation (which, for a delta version, may reconstruct
+/// properties). It is not part of the sort [`ChangeCursor`], so record ordering is
+/// unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_raw_change(
     version_id: u64,
@@ -274,6 +301,7 @@ pub(crate) fn build_raw_change(
     tx_window: &TimeRange,
     valid_window: Option<&TimeRange>,
     label_filter: Option<&str>,
+    namespace_fn: impl FnOnce() -> NamespaceId,
 ) -> Option<RawChange> {
     let tx_range = temporal.transaction_time();
     // Transaction-time window is half-open [t1, t2).
@@ -320,6 +348,7 @@ pub(crate) fn build_raw_change(
         },
         change_type,
         label_id,
+        namespace_id: namespace_fn(),
         transaction_time_range: tx_range,
         valid_time_range: valid_range,
     })
@@ -443,6 +472,7 @@ pub(crate) fn consider_version(
     tx_window: &TimeRange,
     valid_window: Option<&TimeRange>,
     label_filter: Option<&str>,
+    namespace_fn: impl FnOnce() -> NamespaceId,
 ) {
     if let Some(rec) = build_raw_change(
         version_id,
@@ -454,6 +484,7 @@ pub(crate) fn consider_version(
         tx_window,
         valid_window,
         label_filter,
+        namespace_fn,
     )
     .filter(|rec| resume_after.is_none_or(|c| rec.cursor > c))
     {

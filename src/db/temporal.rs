@@ -1204,8 +1204,9 @@ mod changefeed_pushdown_tests {
     use crate::core::error::{Error, Result};
     use crate::core::id::{EdgeId, NodeId, VersionId};
     use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::namespace::{NamespaceId, intern_namespace, namespace_of};
     use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp, time};
-    use crate::core::version::{EdgeVersion, NodeVersion};
+    use crate::core::version::{EdgeVersion, NodeVersion, VersionData};
     use crate::storage::redb_cold_storage::RedbColdStorage;
     use crate::storage::tiered_storage::TieredStorage;
     use std::sync::Arc;
@@ -1331,7 +1332,39 @@ mod changefeed_pushdown_tests {
                 .iter()
                 .map(|r| (r.cursor.kind_ord, r.cursor.version_id))
                 .collect();
-            for v in tiered.scan_node_versions_cold()? {
+            // Namespace derivation for cold versions (Issue #3349, PR3c). Mirror the
+            // production `collect_changes_filtered` anchor→namespace map, built here
+            // from a full pre-scan (order-independent) so this oracle stays
+            // byte-identical to the pushed-down path: an anchor carries the immutable
+            // ride-along key, a delta reads its entity's namespace back from the map.
+            let default_ns_id = intern_namespace(&crate::core::namespace::Namespace::default());
+            let node_cold = tiered.scan_node_versions_cold()?;
+            let edge_cold = tiered.scan_edge_versions_cold()?;
+            let mut node_ns: std::collections::HashMap<u64, NamespaceId> =
+                std::collections::HashMap::new();
+            for v in &node_cold {
+                if let VersionData::Anchor { properties, .. } = &v.data {
+                    let id = intern_namespace(&namespace_of(properties));
+                    if id != default_ns_id {
+                        node_ns.insert(v.node_id.as_u64(), id);
+                    }
+                }
+            }
+            let mut edge_ns: std::collections::HashMap<u64, NamespaceId> =
+                std::collections::HashMap::new();
+            for v in &edge_cold {
+                if let VersionData::Anchor { properties, .. } = &v.data {
+                    let id = intern_namespace(&namespace_of(properties));
+                    if id != default_ns_id {
+                        edge_ns.insert(v.edge_id.as_u64(), id);
+                    }
+                }
+            }
+            for v in &node_cold {
+                let ns_id = node_ns
+                    .get(&v.node_id.as_u64())
+                    .copied()
+                    .unwrap_or(default_ns_id);
                 if let Some(rec) = build_raw_change(
                     v.id.as_u64(),
                     v.node_id.as_u64(),
@@ -1342,13 +1375,18 @@ mod changefeed_pushdown_tests {
                     &tx_window,
                     valid,
                     label,
+                    || ns_id,
                 )
                 .filter(|rec| seen.insert((rec.cursor.kind_ord, rec.cursor.version_id)))
                 {
                     changes.push(rec);
                 }
             }
-            for v in tiered.scan_edge_versions_cold()? {
+            for v in &edge_cold {
+                let ns_id = edge_ns
+                    .get(&v.edge_id.as_u64())
+                    .copied()
+                    .unwrap_or(default_ns_id);
                 if let Some(rec) = build_raw_change(
                     v.id.as_u64(),
                     v.edge_id.as_u64(),
@@ -1359,6 +1397,7 @@ mod changefeed_pushdown_tests {
                     &tx_window,
                     valid,
                     label,
+                    || ns_id,
                 )
                 .filter(|rec| seen.insert((rec.cursor.kind_ord, rec.cursor.version_id)))
                 {

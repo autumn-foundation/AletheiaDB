@@ -56,8 +56,9 @@ use crate::core::changefeed::{
 };
 use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
+use crate::core::namespace::{NamespaceId, intern_namespace, namespace_of};
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
-use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion};
+use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData};
 use crate::storage::wal::LSN;
 use rayon::prelude::*;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
@@ -2159,10 +2160,35 @@ impl RedbColdStorage {
     ) -> Result<Vec<RawChange>> {
         let mut acc = BoundedChanges::new(bound);
 
+        // Namespace derivation for the cold tier (Issue #3349, PR3c). The immutable
+        // ride-along namespace key is carried only on **anchor** versions (a delta
+        // never diffs the immutable key). Cold storage cannot cheaply reconstruct a
+        // delta's property chain during a scan, but it does not need to: the table is
+        // keyed by `VersionId` and iterated ascending, and an entity's create version
+        // (its lowest `VersionId`) is always an anchor carrying the key — so every
+        // anchor for an entity is decoded *before* any of its deltas. We therefore
+        // record each anchor's namespace in a running map as it is decoded and read a
+        // delta's namespace back from it. A migrated delta's covering anchor is
+        // guaranteed present in the cold tier because migration moves oldest-first
+        // (the create-anchor migrates before its deltas). A missing entry (a
+        // `default` entity, whose anchor carries no key) resolves to the default
+        // namespace.
+        let default_ns_id = intern_namespace(&crate::core::namespace::Namespace::default());
+        let mut node_ns: std::collections::HashMap<u64, NamespaceId> =
+            std::collections::HashMap::new();
+        let mut edge_ns: std::collections::HashMap<u64, NamespaceId> =
+            std::collections::HashMap::new();
+
         self.scan_versions_into(
             NODE_VERSIONS_TABLE,
             decode_node_version,
             |v: NodeVersion| {
+                let ns_id = Self::version_namespace_id(
+                    &v.data,
+                    v.node_id.as_u64(),
+                    &mut node_ns,
+                    default_ns_id,
+                );
                 consider_version(
                     &mut acc,
                     resume_after,
@@ -2175,6 +2201,7 @@ impl RedbColdStorage {
                     tx_window,
                     valid_window,
                     label_filter,
+                    move || ns_id,
                 );
             },
         )?;
@@ -2183,6 +2210,12 @@ impl RedbColdStorage {
             EDGE_VERSIONS_TABLE,
             decode_edge_version,
             |v: EdgeVersion| {
+                let ns_id = Self::version_namespace_id(
+                    &v.data,
+                    v.edge_id.as_u64(),
+                    &mut edge_ns,
+                    default_ns_id,
+                );
                 consider_version(
                     &mut acc,
                     resume_after,
@@ -2195,11 +2228,37 @@ impl RedbColdStorage {
                     tx_window,
                     valid_window,
                     label_filter,
+                    move || ns_id,
                 );
             },
         )?;
 
         Ok(acc.into_vec())
+    }
+
+    /// Derive an entity version's interned [`NamespaceId`] during a cold-tier scan
+    /// (Issue #3349, PR3c), maintaining the running anchor→namespace map keyed by
+    /// entity id. An anchor's namespace is read directly from its properties and
+    /// recorded; a delta reads its entity's namespace back from the map (its
+    /// covering anchor was decoded earlier — see [`collect_changes_filtered`]).
+    fn version_namespace_id(
+        data: &VersionData,
+        entity_id: u64,
+        seen: &mut std::collections::HashMap<u64, NamespaceId>,
+        default_ns_id: NamespaceId,
+    ) -> NamespaceId {
+        match data {
+            VersionData::Anchor { properties, .. } => {
+                let ns_id = intern_namespace(&namespace_of(properties));
+                // Only track non-default so the map stays small; a default entity's
+                // deltas fall through to `default_ns_id` on lookup.
+                if ns_id != default_ns_id {
+                    seen.insert(entity_id, ns_id);
+                }
+                ns_id
+            }
+            VersionData::Delta { .. } => seen.get(&entity_id).copied().unwrap_or(default_ns_id),
+        }
     }
 
     /// Store a single node version.

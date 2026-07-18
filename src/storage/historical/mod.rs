@@ -18,6 +18,7 @@ use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::core::namespace::{NamespaceId, intern_namespace, namespace_of};
 use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::provenance::Provenance;
@@ -2037,6 +2038,9 @@ impl HistoricalStorage {
                 tx_window,
                 valid_window,
                 label_filter,
+                // Lazy (Issue #3349, PR3c): derived only for a candidate that
+                // passed the cheap tx/valid/label filters.
+                || self.node_version_namespace_id(v),
             );
         }
 
@@ -2053,10 +2057,43 @@ impl HistoricalStorage {
                 tx_window,
                 valid_window,
                 label_filter,
+                || self.edge_version_namespace_id(v),
             );
         }
 
         acc.into_vec()
+    }
+
+    /// Derive the interned [`NamespaceId`] of a node version (Issue #3349, PR3c).
+    ///
+    /// The namespace is immutable and rides along the property map under
+    /// [`crate::core::namespace::NAMESPACE_KEY`], stamped on every anchor. An
+    /// anchor carries it directly (cheap, no walk); a delta does not (the
+    /// immutable key never diffs), so it is recovered by reconstructing the
+    /// version's properties (cached, and correct across the anchor chain / cold
+    /// tier). A legacy / `default` entity has no key and resolves to the default
+    /// namespace.
+    fn node_version_namespace_id(&self, v: &NodeVersion) -> NamespaceId {
+        let ns = match &v.data {
+            VersionData::Anchor { properties, .. } => namespace_of(properties),
+            VersionData::Delta { .. } => self
+                .reconstruct_node_properties(v.id)
+                .map(|p| namespace_of(&p))
+                .unwrap_or_default(),
+        };
+        intern_namespace(&ns)
+    }
+
+    /// Edge counterpart of [`node_version_namespace_id`](Self::node_version_namespace_id).
+    fn edge_version_namespace_id(&self, v: &EdgeVersion) -> NamespaceId {
+        let ns = match &v.data {
+            VersionData::Anchor { properties, .. } => namespace_of(properties),
+            VersionData::Delta { .. } => self
+                .reconstruct_edge_properties(v.id)
+                .map(|p| namespace_of(&p))
+                .unwrap_or_default(),
+        };
+        intern_namespace(&ns)
     }
 
     /// Build changefeed [`RawChange`]s for a specific, known set of just-committed version
@@ -2096,6 +2133,7 @@ impl HistoricalStorage {
                     &tx_window,
                     None,
                     None,
+                    || self.node_version_namespace_id(v),
                 ) {
                     out.push(rec);
                 }
@@ -2115,6 +2153,7 @@ impl HistoricalStorage {
                     &tx_window,
                     None,
                     None,
+                    || self.edge_version_namespace_id(v),
                 ) {
                     out.push(rec);
                 }
