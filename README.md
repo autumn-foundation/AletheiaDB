@@ -43,7 +43,7 @@ timings: **[60-Second Quickstart guide →](docs/guides/quickstart.md)**
 
 ```toml
 [dependencies]
-aletheiadb = "0.1"
+aletheiadb = "0.3"
 ```
 
 Requires Rust 1.92+.
@@ -182,7 +182,7 @@ All features are off by default except `config-toml`.
 
 `nova` does **not** include `semantic-search` — use both flags if you want everything:
 ```toml
-aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
+aletheiadb = { version = "0.3", features = ["nova", "semantic-search"] }
 ```
 
 ---
