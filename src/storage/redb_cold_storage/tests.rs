@@ -3343,3 +3343,221 @@ fn extent_bounds_round_trip_serialization() {
     // against an index-out-of-bounds panic on `bytes[0]`).
     assert_eq!(ColdTemporalExtentBounds::from_bytes(&[]), None);
 }
+
+// ========================================================================
+// #3616 PR4 disable: ACV1 -> bare unwrap (inverse of the enable wrap pass)
+// ========================================================================
+
+/// The exact enable->disable cold round-trip: an encrypted store whose values
+/// are `ACV1`-wrapped is unwrapped back to bare plaintext; every raw value loses
+/// its wrapper, the format marker clears, the unwrapped bytes are byte-identical
+/// to what a plaintext store holds, and reopening WITHOUT a keyring decodes every
+/// record.
+#[test]
+fn cold_unwrap_restores_bare_plaintext_and_reopens_without_key() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_unwrap.redb");
+    let cipher = test_cipher();
+
+    let nodes: Vec<NodeVersion> = (1..=4).map(create_test_node_version).collect();
+    let edges: Vec<EdgeVersion> = (10..=12).map(create_test_edge_version).collect();
+
+    // The expected BARE bytes: compress(encode(v)) — what a plaintext store holds.
+    let mut expected_node_bare = std::collections::HashMap::new();
+    let mut expected_edge_bare = std::collections::HashMap::new();
+
+    {
+        let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(Arc::clone(&cipher));
+        for n in &nodes {
+            storage.store_node_version(n).unwrap();
+            expected_node_bare.insert(
+                n.version_id().as_u64(),
+                storage.compress(&encode_node_version(n)).unwrap(),
+            );
+        }
+        for e in &edges {
+            storage.store_edge_version(e).unwrap();
+            expected_edge_bare.insert(
+                e.version_id().as_u64(),
+                storage.compress(&encode_edge_version(e)).unwrap(),
+            );
+        }
+
+        // Precondition: every stored value is ACV1-wrapped.
+        for n in &nodes {
+            assert!(
+                storage.raw_node_value_is_acv1_for_test(n.version_id().as_u64()),
+                "node value is ACV1 before unwrap"
+            );
+        }
+
+        // Unwrap the whole store back to bare plaintext.
+        let stats = storage.unwrap_encrypted_cold_values().unwrap();
+        assert_eq!(stats.values_unwrapped, nodes.len() + edges.len());
+        assert_eq!(stats.values_skipped, 0);
+
+        // Every raw value is now BARE (no ACV1 wrapper) and byte-identical to the
+        // plaintext-at-rest form.
+        for n in &nodes {
+            let raw = raw_value(&storage, NODE_VERSIONS_TABLE, n.version_id().as_u64());
+            assert!(
+                parse_cold_wrapper(&raw).is_none(),
+                "node value bare after unwrap"
+            );
+            assert_eq!(
+                raw,
+                expected_node_bare[&n.version_id().as_u64()],
+                "byte-identical bare node value"
+            );
+        }
+        for e in &edges {
+            let raw = raw_value(&storage, EDGE_VERSIONS_TABLE, e.version_id().as_u64());
+            assert!(
+                parse_cold_wrapper(&raw).is_none(),
+                "edge value bare after unwrap"
+            );
+            assert_eq!(
+                raw,
+                expected_edge_bare[&e.version_id().as_u64()],
+                "byte-identical bare edge value"
+            );
+        }
+
+        // The format marker is cleared: the store reports plaintext.
+        assert_eq!(storage.cold_value_format_version().unwrap(), None);
+        assert!(storage.read_cold_rotation_cursor().unwrap().is_none());
+    }
+
+    // Reopen WITHOUT a keyring (plaintext handle) — every record decodes.
+    let plain = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+    assert!(!plain.is_encrypted());
+    for n in &nodes {
+        let loaded = plain.get_node_version(n.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), n.version_id());
+    }
+    for e in &edges {
+        let loaded = plain.get_edge_version(e.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), e.version_id());
+    }
+}
+
+/// Unwrap is idempotent: a second pass over an already-bare store skips every
+/// value (bare == done) and rewrites nothing.
+#[test]
+fn cold_unwrap_is_idempotent_over_bare_values() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_idem.redb");
+    let cipher = test_cipher();
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+
+    let nodes: Vec<NodeVersion> = (1..=3).map(create_test_node_version).collect();
+    for n in &nodes {
+        storage.store_node_version(n).unwrap();
+    }
+
+    let first = storage.unwrap_encrypted_cold_values().unwrap();
+    assert_eq!(first.values_unwrapped, nodes.len());
+    assert_eq!(first.values_skipped, 0);
+
+    // Second pass: everything is already bare -> all skipped, none unwrapped.
+    let second = storage.unwrap_encrypted_cold_values().unwrap();
+    assert_eq!(second.values_unwrapped, 0);
+    assert_eq!(second.values_skipped, nodes.len());
+}
+
+/// A genuine MIX of ACV1 + bare values (a resumed / partial unwrap): the pass
+/// decrypts only the still-wrapped values and skips the already-bare ones.
+#[test]
+fn cold_unwrap_mixed_only_touches_wrapped() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_mixed.redb");
+    let cipher = test_cipher();
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+
+    let nodes: Vec<NodeVersion> = (1..=5).map(create_test_node_version).collect();
+    for n in &nodes {
+        storage.store_node_version(n).unwrap();
+    }
+    // Roll nodes 1..=2 back to bare directly (fake a partial unwrap crash).
+    for n in nodes.iter().take(2) {
+        let bare = storage.compress(&encode_node_version(n)).unwrap();
+        insert_raw(
+            &storage,
+            NODE_VERSIONS_TABLE,
+            n.version_id().as_u64(),
+            &bare,
+        );
+    }
+
+    let stats = storage.unwrap_encrypted_cold_values().unwrap();
+    assert_eq!(
+        stats.values_unwrapped, 3,
+        "only the still-ACV1 nodes are unwrapped"
+    );
+    assert_eq!(
+        stats.values_skipped, 2,
+        "the two already-bare nodes are skipped"
+    );
+
+    // Every node is bare now.
+    for n in &nodes {
+        let raw = raw_value(&storage, NODE_VERSIONS_TABLE, n.version_id().as_u64());
+        assert!(
+            parse_cold_wrapper(&raw).is_none(),
+            "all bare after mixed unwrap"
+        );
+    }
+}
+
+/// Unwrap over an unencrypted (no-keyring) store is refused with a structured
+/// error and touches nothing (the mirror of the wrap needing a cipher).
+#[test]
+fn cold_unwrap_refuses_plaintext_store() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_plain.redb");
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+    assert!(!storage.is_encrypted());
+
+    let node = create_test_node_version(1);
+    storage.store_node_version(&node).unwrap();
+    let before = raw_value(&storage, NODE_VERSIONS_TABLE, 1);
+
+    let err = storage.unwrap_encrypted_cold_values().unwrap_err();
+    assert!(
+        format!("{err}").contains("not encrypted"),
+        "unexpected error: {err}"
+    );
+    // Value untouched.
+    assert_eq!(raw_value(&storage, NODE_VERSIONS_TABLE, 1), before);
+    // Still readable.
+    assert_eq!(
+        storage
+            .get_node_version(node.version_id())
+            .unwrap()
+            .unwrap()
+            .version_id(),
+        node.version_id()
+    );
+}
+
+/// An empty encrypted store unwraps cleanly (no values, marker cleared, no error).
+#[test]
+fn cold_unwrap_empty_store_is_clean_noop() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_empty.redb");
+    let cipher = test_cipher();
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(cipher);
+
+    let stats = storage.unwrap_encrypted_cold_values().unwrap();
+    assert_eq!(stats.values_unwrapped, 0);
+    assert_eq!(stats.values_skipped, 0);
+    assert_eq!(storage.cold_value_format_version().unwrap(), None);
+}

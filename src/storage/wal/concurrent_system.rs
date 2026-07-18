@@ -922,6 +922,89 @@ impl ConcurrentWalSystem {
         })
     }
 
+    /// Uninstall the WAL DEK keyring at runtime, flipping a live encrypted WAL
+    /// back to plaintext (Issue #3616 PR4). This is the structural seam the
+    /// encrypted → plaintext DISABLE engine drives — the exact inverse of
+    /// [`Self::install_wal_keyring`].
+    ///
+    /// # Transition
+    ///
+    /// Only the `Some` → `None` transition is supported here. Uninstalling when
+    /// NO keyring is present is **rejected** with a structured error (never a
+    /// silent no-op or a spurious segment roll): a caller cannot disable
+    /// encryption on an already-plaintext WAL.
+    ///
+    /// # Crash-consistency / concurrency
+    ///
+    /// Symmetric to install: you cannot append plaintext (v13) frames into an
+    /// already-open encrypted (v16) segment, so the uninstall runs as the
+    /// `advance` closure inside the same seal→reopen hand-off
+    /// ([`Self::seal_active_segment_for_rotation`]): it drains + fsyncs in-flight
+    /// ring-buffer entries into the current encrypted segment, seals it, stores
+    /// `None` into the shared presence cell, then opens a fresh segment which is
+    /// now written in the plaintext string-label format. Because the store
+    /// happens **between** seal and reopen while holding the coordinator `writer`
+    /// mutex, no `flush()` can interleave: every segment's header and frames use
+    /// one consistent keyring state, and every acknowledged append is preserved
+    /// across the flip.
+    ///
+    /// # Read capability after uninstall
+    ///
+    /// Dropping the keyring removes read-decrypt capability from the live cell,
+    /// so [`Self::read_from`] (which snapshots the cell) can no longer decode the
+    /// pre-uninstall encrypted segments still on disk. This is expected and
+    /// mirrors the enable engine's inverse concern (its retired plaintext
+    /// segments must be *deleted* for security): the DISABLE driver captures a
+    /// plaintext index snapshot of all pre-uninstall state, then RETIRES those
+    /// encrypted segments, so a reopen reconstructs from the plaintext snapshot
+    /// and replays only the fresh plaintext segment. The retire is a separate
+    /// driver step (mirroring [`install_wal_keyring`]'s retire being separate),
+    /// not part of this seam.
+    ///
+    /// The store closure obeys the same lock-order contract as a rotation
+    /// `advance`: it only mutates the in-memory presence cell and must not
+    /// acquire any lock ordered after `wal`.
+    ///
+    /// [`install_wal_keyring`]: Self::install_wal_keyring
+    // PR4 (#3616) ships this structural uninstall seam; its production consumer is
+    // the encrypted → plaintext disable engine (#3616 PR4), which drives it from
+    // `disable_encryption` and the startup disable-resume hook.
+    pub(crate) fn uninstall_wal_keyring(&self) -> Result<()> {
+        // Serialize the ENTIRE uninstall — presence check, seal, store, reopen —
+        // under the same dedicated leaf mutex install uses. Without it, two
+        // concurrent uninstallers could both observe `Some`, both pass the check,
+        // and both run seal→store→reopen — the second sealing an already-plaintext
+        // segment spuriously. Holding this guard for the whole body makes a second
+        // concurrent uninstaller block here, then observe `None`, and take the
+        // rejection path. It also serializes install against uninstall (both take
+        // this same leaf), so the presence transition is never torn.
+        let _install_guard = self.install_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Reject when there is nothing to uninstall: presence must be `Some` for
+        // this one-way Some → None transition. Checked (under the install lock)
+        // before the seal so an already-plaintext WAL is never re-rolled.
+        if self.wal_keyring.load().is_none() {
+            // A DISTINGUISHABLE precondition variant (not a generic `WalError`) so
+            // the disable engine maps ONLY this to FAILED_PRECONDITION and leaves
+            // genuine WAL I/O / seal faults as INTERNAL (Issue #3616 PR4). MCP
+            // classifies it as FAILED_PRECONDITION.
+            return Err(Error::Storage(StorageError::WalKeyringNotInstalled {
+                reason: "no WAL keyring is installed; runtime uninstall only supports the \
+                         encrypted → plaintext (Some → None) transition (a plaintext WAL is \
+                         already un-encrypted)"
+                    .to_string(),
+            }));
+        }
+
+        let cell = Arc::clone(&self.wal_keyring);
+        // Store `None` into the shared cell strictly between sealing the encrypted
+        // segment and opening the fresh (now plaintext) one, under the writer
+        // mutex — the atomic hand-off point, the exact inverse of install.
+        self.seal_active_segment_for_rotation(move || {
+            cell.store(None);
+        })
+    }
+
     /// Whether every on-disk WAL segment is stamped with `key_version` — the
     /// rotation driver's "old generation fully retired" signal (Issue #3617).
     /// See [`FlushCoordinator::all_segments_use_key_version`].
@@ -1649,6 +1732,145 @@ mod tests {
             (1..=6).collect::<Vec<_>>(),
             "no acknowledged append is lost and the survivor keyring decrypts the \
              post-install cohort"
+        );
+    }
+
+    // ── Issue #3616 PR4: runtime WAL keyring UNINSTALL (encrypted → plaintext) ──
+    //
+    // The exact inverse of the PR2 install seam: seal the encrypted (v16) active
+    // segment, store `None` into the shared presence cell, and reopen a fresh
+    // PLAINTEXT (v13) segment — the structural seam the encrypted → plaintext
+    // DISABLE engine drives. Because dropping the keyring removes read-decrypt
+    // capability, the pre-uninstall encrypted segments become undecryptable
+    // through the live cell (`read_from` now snapshots `None`); the disable
+    // DRIVER retires them after capturing a plaintext snapshot (a later slice).
+    // These seam tests model that retire by deleting the pre-uninstall segment
+    // files, then prove the post-uninstall cohort is plaintext at rest.
+
+    /// D1 — Some→None transition: an encrypted WAL reports `is_encrypted() ==
+    /// true`; after `uninstall_wal_keyring` it reports `false`; records appended
+    /// after the uninstall land in a PLAINTEXT (v13) segment readable with NO
+    /// keyring, and a full round-trip with the retired keyring still recovers
+    /// every cohort (encrypted pre-uninstall + plaintext post-uninstall) in order.
+    #[test]
+    fn uninstall_keyring_some_to_none_transition() {
+        use crate::storage::wal::segment_reader::read_entries_from_dir_with_keyring;
+        use std::collections::HashSet;
+
+        let dir = tempdir().unwrap();
+        let mut config = ConcurrentWalSystemConfig::new(dir.path());
+        config.durability_mode = DurabilityMode::Synchronous;
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        // Reach the ENCRYPTED state the disable engine strips (None → Some).
+        wal.install_wal_keyring(wal_keyring(7)).unwrap();
+        assert!(
+            wal.is_encrypted(),
+            "the WAL must be encrypted before uninstall"
+        );
+
+        // Pre-uninstall cohort → encrypted v16 segment(s).
+        for id in 1..=4 {
+            wal.append(create_test_operation(id)).unwrap();
+        }
+        wal.flush().unwrap();
+
+        // Snapshot the encrypted segment files (the driver retires these after
+        // capturing a plaintext snapshot); retain a keyring clone to model the
+        // driver's decrypt capability over them until then.
+        let pre_uninstall_stems: HashSet<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".log").map(str::to_string)
+            })
+            .collect();
+        let retired = wal
+            .wal_keyring()
+            .expect("an encrypted WAL must expose its keyring");
+
+        // Reverse seam.
+        wal.uninstall_wal_keyring().unwrap();
+        assert!(
+            !wal.is_encrypted(),
+            "uninstalling the keyring must flip the WAL to plaintext"
+        );
+
+        // Post-uninstall cohort → plaintext v13 segment(s).
+        for id in 5..=8 {
+            wal.append(create_test_operation(id)).unwrap();
+        }
+        wal.flush().unwrap();
+
+        // (a) ROUND-TRIP: with the retired keyring the encrypted pre-uninstall
+        // cohort and the plaintext post-uninstall cohort both recover in order
+        // (plaintext segments parse regardless of a present keyring).
+        let all =
+            read_entries_from_dir_with_keyring(dir.path(), LSN::initial(), Some(&retired), true)
+                .unwrap();
+        assert_eq!(
+            recovered_ids(&all),
+            (1..=8).collect::<Vec<_>>(),
+            "with the retired keyring both cohorts recover in order across the uninstall"
+        );
+
+        // (b) PLAINTEXT-AT-REST: model the driver's retire of the encrypted
+        // segments, then a read with NO keyring recovers the post-uninstall
+        // cohort as plaintext — positive proof the reopened segment is v13, not
+        // an in-memory-flag flip that kept writing encrypted.
+        for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stem = name
+                .strip_suffix(".log")
+                .or_else(|| name.strip_suffix(".log.meta"));
+            if let Some(stem) = stem
+                && pre_uninstall_stems.contains(stem)
+            {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+        let plaintext_only =
+            read_entries_from_dir_with_keyring(dir.path(), LSN::initial(), None, true).unwrap();
+        assert_eq!(
+            recovered_ids(&plaintext_only),
+            (5..=8).collect::<Vec<_>>(),
+            "after retiring the encrypted segments, the post-uninstall cohort reads back \
+             as plaintext with NO keyring (the reopened segment is v13 at rest)"
+        );
+    }
+
+    /// D2 — uninstall on a plaintext WAL is rejected. Uninstalling when NO keyring
+    /// is present returns a structured error (not a silent no-op or a spurious
+    /// roll) and loses no data — the mirror of the double-install rejection.
+    #[test]
+    fn uninstall_keyring_when_plaintext_is_rejected() {
+        let dir = tempdir().unwrap();
+        let mut config = ConcurrentWalSystemConfig::new(dir.path());
+        config.durability_mode = DurabilityMode::Synchronous;
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        wal.append(create_test_operation(1)).unwrap();
+        wal.append(create_test_operation(2)).unwrap();
+
+        let err = wal
+            .uninstall_wal_keyring()
+            .expect_err("uninstalling a plaintext WAL must be rejected, not silently applied");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("keyring") || msg.contains("plaintext") || msg.contains("not"),
+            "rejection error should explain no keyring is installed, got: {msg}"
+        );
+
+        // Still plaintext and no data lost.
+        assert!(!wal.is_encrypted());
+        wal.append(create_test_operation(3)).unwrap();
+        wal.flush().unwrap();
+        let entries = wal.read_from(LSN::initial()).unwrap();
+        assert_eq!(
+            recovered_ids(&entries),
+            vec![1, 2, 3],
+            "a rejected uninstall must not lose or corrupt any records"
         );
     }
 

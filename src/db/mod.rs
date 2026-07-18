@@ -38,6 +38,8 @@ pub mod constraint_builder;
 /// reuses the audit Ed25519 signing key, so the module needs `crate::audit`.
 #[cfg(feature = "audit-export")]
 pub mod crypto_shred;
+/// Encrypted → plaintext migration engine — `encryption disable` (Issue #3616 PR4).
+pub mod encryption_disable;
 /// Plaintext → encrypted-at-rest migration engine — `encryption enable` (Issue #3616 PR3).
 pub mod encryption_enable;
 /// Durable encryption-state authority — `{data_dir}/encryption.state` (Issue #3616).
