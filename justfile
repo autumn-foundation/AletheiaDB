@@ -104,6 +104,8 @@ check-features:
     @echo "=== semantic-temporal ===" && cargo check --features semantic-temporal
     @echo "=== semantic-diagnostics ===" && cargo check --features semantic-diagnostics
     @echo "=== semantic-characterization ===" && cargo check --features semantic-characterization
+    @echo "=== semantic-retrieval-fusion (standalone) ===" && cargo check --no-default-features --features semantic-retrieval-fusion
+    @echo "=== semantic-retrieval-fusion + mcp-server ===" && cargo check --no-default-features --features semantic-retrieval-fusion,mcp-server
     @echo "=== nova umbrella ===" && cargo check --features nova
     @echo "=== nova + semantic-search ===" && cargo check --features nova,semantic-search
     # Serde-enabling features (Issue #3390): each must compile standalone
