@@ -3,12 +3,24 @@
 //! Pure, deterministic, monotone re-scoring of vector-similarity candidates that
 //! fuses three already-recorded signals into one tunable, explainable ranking:
 //!
-//! 1. **similarity** — the vector index score, normalized to `[0, 1]`;
+//! 1. **similarity** — the vector index's **cosine** similarity score, which is
+//!    already in `[0, 1]` for non-negative embeddings (negative scores clamp to
+//!    `0`). This is a **Cosine-only v1 contract**: [`similarity_search_fused`]
+//!    rejects a non-Cosine index (Euclidean returns negative squared-L2 in
+//!    `(-∞, 0]`, DotProduct is unbounded), because clamping those into `[0, 1]`
+//!    would silently nullify or distort the similarity term rather than
+//!    normalize it. Metric-aware normalization for other metrics is a follow-up;
+//!    v1 is honest about only supporting Cosine.
 //! 2. **confidence** — [`Provenance::confidence`](crate::core::provenance::Provenance::confidence),
 //!    or a configurable *neutral* default when a candidate has no recorded
 //!    provenance (never a silent exclusion — see Issue #3372 AC5);
 //! 3. **recency** — an exponential decay of the age of the fact's validity
 //!    (`valid_from`) measured against a caller-supplied reference instant.
+//!
+//! Setting `w_similarity = 0` is intentionally allowed: it yields a pure
+//! trust/recency ranking that ignores geometric similarity entirely (a
+//! documented footgun for callers who want it, not a bug). Only an all-zero
+//! weight vector — a fully undefined mean — is rejected.
 //!
 //! The fused score is the **normalized weighted arithmetic mean**
 //!
@@ -25,9 +37,13 @@
 //! explainable, never a single opaque number.
 //!
 //! This is a **ranking** change over recorded inputs — no storage-format change.
-//! It composes *after* the #3348 provenance hard filter (filter first, fuse the
-//! survivors) and, at the Rust-API level, is entered through
+//! At the Rust-API level it is entered through
 //! [`AletheiaDB::similarity_search_fused`](crate::AletheiaDB::similarity_search_fused).
+//! The neutral-default half of AC5 (un-attributed facts are scored, never
+//! dropped) is implemented and tested here; the #3348 *filter-then-fuse*
+//! composition (hard-filter first, fuse the survivors) is an MCP-layer feature
+//! and rides with the deferred MCP surface (§9) — there is no Rust-level
+//! `ProvenanceFilter` to wire in this wave.
 //!
 //! Gated behind the experimental `semantic-retrieval-fusion` cohort flag
 //! (ADR-0050); it graduates into `semantic-search` once the #3366 eval-harness
@@ -37,6 +53,7 @@ use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::db::AletheiaDB;
 use crate::db::similarity_query::SimilarityQuery;
+use crate::index::vector::DistanceMetric;
 use thiserror::Error;
 
 /// Default neutral confidence assigned to a candidate with no recorded
@@ -48,14 +65,49 @@ pub const DEFAULT_NEUTRAL_CONFIDENCE: f64 = 0.5;
 /// one half-life ago scores `recency = 0.5`.
 pub const DEFAULT_RECENCY_HALF_LIFE_SECS: f64 = 60.0 * 60.0 * 24.0 * 30.0;
 
-/// How many candidates to over-fetch from the vector index before fusing.
+/// Neutral recency substituted for a candidate whose version metadata cannot be
+/// loaded (mirrors [`DEFAULT_NEUTRAL_CONFIDENCE`]): an *unknown* validity start
+/// must neither reward the candidate with maximum recency nor punish it with
+/// zero. `0.5` is the neutral midpoint of the `[0, 1]` recency scale. The
+/// breakdown records `recency_defaulted` so the substitution is auditable.
+pub const DEFAULT_NEUTRAL_RECENCY: f64 = 0.5;
+
+/// Minimum over-fetch horizon (floor) used for small `k`.
 ///
 /// Fusion must return the **true** fused top-k, not a re-sort of the
-/// similarity-only shortlist (AC4). We therefore fetch a wide horizon (mirroring
-/// the MCP `MAX_VECTOR_K` bound) so a high-trust candidate that is geometrically
-/// far still enters the fused ranking. The guarantee holds within this horizon —
-/// the same bounded caveat #3348 documents.
+/// similarity-only shortlist (AC4). We therefore fetch a wide horizon so a
+/// high-trust candidate that is geometrically far still enters the fused
+/// ranking. For small `k` a fixed floor keeps the pool wide enough to be
+/// meaningful; for large `k` the horizon scales with `k` (see
+/// [`fused_horizon`]).
 pub const FUSION_OVERFETCH_HORIZON: usize = 1000;
+
+/// Absolute cap on the over-fetch horizon (see [`fused_horizon`]).
+///
+/// Bounds the per-request resource cost (one metadata read + one score per
+/// candidate). The fused top-k guarantee (AC4) therefore holds only for a
+/// target within the **top `FUSION_MAX_HORIZON` similarity ranks**; a target
+/// ranked below that by pure similarity is not guaranteed to enter the fused
+/// pool — the same bounded caveat #3348 documents, made explicit and
+/// `k`-independent here (a plain `k.max(HORIZON)` would degenerate to a
+/// post-hoc re-sort once `k ≥ HORIZON`).
+pub const FUSION_MAX_HORIZON: usize = 10_000;
+
+/// Compute the over-fetch horizon for a fused search returning `k` results.
+///
+/// The horizon is `max(3·k, FUSION_OVERFETCH_HORIZON)` capped at
+/// [`FUSION_MAX_HORIZON`]. Scaling with `k` (rather than a fixed
+/// `k.max(HORIZON)`) is what keeps AC4 honest for large `k`: with a fixed
+/// `1000` floor and `k = 1000`, the candidate pool would equal the
+/// similarity-only top-k and fusion would degenerate into a post-hoc re-sort.
+/// The `3·k` factor covers AC4's "best fused below rank `3k` still surfaces"
+/// target. `saturating_mul` guards against overflow for pathological `k`.
+#[must_use]
+pub fn fused_horizon(k: usize) -> usize {
+    // FUSION_OVERFETCH_HORIZON < FUSION_MAX_HORIZON, so clamp cannot panic.
+    k.saturating_mul(3)
+        .clamp(FUSION_OVERFETCH_HORIZON, FUSION_MAX_HORIZON)
+}
 
 /// Validation error for a [`FusionPolicy`] (AC7).
 ///
@@ -87,6 +139,67 @@ pub enum FusionPolicyError {
         /// The rejected value.
         value: f64,
     },
+    /// The sum of the three weights overflowed to a non-finite value even though
+    /// each individual weight is finite (e.g. all three at `f64::MAX`). A
+    /// non-finite denominator makes the normalized weighted mean `NaN`, breaking
+    /// the total-order / monotonicity guarantee.
+    #[error("the sum of fusion weights must be finite, got {sum}")]
+    NonFiniteWeightSum {
+        /// The non-finite weight sum.
+        sum: f64,
+    },
+}
+
+/// A runtime error from [`AletheiaDB::similarity_search_fused`] (as opposed to
+/// [`FusionPolicyError`], which is a *policy-construction* error).
+///
+/// The (deferred) MCP surface maps these to the #3234 structured codes noted on
+/// each variant; at the Rust-API level they surface through the crate
+/// [`Error`](crate::core::error::Error) via the `From` impl below.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum FusionError {
+    /// The query carried no [`FusionPolicy`]. Maps to `INVALID_ARGUMENT`.
+    #[error(
+        "similarity_search_fused requires a fusion policy; set one with SimilarityQuery::fusion(..)"
+    )]
+    MissingPolicy,
+    /// The queried vector index does not use the Cosine metric. Fusion's
+    /// similarity component is only well-defined for Cosine in v1 (see the
+    /// [module docs](self)). Maps to `FAILED_PRECONDITION`.
+    #[error(
+        "provenance-weighted fusion requires a Cosine vector index; the queried index uses \
+         {metric:?}, whose scores are not in [0,1] (v1 supports Cosine only)"
+    )]
+    UnsupportedMetric {
+        /// The index's actual (unsupported) distance metric.
+        metric: DistanceMetric,
+    },
+    /// A point-in-time (`AS OF`) coordinate was combined with a fusion policy.
+    /// Resolving provenance/recency at a past coordinate is deferred to the MCP
+    /// / hybrid follow-up; rather than silently score against the *current*
+    /// version metadata (mixing versions), the combination is rejected. Maps to
+    /// `INVALID_ARGUMENT`.
+    #[error(
+        "combining `at_time` (AS OF) with a fusion policy is not supported in v1: point-in-time \
+         provenance/recency resolution rides with the deferred MCP/hybrid surface. Use a \
+         current-state fused search, or a plain point-in-time similarity_search."
+    )]
+    AsOfNotSupported,
+}
+
+impl From<FusionError> for Error {
+    fn from(e: FusionError) -> Self {
+        match e {
+            // INVALID_ARGUMENT-class → InvalidVector (retriable:false).
+            FusionError::MissingPolicy | FusionError::AsOfNotSupported => {
+                Error::Vector(VectorError::InvalidVector {
+                    reason: e.to_string(),
+                })
+            }
+            // FAILED_PRECONDITION-class (retriable:false).
+            FusionError::UnsupportedMetric { .. } => Error::FailedPrecondition(e.to_string()),
+        }
+    }
 }
 
 /// A validated fusion scoring model (see the [module docs](self)).
@@ -176,7 +289,13 @@ impl FusionPolicyBuilder {
                 return Err(FusionPolicyError::InvalidWeight { field, value });
             }
         }
-        if self.w_similarity + self.w_confidence + self.w_recency <= 0.0 {
+        let weight_sum = self.w_similarity + self.w_confidence + self.w_recency;
+        if !weight_sum.is_finite() {
+            // Each weight is finite (checked above) but their sum overflowed to
+            // ±inf: a non-finite denominator would make every fused score NaN.
+            return Err(FusionPolicyError::NonFiniteWeightSum { sum: weight_sum });
+        }
+        if weight_sum <= 0.0 {
             return Err(FusionPolicyError::AllZeroWeights);
         }
         if !self.neutral_confidence.is_finite() || !(0.0..=1.0).contains(&self.neutral_confidence) {
@@ -268,6 +387,7 @@ impl FusionPolicy {
             confidence: c,
             confidence_defaulted,
             recency: r,
+            recency_defaulted: false,
             fused,
         }
     }
@@ -286,8 +406,13 @@ pub struct FusionBreakdown {
     /// `true` iff `confidence` was substituted from the policy's
     /// `neutral_confidence` because the candidate had no recorded confidence.
     pub confidence_defaulted: bool,
-    /// The recency component in `(0, 1]`.
+    /// The recency component in `(0, 1]` (or exactly [`DEFAULT_NEUTRAL_RECENCY`]
+    /// when `recency_defaulted`).
     pub recency: f64,
+    /// `true` iff `recency` was substituted from [`DEFAULT_NEUTRAL_RECENCY`]
+    /// because the candidate's version metadata (and thus its `valid_from`)
+    /// could not be loaded — a neutral fallback, never a maximum-recency boost.
+    pub recency_defaulted: bool,
     /// The fused score in `[0, 1]` — the normalized weighted mean.
     pub fused: f64,
 }
@@ -318,58 +443,107 @@ fn clamp_unit(x: f64) -> f64 {
     }
 }
 
+/// A candidate's fusion inputs read from its (current) version.
+#[derive(Debug, Clone, PartialEq)]
+struct CandidateMetadata {
+    /// The recorded provenance confidence, if any (`None` ⇒ neutral default).
+    confidence: Option<f64>,
+    /// The validity start (microseconds since epoch) used for recency.
+    valid_from_micros: i64,
+    /// `true` when version metadata could not be loaded, so recency must fall
+    /// back to a neutral value rather than a maximum-recency boost.
+    recency_defaulted: bool,
+}
+
+/// Resolve a candidate's recency component, substituting a **neutral** recency
+/// (never a maximum-recency boost) when the version metadata was unloadable.
+///
+/// Returns `(recency, recency_defaulted)`.
+fn resolve_recency(
+    policy: &FusionPolicy,
+    reference_now: i64,
+    meta: &CandidateMetadata,
+) -> (f64, bool) {
+    if meta.recency_defaulted {
+        (DEFAULT_NEUTRAL_RECENCY, true)
+    } else {
+        (policy.recency(reference_now, meta.valid_from_micros), false)
+    }
+}
+
 impl AletheiaDB {
     /// Provenance-weighted k-NN: return the **true** fused top-k under the
     /// query's [`FusionPolicy`] (Issue #3372).
     ///
     /// The query must carry a policy set with
     /// [`SimilarityQuery::fusion`](crate::SimilarityQuery::fusion); otherwise an
-    /// error is returned. A wide horizon of candidates is over-fetched from the
-    /// vector index (so a geometrically-far but high-trust candidate can still
-    /// win — AC4), each candidate's confidence and validity are read from its
-    /// current version, the fused score is computed, and the horizon is sorted
-    /// by fused score (descending, with a stable node-id tie-break) before being
-    /// truncated to `k`.
+    /// error is returned. A wide horizon of candidates (see [`fused_horizon`],
+    /// scaled with `k` and capped at [`FUSION_MAX_HORIZON`]) is over-fetched from
+    /// the vector index (so a geometrically-far but high-trust candidate can
+    /// still win — AC4), each candidate's confidence and validity are read from
+    /// its current version, the fused score is computed, and the horizon is
+    /// sorted by fused score (descending, with a stable node-id tie-break)
+    /// before being truncated to `k`.
     ///
-    /// Recency is evaluated against the query's `at_time` coordinate when set,
-    /// else the current wallclock. Candidates with no recorded confidence are
-    /// scored at the policy's `neutral_confidence`, never dropped (AC5).
+    /// **v1 contract:**
+    /// - The queried vector index must use the **Cosine** metric
+    ///   ([`FusionError::UnsupportedMetric`] otherwise — see the [module
+    ///   docs](self)).
+    /// - A point-in-time `at_time` (`AS OF`) coordinate is **not** supported with
+    ///   a fusion policy ([`FusionError::AsOfNotSupported`]); resolving
+    ///   provenance/recency at a past coordinate rides with the deferred
+    ///   MCP/hybrid surface. Recency is therefore evaluated against the current
+    ///   wallclock, captured once for the whole request.
+    ///
+    /// Candidates with no recorded confidence are scored at the policy's
+    /// `neutral_confidence`, never dropped (AC5).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn similarity_search_fused(&self, query: SimilarityQuery) -> Result<Vec<FusedHit>> {
-        let policy = query.fusion_policy().cloned().ok_or_else(|| {
-            Error::Vector(VectorError::IndexError(
-                "similarity_search_fused requires a fusion policy; set one with \
-                 SimilarityQuery::fusion(..)"
-                    .to_string(),
-            ))
-        })?;
+        let policy = query
+            .fusion_policy()
+            .cloned()
+            .ok_or(FusionError::MissingPolicy)?;
+
+        // v1: reject `at_time` + fusion rather than silently scoring against the
+        // *current* version metadata while the candidate set is scoped to a past
+        // coordinate (which would mix versions — MED-1). Full AS-OF metadata
+        // resolution rides with the deferred MCP/hybrid surface.
+        if query.timestamp().is_some() {
+            return Err(FusionError::AsOfNotSupported.into());
+        }
+
+        // v1: fusion's similarity component assumes an already-`[0,1]` score,
+        // true only for Cosine (HIGH-2). Reject other metrics rather than
+        // clamping their (negative / unbounded) scores and silently nullifying
+        // or distorting the similarity term.
+        if let Some(metric) = self.fused_index_metric()
+            && metric != DistanceMetric::Cosine
+        {
+            return Err(FusionError::UnsupportedMetric { metric }.into());
+        }
 
         let k = query.limit();
-        // Recency is evaluated against the query's AS OF coordinate when set
-        // (AC6), otherwise the current wallclock, captured once for the whole
-        // request so every candidate is scored against the same instant.
-        let reference_now = query
-            .timestamp()
-            .map(|ts| ts.wallclock())
-            .unwrap_or_else(|| crate::core::temporal::time::now().wallclock());
+        // Recency is evaluated against the current wallclock, captured once for
+        // the whole request so every candidate is scored against the same
+        // instant (deterministic within the call).
+        let reference_now = crate::core::temporal::time::now().wallclock();
 
-        // Over-fetch a wide horizon so a geometrically-far but high-trust
-        // candidate can still win (AC4). `similarity_search` ignores the fusion
-        // policy, so re-using the query here is a pure similarity search.
-        let horizon = k.max(FUSION_OVERFETCH_HORIZON);
+        // Over-fetch a horizon that scales with `k` (AC4). `similarity_search`
+        // ignores the fusion policy, so re-using the query here is a pure
+        // similarity search.
+        let horizon = fused_horizon(k);
         let candidates = self.similarity_search(query.k(horizon))?;
 
         let mut hits: Vec<FusedHit> = Vec::with_capacity(candidates.len());
         for (node_id, similarity) in candidates {
-            let Some((confidence, valid_from_micros)) =
-                self.node_fusion_metadata(node_id, reference_now)?
-            else {
+            let Some(meta) = self.node_fusion_metadata(node_id)? else {
                 // The node disappeared between the index read and the metadata
                 // read; drop it rather than fabricating a score.
                 continue;
             };
-            let recency = policy.recency(reference_now, valid_from_micros);
-            let breakdown = policy.fuse(f64::from(similarity), confidence, recency);
+            let (recency, recency_defaulted) = resolve_recency(&policy, reference_now, &meta);
+            let mut breakdown = policy.fuse(f64::from(similarity), meta.confidence, recency);
+            breakdown.recency_defaulted = recency_defaulted;
             hits.push(FusedHit { node_id, breakdown });
         }
 
@@ -386,17 +560,27 @@ impl AletheiaDB {
         Ok(hits)
     }
 
+    /// The distance metric of the vector index a fused search would query.
+    ///
+    /// A fused (current-state) search routes through the *default* vector
+    /// property (alphabetically first), so we report that index's metric.
+    /// Returns `None` when no vector index is configured (the subsequent
+    /// `similarity_search` then surfaces its own "no index" error).
+    fn fused_index_metric(&self) -> Option<DistanceMetric> {
+        let property = self.current.get_indexed_property_name()?;
+        self.list_vector_indexes()
+            .into_iter()
+            .find(|info| info.property_name == property)
+            .map(|info| info.distance_metric)
+    }
+
     /// Read a candidate node's confidence (if recorded) and validity start from
     /// its current version, for fusion scoring.
     ///
     /// Returns `Ok(None)` when the node no longer exists. When the version
-    /// metadata cannot be loaded, recency is treated as "now" (`valid_from =
-    /// reference_now`, i.e. recency 1) rather than dropping the candidate.
-    fn node_fusion_metadata(
-        &self,
-        node_id: NodeId,
-        reference_now: i64,
-    ) -> Result<Option<(Option<f64>, i64)>> {
+    /// metadata cannot be loaded, `recency_defaulted` is set so the caller
+    /// substitutes a **neutral** recency (not a maximum-recency boost).
+    fn node_fusion_metadata(&self, node_id: NodeId) -> Result<Option<CandidateMetadata>> {
         let node = match self.get_node(node_id) {
             Ok(node) => node,
             Err(_) => return Ok(None),
@@ -405,9 +589,17 @@ impl AletheiaDB {
             Some((provenance, interval)) => {
                 let confidence = provenance.and_then(|p| p.confidence());
                 let valid_from = interval.valid_time().start().wallclock();
-                Ok(Some((confidence, valid_from)))
+                Ok(Some(CandidateMetadata {
+                    confidence,
+                    valid_from_micros: valid_from,
+                    recency_defaulted: false,
+                }))
             }
-            None => Ok(Some((None, reference_now))),
+            None => Ok(Some(CandidateMetadata {
+                confidence: None,
+                valid_from_micros: 0,
+                recency_defaulted: true,
+            })),
         }
     }
 }
@@ -438,6 +630,22 @@ mod tests {
                 field: "w_confidence",
                 value: -0.1
             }
+        );
+    }
+
+    #[test]
+    fn invalid_weight_sum_overflow_rejected() {
+        // Each weight is finite (f64::MAX) but their sum overflows to +inf,
+        // which would make every fused score NaN (LOW-1).
+        let err = FusionPolicy::builder()
+            .w_similarity(f64::MAX)
+            .w_confidence(f64::MAX)
+            .w_recency(f64::MAX)
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err, FusionPolicyError::NonFiniteWeightSum { sum } if !sum.is_finite()),
+            "expected NonFiniteWeightSum, got {err:?}"
         );
     }
 
@@ -665,5 +873,63 @@ mod tests {
         // valid_from in the future => age clamped to 0 => recency == 1.
         let r = p.recency(now, now + 10_000 * MICROS_PER_SEC);
         assert!((r - 1.0).abs() < 1e-12);
+    }
+
+    // ---- HIGH-1: over-fetch horizon scales with k -----------------------
+
+    #[test]
+    fn fused_horizon_scales_with_k() {
+        // Small k: floored at FUSION_OVERFETCH_HORIZON.
+        assert_eq!(fused_horizon(1), FUSION_OVERFETCH_HORIZON);
+        assert_eq!(fused_horizon(0), FUSION_OVERFETCH_HORIZON);
+        // Once 3k exceeds the floor, the horizon scales with k (this is what a
+        // plain `k.max(FUSION_OVERFETCH_HORIZON)` fails to do — it would still
+        // return 1000 for k=500, degenerating fusion into a post-hoc re-sort).
+        assert!(fused_horizon(500) >= 1500);
+        assert_eq!(fused_horizon(500), 1500);
+        // Just past the floor crossover.
+        assert_eq!(fused_horizon(334), 1002);
+        // Capped at FUSION_MAX_HORIZON, overflow-safe for pathological k.
+        assert_eq!(fused_horizon(usize::MAX), FUSION_MAX_HORIZON);
+        assert_eq!(fused_horizon(FUSION_MAX_HORIZON), FUSION_MAX_HORIZON);
+    }
+
+    // ---- LOW-2: unloadable metadata gets NEUTRAL, not MAX, recency ------
+
+    #[test]
+    fn unloadable_metadata_gets_neutral_recency_not_max() {
+        let p = policy();
+        let now = 1_000_000 * MICROS_PER_SEC;
+        // A candidate whose version metadata could not be loaded.
+        let defaulted = CandidateMetadata {
+            confidence: None,
+            valid_from_micros: 0,
+            recency_defaulted: true,
+        };
+        let (r, flag) = resolve_recency(&p, now, &defaulted);
+        assert!(flag, "recency_defaulted must be propagated");
+        assert_eq!(r, DEFAULT_NEUTRAL_RECENCY);
+        assert!(
+            r < 1.0,
+            "unloadable metadata must NOT be awarded maximum recency (was the old bug)"
+        );
+    }
+
+    #[test]
+    fn loadable_metadata_uses_computed_recency() {
+        let p = FusionPolicy::builder()
+            .recency_half_life_secs(10.0)
+            .build()
+            .unwrap();
+        let now = 100 * MICROS_PER_SEC;
+        // valid_from one half-life ago => recency ~0.5 (computed, not defaulted).
+        let loadable = CandidateMetadata {
+            confidence: Some(0.7),
+            valid_from_micros: now - 10 * MICROS_PER_SEC,
+            recency_defaulted: false,
+        };
+        let (r, flag) = resolve_recency(&p, now, &loadable);
+        assert!(!flag);
+        assert!((r - 0.5).abs() < 1e-9, "expected computed ~0.5, got {r}");
     }
 }

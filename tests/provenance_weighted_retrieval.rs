@@ -217,3 +217,60 @@ fn fused_search_without_policy_errors() {
         .unwrap_err();
     assert!(err.to_string().contains("fusion policy"), "got: {err}");
 }
+
+/// HIGH-2 — fusion's similarity component assumes a `[0,1]` score, true only for
+/// Cosine. A Euclidean index (negative squared-L2 scores) must be rejected with
+/// a structured error, not silently produce a nullified similarity term.
+#[test]
+fn fused_search_on_non_cosine_index_is_rejected() {
+    let db = AletheiaDB::new().unwrap();
+    db.enable_vector_index(
+        "embedding",
+        HnswConfig::new(3, DistanceMetric::Euclidean).with_capacity(64),
+    )
+    .expect("enable euclidean vector index");
+
+    let now = now_micros();
+    make_doc(&db, "doc", &[1.0, 0.0, 0.0], Some(0.5), now);
+
+    let policy = FusionPolicy::builder().build().unwrap();
+    let err = db
+        .similarity_search_fused(
+            SimilarityQuery::from_embedding(vec![1.0f32, 0.0, 0.0])
+                .k(5)
+                .fusion(policy),
+        )
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Cosine") || msg.to_lowercase().contains("metric"),
+        "expected an unsupported-metric error, got: {err}"
+    );
+}
+
+/// MED-1 (fallback) — combining a point-in-time `at_time` coordinate with a
+/// fusion policy is rejected in v1 rather than silently scoring against
+/// current-version metadata while the candidate set is scoped to the past.
+#[test]
+fn fused_search_with_at_time_is_rejected() {
+    let db = AletheiaDB::new().unwrap();
+    cosine_index(&db);
+    let now = now_micros();
+    make_doc(&db, "doc", &[1.0, 0.0, 0.0], Some(0.5), now);
+
+    let ts = Timestamp::from(now);
+    let policy = FusionPolicy::builder().build().unwrap();
+    let err = db
+        .similarity_search_fused(
+            SimilarityQuery::from_embedding(vec![1.0f32, 0.0, 0.0])
+                .k(5)
+                .at_time(ts)
+                .fusion(policy),
+        )
+        .unwrap_err();
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("at_time") || msg.contains("as of"),
+        "expected an AS-OF-unsupported error, got: {err}"
+    );
+}

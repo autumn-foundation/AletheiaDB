@@ -72,9 +72,11 @@ No new storage is needed — this is a **ranking** change over recorded inputs.
   `get_node_version_read_metadata(version_id) -> (Option<Provenance>, BiTemporalInterval)`.
 - **Red (feelings):** callers want an *explainable* ranking they can cite; a black-box
   score erodes trust more than pure similarity does.
-- **Black (caution):** over-fetch is horizon-bounded (`MAX_VECTOR_K`), so AC4's guarantee
-  holds within the horizon only — same caveat #3348 documents. Latency: an extra metadata
-  read per candidate + an O(n log n) sort.
+- **Black (caution):** over-fetch is horizon-bounded (`fused_horizon(k)` =
+  `min(max(3·k, 1000), FUSION_MAX_HORIZON=10_000)`), so AC4's guarantee holds only for a
+  target within the top `FUSION_MAX_HORIZON` similarity ranks — same caveat #3348
+  documents, made `k`-scaled and explicitly capped. Latency: an extra metadata read per
+  candidate + an O(n log n) sort.
 - **Yellow (benefit):** maximal reuse, zero storage change, byte-for-byte no-op when the
   policy is omitted, composes with #3348 filtering and #3370 snapshots for free.
 - **Green (creative):** a pure `fuse()` core shared by the Rust API and (later) both MCP
@@ -119,8 +121,14 @@ so AC2 (byte-for-byte no-op when the policy is omitted) holds trivially.
 
 Let `s` = similarity, `c` = confidence, `r` = recency, each normalized to `[0,1]`:
 
-- `s` = the index similarity score, clamped to `[0,1]` (NaN→0). Cosine similarity is
-  already in-range; negative similarities clamp to 0.
+- `s` = the index's **cosine** similarity score, already in `[0,1]` for non-negative
+  embeddings (negative values clamp to 0, NaN→0). This is a **Cosine-only v1 contract**:
+  `similarity_search_fused` rejects a non-Cosine index with
+  `FusionError::UnsupportedMetric` (→ `FAILED_PRECONDITION`). Euclidean returns negative
+  squared-L2 in `(-∞,0]` (every candidate would clamp to 0, nullifying the term) and
+  DotProduct is unbounded in `(-∞,∞)` (genuinely ambiguous to normalize), so clamping
+  them would silently distort the ranking rather than normalize it. Metric-aware
+  normalization for other metrics is a deliberate follow-up.
 - `c` = `provenance.confidence()` when present, else the policy's `neutral_confidence`
   (AC5); the breakdown records `confidence_defaulted`.
 - `r = exp(-ln2 · age / half_life)`, `age = max(0, reference_now − valid_from)` in
@@ -154,10 +162,18 @@ needs only always-compiled `core::provenance` + the vector path). Gated code:
 and the `similarity_search_fused` entry point. `just check-features` gains a standalone
 compile line; `mcp-server` must still compile with the flag **off** (no-op path).
 
+A lightweight `fuse()`-core micro-bench ships now (`benches/fusion_scoring.rs`, gated on
+`semantic-retrieval-fusion`) to keep the per-candidate scoring hot loop honest. The full
+end-to-end latency gate below is **not** measurable in-tree yet — it depends on the #3366
+eval harness (a seeded 1M-vector adversarial corpus), which does not exist in this repo —
+so it rides with that harness as a graduation gate, not a this-PR check.
+
 **Graduation checklist (into `semantic-search`):**
 - [ ] #3366 eval harness: fused retrieval improves grounding precision@10 by ≥ 25%
       absolute over pure-similarity on the seeded adversarial set; baseline published.
-- [ ] Latency: fused k-NN (k=10, 1M vectors, provenance on 100%) p99 < 20 ms.
+- [ ] Latency: fused k-NN (k=10, 1M vectors, provenance on 100%) p99 < 20 ms
+      (rides with the #3366 eval harness; the in-tree `fusion_scoring` bench only
+      covers the `fuse()`-core micro-cost, not end-to-end k-NN).
 - [ ] Explainability: 100% of results carry a complete breakdown (CI-checked).
 - [ ] MCP surface (`fusion_policy` on `find_similar` / `hybrid_query`) landed & documented.
 - [ ] Move the `#[cfg(feature = "semantic-retrieval-fusion")]` gates to `semantic-search`.
@@ -191,7 +207,11 @@ existing `find_similar` and `hybrid_query` tools (no new tools):
 
 Handler wiring (per surface): parse the policy under
 `#[cfg(feature = "semantic-retrieval-fusion")]` (mirroring `parse_provenance_filter`);
-when present, force the full-horizon over-fetch (reuse `fetch_k = MAX_VECTOR_K + 1`),
+when present, force the over-fetch to the **`k`-scaled** `fused_horizon(k)` =
+`min(max(3·k, 1000), FUSION_MAX_HORIZON)` (**not** a fixed `MAX_VECTOR_K + 1`: a
+`k`-independent horizon degenerates fusion into a post-hoc re-sort once `k` approaches
+the horizon — the HIGH-1 defect; `FUSION_MAX_HORIZON = 10_000` bounds the pool and makes
+the AC4 rank-ceiling explicit),
 build each candidate's `NodeResponse` (already carries `provenance` + `temporal`),
 compute `fuse()` per candidate, sort by fused desc, page, and attach a `score_breakdown`
 sub-object to each `SimilarityResult` / `HybridQueryResult`. Invalid weights →
@@ -210,8 +230,8 @@ and none are added (AS OF fusion is satisfied on `hybrid_query` — a documented
 | AC2 | Omitting the policy reproduces today's behavior byte-for-byte | Legacy `similarity_search` untouched; unit test `omitting_policy_is_unchanged` |
 | AC3 | Per-result score breakdown (never opaque) | `FusionBreakdown`; test `breakdown_is_complete_and_non_opaque` |
 | AC4 | Returned top-k are the *true* fused top-k, not a re-sort of a similarity shortlist | Rust-API adversarial fixture `tests/provenance_weighted_retrieval.rs`: target below position 3k by similarity still in fused top-k |
-| AC5 | Missing provenance ⇒ configurable neutral confidence, never dropped; composes after #3348 filter | test `missing_provenance_uses_neutral_not_dropped` |
-| AC6 | Fusion composes with temporal coordinates (score at the AS OF coordinate) | core: `fuse()`/`recency()` take an explicit `reference_now`; test `recency_uses_supplied_reference_now`. Full MCP AS OF rides with the follow-up. |
+| AC5 | Missing provenance ⇒ configurable neutral confidence, never dropped | **Neutral-default half implemented + tested here** (`missing_provenance_uses_neutral_not_dropped`). The #3348 **filter-then-fuse** composition (hard-filter first, fuse survivors) is an MCP-layer feature (no Rust-level `ProvenanceFilter` to wire) and rides with the deferred MCP surface (§8). |
+| AC6 | Fusion composes with temporal coordinates | **Reference-now recency decay proven in the core** (`fuse()`/`recency()` take an explicit `reference_now`; test `recency_uses_supplied_reference_now`). Full AS-OF **metadata** resolution (confidence/recency at a past coordinate) rides with the deferred MCP/hybrid surface; until then the `at_time` + fusion combination is **rejected** (`FusionError::AsOfNotSupported`, test `fused_search_with_at_time_is_rejected`), never silently mixing current-version metadata with a past candidate set. |
 | AC7 | Invalid params (negative / all-zero / NaN weights, bad neutral / half-life) ⇒ `INVALID_ARGUMENT` | `FusionPolicyError`; tests `invalid_*_rejected`. (MCP mapping in the follow-up.) |
 | AC8 | Experimental cohort flag + graduation checklist | `semantic-retrieval-fusion`, §7; `just check-features` |
 
