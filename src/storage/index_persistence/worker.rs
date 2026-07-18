@@ -53,7 +53,7 @@
 //! This ensures that a bug in the persistence layer doesn't crash the database.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -170,6 +170,109 @@ pub(crate) fn update_manifest(
     }
 }
 
+/// Classify a background-persist failure as *deterministic* (cannot succeed on
+/// retry until the process restarts with a raised cap) vs *transient* (I/O; a
+/// later attempt may succeed).
+///
+/// The persist pipeline flattens structured errors into
+/// `StorageError::PersistenceError(String)` by the time they reach the worker,
+/// so this matches on the stable, capacity-specific fragments the interner and
+/// the property-value serializer produce (`StorageError::CapacityExceeded`'s
+/// Display and the `graph.rs` "Failed to intern string" wrap). An I/O / disk
+/// failure — "Failed to save graph index: <io>", "Failed to create ... dir" —
+/// contains none of these fragments and is therefore treated as transient.
+pub(crate) fn is_deterministic_persist_failure(message: &str) -> bool {
+    message.contains("Capacity exceeded")
+        || message.contains("Failed to intern string")
+        || message.contains("not yet supported for persistence")
+}
+
+/// Per-index background-persist suspension latch (configurable interner cap fix).
+///
+/// On a **deterministic** persist failure (string-interner capacity exhausted,
+/// or a value that cannot be interned) the affected index is SUSPENDED: no
+/// further background attempts are made until the process restarts. This
+/// replaces the pre-fix infinite 1-second retry that pegged a CPU and spammed
+/// stderr forever on a capacity exhaustion — retrying is futile because raising
+/// the cap requires a restart. Suspension is per-index, so a deterministic
+/// failure on one index never silences the others. **Transient** (I/O) failures
+/// do not suspend and stay on the normal cadence.
+#[derive(Default)]
+pub(crate) struct PersistSuspension {
+    /// Once `true`, this index makes no further background-persist attempts.
+    suspended: AtomicBool,
+    /// Number of real persist attempts made (a suspended index makes none).
+    /// Observability / test hook: after a deterministic failure this reaches
+    /// exactly 1 and then stops.
+    attempts: AtomicU64,
+    /// Number of actionable "suspended" log lines emitted. Guaranteed to be at
+    /// most 1 (emitted only on the transition into the suspended state). Test
+    /// hook so a test can assert the log fires exactly once without capturing
+    /// stderr.
+    log_emits: AtomicU64,
+}
+
+impl PersistSuspension {
+    /// Whether this index is suspended (no further attempts until restart).
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.suspended.load(Ordering::Acquire)
+    }
+
+    /// Total real persist attempts made for this index (observability / test
+    /// hook: after a deterministic failure this reaches exactly 1 and stops).
+    #[cfg(test)]
+    pub(crate) fn attempts(&self) -> u64 {
+        self.attempts.load(Ordering::Acquire)
+    }
+
+    /// Number of actionable suspend-transition log lines emitted (0 or 1).
+    #[cfg(test)]
+    pub(crate) fn log_emits(&self) -> u64 {
+        self.log_emits.load(Ordering::Acquire)
+    }
+
+    /// Run one persist attempt for `index_label` unless the index is suspended.
+    ///
+    /// Returns `Some(true)` on success, `Some(false)` on a handled failure, and
+    /// `None` when skipped because the index was already suspended. A
+    /// deterministic failure latches the suspension and logs (once); a transient
+    /// failure logs on the normal cadence and leaves the index attemptable.
+    pub(crate) fn attempt<T, F>(&self, index_label: &str, f: F) -> Option<bool>
+    where
+        F: FnOnce() -> crate::core::error::Result<T>,
+    {
+        if self.is_suspended() {
+            return None;
+        }
+        self.attempts.fetch_add(1, Ordering::AcqRel);
+        match f() {
+            Ok(_) => Some(true),
+            Err(e) => {
+                let message = e.to_string();
+                if is_deterministic_persist_failure(&message) {
+                    // Latch suspension and log EXACTLY ONCE, on the transition.
+                    if !self.suspended.swap(true, Ordering::AcqRel) {
+                        self.log_emits.fetch_add(1, Ordering::AcqRel);
+                        eprintln!(
+                            "Background persistence SUSPENDED for {index_label}: {message}. The \
+                             string interner is at capacity (limit is configured by \
+                             `persistence.max_interned_strings`). NO DATA HAS BEEN LOST — the WAL \
+                             is the source of truth; only the on-disk index snapshot is now stale. \
+                             Raise `persistence.max_interned_strings` and RESTART to resume \
+                             background index persistence."
+                        );
+                    }
+                    Some(false)
+                } else {
+                    // Transient (I/O): keep the normal 1s cadence, no suspension.
+                    eprintln!("Background persistence: Failed to persist {index_label}: {message}");
+                    Some(false)
+                }
+            }
+        }
+    }
+}
+
 /// Spawn a background thread for automatic index persistence.
 ///
 /// This thread periodically checks persistence policies and triggers index saves when:
@@ -202,6 +305,15 @@ pub(crate) fn spawn_background_persistence_thread(
             // Check policies every second
             let check_interval = std::time::Duration::from_secs(1);
 
+            // Per-index suspension latches: a deterministic failure (e.g. the
+            // string interner at capacity) suspends that index's background
+            // persistence until restart, instead of retrying every cycle forever
+            // (configurable interner cap fix).
+            let vector_suspension = PersistSuspension::default();
+            let graph_suspension = PersistSuspension::default();
+            let temporal_suspension = PersistSuspension::default();
+            let string_suspension = PersistSuspension::default();
+
             while !tracker.is_shutdown() {
                 std::thread::sleep(check_interval);
 
@@ -225,14 +337,10 @@ pub(crate) fn spawn_background_persistence_thread(
                 if vector_mutations >= policies.vector.mutation_threshold as u64
                     || vector_seconds >= policies.vector.time_interval_secs as u64
                 {
-                    match persist_vector_indexes(&current, &manager, Some(&tracker), snapshot_lsn) {
-                        Ok(()) => any_index_persisted = true,
-                        Err(e) => {
-                            eprintln!(
-                                "Background persistence: Failed to persist vector indexes: {}",
-                                e
-                            );
-                        }
+                    if let Some(true) = vector_suspension.attempt("vector indexes", || {
+                        persist_vector_indexes(&current, &manager, Some(&tracker), snapshot_lsn)
+                    }) {
+                        any_index_persisted = true;
                     }
                 }
 
@@ -242,14 +350,10 @@ pub(crate) fn spawn_background_persistence_thread(
                 if graph_mutations >= policies.graph.mutation_threshold as u64
                     || graph_seconds >= policies.graph.time_interval_secs as u64
                 {
-                    match persist_graph_index(&current, &manager, Some(&tracker), snapshot_lsn) {
-                        Ok(_) => any_index_persisted = true,
-                        Err(e) => {
-                            eprintln!(
-                                "Background persistence: Failed to persist graph index: {}",
-                                e
-                            );
-                        }
+                    if let Some(true) = graph_suspension.attempt("graph index", || {
+                        persist_graph_index(&current, &manager, Some(&tracker), snapshot_lsn)
+                    }) {
+                        any_index_persisted = true;
                     }
                 }
 
@@ -259,20 +363,16 @@ pub(crate) fn spawn_background_persistence_thread(
                 if temporal_mutations >= policies.temporal.version_threshold as u64
                     || temporal_seconds >= policies.temporal.time_interval_secs as u64
                 {
-                    match persist_temporal_index(
-                        &historical,
-                        &temporal_indexes,
-                        &manager,
-                        &tracker,
-                        snapshot_lsn,
-                    ) {
-                        Ok(()) => any_index_persisted = true,
-                        Err(e) => {
-                            eprintln!(
-                                "Background persistence: Failed to persist temporal index: {}",
-                                e
-                            );
-                        }
+                    if let Some(true) = temporal_suspension.attempt("temporal index", || {
+                        persist_temporal_index(
+                            &historical,
+                            &temporal_indexes,
+                            &manager,
+                            &tracker,
+                            snapshot_lsn,
+                        )
+                    }) {
+                        any_index_persisted = true;
                     }
                 }
 
@@ -282,14 +382,10 @@ pub(crate) fn spawn_background_persistence_thread(
                 if string_mutations >= policies.strings.new_strings_threshold as u64
                     || string_seconds >= policies.strings.time_interval_secs as u64
                 {
-                    match persist_string_interner(&manager, &tracker, snapshot_lsn) {
-                        Ok(_) => any_index_persisted = true,
-                        Err(e) => {
-                            eprintln!(
-                                "Background persistence: Failed to persist string interner: {}",
-                                e
-                            );
-                        }
+                    if let Some(true) = string_suspension.attempt("string interner", || {
+                        persist_string_interner(&manager, &tracker, snapshot_lsn)
+                    }) {
+                        any_index_persisted = true;
                     }
                 }
 
@@ -340,4 +436,126 @@ pub(crate) fn spawn_background_persistence_thread(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::error::{Error, StorageError};
+
+    fn capacity_error() -> Error {
+        Error::Storage(StorageError::CapacityExceeded {
+            resource: "string interner".to_string(),
+            current: 200,
+            limit: 200,
+        })
+    }
+
+    #[test]
+    fn test_deterministic_classifier_matches_capacity_and_intern_wraps() {
+        assert!(is_deterministic_persist_failure(
+            &capacity_error().to_string()
+        ));
+        assert!(is_deterministic_persist_failure(
+            "Failed to save graph index: Failed to intern string: boom"
+        ));
+        // A pure I/O / disk failure is transient, not deterministic.
+        assert!(!is_deterministic_persist_failure(
+            "Failed to save graph index: No space left on device"
+        ));
+        assert!(!is_deterministic_persist_failure(
+            "Failed to create graph directory: permission denied"
+        ));
+    }
+
+    #[test]
+    fn test_deterministic_failure_suspends_after_exactly_one_attempt() {
+        // Regression: a deterministic CapacityExceeded must NOT be retried every
+        // cycle forever. After the first attempt the index suspends and makes no
+        // further attempts (observable non-spin).
+        let suspension = PersistSuspension::default();
+
+        // First call: one real attempt, deterministic failure, latches suspend.
+        assert_eq!(
+            suspension.attempt("graph index", || -> crate::core::error::Result<()> {
+                Err(capacity_error())
+            }),
+            Some(false)
+        );
+        assert!(suspension.is_suspended());
+        assert_eq!(suspension.attempts(), 1);
+
+        // Many further cycles: all skipped, attempt count STAYS at exactly 1.
+        for _ in 0..1000 {
+            assert_eq!(
+                suspension.attempt("graph index", || -> crate::core::error::Result<()> {
+                    panic!("suspended index must not run the persist closure");
+                }),
+                None
+            );
+        }
+        assert_eq!(
+            suspension.attempts(),
+            1,
+            "attempts must stop at 1 once suspended"
+        );
+    }
+
+    #[test]
+    fn test_deterministic_failure_logs_exactly_once() {
+        // The actionable "suspended" line is emitted exactly once (on the
+        // transition into the suspended state), asserted via the emit counter.
+        let suspension = PersistSuspension::default();
+        for _ in 0..1000 {
+            let _ = suspension.attempt("string interner", || -> crate::core::error::Result<()> {
+                Err(capacity_error())
+            });
+        }
+        assert_eq!(
+            suspension.log_emits(),
+            1,
+            "actionable log must fire exactly once"
+        );
+    }
+
+    #[test]
+    fn test_transient_failure_does_not_suspend() {
+        // A transient I/O failure keeps the index attemptable on the normal
+        // cadence — it must NOT latch the suspension.
+        let suspension = PersistSuspension::default();
+        for _ in 0..5 {
+            assert_eq!(
+                suspension.attempt("graph index", || -> crate::core::error::Result<()> {
+                    Err(Error::Storage(StorageError::PersistenceError(
+                        "Failed to save graph index: No space left on device".to_string(),
+                    )))
+                }),
+                Some(false)
+            );
+        }
+        assert!(!suspension.is_suspended());
+        assert_eq!(
+            suspension.attempts(),
+            5,
+            "transient failures keep attempting"
+        );
+        assert_eq!(
+            suspension.log_emits(),
+            0,
+            "transient failures do not emit the suspend line"
+        );
+    }
+
+    #[test]
+    fn test_success_keeps_index_attemptable() {
+        let suspension = PersistSuspension::default();
+        assert_eq!(
+            suspension.attempt("graph index", || -> crate::core::error::Result<u64> {
+                Ok(42)
+            }),
+            Some(true)
+        );
+        assert!(!suspension.is_suspended());
+        assert_eq!(suspension.attempts(), 1);
+    }
 }

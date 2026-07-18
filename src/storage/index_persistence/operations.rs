@@ -1050,16 +1050,13 @@ pub(crate) fn persist_string_interner(
     tracker: &Arc<PersistenceTracker>,
     current_lsn: u64,
 ) -> Result<u64> {
-    manager.save_string_interner().map_err(|e| {
+    // Use the EXACT number of strings the save actually wrote for the manifest
+    // count, not a later `GLOBAL_INTERNER.len()` sample that can race a
+    // concurrent writer interning more strings between the write and the read
+    // (configurable interner cap fix).
+    let count = manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
     })?;
-
-    // Capture the count *after* save completes. Since GLOBAL_INTERNER is append-only,
-    // this count is at least what was saved. If new strings were interned concurrently,
-    // they might not be in the file yet, but having a slightly higher count in the manifest
-    // is safer than lower (though ideally exact).
-    // Note: save_string_interner likely iterates and saves.
-    let count = crate::core::GLOBAL_INTERNER.len() as u64;
 
     tracker.reset_string_mutations();
     tracker.update_string_lsn(current_lsn);

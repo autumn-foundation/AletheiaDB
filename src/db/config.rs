@@ -388,6 +388,15 @@ impl AletheiaDB {
             let mut config = config;
             let durability_mode = config.wal.durability_mode;
 
+            // Reconfigure the process-global string-interner cap from
+            // `persistence.max_interned_strings` BEFORE any WAL bootstrap
+            // deserialization (which interns property keys) or index load (which
+            // re-interns persisted strings and validates the persisted count
+            // against this cap). Doing it here guarantees both the runtime
+            // intern cap and the load-validation cap reflect the configured
+            // value for the rest of open(). Configurable interner cap fix.
+            crate::core::GLOBAL_INTERNER.set_max_capacity(config.persistence.max_interned_strings);
+
             // Capture provenance-chain settings before `config.wal.wal_dir` is
             // moved into the WAL system config. The chain lives under the data
             // dir (the parent of the WAL dir) unless an explicit override is set.
@@ -1523,6 +1532,128 @@ mod ephemeral_tests {
             );
             db.create_node("P", PropertyMapBuilder::new().insert("k", "a").build())
                 .expect_err("constraint must survive WAL+persistence restart");
+        }
+    }
+
+    /// Prod-upgrade regression (configurable interner cap): a durable database
+    /// opened under a LOW `max_interned_strings`, populated near the cap, and
+    /// then REOPENED under a HIGHER cap must (a) load its existing data cleanly,
+    /// (b) intern past the old cap, and (c) hit no migration/format error.
+    ///
+    /// The string interner is a process-global singleton and this test lowers
+    /// its cap, so it runs in a SUBPROCESS to isolate the mutation from other
+    /// tests running concurrently (mirrors the interning.rs mutant-kill pattern).
+    #[test]
+    fn interner_cap_reopen_with_higher_cap_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "db::config::ephemeral_tests::interner_cap_reopen_with_higher_cap_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for interner-cap reopen test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "interner-cap reopen helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("interner-cap reopen helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn interner_cap_reopen_with_higher_cap_helper() {
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use crate::storage::wal::DurabilityMode;
+        use crate::{PropertyMapBuilder, WriteOps};
+        use tempfile::tempdir;
+
+        let scratch = tempdir().unwrap();
+        let db_path = scratch.path().to_path_buf();
+
+        let make_config = |cap: usize| {
+            AletheiaDBConfig::builder()
+                .wal(
+                    WalConfigBuilder::new()
+                        .wal_dir(db_path.join("wal"))
+                        .durability_mode(DurabilityMode::Synchronous)
+                        .build(),
+                )
+                .persistence(PersistenceConfig {
+                    enabled: true,
+                    data_dir: db_path.join("indexes"),
+                    load_on_startup: true,
+                    max_interned_strings: cap,
+                    ..Default::default()
+                })
+                .build()
+        };
+
+        // Session 1: LOW cap (200). Intern a handful of distinct labels well
+        // under the cap, then persist and close.
+        let created = {
+            let db = AletheiaDB::with_unified_config(make_config(200)).unwrap();
+            assert_eq!(crate::core::GLOBAL_INTERNER.max_capacity(), 200);
+
+            let mut ids = Vec::new();
+            for i in 0..20 {
+                let label = format!("LowCapLabel_{i}");
+                let id = db
+                    .create_node(
+                        &label,
+                        PropertyMapBuilder::new()
+                            .insert("k", format!("v{i}"))
+                            .build(),
+                    )
+                    .unwrap();
+                ids.push(id);
+            }
+            db.persist_indexes().unwrap();
+            ids.len()
+        };
+
+        // Session 2: HIGHER cap (10_000). Existing data must load clean and
+        // interning must proceed past the old cap without any format error.
+        {
+            let db = AletheiaDB::with_unified_config(make_config(10_000)).unwrap();
+            assert_eq!(crate::core::GLOBAL_INTERNER.max_capacity(), 10_000);
+            assert_eq!(
+                db.node_count(),
+                created,
+                "existing nodes must reload cleanly after cap raise"
+            );
+
+            // Intern well past the old 200 cap: 500 more distinct labels succeed.
+            for i in 0..500 {
+                let label = format!("HighCapLabel_{i}");
+                db.create_node(
+                    &label,
+                    PropertyMapBuilder::new()
+                        .insert("k", format!("w{i}"))
+                        .build(),
+                )
+                .expect("interning must proceed past the old cap under the raised limit");
+            }
+            assert_eq!(db.node_count(), created + 500);
         }
     }
 

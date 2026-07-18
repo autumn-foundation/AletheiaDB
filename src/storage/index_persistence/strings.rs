@@ -286,20 +286,26 @@ pub fn save_string_interner_with_cipher(
 
 /// Save the global string interner, encrypting with the current generation of
 /// an [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+///
+/// Returns the exact number of strings written, so the manifest's
+/// `string_count` describes precisely what is on disk rather than a later,
+/// racy `GLOBAL_INTERNER.len()` sample (configurable interner cap fix).
 pub(crate) fn save_string_interner_with_keyring(
     path: &Path,
     keyring: Option<&super::common::IndexKeyring>,
-) -> Result<()> {
+) -> Result<u64> {
     let strings = GLOBAL_INTERNER.get_all_strings();
+    let string_count = strings.len() as u64;
 
     let data = StringInternerData {
         magic: INTERNER_MAGIC,
         version: MANIFEST_VERSION,
-        string_count: strings.len() as u64,
+        string_count,
         strings,
     };
 
-    super::common::save_encoded_maybe_encrypted_with_keyring(&data, path, keyring)
+    super::common::save_encoded_maybe_encrypted_with_keyring(&data, path, keyring)?;
+    Ok(string_count)
 }
 
 /// Load the string interner from disk and validate CRC32 checksum.
@@ -387,13 +393,19 @@ fn validate_string_interner(data: StringInternerData, path: &Path) -> Result<Str
         });
     }
 
-    // Validate string count to prevent DoS via memory exhaustion
-    if data.string_count > super::MAX_STRING_COUNT {
+    // Validate string count to prevent DoS via memory exhaustion.
+    //
+    // The effective limit honors the runtime cap configured at `open()` from
+    // `persistence.max_interned_strings` (set on GLOBAL_INTERNER before indexes
+    // load), floored by the generous `MAX_STRING_COUNT` backstop. This keeps the
+    // two caps in lockstep: a database that raised the runtime cap and interned
+    // past the old default reopens cleanly instead of being rejected here.
+    let effective_max = super::MAX_STRING_COUNT.max(GLOBAL_INTERNER.max_capacity() as u64);
+    if data.string_count > effective_max {
         return Err(IndexPersistenceError::SizeLimitExceeded {
             message: format!(
                 "String count {} exceeds maximum allowed count {}",
-                data.string_count,
-                super::MAX_STRING_COUNT
+                data.string_count, effective_max
             ),
         });
     }
@@ -633,6 +645,37 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Size limit exceeded"));
         assert!(err.to_string().contains("String count"));
+    }
+
+    #[test]
+    fn test_string_count_above_old_default_loads_under_raised_cap() {
+        // Regression (configurable interner cap): a persisted interner with more
+        // strings than the OLD 100K default must load cleanly now that the load
+        // validator honors the raised cap (floor = 10M). This proves the two
+        // caps move in lockstep so a grown database reopens.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("interner.idx");
+
+        // `string_count` header claims 200_000 (> the old 100K default, but well
+        // under the 10M floor). The body carries a single string; validation
+        // rejects only on the COUNT header vs the effective cap.
+        let data = StringInternerData {
+            magic: INTERNER_MAGIC,
+            version: MANIFEST_VERSION,
+            string_count: 200_000,
+            strings: vec!["loads_ok".to_string()],
+        };
+        let encoded = bitcode::encode(&data);
+        let mut hasher = Hasher::new();
+        hasher.update(&encoded);
+        let checksum = hasher.finalize();
+        let mut bytes = encoded;
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        // 200_000 <= effective cap (>= 10M floor) → loads OK.
+        let loaded = load_string_interner(&path).expect("count above old default must load");
+        assert_eq!(loaded.string_count, 200_000);
     }
 
     #[test]

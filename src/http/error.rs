@@ -317,6 +317,40 @@ impl AletheiaHttpError {
             };
         }
 
+        // --- Storage capacity exhaustion (configurable interner cap). ---
+        // A string-interner capacity breach is well-formed input the system
+        // refuses in its current state; retrying is futile until the operator
+        // raises the cap and restarts → FAILED_PRECONDITION (412, non-retriable),
+        // with the same actionable message + `{resource,current,limit}` details
+        // the MCP surface emits (byte-shape-identical envelope).
+        if let E::Storage(crate::core::error::StorageError::CapacityExceeded {
+            resource,
+            current,
+            limit,
+        }) = e
+        {
+            let message = if resource.contains("interner") {
+                format!(
+                    "String interner at capacity ({current}/{limit}). Raise \
+                     `persistence.max_interned_strings` above {limit} and restart to intern more \
+                     unique strings. No data is lost — the WAL is the source of truth."
+                )
+            } else {
+                e.to_string()
+            };
+            return Self::Structured {
+                code: "FAILED_PRECONDITION",
+                status: StatusCode::PRECONDITION_FAILED,
+                retriable: false,
+                message,
+                details: Some(json!({
+                    "resource": resource,
+                    "current": current,
+                    "limit": limit,
+                })),
+            };
+        }
+
         // Every other db error keeps the prior write-path mapping (400
         // BadRequest), preserving the contract that genuine bad input stays 400.
         Self::BadRequest(e.to_string())

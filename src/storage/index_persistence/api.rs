@@ -43,6 +43,37 @@ pub struct PersistenceConfig {
     pub load_on_startup: bool,
     /// Whether to use memory-mapped loading
     pub use_mmap: bool,
+    /// Maximum number of unique strings the process-global interner may hold.
+    ///
+    /// This bounds memory against a DoS via unbounded unique labels / property
+    /// keys / property values (each interned string costs ~100 bytes of
+    /// map/pointer overhead plus the string bytes). It is read at database
+    /// `open()` and drives **both** the runtime intern cap and the persisted
+    /// interner's load-validation cap, so raising it lets a grown database
+    /// reopen cleanly and intern past the old limit.
+    ///
+    /// Defaults to [`PersistenceConfig::DEFAULT_MAX_INTERNED_STRINGS`] (10M,
+    /// ~1 GB). Because it is read at `open()`, **changing it requires a
+    /// restart**. The process-global interner means the last database opened in
+    /// a process wins this setting.
+    #[cfg_attr(feature = "serde", serde(default = "default_max_interned_strings"))]
+    pub max_interned_strings: usize,
+}
+
+/// Serde field default for [`PersistenceConfig::max_interned_strings`], so a
+/// partial `[persistence]` TOML table that omits the field still gets the 10M
+/// default rather than `0`.
+#[cfg(feature = "serde")]
+fn default_max_interned_strings() -> usize {
+    PersistenceConfig::DEFAULT_MAX_INTERNED_STRINGS
+}
+
+impl PersistenceConfig {
+    /// Default maximum number of unique interned strings (10,000,000, ~1 GB).
+    ///
+    /// Kept in lockstep with
+    /// [`crate::core::interning::DEFAULT_MAX_INTERNED_STRINGS`].
+    pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 10_000_000;
 }
 
 /// The default is **disabled** persistence (Issue #3388).
@@ -72,6 +103,7 @@ impl Default for PersistenceConfig {
             policies: PersistencePolicies::default(),
             load_on_startup: true,
             use_mmap: true,
+            max_interned_strings: Self::DEFAULT_MAX_INTERNED_STRINGS,
         }
     }
 }

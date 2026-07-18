@@ -151,10 +151,18 @@ pub const TEMPORAL_ADJACENCY_MAGIC: [u8; 4] = *b"GTAJ";
 /// Magic bytes for vector metadata files.
 pub const VECTOR_META_MAGIC: [u8; 4] = *b"GVEC";
 
-/// Maximum number of strings allowed in the string interner (DoS protection).
-/// ~100K strings should be sufficient for most databases while preventing
-/// memory exhaustion attacks.
-pub const MAX_STRING_COUNT: u64 = 100_000;
+/// Backstop floor for the number of strings allowed when loading a persisted
+/// string interner (DoS protection).
+///
+/// Raised from 100_000 to 10_000_000 (Issue: configurable interner cap) to move
+/// in lockstep with the runtime intern cap
+/// ([`DEFAULT_MAX_INTERNED_STRINGS`](crate::core::interning::DEFAULT_MAX_INTERNED_STRINGS));
+/// otherwise a database that interned more than the old default would save fine
+/// but fail to reload. This constant is only a **floor**: the effective load
+/// limit is `max(MAX_STRING_COUNT, GLOBAL_INTERNER.max_capacity())`, so a
+/// deployment that raised `persistence.max_interned_strings` above this floor
+/// can still reopen its data (see `strings::validate_string_interner`).
+pub const MAX_STRING_COUNT: u64 = 10_000_000;
 
 /// Maximum length of a single string in bytes (DoS protection).
 /// Increased from 1MB to 10MB to support business scenarios:

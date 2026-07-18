@@ -306,20 +306,39 @@ writer already gets a synchronous, non-retriable error. **Change:** make the mes
 `persistence.max_interned_strings` and restart"* — and ensure the structured
 `details` carry `resource`/`current`/`limit`.
 
-**(ii) Background thread — terminal-loud, no spin.** In
+**(ii) Background thread — terminal-loud, suspend-until-restart.** In
 `worker.rs:203-314`, for each `persist_*` call that currently does
 `Err(e) => eprintln!(...)`:
 
-1. **Classify** the error: *deterministic* (`CapacityExceeded`, serialization/format
-   errors — retrying the identical state cannot succeed) vs *transient* (I/O — a
-   later attempt may succeed).
-2. On **deterministic** failure: log **once** at ERROR level with actionable text
-   naming `persistence.max_interned_strings`, then **stop hot-retrying** — apply
-   **bounded exponential backoff capped at ~60s** and **dedupe** repeated identical
-   log lines (log once, then at most a rate-limited summary). CPU and log volume
-   become observably bounded.
-3. On **transient** failure: keep the existing retry cadence (I/O may recover), but
-   still apply backoff so a persistently failing disk does not spin at 1s forever.
+1. **Classify** the error: *deterministic* (`CapacityExceeded`, the intern-string
+   serialization wrap — retrying the identical state cannot succeed) vs *transient*
+   (I/O — a later attempt may succeed).
+2. On **deterministic** failure: log **once** via `eprintln!` (the module's
+   established best-effort-stderr convention — no new dependency on an optional
+   logging framework) with actionable text naming `persistence.max_interned_strings`,
+   then **SUSPEND** background persistence for that affected index entirely — set a
+   per-index "persist-suspended" latch so **no further attempts** are made until the
+   process restarts. Because raising the cap *requires a restart* (the runtime and
+   load caps are both read at `open()`), retrying — even with backoff — is futile;
+   suspending is cleaner, testable, and provably bounded (attempt count for the
+   affected index goes to exactly 1 and then stops). The log fires exactly once,
+   guarded on the transition into the suspended state.
+3. On **transient** failure: keep the existing 1s retry cadence (I/O may recover); do
+   **not** suspend.
+
+The per-index latch is a small `PersistSuspension` value (an `AtomicBool` suspended
+flag plus atomic attempt / log-emit counters used as test hooks), one per index type
+(vector/graph/temporal/strings), so a deterministic failure on one index never
+silences the others.
+
+**(iii) Manifest string count — exact written count, not a racy global sample.**
+`persist_string_interner` previously stamped the manifest's `string_count` from a live
+`GLOBAL_INTERNER.len()` read taken *after* the save completed, which can race a
+concurrent writer that interned more strings between the file write and the count
+read. The save functions now return the exact number of strings they serialized, and
+`persist_string_interner` threads that written count through to
+`tracker.update_last_persisted_string_count`, so the manifest describes exactly what is
+on disk.
 
 **Scope note:** property-**value** interning **stays at persist time** (moving it to
 the write path is out of scope and risky — it changes hot-path latency and the write
@@ -372,12 +391,14 @@ actionable, machine-readable signal instead of a bare string.
 1. **Synchronous writer cap error** — with a low configured cap, a `create_node`
    whose label/property-key interning exceeds the cap returns a synchronous
    `CapacityExceeded` (structured) — the writer is *not* silently deferred.
-2. **Background thread does not spin on cap exhaustion** — under a low cap that a
-   value-string persist will breach, assert the persist failure count stays
-   **bounded** over a window (or that backoff grows) — i.e. observable non-spin, not
-   ~1 failure/sec unbounded.
-3. **Log-once / dedupe** — the actionable deterministic-failure line is emitted **at
-   most once** (subsequent identical failures do not re-log per cycle).
+2. **Background thread does not spin on cap exhaustion** — under a deterministic
+   `CapacityExceeded` failure, assert the affected index's persist-**attempt count
+   goes to exactly 1 and then STOPS** (the index is observably suspended), rather than
+   re-attempting each cycle. A transient (I/O) failure, by contrast, does **not**
+   suspend and keeps attempting.
+3. **Log-once** — the actionable deterministic-failure line is emitted **exactly
+   once** (asserted via the atomic emit-counter test hook on the transition into the
+   suspended state).
 4. **Prod-upgrade (the headline test)** — durable DB under a LOW configured cap;
    fill to/near the cap; close; reopen with a HIGHER cap → (a) existing data loads
    clean, (b) interning proceeds beyond the old cap, (c) no migration / no format
