@@ -334,36 +334,33 @@ pub(crate) fn spawn_background_persistence_thread(
                 // Check vector index policy
                 let vector_mutations = tracker.get_vector_mutations();
                 let vector_seconds = tracker.seconds_since_vector_persist();
-                if vector_mutations >= policies.vector.mutation_threshold as u64
-                    || vector_seconds >= policies.vector.time_interval_secs as u64
-                {
-                    if let Some(true) = vector_suspension.attempt("vector indexes", || {
+                if (vector_mutations >= policies.vector.mutation_threshold as u64
+                    || vector_seconds >= policies.vector.time_interval_secs as u64)
+                    && let Some(true) = vector_suspension.attempt("vector indexes", || {
                         persist_vector_indexes(&current, &manager, Some(&tracker), snapshot_lsn)
-                    }) {
-                        any_index_persisted = true;
-                    }
+                    })
+                {
+                    any_index_persisted = true;
                 }
 
                 // Check graph index policy
                 let graph_mutations = tracker.get_graph_mutations();
                 let graph_seconds = tracker.seconds_since_graph_persist();
-                if graph_mutations >= policies.graph.mutation_threshold as u64
-                    || graph_seconds >= policies.graph.time_interval_secs as u64
-                {
-                    if let Some(true) = graph_suspension.attempt("graph index", || {
+                if (graph_mutations >= policies.graph.mutation_threshold as u64
+                    || graph_seconds >= policies.graph.time_interval_secs as u64)
+                    && let Some(true) = graph_suspension.attempt("graph index", || {
                         persist_graph_index(&current, &manager, Some(&tracker), snapshot_lsn)
-                    }) {
-                        any_index_persisted = true;
-                    }
+                    })
+                {
+                    any_index_persisted = true;
                 }
 
                 // Check temporal index policy
                 let temporal_mutations = tracker.get_temporal_mutations();
                 let temporal_seconds = tracker.seconds_since_temporal_persist();
-                if temporal_mutations >= policies.temporal.version_threshold as u64
-                    || temporal_seconds >= policies.temporal.time_interval_secs as u64
-                {
-                    if let Some(true) = temporal_suspension.attempt("temporal index", || {
+                if (temporal_mutations >= policies.temporal.version_threshold as u64
+                    || temporal_seconds >= policies.temporal.time_interval_secs as u64)
+                    && let Some(true) = temporal_suspension.attempt("temporal index", || {
                         persist_temporal_index(
                             &historical,
                             &temporal_indexes,
@@ -371,22 +368,21 @@ pub(crate) fn spawn_background_persistence_thread(
                             &tracker,
                             snapshot_lsn,
                         )
-                    }) {
-                        any_index_persisted = true;
-                    }
+                    })
+                {
+                    any_index_persisted = true;
                 }
 
                 // Check string interner policy
                 let string_mutations = tracker.get_string_mutations();
                 let string_seconds = tracker.seconds_since_string_persist();
-                if string_mutations >= policies.strings.new_strings_threshold as u64
-                    || string_seconds >= policies.strings.time_interval_secs as u64
-                {
-                    if let Some(true) = string_suspension.attempt("string interner", || {
+                if (string_mutations >= policies.strings.new_strings_threshold as u64
+                    || string_seconds >= policies.strings.time_interval_secs as u64)
+                    && let Some(true) = string_suspension.attempt("string interner", || {
                         persist_string_interner(&manager, &tracker, snapshot_lsn)
-                    }) {
-                        any_index_persisted = true;
-                    }
+                    })
+                {
+                    any_index_persisted = true;
                 }
 
                 // CRITICAL FIX (Issue #1011): Update manifest after any index persistence

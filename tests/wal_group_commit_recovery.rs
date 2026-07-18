@@ -109,6 +109,7 @@ fn group_commit_config(db_path: &Path) -> AletheiaDBConfig {
             load_on_startup: true,
             policies: inert_policies(),
             use_mmap: false,
+            ..Default::default()
         })
         .build()
 }
@@ -382,6 +383,7 @@ mod encrypted {
                 load_on_startup: true,
                 policies: inert_policies(),
                 use_mmap: false,
+                ..Default::default()
             })
             .encryption(EncryptionConfig::file_based(key_path))
             .build()

@@ -1581,10 +1581,10 @@ mod ephemeral_tests {
     #[test]
     #[ignore]
     fn interner_cap_reopen_with_higher_cap_helper() {
+        use crate::PropertyMapBuilder;
         use crate::config::{AletheiaDBConfig, WalConfigBuilder};
         use crate::storage::index_persistence::PersistenceConfig;
         use crate::storage::wal::DurabilityMode;
-        use crate::{PropertyMapBuilder, WriteOps};
         use tempfile::tempdir;
 
         let scratch = tempdir().unwrap();
