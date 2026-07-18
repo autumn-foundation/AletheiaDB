@@ -171,20 +171,30 @@ pub(crate) fn update_manifest(
 }
 
 /// Classify a background-persist failure as *deterministic* (cannot succeed on
-/// retry until the process restarts with a raised cap) vs *transient* (I/O; a
-/// later attempt may succeed).
+/// retry until the process restarts with a raised cap) vs *transient* (I/O, or a
+/// feature-gap that self-heals when the offending entity is edited; a later
+/// attempt may succeed).
 ///
-/// The persist pipeline flattens structured errors into
-/// `StorageError::PersistenceError(String)` by the time they reach the worker,
-/// so this matches on the stable, capacity-specific fragments the interner and
-/// the property-value serializer produce (`StorageError::CapacityExceeded`'s
-/// Display and the `graph.rs` "Failed to intern string" wrap). An I/O / disk
-/// failure — "Failed to save graph index: <io>", "Failed to create ... dir" —
-/// contains none of these fragments and is therefore treated as transient.
-pub(crate) fn is_deterministic_persist_failure(message: &str) -> bool {
-    message.contains("Capacity exceeded")
-        || message.contains("Failed to intern string")
-        || message.contains("not yet supported for persistence")
+/// This matches a **structured** signal — a typed
+/// [`StorageError::CapacityExceeded`](crate::core::error::StorageError::CapacityExceeded)
+/// (configurable interner cap) — rather than scraping Display text, so a future
+/// reword of an error message can never silently reintroduce the infinite-retry
+/// hang. The persist pipeline preserves that variant to the worker via
+/// [`IndexPersistenceError::into_persist_storage_error`](crate::storage::index_persistence::error::IndexPersistenceError::into_persist_storage_error).
+///
+/// Only genuine capacity/intern-exhaustion is deterministic. Notably the
+/// Array/SparseVector "not yet supported for persistence" case is TRANSIENT: it
+/// self-heals the moment the offending node/edge is updated or deleted, so it
+/// must NOT permanently suspend the whole index (a `{:?}`/reword-proof structural
+/// distinction, not a message-substring one). Pure I/O / disk failures are
+/// likewise transient.
+pub(crate) fn is_deterministic_persist_failure(e: &crate::core::error::Error) -> bool {
+    matches!(
+        e,
+        crate::core::error::Error::Storage(
+            crate::core::error::StorageError::CapacityExceeded { .. }
+        )
+    )
 }
 
 /// Per-index background-persist suspension latch (configurable interner cap fix).
@@ -249,7 +259,7 @@ impl PersistSuspension {
             Ok(_) => Some(true),
             Err(e) => {
                 let message = e.to_string();
-                if is_deterministic_persist_failure(&message) {
+                if is_deterministic_persist_failure(&e) {
                     // Latch suspension and log EXACTLY ONCE, on the transition.
                     if !self.suspended.swap(true, Ordering::AcqRel) {
                         self.log_emits.fetch_add(1, Ordering::AcqRel);
@@ -447,21 +457,60 @@ mod tests {
         })
     }
 
+    fn array_unsupported_error() -> Error {
+        // Mirrors how the Array "not yet supported for persistence" feature-gap
+        // reaches the worker: flattened into a PersistenceError string (NOT a
+        // typed CapacityExceeded).
+        Error::Storage(StorageError::PersistenceError(
+            "Failed to persist node properties: Serialization error: Array properties are not \
+             yet supported for persistence. This prevents silent data loss."
+                .to_string(),
+        ))
+    }
+
     #[test]
-    fn test_deterministic_classifier_matches_capacity_and_intern_wraps() {
-        assert!(is_deterministic_persist_failure(
-            &capacity_error().to_string()
-        ));
-        assert!(is_deterministic_persist_failure(
-            "Failed to save graph index: Failed to intern string: boom"
-        ));
-        // A pure I/O / disk failure is transient, not deterministic.
-        assert!(!is_deterministic_persist_failure(
-            "Failed to save graph index: No space left on device"
-        ));
-        assert!(!is_deterministic_persist_failure(
-            "Failed to create graph directory: permission denied"
-        ));
+    fn test_deterministic_classifier_matches_typed_capacity_only() {
+        // A typed CapacityExceeded (configurable interner cap) is deterministic.
+        assert!(is_deterministic_persist_failure(&capacity_error()));
+
+        // The Array "not yet supported" feature-gap is TRANSIENT: it self-heals
+        // when the offending entity is edited/deleted, so it must NOT suspend.
+        assert!(!is_deterministic_persist_failure(&array_unsupported_error()));
+
+        // Pure I/O / disk failures are transient.
+        assert!(!is_deterministic_persist_failure(&Error::Storage(
+            StorageError::PersistenceError(
+                "Failed to save graph index: No space left on device".to_string(),
+            )
+        )));
+        assert!(!is_deterministic_persist_failure(&Error::Storage(
+            StorageError::PersistenceError(
+                "Failed to create graph directory: permission denied".to_string(),
+            )
+        )));
+    }
+
+    #[test]
+    fn test_array_unsupported_does_not_permanently_suspend() {
+        // Regression (configurable interner cap review): the Array "not yet
+        // supported" feature-gap must NOT permanently suspend the whole index —
+        // it self-heals. It stays attemptable on the normal cadence, like any
+        // transient failure.
+        let suspension = PersistSuspension::default();
+        for _ in 0..5 {
+            assert_eq!(
+                suspension.attempt("graph index", || -> crate::core::error::Result<()> {
+                    Err(array_unsupported_error())
+                }),
+                Some(false)
+            );
+        }
+        assert!(
+            !suspension.is_suspended(),
+            "array-unsupported feature-gap must not permanently suspend the index"
+        );
+        assert_eq!(suspension.attempts(), 5);
+        assert_eq!(suspension.log_emits(), 0);
     }
 
     #[test]
@@ -553,5 +602,119 @@ mod tests {
         );
         assert!(!suspension.is_suspended());
         assert_eq!(suspension.attempts(), 1);
+    }
+
+    /// End-to-end regression (finding 8, the actual "egregore hang" trigger):
+    /// drive the REAL persist pipeline (`persist_indexes` →
+    /// `persist_graph_index_from_snapshot`, which interns property VALUES at
+    /// persist time) at a tiny cap so a genuine high-cardinality value load
+    /// overflows the interner — then assert the real `PersistSuspension` latch
+    /// suspends after exactly one attempt (no spin, one log). NOT a synthetic
+    /// injected error: the failure originates in real value interning.
+    ///
+    /// It lowers the process-global interner cap, so it runs in a SUBPROCESS.
+    #[test]
+    fn real_value_path_capacity_suspends_persistence_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "storage::index_persistence::worker::tests::\
+                 real_value_path_capacity_suspends_persistence_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for real-value-path suspension test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "real-value-path suspension helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("real-value-path suspension helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn real_value_path_capacity_suspends_persistence_helper() {
+        use crate::AletheiaDB;
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::property::PropertyMapBuilder;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db = AletheiaDB::open(dir.path()).expect("durable open");
+
+        // Write nodes carrying DISTINCT string property VALUES. Values are
+        // interned LAZILY at persist time (not the write path), so these writes
+        // succeed regardless of the cap — exactly the "egregore hang" setup where
+        // the writer sees no error and the persist thread later chokes.
+        for i in 0..50 {
+            db.create_node(
+                "ValNode",
+                PropertyMapBuilder::new()
+                    .insert("v", format!("distinct_value_{i}"))
+                    .build(),
+            )
+            .unwrap();
+        }
+
+        // Pin the cap just above the current interner size so persisting the
+        // high-cardinality VALUES overflows partway through. This runs well within
+        // the background thread's initial 1s sleep, so our manual persist is the
+        // one that trips the cap (the background thread, if it later fires, only
+        // suspends ITS own independent latch).
+        let base = GLOBAL_INTERNER.len();
+        GLOBAL_INTERNER.set_max_capacity(base + 10);
+
+        let suspension = PersistSuspension::default();
+
+        // First REAL persist: value interning trips a typed CapacityExceeded,
+        // which the structured classifier treats as deterministic → suspend after
+        // exactly one attempt.
+        let r1 = suspension.attempt("graph index", || db.persist_indexes());
+        assert_eq!(
+            r1,
+            Some(false),
+            "the real persist must fail on the value-interning capacity breach"
+        );
+        assert!(
+            suspension.is_suspended(),
+            "a real value-path capacity breach must suspend background persistence"
+        );
+        assert_eq!(suspension.attempts(), 1);
+
+        // Many further cycles are all SKIPPED (no spin): attempts stay at 1.
+        for _ in 0..200 {
+            assert_eq!(
+                suspension.attempt("graph index", || db.persist_indexes()),
+                None
+            );
+        }
+        assert_eq!(
+            suspension.attempts(),
+            1,
+            "a suspended index must make no further attempts (no CPU-pegging spin)"
+        );
+        assert_eq!(
+            suspension.log_emits(),
+            1,
+            "the actionable suspend line must fire exactly once"
+        );
     }
 }

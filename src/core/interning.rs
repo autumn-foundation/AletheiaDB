@@ -21,9 +21,14 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 /// Raised from 100_000 to 10_000_000 (Issue: configurable interner cap): a
 /// legitimately large dataset (e.g. a code graph with high-cardinality file
 /// paths / symbol names as property values) can intern well past 100K unique
-/// strings. At ~100 bytes of map/pointer overhead per entry, 10M entries bound
-/// the interner at roughly ~1 GB while remaining near-impossible to hit for
-/// realistic workloads. The cap is configurable at runtime via
+/// strings. This is a **COUNT** cap, not a memory cap: at ~100 bytes of
+/// map/pointer overhead per entry plus the string's own bytes, 10M *short*
+/// entries sit around ~1–1.6 GB (typical case), but the true worst case is
+/// `count × (overhead + string bytes)`, with string bytes bounded only by the
+/// per-string [`crate::storage::index_persistence::MAX_STRING_LENGTH`] (10 MB) —
+/// so it is paired with that per-string cap rather than being a hard memory
+/// ceiling. It remains near-impossible to hit for realistic workloads. The cap
+/// is configurable at runtime via
 /// [`StringInterner::set_max_capacity`] (driven from
 /// `persistence.max_interned_strings`) and via the
 /// [`MAX_INTERNED_STRINGS_ENV`] environment variable.
@@ -195,8 +200,12 @@ impl StringInterner {
                 // Load the (possibly reconfigured) capacity on the slow path only.
                 let max_capacity = self.max_capacity.load(Ordering::Relaxed);
 
-                // Check if we exceeded capacity AFTER reserving ID. Compare in
-                // usize so a configured cap above u32::MAX is not truncated.
+                // Check if we exceeded capacity AFTER reserving ID. `id_value` is
+                // a `u32` (the id space is `AtomicU32`), so any configured cap at
+                // or above `u32::MAX` is unreachable by construction — the id
+                // generator saturates first. Callers clamp the configured cap to
+                // `u32::MAX` at `open()` so the effective cap is honest. Compare in
+                // usize so no truncation occurs at the boundary.
                 if id_value as usize >= max_capacity {
                     // Best effort: undo the reservation
                     self.next_id.fetch_sub(1, Ordering::Relaxed);

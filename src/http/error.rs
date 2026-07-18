@@ -973,6 +973,105 @@ mod tests {
         assert_eq!(body["error"]["retriable"], false);
     }
 
+    /// Configurable interner cap: a string-interner `CapacityExceeded` surfaced
+    /// from a write handler renders as `412 FAILED_PRECONDITION`, `retriable:
+    /// false`, structured `details {resource, current, limit}`, and an actionable
+    /// message naming `persistence.max_interned_strings` — byte-shape-identical
+    /// to the MCP surface (mirrors `mcp::error`'s
+    /// `interner_capacity_exceeded_maps_to_actionable_failed_precondition`).
+    #[tokio::test]
+    async fn interner_capacity_exceeded_renders_412_failed_precondition_with_details() {
+        use crate::core::error::StorageError;
+        let db_err: crate::core::error::Error = StorageError::CapacityExceeded {
+            resource: "string interner".into(),
+            current: 200,
+            limit: 200,
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["resource"], "string interner");
+        assert_eq!(body["error"]["details"]["current"], 200);
+        assert_eq!(body["error"]["details"]["limit"], 200);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("persistence.max_interned_strings"),
+            "message must name the knob, got: {}",
+            body["error"]["message"]
+        );
+    }
+
+    /// A NON-interner `CapacityExceeded` (some other resource) still renders as
+    /// `412 FAILED_PRECONDITION` with `{resource,current,limit}` details, but the
+    /// message is the plain Display (it does NOT name the interner knob) — the
+    /// actionable message is interner-specific.
+    #[tokio::test]
+    async fn non_interner_capacity_exceeded_keeps_plain_message() {
+        use crate::core::error::StorageError;
+        let db_err: crate::core::error::Error = StorageError::CapacityExceeded {
+            resource: "some other pool".into(),
+            current: 5,
+            limit: 5,
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["details"]["resource"], "some other pool");
+        assert_eq!(body["error"]["message"], db_err.to_string());
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("persistence.max_interned_strings")
+        );
+    }
+
+    /// Envelope PARITY guard (configurable interner cap): the actionable message
+    /// and structured `details` for a string-interner capacity breach are
+    /// duplicated verbatim across `mcp/error.rs` and `http/error.rs`; this test
+    /// catches drift by asserting the two surfaces emit byte-identical
+    /// `code`/`message`/`retriable`/`details`.
+    #[cfg(feature = "mcp-server")]
+    #[tokio::test]
+    async fn interner_cap_envelope_matches_mcp_surface() {
+        use crate::core::error::StorageError;
+        use crate::mcp::McpError;
+
+        let db_err: crate::core::error::Error = StorageError::CapacityExceeded {
+            resource: "string interner".into(),
+            current: 200,
+            limit: 200,
+        }
+        .into();
+
+        let mcp = McpError::from_db_error(&db_err).to_json();
+        let (_status, http_body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        let http = &http_body["error"];
+
+        assert_eq!(mcp["code"], http["code"], "code must match across surfaces");
+        assert_eq!(
+            mcp["message"], http["message"],
+            "actionable message must match across surfaces"
+        );
+        assert_eq!(
+            mcp["retriable"], http["retriable"],
+            "retriable must match across surfaces"
+        );
+        assert_eq!(
+            mcp["details"], http["details"],
+            "structured details must match across surfaces"
+        );
+    }
+
     #[tokio::test]
     async fn auth_error_renders_nested_unauthenticated() {
         let (status, body) = body_json(AletheiaHttpError::Unauthorized).await;

@@ -320,7 +320,10 @@ async fn handle_create_node(
     principal: Option<String>,
 ) -> Result<Value, AletheiaHttpError> {
     let props = match properties {
-        Some(p) => json_to_property_map(&p).map_err(AletheiaHttpError::BadRequest)?,
+        // A property-KEY interner capacity breach must render as `412
+        // FAILED_PRECONDITION` (configurable interner cap); a bad value stays
+        // `400 INVALID_ARGUMENT`. `from_db_error` routes each correctly.
+        Some(p) => json_to_property_map(&p).map_err(|e| AletheiaHttpError::from_db_error(&e))?,
         None => crate::core::PropertyMap::new(),
     };
 
@@ -631,8 +634,11 @@ async fn handle_bulk_create_nodes(
                 let mut ids = Vec::with_capacity(nodes.len());
                 for node in &nodes {
                     let props = match &node.properties {
-                        Some(p) => json_to_property_map(p)
-                            .map_err(|e| crate::core::error::Error::other(e.to_string()))?,
+                        // Propagate the TYPED error (a property-KEY interner
+                        // capacity breach stays `StorageError::CapacityExceeded`)
+                        // so the bulk `from_db_error` below renders it as `412
+                        // FAILED_PRECONDITION` instead of flattening it to a 400.
+                        Some(p) => json_to_property_map(p)?,
                         None => crate::core::PropertyMap::new(),
                     };
                     ids.push(tx.create_node_with_options(
@@ -697,8 +703,11 @@ async fn handle_bulk_update_nodes(
                 for update in &updates {
                     let node_id = NodeId::new(update.node_id)?;
                     let props = match &update.properties {
-                        Some(p) => json_to_property_map(p)
-                            .map_err(|e| crate::core::error::Error::other(e.to_string()))?,
+                        // Propagate the TYPED error (a property-KEY interner
+                        // capacity breach stays `StorageError::CapacityExceeded`)
+                        // so the bulk `from_db_error` below renders it as `412
+                        // FAILED_PRECONDITION` instead of flattening it to a 400.
+                        Some(p) => json_to_property_map(p)?,
                         None => crate::core::PropertyMap::new(),
                     };
                     tx.update_node_with_options(
@@ -1337,6 +1346,97 @@ pub fn all_routes() -> Vec<Route> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Configurable interner cap (finding 1): a REAL HTTP `create_node` handler
+    /// call whose property KEY tips the interner over must render as the
+    /// structured `412 FAILED_PRECONDITION` envelope with `{resource,current,
+    /// limit}` details naming `persistence.max_interned_strings` — NOT the prior
+    /// `400 BadRequest`. Lowers the process-global interner cap, so it runs in a
+    /// SUBPROCESS to isolate the mutation from concurrent tests.
+    #[test]
+    fn interner_cap_property_key_breach_http_is_412_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "http::handlers::tests::interner_cap_property_key_breach_http_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for HTTP interner-cap test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "HTTP interner-cap helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("HTTP interner-cap helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn interner_cap_property_key_breach_http_helper() {
+        use crate::core::GLOBAL_INTERNER;
+        use std::collections::HashMap;
+
+        let db = Arc::new(crate::AletheiaDB::new().expect("db init"));
+
+        // Pin the cap at the live interner size so the NEXT new intern — the fresh
+        // property KEY, interned by `json_to_property_map` inside the handler —
+        // tips it over.
+        let base = GLOBAL_INTERNER.len();
+        GLOBAL_INTERNER.set_max_capacity(base);
+
+        let mut props = HashMap::new();
+        props.insert(
+            "uniq_http_property_key_tips_over".to_string(),
+            serde_json::json!("some_value"),
+        );
+
+        let err = handle_create_node(db, "TipLabel".to_string(), Some(props), None)
+            .await
+            .expect_err("a property-KEY interner breach must fail the create");
+
+        // AFTER the fix: the structured 412 FAILED_PRECONDITION envelope.
+        // (BEFORE the fix this was `AletheiaHttpError::BadRequest` → 400.)
+        match &err {
+            AletheiaHttpError::Structured {
+                code,
+                status,
+                retriable,
+                message,
+                details,
+            } => {
+                assert_eq!(*code, "FAILED_PRECONDITION");
+                assert_eq!(*status, axum::http::StatusCode::PRECONDITION_FAILED);
+                assert!(!retriable);
+                assert!(
+                    message.contains("persistence.max_interned_strings"),
+                    "message must name the knob, got: {message}"
+                );
+                let d = details.as_ref().expect("details must be present");
+                assert_eq!(d["resource"], "string interner");
+                assert!(d["limit"].is_number());
+                assert!(d["current"].is_number());
+            }
+            other => panic!("expected Structured FAILED_PRECONDITION, got {other:?}"),
+        }
+    }
 
     #[test]
     fn json_to_predicate_value_covers_supported_kinds() {

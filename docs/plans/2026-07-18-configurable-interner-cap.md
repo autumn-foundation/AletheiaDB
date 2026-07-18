@@ -90,11 +90,17 @@ change too.
    `intern()` via `self.max_capacity.load(Relaxed)`. The fast-path (already
    interned) is untouched; the check is only on the slow insert path, so the added
    atomic load is off the hot path and negligible.
-3. At DB construction (where `PersistenceConfig` is available), call
-   `GLOBAL_INTERNER.set_max_capacity(effective_cap)`.
-4. **Precedence:** explicit `persistence.max_interned_strings` (config/TOML/builder)
-   `>` `ALETHEIADB_MAX_INTERNED_STRINGS` env var `>` raised default (10M). The env
-   seed still applies for embedded/`GLOBAL_INTERNER`-only users who never open a DB.
+3. At DB construction (where `PersistenceConfig` is available), validate/clamp the
+   configured value (reject `0`, clamp `> u32::MAX` since ids are `AtomicU32`) then
+   call `GLOBAL_INTERNER.set_max_capacity(effective_cap)`.
+4. **Precedence (corrected).** The framing is NOT a three-way "config > env >
+   default" fallback. The two paths are disjoint: on the `open()` /
+   `with_unified_config` path the **config field is authoritative** — it is applied
+   at `open()` and the field *always* carries a value (default 10M), so it
+   **effectively overrides** `ALETHEIADB_MAX_INTERNED_STRINGS`. The env var only
+   matters on the **embedded/ephemeral** path (`GLOBAL_INTERNER`-only users who
+   never open a DB): it seeds the LazyLock at first access. So: with `open()`,
+   config wins; without `open()`, the env seed applies.
 
 **v1 caveat (document loudly):** the interner is **process-global**. If a process
 opens multiple DBs with different caps, **last `open()` wins** for the shared
@@ -235,14 +241,23 @@ names) averaging ~30–60 B:
 
 **Decision: keep a configurable COUNT cap, raise the default to `10_000_000` (10M).**
 
+> **Honesty caveat (count cap, not memory cap).** The cap bounds ENTRY COUNT, not
+> memory. The "10M ≈ ~1 GB" figure is a *typical-case* estimate for short
+> identifiers, **not** a ceiling. Worst-case interner memory is
+> `count × (per-entry overhead + Σ string bytes)`, and the string bytes are
+> bounded only by the per-string `MAX_STRING_LENGTH` (10 MB) and the persisted
+> file-size cap — so the adversarial worst case is `count × 10 MB`, far above
+> ~1 GB. The count cap is paired with those per-string and file-size caps; a true
+> total-byte budget is the deferred alternative (§B).
+
 Justification:
 
 - Per-string length is **already** bounded (10 MB) and the persist file is
   **already** size-bounded, so the residual unbounded vector is *count*, not size —
   a count cap targets exactly the remaining DoS dimension.
-- 10M short strings ≈ ~1.0–1.6 GB is **proportionate to a legitimately large
-  dataset**, while making the cap near-impossible to hit for the user's ~299k-record
-  / ~1–3M-unique-string code graph.
+- 10M short strings ≈ ~1.0–1.6 GB (typical case) is **proportionate to a
+  legitimately large dataset**, while making the cap near-impossible to hit for the
+  user's ~299k-record / ~1–3M-unique-string code graph.
 - The `InternedString` id is a `u32`, so the absolute hard ceiling is ~4.29B; 10M
   sits comfortably below it with room for the knob to go higher if ever needed.
 
