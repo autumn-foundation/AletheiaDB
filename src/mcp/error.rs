@@ -346,6 +346,10 @@ fn classify_storage_error(e: &StorageError) -> (McpErrorCode, bool) {
         StorageError::WalKeyringAlreadyInstalled { .. } => {
             (McpErrorCode::FailedPrecondition, false)
         }
+        // Disabling encryption on an already-plaintext WAL is a caller precondition
+        // failure, not an internal fault (Issue #3616 PR4) — the mirror of the
+        // already-installed rejection above, and likewise non-retriable.
+        StorageError::WalKeyringNotInstalled { .. } => (McpErrorCode::FailedPrecondition, false),
         // A per-principal changefeed quota breach (Issue #3678) is a transient
         // fairness limit: another of this principal's subscriptions may drop, so
         // retrying with backoff can succeed → RESOURCE_EXHAUSTED, retriable.
