@@ -138,15 +138,22 @@ fn map_wal_install_err(e: Error) -> Error {
 }
 
 impl AletheiaDB {
-    /// The AEAD algorithm an enable migration writes under. A plaintext database
-    /// has no `encryption_config`, so this falls back to the crate default — which
-    /// is exactly what the next `open()` (reading the flipped authority) will also
-    /// use, keeping the WAL DEK cipher in lockstep across the reopen.
+    /// The AEAD algorithm an enable migration writes under (Issue #3616 PR3).
+    ///
+    /// Sourced from `config.encryption.algorithm` (retained on the DB as
+    /// [`configured_encryption_algorithm`](AletheiaDB::configured_encryption_algorithm)
+    /// even when encryption is disabled), NOT from the absent `encryption_config`
+    /// of a plaintext database. This is the single source of truth for BOTH the
+    /// enable write and the interrupted-enable resume: the resume's wrap passes and
+    /// the ciphers `open()` builds from `config.encryption.algorithm`
+    /// (`enable_resume_ciphers`) then read the identical value, so they can never
+    /// diverge (the pre-fix bug: enable/resume used `Algorithm::default()` while the
+    /// ciphers used the operator's concrete config algorithm → an undecryptable DB).
+    ///
+    /// The concrete (resolved) form is what gets PINNED into the authority at enable
+    /// time, so a reopen — even on a different CPU class — rebuilds the same cipher.
     fn enable_algorithm(&self) -> Algorithm {
-        self.encryption_config
-            .as_ref()
-            .map(|c| c.algorithm)
-            .unwrap_or_default()
+        self.configured_encryption_algorithm
     }
 
     /// Migrate this **plaintext** database to encrypted-at-rest under
@@ -311,9 +318,11 @@ impl AletheiaDB {
         // === Step 3: flip the authority BEFORE clearing the ledger (binding order) ===
         // (breadcrumb #5) A crash after this but before the clear resumes via
         // `resume_pending_enable`.
+        // Pin the RESOLVED concrete algorithm (the same one every wrap pass above
+        // wrote under) so the reopen rebuilds the identical cipher.
         write_encryption_state_durable(
             manager.base_path(),
-            &EncryptionState::enabled(key_source.clone()),
+            &EncryptionState::enabled_with_algorithm(key_source.clone(), algorithm),
         )?;
 
         // === Step 4: clear the ledger (breadcrumb #6) ================================
@@ -411,7 +420,10 @@ impl AletheiaDB {
         // the flip->clear-gap resume case).
         write_encryption_state_durable(
             manager.base_path(),
-            &EncryptionState::enabled(fresh.new_source.clone()),
+            &EncryptionState::enabled_with_algorithm(
+                fresh.new_source.clone(),
+                self.enable_algorithm(),
+            ),
         )?;
         clear_rotation_state(manager);
         Ok(())
@@ -466,7 +478,10 @@ impl AletheiaDB {
         // clearing the ledger (idempotent if already flipped).
         write_encryption_state_durable(
             manager.base_path(),
-            &EncryptionState::enabled(view.new_source.clone()),
+            &EncryptionState::enabled_with_algorithm(
+                view.new_source.clone(),
+                self.enable_algorithm(),
+            ),
         )?;
         clear_rotation_state(manager);
         Ok(())
@@ -535,6 +550,22 @@ mod tests {
                 ..Default::default()
             })
             .build()
+    }
+
+    /// Like [`plaintext_durable_config`] but with a CONCRETE (non-`Auto`)
+    /// `encryption.algorithm` while `enabled=false` — the natural "pre-configure the
+    /// algorithm, then turn it on" operator workflow (Issue #3616 PR3 algorithm pin).
+    fn plaintext_durable_config_with_algorithm(
+        data_dir: &Path,
+        algorithm: crate::encryption::factory::Algorithm,
+    ) -> AletheiaDBConfig {
+        let mut cfg = plaintext_durable_config(data_dir);
+        cfg.encryption = crate::encryption::config::EncryptionConfig {
+            enabled: false,
+            algorithm,
+            ..Default::default()
+        };
+        cfg
     }
 
     fn key_source_at(dir: &Path) -> KeyProviderConfig {
@@ -1340,6 +1371,123 @@ mod tests {
         }
         let state = read_encryption_state(&indexes).unwrap().unwrap();
         assert!(state.enabled, "authority flipped by cold resume");
+        assert!(!indexes.join("rotation.state").exists(), "ledger cleared");
+    }
+
+    /// B1 (the HIGH pin bug): enabling under a CONCRETE algorithm that differs from
+    /// what `Auto` resolves to on this host must round-trip through reopen. Before
+    /// the fix, enable wrote under `Algorithm::default()` (Auto→AES-NI host→AES) while
+    /// the reopen built ChaCha ciphers from the operator's TOML → AEAD failure → an
+    /// UNOPENABLE DB. Now enable writes under the configured algorithm AND pins the
+    /// resolved concrete form into the authority, so reopen uses the identical cipher
+    /// — and the pin OVERRIDES a divergent TOML algorithm (portability across a TOML
+    /// edit or a cross-CPU host).
+    #[test]
+    fn enable_under_concrete_chacha_roundtrips_through_reopen() {
+        use crate::encryption::factory::Algorithm;
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+
+        {
+            let mut db = AletheiaDB::with_unified_config(plaintext_durable_config_with_algorithm(
+                dir.path(),
+                Algorithm::ChaCha20Poly1305,
+            ))
+            .unwrap();
+            db.create_node("Person", PropertyMapBuilder::new().insert("n", "z").build())
+                .unwrap();
+            db.persist_indexes().unwrap();
+            db.enable_encryption(key.clone()).unwrap();
+        }
+
+        // The authority pins the concrete ChaCha algorithm actually written under.
+        let state = read_encryption_state(&indexes).unwrap().unwrap();
+        assert!(state.enabled);
+        assert_eq!(state.algorithm, Some(Algorithm::ChaCha20Poly1305));
+
+        // Reopen under the SAME concrete-ChaCha config: data survives (the pre-fix
+        // break would fail here on an AES-NI host, where the enable wrote AES).
+        {
+            let db = AletheiaDB::with_unified_config(plaintext_durable_config_with_algorithm(
+                dir.path(),
+                Algorithm::ChaCha20Poly1305,
+            ))
+            .unwrap();
+            assert_eq!(db.node_count(), 1, "ChaCha-enabled DB reopens and decrypts");
+            assert!(db.wal.is_encrypted());
+        }
+
+        // Reopen under a DIVERGENT TOML algorithm (AES) AND with algorithm=Auto: the
+        // PINNED ChaCha in the authority overrides both, so the DB still opens — proof
+        // the pin makes reopen immune to TOML edits / cross-CPU Auto resolution.
+        for divergent in [Algorithm::Aes256Gcm, Algorithm::Auto] {
+            let db = AletheiaDB::with_unified_config(plaintext_durable_config_with_algorithm(
+                dir.path(),
+                divergent,
+            ))
+            .unwrap();
+            assert_eq!(
+                db.node_count(),
+                1,
+                "pinned ChaCha overrides a divergent config algorithm ({divergent:?})"
+            );
+            assert!(db.wal.is_encrypted());
+        }
+    }
+
+    /// B1 (resume intra-run consistency): an interrupted enable resumed under a
+    /// CONCRETE config algorithm must write AND read every layer under that ONE
+    /// algorithm. Before the fix the resume wrap passes used `Algorithm::default()`
+    /// (Auto) while the ciphers `open()` built used the concrete config algorithm →
+    /// the resume manufactured unreadable AEIX/ACV1 within a single run.
+    #[test]
+    fn enable_resume_under_concrete_algorithm_writes_and_reads_consistently() {
+        use crate::encryption::factory::Algorithm;
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+        let idx_dir = index_files_dir(dir.path());
+
+        {
+            let db = AletheiaDB::with_unified_config(plaintext_durable_config_with_algorithm(
+                dir.path(),
+                Algorithm::ChaCha20Poly1305,
+            ))
+            .unwrap();
+            db.create_node("N", PropertyMapBuilder::new().insert("k", "v").build())
+                .unwrap();
+            db.persist_indexes().unwrap();
+        }
+        // Interrupted enable (real shape: wal=Pending AND index=Pending), all bytes
+        // still plaintext.
+        write_enable_ledger(&manager_for(dir.path()), &key, true, false).unwrap();
+
+        // Reopen under the concrete-ChaCha config: resume rolls the WAL, wraps the
+        // index, flips + clears — all under ChaCha, all mutually readable.
+        {
+            let db = AletheiaDB::with_unified_config(plaintext_durable_config_with_algorithm(
+                dir.path(),
+                Algorithm::ChaCha20Poly1305,
+            ))
+            .unwrap();
+            assert_eq!(
+                db.node_count(),
+                1,
+                "resume-wrapped bytes decrypt under ChaCha"
+            );
+            assert!(db.wal.is_encrypted());
+        }
+        let (total, plain, aeix) = classify_index_files(&idx_dir);
+        assert_eq!(plain, 0, "resume wrapped every index file under ChaCha");
+        assert!(aeix == total && aeix > 0);
+        let state = read_encryption_state(&indexes).unwrap().unwrap();
+        assert!(state.enabled);
+        assert_eq!(
+            state.algorithm,
+            Some(Algorithm::ChaCha20Poly1305),
+            "resume pins ChaCha"
+        );
         assert!(!indexes.join("rotation.state").exists(), "ledger cleared");
     }
 

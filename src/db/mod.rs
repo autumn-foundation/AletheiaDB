@@ -231,6 +231,16 @@ pub struct AletheiaDB {
     /// Issue #488: re-sourcing the current MEK to guard against rotating to the
     /// same key). `None` when encryption is disabled.
     pub(crate) encryption_config: Option<crate::encryption::config::EncryptionConfig>,
+    /// The AEAD algorithm from `config.encryption.algorithm`, retained REGARDLESS
+    /// of whether encryption is currently enabled (Issue #3616 PR3). A plaintext
+    /// database has no `encryption_config`, but `enable_encryption` must still write
+    /// its at-rest bytes under the operator's configured algorithm (and pin the
+    /// resolved concrete form into the authority) so the reopen — which builds its
+    /// ciphers from `config.encryption.algorithm` — reads them back under the
+    /// identical cipher. On the interrupted-enable resume path this also keeps the
+    /// wrap passes in lockstep with the ciphers `open()` built from the same config
+    /// algorithm.
+    pub(crate) configured_encryption_algorithm: crate::encryption::factory::Algorithm,
     /// Uniqueness constraint registry (declarations + reservation index) plus
     /// property-type / required-key schema constraints (Issue #3378).
     pub(crate) constraint_registry: Arc<crate::core::constraint::ConstraintRegistry>,

@@ -453,6 +453,18 @@ impl AletheiaDB {
                             })?;
                     config.encryption.enabled = true;
                     config.encryption.key_provider = key_source;
+                    // Issue #3616 PR3: the authority also PINS the concrete AEAD
+                    // algorithm the enable migration wrote under. Override the
+                    // operator's `config.encryption.algorithm` with it so the DB
+                    // reopens under the EXACT cipher it was written with — immune to
+                    // a later TOML edit (e.g. a concrete `chacha20` that Auto did not
+                    // resolve to) and to a cross-CPU host migration (`Auto` resolving
+                    // AES on one host, ChaCha on another). A legacy `version=1`
+                    // authority pins nothing (`None`) → the config algorithm stands,
+                    // exactly the prior behavior.
+                    if let Some(pinned) = authority.algorithm {
+                        config.encryption.algorithm = pinned;
+                    }
                 } else {
                     config.encryption.enabled = false;
                 }
@@ -720,6 +732,12 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
                 encryption_manager: encryption_manager.clone(),
                 encryption_config: encryption_config_stored,
+                // Retained even when encryption is disabled (a plaintext DB that may
+                // later be enabled) so `enable_encryption` writes + pins the operator's
+                // configured algorithm (Issue #3616 PR3). On the reopen path this is the
+                // authority-overridden concrete algorithm; on a plaintext DB it is the
+                // raw config value (possibly `Auto`).
+                configured_encryption_algorithm: config.encryption.algorithm,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 schema_constraint_path: if config.persistence.enabled {
                     Some(crate::db::schema_constraint::sidecar_path(&chain_data_dir))
@@ -1247,6 +1265,9 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
                 encryption_manager: None,
                 encryption_config: None,
+                // Ephemeral (in-memory) DB: no encryption config and cannot be
+                // enabled; default algorithm (Issue #3616 PR3).
+                configured_encryption_algorithm: crate::encryption::factory::Algorithm::default(),
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 // `with_full_config` has no index-persistence data dir; schema
                 // constraints are in-memory only (ephemeral `new()` path).
