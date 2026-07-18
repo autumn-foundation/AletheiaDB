@@ -1349,28 +1349,70 @@ fn erased_dek_bytes_absent_from_v7_archive() {
         drop(db);
     }
 
-    // The wrapped-DEK ciphertext must not appear anywhere in the raw archive.
-    let archive = std::fs::read(&albk).unwrap();
-    let present = archive
-        .windows(wrapped_dek.len())
-        .any(|w| w == wrapped_dek.as_slice());
+    // STRUCTURAL proof: decode the archive and its keyring sidecar, and assert
+    // the erased subject's entry carries NO wrapped key (physically removed).
+    let payload = crate::storage::backup::read_artifact(&albk).expect("read v7 archive");
     assert!(
-        !present,
-        "erased subject's wrapped-DEK ciphertext must be absent from the v7 archive"
+        !payload.keyring_sidecar.is_empty(),
+        "v7 archive of a crypto-shred DB must carry a keyring sidecar"
+    );
+    // `keyring_sidecar` is `[bitcode(SubjectKeyringSidecar) || crc32 LE]`; strip
+    // the 4-byte CRC before decoding.
+    let sidecar_bytes = &payload.keyring_sidecar[..payload.keyring_sidecar.len() - 4];
+    let sidecar: super::keyring::SubjectKeyringSidecar =
+        bitcode::decode(sidecar_bytes).expect("decode keyring sidecar");
+    let erased = sidecar
+        .entries
+        .iter()
+        .find(|e| e.subject_id == "subject-D")
+        .expect("erased subject entry must be present in the sidecar");
+    assert!(
+        erased.wrapped_key.is_none(),
+        "erased subject must carry no wrapped DEK in the archived keyring"
+    );
+
+    // BYTE proof (raw archive): the captured wrapped-DEK ciphertext must not
+    // appear anywhere in the compressed on-disk artifact.
+    let archive = std::fs::read(&albk).unwrap();
+    assert!(
+        !archive
+            .windows(wrapped_dek.len())
+            .any(|w| w == wrapped_dek.as_slice()),
+        "erased subject's wrapped-DEK ciphertext must be absent from the raw v7 archive"
+    );
+
+    // BYTE proof (decompressed payload): scan the DECOMPRESSED payload too, so
+    // the absence is not vacuously true against the compressed bytes.
+    let payload_bytes =
+        crate::storage::backup::decompress_artifact_payload(&albk).expect("decompress .albk");
+    assert!(
+        !payload_bytes
+            .windows(wrapped_dek.len())
+            .any(|w| w == wrapped_dek.as_slice()),
+        "erased subject's wrapped-DEK ciphertext must be absent from the DECOMPRESSED payload"
     );
 }
 
 /// T5: a designate→erase→backup leaves zero designated plaintext in the `.albk`
-/// artifact (the sentinel scan reaches into the backup file).
+/// artifact.
+///
+/// The `.albk` body is zstd-COMPRESSED, so a raw byte scan of the on-disk file
+/// can pass **vacuously** (a plaintext needle would not match the compressed
+/// bytes even if it were logically present). This test therefore scans the
+/// DECOMPRESSED payload as the primary proof of absence, keeping the raw-file
+/// scan as a secondary check.
 #[test]
 fn sentinel_scan_albk_zero_designated_plaintext() {
     let src = tempfile::tempdir().unwrap();
     // Put the backup in its own dir so the scan targets the artifact directly.
     let backup_dir = tempfile::tempdir().unwrap();
     let albk = backup_dir.path().join("backup.albk");
+    let embedding = sentinel_embedding();
 
     {
         let db = enc_db(src.path());
+        db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+            .unwrap();
         let node_id = db
             .create_node("Person", PropertyMapBuilder::new().insert("s", "p").build())
             .unwrap();
@@ -1382,7 +1424,10 @@ fn sentinel_scan_albk_zero_designated_plaintext() {
         db.replace_node(
             node_id,
             "Person",
-            PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+            PropertyMapBuilder::new()
+                .insert("email", SENTINEL)
+                .insert_vector("embedding", &embedding)
+                .build(),
         )
         .unwrap();
         db.erase_subject("subject-S").unwrap();
@@ -1390,7 +1435,24 @@ fn sentinel_scan_albk_zero_designated_plaintext() {
         drop(db);
     }
 
-    // The `.albk` artifact holds no designated plaintext.
+    // PRIMARY: scan the DECOMPRESSED payload — this is the real proof of
+    // absence (the raw-file scan alone can pass vacuously on compressed bytes).
+    let payload_bytes =
+        crate::storage::backup::decompress_artifact_payload(&albk).expect("decompress .albk");
+    let sentinel = SENTINEL.as_bytes();
+    let emb_bytes = embedding_bytes(&embedding);
+    assert!(
+        !payload_bytes.windows(sentinel.len()).any(|w| w == sentinel),
+        "designated plaintext sentinel present in DECOMPRESSED .albk payload"
+    );
+    assert!(
+        !payload_bytes
+            .windows(emb_bytes.len())
+            .any(|w| w == emb_bytes.as_slice()),
+        "designated embedding LE bytes present in DECOMPRESSED .albk payload"
+    );
+
+    // SECONDARY: the raw `.albk` artifact holds no designated plaintext either.
     assert_no_designated_plaintext(backup_dir.path(), SENTINEL.as_bytes());
     // And neither does the (encrypted) source tree.
     assert_no_designated_plaintext(src.path(), SENTINEL.as_bytes());
@@ -1431,4 +1493,223 @@ fn no_cryptoshred_db_v7_roundtrip() {
         node.properties.get("k"),
         Some(&PropertyValue::from("v".to_string()))
     );
+}
+
+/// Issue #3665 hardening: restoring a **keyless** (pre-v7 style) archive that
+/// still carries designated (SUBJ-sealed) property bytes succeeds, leaves the
+/// property sealed-**unreadable** (opaque envelope, never the plaintext), and
+/// exercises the loud-warning branch in `restore_keyring_sidecar`.
+#[test]
+fn keyless_restore_of_sealed_property_seals_unreadable() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let key_file = src.path().join("mek.key");
+    let albk = src.path().join("v7.albk");
+    let keyless_albk = src.path().join("keyless.albk");
+
+    let node_id;
+    {
+        let db = enc_db(src.path());
+        node_id = db
+            .create_node("Person", PropertyMapBuilder::new().insert("s", "p").build())
+            .unwrap();
+        db.designate_subject(
+            "subject-KL",
+            vec![DesignationTarget::WholeNode(node_id.as_u64())],
+        )
+        .unwrap();
+        db.replace_node(
+            node_id,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+        )
+        .unwrap();
+        db.backup(&albk).unwrap();
+        drop(db);
+    }
+
+    // Simulate a pre-v7 (keyless) archive: read the v7 payload, strip the
+    // keyring, and re-encode. The sealed property bytes remain in the graph.
+    let mut payload = crate::storage::backup::read_artifact(&albk).expect("read v7 archive");
+    assert!(
+        !payload.keyring_sidecar.is_empty(),
+        "the v7 archive must carry a keyring to strip"
+    );
+    payload.keyring_sidecar = Vec::new();
+    crate::storage::backup::write_artifact(&payload, &keyless_albk).expect("write keyless archive");
+
+    // Restore succeeds (the warning branch fires; the sealed prop cannot be
+    // recovered without the keyring).
+    let restored = AletheiaDB::restore_to_data_dir(&keyless_albk, dst.path()).unwrap();
+    drop(restored);
+    // No keyring sidecar is written for a keyless archive.
+    assert!(
+        !dst.path().join("subject_keyring.dat").exists(),
+        "a keyless restore must not write subject_keyring.dat"
+    );
+
+    // Reopen WITH the MEK: the property is still an opaque SUBJ envelope,
+    // never the plaintext (sealed-unreadable).
+    let db = reopen_encrypted(dst.path(), &key_file);
+    match db.get_node(node_id).unwrap().properties.get("email") {
+        Some(PropertyValue::Bytes(b)) => {
+            assert!(
+                super::envelope::is_envelope(b),
+                "keyless-restored designated value must remain a SUBJ envelope"
+            );
+            assert_ne!(
+                b.as_ref(),
+                SENTINEL.as_bytes(),
+                "keyless-restored designated value must never be the plaintext"
+            );
+        }
+        other => panic!("expected an opaque sealed envelope, got {other:?}"),
+    }
+}
+
+/// Issue #3665 hardening: a keyless (empty-sidecar) restore into a data dir
+/// that already holds a leftover `subject_keyring.dat` removes the stale file
+/// so the restored (empty-crypto-shred) state wins over the stale keyring.
+#[test]
+fn keyless_restore_removes_stale_keyring() {
+    let dst = tempfile::tempdir().unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    let albk = backup_dir.path().join("plain.albk");
+
+    // A plain (no crypto-shred) v7 archive.
+    {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Doc", PropertyMapBuilder::new().insert("k", "v").build())
+            .unwrap();
+        db.backup(&albk).unwrap();
+    }
+
+    // Pre-seed a stale keyring in the target data dir.
+    let stale = dst
+        .path()
+        .join(crate::db::crypto_shred::keyring::KEYRING_FILENAME);
+    std::fs::write(&stale, b"stale-keyring-content").unwrap();
+    assert!(stale.exists());
+
+    let db = AletheiaDB::restore_to_data_dir(&albk, dst.path()).unwrap();
+    // The stale keyring must be gone — the restored empty state wins.
+    assert!(
+        !stale.exists(),
+        "keyless restore must remove a pre-existing stale subject_keyring.dat"
+    );
+    assert!(
+        !db.crypto_shred.has_any_designations(),
+        "restored plain DB must have no crypto-shred state"
+    );
+}
+
+/// Issue #3665 hardening: a malicious v7 archive with an over-cap keyring
+/// sidecar is rejected on the restore WRITE path (symmetry with the 64 MiB
+/// load cap) BEFORE any oversized `subject_keyring.dat` is written.
+#[test]
+fn oversized_keyring_sidecar_rejected_on_restore() {
+    use crate::db::crypto_shred::keyring::MAX_KEYRING_BYTES;
+
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let plain_albk = src.path().join("plain.albk");
+    let evil_albk = src.path().join("evil.albk");
+
+    // Start from a valid plain v7 archive, then bloat its keyring sidecar with
+    // over-cap zero bytes (no key material — just zeros).
+    {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Doc", PropertyMapBuilder::new().insert("k", "v").build())
+            .unwrap();
+        db.backup(&plain_albk).unwrap();
+    }
+    let mut payload =
+        crate::storage::backup::read_artifact(&plain_albk).expect("read plain archive");
+    payload.keyring_sidecar = vec![0u8; (MAX_KEYRING_BYTES + 1) as usize];
+    crate::storage::backup::write_artifact(&payload, &evil_albk).expect("write evil archive");
+
+    let result = AletheiaDB::restore_to_data_dir(&evil_albk, dst.path());
+    assert!(
+        result.is_err(),
+        "an over-cap keyring sidecar must be rejected on restore"
+    );
+    // The over-cap sidecar is rejected BEFORE any write, so no
+    // `subject_keyring.dat` may exist in the target data dir at all.
+    let written = dst
+        .path()
+        .join(crate::db::crypto_shred::keyring::KEYRING_FILENAME);
+    assert!(
+        !written.exists(),
+        "no subject_keyring.dat may be written when an over-cap sidecar is rejected"
+    );
+}
+
+/// R2 cold clause (Issue #3665 hardening, best-effort): a sealed designated
+/// property that MIGRATES to the cold redb tier leaves zero designated
+/// plaintext in `cold.redb` (seal-at-write means only the opaque SUBJ envelope
+/// ever reaches any tier). Cold storage is configured/attached via public /
+/// test APIs only — no cold-tier SOURCE is edited.
+#[test]
+fn cold_tier_redb_zero_designated_plaintext() {
+    use crate::storage::migration::{MigrationPolicyBuilder, MigrationService};
+    use crate::storage::redb_cold_storage::RedbColdStorage;
+    use crate::storage::tiered_storage::TieredStorage;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cold_path = dir.path().join("cold.redb");
+
+    let db = enc_db(dir.path());
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().insert("s", "p").build())
+        .unwrap();
+    db.designate_subject(
+        "subject-COLD",
+        vec![DesignationTarget::WholeNode(node_id.as_u64())],
+    )
+    .unwrap();
+    // v2: the sealed SENTINEL version (will become non-head and migrate cold).
+    db.replace_node(
+        node_id,
+        "Person",
+        PropertyMapBuilder::new().insert("email", SENTINEL).build(),
+    )
+    .unwrap();
+    // v3: a newer head, so v2 is eligible to migrate to the cold tier.
+    db.replace_node(
+        node_id,
+        "Person",
+        PropertyMapBuilder::new().insert("email", "later").build(),
+    )
+    .unwrap();
+
+    // Attach a cold tier and migrate everything older than the head version.
+    let cold = Arc::new(RedbColdStorage::with_default_config(&cold_path).unwrap());
+    let tiered = Arc::new(TieredStorage::with_default_config(Arc::clone(&cold)));
+    db.__test_historical_storage()
+        .write()
+        .set_tiered_storage(tiered);
+    let policy = MigrationPolicyBuilder::new()
+        .age_threshold(Duration::ZERO)
+        .build();
+    let service = MigrationService::new(Arc::clone(&cold), policy);
+    let migrated = db
+        .__test_historical_storage()
+        .write()
+        .migrate_to_cold(&service)
+        .unwrap();
+    assert!(
+        migrated >= 1,
+        "at least the sealed non-head version must migrate to cold"
+    );
+
+    // Erase the subject, then flush/close the cold store so its file is on disk.
+    db.erase_subject("subject-COLD").unwrap();
+    drop(service);
+    drop(db);
+    drop(cold);
+
+    assert!(cold_path.exists(), "cold.redb must exist after migration");
+    // The scan reaches the whole data dir, including cold.redb.
+    assert_no_designated_plaintext(dir.path(), SENTINEL.as_bytes());
 }

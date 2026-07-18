@@ -31,8 +31,13 @@ pub const INITIAL_SUBJECT_KEY_VERSION: u32 = 1;
 /// Current on-disk keyring sidecar format version.
 pub const KEYRING_SIDECAR_VERSION: u16 = 1;
 
-/// Max accepted keyring file size on load (DoS guard).
-const MAX_KEYRING_BYTES: u64 = 64 * 1024 * 1024;
+/// Max accepted keyring file size (DoS guard).
+///
+/// Enforced symmetrically on **load** (via [`load_keyring`]) and on the
+/// `.albk` restore **write** path (Issue #3665 hardening): a malicious v7
+/// archive could otherwise force a multi-GiB `subject_keyring.dat` write
+/// before the fail-closed loader rejects it (disk-exhaustion DoS).
+pub(crate) const MAX_KEYRING_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Filename of the durable keyring sidecar under the data root.
 pub const KEYRING_FILENAME: &str = "subject_keyring.dat";

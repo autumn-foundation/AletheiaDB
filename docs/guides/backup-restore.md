@@ -115,6 +115,13 @@ The payload is a `BackupPayload` struct containing:
 > subject was erased still contains that subject's (recoverable) wrapped DEK —
 > the standard crypto-shred pre-erasure caveat (AC7): track and destroy stale
 > pre-erasure archives.
+>
+> **Integrity is assumed out-of-band (the CRC is not a MAC).** The keyring
+> sidecar carries a CRC-32 checksum that catches accidental corruption but does
+> not authenticate the archive; an attacker able to rewrite the file at rest
+> could delete an erasure's audit record undetected. Protect archive integrity
+> and authenticity via the filesystem/transport layer. Whole-archive signing is
+> a possible future slice.
 
 ## Error Types
 
@@ -147,11 +154,12 @@ instance without cold storage (and vice versa) with no version loss.
 
 ## Format Version Contract
 
-- The current format version is `1`.
+- The current format version is `7` (see `BACKUP_FORMAT_VERSION` and its
+  version history in `src/storage/backup/mod.rs`).
+- Older artifacts (versions `1`–`6`) still restore: `read_artifact` decodes each
+  frozen legacy payload shape and upgrades it to the current one.
 - Artifacts with an unknown (higher) `format_version` are rejected with
-  `BackupError::IncompatibleVersion { found, supported: 1 }`.
-- Older artifacts (lower version) will be handled with a migration path in future
-  releases; currently only version `1` is produced and accepted.
+  `BackupError::IncompatibleVersion { found, supported: 7 }`.
 
 ## CLI Integration
 

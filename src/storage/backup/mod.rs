@@ -842,6 +842,40 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
     }
 }
 
+/// Test-only helper: read an `.albk` artifact, validate its magic + version,
+/// strip the 6-byte header, and zstd-decompress the body to the **raw bitcode
+/// payload bytes**.
+///
+/// The `.albk` body is zstd-compressed, so a raw byte scan of the on-disk file
+/// can pass **vacuously** — a plaintext/DEK needle would not match the
+/// compressed bytes even if it were logically present in the payload. This
+/// helper lets a sentinel/absence test scan the *decompressed* payload so the
+/// scan actually proves absence (Issue #3665 hardening, T4/T5).
+///
+/// Gated on `audit-export`: its only callers are the crypto-shred integration
+/// tests, and `crate::db::crypto_shred` itself is `#[cfg(feature = "audit-export")]`.
+#[cfg(all(test, feature = "audit-export"))]
+pub(crate) fn decompress_artifact_payload(path: &Path) -> Result<Vec<u8>, BackupError> {
+    let bytes = std::fs::read(path).map_err(|e| BackupError::Io(e.to_string()))?;
+    if bytes.len() < 6 {
+        return Err(BackupError::Corrupt(
+            "Artifact too short to contain header".to_string(),
+        ));
+    }
+    if bytes[..4] != BACKUP_MAGIC {
+        return Err(BackupError::BadMagic);
+    }
+    let found_version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if found_version > BACKUP_FORMAT_VERSION {
+        return Err(BackupError::IncompatibleVersion {
+            found: found_version,
+            supported: BACKUP_FORMAT_VERSION,
+        });
+    }
+    zstd::decode_all(&bytes[6..])
+        .map_err(|e| BackupError::Corrupt(format!("zstd decompression failed: {e}")))
+}
+
 // ============================================================================
 // Materialise payload → index-persistence directory
 // ============================================================================

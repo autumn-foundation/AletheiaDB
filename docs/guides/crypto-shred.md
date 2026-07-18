@@ -194,6 +194,15 @@ Understand these boundaries before relying on it for compliance.
    for a definitive post-erasure verdict, rely on a fresh reopen rather than a
    long-lived warm process.
 
+8. **Archive integrity is assumed out-of-band (the CRC is not a MAC).** A
+   `.albk` backup's keyring sidecar is guarded by a CRC-32 checksum, which
+   detects accidental corruption but is **not** a message authentication code:
+   it does not prove authenticity. An attacker who can rewrite an archive at
+   rest could therefore delete an erasure's audit record (or otherwise alter the
+   archive) without detection. Integrity and authenticity of the archive are
+   assumed to be provided out-of-band by the filesystem or transport layer;
+   whole-archive signing is a possible future slice.
+
 ## See also
 
 - [security-quickstart.md](security-quickstart.md) — authentication, RBAC

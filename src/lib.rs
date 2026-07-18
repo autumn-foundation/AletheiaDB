@@ -142,6 +142,10 @@ pub use db::{
     PitrTarget, SchemaInstant, SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats,
     TimeBounds, UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
 };
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub use db::{
+    FusedHit, FusionBreakdown, FusionError, FusionPolicy, FusionPolicyBuilder, FusionPolicyError,
+};
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
     vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},
