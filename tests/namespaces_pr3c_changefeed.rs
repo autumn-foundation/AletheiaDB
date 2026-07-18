@@ -232,14 +232,140 @@ fn list_changes_records_carry_namespace_and_never_leak_reserved_key() {
 
     let q = ChangeFeedQuery::new(Timestamp::from(0), TIMESTAMP_MAX, 100_000);
     let page = db.list_changes(&q).unwrap();
-    // Every record carries a resolved namespace; the reserved key never appears as
-    // a namespace value (it is surfaced as the field, not the raw key).
+    // Every record carries a resolved namespace; the reserved ride-along KEY never
+    // appears as a namespace value (it is surfaced as the field, not the raw key).
     let seen = namespaces_seen(&page.changes);
     assert!(seen.contains("agent:a"));
     assert!(seen.contains("default"));
+    // Narrowed (Issue #3349, PR3c): assert the reserved ride-along KEY `__aletheia_ns`
+    // (and the shred prefix) never leak as a namespace value. We deliberately do NOT
+    // forbid every `__aletheia_*` value, because the reserved fail-closed sentinel
+    // value `__aletheia_unresolved` is a legitimate namespace that surfaces under an
+    // `All` / unset scope (see `reconstruction_failure_derives_sentinel_not_default`).
     assert!(
-        !seen.iter().any(|ns| ns.starts_with("__aletheia_")),
-        "reserved ride-along key leaked as a namespace value: {seen:?}"
+        !seen.contains(aletheiadb::NAMESPACE_KEY),
+        "reserved ride-along key `{}` leaked as a namespace value: {seen:?}",
+        aletheiadb::NAMESPACE_KEY
+    );
+    assert!(
+        !seen.iter().any(|ns| ns.starts_with("__shred_")),
+        "reserved shred key leaked as a namespace value: {seen:?}"
+    );
+}
+
+/// Reconstruction-failure namespace derivation (Issue #3349, PR3c security fix).
+///
+/// When a delta version's properties cannot be reconstructed (its delta chain
+/// outgrows `max_reconstruction_depth` → `MaxDepthExceeded`), its namespace is
+/// genuinely underivable. The engine must **fail closed** to the reserved
+/// `__aletheia_unresolved` sentinel — **never** to `default` (a real, subscribable
+/// namespace). A `default`-scoped subscriber must NOT receive the change; an
+/// `All`-scoped subscriber must.
+#[test]
+fn reconstruction_failure_derives_sentinel_not_default() {
+    use aletheiadb::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+    use aletheiadb::core::changefeed::ChangeFeedQuery;
+    use aletheiadb::core::namespace::UNRESOLVED_NAMESPACE;
+    use aletheiadb::core::temporal::{TIMESTAMP_MAX, Timestamp};
+
+    // A tiny reconstruction-depth cap with a huge anchor interval builds an
+    // ever-growing delta chain. The write path caches every version's properties
+    // as it writes (Issue #210), so a *small* reconstruction cache is required to
+    // force older mid-chain deltas to be evicted — then reconstructing them at
+    // changefeed time must walk the (too-deep) chain and hard-fail with
+    // MaxDepthExceeded, making their namespace underivable. Point the WAL at a
+    // fresh tempdir so no stale on-disk state leaks in (the default `aletheiadb/wal`
+    // is a shared relative path).
+    let dir = tempfile::tempdir().unwrap();
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(dir.path().join("wal"))
+                .build(),
+        )
+        .historical(
+            HistoricalConfigBuilder::new()
+                .max_reconstruction_depth(5)
+                .unwrap()
+                .anchor_interval(1_000_000)
+                .unwrap()
+                .reconstruction_cache_size(4)
+                .unwrap()
+                .build(),
+        )
+        .build();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
+
+    // A single non-default entity, then many updates growing a deep delta chain.
+    // The small reconstruction cache evicts older mid-chain deltas, so their later
+    // reconstruction (during the pull `list_changes` scan) must walk past the depth
+    // cap and hard-fail — the derivation-failure the fix must fail *closed*.
+    //
+    // NOTE: the reconstruction failure only manifests on the **pull** path. The
+    // push (subscription) broadcast reconstructs at commit time, when the just-
+    // written version's properties are still cached (Issue #210), so it never hits
+    // the failure; the pull scan does, after eviction.
+    let node = db
+        .create_node_in_namespace("Person", props("v0"), "agent:a")
+        .unwrap();
+    for i in 1..=20 {
+        db.write(|tx| {
+            tx.update_node(node, props(&format!("v{i}")))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+    }
+
+    // Deterministic derivation check (pull feed): at least one committed version is
+    // genuinely unreconstructable → the fail-closed sentinel, and NO record of this
+    // non-default entity is ever attributed to `default` (the security-critical leak).
+    let q = ChangeFeedQuery::new(Timestamp::from(0), TIMESTAMP_MAX, 100_000);
+    let page = db.list_changes(&q).unwrap();
+    let node_records: Vec<&ChangeRecord> = page
+        .changes
+        .iter()
+        .filter(|r| r.entity_id == node.as_u64())
+        .collect();
+    assert!(!node_records.is_empty(), "no changes for the node");
+    assert!(
+        node_records.iter().all(|r| !r.namespace.is_default()),
+        "a non-default entity's change was attributed to `default` (leak): {:?}",
+        namespaces_seen(&page.changes)
+    );
+    let sentinel_rec: &ChangeRecord = node_records
+        .iter()
+        .copied()
+        .find(|r| r.namespace.as_str() == UNRESOLVED_NAMESPACE)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a fail-closed `{UNRESOLVED_NAMESPACE}` record for the unreconstructable \
+                 version, got {:?}",
+                namespaces_seen(&page.changes)
+            )
+        });
+
+    // Subscription-filter semantics on the underivable record: a `default`-scoped
+    // subscriber must NOT match it (the buggy fail-open to `default` would have
+    // delivered it), while an `All`-scoped subscriber does — exercised through the
+    // exact `ChangeFilter::matches` predicate the live subscription path uses.
+    let default_filter =
+        ChangeFilter::all().with_namespace_scope(NamespaceScope::Single(Namespace::default()));
+    let all_filter = ChangeFilter::all();
+    assert!(
+        !default_filter.matches(sentinel_rec),
+        "a `default`-scoped subscriber must NOT receive an underivable non-default change"
+    );
+    assert!(
+        all_filter.matches(sentinel_rec),
+        "an `All`-scoped subscriber must still receive the underivable change"
+    );
+    // And a subscriber scoped to the entity's REAL namespace also does not receive a
+    // record the engine could not attribute to it (fail-closed, not mis-attributed).
+    let agent_a_filter = ChangeFilter::all()
+        .with_namespace_scope(NamespaceScope::Single(Namespace::new("agent:a").unwrap()));
+    assert!(
+        !agent_a_filter.matches(sentinel_rec),
+        "an underivable record must not be mis-attributed to agent:a either (it is unresolved)"
     );
 }
 
