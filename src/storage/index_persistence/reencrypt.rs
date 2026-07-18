@@ -502,6 +502,78 @@ pub(crate) fn max_index_key_version_in_dir(
     Ok(max)
 }
 
+/// Progress of a plaintext → `AEIX` wrap pass (Issue #3616 PR3 enable).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WrapProgress {
+    /// Total files considered under the indexes dir (plaintext + already-`AEIX`).
+    pub files_total: usize,
+    /// Bare plaintext files freshly wrapped into `AEIX` this pass.
+    pub files_wrapped: usize,
+    /// Files already carrying the `AEIX` header, left untouched (idempotency).
+    pub files_skipped: usize,
+}
+
+/// Wrap every **bare plaintext** index file under `indexes_dir` into the
+/// encrypted `AEIX` format under `cipher`, stamping `key_version` (Issue #3616
+/// PR3 — the plaintext → encrypted *enable* migration).
+///
+/// This is the counterpart the `enable` engine needs but
+/// [`IndexKeyRotation::re_encrypt`] cannot provide: `re_encrypt` walks only files
+/// that already carry the `AEIX` header and returns
+/// [`FileOutcome::SkippedPlaintext`] for a bare file (it rekeys old-gen → new-gen
+/// *encrypted* files). Enabling encryption over a plaintext database must do the
+/// opposite — take each bare file and produce an `AEIX` file.
+///
+/// A plaintext index file on disk is exactly the AEAD *plaintext* an encrypted
+/// index file wraps (both are `[bitcode_body][crc32:4]` before the header — see
+/// [`save_encoded_encrypted`](super::common::save_encoded_encrypted)), so this
+/// pass reads the whole file and re-publishes it as
+/// `[header][AEAD(whole_file, aad=header)]` atomically (temp-write + rename). The
+/// transform is byte-preserving: the encrypted reader (`read_index_file`) decrypts
+/// back to the identical original bytes, so a checkpoint / native-`usearch` / any
+/// index file round-trips regardless of its internal shape.
+///
+/// **Idempotent / resumable / crash-safe.** A file already carrying the `AEIX`
+/// header is skipped, so a re-run after a crash mid-pass converges (each file is
+/// published atomically, so a crash leaves either the intact plaintext or the
+/// intact `AEIX` file, never a torn one). Checkpoint files ride the index DEK and
+/// format and so are covered by this same pass. Every non-scratch regular file
+/// under `indexes_dir` participates (control-plane files such as
+/// `rotation.state` / `encryption.state` live in the manager's *base* dir, one
+/// level up, and are never enumerated here).
+///
+/// # Errors
+///
+/// Returns an error if a file cannot be read, encrypted, or atomically written.
+pub(crate) fn wrap_plaintext_index_dir(
+    indexes_dir: &Path,
+    cipher: &Arc<dyn Cipher>,
+    key_version: u32,
+) -> Result<WrapProgress, RotationError> {
+    let mut files = Vec::new();
+    if indexes_dir.exists() {
+        collect_all_files(indexes_dir, &mut files)?;
+    }
+    files.sort();
+
+    let mut progress = WrapProgress {
+        files_total: files.len(),
+        ..Default::default()
+    };
+    for path in files {
+        let bytes = std::fs::read(&path)?;
+        if is_encrypted_index(&bytes) {
+            // Already wrapped (a resumed pass, or an interleaved encrypted write).
+            progress.files_skipped += 1;
+            continue;
+        }
+        let wrapped = encrypt_index_bytes_versioned(&bytes, cipher, key_version)?;
+        atomic_write(&path, &wrapped)?;
+        progress.files_wrapped += 1;
+    }
+    Ok(progress)
+}
+
 /// A temp/scratch file the rotation engine must never treat as an index file.
 fn is_scratch_file(name: &str) -> bool {
     name.ends_with(".tmp") || name.contains(".tmp.") || name.starts_with(".aeix-usearch-tmp-")

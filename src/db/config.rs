@@ -453,10 +453,42 @@ impl AletheiaDB {
                             })?;
                     config.encryption.enabled = true;
                     config.encryption.key_provider = key_source;
+                    // Issue #3616 PR3: the authority also PINS the concrete AEAD
+                    // algorithm the enable migration wrote under. Override the
+                    // operator's `config.encryption.algorithm` with it so the DB
+                    // reopens under the EXACT cipher it was written with — immune to
+                    // a later TOML edit (e.g. a concrete `chacha20` that Auto did not
+                    // resolve to) and to a cross-CPU host migration (`Auto` resolving
+                    // AES on one host, ChaCha on another). A legacy `version=1`
+                    // authority pins nothing (`None`) → the config algorithm stands,
+                    // exactly the prior behavior.
+                    if let Some(pinned) = authority.algorithm {
+                        config.encryption.algorithm = pinned;
+                    }
                 } else {
                     config.encryption.enabled = false;
                 }
             }
+
+            // Issue #3616 PR3: an INTERRUPTED plaintext → encrypted enable leaves
+            // the durable authority NOT yet flipped, so `config.encryption.enabled`
+            // is still `false` here even though the on-disk WAL/index/cold bytes may
+            // already have been (partially) migrated. On that branch, resolve the
+            // enable DEKs from the pending ENABLE ledger so the at-rest layers below
+            // (index manager, cold store) are built UNDER those DEKs — otherwise
+            // they would be built plaintext and then fail to read (or over-write
+            // with plaintext) the freshly-wrapped `AEIX`/`ACV1` bytes the resume
+            // passes produce. The WAL is handled separately by the pre-read hook.
+            // `None` on the common path (no pending enable) reproduces prior
+            // behavior exactly.
+            let enable_resume = if config.persistence.enabled && !config.encryption.enabled {
+                crate::db::rotation::enable_resume_ciphers(
+                    &config.persistence.data_dir,
+                    config.encryption.algorithm,
+                )?
+            } else {
+                None
+            };
 
             // Create encryption manager if encryption is enabled
             let encryption_manager = if config.encryption.enabled {
@@ -544,6 +576,21 @@ impl AletheiaDB {
                     &config.encryption,
                     &config.persistence.data_dir,
                 )?;
+            } else if config.persistence.enabled {
+                // Issue #3616 PR3: an INTERRUPTED plaintext→encrypted enable leaves
+                // the authority NOT yet flipped, so `config.encryption.enabled` is
+                // false here even though the WAL may already have been rolled to
+                // encrypted. Install the WAL keyring from the pending enable ledger
+                // BEFORE the replay read so those encrypted segments decrypt
+                // (otherwise the read below mis-reads ciphertext as undecodable
+                // plaintext and fails). `resume_pending_enable` (further down)
+                // finishes the migration. A no-op when no enable ledger is pending
+                // or the WAL is not yet encrypted.
+                crate::db::rotation::install_pending_enable_wal_keyring(
+                    &wal,
+                    &config.encryption,
+                    &config.persistence.data_dir,
+                )?;
             }
 
             // Held (as `mut`, consumed by whichever replay branch runs) across
@@ -580,9 +627,19 @@ impl AletheiaDB {
             // encrypted at rest (Issue #481); mirrors the WAL cipher wiring
             // above. Encryption disabled => None => plaintext, unchanged.
             let persistence_manager = if config.persistence.enabled {
-                let index_cipher = encryption_manager
+                // Issue #3616 PR3: on an interrupted-enable resume the manager must
+                // read/write under the enable index DEK (checkpoints ride it), so a
+                // half-wrapped index dir loads and the resume wrap pass publishes
+                // `AEIX` the same open() then reads back. Otherwise the index cipher
+                // comes from the (enabled) encryption manager as before.
+                let index_cipher = enable_resume
                     .as_ref()
-                    .map(|mgr| Arc::clone(mgr.index_cipher()));
+                    .map(|e| Arc::clone(&e.index))
+                    .or_else(|| {
+                        encryption_manager
+                            .as_ref()
+                            .map(|mgr| Arc::clone(mgr.index_cipher()))
+                    });
                 // Issue #488 version-provisioning: build the index keyring at the
                 // resolved on-disk version so `index_rotation_status` /
                 // `encryption verify` classify rotated files correctly after a
@@ -675,6 +732,12 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
                 encryption_manager: encryption_manager.clone(),
                 encryption_config: encryption_config_stored,
+                // Retained even when encryption is disabled (a plaintext DB that may
+                // later be enabled) so `enable_encryption` writes + pins the operator's
+                // configured algorithm (Issue #3616 PR3). On the reopen path this is the
+                // authority-overridden concrete algorithm; on a plaintext DB it is the
+                // raw config value (possibly `Auto`).
+                configured_encryption_algorithm: config.encryption.algorithm,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 schema_constraint_path: if config.persistence.enabled {
                     Some(crate::db::schema_constraint::sidecar_path(&chain_data_dir))
@@ -955,10 +1018,29 @@ impl AletheiaDB {
                 )?;
             }
 
-            // Start background persistence thread if enabled
+            // Start background persistence thread if enabled.
+            //
+            // Issue #3616 PR3 (NIT-2) load-bearing invariant: on an interrupted-enable
+            // resume this worker is spawned HERE, BEFORE `resume_pending_enable_cold`
+            // runs the cold wrap (below). That is safe ONLY because both at-rest layers
+            // were built under the enable-resume ciphers on this path — the index
+            // manager under `enable_resume.index` (so a persist writes `AEIX`, never
+            // plaintext over the freshly-wrapped files) and the cold store under
+            // `enable_resume.cold` (so a hot→cold migration writes `ACV1`, and the wrap
+            // pass is idempotent). A future refactor that built either layer PLAINTEXT
+            // on the resume path would reintroduce a plaintext/bare-over-encrypted race
+            // with this running worker: the worker must NEVER run with a plaintext
+            // manager while an enable ledger is pending. The `index_cipher`
+            // (config.rs) and cold `with_cipher_versioned` (below) wiring enforce this.
             if let Some(ref tracker) = persistence_tracker
                 && let Some(ref manager) = persistence_manager
             {
+                debug_assert!(
+                    enable_resume.is_none() || manager.keyring().is_some(),
+                    "enable-resume must build the index manager under the enable index \
+                     DEK; a plaintext manager with a pending enable ledger would let this \
+                     worker persist plaintext over encrypted index files (Issue #3616 PR3)"
+                );
                 let handle = spawn_background_persistence_thread(
                     Arc::clone(&db.current),
                     Arc::clone(&db.historical),
@@ -994,6 +1076,16 @@ impl AletheiaDB {
                         }
                         None => cold_storage.with_cipher(Arc::clone(enc_mgr.cold_cipher())),
                     };
+                } else if let Some(ref e) = enable_resume {
+                    // Issue #3616 PR3: on an interrupted-enable resume the authority
+                    // is not yet flipped (no encryption manager), but the cold store
+                    // must be built under the enable cold DEK so `ACV1` values
+                    // written by the resume wrap pass (below) are read back this same
+                    // open(). Provisioned at the enable version.
+                    cold_storage = cold_storage.with_cipher_versioned(
+                        Arc::clone(&e.cold),
+                        crate::db::rotation::ENABLE_KEY_VERSION,
+                    );
                 }
 
                 let cold_storage = Arc::new(cold_storage);
@@ -1039,6 +1131,25 @@ impl AletheiaDB {
                 db.historical
                     .write()
                     .set_tiered_storage(Arc::new(tiered_storage));
+
+                // Issue #3616 PR3: finish an interrupted plaintext → encrypted
+                // enable migration's COLD layer, now that the cold store is wired.
+                // `resume_pending_enable` (run before index load) deferred the cold
+                // wrap + the authority flip + the ledger clear to here — this wraps
+                // the bare cold values to `ACV1`, then (all layers settled) flips
+                // the authority and clears the ledger, preserving the binding order.
+                // A guarded no-op when no enable migration with a cold layer is
+                // pending.
+                db.resume_pending_enable_cold()?;
+            } else {
+                // Issue #3616 PR3: this open() did NOT build a cold tier
+                // (enable_cold_storage disabled or no cold path). If an interrupted
+                // enable recorded a cold layer as Pending, `resume_pending_enable_cold`
+                // (with its fail-closed guard) never runs — so the ledger would wedge
+                // forever (authority never flips, no diagnostic). Fail LOUDLY here
+                // with the same actionable "reopen with the cold tier enabled" error
+                // instead of silently stranding the migration.
+                db.fail_if_pending_enable_cold_without_tier()?;
             }
 
             seed_startup_current_timestamp(&db)?;
@@ -1154,6 +1265,9 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
                 encryption_manager: None,
                 encryption_config: None,
+                // Ephemeral (in-memory) DB: no encryption config and cannot be
+                // enabled; default algorithm (Issue #3616 PR3).
+                configured_encryption_algorithm: crate::encryption::factory::Algorithm::default(),
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 // `with_full_config` has no index-persistence data dir; schema
                 // constraints are in-memory only (ephemeral `new()` path).

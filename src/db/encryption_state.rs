@@ -53,10 +53,38 @@ use std::path::{Path, PathBuf};
 
 use crate::core::error::{Result, StorageError};
 use crate::encryption::config::KeyProviderConfig;
+use crate::encryption::factory::Algorithm;
 
-/// Current on-disk format version of the authority file. Bumped when the line
-/// schema evolves; an unknown version fails closed (never guessed).
-const ENCRYPTION_STATE_VERSION: u32 = 1;
+/// Current on-disk format version of the authority file.
+///
+/// `version=2` (Issue #3616 PR3) additively records the pinned concrete AEAD
+/// `algorithm` an enable migration wrote under. The reader still accepts a legacy
+/// `version=1` file (no `algorithm` line → `algorithm: None`, reopen falls back to
+/// the config algorithm, exactly the prior behavior). An unknown version fails
+/// closed (never guessed).
+const ENCRYPTION_STATE_VERSION: u32 = 2;
+
+/// Serialize a concrete AEAD [`Algorithm`] to its stable on-disk token. `Auto` is
+/// resolved to its concrete form first so the pinned value is never ambiguous
+/// (the whole point of pinning is cross-host portability).
+fn algorithm_token(algorithm: Algorithm) -> &'static str {
+    match algorithm.resolve() {
+        Algorithm::Aes256Gcm => "aes256gcm",
+        Algorithm::ChaCha20Poly1305 => "chacha20poly1305",
+        // `resolve()` never returns `Auto`; be explicit rather than `unreachable!`.
+        Algorithm::Auto => "aes256gcm",
+    }
+}
+
+/// Parse a pinned-algorithm token written by [`algorithm_token`]. Returns `None`
+/// for an unrecognized token (treated as corrupt by the caller).
+fn algorithm_from_token(token: &str) -> Option<Algorithm> {
+    match token {
+        "aes256gcm" => Some(Algorithm::Aes256Gcm),
+        "chacha20poly1305" => Some(Algorithm::ChaCha20Poly1305),
+        _ => None,
+    }
+}
 
 /// The durable encryption-state authority parsed from `{data_dir}/encryption.state`.
 ///
@@ -69,23 +97,46 @@ pub(crate) struct EncryptionState {
     /// The non-secret key-source reference (File path / Env var name). `Some`
     /// iff `enabled`; `None` when the authority records "disabled".
     pub key_source: Option<KeyProviderConfig>,
+    /// The pinned concrete AEAD algorithm the enable migration wrote under
+    /// (Issue #3616 PR3). `Some` for a `version=2` enabled authority; `None` for a
+    /// legacy `version=1` authority or a disabled state. On reopen it OVERRIDES the
+    /// operator's `config.encryption.algorithm`, so an enable performed under a
+    /// concrete (or host-resolved `Auto`) algorithm always reopens under the exact
+    /// same cipher, regardless of TOML edits or a cross-CPU host migration.
+    pub algorithm: Option<Algorithm>,
 }
 
 impl EncryptionState {
-    /// Construct the "encryption enabled under `key_source`" authority.
+    /// Construct the "encryption enabled under `key_source`" authority WITHOUT a
+    /// pinned algorithm (legacy shape). Prefer [`Self::enabled_with_algorithm`] on
+    /// the production enable path so the concrete cipher is pinned durably.
     ///
     /// `key_source` must be a File or Env reference; other backends are refused
     /// at write time (they carry secrets the line format cannot persist).
-    ///
-    /// The producer is the `encryption enable` migration engine (Issue #3616,
-    /// landing in a follow-up commit on this same PR). Until then only the
-    /// READ + precedence path is wired into `open()`, so this constructor and
-    /// [`write_encryption_state_durable`] have test-only callers.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn enabled(key_source: KeyProviderConfig) -> Self {
         Self {
             enabled: true,
             key_source: Some(key_source),
+            algorithm: None,
+        }
+    }
+
+    /// Construct the "encryption enabled under `key_source`, pinned to
+    /// `algorithm`" authority (Issue #3616 PR3). The algorithm is resolved to its
+    /// concrete form so the pinned value is host-independent.
+    ///
+    /// The producer is the `encryption enable` migration engine
+    /// (`crate::db::encryption_enable`), which flips this authority durably as the
+    /// binding step BEFORE clearing the migration ledger.
+    pub(crate) fn enabled_with_algorithm(
+        key_source: KeyProviderConfig,
+        algorithm: Algorithm,
+    ) -> Self {
+        Self {
+            enabled: true,
+            key_source: Some(key_source),
+            algorithm: Some(algorithm.resolve()),
         }
     }
 }
@@ -135,6 +186,7 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
     let mut enabled = None;
     let mut kind = None;
     let mut value = None;
+    let mut algorithm_line = None;
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -153,6 +205,8 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
             }
             "key_source_kind" => kind = Some(v.to_string()),
             "key_source_value" => value = Some(v.to_string()),
+            // Pinned concrete AEAD algorithm (Issue #3616 PR3, `version=2`).
+            "algorithm" => algorithm_line = Some(v.to_string()),
             // Unknown keys are ignored for forward-compatibility, mirroring the
             // rotation ledger reader.
             _ => {}
@@ -162,7 +216,10 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
     // `version=` is MANDATORY — a well-formed writer always emits it, so its
     // absence means a truncated/garbled file, not a legacy artifact.
     let version = version.ok_or_else(|| corrupt("missing version"))?;
-    if version != ENCRYPTION_STATE_VERSION {
+    // Accept every version this build understands. A `version=1` file predates the
+    // pinned `algorithm` line (Issue #3616 PR3) and loads with `algorithm: None` —
+    // reopen then falls back to the config algorithm, exactly the prior behavior.
+    if version != 1 && version != ENCRYPTION_STATE_VERSION {
         return Err(corrupt(&format!("unsupported version {version}")));
     }
     let enabled = enabled.ok_or_else(|| corrupt("missing enabled"))?;
@@ -171,6 +228,7 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
         return Ok(Some(EncryptionState {
             enabled: false,
             key_source: None,
+            algorithm: None,
         }));
     }
 
@@ -184,9 +242,20 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
         Some(other) => return Err(corrupt(&format!("unsupported key_source_kind {other:?}"))),
         None => return Err(corrupt("missing key_source_kind")),
     };
+    // A present `algorithm` line must parse to a known concrete algorithm; an
+    // unrecognized token is corrupt (fail-closed, never a silent wrong cipher).
+    // Absent (legacy `version=1`) → `None`.
+    let algorithm = match algorithm_line {
+        Some(token) => Some(
+            algorithm_from_token(&token)
+                .ok_or_else(|| corrupt(&format!("unsupported algorithm {token:?}")))?,
+        ),
+        None => None,
+    };
     Ok(Some(EncryptionState {
         enabled: true,
         key_source: Some(key_source),
+        algorithm,
     }))
 }
 
@@ -208,10 +277,10 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
 /// * The directory cannot be created or the file cannot be written durably.
 ///
 /// The production caller is the `encryption enable` migration engine (Issue
-/// #3616), which lands in a follow-up commit on this PR; this foundation commit
-/// wires only the READ + precedence path into `open()`, so the writer's only
-/// callers today are the round-trip / crash-safety tests below.
-#[allow(dead_code)]
+/// #3616 PR3, `crate::db::encryption_enable`): `enable_encryption` flips the
+/// authority to `enabled` as the binding step before clearing the ledger, and
+/// `resume_pending_enable` performs the same flip when finishing an interrupted
+/// enable.
 pub(crate) fn write_encryption_state_durable(
     data_dir: &Path,
     state: &EncryptionState,
@@ -233,8 +302,15 @@ pub(crate) fn write_encryption_state_durable(
                     .into());
                 }
             };
+            // The pinned concrete algorithm line is additive (`version=2`); a state
+            // constructed without one (legacy `enabled`) omits it and reads back as
+            // `algorithm: None`.
+            let algorithm_line = match state.algorithm {
+                Some(algorithm) => format!("algorithm={}\n", algorithm_token(algorithm)),
+                None => String::new(),
+            };
             format!(
-                "version={ENCRYPTION_STATE_VERSION}\nenabled=true\nkey_source_kind={kind}\nkey_source_value={value}\n"
+                "version={ENCRYPTION_STATE_VERSION}\nenabled=true\nkey_source_kind={kind}\nkey_source_value={value}\n{algorithm_line}"
             )
         }
         (true, None) => {
@@ -308,9 +384,77 @@ mod tests {
         let state = EncryptionState {
             enabled: false,
             key_source: None,
+            algorithm: None,
         };
         write_encryption_state_durable(dir.path(), &state).unwrap();
         assert_eq!(read_encryption_state(dir.path()).unwrap(), Some(state));
+    }
+
+    #[test]
+    fn round_trips_pinned_algorithm() {
+        // A version=2 authority pins the concrete algorithm; it round-trips.
+        for algo in [Algorithm::Aes256Gcm, Algorithm::ChaCha20Poly1305] {
+            let dir = tmp();
+            let state = EncryptionState::enabled_with_algorithm(
+                KeyProviderConfig::File {
+                    path: "/etc/aletheia/mek.key".into(),
+                },
+                algo,
+            );
+            write_encryption_state_durable(dir.path(), &state).unwrap();
+            let read = read_encryption_state(dir.path()).unwrap().unwrap();
+            assert_eq!(read.algorithm, Some(algo));
+            assert_eq!(read, state);
+            // The pinned token is on disk under the additive `algorithm=` key.
+            let text = std::fs::read_to_string(encryption_state_path(dir.path())).unwrap();
+            assert!(text.contains("version=2"));
+            assert!(text.contains("algorithm="));
+        }
+    }
+
+    #[test]
+    fn auto_is_pinned_to_a_concrete_algorithm() {
+        // Pinning `Auto` records the host-resolved concrete algorithm, never `Auto`.
+        let dir = tmp();
+        let state = EncryptionState::enabled_with_algorithm(
+            KeyProviderConfig::Env {
+                variable: "MEK".to_string(),
+            },
+            Algorithm::Auto,
+        );
+        write_encryption_state_durable(dir.path(), &state).unwrap();
+        let read = read_encryption_state(dir.path()).unwrap().unwrap();
+        assert!(matches!(
+            read.algorithm,
+            Some(Algorithm::Aes256Gcm) | Some(Algorithm::ChaCha20Poly1305)
+        ));
+        assert_ne!(read.algorithm, Some(Algorithm::Auto));
+    }
+
+    #[test]
+    fn legacy_v1_authority_reads_with_no_pinned_algorithm() {
+        // A pre-#3616-PR3 `version=1` authority (no `algorithm` line) still loads,
+        // with `algorithm: None` — reopen then falls back to the config algorithm.
+        let dir = tmp();
+        std::fs::write(
+            encryption_state_path(dir.path()),
+            b"version=1\nenabled=true\nkey_source_kind=env\nkey_source_value=MEK\n",
+        )
+        .unwrap();
+        let read = read_encryption_state(dir.path()).unwrap().unwrap();
+        assert!(read.enabled);
+        assert_eq!(read.algorithm, None, "legacy v1 pins no algorithm");
+    }
+
+    #[test]
+    fn corrupt_unknown_algorithm_token_fails_closed() {
+        let dir = tmp();
+        std::fs::write(
+            encryption_state_path(dir.path()),
+            b"version=2\nenabled=true\nkey_source_kind=env\nkey_source_value=MEK\nalgorithm=twofish\n",
+        )
+        .unwrap();
+        assert!(read_encryption_state(dir.path()).is_err());
     }
 
     #[test]
@@ -357,7 +501,7 @@ mod tests {
             assert!(
                 matches!(
                     key,
-                    "version" | "enabled" | "key_source_kind" | "key_source_value"
+                    "version" | "enabled" | "key_source_kind" | "key_source_value" | "algorithm"
                 ),
                 "unexpected key on disk: {key}"
             );
@@ -432,6 +576,7 @@ mod tests {
                 path: "/k.aekf".into(),
                 passphrase_env: "PASS".to_string(),
             }),
+            algorithm: None,
         };
         assert!(write_encryption_state_durable(dir.path(), &state).is_err());
         // And nothing partial was left on disk.

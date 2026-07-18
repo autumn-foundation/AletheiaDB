@@ -340,6 +340,12 @@ fn classify_storage_error(e: &StorageError) -> (McpErrorCode, bool) {
         // Resource limits (DoS protection): the request is well-formed but
         // the system refuses in its current state.
         StorageError::CapacityExceeded { .. } => (McpErrorCode::FailedPrecondition, false),
+        // Enabling encryption on an already-encrypted WAL is a caller precondition
+        // failure, not an internal fault (Issue #3616 PR3) — and retrying cannot
+        // succeed, so it is non-retriable.
+        StorageError::WalKeyringAlreadyInstalled { .. } => {
+            (McpErrorCode::FailedPrecondition, false)
+        }
         // A per-principal changefeed quota breach (Issue #3678) is a transient
         // fairness limit: another of this principal's subscriptions may drop, so
         // retrying with backoff can succeed → RESOURCE_EXHAUSTED, retriable.

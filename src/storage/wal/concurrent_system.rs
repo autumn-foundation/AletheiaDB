@@ -880,11 +880,8 @@ impl ConcurrentWalSystem {
     ///
     /// [`add_generation`]: crate::encryption::wal_encryption::WalKeyring::add_generation
     // PR2 (#3616) ships this structural install seam; its production consumer is
-    // the plaintext → encrypted enable engine landing in #3616 PR3. Until then the
-    // only caller is the concurrency-test suite, so the non-test lib build sees it
-    // as unused — allow that here rather than block the seam on its future driver.
-    // TODO(#3616 PR3): remove this allow once the enable engine calls install_wal_keyring.
-    #[allow(dead_code)]
+    // the plaintext → encrypted enable engine (#3616 PR3), which drives it from
+    // `enable_encryption` and the startup `install_pending_enable_wal_keyring` hook.
     pub(crate) fn install_wal_keyring(
         &self,
         keyring: crate::encryption::wal_encryption::WalKeyring,
@@ -903,9 +900,11 @@ impl ConcurrentWalSystem {
         // Checked (under the install lock) before the seal so an already-encrypted
         // WAL is never re-rolled.
         if self.wal_keyring.load().is_some() {
-            // TODO(#3616 PR3): when surfaced via MCP, map this precondition to
-            // FAILED_PRECONDITION rather than the default WalError→INTERNAL.
-            return Err(Error::Storage(StorageError::WalError {
+            // A DISTINGUISHABLE precondition variant (not a generic `WalError`) so
+            // the enable engine's `map_wal_install_err` maps ONLY this to
+            // FAILED_PRECONDITION and leaves genuine WAL I/O / seal faults as
+            // INTERNAL (Issue #3616 PR3). MCP classifies it as FAILED_PRECONDITION.
+            return Err(Error::Storage(StorageError::WalKeyringAlreadyInstalled {
                 reason: "a WAL keyring is already installed; runtime install only \
                          supports the plaintext → encrypted (None → Some) transition \
                          (key rotation is a separate operation)"

@@ -2629,6 +2629,79 @@ fn crash_mid_cold_batch_resumes_from_cursor() {
 }
 
 #[test]
+fn enable_wrap_plaintext_resumes_from_cursor() {
+    // Issue #3616 PR3 (A4): the enable bare→ACV1 wrap pass (`WrapPlaintext` mode)
+    // must resume from the DURABLE cursor a real crash mid-pass leaves — NOT merely
+    // the per-value idempotency backstop. Simulate a crash after some batches: bare
+    // nodes 1..=3 already wrapped to ACV1@1 with a cursor pinned at (Node, key=3);
+    // nodes 4..=5 remain BARE (plaintext). Resume must continue strictly AFTER the
+    // cursor (never revisiting 1..=3), wrap 4..=5, and complete.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("enable_resume.redb");
+    let cipher = test_cipher();
+    let target = crate::db::rotation::ENABLE_KEY_VERSION;
+
+    // Build the store WITH the enable cipher (so wrap + reads work), but plant BARE
+    // (compressed, UNENCRYPTED) values directly — the plaintext-at-rest an enable wraps.
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+    let nodes: Vec<NodeVersion> = (1..=5).map(create_test_node_version).collect();
+    let mut bare_compressed = std::collections::HashMap::new();
+    for (k, n) in (1..=5u64).zip(&nodes) {
+        let compressed = storage.compress(&encode_node_version(n)).unwrap();
+        insert_raw(&storage, NODE_VERSIONS_TABLE, k, &compressed);
+        bare_compressed.insert(k, compressed);
+    }
+
+    // Manually wrap nodes 1..=3 to ACV1@target and plant the resume cursor at key=3.
+    for k in 1..=3u64 {
+        let ct = cipher.encrypt(&bare_compressed[&k], &[]).unwrap();
+        insert_raw(
+            &storage,
+            NODE_VERSIONS_TABLE,
+            k,
+            &wrap_cold_value(target, &ct),
+        );
+    }
+    let cursor = ColdRotationCursor {
+        target_version: target,
+        table: ColdTableKind::Node,
+        last_completed_key: 3,
+    };
+    insert_raw_metadata(&storage, COLD_ROTATION_CURSOR_KEY, &cursor.to_bytes());
+    let node1_before = raw_value(&storage, NODE_VERSIONS_TABLE, 1);
+
+    // Resume the enable wrap pass.
+    let stats = storage.wrap_plaintext_cold_values(&cipher, target).unwrap();
+    // Nodes 1..=3 are past the cursor (never revisited); only 4..=5 are wrapped.
+    assert_eq!(
+        stats.values_rewrapped, 2,
+        "only the bare nodes 4,5 past the cursor are wrapped"
+    );
+
+    // No re-encrypt of the already-wrapped, past-the-cursor node 1.
+    assert_eq!(
+        raw_value(&storage, NODE_VERSIONS_TABLE, 1),
+        node1_before,
+        "a value past the cursor must not be revisited/re-encrypted"
+    );
+    // Every node is ACV1@target now; the pass completed (cursor cleared, marker set).
+    for k in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, target);
+    }
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(target));
+    assert!(storage.read_cold_rotation_cursor().unwrap().is_none());
+
+    // All values still decrypt back to their records.
+    for n in &nodes {
+        let loaded = storage.get_node_version(n.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), n.version_id());
+    }
+}
+
+#[test]
 fn reencrypt_is_idempotent_over_already_wrapped_values() {
     // A re-run after a stale/absent cursor must skip already-target-wrapped
     // values, never double-encrypt (the ACV1 wrapper is the idempotency backstop).

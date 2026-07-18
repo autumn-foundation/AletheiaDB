@@ -51,6 +51,33 @@ impl AletheiaDB {
         let result = (|| {
             use crate::storage::index_persistence::formats::IndexManifest;
 
+            let manager = self.persistence_manager.as_ref().ok_or_else(|| {
+                StorageError::InconsistentState {
+                    reason: "Index persistence not enabled".to_string(),
+                }
+            })?;
+
+            // Fail-closed guard for the QUIESCED post-`enable_encryption` handle
+            // (Issue #3616 PR3). After `enable_encryption` the live WAL is encrypted
+            // but this handle's index manager still carries a PLAINTEXT keyring
+            // (there is no live `None → Some` index-keyring install — see the loud
+            // reopen contract on `enable_encryption`). Persisting now would write
+            // PLAINTEXT index files OVER the freshly-wrapped `AEIX` snapshot — the
+            // exact corruption the enable engine exists to prevent. Refuse loudly and
+            // direct the caller to reopen; the resume path (which DOES build the
+            // manager under the enable index DEK, so its keyring is `Some`) is
+            // unaffected, as is a normally-encrypted reopen.
+            if self.wal.is_encrypted() && manager.keyring().is_none() {
+                return Err(crate::core::error::Error::FailedPrecondition(
+                    "cannot persist indexes on a post-enable quiesced handle: the WAL is \
+                     encrypted but this handle's index manager is still plaintext, so a \
+                     persist would write plaintext index files over the encrypted (AEIX) \
+                     snapshot. You MUST reopen the database (drop this handle and call \
+                     AletheiaDB::open) to get a fully-encrypted, persistable instance."
+                        .to_string(),
+                ));
+            }
+
             // Warn if background persistence thread has stopped
             if self
                 .persistence_thread_stopped
@@ -61,12 +88,6 @@ impl AletheiaDB {
                      Automatic persistence is disabled. Manual persist_indexes() calls will still work."
                 );
             }
-
-            let manager = self.persistence_manager.as_ref().ok_or_else(|| {
-                StorageError::InconsistentState {
-                    reason: "Index persistence not enabled".to_string(),
-                }
-            })?;
 
             let tracker = self.persistence_tracker.as_ref();
 
