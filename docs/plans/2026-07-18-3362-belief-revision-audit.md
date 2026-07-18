@@ -55,7 +55,7 @@ revision sequence + confidence trajectory the ACs demand.
 |---|---|---|
 | **Clock skew / backdated `valid_from`** makes a correction look like a `world_change` | mislabels the revision | Rule keys off *recorded* geometry only (`valid_from` vs the max prior `valid_from`), documented as such; we classify what was *written*, never guess intent (Out-of-Scope forbids NLP/inference). A backdated write that advances `valid_from` **is** a world-change by our definition — deterministic, falsifiable. |
 | **Tie**: new `valid_from == max prior valid_from` | ambiguous corr/world | Deterministic tie-break: `>` strictly ⇒ world_change, `<=` (incl. equal) ⇒ correction. Documented + tested both orderings (risk #1). |
-| **No-op re-write, same source** | spurious revision? | Classified `reaffirmation` (no value delta). Source is surfaced so the caller sees "same source re-asserted"; we do not suppress it (append-only truth). |
+| **No-op re-write, same source** | spurious `reaffirmation`? | AC2 defines `reaffirmation` as the same value re-asserted **by a different source**, so a *same-source* (or unknown-source) no-op is **not** a reaffirmation — it falls through to the valid-interval geometry (correction/world_change). The source is surfaced regardless; we never suppress the version (append-only truth). Source-gating tested by `classify_same_source_no_delta_is_not_reaffirmation` / `classify_absent_source_no_delta_is_not_reaffirmation`. |
 | **Retraction that also changes value** (backdated delete w/ valid_time) | corr/world vs retraction race | Precedence: a **closed valid interval wins** → `Retraction`. Documented ordering. |
 | **`HashMap` iteration leaking into output** | non-determinism (breaks AC4) | Sort `changes` by key; no map iteration in output; versions already ordered by `version_number`. |
 | **Idempotent re-retraction** (`already_retracted`) appends no version | phantom double retraction | No new version ⇒ no extra revision. Verified by test. |
@@ -125,13 +125,42 @@ as_of_transaction_time` (if the coordinate is set; else all). For revision `i`:
 |---|---|---|
 | 1 | `initial_assertion` | `i == 0` (first visible version — no predecessor). |
 | 2 | `retraction` | This version's **valid interval is closed** (`valid_time().is_closed()`, i.e. `valid_to != TIMESTAMP_MAX`). Covers both a **delete tombstone** (empty `[t, t)`) and a **#3230 valid-time retraction** (`[valid_from, valid_to)`). |
-| 3 | `reaffirmation` | Not closed, and `VersionDiff(v[i-1], v[i])` has **no value change** (`!has_changes()`). The provenance/source is surfaced so a caller sees who re-asserted. |
-| 4 | `world_change` | Not closed, value changed, and `v[i].valid_from > max(v[j].valid_from for j<i)` — a **new/later** valid interval: the fact itself changed. |
-| 5 | `correction` | Not closed, value changed, and `v[i].valid_from <= max prior valid_from` — rewriting an **already-recorded** valid period at a later transaction time (tx-time supersession). |
+| 3 | `reaffirmation` | Not closed, `VersionDiff(v[i-1], v[i])` has **no value change** (`!has_changes()`), **and** both `v[i-1]` and `v[i]` carry a *known* provenance `source` that **differ** — AC2's "the same value re-asserted *by a different source*". If either side's source is absent/unknown, this is **not** a reaffirmation: it falls through to rules 4/5 (a same-source no-op with equal/earlier `valid_from` is a `correction`; with advanced `valid_from` a `world_change`). |
+| 4 | `world_change` | Not closed, not a reaffirmation, and `v[i].valid_from > max(v[j].valid_from for j<i)` — a **new/later** valid interval: the fact itself changed. |
+| 5 | `correction` | Not closed, not a reaffirmation, and `v[i].valid_from <= max prior valid_from` — rewriting **or backfilling** a same-or-earlier valid period at a later transaction time (tx-time supersession). |
 
-Rules 4/5 are mutually exclusive by the strict `>` tie-break (equal ⇒
-correction). Precedence 2 dominates 4/5 (a closed interval is always a
-retraction, even if properties also changed).
+Rules 4/5 are mutually exclusive by the strict `>` tie-break on the
+**running-max** `valid_from` (equal ⇒ correction; the max is over *all* prior
+versions, not just the immediate predecessor — see
+`running_max_valid_from_governs_correction`). Precedence 2 dominates 4/5 (a
+closed interval is always a retraction, even if properties also changed).
+Precedence 3 dominates 4/5 too: the reaffirmation check runs **before** the
+world_change/correction split, so a same-value re-assertion by a different
+source is a `reaffirmation` even when its `valid_from` advanced — value-unchanged
+wins over validity-advanced (`classify_reaffirmation_precedes_world_change`).
+
+**Backfill is a documented `correction` (AC2 interpretation, flagged for
+coordinator awareness).** AC2's literal wording is that `correction` "rewrites an
+already-recorded valid interval", but this classifier uses the
+`valid_from <= running-max` proxy with **no interval-overlap check**. A backdated
+write asserting a *new, previously-unrecorded* earlier valid interval therefore
+also classifies as `correction`. This is deliberate: AC2 fixes exactly five
+categories, so we do **not** introduce a sixth `backfill` class. Read
+`correction` as "a same-or-earlier valid interval recorded by a later
+transaction — i.e. rewriting **or** backfilling our record of a past validity
+period". Locked by `backfill_earlier_interval_is_correction`. (A true
+overlap-aware backfill/correction split would be a follow-up requiring an AC
+amendment.)
+
+**Retraction `changes` rendering.** A #3230 valid-time retraction and a hard
+delete both render `changes` as the predecessor's properties "removed"
+(`(key, Some(old), None)`). For a valid-time retraction this means "no longer
+asserted after `valid_to`" — **not** value deletion; the pre-`valid_to` history
+stays readable. This is documentation of the existing output, not a shape change.
+The rule 2 (closed-interval ⇒ retraction) inference is sound only under the #3504
+append-only-valid-time invariant (no live write path asserts a bounded valid
+interval on a normal write); a future bounded-validity assertion API would need
+this revisited (noted in a code comment at the retraction check).
 
 `changes` per revision (sorted by key for determinism):
 - `initial_assertion`: `(key, None, Some(new))` for each property at `v[0]`.
@@ -170,8 +199,11 @@ Single `historical.read()` history fetch + O(n) pairwise classify; the running
 `max prior valid_from` avoids any O(n²) overlap scan. Target **<10 ms for ≤100
 versions**. A gated Criterion micro-bench (`benches/belief_revision.rs`,
 `required-features=["semantic-temporal"]`) over a ~100-version synthetic history
-guards it. A full CI perf gate rides with cohort graduation if the eval harness
-is absent.
+**measures** it. The threshold is intentionally **not** asserted as a wall-clock
+check inside a unit test (that would be flaky under CI load / shared runners);
+consistent with the project's approach, the enforced CI perf gate rides with
+cohort **graduation** (out of `experimental`) once the eval/perf harness is
+present. Until then the bench is the reproducible measurement of record.
 
 ---
 
@@ -239,7 +271,13 @@ is absent.
 | 9 | determinism (no map order leak) | `audit_is_byte_identical` |
 | 10 | 20-write fixture, 100% classification accuracy | `scripted_20_write_fixture_100pct` (Success Metric) |
 | 11 | edges audited symmetrically | `edge_belief_revisions` |
-| 12 | <10 ms ≤100 versions | `benches/belief_revision.rs` |
+| 12 | <10 ms ≤100 versions | `benches/belief_revision.rs` (measured; perf gate rides with graduation, §8) |
+| 13 | reaffirmation honors AC2 "different source"; same/unknown-source no-op is not | `classify_same_source_no_delta_is_not_reaffirmation` / `classify_absent_source_no_delta_is_not_reaffirmation` |
+| 14 | reaffirmation precedes world_change (same value, advanced `valid_from`) | `classify_reaffirmation_precedes_world_change` |
+| 15 | running-max (not predecessor-only) governs corr/world | `running_max_valid_from_governs_correction` |
+| 16 | backfill of a new earlier interval ⇒ `correction` (documented AC2 reading) | `backfill_earlier_interval_is_correction` |
+| 17 | determinism is key-insertion-order independent; multi-key correction sorted | `audit_is_key_order_independent` |
+| 18 | **all five classes reachable end-to-end through real writes** | `tests/belief_revision_e2e.rs::end_to_end_all_five_classes_through_real_writes` |
 
 ---
 

@@ -22,13 +22,36 @@
 //! |---|---|---|
 //! | 1 | [`RevisionClass::InitialAssertion`] | `i == 0` (first visible version). |
 //! | 2 | [`RevisionClass::Retraction`] | this version's valid interval is **closed** (`valid_to != ∞`) — a delete tombstone (empty `[t,t)`) or a #3230 valid-time retraction. |
-//! | 3 | [`RevisionClass::Reaffirmation`] | no value change vs the predecessor. |
-//! | 4 | [`RevisionClass::WorldChange`] | value changed and `valid_from` advanced beyond every prior `valid_from` — the fact itself changed. |
-//! | 5 | [`RevisionClass::Correction`] | value changed and `valid_from` did **not** advance — a later transaction-time rewrite of an already-recorded valid period. |
+//! | 3 | [`RevisionClass::Reaffirmation`] | no value change vs the predecessor **and** this version's provenance `source` is present and **differs** from the predecessor's — AC2's "the same value re-asserted *by a different source*". If either side's source is absent/unknown, this is **not** a reaffirmation; it falls through to the valid-interval geometry (rules 4/5). |
+//! | 4 | [`RevisionClass::WorldChange`] | value changed (or a same-source no-op) and `valid_from` advanced beyond every prior `valid_from` — the fact itself changed. |
+//! | 5 | [`RevisionClass::Correction`] | value changed (or a same-source no-op) and `valid_from` did **not** advance — a later transaction-time rewrite **or backfill** of a same-or-earlier valid period. |
 //!
 //! Precedence is strict: a closed valid interval is always a retraction; the
-//! `world_change`/`correction` split uses a strict `>` on `valid_from` so equal
-//! `valid_from` is a correction.
+//! reaffirmation check (rule 3) runs **before** the `world_change`/`correction`
+//! split, so a same-value re-assertion by a different source is a
+//! `reaffirmation` even when its `valid_from` advanced (value-unchanged wins
+//! over validity-advanced). The `world_change`/`correction` split uses a strict
+//! `>` on the running-max `valid_from` so equal `valid_from` is a correction.
+//!
+//! **Backfill is a `correction` (documented AC2 interpretation).** A backdated
+//! write asserting a *new, previously-unrecorded* earlier valid interval is
+//! classified `correction` via the `valid_from <= running-max` proxy — there is
+//! no interval-overlap check. So `correction` here means "a same-or-earlier
+//! valid interval recorded by a later transaction — i.e. rewriting **or
+//! backfilling** our record of a past validity period", a deliberate reading of
+//! AC2's "rewrites an already-recorded valid interval" wording (AC2 fixes
+//! exactly five categories, so no sixth `backfill` class is introduced).
+//!
+//! **Retraction rendering.** A #3230 valid-time retraction and a hard delete
+//! both render their `changes` as the predecessor's properties "removed"
+//! (`(key, Some(old), None)`). For a valid-time retraction this means "no
+//! longer asserted after `valid_to`", **not** that the stored values were
+//! erased — the history remains readable `AS OF` a time before `valid_to`.
+//!
+//! v1 notes: a property-scoped audit reports each surviving revision with the
+//! **entity-level** classification (not a per-property re-classification), and
+//! `as_of_transaction_time` filtering relies on versions being appended in
+//! transaction-time-monotonic order.
 //!
 //! # Worked example — correction vs world-change on the same entity
 //!
@@ -84,8 +107,9 @@ pub enum RevisionClass {
     /// A deletion tombstone or a #3230 valid-time retraction (valid interval
     /// closed).
     Retraction,
-    /// The same value was re-asserted (no value delta vs the predecessor),
-    /// typically by a different source.
+    /// The same value was re-asserted (no value delta vs the predecessor) **by a
+    /// different, known source** (AC2). A same-source or unknown-source no-op is
+    /// classified by valid-interval geometry instead, never as a reaffirmation.
     Reaffirmation,
 }
 
@@ -322,7 +346,7 @@ fn build_log(
 
     for (i, v) in visible.iter().enumerate() {
         let predecessor = if i == 0 { None } else { Some(visible[i - 1]) };
-        let class = classify(i, v, predecessor, max_prior_valid_from);
+        let class = classify(v, predecessor, max_prior_valid_from);
         let changes = build_changes(v, predecessor, class);
 
         // Update the running max valid_from AFTER classifying this version.
@@ -371,28 +395,38 @@ fn build_log(
 /// is cheap relative to the single `historical.read()` the audit already paid
 /// for, and the audit is a cold read, not a hot path.
 fn classify(
-    index: usize,
     version: &VersionInfo,
     predecessor: Option<&VersionInfo>,
     max_prior_valid_from: Option<Timestamp>,
 ) -> RevisionClass {
-    // 1. First visible version.
-    if index == 0 || predecessor.is_none() {
+    // 1. First visible version (no predecessor). `predecessor.is_none()` holds
+    //    exactly when the version is index 0 of the visible prefix, so this
+    //    single guard subsumes the old `index == 0 || predecessor.is_none()`.
+    let Some(pred) = predecessor else {
         return RevisionClass::InitialAssertion;
-    }
+    };
     // 2. Closed valid interval => retraction / deletion (dominates value change).
+    //    This rule holds only because no live write path today asserts a bounded
+    //    valid interval on a normal write — a closed interval means a #3230
+    //    valid-time retraction or a delete tombstone (the #3504 append-only
+    //    valid-time invariant). A future bounded-validity assertion API would
+    //    make "closed interval" ambiguous and this check would need revisiting.
     if version.temporal.valid_time().is_closed() {
         return RevisionClass::Retraction;
     }
-    let pred = predecessor.expect("predecessor present for index > 0");
     let diff = VersionDiff::compute(
         &pred.properties,
         &version.properties,
         pred.version_id,
         version.version_id,
     );
-    // 3. No value change => reaffirmation.
-    if !diff.has_changes() {
+    // 3. No value change AND re-asserted by a *different, known* source =>
+    //    reaffirmation (AC2). None-handling is explicit: if either side's source
+    //    is absent/unknown we do NOT classify as reaffirmation — we fall through
+    //    to the valid-interval geometry (rules 4/5) below. Checked before the
+    //    world_change/correction split, so value-unchanged wins over
+    //    validity-advanced (LOW-3 documented precedence).
+    if !diff.has_changes() && sources_differ(pred, version) {
         return RevisionClass::Reaffirmation;
     }
     // 4/5. valid_from advanced beyond all prior => world_change, else correction.
@@ -400,6 +434,20 @@ fn classify(
     match max_prior_valid_from {
         Some(max) if vf > max => RevisionClass::WorldChange,
         _ => RevisionClass::Correction,
+    }
+}
+
+/// Whether `version`'s provenance `source` is present **and** differs from
+/// `pred`'s present source. If either side has no provenance or no `source`
+/// (absent/unknown), returns `false` — a reaffirmation requires two *known*
+/// sources that disagree (AC2's "different source").
+fn sources_differ(pred: &VersionInfo, version: &VersionInfo) -> bool {
+    match (
+        pred.provenance.as_ref().and_then(Provenance::source),
+        version.provenance.as_ref().and_then(Provenance::source),
+    ) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
     }
 }
 
@@ -512,7 +560,6 @@ impl AletheiaDB {
     ///
     /// - `NOT_FOUND` for an unknown entity.
     /// - `INVALID_ARGUMENT` for a `limit` of 0 or an unknown `property_key`.
-    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn belief_revisions(
         &self,
         entity: EntityId,
@@ -612,7 +659,7 @@ mod tests {
     #[test]
     fn classify_first_version_is_initial_assertion() {
         let v = open_version(1, 1000, 100, status_props("a"), None);
-        assert_eq!(classify(0, &v, None, None), RevisionClass::InitialAssertion);
+        assert_eq!(classify(&v, None, None), RevisionClass::InitialAssertion);
     }
 
     #[test]
@@ -621,7 +668,7 @@ mod tests {
         let v = open_version(2, 1000, 200, status_props("b"), None);
         // max prior valid_from == 1000, new == 1000 (not >) => correction.
         assert_eq!(
-            classify(1, &v, Some(&pred), Some(ts(1000))),
+            classify(&v, Some(&pred), Some(ts(1000))),
             RevisionClass::Correction
         );
     }
@@ -631,7 +678,7 @@ mod tests {
         let pred = open_version(1, 2000, 100, status_props("a"), None);
         let v = open_version(2, 1500, 200, status_props("b"), None);
         assert_eq!(
-            classify(1, &v, Some(&pred), Some(ts(2000))),
+            classify(&v, Some(&pred), Some(ts(2000))),
             RevisionClass::Correction
         );
     }
@@ -641,7 +688,7 @@ mod tests {
         let pred = open_version(1, 1000, 100, status_props("a"), None);
         let v = open_version(2, 2000, 200, status_props("b"), None);
         assert_eq!(
-            classify(1, &v, Some(&pred), Some(ts(1000))),
+            classify(&v, Some(&pred), Some(ts(1000))),
             RevisionClass::WorldChange
         );
     }
@@ -651,7 +698,7 @@ mod tests {
         let pred = open_version(1, 1000, 100, status_props("a"), Some(prov("s1", None)));
         let v = open_version(2, 1000, 200, status_props("a"), Some(prov("s2", None)));
         assert_eq!(
-            classify(1, &v, Some(&pred), Some(ts(1000))),
+            classify(&v, Some(&pred), Some(ts(1000))),
             RevisionClass::Reaffirmation
         );
     }
@@ -662,7 +709,7 @@ mod tests {
         // Closed valid interval AND a value change: retraction wins (precedence).
         let v = closed_version(2, 1000, 1500, 200, status_props("b"), None);
         assert_eq!(
-            classify(1, &v, Some(&pred), Some(ts(1000))),
+            classify(&v, Some(&pred), Some(ts(1000))),
             RevisionClass::Retraction
         );
     }
@@ -673,9 +720,97 @@ mod tests {
         // Empty valid interval [t, t) == delete tombstone.
         let v = closed_version(2, 2000, 2000, 200, status_props("a"), None);
         assert_eq!(
-            classify(1, &v, Some(&pred), Some(ts(1000))),
+            classify(&v, Some(&pred), Some(ts(1000))),
             RevisionClass::Retraction
         );
+    }
+
+    // ---- MED-1: reaffirmation honors AC2's "different source" ----------------
+
+    #[test]
+    fn classify_same_source_no_delta_is_not_reaffirmation() {
+        // Same value re-recorded by the SAME source at a later tx-time. AC2 says
+        // reaffirmation is a re-assertion *by a different source*, so this is NOT
+        // a reaffirmation — it classifies by geometry (equal valid_from => correction).
+        let pred = open_version(1, 1000, 100, status_props("a"), Some(prov("src-a", None)));
+        let v = open_version(2, 1000, 200, status_props("a"), Some(prov("src-a", None)));
+        let class = classify(&v, Some(&pred), Some(ts(1000)));
+        assert_ne!(class, RevisionClass::Reaffirmation);
+        assert_eq!(class, RevisionClass::Correction);
+    }
+
+    #[test]
+    fn classify_absent_source_no_delta_is_not_reaffirmation() {
+        // No provenance on either side: source unknown => not a reaffirmation,
+        // classify by geometry (equal valid_from => correction).
+        let pred = open_version(1, 1000, 100, status_props("a"), None);
+        let v = open_version(2, 1000, 200, status_props("a"), None);
+        assert_eq!(
+            classify(&v, Some(&pred), Some(ts(1000))),
+            RevisionClass::Correction
+        );
+        // One side present, the other absent: still not a reaffirmation.
+        let v_one_side = open_version(2, 1000, 200, status_props("a"), Some(prov("src-a", None)));
+        assert_eq!(
+            classify(&v_one_side, Some(&pred), Some(ts(1000))),
+            RevisionClass::Correction
+        );
+    }
+
+    // ---- LOW-3: reaffirmation wins over world_change (same value, advanced vf) -
+
+    #[test]
+    fn classify_reaffirmation_precedes_world_change() {
+        // Same value, DIFFERENT source, but valid_from advanced beyond the max:
+        // value-unchanged wins => reaffirmation, not world_change (documented
+        // precedence — the reaffirmation check runs before the corr/world split).
+        let pred = open_version(1, 1000, 100, status_props("a"), Some(prov("src-a", None)));
+        let v = open_version(2, 5000, 200, status_props("a"), Some(prov("src-b", None)));
+        assert_eq!(
+            classify(&v, Some(&pred), Some(ts(1000))),
+            RevisionClass::Reaffirmation
+        );
+    }
+
+    // ---- MED-3: running-max valid_from (not predecessor-only) ----------------
+
+    #[test]
+    fn running_max_valid_from_governs_correction() {
+        use RevisionClass::*;
+        // [vf1000 init] -> [vf5000 world_change] -> [vf2000 correction]
+        //   -> [vf3000 correction]. The last version's valid_from (3000) is ABOVE
+        // its immediate predecessor (2000) but AT-OR-BELOW the running max (5000),
+        // so it MUST be a correction. A broken "compare to predecessor only" rule
+        // would mislabel it world_change — this kills that mutant.
+        let h = history(vec![
+            open_version(1, 1000, 100, status_props("a1"), None),
+            open_version(2, 5000, 200, status_props("a2"), None),
+            open_version(3, 2000, 300, status_props("a3"), None),
+            open_version(4, 3000, 400, status_props("a4"), None),
+        ]);
+        let log = audit_history(&h, &RevisionOptions::default());
+        let classes: Vec<RevisionClass> = log.revisions.iter().map(|r| r.class).collect();
+        assert_eq!(
+            classes,
+            vec![InitialAssertion, WorldChange, Correction, Correction],
+            "vf above predecessor but <= running max must be correction"
+        );
+    }
+
+    // ---- MED-4: backfill of a new, earlier valid interval => correction ------
+
+    #[test]
+    fn backfill_earlier_interval_is_correction() {
+        // v1 records a fact valid from 5000; v2 backfills an EARLIER,
+        // previously-unrecorded valid interval (from 1000). Documented AC2
+        // interpretation: a same-or-earlier valid interval recorded by a later
+        // transaction is a `correction` (no overlap check, no 6th category).
+        let h = history(vec![
+            open_version(1, 5000, 100, status_props("a1"), None),
+            open_version(2, 1000, 200, status_props("a2"), None),
+        ]);
+        let log = audit_history(&h, &RevisionOptions::default());
+        assert_eq!(log.revisions[1].class, RevisionClass::Correction);
     }
 
     // ---- 20-write scripted fixture: 100% classification accuracy (AC2) -----
@@ -935,6 +1070,70 @@ mod tests {
                 serde_json::to_string(&jb).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn audit_is_key_order_independent() {
+        // Two histories with byte-equal CONTENT but different property-map key
+        // insertion orders. Because `changes` are sorted by key and no HashMap
+        // iteration reaches the output, the serialized audits must be identical.
+        // (The old `audit_is_byte_identical` ran twice on the SAME instance, so a
+        // missing sort could hide behind stable-within-run HashMap order.)
+        let props_a = |a: i64, z: i64, m: i64| {
+            PropertyMapBuilder::new()
+                .insert("alpha", a)
+                .insert("zeta", z)
+                .insert("mid", m)
+                .build()
+        };
+        let props_shuffled = |a: i64, z: i64, m: i64| {
+            PropertyMapBuilder::new()
+                .insert("zeta", z)
+                .insert("mid", m)
+                .insert("alpha", a)
+                .build()
+        };
+        let h1 = history(vec![
+            open_version(1, 1000, 100, props_a(1, 2, 3), Some(prov("s", Some(0.5)))),
+            open_version(2, 1000, 200, props_a(9, 8, 7), Some(prov("s2", Some(0.6)))),
+        ]);
+        let h2 = history(vec![
+            open_version(
+                1,
+                1000,
+                100,
+                props_shuffled(1, 2, 3),
+                Some(prov("s", Some(0.5))),
+            ),
+            open_version(
+                2,
+                1000,
+                200,
+                props_shuffled(9, 8, 7),
+                Some(prov("s2", Some(0.6))),
+            ),
+        ]);
+        let a = audit_history(&h1, &RevisionOptions::default());
+        let b = audit_history(&h2, &RevisionOptions::default());
+        assert_eq!(
+            format!("{a:?}"),
+            format!("{b:?}"),
+            "audit output must not depend on property-map key insertion order"
+        );
+        // (b) The v2 revision is a correction touching >= 2 keys, all sorted.
+        let r1 = &a.revisions[1];
+        assert_eq!(r1.class, RevisionClass::Correction);
+        let keys: Vec<&str> = r1.changes.iter().map(|c| c.key.as_str()).collect();
+        assert!(
+            keys.len() >= 2,
+            "expected a multi-key correction, got {keys:?}"
+        );
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            keys, sorted,
+            "changes must be sorted by key on a multi-key correction"
+        );
     }
 
     // ---- AC5: as_of_transaction_time time-travel ---------------------------
