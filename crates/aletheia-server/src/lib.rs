@@ -30,6 +30,7 @@
 pub mod app;
 pub mod changefeed_stream;
 pub mod constraints_lineage_audit_tools;
+pub mod crypto_shred_tools;
 pub mod edge_tools;
 pub mod http_routes;
 pub mod metrics_exposition;

@@ -3,7 +3,7 @@
   "generated_for": "framework port parity harness",
   "totals": {
     "http_routes": 5,
-    "mcp_tools": 61,
+    "mcp_tools": 63,
     "mcp_budgetable_read_tools": 20
   },
   "http": {
@@ -189,7 +189,9 @@
       {"name": "create_namespace", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "list_namespaces", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "describe_namespace", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "database_stats", "access_class": "metrics", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]}
+      {"name": "database_stats", "access_class": "metrics", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "designate_subject", "access_class": "admin", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "erase_subject", "access_class": "admin", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]}
     ]
   },
   "coverage_gaps": [

@@ -33,7 +33,7 @@
 //! (via the public `McpErrorCode` enum — the single source of truth for the
 //! wire codes), the success + structured-error envelope shapes, the temporal
 //! block on read responses, and the vector-elision default. It also pins the
-//! full 61-tool inventory + access-class table as a golden constant that a
+//! full 63-tool inventory + access-class table as a golden constant that a
 //! porter must keep in lockstep with the server.
 //!
 //! Run with:
@@ -354,7 +354,7 @@ fn representative_tool_roundtrip_is_wellformed() {
 }
 
 // ===========================================================================
-// Golden tool inventory — the 61-tool advertised set + access classes.
+// Golden tool inventory — the 63-tool advertised set + access classes.
 //
 // This is the one place the FULL registry is pinned from an external test:
 // because the advertised list (`tool_definitions`) is not reachable through the
@@ -364,9 +364,11 @@ fn representative_tool_roundtrip_is_wellformed() {
 // ===========================================================================
 
 /// (tool_name, access_class) for every advertised MCP tool, per
-/// `src/mcp/auth.rs::TOOL_ACCESS_CLASSES`. Access class ∈ {read, write, metrics}
-/// (MCP advertises no admin-class tools).
-const TOOL_INVENTORY: [(&str, &str); 61] = [
+/// `src/mcp/auth.rs::TOOL_ACCESS_CLASSES`. Access class ∈
+/// {read, write, metrics, admin} — the GDPR crypto-shred tools
+/// (`designate_subject`/`erase_subject`, Issue #3359) are the first
+/// admin-class MCP tools.
+const TOOL_INVENTORY: [(&str, &str); 63] = [
     ("get_node", "read"),
     ("create_node", "write"),
     ("update_node", "write"),
@@ -428,13 +430,16 @@ const TOOL_INVENTORY: [(&str, &str); 61] = [
     ("list_namespaces", "read"),
     ("describe_namespace", "read"),
     ("database_stats", "metrics"),
+    // GDPR crypto-shred (Issue #3359) — the first admin-class MCP tools.
+    ("designate_subject", "admin"),
+    ("erase_subject", "admin"),
 ];
 
 /// PARITY (external mirror, NOT a live drift detector): this constant is a
-/// cross-crate reference copy of the 61-tool inventory. Because the live
+/// cross-crate reference copy of the 63-tool inventory. Because the live
 /// registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)`
 /// and unreachable from this external test crate, this test only validates the
-/// mirror's internal consistency (61 tools, unique names, MCP-legal classes,
+/// mirror's internal consistency (63 tools, unique names, MCP-legal classes,
 /// exactly one metrics tool) — it does NOT read the server, so it cannot by
 /// itself catch a tool added/removed/renamed/reclassified in the registry.
 ///
@@ -445,7 +450,7 @@ const TOOL_INVENTORY: [(&str, &str); 61] = [
 /// `tests/parity/inventory.json` in lockstep when the inventory changes.
 #[test]
 fn tool_inventory_golden_is_stable() {
-    assert_eq!(TOOL_INVENTORY.len(), 61, "MCP advertises exactly 61 tools");
+    assert_eq!(TOOL_INVENTORY.len(), 63, "MCP advertises exactly 63 tools");
 
     // Names unique.
     let mut names: Vec<&str> = TOOL_INVENTORY.iter().map(|(n, _)| *n).collect();
@@ -454,10 +459,10 @@ fn tool_inventory_golden_is_stable() {
     names.dedup();
     assert_eq!(names.len(), count, "tool names must be unique");
 
-    // Access classes are drawn from the MCP-legal set (no admin tools).
+    // Access classes are drawn from the MCP-legal set.
     for (name, class) in TOOL_INVENTORY {
         assert!(
-            matches!(class, "read" | "write" | "metrics"),
+            matches!(class, "read" | "write" | "metrics" | "admin"),
             "tool `{name}` has an unexpected access class `{class}`"
         );
     }

@@ -1648,6 +1648,61 @@ pub struct DescribeNamespaceRequest {
 }
 
 // ============================================================================
+// GDPR crypto-shred (Issue #3359, Slice 4b) — ADMIN-class tools
+// ============================================================================
+
+/// One designation target for `designate_subject`: a whole entity, or a
+/// specific set of property keys on that entity.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DesignationTargetInput {
+    /// Entity kind: `"node"` or `"edge"`.
+    #[schemars(description = "Entity kind: \"node\" or \"edge\"")]
+    pub entity_kind: String,
+
+    /// The entity id to designate.
+    #[schemars(description = "The id of the node or edge to designate under the subject")]
+    pub id: u64,
+
+    /// Optional property keys to seal. Omit (or empty) to seal the whole entity.
+    #[schemars(
+        description = "Optional property keys to seal under the subject. Omit or leave empty to \
+                       seal the WHOLE entity; provide keys to seal only those specific properties."
+    )]
+    pub keys: Option<Vec<String>>,
+}
+
+/// Arguments for the admin-gated `designate_subject` tool.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DesignateSubjectRequest {
+    /// The erasure-subject id to designate targets under.
+    #[schemars(
+        description = "The erasure-subject id (non-empty, <=256 bytes, no control characters). \
+                       Designating an already-active subject merges the new targets into it."
+    )]
+    pub subject_id: String,
+
+    /// One or more designation targets (whole entities and/or property keys).
+    #[schemars(
+        description = "One or more designation targets (whole nodes/edges and/or specific \
+                       property keys) to seal under the subject. Must be non-empty."
+    )]
+    pub targets: Vec<DesignationTargetInput>,
+}
+
+/// Arguments for the admin-gated `erase_subject` tool.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct EraseSubjectRequest {
+    /// The erasure-subject id to irreversibly erase.
+    #[schemars(
+        description = "The erasure-subject id to irreversibly erase. Destroys the subject's key \
+                       material so its sealed payload becomes permanently undecryptable and \
+                       returns a signed erasure attestation. Re-erasing is an idempotent no-op \
+                       returning the recorded attestation."
+    )]
+    pub subject_id: String,
+}
+
+// ============================================================================
 // Provenance hash chain (Issue #3351)
 // ============================================================================
 

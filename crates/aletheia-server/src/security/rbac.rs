@@ -31,7 +31,7 @@
 //!
 //! This registry is anchored on `tests/parity/inventory.json` — the inventory's
 //! `mcp.tools[].access_class` is the shared source of truth. It enumerates all
-//! 61 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
+//! 63 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
 //! checks it bidirectionally against the inventory, and
 //! `mcp_routable_tools_are_all_classified` checks the live routable set is a
 //! subset (every routable tool classified). Handlers become routable one slice
@@ -44,7 +44,7 @@ use aletheiadb::auth::{AccessClass, Role};
 /// tests derive from THIS list, so the routable-name set and the class-table
 /// set cannot silently drift into two independently-maintained lists.
 ///
-/// This registry is **inventory-anchored**: it enumerates all 61 tools from
+/// This registry is **inventory-anchored**: it enumerates all 63 tools from
 /// `tests/parity/inventory.json` (`mcp.tools[].access_class`) upfront, mirroring
 /// the legacy `src/mcp/auth.rs::TOOL_ACCESS_CLASSES` verbatim. The conformance
 /// test `registry_matches_inventory_exactly` (`tests/security_rbac.rs`) proves
@@ -125,8 +125,13 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     ("update_node_embedding", AccessClass::Write),
     // Namespace creation (Issue #3349, PR3b) — a write.
     ("create_namespace", AccessClass::Write),
-    // ---- Admin: none yet. Key lifecycle is served by the HTTP admin surface
-    // over the shared persisted store (no Admin-class MCP tools).
+    // ---- Admin: GDPR crypto-shred designation & irreversible erasure
+    // (Issue #3359, Slice 4b) — the first Admin-class MCP tools. Erasure
+    // destroys per-subject key material (irreversible), so it is Admin, not
+    // Write. Key lifecycle (create/list/revoke) is still served by the HTTP
+    // admin surface over the shared persisted store.
+    ("designate_subject", AccessClass::Admin),
+    ("erase_subject", AccessClass::Admin),
 ];
 
 /// The access class required by an MCP tool, or `None` if the name is not a
