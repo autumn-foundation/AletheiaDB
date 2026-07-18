@@ -44,7 +44,7 @@
 //! let version = tiered.get_node_version(version_id)?;
 //! ```
 
-use crate::core::changefeed::{ChangeCursor, RawChange};
+use crate::core::changefeed::{ChangeCursor, EntityKind, RawChange};
 use crate::core::error::Result;
 use crate::core::id::VersionId;
 use crate::core::temporal::TimeRange;
@@ -306,6 +306,34 @@ pub struct TieredStorage {
     /// Transaction-time-ordered directory of the cold tier's change-version membership, enabling
     /// the windowed `list_changes` pushdown (Issue #3677).
     cold_change_directory: ColdChangeDirectory,
+    /// Build-latch for the **lazy** one-time cold-change directory seed (Issue #3677). `false`
+    /// until the first changefeed use (`ensure_directory_seeded`) attempts the streaming seed, then
+    /// `true` forever. Held (as a `parking_lot::Mutex`) across the streaming cold scan so the seed
+    /// runs exactly once even under concurrent first-time callers; it is a **leaf** — while held it
+    /// takes no other lock except the directory `RwLock` (briefly, inside `insert_many`), and never
+    /// a write-path lock (`historical`/`wal`/`current_timestamp`), which `list_changes` has already
+    /// released before it reaches the cold path.
+    directory_seeded: Mutex<bool>,
+}
+
+/// The [`ChangeCursor`] identifying a node version in the cold-change directory (Issue #3677).
+fn node_cursor(version: &NodeVersion) -> ChangeCursor {
+    ChangeCursor::for_version(
+        version.temporal.transaction_time().start(),
+        EntityKind::Node,
+        version.node_id.as_u64(),
+        version.id.as_u64(),
+    )
+}
+
+/// The [`ChangeCursor`] identifying an edge version in the cold-change directory (Issue #3677).
+fn edge_cursor(version: &EdgeVersion) -> ChangeCursor {
+    ChangeCursor::for_version(
+        version.temporal.transaction_time().start(),
+        EntityKind::Edge,
+        version.edge_id.as_u64(),
+        version.id.as_u64(),
+    )
 }
 
 impl TieredStorage {
@@ -319,20 +347,18 @@ impl TieredStorage {
         let warm_cache_size = config.warm_cache_size;
         let cold_change_directory =
             ColdChangeDirectory::new(config.cold_change_directory_max_entries);
-        let storage = Self {
+        // The directory is seeded **lazily** on first changefeed use (`ensure_directory_seeded`),
+        // not here: a pure key-value cold user that never calls `list_changes` pays zero seed cost,
+        // and the O(N_cold) seed I/O is deferred off the `TieredStorage::new` / open hot path.
+        Self {
             config,
             cold,
             node_warm_cache: Cache::new(warm_cache_size),
             edge_warm_cache: Cache::new(warm_cache_size),
             metrics: AtomicTieredMetrics::new(),
             cold_change_directory,
-        };
-        // Seed the cold-change directory from whatever the cold tier already holds (a fresh attach
-        // over a populated cold store, or a restart). This is the honest one-time O(N_cold) rebuild
-        // cost — a best-effort seed: a scan error just leaves the directory empty (queries then
-        // degrade to the full scan, which is always correct).
-        storage.rebuild_directory();
-        storage
+            directory_seeded: Mutex::new(false),
+        }
     }
 
     /// Create with default configuration.
@@ -462,10 +488,21 @@ impl TieredStorage {
         resume_after: Option<ChangeCursor>,
         bound: usize,
     ) -> Result<Vec<RawChange>> {
-        match self
-            .cold_change_directory
-            .eligible_candidates(tx_window, resume_after)
-        {
+        // Lazily seed the directory on first changefeed use (once per process). A failed seed
+        // latches `Degraded`, so `eligible_candidates` below returns `None` and we take the sound
+        // full scan — never serving a silently-empty directory as authoritative.
+        self.ensure_directory_seeded();
+
+        // With no valid-window/label filter every in-window candidate survives, so the directory
+        // may cap its candidate allocation at `bound`; with a filter it collects the full range.
+        let has_filter = valid_window.is_some() || label_filter.is_some();
+
+        match self.cold_change_directory.eligible_candidates(
+            tx_window,
+            resume_after,
+            bound,
+            has_filter,
+        ) {
             Some(candidates) => self.cold.collect_changes_from_cursors(
                 &candidates,
                 tx_window,
@@ -494,14 +531,62 @@ impl TieredStorage {
         self.cold_change_directory.insert_many(cursors);
     }
 
-    /// (Re)seed the cold-change directory from the cold tier's current membership (Issue #3677).
+    /// Ensure the cold-change directory has been seeded exactly once from the cold tier (Issue
+    /// #3677 — lazy streaming seed). Called before every `collect_cold_changes` consults the
+    /// directory.
     ///
-    /// Best-effort: a scan error leaves the directory as-is; queries then degrade to the full cold
-    /// scan, which is always correct.
-    pub(crate) fn rebuild_directory(&self) {
-        if let Ok(cursors) = self.cold.scan_change_cursors() {
-            self.cold_change_directory.insert_many(cursors);
+    /// The first caller streams the cold tier's change cursors into the directory and marks it
+    /// authoritatively [`Seeded`](crate::storage::cold_change_directory) on success, or permanently
+    /// `Degraded` on any cold I/O / decode failure; the latch is set either way so a broken store
+    /// is never re-scanned on every query. Subsequent callers are a cheap latched no-op. A pure
+    /// key-value cold user that never calls `list_changes` never seeds at all.
+    ///
+    /// Lock discipline: the build-latch `Mutex` is held across the streaming cold scan, but it is a
+    /// **leaf** — the only other lock taken while it is held is the directory `RwLock` (briefly,
+    /// inside `insert_many`); no write-path lock (`historical`/`wal`/`current_timestamp`) is
+    /// acquired, and `list_changes` has already dropped its `historical` read lock before reaching
+    /// the cold path, so there is no lock-order inversion.
+    pub(crate) fn ensure_directory_seeded(&self) {
+        let mut seeded = self.directory_seeded.lock();
+        if *seeded {
+            return;
         }
+        match self.rebuild_directory() {
+            Ok(()) => self.cold_change_directory.mark_seeded(),
+            Err(_) => self.cold_change_directory.mark_degraded(),
+        }
+        *seeded = true;
+    }
+
+    /// Stream-seed the cold-change directory from the cold tier's current membership (Issue #3677).
+    ///
+    /// Streams the cold tier's change cursors one at a time and flushes them into the directory in
+    /// bounded chunks (each chunk enforces the cap), so peak memory is `O(max_entries + chunk)` —
+    /// it never materializes a full `Vec<NodeVersion>` / `Vec<EdgeVersion>` or an uncapped cursor
+    /// `Vec`. This is the honest one-time `O(N_cold)` seed I/O.
+    ///
+    /// Returns the scan result unchanged: `Ok(())` on a complete seed (the caller marks the
+    /// directory authoritative) or `Err` on any cold failure. **A failed seed forces full-scan
+    /// degradation for the process lifetime** (the caller latches `Degraded` and never re-scans) —
+    /// any partial cursors inserted before the failure are inert, because a degraded directory is
+    /// never consulted.
+    fn rebuild_directory(&self) -> Result<()> {
+        /// Flush granularity: bounds the transient cursor buffer so peak memory stays
+        /// `O(max_entries + SEED_CHUNK)` rather than `O(N_cold)`.
+        const SEED_CHUNK: usize = 4096;
+
+        let mut buf: Vec<ChangeCursor> = Vec::with_capacity(SEED_CHUNK);
+        self.cold.stream_change_cursors(|cursor| {
+            buf.push(cursor);
+            if buf.len() >= SEED_CHUNK {
+                self.cold_change_directory
+                    .insert_many(std::mem::replace(&mut buf, Vec::with_capacity(SEED_CHUNK)));
+            }
+        })?;
+        if !buf.is_empty() {
+            self.cold_change_directory.insert_many(buf);
+        }
+        Ok(())
     }
 
     /// Test-only: access the cold-change directory for white-box assertions (Issue #3677).
@@ -544,30 +629,42 @@ impl TieredStorage {
 
     /// Store a node version to cold storage.
     ///
-    /// This is called during migration from hot to cold tier.
+    /// This writes straight to the cold tier (the production hot→cold migration path records
+    /// cursors separately in `historical::migrate_to_cold`, so this method is used mainly for
+    /// direct/test cold writes). To keep the cold-change directory from silently desyncing on a
+    /// direct write (Issue #3677, robustness fix), it also records the stored version's cursor —
+    /// meaningful once the directory is seeded, a harmless no-op-ish insert before then.
     pub fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
-        self.cold.store_node_version(version)
+        self.cold.store_node_version(version)?;
+        self.record_cold_cursors(std::iter::once(node_cursor(version)));
+        Ok(())
     }
 
-    /// Store an edge version to cold storage.
-    ///
-    /// This is called during migration from hot to cold tier.
+    /// Store an edge version to cold storage. Records the stored version's cursor in the
+    /// cold-change directory to prevent silent desync on a direct write (see
+    /// [`store_node_version`](Self::store_node_version)).
     pub fn store_edge_version(&self, version: &EdgeVersion) -> Result<()> {
-        self.cold.store_edge_version(version)
+        self.cold.store_edge_version(version)?;
+        self.record_cold_cursors(std::iter::once(edge_cursor(version)));
+        Ok(())
     }
 
-    /// Store multiple node versions in a batch.
-    ///
-    /// This is more efficient for bulk migrations.
+    /// Store multiple node versions in a batch. Records the stored versions' cursors in the
+    /// cold-change directory to prevent silent desync on a direct write (see
+    /// [`store_node_version`](Self::store_node_version)).
     pub fn store_node_versions_batch(&self, versions: &[NodeVersion]) -> Result<()> {
-        self.cold.store_node_versions_batch(versions)
+        self.cold.store_node_versions_batch(versions)?;
+        self.record_cold_cursors(versions.iter().map(node_cursor));
+        Ok(())
     }
 
-    /// Store multiple edge versions in a batch.
-    ///
-    /// This is more efficient for bulk migrations.
+    /// Store multiple edge versions in a batch. Records the stored versions' cursors in the
+    /// cold-change directory to prevent silent desync on a direct write (see
+    /// [`store_node_version`](Self::store_node_version)).
     pub fn store_edge_versions_batch(&self, versions: &[EdgeVersion]) -> Result<()> {
-        self.cold.store_edge_versions_batch(versions)
+        self.cold.store_edge_versions_batch(versions)?;
+        self.record_cold_cursors(versions.iter().map(edge_cursor));
+        Ok(())
     }
 
     /// Check if a node version exists in cold storage.

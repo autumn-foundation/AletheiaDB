@@ -288,6 +288,18 @@ use aletheiadb::storage::redb_cold_storage::RedbConfig;
 let config = RedbConfig::new().with_reencrypt_batch_size(512);
 ```
 
+### Tiered Storage (Hot/Warm/Cold) Configuration
+
+`TieredStorageConfig` tunes the warm cache, version-chain prefetch, and the
+in-memory cold changefeed directory that backs the `list_changes` cold-tier
+pushdown (see the tiered-storage guide).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `warm_cache_size` | usize | 10,000 | Warm-cache entries retained per version type |
+| `prefetch_depth` | usize | 5 | Maximum versions prefetched along a version chain |
+| `cold_change_directory_max_entries` | usize | 1,000,000 | Memory budget (entry count) for the in-memory cold changefeed directory (each entry ≈ one `ChangeCursor`, ~5 machine words → ~40-50 MB at the default); `0` disables it so every cold `list_changes` scan degrades to the full scan (Issue #3677) |
+
 ## Configuration Presets
 
 ### Development (Default)

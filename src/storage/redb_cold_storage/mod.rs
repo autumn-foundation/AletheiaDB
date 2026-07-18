@@ -932,6 +932,12 @@ pub struct RedbColdStorage {
     fail_writes: AtomicBool,
     #[cfg(test)]
     writes_attempted: AtomicBool,
+    /// Fault injection flag for the cold-change-cursor seed scan (Issue #3677). When set, the
+    /// streaming seed [`stream_change_cursors`](Self::stream_change_cursors) returns an error, so a
+    /// test can force the cold-change directory to fail its seed over a populated cold store and
+    /// assert the query path degrades to the full scan instead of dropping cold rows.
+    #[cfg(test)]
+    fail_change_cursor_scan: AtomicBool,
 }
 
 impl RedbColdStorage {
@@ -1036,6 +1042,8 @@ impl RedbColdStorage {
             fail_writes: AtomicBool::new(false),
             #[cfg(test)]
             writes_attempted: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_change_cursor_scan: AtomicBool::new(false),
         })
     }
 
@@ -1379,6 +1387,19 @@ impl RedbColdStorage {
     #[cfg(test)]
     pub fn was_write_attempted(&self) -> bool {
         self.writes_attempted.load(Ordering::SeqCst)
+    }
+
+    /// Set the fault injection flag for the cold-change-cursor seed scan (Issue #3677).
+    ///
+    /// When set to `true`, [`stream_change_cursors`](Self::stream_change_cursors) — the streaming
+    /// seed of the cold-change directory — returns an error, letting a test force a seed failure
+    /// over a populated cold store and verify the changefeed degrades to the full scan rather than
+    /// silently dropping cold rows.
+    ///
+    /// #[doc(hidden)]
+    #[cfg(test)]
+    pub(crate) fn set_fail_change_cursor_scan(&self, fail: bool) {
+        self.fail_change_cursor_scan.store(fail, Ordering::SeqCst);
     }
 
     /// Helper to check failure injection
@@ -2118,6 +2139,15 @@ impl RedbColdStorage {
     /// decoded versions into a `Vec` — the caller's `emit` closure decides what (if anything) to
     /// keep. This is what lets the filtered changefeed scan hold only `O(bound)` survivors in
     /// memory instead of the whole table.
+    ///
+    /// # Test-only decode counter
+    ///
+    /// This helper deliberately does **not** increment the `COLD_VERSIONS_DECODED` counter — a
+    /// caller that wants its decodes counted (the full-scan changefeed path
+    /// [`collect_changes_filtered`](Self::collect_changes_filtered)) increments it inside its own
+    /// `emit`, while a caller that must stay off the counter (the one-time cold-change directory
+    /// seed [`stream_change_cursors`](Self::stream_change_cursors)) simply does not, so the
+    /// changefeed decode-count tests measure only query-time point reads, never the seed.
     fn scan_versions_into<V, D, E>(
         &self,
         table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
@@ -2157,8 +2187,6 @@ impl RedbColdStorage {
             let compressed = self.decrypt_if_needed(raw)?;
             let decompressed = self.decompress(&compressed)?;
             let decoded = decode_fn(&decompressed)?;
-            #[cfg(test)]
-            COLD_VERSIONS_DECODED.with(|c| c.set(c.get() + 1));
             emit(decoded);
         }
         Ok(())
@@ -2197,6 +2225,10 @@ impl RedbColdStorage {
             NODE_VERSIONS_TABLE,
             decode_node_version,
             |v: NodeVersion| {
+                // Count this as a query-time cold decode (the full-scan changefeed path); the
+                // one-time directory seed decodes off this counter, see `scan_versions_into`.
+                #[cfg(test)]
+                COLD_VERSIONS_DECODED.with(|c| c.set(c.get() + 1));
                 consider_version(
                     &mut acc,
                     resume_after,
@@ -2217,6 +2249,8 @@ impl RedbColdStorage {
             EDGE_VERSIONS_TABLE,
             decode_edge_version,
             |v: EdgeVersion| {
+                #[cfg(test)]
+                COLD_VERSIONS_DECODED.with(|c| c.set(c.get() + 1));
                 consider_version(
                     &mut acc,
                     resume_after,
@@ -2309,33 +2343,55 @@ impl RedbColdStorage {
         Ok(acc.into_vec())
     }
 
-    /// Compute the [`ChangeCursor`] of every version currently held in cold storage (Issue #3677).
+    /// Stream the [`ChangeCursor`] of every version currently held in cold storage, invoking `emit`
+    /// on each — the streaming seed of the in-memory cold-change directory (Issue #3677).
     ///
-    /// Used to (re)build the in-memory cold-change directory on startup / cold attach. This walks
-    /// the cold tables via the non-instrumented [`scan_node_versions`](Self::scan_node_versions) /
-    /// [`scan_edge_versions`](Self::scan_edge_versions) path (the honest `O(N_cold)` one-time
-    /// rebuild cost), computing each version's cursor without materializing changefeed rows.
-    pub(crate) fn scan_change_cursors(&self) -> Result<Vec<ChangeCursor>> {
-        let nodes = self.scan_node_versions()?;
-        let edges = self.scan_edge_versions()?;
-        let mut cursors = Vec::with_capacity(nodes.len() + edges.len());
-        for v in &nodes {
-            cursors.push(ChangeCursor::for_version(
-                v.temporal.transaction_time().start(),
-                EntityKind::Node,
-                v.node_id.as_u64(),
-                v.id.as_u64(),
-            ));
+    /// Unlike a materializing scan this never accumulates a `Vec<NodeVersion>` / `Vec<EdgeVersion>`
+    /// or an uncapped `Vec<ChangeCursor>`: it decodes one cold version at a time, computes its
+    /// cursor, hands it to `emit`, and drops the decoded version. Peak memory is therefore whatever
+    /// `emit` retains (the directory caps that at `max_entries`), not `O(N_cold)` decoded versions.
+    /// This is the honest one-time `O(N_cold)` seed I/O, run lazily on first changefeed use.
+    ///
+    /// It walks the non-counter-incrementing [`scan_versions_into`](Self::scan_versions_into) path
+    /// so the changefeed decode-count tests measure only query-time point reads, never this seed.
+    ///
+    /// Returns `Err` on any cold I/O / decode failure (the caller then latches the directory
+    /// `Degraded` and every query degrades to the full scan — a failed seed is never served as a
+    /// complete empty answer).
+    pub(crate) fn stream_change_cursors<E>(&self, mut emit: E) -> Result<()>
+    where
+        E: FnMut(ChangeCursor),
+    {
+        #[cfg(test)]
+        if self.fail_change_cursor_scan.load(Ordering::SeqCst) {
+            return Err(StorageError::io_error("Simulated cold-change seed scan failure").into());
         }
-        for v in &edges {
-            cursors.push(ChangeCursor::for_version(
-                v.temporal.transaction_time().start(),
-                EntityKind::Edge,
-                v.edge_id.as_u64(),
-                v.id.as_u64(),
-            ));
-        }
-        Ok(cursors)
+
+        self.scan_versions_into(
+            NODE_VERSIONS_TABLE,
+            decode_node_version,
+            |v: NodeVersion| {
+                emit(ChangeCursor::for_version(
+                    v.temporal.transaction_time().start(),
+                    EntityKind::Node,
+                    v.node_id.as_u64(),
+                    v.id.as_u64(),
+                ));
+            },
+        )?;
+        self.scan_versions_into(
+            EDGE_VERSIONS_TABLE,
+            decode_edge_version,
+            |v: EdgeVersion| {
+                emit(ChangeCursor::for_version(
+                    v.temporal.transaction_time().start(),
+                    EntityKind::Edge,
+                    v.edge_id.as_u64(),
+                    v.id.as_u64(),
+                ));
+            },
+        )?;
+        Ok(())
     }
 
     /// Store a single node version.

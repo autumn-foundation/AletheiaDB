@@ -1695,6 +1695,9 @@ mod changefeed_pushdown_tests {
         // A narrow, recent tx-window matching only versions i in {196,197,198,199,200}.
         let q = query(ts(195_500), ts(201_000), 5);
 
+        // Warm-up: trigger the lazy (non-counter-incrementing) directory seed before measuring, so
+        // the reset+measure below sees only query-time point-read decodes.
+        let _ = db.list_changes(&q).unwrap();
         crate::storage::redb_cold_storage::reset_cold_decode_counter();
         let page = db.list_changes(&q).unwrap();
         let decoded = crate::storage::redb_cold_storage::cold_decode_count();
@@ -2361,7 +2364,9 @@ mod changefeed_pushdown_tests {
             "ordering follows tx-time, not version_id"
         );
 
-        // Only the two in-window versions are decoded (point reads), not a full scan.
+        // Only the two in-window versions are decoded (point reads), not a full scan. The earlier
+        // `assert_parity`/`drain_all` calls above already triggered the lazy directory seed, so the
+        // reset+measure below sees only query-time point-read decodes.
         crate::storage::redb_cold_storage::reset_cold_decode_counter();
         let _ = db.list_changes(&query(from, to, 10)).unwrap();
         let decoded = crate::storage::redb_cold_storage::cold_decode_count();
@@ -2385,6 +2390,8 @@ mod changefeed_pushdown_tests {
         // Whole-timeline window (all 200 match), small limit -> bound = limit + 1.
         let (from, to) = all();
         let limit = 5usize;
+        // Warm-up: trigger the lazy (non-counter-incrementing) directory seed before measuring.
+        let _ = db.list_changes(&query(from, to, limit)).unwrap();
         crate::storage::redb_cold_storage::reset_cold_decode_counter();
         let page = db.list_changes(&query(from, to, limit)).unwrap();
         let decoded = crate::storage::redb_cold_storage::cold_decode_count();
@@ -2408,6 +2415,9 @@ mod changefeed_pushdown_tests {
             .collect();
         // Budget 10 -> newest 10 retained (i = 191..=200), i = 1..=190 evicted.
         let (_dir, tiered) = attach_cold_with_max(&db, &nodes, &[], 10);
+        // Seeding is lazy — trigger it before probing directory state.
+        tiered.ensure_directory_seeded();
+        assert!(tiered.cold_change_directory().is_seeded());
         assert!(!tiered.cold_change_directory().is_complete());
         assert_eq!(tiered.cold_change_directory().len(), 10);
 
@@ -2416,7 +2426,12 @@ mod changefeed_pushdown_tests {
         assert!(
             tiered
                 .cold_change_directory()
-                .eligible_candidates(&TimeRange::new(ts(195_500), ts(201_000)).unwrap(), None)
+                .eligible_candidates(
+                    &TimeRange::new(ts(195_500), ts(201_000)).unwrap(),
+                    None,
+                    usize::MAX,
+                    false
+                )
                 .is_some(),
             "recent window must remain eligible under eviction"
         );
@@ -2443,13 +2458,15 @@ mod changefeed_pushdown_tests {
             .map(|i| cold_node(i, i, ts((i as i64) * 1_000), "Person"))
             .collect();
         let (_dir, tiered) = attach_cold_with_max(&db, &nodes, &[], 10);
+        // Seeding is lazy — trigger it so the eviction watermark is established before probing.
+        tiered.ensure_directory_seeded();
 
         // Old window matching i in {1..=5}, below the eviction watermark -> must degrade.
         let old_window = TimeRange::new(ts(500), ts(5_500)).unwrap();
         assert!(
             tiered
                 .cold_change_directory()
-                .eligible_candidates(&old_window, None)
+                .eligible_candidates(&old_window, None, usize::MAX, false)
                 .is_none(),
             "old window below watermark must degrade to scan"
         );
@@ -2471,8 +2488,8 @@ mod changefeed_pushdown_tests {
     }
 
     // D8 --------------------------------------------------------------------------------------
-    /// The directory is seeded from the cold tier on construction (startup / attach), so a
-    /// freshly-built `TieredStorage` over a populated cold store answers with parity.
+    /// The directory is seeded from the cold tier on first changefeed use (lazy seed), so a
+    /// freshly-built `TieredStorage` over a populated cold store answers with parity once seeded.
     #[test]
     fn cold_directory_startup_rebuild_parity() {
         let db = AletheiaDB::new().unwrap();
@@ -2492,12 +2509,20 @@ mod changefeed_pushdown_tests {
             cold.store_edge_version(v).unwrap();
         }
 
-        // Fresh construction over the already-populated cold Arc: `new` rebuilds the directory.
+        // Fresh construction over the already-populated cold Arc: the directory is NOT seeded yet
+        // (seeding is lazy, deferred to first changefeed use).
         let tiered = Arc::new(TieredStorage::with_default_config(cold));
+        assert!(
+            !tiered.cold_change_directory().is_seeded(),
+            "directory is not seeded until first changefeed use"
+        );
+        // First changefeed use seeds it from the cold tier.
+        tiered.ensure_directory_seeded();
+        assert!(tiered.cold_change_directory().is_seeded());
         assert_eq!(
             tiered.cold_change_directory().len(),
             nodes.len() + edges.len(),
-            "directory seeded from cold on construction"
+            "directory seeded from cold on first use"
         );
         assert!(tiered.cold_change_directory().is_complete());
         db.__test_historical_storage()
@@ -2635,6 +2660,105 @@ mod changefeed_pushdown_tests {
             "paged drain equals unbounded across concurrent migration (no gap, no dup)"
         );
         drop(dir);
+    }
+
+    // D10 -------------------------------------------------------------------------------------
+    /// FIX 1 regression (Issue #3677): a **failed** directory seed over a populated cold store must
+    /// degrade to the full cold scan, never serve an empty-but-"complete" directory that silently
+    /// drops every cold row. The fault-injection hook forces the streaming seed to error; the
+    /// directory latches `Degraded`, and `list_changes` still returns the full correct set
+    /// (byte-parity with the reference oracle).
+    #[test]
+    fn cold_directory_seed_failure_degrades_to_scan() {
+        let db = AletheiaDB::new().unwrap();
+        // Populate a cold tier with a spread of node + edge versions.
+        let nodes: Vec<_> = (1..=50u64)
+            .map(|i| cold_node(i, i, ts((i as i64) * 1_000), "Person"))
+            .collect();
+        let edges: Vec<_> = (1..=20u64)
+            .map(|i| cold_edge(1_000 + i, 1_000 + i, ts((i as i64) * 1_500), "KNOWS"))
+            .collect();
+        let (_dir, tiered) = attach_cold_with_max(&db, &nodes, &edges, 1_000_000);
+
+        // Force the streaming seed scan to fail over the populated store BEFORE any changefeed use.
+        tiered.cold_storage().set_fail_change_cursor_scan(true);
+
+        // First changefeed use attempts the seed, which fails -> directory latches Degraded.
+        let (from, to) = all();
+        let q = query(from, to, 1_000);
+        let page = db.list_changes(&q).unwrap();
+
+        // (b) The degrade path was taken: the seed did not succeed, and the directory is permanently
+        // degraded (never trusted) rather than left empty-but-"seeded".
+        assert!(
+            !tiered.cold_change_directory().is_seeded(),
+            "a failed seed must not mark the directory seeded"
+        );
+        assert!(
+            tiered.cold_change_directory().is_degraded(),
+            "a failed seed latches the permanent Degraded state"
+        );
+
+        // (a) No cold rows dropped: the full correct set is served via the degrade (full-scan) path,
+        // byte-identical to the independent reference oracle.
+        assert_eq!(
+            page.changes.len(),
+            nodes.len() + edges.len(),
+            "all {} cold rows served despite the failed seed (none dropped)",
+            nodes.len() + edges.len()
+        );
+        assert_parity(&db, &q);
+        // A narrow recent window that *would* be directory-eligible if seeded still degrades cleanly.
+        assert_parity(&db, &query(ts(48_500), ts(51_000), 10));
+    }
+
+    // D11 -------------------------------------------------------------------------------------
+    /// FIX 2 (Issue #3677): the directory is seeded **lazily** — not at `TieredStorage::new`, but on
+    /// the first changefeed use — then serves the fast path (small decode count) with parity on
+    /// subsequent queries.
+    #[test]
+    fn cold_directory_lazy_seed_builds_once() {
+        let db = AletheiaDB::new().unwrap();
+        let nodes: Vec<_> = (1..=30u64)
+            .map(|i| cold_node(i, i, ts((i as i64) * 1_000), "Person"))
+            .collect();
+        let (_dir, tiered) = attach_cold_with_max(&db, &nodes, &[], 1_000_000);
+
+        // Not seeded until the first changefeed use — a pure key-value cold user pays no seed cost.
+        assert!(
+            !tiered.cold_change_directory().is_seeded(),
+            "directory must be unseeded before the first list_changes"
+        );
+        assert_eq!(
+            tiered.cold_change_directory().len(),
+            0,
+            "no directory entries exist before the lazy seed"
+        );
+
+        // First list_changes triggers the one-time streaming seed.
+        let q = query(ts(25_500), ts(31_000), 5); // recent window matching i in {26..=30}
+        let page1 = db.list_changes(&q).unwrap();
+        assert!(
+            tiered.cold_change_directory().is_seeded(),
+            "directory is seeded after the first list_changes"
+        );
+        assert_eq!(
+            tiered.cold_change_directory().len(),
+            30,
+            "seeded from every cold version"
+        );
+        assert_eq!(page1.changes.len(), 5);
+
+        // Subsequent query serves the fast path: only the window candidates are point-read.
+        crate::storage::redb_cold_storage::reset_cold_decode_counter();
+        let page2 = db.list_changes(&q).unwrap();
+        let decoded = crate::storage::redb_cold_storage::cold_decode_count();
+        assert_eq!(page2.changes.len(), 5);
+        assert!(
+            decoded <= 20,
+            "seeded fast path decodes only window candidates, decoded {decoded} of 30"
+        );
+        assert_parity(&db, &q);
     }
 
     /// Bench-adjacent (honest): print the candidate working-set size and wall time of the
