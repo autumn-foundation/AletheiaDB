@@ -29,7 +29,6 @@ use crate::storage::index_persistence::formats::{
     GraphIndexData, StringInternerData, TemporalIndexData,
 };
 use crate::storage::index_persistence::graph::{persist_property_map, save_graph_index};
-use crate::storage::index_persistence::strings::restore_string_interner;
 use crate::storage::index_persistence::temporal::{
     convert_edge_version, convert_node_version, save_temporal_index,
 };
@@ -790,11 +789,25 @@ pub(crate) fn materialize_to_dir(
     std::fs::write(&sentinel, b"")
         .map_err(|e| BackupError::Io(format!("failed to write restore sentinel: {e}")))?;
 
-    // 1. String interner (must come first; graph + temporal resolve string indices).
-    // Clear before restoring so this process's interner matches the backup's ID layout.
-    GLOBAL_INTERNER.clear();
-    restore_string_interner(&payload.interner)
-        .map_err(|e| BackupError::Serialization(e.to_string()))?;
+    // 1. String interner: NO process-global mutation.
+    //
+    // We deliberately DO NOT touch the process-global `GLOBAL_INTERNER` here.
+    // A previous version cleared it and re-interned the backup's strings from
+    // id 0 so that this process's interner matched the backup's file-space id
+    // layout. That clear was a PROCESS-GLOBAL side effect: any other
+    // `AletheiaDB` live in the same process instantly held dangling label /
+    // property-key ids, producing "not found in interner - data corruption
+    // detected" WAL-serialize errors or silent wrong-label reads on the
+    // concurrent DB (the concurrent-restore corruption regression).
+    //
+    // It is unnecessary: `save_graph_index` / `save_temporal_index` serialize
+    // `payload.graph` / `payload.temporal` verbatim in the backup's file-space
+    // ids (they never resolve against `GLOBAL_INTERNER`), and the reopen path
+    // (`load_manifest_and_strings_with_remap`, Issue #3490) re-derives a
+    // file-id -> live-id `InternerRemap` from the interner file written below
+    // and applies it to the loaded graph/temporal data. So a restored data dir
+    // reads correct labels purely through the remap-aware startup path, with no
+    // global mutation from `materialize_to_dir`.
 
     // 2. Write interner file.
     let interner_path = manager.interner_path();
