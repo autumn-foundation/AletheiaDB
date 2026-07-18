@@ -543,6 +543,16 @@ harness = false
 path = "benches/mcp_round_trip.rs"
 required-features = ["mcp-server", "config-toml"]
 
+# Crypto-shred designation overhead + non-designated zero-regression (Issue #3665, AC8).
+# Quantifies sealed-write latency/throughput vs plain writes and the <2us
+# non-designated single-hop guarantee. Requires the audit-export feature that
+# gates the crypto-shred designation subsystem.
+[[bench]]
+name = "crypto_shred_overhead"
+harness = false
+path = "benches/crypto_shred_overhead.rs"
+required-features = ["audit-export"]
+
 # Storage layer - raw storage primitives and fast path
 [[bench]]
 name = "current_state"
