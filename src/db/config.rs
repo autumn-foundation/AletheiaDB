@@ -470,6 +470,38 @@ impl AletheiaDB {
                 }
             }
 
+            // Issue #3616 PR4: an INTERRUPTED encrypted → plaintext disable leaves
+            // the durable authority STILL `enabled` (the flip to `disabled` is the
+            // commit point, done LAST), so `config.encryption.enabled` is `true`
+            // here even though the on-disk bytes are being unwrapped to plaintext.
+            // But the disable END STATE is plaintext, and a live encrypted index
+            // manager / cold store would RE-ENCRYPT over the freshly-unwrapped bytes
+            // on the next background persist / cold migration. So on a pending-disable
+            // startup we build every at-rest layer PLAINTEXT (the end state) by
+            // FORCING `enabled=false`, and resolve the DECRYPT ciphers from the
+            // pending disable ledger for the transient resume read passes: the
+            // pre-read WAL hook installs the decrypt keyring so the replay decrypts
+            // the still-encrypted segments, the index unwrap decrypts each `AEIX`
+            // file explicitly, and the cold store is built under the decrypt cold DEK
+            // so its `ACV1` → bare unwrap can decrypt. `None` on the common path (no
+            // pending disable) reproduces prior behavior exactly. A ledger is either
+            // an enable OR a disable ledger, never both, so this never collides with
+            // the enable-resume path below.
+            let disable_resume = if config.persistence.enabled && config.encryption.enabled {
+                crate::db::rotation::disable_resume_ciphers(
+                    &config.persistence.data_dir,
+                    config.encryption.algorithm,
+                )?
+            } else {
+                None
+            };
+            if disable_resume.is_some() {
+                // Force the plaintext (end-state) build; the resume read passes use
+                // the decrypt ciphers resolved above, and the authority is flipped to
+                // `disabled` only once every layer is unwrapped.
+                config.encryption.enabled = false;
+            }
+
             // Issue #3616 PR3: an INTERRUPTED plaintext → encrypted enable leaves
             // the durable authority NOT yet flipped, so `config.encryption.enabled`
             // is still `false` here even though the on-disk WAL/index/cold bytes may
@@ -587,6 +619,19 @@ impl AletheiaDB {
                 // finishes the migration. A no-op when no enable ledger is pending
                 // or the WAL is not yet encrypted.
                 crate::db::rotation::install_pending_enable_wal_keyring(
+                    &wal,
+                    &config.encryption,
+                    &config.persistence.data_dir,
+                )?;
+                // Issue #3616 PR4: mirror for an INTERRUPTED disable — the WAL was
+                // built plaintext (end state) above, but the on-disk segments may
+                // still be encrypted (uninstall/retire not finished). Install the
+                // DECRYPT keyring from the pending disable ledger BEFORE the replay
+                // read so those encrypted segments decrypt; `resume_pending_disable`
+                // (further down) then uninstalls it back to plaintext and retires the
+                // encrypted tail. A no-op when no disable ledger is pending or the
+                // encrypted WAL tail is already retired.
+                crate::db::rotation::install_pending_disable_wal_keyring(
                     &wal,
                     &config.encryption,
                     &config.persistence.data_dir,
@@ -790,6 +835,15 @@ impl AletheiaDB {
             // `config.encryption.enabled` is still false and that gated path never
             // fires. A guarded no-op when no pending-enable ledger exists.
             db.resume_pending_enable()?;
+
+            // Issue #3616 PR4: resume an interrupted encrypted → plaintext disable
+            // migration BEFORE loading indexes, so any half-unwrapped index bytes are
+            // completed (and the WAL finished uninstalling + retiring its encrypted
+            // tail) before the index directory is read back by the PLAINTEXT manager.
+            // Distinct from the rotation/enable paths: a pending disable ledger forced
+            // `config.encryption.enabled=false` above, so those gated paths never
+            // fire. A guarded no-op when no pending-disable ledger exists.
+            db.resume_pending_disable()?;
 
             // Load indexes on startup if enabled
             if let Some(ref manager) = persistence_manager
@@ -1041,6 +1095,17 @@ impl AletheiaDB {
                      DEK; a plaintext manager with a pending enable ledger would let this \
                      worker persist plaintext over encrypted index files (Issue #3616 PR3)"
                 );
+                // Issue #3616 PR4: the inverse invariant — a pending disable ledger
+                // MUST build the index manager PLAINTEXT (the end state). An encrypted
+                // manager with a pending disable ledger would let this worker persist
+                // `AEIX` over the freshly-unwrapped plaintext index files. The
+                // `disable_resume` force-`enabled=false` wiring above enforces this.
+                debug_assert!(
+                    disable_resume.is_none() || manager.keyring().is_none(),
+                    "disable-resume must build the index manager PLAINTEXT; an encrypted \
+                     manager with a pending disable ledger would let this worker persist \
+                     encrypted index files over the unwrapped plaintext snapshot (Issue #3616 PR4)"
+                );
                 let handle = spawn_background_persistence_thread(
                     Arc::clone(&db.current),
                     Arc::clone(&db.historical),
@@ -1086,6 +1151,14 @@ impl AletheiaDB {
                         Arc::clone(&e.cold),
                         crate::db::rotation::ENABLE_KEY_VERSION,
                     );
+                } else if let Some(ref d) = disable_resume {
+                    // Issue #3616 PR4: on an interrupted-disable resume the authority
+                    // is not yet flipped (no encryption manager), but the cold store
+                    // must be built under the DECRYPT cold DEK — at the recorded
+                    // (to-be-retired) version — so `resume_pending_disable_cold`'s
+                    // `ACV1` → bare unwrap pass (below) can decrypt each wrapped value.
+                    cold_storage =
+                        cold_storage.with_cipher_versioned(Arc::clone(&d.cold), d.version);
                 }
 
                 let cold_storage = Arc::new(cold_storage);
@@ -1141,6 +1214,16 @@ impl AletheiaDB {
                 // A guarded no-op when no enable migration with a cold layer is
                 // pending.
                 db.resume_pending_enable_cold()?;
+
+                // Issue #3616 PR4: finish an interrupted encrypted → plaintext
+                // disable migration's COLD layer, now that the cold store is wired
+                // under the decrypt cold DEK. `resume_pending_disable` (run before
+                // index load) deferred the cold unwrap + the authority flip + the
+                // ledger clear to here — this unwraps each `ACV1` value back to bare,
+                // then (all layers settled) flips the authority to `disabled` and
+                // clears the ledger, preserving the binding order. A guarded no-op
+                // when no disable migration with a cold layer is pending.
+                db.resume_pending_disable_cold()?;
             } else {
                 // Issue #3616 PR3: this open() did NOT build a cold tier
                 // (enable_cold_storage disabled or no cold path). If an interrupted
@@ -1150,6 +1233,9 @@ impl AletheiaDB {
                 // with the same actionable "reopen with the cold tier enabled" error
                 // instead of silently stranding the migration.
                 db.fail_if_pending_enable_cold_without_tier()?;
+                // Issue #3616 PR4: the same guard for an interrupted disable whose
+                // ledger records a cold layer but this open() built no cold tier.
+                db.fail_if_pending_disable_cold_without_tier()?;
             }
 
             seed_startup_current_timestamp(&db)?;

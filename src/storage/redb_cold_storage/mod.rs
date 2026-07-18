@@ -221,7 +221,6 @@ pub struct ColdReencryptStats {
 
 /// Statistics returned by a cold `ACV1` → bare unwrap pass (Issue #3616 PR4
 /// disable — the inverse of [`wrap_plaintext_cold_values`]).
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ColdUnwrapStats {
     /// Values decrypted out of their `ACV1` wrapper and rewritten BARE.
@@ -1746,7 +1745,6 @@ impl RedbColdStorage {
     /// * the store is not encrypted (no keyring to decrypt with);
     /// * a value fails to decrypt (a genuine wrong/absent key — surfaced loudly,
     ///   never silently left encrypted) or a redb transaction fails.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn unwrap_encrypted_cold_values(&self) -> Result<ColdUnwrapStats> {
         if self.keyring.is_none() {
             return Err(StorageError::InconsistentState {

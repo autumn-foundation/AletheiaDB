@@ -78,6 +78,42 @@ impl AletheiaDB {
                 ));
             }
 
+            // Fail-closed guard for the QUIESCED post-`disable_encryption` handle
+            // (Issue #3616 PR4) — the mirror of the enable guard above. After
+            // `disable_encryption` the live WAL is plaintext (keyring uninstalled)
+            // but this handle's index manager still carries the ENCRYPTED keyring
+            // (there is no live `Some → None` index-keyring uninstall — see the loud
+            // reopen contract on `disable_encryption`). Persisting now would write
+            // `AEIX` index files OVER the freshly-unwrapped plaintext snapshot — the
+            // exact corruption the disable engine exists to prevent.
+            //
+            // Unlike the enable guard, the raw state (WAL plaintext + index keyring
+            // `Some`) is NOT unique to a post-disable handle: an index-only-encrypted
+            // database (a plaintext WAL over an encrypted index — the sole config in
+            // which an index-only key rotation is safe) has the identical shape and
+            // MUST keep persisting normally. So this rare ambiguous branch is
+            // disambiguated by the durable authority: only a database whose authority
+            // records `disabled` (what `disable_encryption` flips it to) is a
+            // post-disable quiesced handle. A DB with no authority, or one recording
+            // `enabled`, is the legitimate index-only-encrypted case and is allowed.
+            // The extra authority read happens ONLY in this branch (never entered by a
+            // normal plaintext DB — keyring `None`, or a normal encrypted DB — WAL
+            // encrypted), so it adds no hot-path cost.
+            if !self.wal.is_encrypted()
+                && manager.keyring().is_some()
+                && crate::db::encryption_state::read_encryption_state(manager.base_path())?
+                    .is_some_and(|state| !state.enabled)
+            {
+                return Err(crate::core::error::Error::FailedPrecondition(
+                    "cannot persist indexes on a post-disable quiesced handle: the WAL is \
+                     plaintext but this handle's index manager is still encrypted, so a \
+                     persist would write encrypted (AEIX) index files over the plaintext \
+                     snapshot. You MUST reopen the database (drop this handle and call \
+                     AletheiaDB::open) to get a fully-plaintext, persistable instance."
+                        .to_string(),
+                ));
+            }
+
             // Warn if background persistence thread has stopped
             if self
                 .persistence_thread_stopped

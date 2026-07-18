@@ -576,12 +576,8 @@ pub(crate) fn wrap_plaintext_index_dir(
 
 /// Progress of an `AEIX` → plaintext unwrap pass (Issue #3616 PR4 disable).
 ///
-/// Shipped ahead of its production consumer: the disable-engine driver
-/// (`disable_encryption` + `resume_pending_disable`) that calls
-/// [`unwrap_encrypted_index_dir`] lands in a later PR4 slice. Until then only the
-/// round-trip tests exercise it, so the lib build sees it as dead — mirror the
-/// repo's seam-ahead-of-consumer pattern (see `disable_scope` in `db/rotation.rs`).
-#[cfg_attr(not(test), allow(dead_code))]
+/// Consumed in non-test builds by the disable-engine driver (via
+/// `unwrap_disable_index_files` in `db/rotation.rs`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnwrapProgress {
     /// Total files considered under the indexes dir (`AEIX` + already-plaintext).
@@ -626,7 +622,6 @@ pub struct UnwrapProgress {
 ///
 /// Returns an error if a file cannot be read, decrypted (a genuine wrong/absent
 /// key — surfaced loudly, never silently left encrypted), or atomically written.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn unwrap_encrypted_index_dir(
     indexes_dir: &Path,
     cipher: &Arc<dyn Cipher>,

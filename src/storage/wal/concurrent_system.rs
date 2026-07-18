@@ -968,8 +968,7 @@ impl ConcurrentWalSystem {
     /// [`install_wal_keyring`]: Self::install_wal_keyring
     // PR4 (#3616) ships this structural uninstall seam; its production consumer is
     // the encrypted → plaintext disable engine (#3616 PR4), which drives it from
-    // `disable_encryption` and the startup disable-resume hook (later slices).
-    #[cfg_attr(not(test), allow(dead_code))]
+    // `disable_encryption` and the startup disable-resume hook.
     pub(crate) fn uninstall_wal_keyring(&self) -> Result<()> {
         // Serialize the ENTIRE uninstall — presence check, seal, store, reopen —
         // under the same dedicated leaf mutex install uses. Without it, two
