@@ -1507,16 +1507,30 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
 ///
 /// # Precedence
 ///
-/// 1. **Pending rotation ledger** — the currently CONFIGURED key still
-///    corresponds to the OLD generation (the provider switch happens only after
-///    a rotation COMPLETES), so we provision to `ledger.new_version - 1` (the
-///    old version, since `new_version = old_version + 1` by construction) and
-///    let startup [`resume_pending_rotation`] drive the keyring to the ledger
-///    target. Provisioning to the *max on-disk* here would instead be the
-///    target itself and would mis-label the configured (old) cipher as the new
-///    version, breaking resume; the ledger target is therefore the authority
-///    for the *final* `current_version` (reached via resume), not the build
-///    version. This holds for a `cancel` ledger too (old = target - 1).
+/// 1. **Pending rotation ledger** — the provisioned version is resolved
+///    per-direction, because `new_version` does NOT mean the same thing for
+///    every direction:
+///    * `Forward` / `Cancel` — the currently CONFIGURED key still corresponds
+///      to the OLD generation (the provider switch happens only after a
+///      rotation COMPLETES), and `new_version = old_version + 1` by
+///      construction, so we provision to `ledger.new_version - 1` (the old
+///      version) and let startup [`resume_pending_rotation`] drive the keyring
+///      to the ledger target. Provisioning to the *max on-disk* here would
+///      instead be the target itself and would mis-label the configured (old)
+///      cipher as the new version, breaking resume; the ledger target is
+///      therefore the authority for the *final* `current_version` (reached via
+///      resume), not the build version. This holds for a `cancel` ledger too
+///      (old = target - 1).
+///    * `Disable` — a `disable_scope` ledger records `new_version =
+///      current_version` (the key still protecting the on-disk ciphertext, the
+///      key a resumed disable DECRYPTS with — see [`RotationDirection::Disable`]),
+///      NOT `old + 1`. Subtracting 1 here would provision `current_version - 1`
+///      and leave startup unable to decrypt files stamped `current_version`
+///      after a mid-disable crash, so we provision to `ledger.new_version`
+///      verbatim.
+///    * `Enable` — a plaintext → encrypted ledger has `new_version == BASE`, so
+///      `new_version` (no subtraction) equals the base and matches the old
+///      formula's result; kept in the exhaustive match for clarity.
 /// 2. **No pending ledger** (a completed rotation, or never rotated) — provision
 ///    to the MAX stamped key version across BOTH persisted layers: index-file
 ///    `AEIX` headers folded with WAL segment headers. A never-rotated database
@@ -1532,7 +1546,16 @@ pub(crate) fn resolve_provisioned_key_version(
     // 1. A pending ledger is the authority for a mid-rotation-crash state.
     let ledger_path = rotation_state_dir.join("rotation.state");
     if let Some(ledger) = read_rotation_state_at(&ledger_path)? {
-        return Ok(ledger.new_version.saturating_sub(1).max(BASE));
+        let version = match ledger.direction {
+            RotationDirection::Forward | RotationDirection::Cancel => {
+                ledger.new_version.saturating_sub(1).max(BASE)
+            }
+            // A disable ledger's `new_version` is the CURRENT (to-be-retired)
+            // key version protecting on-disk ciphertext, not `old + 1`; an
+            // enable ledger's is `BASE`. Both provision to `new_version` as-is.
+            RotationDirection::Enable | RotationDirection::Disable => ledger.new_version,
+        };
+        return Ok(version);
     }
 
     // 2. Otherwise the max stamped version across the index and WAL layers.
@@ -3689,31 +3712,111 @@ mod tests {
     }
 
     #[test]
+    fn disable_ledger_provisions_current_version_not_minus_one() {
+        // Crash-consistency regression (gemini HIGH): after a mid-disable crash the
+        // on-disk ciphertext is still stamped with the CURRENT key version, which a
+        // `disable_scope` ledger records verbatim as `new_version` (NOT `old + 1`).
+        // `resolve_provisioned_key_version` must therefore provision the keyring to
+        // `new_version` as-is for a disable ledger — the old uniform `new_version - 1`
+        // would provision `current - 1` and leave startup unable to decrypt files
+        // stamped `current`.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let indexes_dir = root.join("indexes");
+        let wal_dir = root.join("wal");
+
+        // Disable case: pending disable ledger recording current key version 7.
+        let disable_dir = root.join("disable_data");
+        let disable_mgr = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            disable_dir.clone(),
+            None,
+        ));
+        let disable_ledger = super::RotationLedger::disable_scope(
+            7,
+            KeyProviderConfig::File {
+                path: root.join("mek.key"),
+            },
+            /* index_in_scope */ true,
+            /* cold_in_scope */ false,
+        );
+        super::write_ledger(&disable_mgr, &disable_ledger).unwrap();
+        let resolved =
+            super::resolve_provisioned_key_version(&indexes_dir, &wal_dir, disable_mgr.base_path())
+                .unwrap();
+        assert_eq!(
+            resolved, 7,
+            "a disable ledger must provision to its recorded current version (7), not 7 - 1"
+        );
+
+        // Regression guard: the additive change must NOT alter the Forward path —
+        // a forward ledger with `new_version = old + 1` still resolves to `old`.
+        let fwd_dir = root.join("forward_data");
+        let fwd_mgr =
+            std::sync::Arc::new(IndexPersistenceManager::with_cipher(fwd_dir.clone(), None));
+        super::write_rotation_state(
+            &fwd_mgr,
+            6, // new_version = old(5) + 1
+            &KeyProviderConfig::File {
+                path: root.join("new.key"),
+            },
+            super::RotationDirection::Forward,
+        )
+        .unwrap();
+        let fwd_resolved =
+            super::resolve_provisioned_key_version(&indexes_dir, &wal_dir, fwd_mgr.base_path())
+                .unwrap();
+        assert_eq!(
+            fwd_resolved, 5,
+            "a forward ledger (new_version = old + 1) must still resolve to old (5)"
+        );
+    }
+
+    #[test]
     fn disable_ledger_is_skipped_by_rotation_resume() {
         // A `direction=disable` ledger must NEVER be driven by the rotation resume
         // paths (which assume an already-encrypted old→new generation). It is the
         // disable engine's own resume that completes it — exactly as an `enable`
-        // ledger is skipped. Proven here by the direct classification helpers so
-        // the guard is regression-locked without standing up a full DB.
+        // ledger is skipped. Proven by driving the ACTUAL rotation resume entry
+        // point (`resume_pending_rotation`) against a pending disable ledger and
+        // asserting it returns `Ok(None)` (skipped, breadcrumb untouched) rather
+        // than attempting to resume it as an old→new-generation rotation.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        let data_dir = root.join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-        let manager =
-            std::sync::Arc::new(IndexPersistenceManager::with_cipher(data_dir.clone(), None));
+        let key = root.join("mek.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key).unwrap();
+
+        let enc_cfg = EncryptionConfig::file_based(&key);
+        // A disable ledger only ever exists on an encrypted DB, so give the
+        // manager the real index cipher — a faithful encrypted-startup shape.
+        let manager = std::sync::Arc::new(IndexPersistenceManager::with_cipher(
+            root.join("data"),
+            Some(std::sync::Arc::clone(
+                EncryptionManager::from_config(&enc_cfg)
+                    .unwrap()
+                    .index_cipher(),
+            )),
+        ));
         let ledger = super::RotationLedger::disable_scope(
             3,
-            KeyProviderConfig::File {
-                path: root.join("mek.key"),
-            },
+            KeyProviderConfig::File { path: key.clone() },
             true,
             false,
         );
         super::write_ledger(&manager, &ledger).unwrap();
 
+        // The real rotation resume entry point must SKIP a disable ledger.
+        let report = super::resume_pending_rotation(&manager, &enc_cfg, None, None)
+            .expect("resume must not error on a disable ledger");
+        assert!(
+            report.is_none(),
+            "rotation resume must skip a disable ledger (Ok(None)), never drive it"
+        );
+
+        // And it must leave the breadcrumb in place for the disable engine's own
+        // resume to complete — skipping must not clear or mutate the ledger.
         let read = super::read_rotation_state(&manager)
             .unwrap()
-            .expect("ledger present");
+            .expect("disable ledger must survive a skipping rotation-resume pass");
         assert!(
             matches!(read.direction, super::RotationDirection::Disable),
             "a disable ledger must parse back as Disable, never a rotation"
