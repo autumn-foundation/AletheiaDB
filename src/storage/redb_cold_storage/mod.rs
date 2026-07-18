@@ -2236,6 +2236,108 @@ impl RedbColdStorage {
         Ok(acc.into_vec())
     }
 
+    /// Materialize the changefeed rows for an explicit, ascending list of candidate cursors
+    /// (Issue #3677 — the cold-tier directory pushdown).
+    ///
+    /// Each candidate names one cold row (`kind_ord` + `version_id`). This point-reads that row
+    /// (decoding it — I/O is `O(candidates)`, not `O(N_cold)`) and feeds the decoded version
+    /// through the **same** [`consider_version`] the full scan uses, so the retained page is
+    /// byte-identical to [`collect_changes_filtered`](Self::collect_changes_filtered) for the same
+    /// arguments. Because candidates arrive in ascending [`ChangeCursor`] order and
+    /// `consider_version` keeps only the `bound`-smallest survivors, once the accumulator holds
+    /// `bound` rows no later candidate can displace one, so the walk early-stops.
+    ///
+    /// A candidate whose version_id is absent (raced eviction between directory read and point
+    /// read) is skipped, never an error.
+    pub(crate) fn collect_changes_from_cursors(
+        &self,
+        cursors: &[ChangeCursor],
+        tx_window: &TimeRange,
+        valid_window: Option<&TimeRange>,
+        label_filter: Option<&str>,
+        resume_after: Option<ChangeCursor>,
+        bound: usize,
+    ) -> Result<Vec<RawChange>> {
+        let mut acc = BoundedChanges::new(bound);
+
+        for cursor in cursors {
+            // Early-stop: with a finite bound and ascending candidates, once `bound` survivors are
+            // retained no larger-cursor candidate can belong on the page.
+            if bound != usize::MAX && acc.len() >= bound {
+                break;
+            }
+
+            let version_id = VersionId::new_unchecked(cursor.version_id);
+            match EntityKind::from_ord(cursor.kind_ord) {
+                EntityKind::Node => {
+                    if let Some(v) = self.get_node_version(version_id)? {
+                        consider_version(
+                            &mut acc,
+                            resume_after,
+                            v.id.as_u64(),
+                            v.node_id.as_u64(),
+                            EntityKind::Node,
+                            &v.temporal,
+                            v.label,
+                            v.prev_version.is_none(),
+                            tx_window,
+                            valid_window,
+                            label_filter,
+                        );
+                    }
+                }
+                EntityKind::Edge => {
+                    if let Some(v) = self.get_edge_version(version_id)? {
+                        consider_version(
+                            &mut acc,
+                            resume_after,
+                            v.id.as_u64(),
+                            v.edge_id.as_u64(),
+                            EntityKind::Edge,
+                            &v.temporal,
+                            v.label,
+                            v.prev_version.is_none(),
+                            tx_window,
+                            valid_window,
+                            label_filter,
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(acc.into_vec())
+    }
+
+    /// Compute the [`ChangeCursor`] of every version currently held in cold storage (Issue #3677).
+    ///
+    /// Used to (re)build the in-memory cold-change directory on startup / cold attach. This walks
+    /// the cold tables via the non-instrumented [`scan_node_versions`](Self::scan_node_versions) /
+    /// [`scan_edge_versions`](Self::scan_edge_versions) path (the honest `O(N_cold)` one-time
+    /// rebuild cost), computing each version's cursor without materializing changefeed rows.
+    pub(crate) fn scan_change_cursors(&self) -> Result<Vec<ChangeCursor>> {
+        let nodes = self.scan_node_versions()?;
+        let edges = self.scan_edge_versions()?;
+        let mut cursors = Vec::with_capacity(nodes.len() + edges.len());
+        for v in &nodes {
+            cursors.push(ChangeCursor::for_version(
+                v.temporal.transaction_time().start(),
+                EntityKind::Node,
+                v.node_id.as_u64(),
+                v.id.as_u64(),
+            ));
+        }
+        for v in &edges {
+            cursors.push(ChangeCursor::for_version(
+                v.temporal.transaction_time().start(),
+                EntityKind::Edge,
+                v.edge_id.as_u64(),
+                v.id.as_u64(),
+            ));
+        }
+        Ok(cursors)
+    }
+
     /// Store a single node version.
     ///
     /// Encodes and compresses the version before writing it to the `node_versions` table.

@@ -49,6 +49,7 @@ use crate::core::error::Result;
 use crate::core::id::VersionId;
 use crate::core::temporal::TimeRange;
 use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
+use crate::storage::cold_change_directory::ColdChangeDirectory;
 use crate::storage::redb_cold_storage::{ColdStorageStats, RedbColdStorage};
 use parking_lot::Mutex;
 use quick_cache::sync::Cache;
@@ -78,6 +79,16 @@ pub struct TieredStorageConfig {
 
     /// Maximum number of versions to prefetch in a chain.
     pub prefetch_depth: usize,
+
+    /// Maximum number of entries retained in the in-memory cold-change directory (Issue #3677).
+    ///
+    /// The directory maps the cold tier's changefeed membership by transaction time so a windowed
+    /// `list_changes` point-reads only the versions in its window instead of decoding the whole
+    /// cold store. Each entry costs a single `ChangeCursor` (≈5 machine words). When the cap is
+    /// exceeded the oldest entries are evicted and any query whose window could touch the evicted
+    /// region degrades to the (sound) full cold scan. `0` disables the directory entirely, so
+    /// every `list_changes` cold scan degrades to the full scan.
+    pub cold_change_directory_max_entries: usize,
 }
 
 impl Default for TieredStorageConfig {
@@ -86,6 +97,7 @@ impl Default for TieredStorageConfig {
             warm_cache_size: 10_000,
             enable_prefetch: true,
             prefetch_depth: 5,
+            cold_change_directory_max_entries: 1_000_000,
         }
     }
 }
@@ -291,6 +303,9 @@ pub struct TieredStorage {
     /// Warm cache for edge versions retrieved from cold storage.
     edge_warm_cache: Cache<VersionId, Arc<EdgeVersion>>,
     metrics: AtomicTieredMetrics,
+    /// Transaction-time-ordered directory of the cold tier's change-version membership, enabling
+    /// the windowed `list_changes` pushdown (Issue #3677).
+    cold_change_directory: ColdChangeDirectory,
 }
 
 impl TieredStorage {
@@ -302,13 +317,22 @@ impl TieredStorage {
     /// * `cold` - Cold storage backend
     pub fn new(config: TieredStorageConfig, cold: Arc<RedbColdStorage>) -> Self {
         let warm_cache_size = config.warm_cache_size;
-        Self {
+        let cold_change_directory =
+            ColdChangeDirectory::new(config.cold_change_directory_max_entries);
+        let storage = Self {
             config,
             cold,
             node_warm_cache: Cache::new(warm_cache_size),
             edge_warm_cache: Cache::new(warm_cache_size),
             metrics: AtomicTieredMetrics::new(),
-        }
+            cold_change_directory,
+        };
+        // Seed the cold-change directory from whatever the cold tier already holds (a fresh attach
+        // over a populated cold store, or a restart). This is the honest one-time O(N_cold) rebuild
+        // cost — a best-effort seed: a scan error just leaves the directory empty (queries then
+        // degrade to the full scan, which is always correct).
+        storage.rebuild_directory();
+        storage
     }
 
     /// Create with default configuration.
@@ -418,16 +442,17 @@ impl TieredStorage {
         self.cold.scan_edge_versions()
     }
 
-    /// Filter-during-decode changefeed scan of the cold tier, bounded to the `bound`-smallest
-    /// survivors by cursor (Issue #3216, PR 2).
+    /// Windowed changefeed scan of the cold tier, bounded to the `bound`-smallest survivors by
+    /// cursor (Issue #3216 PR 2 + Issue #3677 pushdown).
     ///
-    /// Delegates to
-    /// [`RedbColdStorage::collect_changes_filtered`](crate::storage::redb_cold_storage::RedbColdStorage::collect_changes_filtered),
-    /// which applies the changefeed predicate + resume cursor inline as each version is decoded
-    /// and returns only the retained [`RawChange`]s — replacing the full
-    /// `scan_node_versions_cold` / `scan_edge_versions_cold` materialize-then-refilter used by
-    /// `list_changes`. Cold I/O remains O(N) (see the correctness note on the delegate: the
-    /// `version_id` key is not transaction-time ordered, so no early-stop is sound).
+    /// When the in-memory cold-change directory covers the query window (the common recent-window
+    /// case) this ranges the directory and point-reads only the `O(window)` versions it names —
+    /// decoding a handful of cold rows instead of the whole store. When the directory cannot
+    /// vouch for the window (disabled, or the window reaches into an evicted region) it degrades to
+    /// the sound full scan
+    /// [`RedbColdStorage::collect_changes_filtered`](crate::storage::redb_cold_storage::RedbColdStorage::collect_changes_filtered).
+    /// Both paths funnel every candidate through the same `consider_version`, so the retained page
+    /// is byte-identical either way.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn collect_cold_changes(
         &self,
@@ -437,14 +462,48 @@ impl TieredStorage {
         resume_after: Option<ChangeCursor>,
         bound: usize,
     ) -> Result<Vec<RawChange>> {
-        self.cold.collect_changes_filtered(
-            tx_window,
-            valid_window,
-            label_filter,
-            resume_after,
-            bound,
-        )
+        match self
+            .cold_change_directory
+            .eligible_candidates(tx_window, resume_after)
+        {
+            Some(candidates) => self.cold.collect_changes_from_cursors(
+                &candidates,
+                tx_window,
+                valid_window,
+                label_filter,
+                resume_after,
+                bound,
+            ),
+            None => self.cold.collect_changes_filtered(
+                tx_window,
+                valid_window,
+                label_filter,
+                resume_after,
+                bound,
+            ),
+        }
     }
+
+    /// Record the cursors of versions just migrated into the cold tier (Issue #3677).
+    ///
+    /// Called from the hot→cold migration path **after** the versions are durably stored in cold
+    /// and **before** they are removed from the hot maps, so a version is always present in
+    /// `hot ∪ directory` — never absent from both — during the migration window (the existing
+    /// cross-tier dedup by `(kind_ord, version_id)` covers the transient overlap).
+    pub(crate) fn record_cold_cursors(&self, cursors: impl IntoIterator<Item = ChangeCursor>) {
+        self.cold_change_directory.insert_many(cursors);
+    }
+
+    /// (Re)seed the cold-change directory from the cold tier's current membership (Issue #3677).
+    ///
+    /// Best-effort: a scan error leaves the directory as-is; queries then degrade to the full cold
+    /// scan, which is always correct.
+    pub(crate) fn rebuild_directory(&self) {
+        if let Ok(cursors) = self.cold.scan_change_cursors() {
+            self.cold_change_directory.insert_many(cursors);
+        }
+    }
+
 
     /// Prefetch versions in a chain (up to prefetch_depth).
     fn prefetch_chain<V, F>(&self, start: &V, cache: &Cache<VersionId, Arc<V>>, fetch_fn: &F)
@@ -728,6 +787,7 @@ mod tests {
             warm_cache_size: 100,
             enable_prefetch: true,
             prefetch_depth: 3,
+            ..Default::default()
         };
         let tiered = TieredStorage::new(config, Arc::new(cold));
 
@@ -758,6 +818,7 @@ mod tests {
             warm_cache_size: 100,
             enable_prefetch: false,
             prefetch_depth: 3,
+            ..Default::default()
         };
         let tiered = TieredStorage::new(config, Arc::new(cold));
 
@@ -1063,6 +1124,7 @@ mod tests {
             warm_cache_size: 100,
             enable_prefetch: true,
             prefetch_depth: 3,
+            ..Default::default()
         };
         let tiered = TieredStorage::new(config, Arc::new(cold));
 
@@ -1115,6 +1177,7 @@ mod tests {
             warm_cache_size: 5,
             enable_prefetch: false,
             prefetch_depth: 0,
+            ..Default::default()
         };
         let tiered = TieredStorage::new(config, Arc::new(cold));
 
@@ -1190,6 +1253,7 @@ mod tests {
             warm_cache_size: 100,
             enable_prefetch: true,
             prefetch_depth: 3,
+            ..Default::default()
         };
         let tiered = TieredStorage::new(config, Arc::new(cold));
 
