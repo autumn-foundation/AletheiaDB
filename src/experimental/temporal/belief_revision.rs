@@ -251,13 +251,13 @@ impl<'a> BeliefRevisions<'a> {
         let history = self.fetch_history(entity)?;
 
         // Property-scope validation: the key must exist somewhere in history.
-        if let Some(key) = options.property_key.as_deref() {
-            if !history_contains_key(&history, key) {
-                return Err(invalid_argument(
-                    "property_key",
-                    format!("entity {entity} never had property '{key}'"),
-                ));
-            }
+        if let Some(key) = options.property_key.as_deref()
+            && !history_contains_key(&history, key)
+        {
+            return Err(invalid_argument(
+                "property_key",
+                format!("entity {entity} never had property '{key}'"),
+            ));
         }
 
         let log = build_log(entity, &history, options, effective_limit);
@@ -333,6 +333,9 @@ fn build_log(
         });
 
         // Property scope: only emit revisions that touched the scoped key.
+        // Note: a reaffirmation has no value delta, so its `changes` are empty
+        // and it is skipped under a property scope — a scoped audit reports the
+        // *value* trajectory of the key, not every re-assertion of it (v1).
         if let Some(key) = options.property_key.as_deref() {
             let filtered: Vec<PropertyChange> =
                 changes.into_iter().filter(|c| c.key == key).collect();
@@ -361,6 +364,12 @@ fn build_log(
 
 /// Classify a single version. Pure function of the version, its predecessor, and
 /// the max `valid_from` recorded before it — unit-testable in isolation.
+///
+/// This deliberately recomputes the property [`VersionDiff`] rather than
+/// threading one in, so the classifier stays a self-contained pure predicate
+/// (the value the design leans on for the table-driven fixture test). The diff
+/// is cheap relative to the single `historical.read()` the audit already paid
+/// for, and the audit is a cold read, not a hot path.
 fn classify(
     index: usize,
     version: &VersionInfo,
