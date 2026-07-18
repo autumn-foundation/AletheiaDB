@@ -303,6 +303,20 @@ pub struct AletheiaDB {
     /// persistence is enabled; in-memory-only for ephemeral databases. See
     /// [`crate::db::namespace`].
     pub(crate) namespaces: Arc<namespace::NamespaceRegistry>,
+    /// Temporal semantic drift-monitor registry (Issue #3367).
+    ///
+    /// Declarative rules that watch an embedding property's evolution against a
+    /// threshold + window and materialize durable, bi-temporal `__drift_alarm`
+    /// nodes when meaning moves. Entirely off the data write path (a leaf, like
+    /// [`snapshots`](Self::snapshots)). Durably persisted to a
+    /// `{data_dir}/drift_monitors.json` sidecar when index persistence is
+    /// enabled; in-memory-only for ephemeral databases. Gated to the
+    /// experimental `semantic-temporal` cohort so it is compiled out (zero cost)
+    /// when the feature is off. See
+    /// [`crate::experimental::temporal::drift_alarm`].
+    #[cfg(feature = "semantic-temporal")]
+    pub(crate) drift_monitors:
+        Arc<crate::experimental::temporal::drift_alarm::DriftMonitorRegistry>,
     /// Opt-in tamper-evident provenance hash chain (Issue #3351).
     ///
     /// `None` unless `config.chain.enabled`. When present, each committed

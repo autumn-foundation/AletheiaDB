@@ -313,8 +313,21 @@ pub struct DriftFiring {
 /// `INVALID_ARGUMENT` on a dimension mismatch or a zero-magnitude vector for a
 /// cosine/angular metric.
 pub fn metric_distance(a: &[f32], b: &[f32], metric: DriftMetric) -> Result<f32> {
-    let _ = (a, b, metric);
-    todo!("Stage B (#3367): metric distance computation")
+    // Mirror the temporal vector index's private `compute_drift_distance`
+    // (`src/index/vector/temporal/mod.rs`) exactly, so an alarm's measured
+    // distance equals what `find_semantic_drift` would report for the same pair.
+    use crate::core::vector::{cosine_similarity, euclidean_distance};
+    match metric {
+        DriftMetric::Cosine => {
+            let similarity = cosine_similarity(a, b)?;
+            Ok(1.0 - similarity)
+        }
+        DriftMetric::Euclidean => euclidean_distance(a, b),
+        DriftMetric::Angular => {
+            let similarity = cosine_similarity(a, b)?;
+            Ok(similarity.clamp(-1.0, 1.0).acos())
+        }
+    }
 }
 
 /// Deterministic component-wise arithmetic mean over `vectors`.
@@ -324,8 +337,32 @@ pub fn metric_distance(a: &[f32], b: &[f32], metric: DriftMetric) -> Result<f32>
 /// **not** renormalized (documented firing-rule contract).
 #[must_use]
 pub fn centroid(vectors: &[&[f32]]) -> Option<Vec<f32>> {
-    let _ = vectors;
-    todo!("Stage B (#3367): deterministic component-wise centroid")
+    let first = vectors.first()?;
+    let dim = first.len();
+    // Component-wise sum in the caller-provided (node-id-sorted) order, then
+    // divide by count. Deliberately NOT renormalized: the firing rule compares
+    // raw arithmetic means so a fixture is hand-computable. A vector whose
+    // dimension does not match the first is skipped (defensive; all vectors of
+    // one index share a dimension in practice).
+    let mut sum = vec![0.0f32; dim];
+    let mut count = 0usize;
+    for v in vectors {
+        if v.len() != dim {
+            continue;
+        }
+        for (acc, x) in sum.iter_mut().zip(v.iter()) {
+            *acc += *x;
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    let inv = 1.0 / count as f32;
+    for acc in &mut sum {
+        *acc *= inv;
+    }
+    Some(sum)
 }
 
 /// Pure per-entity firing decision for one `(now, past)` embedding pair.
@@ -344,8 +381,21 @@ pub fn decide_entity_firing(
     threshold: f32,
     has_unresolved: bool,
 ) -> Result<Option<f32>> {
-    let _ = (e_now, e_past, metric, threshold, has_unresolved);
-    todo!("Stage B (#3367): pure per-entity firing decision")
+    // Rule 3: an unresolved alarm for (M, E) suppresses re-firing.
+    if has_unresolved {
+        return Ok(None);
+    }
+    // Rule 1: both endpoints must exist (a version actually in-window).
+    let (Some(now), Some(past)) = (e_now, e_past) else {
+        return Ok(None);
+    };
+    let distance = metric_distance(now, past, metric)?;
+    // Rule 2: strict `>` — exactly-at-threshold does NOT fire.
+    if distance > threshold {
+        Ok(Some(distance))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Evaluate a monitor against the database as of `now`, producing the set of
@@ -360,17 +410,497 @@ pub fn evaluate_monitor(
     monitor: &DriftMonitor,
     now: Timestamp,
 ) -> Result<Vec<DriftFiring>> {
-    let _ = (db, monitor, now);
-    todo!("Stage B (#3367): monitor evaluation over temporal vector history")
+    // Lookback window: [now - window, now]. We compare, per entity, the
+    // *earliest* embedding version still inside that window against the
+    // *latest* (current) one. This is the operational reading of the design's
+    // `embedding(E, now)` vs `embedding(E, now - window)`: reconstructing
+    // literally at the instant `now - window` would never fire on an entity's
+    // very first drift (that instant precedes its creation), so the "past
+    // endpoint" is the oldest fact still within the lookback window. If fewer
+    // than two versions fall in the window the past endpoint is MISSING and the
+    // entity does not fire (rule 1).
+    let window_micros = i128::from(monitor.spec.window.as_micros() as i64);
+    let now_wall = i128::from(now.wallclock());
+    let past_wall = now_wall.saturating_sub(window_micros);
+    let past_bound =
+        Timestamp::new(clamp_micros(past_wall), 0).unwrap_or_else(|_| Timestamp::from(0));
+
+    match monitor.spec.target {
+        DriftTarget::PerEntity => {
+            let mut firings = Vec::new();
+            for node in monitor_entities(db, &monitor.spec) {
+                let window = entity_window_embeddings(
+                    db,
+                    node,
+                    past_wall,
+                    now_wall,
+                    &monitor.spec.property_key,
+                );
+                let (e_now, e_past) = endpoints(&window);
+                let decision = decide_entity_firing(
+                    e_now.map(|w| w.embedding.as_slice()),
+                    e_past.map(|w| w.embedding.as_slice()),
+                    monitor.spec.metric,
+                    monitor.spec.threshold,
+                    // Purity: dedup against unresolved alarms happens at
+                    // persistence time (`evaluate_drift_monitor_now`), not here.
+                    false,
+                )?;
+                if let Some(distance) = decision {
+                    // `endpoints` guarantees both are `Some` when a distance is
+                    // produced.
+                    let now_pt = e_now.expect("firing implies a now endpoint");
+                    let past_pt = e_past.expect("firing implies a past endpoint");
+                    firings.push(DriftFiring {
+                        entity: Some(node),
+                        label: None,
+                        measured_distance: distance,
+                        compared_now: now_pt.at,
+                        compared_past: past_pt.at,
+                        from_version: Some(past_pt.version),
+                        to_version: Some(now_pt.version),
+                    });
+                }
+            }
+            Ok(firings)
+        }
+        DriftTarget::LabelCentroid => {
+            // Deterministic component-wise mean over entities carrying the label
+            // that have the vector, iterated in ascending node-id order.
+            let mut now_vecs: Vec<Vec<f32>> = Vec::new();
+            let mut past_vecs: Vec<Vec<f32>> = Vec::new();
+            for node in monitor_entities(db, &monitor.spec) {
+                let window = entity_window_embeddings(
+                    db,
+                    node,
+                    past_wall,
+                    now_wall,
+                    &monitor.spec.property_key,
+                );
+                let (e_now, e_past) = endpoints(&window);
+                // Skip entities missing the vector in-window (documented).
+                if let (Some(n), Some(p)) = (e_now, e_past) {
+                    now_vecs.push(n.embedding.clone());
+                    past_vecs.push(p.embedding.clone());
+                }
+            }
+            let now_refs: Vec<&[f32]> = now_vecs.iter().map(Vec::as_slice).collect();
+            let past_refs: Vec<&[f32]> = past_vecs.iter().map(Vec::as_slice).collect();
+            let (Some(c_now), Some(c_past)) = (centroid(&now_refs), centroid(&past_refs)) else {
+                return Ok(Vec::new());
+            };
+            let decision = decide_entity_firing(
+                Some(&c_now),
+                Some(&c_past),
+                monitor.spec.metric,
+                monitor.spec.threshold,
+                false,
+            )?;
+            match decision {
+                Some(distance) => Ok(vec![DriftFiring {
+                    entity: None,
+                    label: monitor.spec.label.clone(),
+                    measured_distance: distance,
+                    compared_now: now,
+                    compared_past: past_bound,
+                    from_version: None,
+                    to_version: None,
+                }]),
+                None => Ok(Vec::new()),
+            }
+        }
+    }
+}
+
+/// One embedding version observed inside a monitor's lookback window.
+struct WindowEmbedding {
+    /// Transaction-time coordinate of the version.
+    at: Timestamp,
+    /// The version reference.
+    version: VersionId,
+    /// The reconstructed embedding at that version.
+    embedding: Vec<f32>,
+}
+
+/// Clamp a 128-bit micros value back into `i64` range for `Timestamp`.
+fn clamp_micros(v: i128) -> i64 {
+    v.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+/// The entities a monitor watches, in ascending node-id order: the explicit
+/// `entities` set if given, else every node carrying `label`, else empty.
+fn monitor_entities(db: &AletheiaDB, spec: &DriftMonitorSpec) -> Vec<NodeId> {
+    let mut ids: Vec<NodeId> = if let Some(entities) = &spec.entities {
+        entities.clone()
+    } else if let Some(label) = &spec.label {
+        db.scan_nodes_by_label(label).collect()
+    } else {
+        Vec::new()
+    };
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Reconstruct an entity's embedding versions that fall inside the lookback
+/// window `[past_wall, now_wall]` (transaction-time wallclock micros), oldest
+/// first. Backed by the bi-temporal node history (`get_node_history`), which
+/// carries both the version id and the embedding property for each version —
+/// the temporal reconstruction the design references, plus the version refs the
+/// alarm record needs. A node with no history (e.g. never created) yields an
+/// empty window rather than an error, so a monitor over a not-yet-existing
+/// entity simply does not fire.
+fn entity_window_embeddings(
+    db: &AletheiaDB,
+    node: NodeId,
+    past_wall: i128,
+    now_wall: i128,
+    property_key: &str,
+) -> Vec<WindowEmbedding> {
+    let history = match db.get_node_history(node) {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for version in history.versions {
+        let tx_start = version.temporal.transaction_time().start();
+        let tx_wall = i128::from(tx_start.wallclock());
+        if tx_wall < past_wall || tx_wall > now_wall {
+            continue;
+        }
+        if let Some(crate::core::property::PropertyValue::Vector(v)) =
+            version.properties.get(property_key)
+        {
+            out.push(WindowEmbedding {
+                at: tx_start,
+                version: version.version_id,
+                embedding: v.to_vec(),
+            });
+        }
+    }
+    // Oldest first (get_node_history is already version-number ordered, but sort
+    // by transaction time defensively for a stable oldest/newest pick).
+    out.sort_by_key(|w| w.at);
+    out
+}
+
+/// Pick the `(now, past)` endpoints from an oldest-first window: `now` is the
+/// latest version, `past` is the earliest — but only when at least two versions
+/// are in-window (a single version has no past to compare against).
+fn endpoints(window: &[WindowEmbedding]) -> (Option<&WindowEmbedding>, Option<&WindowEmbedding>) {
+    match window.len() {
+        0 => (None, None),
+        1 => (Some(&window[0]), None),
+        n => (Some(&window[n - 1]), Some(&window[0])),
+    }
 }
 
 /// Build an `INVALID_ARGUMENT`-mapped error (`QueryError::InvalidParameter`).
-#[allow(dead_code)] // Stage B (#3367): used by monitor validation in the green impl.
 fn invalid_argument(parameter: &str, reason: impl Into<String>) -> Error {
     Error::Query(QueryError::InvalidParameter {
         parameter: parameter.to_string(),
         reason: reason.into(),
     })
+}
+
+/// `NOT_FOUND`-mapped error for a missing monitor/alarm (reuses the string-
+/// carrying storage not-found variant, mirroring the snapshot registry).
+fn not_found(what: impl Into<String>) -> Error {
+    Error::Storage(crate::core::error::StorageError::PropertyNotFound(
+        what.into(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Monitor registry (durable sidecar `drift_monitors.json`, mirrors #3370).
+// ---------------------------------------------------------------------------
+
+/// Lowercase token for a [`DriftMetric`] (stable across JSON / sidecar).
+fn metric_token(metric: DriftMetric) -> &'static str {
+    match metric {
+        DriftMetric::Cosine => "cosine",
+        DriftMetric::Euclidean => "euclidean",
+        DriftMetric::Angular => "angular",
+    }
+}
+
+/// Parse a [`DriftMetric`] token; unknown tokens fall back to `Cosine`.
+fn metric_from_token(token: &str) -> DriftMetric {
+    match token {
+        "euclidean" => DriftMetric::Euclidean,
+        "angular" => DriftMetric::Angular,
+        _ => DriftMetric::Cosine,
+    }
+}
+
+/// In-process registry of declared drift monitors, optionally persisted to a
+/// `drift_monitors.json` sidecar (atomic temp→fsync→rename), mirroring the
+/// named-snapshot registry (#3370). Entirely off the data write path.
+pub(crate) struct DriftMonitorRegistry {
+    entries: parking_lot::RwLock<std::collections::BTreeMap<u64, DriftMonitor>>,
+    next_id: AtomicU64,
+    persist_path: Option<std::path::PathBuf>,
+    save_lock: parking_lot::Mutex<()>,
+}
+
+/// serde envelope for the sidecar. Foreign types (`DriftMetric`, `NodeId`,
+/// `Timestamp`) have no serde derives, so a monitor is projected onto a flat
+/// primitive record, mirroring the snapshot registry's `ts_hlc` approach.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedMonitor {
+    id: u64,
+    property_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entities: Option<Vec<u64>>,
+    metric: String,
+    threshold: f32,
+    window_micros: u64,
+    target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scheduled_interval_micros: Option<u64>,
+    created_wallclock: i64,
+    created_logical: u32,
+}
+
+/// The on-disk registry envelope (versioned, mirrors the snapshot store).
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedRegistry {
+    version: u32,
+    monitors: Vec<PersistedMonitor>,
+}
+
+/// Persisted-format version for the drift-monitor sidecar.
+#[cfg(feature = "serde")]
+const PERSIST_FORMAT_VERSION: u32 = 1;
+
+impl DriftMonitorRegistry {
+    /// An empty, memory-only registry (no file is ever written).
+    pub(crate) fn in_memory() -> Self {
+        Self {
+            entries: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
+            next_id: AtomicU64::new(1),
+            persist_path: None,
+            save_lock: parking_lot::Mutex::new(()),
+        }
+    }
+
+    /// Open a registry, loading any existing sidecar at `path`.
+    ///
+    /// A corrupt or unparseable sidecar is quarantined aside (`*.corrupt`) and
+    /// the registry starts empty — startup is never bricked (mirrors #3370).
+    pub(crate) fn open(path: Option<std::path::PathBuf>) -> Result<Self> {
+        let registry = Self {
+            entries: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
+            next_id: AtomicU64::new(1),
+            persist_path: path.clone(),
+            save_lock: parking_lot::Mutex::new(()),
+        };
+        #[cfg(feature = "serde")]
+        if let Some(path) = path {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => match serde_json::from_str::<PersistedRegistry>(&contents) {
+                    Ok(parsed) if parsed.version <= PERSIST_FORMAT_VERSION => {
+                        let mut max_id = 0u64;
+                        let mut entries = registry.entries.write();
+                        for pm in parsed.monitors {
+                            if let Some(monitor) = persisted_to_monitor(pm) {
+                                max_id = max_id.max(monitor.id.get());
+                                entries.insert(monitor.id.get(), monitor);
+                            }
+                        }
+                        registry.next_id.store(max_id + 1, Ordering::SeqCst);
+                    }
+                    _ => quarantine(&path),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => quarantine(&path),
+            }
+        }
+        Ok(registry)
+    }
+
+    /// Register a new monitor: assign a monotonic id, insert, persist.
+    pub(crate) fn register(
+        &self,
+        spec: DriftMonitorSpec,
+        created_at: Timestamp,
+    ) -> Result<DriftMonitor> {
+        let _guard = self.save_lock.lock();
+        let id = MonitorId::new(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let monitor = DriftMonitor {
+            id,
+            spec,
+            created_at,
+        };
+        self.entries.write().insert(id.get(), monitor.clone());
+        if let Err(e) = self.save_locked() {
+            self.entries.write().remove(&id.get());
+            return Err(e);
+        }
+        Ok(monitor)
+    }
+
+    /// Fetch a monitor by id.
+    pub(crate) fn get(&self, id: MonitorId) -> Option<DriftMonitor> {
+        self.entries.read().get(&id.get()).cloned()
+    }
+
+    /// List all monitors in ascending id order.
+    pub(crate) fn list(&self) -> Vec<DriftMonitor> {
+        self.entries.read().values().cloned().collect()
+    }
+
+    /// Remove a monitor by id (NOT_FOUND if absent).
+    pub(crate) fn remove(&self, id: MonitorId) -> Result<()> {
+        let _guard = self.save_lock.lock();
+        let removed = {
+            let mut entries = self.entries.write();
+            match entries.remove(&id.get()) {
+                Some(removed) => removed,
+                None => return Err(not_found(format!("drift monitor {}", id.get()))),
+            }
+        };
+        if let Err(e) = self.save_locked() {
+            self.entries.write().insert(id.get(), removed);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Durable-write body, assuming `save_lock` is held. No-op when no path.
+    fn save_locked(&self) -> Result<()> {
+        let Some(path) = &self.persist_path else {
+            return Ok(());
+        };
+        #[cfg(not(feature = "serde"))]
+        {
+            let _ = path;
+            return Ok(());
+        }
+        #[cfg(feature = "serde")]
+        {
+            let monitors: Vec<PersistedMonitor> = self
+                .entries
+                .read()
+                .values()
+                .map(monitor_to_persisted)
+                .collect();
+            let serialized = serde_json::to_vec_pretty(&PersistedRegistry {
+                version: PERSIST_FORMAT_VERSION,
+                monitors,
+            })
+            .map_err(|e| Error::Other(format!("failed to serialize drift monitors: {e}")))?;
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            let tmp_path = path.with_extension("tmp");
+            let _ = std::fs::remove_file(&tmp_path);
+            {
+                use std::io::Write as _;
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                let mut file = options.open(&tmp_path)?;
+                file.write_all(&serialized)?;
+                file.sync_all()?;
+            }
+            std::fs::rename(&tmp_path, path)?;
+            #[cfg(unix)]
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Move a corrupt/unreadable sidecar aside (`*.corrupt`) so startup proceeds.
+#[cfg(feature = "serde")]
+fn quarantine(path: &std::path::Path) {
+    let mut corrupt = path.as_os_str().to_owned();
+    corrupt.push(".corrupt");
+    let _ = std::fs::rename(path, std::path::PathBuf::from(corrupt));
+}
+
+#[cfg(feature = "serde")]
+fn monitor_to_persisted(monitor: &DriftMonitor) -> PersistedMonitor {
+    let (target, scheduled_interval_micros) = match monitor.spec.mode {
+        EvalMode::OnWrite => (monitor.spec.target.as_str().to_string(), None),
+        EvalMode::Scheduled { interval } => (
+            monitor.spec.target.as_str().to_string(),
+            Some(interval.as_micros() as u64),
+        ),
+    };
+    PersistedMonitor {
+        id: monitor.id.get(),
+        property_key: monitor.spec.property_key.clone(),
+        label: monitor.spec.label.clone(),
+        entities: monitor
+            .spec
+            .entities
+            .as_ref()
+            .map(|e| e.iter().map(|n| n.as_u64()).collect()),
+        metric: metric_token(monitor.spec.metric).to_string(),
+        threshold: monitor.spec.threshold,
+        window_micros: monitor.spec.window.as_micros() as u64,
+        target,
+        scheduled_interval_micros,
+        created_wallclock: monitor.created_at.wallclock(),
+        created_logical: monitor.created_at.logical(),
+    }
+}
+
+#[cfg(feature = "serde")]
+fn persisted_to_monitor(pm: PersistedMonitor) -> Option<DriftMonitor> {
+    let target = match pm.target.as_str() {
+        "label_centroid" => DriftTarget::LabelCentroid,
+        _ => DriftTarget::PerEntity,
+    };
+    let mode = match pm.scheduled_interval_micros {
+        Some(micros) => EvalMode::Scheduled {
+            interval: Duration::from_micros(micros),
+        },
+        None => EvalMode::OnWrite,
+    };
+    let entities = pm.entities.map(|ids| {
+        ids.into_iter()
+            .filter_map(|n| NodeId::new(n).ok())
+            .collect()
+    });
+    let created_at = Timestamp::new(pm.created_wallclock, pm.created_logical).ok()?;
+    Some(DriftMonitor {
+        id: MonitorId::new(pm.id),
+        spec: DriftMonitorSpec {
+            property_key: pm.property_key,
+            label: pm.label,
+            entities,
+            metric: metric_from_token(&pm.metric),
+            threshold: pm.threshold,
+            window: Duration::from_micros(pm.window_micros),
+            target,
+            mode,
+        },
+        created_at,
+    })
+}
+
+/// Build the sidecar path for the drift-monitor registry, or `None` when the
+/// database is ephemeral. Lives inside the persistence dir at
+/// `{persistence.data_dir}/drift_monitors.json`, mirroring `snapshots.json`.
+pub(crate) fn registry_path_for(
+    persistence: &crate::storage::index_persistence::PersistenceConfig,
+) -> Option<std::path::PathBuf> {
+    if !persistence.enabled {
+        return None;
+    }
+    Some(persistence.data_dir.join("drift_monitors.json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +956,96 @@ impl DriftAlarmEngine {
 // Feature-gated AletheiaDB accessors (present only under `semantic-temporal`).
 // ---------------------------------------------------------------------------
 
+// Property keys under which an alarm's AC4 fields live on its `__drift_alarm`
+// node (append-only bi-temporal; resolve is a recorded update, never a delete).
+const P_MONITOR_ID: &str = "monitor_id";
+const P_ENTITY_ID: &str = "entity_id";
+const P_LABEL: &str = "label";
+const P_DISTANCE: &str = "measured_distance";
+const P_THRESHOLD: &str = "threshold";
+const P_METRIC: &str = "metric";
+const P_NOW_WALL: &str = "compared_now_wallclock";
+const P_NOW_LOG: &str = "compared_now_logical";
+const P_PAST_WALL: &str = "compared_past_wallclock";
+const P_PAST_LOG: &str = "compared_past_logical";
+const P_FROM_VER: &str = "from_version";
+const P_TO_VER: &str = "to_version";
+const P_RESOLVED: &str = "resolved";
+const P_FIRED_WALL: &str = "fired_at_wallclock";
+const P_FIRED_LOG: &str = "fired_at_logical";
+const P_RESOLUTION_WALL: &str = "resolution_wallclock";
+const P_RESOLUTION_LOG: &str = "resolution_logical";
+
+fn prop_int(props: &crate::core::property::PropertyMap, key: &str) -> Option<i64> {
+    match props.get(key) {
+        Some(crate::core::property::PropertyValue::Int(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+fn prop_float(props: &crate::core::property::PropertyMap, key: &str) -> Option<f64> {
+    match props.get(key) {
+        Some(crate::core::property::PropertyValue::Float(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+fn prop_bool(props: &crate::core::property::PropertyMap, key: &str) -> Option<bool> {
+    match props.get(key) {
+        Some(crate::core::property::PropertyValue::Bool(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+fn prop_string(props: &crate::core::property::PropertyMap, key: &str) -> Option<String> {
+    match props.get(key) {
+        Some(crate::core::property::PropertyValue::String(v)) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
+/// Reconstruct a [`DriftAlarm`] from the properties of a `__drift_alarm` node.
+/// Returns `None` if a required field is absent (not an alarm node).
+fn alarm_from_node(
+    alarm_id: NodeId,
+    props: &crate::core::property::PropertyMap,
+) -> Option<DriftAlarm> {
+    let monitor_id = MonitorId::new(prop_int(props, P_MONITOR_ID)? as u64);
+    let measured_distance = prop_float(props, P_DISTANCE)? as f32;
+    let threshold = prop_float(props, P_THRESHOLD)? as f32;
+    let metric = metric_from_token(&prop_string(props, P_METRIC)?);
+    let compared_now = Timestamp::new(
+        prop_int(props, P_NOW_WALL)?,
+        prop_int(props, P_NOW_LOG).unwrap_or(0) as u32,
+    )
+    .ok()?;
+    let compared_past = Timestamp::new(
+        prop_int(props, P_PAST_WALL)?,
+        prop_int(props, P_PAST_LOG).unwrap_or(0) as u32,
+    )
+    .ok()?;
+    let fired_at = Timestamp::new(
+        prop_int(props, P_FIRED_WALL)?,
+        prop_int(props, P_FIRED_LOG).unwrap_or(0) as u32,
+    )
+    .ok()?;
+    Some(DriftAlarm {
+        alarm_id,
+        monitor_id,
+        entity: prop_int(props, P_ENTITY_ID).and_then(|v| NodeId::new(v as u64).ok()),
+        label: prop_string(props, P_LABEL),
+        measured_distance,
+        threshold,
+        metric,
+        compared_now,
+        compared_past,
+        from_version: prop_int(props, P_FROM_VER).and_then(|v| VersionId::new(v as u64).ok()),
+        to_version: prop_int(props, P_TO_VER).and_then(|v| VersionId::new(v as u64).ok()),
+        resolved: prop_bool(props, P_RESOLVED).unwrap_or(false),
+        fired_at,
+    })
+}
+
 impl AletheiaDB {
     /// Create and register a drift monitor (Issue #3367).
     ///
@@ -434,13 +1054,62 @@ impl AletheiaDB {
     /// `INVALID_ARGUMENT` for an unknown property, a metric inconsistent with
     /// the property's index metric, a non-positive threshold, or a zero window.
     pub fn create_drift_monitor(&self, spec: DriftMonitorSpec) -> Result<DriftMonitor> {
-        let _ = spec;
-        todo!("Stage B (#3367): validate + register drift monitor")
+        // Threshold must be positive and finite (strict `>` firing rule).
+        if !(spec.threshold.is_finite() && spec.threshold > 0.0) {
+            return Err(invalid_argument(
+                "threshold",
+                "threshold must be a positive, finite number",
+            ));
+        }
+        // Window must be a positive duration.
+        if spec.window.is_zero() {
+            return Err(invalid_argument(
+                "window",
+                "window must be a positive duration",
+            ));
+        }
+        // The property must have a temporal vector index; its metric must be
+        // consistent with the monitor's metric.
+        let index = self
+            .current
+            .get_temporal_vector_index_for(&spec.property_key)
+            .ok_or_else(|| {
+                invalid_argument(
+                    "property_key",
+                    format!(
+                        "no temporal vector index enabled for property '{}'",
+                        spec.property_key
+                    ),
+                )
+            })?;
+        let index_metric = index.distance_metric();
+        let consistent = matches!(
+            (spec.metric, index_metric),
+            (DriftMetric::Cosine, crate::index::vector::DistanceMetric::Cosine)
+                | (
+                    DriftMetric::Euclidean,
+                    crate::index::vector::DistanceMetric::Euclidean
+                )
+                // Angular is a cosine-family refinement permitted on a cosine index.
+                | (DriftMetric::Angular, crate::index::vector::DistanceMetric::Cosine)
+        );
+        if !consistent {
+            return Err(invalid_argument(
+                "metric",
+                format!(
+                    "metric {:?} is inconsistent with the property's index metric {index_metric:?}",
+                    spec.metric
+                ),
+            ));
+        }
+        let created_at = crate::core::temporal::time::now();
+        self.drift_monitors.register(spec, created_at)
     }
 
-    /// List all registered drift monitors.
+    /// List all registered drift monitors (ascending id order).
+    #[must_use]
     pub fn list_drift_monitors(&self) -> Vec<DriftMonitor> {
-        todo!("Stage B (#3367): list drift monitors")
+        self.drift_monitors.list()
     }
 
     /// Fetch a single monitor by id.
@@ -449,8 +1118,9 @@ impl AletheiaDB {
     ///
     /// `NOT_FOUND` for an unknown monitor id.
     pub fn get_drift_monitor(&self, id: MonitorId) -> Result<DriftMonitor> {
-        let _ = id;
-        todo!("Stage B (#3367): get drift monitor")
+        self.drift_monitors
+            .get(id)
+            .ok_or_else(|| not_found(format!("drift monitor {}", id.get())))
     }
 
     /// Delete a monitor, removing it from future evaluation.
@@ -459,41 +1129,214 @@ impl AletheiaDB {
     ///
     /// `NOT_FOUND` for an unknown monitor id.
     pub fn delete_drift_monitor(&self, id: MonitorId) -> Result<()> {
-        let _ = id;
-        todo!("Stage B (#3367): delete drift monitor")
+        self.drift_monitors.remove(id)
     }
 
     /// Evaluate a monitor immediately (synchronous), persisting any fired
     /// alarms and returning them. Used for scheduled cadence and tests.
     ///
+    /// Deduplicates against existing UNRESOLVED alarms for the same
+    /// `(monitor, entity/label)`, so a monitor never double-fires while an
+    /// alarm is outstanding (rule 3); it re-arms only after resolution.
+    ///
     /// # Errors
     ///
     /// `NOT_FOUND` for an unknown monitor; evaluation/persistence errors.
     pub fn evaluate_drift_monitor_now(&self, id: MonitorId) -> Result<Vec<DriftAlarm>> {
-        let _ = id;
-        todo!("Stage B (#3367): synchronous monitor evaluation + persistence")
+        let monitor = self.get_drift_monitor(id)?;
+        let now = crate::core::temporal::time::now();
+        let firings = evaluate_monitor(self, &monitor, now)?;
+        if firings.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Suppression set: entities / labels with an outstanding unresolved alarm.
+        let existing = self.query_drift_alarms(&DriftAlarmFilter {
+            monitor_id: Some(id),
+            resolved: Some(false),
+            limit: MAX_ALARM_QUERY_LIMIT,
+            ..DriftAlarmFilter::default()
+        })?;
+        let mut unresolved_entities: std::collections::HashSet<u64> =
+            std::collections::HashSet::new();
+        let mut unresolved_labels: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for a in existing {
+            if let Some(e) = a.entity {
+                unresolved_entities.insert(e.as_u64());
+            }
+            if let Some(l) = a.label {
+                unresolved_labels.insert(l);
+            }
+        }
+
+        let mut created = Vec::new();
+        for firing in firings {
+            let suppressed = match (&firing.entity, &firing.label) {
+                (Some(e), _) => unresolved_entities.contains(&e.as_u64()),
+                (None, Some(l)) => unresolved_labels.contains(l),
+                _ => false,
+            };
+            if suppressed {
+                continue;
+            }
+            let alarm = self.persist_drift_alarm(id, &monitor, &firing, now)?;
+            // Guard against two firings in one batch for the same key.
+            if let Some(e) = alarm.entity {
+                unresolved_entities.insert(e.as_u64());
+            }
+            if let Some(l) = &alarm.label {
+                unresolved_labels.insert(l.clone());
+            }
+            created.push(alarm);
+        }
+        Ok(created)
+    }
+
+    /// Materialize one firing as an append-only `__drift_alarm` bi-temporal node
+    /// via the normal write path, carrying every AC4 field as a property.
+    fn persist_drift_alarm(
+        &self,
+        monitor_id: MonitorId,
+        monitor: &DriftMonitor,
+        firing: &DriftFiring,
+        now: Timestamp,
+    ) -> Result<DriftAlarm> {
+        let mut builder = crate::PropertyMapBuilder::new()
+            .insert(P_MONITOR_ID, monitor_id.get() as i64)
+            .insert(P_DISTANCE, f64::from(firing.measured_distance))
+            .insert(P_THRESHOLD, f64::from(monitor.spec.threshold))
+            .insert(P_METRIC, metric_token(monitor.spec.metric))
+            .insert(P_NOW_WALL, firing.compared_now.wallclock())
+            .insert(P_NOW_LOG, i64::from(firing.compared_now.logical()))
+            .insert(P_PAST_WALL, firing.compared_past.wallclock())
+            .insert(P_PAST_LOG, i64::from(firing.compared_past.logical()))
+            .insert(P_RESOLVED, false)
+            .insert(P_FIRED_WALL, now.wallclock())
+            .insert(P_FIRED_LOG, i64::from(now.logical()));
+        if let Some(entity) = firing.entity {
+            builder = builder.insert(P_ENTITY_ID, entity.as_u64() as i64);
+        }
+        if let Some(label) = &firing.label {
+            builder = builder.insert(P_LABEL, label.as_str());
+        }
+        if let Some(from) = firing.from_version {
+            builder = builder.insert(P_FROM_VER, from.as_u64() as i64);
+        }
+        if let Some(to) = firing.to_version {
+            builder = builder.insert(P_TO_VER, to.as_u64() as i64);
+        }
+        let alarm_id = self.create_node(DRIFT_ALARM_LABEL, builder.build())?;
+        Ok(DriftAlarm {
+            alarm_id,
+            monitor_id,
+            entity: firing.entity,
+            label: firing.label.clone(),
+            measured_distance: firing.measured_distance,
+            threshold: monitor.spec.threshold,
+            metric: monitor.spec.metric,
+            compared_now: firing.compared_now,
+            compared_past: firing.compared_past,
+            from_version: firing.from_version,
+            to_version: firing.to_version,
+            resolved: false,
+            fired_at: now,
+        })
     }
 
     /// Query durable drift alarms by monitor / label / resolved state / time
     /// range.
     ///
+    /// When `time_range` is set, each alarm is reconstructed AS OF the range's
+    /// end coordinate (deterministic historical read), so an alarm resolved
+    /// *after* that coordinate still reads unresolved — the append-only
+    /// contract (AC5).
+    ///
     /// # Errors
     ///
-    /// `INVALID_ARGUMENT` for a malformed filter.
+    /// Propagates read errors from the storage layer.
     pub fn query_drift_alarms(&self, filter: &DriftAlarmFilter) -> Result<Vec<DriftAlarm>> {
-        let _ = filter;
-        todo!("Stage B (#3367): query drift alarms")
+        let limit = filter.limit.min(MAX_ALARM_QUERY_LIMIT);
+        let mut ids: Vec<NodeId> = self.scan_nodes_by_label(DRIFT_ALARM_LABEL).collect();
+        ids.sort_unstable();
+
+        let mut out = Vec::new();
+        for id in ids {
+            let props = match filter.time_range {
+                Some((_start, end)) => match self.get_node_at_time(id, end, end) {
+                    Ok(node) => node.properties,
+                    // Alarm did not exist at that coordinate: exclude it.
+                    Err(_) => continue,
+                },
+                None => match self.get_node(id) {
+                    Ok(node) => node.properties,
+                    Err(_) => continue,
+                },
+            };
+            let Some(alarm) = alarm_from_node(id, &props) else {
+                continue;
+            };
+            if let Some(m) = filter.monitor_id
+                && alarm.monitor_id != m
+            {
+                continue;
+            }
+            if let Some(l) = &filter.label
+                && alarm.label.as_deref() != Some(l.as_str())
+            {
+                continue;
+            }
+            if let Some(r) = filter.resolved
+                && alarm.resolved != r
+            {
+                continue;
+            }
+            out.push(alarm);
+        }
+        out.sort_by(|a, b| {
+            a.fired_at
+                .cmp(&b.fired_at)
+                .then_with(|| a.alarm_id.cmp(&b.alarm_id))
+        });
+        out.truncate(limit);
+        Ok(out)
     }
 
     /// Resolve an alarm — a recorded, `AS OF`-stable bi-temporal update (sets
     /// `resolved = true` with a resolution transaction time), never a delete.
+    /// Idempotent: re-resolving returns the already-resolved alarm.
     ///
     /// # Errors
     ///
     /// `NOT_FOUND` if `alarm_id` is not a drift-alarm node.
     pub fn resolve_drift_alarm(&self, alarm_id: NodeId) -> Result<DriftAlarm> {
-        let _ = alarm_id;
-        todo!("Stage B (#3367): resolve drift alarm as a recorded update")
+        // Confirm the id is a drift-alarm node (resolves the interned label
+        // without needing the interner directly).
+        if !self
+            .scan_nodes_by_label(DRIFT_ALARM_LABEL)
+            .any(|n| n == alarm_id)
+        {
+            return Err(not_found(format!("drift alarm {}", alarm_id.as_u64())));
+        }
+        let node = self.get_node(alarm_id)?;
+        let alarm = alarm_from_node(alarm_id, &node.properties)
+            .ok_or_else(|| not_found(format!("drift alarm {}", alarm_id.as_u64())))?;
+        if alarm.resolved {
+            // Idempotent no-op: already resolved.
+            return Ok(alarm);
+        }
+        let now = crate::core::temporal::time::now();
+        let props = crate::PropertyMapBuilder::new()
+            .insert(P_RESOLVED, true)
+            .insert(P_RESOLUTION_WALL, now.wallclock())
+            .insert(P_RESOLUTION_LOG, i64::from(now.logical()))
+            .build();
+        // PATCH update -> a new bi-temporal version; the prior (unresolved)
+        // version remains readable AS OF before this transaction time.
+        self.update_node_with_valid_time(alarm_id, props, None)?;
+        let mut resolved = alarm;
+        resolved.resolved = true;
+        Ok(resolved)
     }
 }
 
