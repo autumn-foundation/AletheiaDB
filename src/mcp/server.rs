@@ -274,6 +274,13 @@ pub(crate) fn split_text_into_chunks(text: &str, chunk_size_chars: usize) -> Vec
 /// rejection per the #3226 completeness convention.
 pub(crate) const DEFAULT_MAX_BATCH_OPERATIONS: usize = 1000;
 
+/// Maximum number of designation targets accepted by a single
+/// `designate_subject` call (Issue #3701 hardening). Mirrors the `apply_batch`
+/// cap: an over-cap request is rejected up front with `INVALID_ARGUMENT`
+/// (limit echoed per the #3226 convention) before any registry mutation, so an
+/// unbounded `targets` array cannot be used as a DoS vector.
+pub(crate) const MAX_DESIGNATE_TARGETS: usize = 1000;
+
 /// AletheiaDB MCP Server.
 ///
 /// Exposes AletheiaDB's graph, vector, and temporal capabilities through the Model Context Protocol.
@@ -3197,6 +3204,26 @@ impl AletheiaMcpServer {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
+
+        // DoS guard: reject an over-cap `targets` array up front, BEFORE any
+        // registry mutation, mirroring the `apply_batch` cap (limit echoed per
+        // the #3226 convention).
+        if req.targets.len() > MAX_DESIGNATE_TARGETS {
+            return self.error_result(
+                McpError::new(
+                    McpErrorCode::InvalidArgument,
+                    format!(
+                        "designate targets length {} exceeds maximum of {}",
+                        req.targets.len(),
+                        MAX_DESIGNATE_TARGETS
+                    ),
+                )
+                .details(json!({
+                    "limit": MAX_DESIGNATE_TARGETS,
+                    "submitted": req.targets.len(),
+                })),
+            );
+        }
 
         let mut targets = Vec::with_capacity(req.targets.len());
         for t in req.targets {
