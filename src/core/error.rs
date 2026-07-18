@@ -347,6 +347,9 @@ impl From<&crate::storage::index_persistence::IndexPersistenceError> for Persist
             }
             crate::storage::index_persistence::IndexPersistenceError::SizeLimitExceeded {
                 ..
+            }
+            | crate::storage::index_persistence::IndexPersistenceError::InternerCapacityExceeded {
+                ..
             } => PersistenceErrorKind::SizeLimitExceeded,
             crate::storage::index_persistence::IndexPersistenceError::Io(_) => {
                 PersistenceErrorKind::Io
@@ -406,6 +409,18 @@ pub enum StorageError {
     /// `INTERNAL`.
     #[error("WAL keyring already installed: {reason}")]
     WalKeyringAlreadyInstalled {
+        /// The rejection reason.
+        reason: String,
+    },
+    /// A runtime WAL keyring UNINSTALL was attempted while none is present
+    /// (Issue #3616 PR4). The mirror of
+    /// [`WalKeyringAlreadyInstalled`](Self::WalKeyringAlreadyInstalled): distinct
+    /// from the generic [`WalError`](Self::WalError) so the disable engine can
+    /// classify this **precondition** failure as `FAILED_PRECONDITION` (a caller
+    /// cannot disable encryption on an already-plaintext WAL) while genuine WAL
+    /// I/O / seal-and-reopen faults keep falling through to `INTERNAL`.
+    #[error("WAL keyring not installed: {reason}")]
+    WalKeyringNotInstalled {
         /// The rejection reason.
         reason: String,
     },

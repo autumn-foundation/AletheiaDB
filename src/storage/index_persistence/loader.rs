@@ -233,8 +233,8 @@ impl IndexPersistenceManager {
         save_manifest_with_keyring(manifest, &self.manifest_path(), self.keyring())
     }
 
-    /// Save the string interner.
-    pub fn save_string_interner(&self) -> Result<()> {
+    /// Save the string interner, returning the exact number of strings written.
+    pub fn save_string_interner(&self) -> Result<u64> {
         self.ensure_directories()?;
         save_string_interner_with_keyring(&self.interner_path(), self.keyring())
     }

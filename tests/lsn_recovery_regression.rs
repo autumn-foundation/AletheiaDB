@@ -93,6 +93,7 @@ fn durable_config(db_path: &Path) -> AletheiaDBConfig {
             load_on_startup: true,
             policies: inert_policies(),
             use_mmap: false,
+            ..Default::default()
         })
         .build()
 }
@@ -603,6 +604,7 @@ fn t9_recovery_and_seeding_across_rotated_segments() {
                 load_on_startup: true,
                 policies: inert_policies(),
                 use_mmap: false,
+                ..Default::default()
             })
             .build()
     };

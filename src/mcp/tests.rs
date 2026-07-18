@@ -1543,7 +1543,50 @@ mod changefeed_await_tests {
             from_token: None,
             timeout_ms: Some(0),
             limit: None,
+            namespace: None,
         }
+    }
+
+    /// Issue #3349, PR3c: an `await_changes` call scoped to namespace `A` (via the
+    /// catch-up path) returns only `A`'s changes; a `"bad name"` scope is rejected
+    /// with `INVALID_ARGUMENT` (never a silently-unscoped subscription).
+    #[test]
+    fn await_changes_namespace_scopes_catch_up() {
+        let server = create_test_server();
+        let db = server.db();
+        // Commit changes in two namespaces BEFORE the resume window opens.
+        let base = db
+            .create_node_in_namespace("Person", crate::PropertyMap::new(), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", crate::PropertyMap::new(), "agent:b")
+            .unwrap();
+        // A resume token anchored before both writes: catch-up scans them, the
+        // namespace filter then keeps only agent:a.
+        let from = crate::core::changefeed::ChangeCursor::baseline_after(Timestamp::from(0));
+
+        let mut req = await_req();
+        req.from_token = Some(from);
+        req.namespace = Some(serde_json::json!("agent:a"));
+        let response = server.await_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let changes = value["changes"].as_array().expect("changes array");
+        assert!(!changes.is_empty(), "expected the agent:a catch-up change");
+        for c in changes {
+            assert_eq!(
+                c["namespace"],
+                serde_json::json!("agent:a"),
+                "await_changes returned a foreign namespace: {c}"
+            );
+        }
+        // The agent:a node is present; no agent:b entity leaked.
+        assert!(changes.iter().any(|c| c["entity_id"] == base.as_u64()));
+
+        // A malformed namespace scope is rejected before subscribing.
+        let mut bad = await_req();
+        bad.namespace = Some(serde_json::json!("bad name"));
+        let resp = server.await_changes(bad);
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("INVALID_ARGUMENT"));
     }
 
     #[test]

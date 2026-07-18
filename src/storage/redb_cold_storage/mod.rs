@@ -56,8 +56,11 @@ use crate::core::changefeed::{
 };
 use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
+use crate::core::namespace::{
+    NamespaceId, intern_namespace, namespace_of, unresolved_namespace_id,
+};
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
-use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion};
+use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData};
 use crate::storage::wal::LSN;
 use rayon::prelude::*;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
@@ -216,6 +219,20 @@ pub struct ColdReencryptStats {
     /// per non-empty batch (bounded by the configurable
     /// [`RedbConfig::reencrypt_batch_size`]). Lets callers/tests observe that a
     /// small batch cap was honored (a multi-batch pass reports `> 1`).
+    pub batches_committed: usize,
+}
+
+/// Statistics returned by a cold `ACV1` → bare unwrap pass (Issue #3616 PR4
+/// disable — the inverse of [`wrap_plaintext_cold_values`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColdUnwrapStats {
+    /// Values decrypted out of their `ACV1` wrapper and rewritten BARE.
+    pub values_unwrapped: usize,
+    /// Values skipped because they were already bare (idempotent re-run /
+    /// resumed pass).
+    pub values_skipped: usize,
+    /// Number of redb write transactions committed across the whole pass, one
+    /// per non-empty batch (bounded by [`RedbConfig::reencrypt_batch_size`]).
     pub batches_committed: usize,
 }
 
@@ -1701,6 +1718,195 @@ impl RedbColdStorage {
         self.migrate_cold_values(target_version, target_cipher, ColdSourceMode::WrapPlaintext)
     }
 
+    /// Unwrap every **`ACV1`-wrapped** cold value back to bare plaintext (the
+    /// exact inverse of [`wrap_plaintext_cold_values`]; Issue #3616 PR4 disable).
+    ///
+    /// Each `ACV1` value is decrypted under its stamped generation (via the live
+    /// keyring, exactly as a normal read does) and rewritten BARE — the same
+    /// compressed bytes a never-encrypted value carries — so a uniformly-encrypted
+    /// cold store becomes a plaintext one the cold reader dispatches as bare. This
+    /// is the cold counterpart the disable engine needs: the enable engine wrapped
+    /// bare → `ACV1`, so a disable takes each `ACV1` value and produces the
+    /// compressed plaintext it wraps. No record is ever decoded (the same
+    /// compressed bytes are unwrapped in place), so temporal bounds cannot change;
+    /// only `node_versions`/`edge_versions` VALUES are touched, never `flushed_lsn`
+    /// / `temporal_extent`. On completion the durable [`COLD_VALUE_FORMAT_KEY`]
+    /// marker is cleared (the store is plaintext, `cold_value_format_version`
+    /// reports `None`).
+    ///
+    /// **Idempotent / resumable / crash-safe** WITHOUT a version cursor: each
+    /// batch's rewrites commit in one redb transaction, and a re-run after a crash
+    /// skips the already-bare values a prior partial run produced (a bare value is
+    /// its own completion marker — the mirror of the wrap pass's already-wrapped
+    /// skip). A value carrying no `ACV1` wrapper is treated as already-bare
+    /// plaintext (the post-enable invariant this pass inverts; the enable wrap
+    /// produces uniformly `ACV1`-wrapped values, so no pre-#3617 legacy
+    /// bare-ciphertext value is in scope).
+    ///
+    /// # Errors
+    ///
+    /// * the store is not encrypted (no keyring to decrypt with);
+    /// * a value fails to decrypt (a genuine wrong/absent key — surfaced loudly,
+    ///   never silently left encrypted) or a redb transaction fails.
+    pub fn unwrap_encrypted_cold_values(&self) -> Result<ColdUnwrapStats> {
+        if self.keyring.is_none() {
+            return Err(StorageError::InconsistentState {
+                reason: "cold storage is not encrypted; nothing to unwrap".to_string(),
+            }
+            .into());
+        }
+
+        let mut stats = ColdUnwrapStats::default();
+        for table in [ColdTableKind::Node, ColdTableKind::Edge] {
+            self.unwrap_one_table(table, &mut stats)?;
+        }
+
+        // Terminal marker: the whole store is now plaintext; drop the format
+        // marker (so `cold_value_format_version` reports `None`) and any stale
+        // rotation cursor, in one transaction.
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+        {
+            let mut meta = write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to open metadata table"))?;
+            meta.remove(COLD_VALUE_FORMAT_KEY)
+                .map_err(map_storage_error("Failed to clear cold_value_format"))?;
+            meta.remove(COLD_ROTATION_CURSOR_KEY)
+                .map_err(map_storage_error("Failed to clear cold_rotation cursor"))?;
+        }
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit cold unwrap completion"))?;
+
+        Ok(stats)
+    }
+
+    /// Unwrap one value-bearing table's `ACV1` values back to bare, in bounded
+    /// per-transaction batches (Issue #3616 PR4 disable). Mirrors
+    /// [`reencrypt_one_table`](Self::reencrypt_one_table) but writes the decrypted
+    /// compressed bytes BARE (no wrapper) instead of re-wrapping, and relies on
+    /// the natural "bare == done" idempotency rather than a version cursor.
+    fn unwrap_one_table(
+        &self,
+        table_kind: ColdTableKind,
+        stats: &mut ColdUnwrapStats,
+    ) -> Result<()> {
+        use std::ops::Bound;
+        let table_def = table_kind.table();
+        let batch_size = self.config.reencrypt_batch_size.max(1);
+        let mut resume_after: Option<u64> = None;
+        loop {
+            let write_txn = self
+                .db
+                .begin_write()
+                .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+            let batch_len;
+            let mut last_key = resume_after;
+            {
+                let mut table = write_txn
+                    .open_table(table_def)
+                    .map_err(map_table_error("Failed to open versions table"))?;
+
+                // Collect a bounded slice into owned buffers FIRST — the redb
+                // iterator borrows the table immutably and cannot be held across
+                // the `insert` calls below (which need `&mut table`).
+                let collected: Vec<(u64, Vec<u8>)> = {
+                    let lower = match resume_after {
+                        Some(k) => Bound::Excluded(k),
+                        None => Bound::Unbounded,
+                    };
+                    let range = table
+                        .range::<u64>((lower, Bound::Unbounded))
+                        .map_err(map_storage_error("Failed to range cold table"))?;
+                    let mut v = Vec::with_capacity(batch_size);
+                    for entry in range.take(batch_size) {
+                        let (k, val) =
+                            entry.map_err(map_storage_error("Failed to read cold entry"))?;
+                        v.push((k.value(), val.value().to_vec()));
+                    }
+                    v
+                };
+
+                batch_len = collected.len();
+                if batch_len == 0 {
+                    drop(table);
+                    drop(write_txn);
+                    break;
+                }
+
+                for (key, value) in &collected {
+                    last_key = Some(*key);
+                    // Idempotency backstop: a value with no `ACV1` wrapper is
+                    // already bare plaintext → skip (a prior partial run, or the
+                    // post-enable invariant this pass inverts).
+                    //
+                    // FAIL-CLOSED INVARIANT (Issue #3616 PR4 review): treating a
+                    // no-wrapper value as bare plaintext is only correct because
+                    // this pass runs EXCLUSIVELY over an ENABLE-engine-created
+                    // store, where every encrypted cold value carries an `ACV1`
+                    // wrapper. That invariant is enforced upstream by construction,
+                    // not merely assumed here:
+                    //   * the normal encrypted write path (`encrypt_if_needed`)
+                    //     ALWAYS `ACV1`-wraps (`wrap_cold_value`) when a keyring is
+                    //     present, and
+                    //   * `enable`'s `wrap_plaintext_cold_values` converts every
+                    //     pre-existing bare value bare → `ACV1` and unconditionally
+                    //     stamps the terminal `COLD_VALUE_FORMAT_KEY` marker (even
+                    //     for an empty store).
+                    // So a disable-able store's encrypted cold values are uniformly
+                    // `ACV1`-wrapped, and the ONLY no-wrapper values reaching here
+                    // are genuinely bare (a completed prior batch/run). LEGACY
+                    // pre-#3617 bare-ciphertext (encrypted, no `ACV1` wrapper), which
+                    // `decrypt_if_needed` still supports on the read path, is OUT OF
+                    // SCOPE: it predates both the `ACV1` scheme and the durable
+                    // encryption authority the disable engine requires, so it never
+                    // reaches this pass.
+                    //
+                    // A marker-based fail-closed guard was evaluated and deliberately
+                    // NOT added: the `COLD_VALUE_FORMAT_KEY` marker cannot represent
+                    // the legacy-encrypted state distinctly — it is ABSENT for a
+                    // legacy store, a never-encrypted plaintext store, AND a store
+                    // whose disable already cleared it and is being re-driven by the
+                    // post-clear resume window (a crash between
+                    // `unwrap_encrypted_cold_values` clearing the marker and
+                    // `mark_cold_complete` legitimately re-runs this pass over an
+                    // all-bare, marker-absent, keyring-present store). Refusing on
+                    // "marker absent" would therefore break that legitimate
+                    // idempotent resume rather than catch a real defect, and refusing
+                    // for enable-engine stores is impossible (their marker is always
+                    // set). The safe guard is the upstream construction invariant
+                    // above, so this skip stays.
+                    if parse_cold_wrapper(value).is_none() {
+                        stats.values_skipped += 1;
+                        continue;
+                    }
+                    // Decrypt the wrapped value under its stamped generation,
+                    // yielding the compressed plaintext bytes a bare value holds.
+                    let bare = self.decrypt_if_needed(value)?;
+                    table
+                        .insert(*key, bare.as_slice())
+                        .map_err(map_storage_error("Failed to rewrite cold value"))?;
+                    stats.values_unwrapped += 1;
+                }
+            }
+
+            write_txn
+                .commit()
+                .map_err(map_commit_error("Failed to commit cold unwrap batch"))?;
+            stats.batches_committed += 1;
+
+            resume_after = last_key;
+            if batch_len < batch_size {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Shared driver for the cold value-migration passes (Issue #3617 PR3 rekey /
     /// Issue #3616 PR3 enable-wrap): resume from the durable cursor, process the
     /// Node then Edge value tables in bounded batches, and write the terminal
@@ -2159,10 +2365,46 @@ impl RedbColdStorage {
     ) -> Result<Vec<RawChange>> {
         let mut acc = BoundedChanges::new(bound);
 
+        // Namespace derivation for the cold tier (Issue #3349, PR3c). The immutable
+        // ride-along namespace key is carried only on **anchor** versions (a delta
+        // never diffs the immutable key). Cold storage cannot cheaply reconstruct a
+        // delta's property chain during a scan, but it does not need to *when the
+        // covering anchor is also cold*: the table is keyed by `VersionId` and
+        // iterated ascending, and an entity's create version (its lowest `VersionId`)
+        // is always an anchor carrying the key — so an in-cold anchor is decoded
+        // *before* any of its deltas. We record **every** anchor's namespace
+        // (default included) in a running map as it is decoded and read a delta's
+        // namespace back from it (fast path).
+        //
+        // # LRU anchor-split (the fail-closed miss)
+        //
+        // The "anchor always precedes delta" invariant only holds *within* the cold
+        // scan. Under `MigrationPolicy::aggressive()` / `enable_lru`, a
+        // frequently-accessed anchor can stay HOT while an older delta migrates COLD
+        // — so a cold delta's covering anchor is absent from this scan. A map MISS is
+        // therefore **not** a `default` entity; it is an unresolvable-here delta. We
+        // stamp such a delta with the reserved
+        // [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel — **never**
+        // `default` — and the [`HistoricalStorage`] layer, which sees both tiers,
+        // re-derives its real namespace via tier-aware reconstruction (see
+        // `resolve_unresolved_namespaces`). Failing open to `default` here would leak
+        // the change to `default`-scoped subscribers and hide it from its own.
+        let unresolved_ns_id = unresolved_namespace_id();
+        let mut node_ns: std::collections::HashMap<u64, NamespaceId> =
+            std::collections::HashMap::new();
+        let mut edge_ns: std::collections::HashMap<u64, NamespaceId> =
+            std::collections::HashMap::new();
+
         self.scan_versions_into(
             NODE_VERSIONS_TABLE,
             decode_node_version,
             |v: NodeVersion| {
+                let ns_id = Self::version_namespace_id(
+                    &v.data,
+                    v.node_id.as_u64(),
+                    &mut node_ns,
+                    unresolved_ns_id,
+                );
                 consider_version(
                     &mut acc,
                     resume_after,
@@ -2175,6 +2417,7 @@ impl RedbColdStorage {
                     tx_window,
                     valid_window,
                     label_filter,
+                    move || ns_id,
                 );
             },
         )?;
@@ -2183,6 +2426,12 @@ impl RedbColdStorage {
             EDGE_VERSIONS_TABLE,
             decode_edge_version,
             |v: EdgeVersion| {
+                let ns_id = Self::version_namespace_id(
+                    &v.data,
+                    v.edge_id.as_u64(),
+                    &mut edge_ns,
+                    unresolved_ns_id,
+                );
                 consider_version(
                     &mut acc,
                     resume_after,
@@ -2195,11 +2444,45 @@ impl RedbColdStorage {
                     tx_window,
                     valid_window,
                     label_filter,
+                    move || ns_id,
                 );
             },
         )?;
 
         Ok(acc.into_vec())
+    }
+
+    /// Derive an entity version's interned [`NamespaceId`] during a cold-tier scan
+    /// (Issue #3349, PR3c), maintaining the running anchor→namespace map keyed by
+    /// entity id. An anchor's namespace is read directly from its properties and
+    /// recorded; a delta reads its entity's namespace back from the map (its
+    /// covering anchor, if also cold, was decoded earlier — see
+    /// [`collect_changes_filtered`]).
+    ///
+    /// **Every** anchor is recorded — `default` entities included — so a map MISS
+    /// for a delta is unambiguous: it means the delta's covering anchor is **not in
+    /// this cold scan** (the LRU anchor-split case), not merely that the entity is
+    /// `default`. Such a miss returns `unresolved_ns_id` (the fail-closed
+    /// [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel) rather than
+    /// `default`; the [`HistoricalStorage`](crate::storage::historical) layer
+    /// re-derives the real namespace tier-aware afterward. Returning `default` here
+    /// would leak the change to `default`-scoped subscribers.
+    fn version_namespace_id(
+        data: &VersionData,
+        entity_id: u64,
+        seen: &mut std::collections::HashMap<u64, NamespaceId>,
+        unresolved_ns_id: NamespaceId,
+    ) -> NamespaceId {
+        match data {
+            VersionData::Anchor { properties, .. } => {
+                let ns_id = intern_namespace(&namespace_of(properties));
+                // Record every anchor (default included) so a later delta MISS is a
+                // genuine "anchor not in this scan" signal, not a default entity.
+                seen.insert(entity_id, ns_id);
+                ns_id
+            }
+            VersionData::Delta { .. } => seen.get(&entity_id).copied().unwrap_or(unresolved_ns_id),
+        }
     }
 
     /// Store a single node version.

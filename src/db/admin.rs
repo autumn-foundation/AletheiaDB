@@ -78,6 +78,59 @@ impl AletheiaDB {
                 ));
             }
 
+            // Fail-closed guard for the QUIESCED post-`disable_encryption` handle
+            // (Issue #3616 PR4) — the mirror of the enable guard above. After
+            // `disable_encryption` the live WAL is plaintext (keyring uninstalled)
+            // but this handle's index manager still carries the ENCRYPTED keyring
+            // (there is no live `Some → None` index-keyring uninstall — see the loud
+            // reopen contract on `disable_encryption`). Persisting now would write
+            // `AEIX` index files OVER the freshly-unwrapped plaintext snapshot — the
+            // exact corruption the disable engine exists to prevent.
+            //
+            // Unlike the enable guard, the raw state (WAL plaintext + index keyring
+            // `Some`) is NOT unique to a post-disable handle: an index-only-encrypted
+            // database (a plaintext WAL over an encrypted index — the sole config in
+            // which an index-only key rotation is safe) has the identical shape and
+            // MUST keep persisting normally. So this rare ambiguous branch is
+            // disambiguated by TWO durable signals, EITHER of which marks a
+            // post-disable quiesced handle:
+            //
+            //   (a) the authority records `disabled` — the terminal state a
+            //       SUCCESSFUL `disable_encryption` flips it to; and
+            //   (b) a pending `direction=disable` rotation ledger is present — the
+            //       breadcrumb a disable writes BEFORE it flips the authority.
+            //
+            // Signal (b) closes a real gap: a disable that FAILS at the cold-unwrap
+            // step (index already unwrapped to plaintext, WAL already plaintext, but
+            // the authority not yet flipped) returns Err leaving WAL plaintext +
+            // keyring `Some` + authority STILL `enabled` + a pending disable ledger.
+            // On that errored handle, gating on the authority alone would read
+            // `enabled` and WRONGLY allow a persist that rewrites `AEIX` over the
+            // already-plaintext index snapshot. Also firing on the disable ledger
+            // fails closed in that window. This does NOT reintroduce the
+            // index-only-encrypted false positive: that config runs an index key
+            // ROTATION whose ledger is `direction=rotate/enable`, and
+            // `read_disable_ledger` filters to `direction=disable` only (returning
+            // `None` for a rotation/enable ledger or no ledger), so the legitimate
+            // index-only case still persists normally. The extra reads happen ONLY in
+            // this branch (never entered by a normal plaintext DB — keyring `None`, or
+            // a normal encrypted DB — WAL encrypted), so they add no hot-path cost.
+            if !self.wal.is_encrypted()
+                && manager.keyring().is_some()
+                && (crate::db::encryption_state::read_encryption_state(manager.base_path())?
+                    .is_some_and(|state| !state.enabled)
+                    || crate::db::rotation::read_disable_ledger(manager)?.is_some())
+            {
+                return Err(crate::core::error::Error::FailedPrecondition(
+                    "cannot persist indexes on a post-disable quiesced handle: the WAL is \
+                     plaintext but this handle's index manager is still encrypted, so a \
+                     persist would write encrypted (AEIX) index files over the plaintext \
+                     snapshot. You MUST reopen the database (drop this handle and call \
+                     AletheiaDB::open) to get a fully-plaintext, persistable instance."
+                        .to_string(),
+                ));
+            }
+
             // Warn if background persistence thread has stopped
             if self
                 .persistence_thread_stopped

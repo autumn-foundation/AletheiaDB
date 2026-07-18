@@ -1658,6 +1658,54 @@ wal_dir = "/custom/path/to/wal"
         assert!(!c.persistence.enabled);
     }
 
+    /// Configurable interner cap: the default `max_interned_strings` is 10M and
+    /// matches the interner's own default constant (they move in lockstep).
+    #[test]
+    fn persistence_default_max_interned_strings_is_ten_million() {
+        use crate::storage::index_persistence::PersistenceConfig;
+        assert_eq!(
+            PersistenceConfig::default().max_interned_strings,
+            10_000_000
+        );
+        assert_eq!(PersistenceConfig::DEFAULT_MAX_INTERNED_STRINGS, 10_000_000);
+        assert_eq!(
+            PersistenceConfig::DEFAULT_MAX_INTERNED_STRINGS,
+            crate::core::interning::DEFAULT_MAX_INTERNED_STRINGS,
+        );
+    }
+
+    /// Configurable interner cap: `max_interned_strings` round-trips through the
+    /// unified config builder.
+    #[test]
+    fn persistence_max_interned_strings_builder_round_trip() {
+        use crate::storage::index_persistence::PersistenceConfig;
+        let config = AletheiaDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                max_interned_strings: 1234,
+                ..Default::default()
+            })
+            .build();
+        assert_eq!(config.persistence.max_interned_strings, 1234);
+    }
+
+    /// Configurable interner cap: `max_interned_strings` round-trips through
+    /// TOML, and a partial `[persistence]` table that omits it inherits the 10M
+    /// default (field-level serde default).
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn persistence_max_interned_strings_toml_round_trip() {
+        let c = AletheiaDBConfig::from_toml_str(
+            "[persistence]\nenabled = true\nmax_interned_strings = 1234\n",
+        )
+        .unwrap();
+        assert_eq!(c.persistence.max_interned_strings, 1234);
+
+        // Omitted field → 10M default (not 0).
+        let c = AletheiaDBConfig::from_toml_str("[persistence]\ndata_dir = \"custom\"\n").unwrap();
+        assert_eq!(c.persistence.max_interned_strings, 10_000_000);
+    }
+
     /// The canonical durable entry point must keep persistence enabled with
     /// explicit directories, unaffected by the Issue #3388 default flip.
     #[test]

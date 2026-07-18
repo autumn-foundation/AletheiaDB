@@ -74,6 +74,43 @@ let f = ChangeFilter::all()
     .with_change_types([ChangeType::Created]);
 ```
 
+### Namespace scoping (Issue #3349)
+
+`with_namespace_scope` restricts the feed to a namespace (the ownership/visibility
+axis), so a subscriber scoped to `agent:planner` never receives `agent:researcher`'s
+changes:
+
+```rust
+use aletheiadb::{ChangeFilter, NamespaceScope, Namespace};
+
+// A single namespace:
+let f = ChangeFilter::all()
+    .with_namespace_scope(NamespaceScope::Single(Namespace::new("agent:planner")?));
+
+// A union (private scratch + shared knowledge base):
+let f = ChangeFilter::all().with_namespace_scope(
+    NamespaceScope::list(vec![
+        Namespace::new("agent:planner")?,
+        Namespace::new("shared")?,
+    ])?,
+);
+
+// Every namespace (no filter) — the same as omitting it at the core API:
+let f = ChangeFilter::all().with_namespace_scope(NamespaceScope::All);
+```
+
+A change's namespace is the affected entity's **immutable** namespace, recorded on
+every version, so create / update / delete of both nodes and edges are scoped
+consistently. It is surfaced as a first-class `namespace` field on every change record
+(the reserved `__aletheia_ns` ride-along key never leaks).
+
+On the MCP `await_changes` tool and the HTTP `/changes/await` + `/changes/stream`
+surfaces the scope is a `namespace` param (a single name, an array / comma-separated
+union, or `"all"`); **omitting** it there scopes to the `default` namespace only
+(isolated-by-default, matching the read tools), whereas the bare Rust
+`ChangeFilter::all()` with no `with_namespace_scope` call is unscoped (every namespace)
+for exact back-compat.
+
 **Semantics** (chosen so each dimension is meaningful):
 
 - A filter-less filter (all dimensions unset) matches **everything**.
@@ -81,6 +118,8 @@ let f = ChangeFilter::all()
   setting **only** `edge_types` yields **only** matching edge changes (nodes excluded). Set
   both to receive both kinds.
 - `change_types`, if set, is an independent AND applied regardless of kind.
+- `namespace`, if set, is an independent AND on the ownership axis; unset (or
+  `NamespaceScope::All`) matches every namespace.
 - Label / edge-type matching is **exact string** match (mirroring the #3216 `label` filter).
 
 There is no way in v1 to say "all node changes regardless of label" without an edge

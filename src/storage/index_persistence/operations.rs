@@ -536,9 +536,8 @@ pub(crate) fn persist_graph_index(
 
     // Stream all nodes without collecting into intermediate Vec (prevents OOM on large graphs)
     for node in current.all_nodes() {
-        let properties = persist_property_map(&node.properties).map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to persist node properties: {}", e))
-        })?;
+        let properties = persist_property_map(&node.properties)
+            .map_err(|e| e.into_persist_storage_error("Failed to persist node properties"))?;
 
         graph_data.nodes.push(PersistedNode {
             id: node.id.as_u64(),
@@ -551,9 +550,8 @@ pub(crate) fn persist_graph_index(
 
     // Stream all edges without collecting into intermediate Vec (prevents OOM on large graphs)
     for edge in current.all_edges() {
-        let properties = persist_property_map(&edge.properties).map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to persist edge properties: {}", e))
-        })?;
+        let properties = persist_property_map(&edge.properties)
+            .map_err(|e| e.into_persist_storage_error("Failed to persist edge properties"))?;
 
         graph_data.edges.push(PersistedEdge {
             id: edge.id.as_u64(),
@@ -633,9 +631,8 @@ pub(crate) fn persist_graph_index_from_snapshot(
     // intern previously unseen string values, so this must precede the interner
     // save below (mirrors `persist_graph_index`'s "interner AFTER graph
     // conversion" ordering).
-    let graph_data = extract_graph_data_from_snapshot(snapshot).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to extract graph snapshot: {}", e))
-    })?;
+    let graph_data = extract_graph_data_from_snapshot(snapshot)
+        .map_err(|e| e.into_persist_storage_error("Failed to extract graph snapshot"))?;
 
     manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
@@ -723,11 +720,14 @@ pub(crate) fn persist_temporal_index(
         } else {
             convert_node_version(version)
         }
+        // Preserve a structured interner-capacity signal (configurable interner
+        // cap): a property VALUE interned here can exhaust the cap, and the
+        // background worker must classify that as deterministic (suspend), not
+        // transient. Every other conversion failure keeps the contextual wrap.
         .map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to convert node version {}: {}",
-                version.id.as_u64(),
-                e
+            e.into_persist_storage_error(&format!(
+                "Failed to convert node version {}",
+                version.id.as_u64()
             ))
         })?;
         node_versions.push(entry);
@@ -767,11 +767,12 @@ pub(crate) fn persist_temporal_index(
         } else {
             convert_edge_version(version)
         }
+        // Preserve a structured interner-capacity signal (configurable interner
+        // cap), same rationale as the node-version path above.
         .map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to convert edge version {}: {}",
-                version.id.as_u64(),
-                e
+            e.into_persist_storage_error(&format!(
+                "Failed to convert edge version {}",
+                version.id.as_u64()
             ))
         })?;
         edge_versions.push(entry);
@@ -980,11 +981,14 @@ pub(crate) fn persist_temporal_index_from_snapshot(
         } else {
             convert_node_version(version)
         }
+        // Preserve a structured interner-capacity signal (configurable interner
+        // cap): a property VALUE interned here can exhaust the cap, and the
+        // background worker must classify that as deterministic (suspend), not
+        // transient. Every other conversion failure keeps the contextual wrap.
         .map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to convert node version {}: {}",
-                version.id.as_u64(),
-                e
+            e.into_persist_storage_error(&format!(
+                "Failed to convert node version {}",
+                version.id.as_u64()
             ))
         })?;
         node_versions.push(entry);
@@ -1008,11 +1012,12 @@ pub(crate) fn persist_temporal_index_from_snapshot(
         } else {
             convert_edge_version(version)
         }
+        // Preserve a structured interner-capacity signal (configurable interner
+        // cap), same rationale as the node-version path above.
         .map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to convert edge version {}: {}",
-                version.id.as_u64(),
-                e
+            e.into_persist_storage_error(&format!(
+                "Failed to convert edge version {}",
+                version.id.as_u64()
             ))
         })?;
         edge_versions.push(entry);
@@ -1050,16 +1055,13 @@ pub(crate) fn persist_string_interner(
     tracker: &Arc<PersistenceTracker>,
     current_lsn: u64,
 ) -> Result<u64> {
-    manager.save_string_interner().map_err(|e| {
+    // Use the EXACT number of strings the save actually wrote for the manifest
+    // count, not a later `GLOBAL_INTERNER.len()` sample that can race a
+    // concurrent writer interning more strings between the write and the read
+    // (configurable interner cap fix).
+    let count = manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
     })?;
-
-    // Capture the count *after* save completes. Since GLOBAL_INTERNER is append-only,
-    // this count is at least what was saved. If new strings were interned concurrently,
-    // they might not be in the file yet, but having a slightly higher count in the manifest
-    // is safer than lower (though ideally exact).
-    // Note: save_string_interner likely iterates and saves.
-    let count = crate::core::GLOBAL_INTERNER.len() as u64;
 
     tracker.reset_string_mutations();
     tracker.update_string_lsn(current_lsn);
