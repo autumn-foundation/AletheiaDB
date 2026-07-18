@@ -654,6 +654,22 @@ impl AletheiaDB {
         // Deterministic order: transaction-time ascending, then kind, id, version.
         changes.sort_unstable_by_key(|record| record.cursor);
 
+        // Re-derive any records the fast-path derivation left UNRESOLVED (fail-closed
+        // sentinel), Issue #3349 PR3c: a cold-tier delta whose covering anchor stayed
+        // HOT under LRU migration cannot be resolved by the cold scan alone. The
+        // historical layer sees both tiers and re-derives the real namespace via
+        // tier-aware reconstruction; a genuine hard-failure keeps the sentinel (never
+        // `default`). Cheap no-op when nothing is unresolved (common case), and only
+        // then is the read lock re-taken.
+        {
+            let sentinel = crate::core::namespace::unresolved_namespace_id();
+            if changes.iter().any(|r| r.namespace_id == sentinel) {
+                self.historical
+                    .read()
+                    .resolve_unresolved_namespaces(&mut changes);
+            }
+        }
+
         let next_cursor = if has_more {
             changes.last().map(|record| record.cursor.encode())
         } else {
@@ -1204,7 +1220,9 @@ mod changefeed_pushdown_tests {
     use crate::core::error::{Error, Result};
     use crate::core::id::{EdgeId, NodeId, VersionId};
     use crate::core::interning::GLOBAL_INTERNER;
-    use crate::core::namespace::{NamespaceId, intern_namespace, namespace_of};
+    use crate::core::namespace::{
+        NamespaceId, intern_namespace, namespace_of, unresolved_namespace_id,
+    };
     use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp, time};
     use crate::core::version::{EdgeVersion, NodeVersion, VersionData};
     use crate::storage::redb_cold_storage::RedbColdStorage;
@@ -1336,35 +1354,40 @@ mod changefeed_pushdown_tests {
             // production `collect_changes_filtered` anchor→namespace map, built here
             // from a full pre-scan (order-independent) so this oracle stays
             // byte-identical to the pushed-down path: an anchor carries the immutable
-            // ride-along key, a delta reads its entity's namespace back from the map.
-            let default_ns_id = intern_namespace(&crate::core::namespace::Namespace::default());
+            // ride-along key (recorded for EVERY anchor, default included), a delta
+            // reads its entity's namespace back from the map. A delta MISS (its
+            // covering anchor is not in the cold tier — the LRU anchor-split case)
+            // resolves to the fail-closed UNRESOLVED sentinel, exactly as the cold
+            // scan does; the tier-aware `resolve_unresolved_namespaces` fixup below
+            // then re-derives the real namespace, mirroring the production path.
+            let unresolved_ns_id = unresolved_namespace_id();
             let node_cold = tiered.scan_node_versions_cold()?;
             let edge_cold = tiered.scan_edge_versions_cold()?;
             let mut node_ns: std::collections::HashMap<u64, NamespaceId> =
                 std::collections::HashMap::new();
             for v in &node_cold {
                 if let VersionData::Anchor { properties, .. } = &v.data {
-                    let id = intern_namespace(&namespace_of(properties));
-                    if id != default_ns_id {
-                        node_ns.insert(v.node_id.as_u64(), id);
-                    }
+                    node_ns.insert(
+                        v.node_id.as_u64(),
+                        intern_namespace(&namespace_of(properties)),
+                    );
                 }
             }
             let mut edge_ns: std::collections::HashMap<u64, NamespaceId> =
                 std::collections::HashMap::new();
             for v in &edge_cold {
                 if let VersionData::Anchor { properties, .. } = &v.data {
-                    let id = intern_namespace(&namespace_of(properties));
-                    if id != default_ns_id {
-                        edge_ns.insert(v.edge_id.as_u64(), id);
-                    }
+                    edge_ns.insert(
+                        v.edge_id.as_u64(),
+                        intern_namespace(&namespace_of(properties)),
+                    );
                 }
             }
             for v in &node_cold {
                 let ns_id = node_ns
                     .get(&v.node_id.as_u64())
                     .copied()
-                    .unwrap_or(default_ns_id);
+                    .unwrap_or(unresolved_ns_id);
                 if let Some(rec) = build_raw_change(
                     v.id.as_u64(),
                     v.node_id.as_u64(),
@@ -1386,7 +1409,7 @@ mod changefeed_pushdown_tests {
                 let ns_id = edge_ns
                     .get(&v.edge_id.as_u64())
                     .copied()
-                    .unwrap_or(default_ns_id);
+                    .unwrap_or(unresolved_ns_id);
                 if let Some(rec) = build_raw_change(
                     v.id.as_u64(),
                     v.edge_id.as_u64(),
@@ -1416,6 +1439,16 @@ mod changefeed_pushdown_tests {
             changes.truncate(limit);
         }
         changes.sort_unstable_by_key(|record| record.cursor);
+        // Mirror the production tier-aware fixup for any UNRESOLVED cold delta
+        // (LRU anchor-split), so the oracle stays byte-identical (Issue #3349, PR3c).
+        {
+            let sentinel = unresolved_namespace_id();
+            if changes.iter().any(|r| r.namespace_id == sentinel) {
+                db.__test_historical_storage()
+                    .read()
+                    .resolve_unresolved_namespaces(&mut changes);
+            }
+        }
         let next_cursor = if has_more {
             changes.last().map(|record| record.cursor.encode())
         } else {
@@ -1536,6 +1569,112 @@ mod changefeed_pushdown_tests {
             })
             .count();
         assert_eq!(dual_hits, 1, "dual-tier version must appear exactly once");
+    }
+
+    // 3b ----------------------------------------------------------------------------------------
+    /// Cold-tier LRU **anchor-split** namespace derivation (Issue #3349, PR3c
+    /// security fix). Models the state produced by `MigrationPolicy::aggressive()` /
+    /// `enable_lru`: a non-default entity's frequently-accessed **anchor stays HOT**
+    /// while an older **delta migrates COLD**. The cold scan sees the delta but not
+    /// its covering anchor, so its running anchor→namespace map MISSES.
+    ///
+    /// The buggy behavior failed **open** to `default` (a real, subscribable
+    /// namespace): the change leaked to `default`-scoped subscribers and was hidden
+    /// from its own namespace's. The fix makes the derivation **tier-aware** at the
+    /// historical layer — reconstructing the delta across both tiers to recover its
+    /// REAL namespace (`agent:a`) — never `default`.
+    #[test]
+    fn cold_lru_anchor_split_derives_real_namespace_not_default() {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+
+        let db = AletheiaDB::new().unwrap();
+
+        // Real hot write: a non-default entity. Its anchor (v1) stays HOT and carries
+        // the immutable `__aletheia_ns = agent:a` ride-along key.
+        let node = db
+            .create_node_in_namespace("Person", props("Alice"), "agent:a")
+            .unwrap();
+
+        // Learn the anchor's version id + tx-time from the (hot-only) feed.
+        let (from, to) = all();
+        let base = db.list_changes(&query(from, to, 100)).unwrap();
+        let anchor_rec = base
+            .changes
+            .iter()
+            .find(|r| r.entity_id == node.as_u64())
+            .expect("anchor change present");
+        assert_eq!(
+            anchor_rec.namespace.as_str(),
+            "agent:a",
+            "hot anchor must resolve to its real namespace"
+        );
+        let anchor_vid = anchor_rec.version_id;
+        let anchor_tx = anchor_rec.transaction_time_range.start();
+
+        // Extract the anchor's stored properties (which include the ride-along key).
+        let anchor_version = hot_node_version(&db, anchor_vid);
+        let anchor_props = match &anchor_version.data {
+            VersionData::Anchor { properties, .. } => properties.clone(),
+            _ => panic!("v1 must be an anchor"),
+        };
+
+        // Build a synthetic COLD delta for the SAME node, chaining back to the HOT
+        // anchor via `prev_version`. The delta changes only `name`, so it never
+        // touches the immutable namespace key — exactly as a real update delta does.
+        let new_props = PropertyMapBuilder::from_map(anchor_props.clone())
+            .insert("name", "Alice2")
+            .build();
+        let delta_vid = anchor_vid + 1_000_000; // unused id, never in hot
+        let delta_tx = ts(anchor_tx.wallclock() + 1_000_000);
+        let delta = NodeVersion::new_delta(
+            VersionId::new(delta_vid).unwrap(),
+            node,
+            BiTemporalInterval::now(delta_tx, delta_tx),
+            anchor_version.label,
+            &anchor_props,
+            &new_props,
+            VersionId::new(anchor_vid).unwrap(),
+        );
+
+        // Cold tier holds ONLY the delta; the anchor remains hot (the LRU split).
+        let _dir = attach_cold(&db, &[delta], &[]);
+
+        // The production path (and the byte-identical oracle) must attribute the cold
+        // delta to `agent:a`, not `default`.
+        let page = assert_parity(&db, &query(from, to, 100));
+        let cold_rec = page
+            .changes
+            .iter()
+            .find(|r| r.version_id == delta_vid)
+            .expect("cold delta change present in feed");
+
+        assert_eq!(
+            cold_rec.namespace.as_str(),
+            "agent:a",
+            "cold LRU-split delta must derive its REAL namespace tier-aware, not `default`"
+        );
+        assert_ne!(
+            cold_rec.namespace,
+            Namespace::default(),
+            "must never fail open to the real, subscribable `default` namespace"
+        );
+
+        // Scope semantics: the real-namespace reader receives it; `default` does NOT;
+        // `All` does.
+        let ns_a = NamespaceScope::Single(Namespace::new("agent:a").unwrap());
+        let ns_default = NamespaceScope::Single(Namespace::default());
+        assert!(
+            ns_a.contains(&cold_rec.namespace),
+            "agent:a-scoped reader must receive the cold delta"
+        );
+        assert!(
+            !ns_default.contains(&cold_rec.namespace),
+            "default-scoped reader must NOT receive a non-default entity's cold delta"
+        );
+        assert!(
+            NamespaceScope::All.contains(&cold_rec.namespace),
+            "All-scoped reader must receive it"
+        );
     }
 
     // 4 -----------------------------------------------------------------------------------------

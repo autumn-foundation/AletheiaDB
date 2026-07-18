@@ -56,7 +56,9 @@ use crate::core::changefeed::{
 };
 use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
-use crate::core::namespace::{NamespaceId, intern_namespace, namespace_of};
+use crate::core::namespace::{
+    NamespaceId, intern_namespace, namespace_of, unresolved_namespace_id,
+};
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData};
 use crate::storage::wal::LSN;
@@ -2163,17 +2165,28 @@ impl RedbColdStorage {
         // Namespace derivation for the cold tier (Issue #3349, PR3c). The immutable
         // ride-along namespace key is carried only on **anchor** versions (a delta
         // never diffs the immutable key). Cold storage cannot cheaply reconstruct a
-        // delta's property chain during a scan, but it does not need to: the table is
-        // keyed by `VersionId` and iterated ascending, and an entity's create version
-        // (its lowest `VersionId`) is always an anchor carrying the key — so every
-        // anchor for an entity is decoded *before* any of its deltas. We therefore
-        // record each anchor's namespace in a running map as it is decoded and read a
-        // delta's namespace back from it. A migrated delta's covering anchor is
-        // guaranteed present in the cold tier because migration moves oldest-first
-        // (the create-anchor migrates before its deltas). A missing entry (a
-        // `default` entity, whose anchor carries no key) resolves to the default
-        // namespace.
-        let default_ns_id = intern_namespace(&crate::core::namespace::Namespace::default());
+        // delta's property chain during a scan, but it does not need to *when the
+        // covering anchor is also cold*: the table is keyed by `VersionId` and
+        // iterated ascending, and an entity's create version (its lowest `VersionId`)
+        // is always an anchor carrying the key — so an in-cold anchor is decoded
+        // *before* any of its deltas. We record **every** anchor's namespace
+        // (default included) in a running map as it is decoded and read a delta's
+        // namespace back from it (fast path).
+        //
+        // # LRU anchor-split (the fail-closed miss)
+        //
+        // The "anchor always precedes delta" invariant only holds *within* the cold
+        // scan. Under `MigrationPolicy::aggressive()` / `enable_lru`, a
+        // frequently-accessed anchor can stay HOT while an older delta migrates COLD
+        // — so a cold delta's covering anchor is absent from this scan. A map MISS is
+        // therefore **not** a `default` entity; it is an unresolvable-here delta. We
+        // stamp such a delta with the reserved
+        // [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel — **never**
+        // `default` — and the [`HistoricalStorage`] layer, which sees both tiers,
+        // re-derives its real namespace via tier-aware reconstruction (see
+        // `resolve_unresolved_namespaces`). Failing open to `default` here would leak
+        // the change to `default`-scoped subscribers and hide it from its own.
+        let unresolved_ns_id = unresolved_namespace_id();
         let mut node_ns: std::collections::HashMap<u64, NamespaceId> =
             std::collections::HashMap::new();
         let mut edge_ns: std::collections::HashMap<u64, NamespaceId> =
@@ -2187,7 +2200,7 @@ impl RedbColdStorage {
                     &v.data,
                     v.node_id.as_u64(),
                     &mut node_ns,
-                    default_ns_id,
+                    unresolved_ns_id,
                 );
                 consider_version(
                     &mut acc,
@@ -2214,7 +2227,7 @@ impl RedbColdStorage {
                     &v.data,
                     v.edge_id.as_u64(),
                     &mut edge_ns,
-                    default_ns_id,
+                    unresolved_ns_id,
                 );
                 consider_version(
                     &mut acc,
@@ -2240,24 +2253,32 @@ impl RedbColdStorage {
     /// (Issue #3349, PR3c), maintaining the running anchor→namespace map keyed by
     /// entity id. An anchor's namespace is read directly from its properties and
     /// recorded; a delta reads its entity's namespace back from the map (its
-    /// covering anchor was decoded earlier — see [`collect_changes_filtered`]).
+    /// covering anchor, if also cold, was decoded earlier — see
+    /// [`collect_changes_filtered`]).
+    ///
+    /// **Every** anchor is recorded — `default` entities included — so a map MISS
+    /// for a delta is unambiguous: it means the delta's covering anchor is **not in
+    /// this cold scan** (the LRU anchor-split case), not merely that the entity is
+    /// `default`. Such a miss returns `unresolved_ns_id` (the fail-closed
+    /// [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel) rather than
+    /// `default`; the [`HistoricalStorage`](crate::storage::historical) layer
+    /// re-derives the real namespace tier-aware afterward. Returning `default` here
+    /// would leak the change to `default`-scoped subscribers.
     fn version_namespace_id(
         data: &VersionData,
         entity_id: u64,
         seen: &mut std::collections::HashMap<u64, NamespaceId>,
-        default_ns_id: NamespaceId,
+        unresolved_ns_id: NamespaceId,
     ) -> NamespaceId {
         match data {
             VersionData::Anchor { properties, .. } => {
                 let ns_id = intern_namespace(&namespace_of(properties));
-                // Only track non-default so the map stays small; a default entity's
-                // deltas fall through to `default_ns_id` on lookup.
-                if ns_id != default_ns_id {
-                    seen.insert(entity_id, ns_id);
-                }
+                // Record every anchor (default included) so a later delta MISS is a
+                // genuine "anchor not in this scan" signal, not a default entity.
+                seen.insert(entity_id, ns_id);
                 ns_id
             }
-            VersionData::Delta { .. } => seen.get(&entity_id).copied().unwrap_or(default_ns_id),
+            VersionData::Delta { .. } => seen.get(&entity_id).copied().unwrap_or(unresolved_ns_id),
         }
     }
 
