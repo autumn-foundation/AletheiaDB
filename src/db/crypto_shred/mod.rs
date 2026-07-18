@@ -215,9 +215,10 @@ pub struct CryptoShredState {
     /// Memoized subject-wrapping cipher (PR-1b). Built lazily on the first
     /// seal/unseal from the database's encryption config and reused for the
     /// process lifetime. Safe to cache because the subject-wrapping DEK is a
-    /// deterministic `HKDF(MEK, "subject-wrap")` and v1 crypto-shred does not
-    /// rotate the MEK (subject-keyring re-wrap on rotation is deferred to a
-    /// later slice, which must invalidate this cache).
+    /// deterministic `HKDF(MEK, "subject-wrap")`. On a full-MEK rotation the
+    /// derived cipher changes, so [`CryptoShredState::rewrap_keyring`] (Slice 5)
+    /// **invalidates this cache** (sets it back to `None`) after re-wrapping the
+    /// keyring, so the next seal/unseal rebuilds it under the new MEK.
     wrap_cipher: Mutex<Option<Arc<dyn Cipher>>>,
 }
 
@@ -403,9 +404,33 @@ impl CryptoShredState {
             .map(|w| w.wrapped.clone())
     }
 
+    /// The `key_version` stamped on a subject's wrapped DEK, or `None` if the
+    /// subject is unknown or erased (test/introspection, Slice 5). Used to assert
+    /// the subject-keyring re-wrap advanced the wrapping generation.
+    #[cfg(test)]
+    #[must_use = "the wrapped-DEK key version is the observed value under test; discarding it makes the call a no-op"]
+    pub(crate) fn subject_wrapped_key_version_for_test(&self, subject_id: &str) -> Option<u32> {
+        self.lock_keyring()
+            .get(subject_id)
+            .and_then(|e| e.wrapped_key.as_ref())
+            .map(|w| w.key_version)
+    }
+
     /// The breadcrumb path, if any.
     fn breadcrumb_path(&self) -> Option<&Path> {
         self.breadcrumb_path.as_deref()
+    }
+
+    /// Whether the subject-wrapping cipher is currently memoized (test-only,
+    /// Slice 5). Used to assert [`rewrap_keyring`](Self::rewrap_keyring)
+    /// invalidates the cache.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn wrap_cipher_cached_for_test(&self) -> bool {
+        self.wrap_cipher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     /// Reference to the attestation signing key.
@@ -675,6 +700,156 @@ impl CryptoShredState {
         let cipher: Arc<dyn Cipher> = Arc::from(build()?);
         *guard = Some(Arc::clone(&cipher));
         Ok(cipher)
+    }
+
+    /// Whether any **active** subject holds a wrapped DEK stamped at a key
+    /// version older than `new_version` (subject-keyring re-wrap scoping,
+    /// Slice 5).
+    ///
+    /// Used by the rotation driver to decide whether the subject-keyring layer
+    /// is in scope for a full-MEK rotation: a database with no subjects, or one
+    /// whose every subject is already at (or beyond) `new_version`, needs no
+    /// re-wrap pass and records the layer `Skipped`. Erased subjects (whose
+    /// wrapped key is physically gone) are never stale — there is nothing to
+    /// re-wrap.
+    #[must_use]
+    pub(crate) fn keyring_has_stale_wrapped_entries(&self, new_version: u32) -> bool {
+        use keyring::SubjectState;
+        let guard = self.lock_keyring();
+        guard.iter_entries().any(|e| {
+            e.state == SubjectState::Active
+                && e.wrapped_key
+                    .as_ref()
+                    .is_some_and(|w| w.key_version < new_version)
+        })
+    }
+
+    /// Re-wrap every stale-generation subject DEK from `old_wrap_cipher` to
+    /// `new_wrap_cipher`, stamping `new_version` (subject-keyring re-wrap on a
+    /// full-MEK rotation, Slice 5).
+    ///
+    /// A full-MEK rotation re-derives the subject-wrapping cipher
+    /// (`HKDF(MEK, "subject-wrap")`), so every per-subject wrapped DEK sealed
+    /// under the OLD MEK must be re-wrapped under the NEW MEK or it becomes
+    /// undecryptable once the operator drops the old key. This unwraps each DEK
+    /// under `old_wrap_cipher` (never leaving `Zeroizing`) and re-wraps it under
+    /// `new_wrap_cipher`, advancing only the wrapping — the random per-subject
+    /// DEK, the designation, lifecycle state, attestation, and timestamps are
+    /// untouched.
+    ///
+    /// # Erased invariant & idempotency
+    /// - An **erased** subject (or any entry with `wrapped_key == None`) is
+    ///   SKIPPED — its key is destroyed and must never be re-introduced.
+    /// - An entry already at `key_version >= new_version` is SKIPPED, so a
+    ///   crash-resumed or double-invoked pass re-wraps zero entries and is a
+    ///   safe no-op.
+    ///
+    /// After the pass the keyring is persisted **once** (atomic, durable) and
+    /// the memoized `wrap_cipher` is invalidated so the next seal/unseal rebuilds
+    /// it under the new MEK. Returns the number of entries re-wrapped.
+    ///
+    /// # Durability (v1 save-once)
+    /// The keyring is saved a single time after all entries are re-wrapped, not
+    /// per entry. A crash mid-pass therefore leaves the on-disk keyring at the
+    /// pre-pass state; the rotation ledger records the layer `Pending`, and the
+    /// idempotent resume re-runs the whole pass under the old MEK. A per-entry
+    /// durable cursor (bounding the redo window for very large subject counts)
+    /// is a named follow-up.
+    ///
+    /// # Errors
+    /// - [`CryptoShredError::Crypto`] if a DEK fails to unwrap under
+    ///   `old_wrap_cipher` (e.g. a wrong/new key presented mid-pass — a loud
+    ///   AEAD authentication failure, never silent wrong data) or fails to
+    ///   re-wrap, or unwraps to the wrong length.
+    /// - [`CryptoShredError::Io`] on durable-write failure.
+    pub(crate) fn rewrap_keyring(
+        &self,
+        old_wrap_cipher: &dyn Cipher,
+        new_wrap_cipher: &dyn Cipher,
+        new_version: u32,
+    ) -> Result<usize, CryptoShredError> {
+        use keyring::{SubjectState, WrappedKey};
+
+        let mut guard = self.lock_keyring();
+
+        // Plan: the (subject_id, old_key_version, wrapped_blob) of every entry
+        // that needs re-wrapping. Skip erased / keyless entries (erased
+        // invariant) and entries already at/beyond the target (idempotent).
+        struct RewrapItem {
+            subject_id: String,
+            old_key_version: u32,
+            wrapped: Vec<u8>,
+        }
+        let mut plan: Vec<RewrapItem> = Vec::new();
+        for entry in guard.iter_entries() {
+            if entry.state == SubjectState::Erased {
+                continue;
+            }
+            let Some(w) = entry.wrapped_key.as_ref() else {
+                continue;
+            };
+            if w.key_version >= new_version {
+                continue;
+            }
+            plan.push(RewrapItem {
+                subject_id: entry.subject_id.clone(),
+                old_key_version: w.key_version,
+                wrapped: w.wrapped.clone(),
+            });
+        }
+
+        let mut rewrapped = 0usize;
+        for item in &plan {
+            // Unwrap the DEK under the OLD wrapping cipher, binding the entry's
+            // own current key version as AAD (mirrors `dek_from_guard`). The
+            // plaintext DEK never leaves `Zeroizing`.
+            let old_aad = wrap_aad(&item.subject_id, item.old_key_version);
+            let raw = Zeroizing::new(
+                old_wrap_cipher
+                    .decrypt(&item.wrapped, &old_aad)
+                    .map_err(|e| CryptoShredError::Crypto(e.to_string()))?,
+            );
+            if raw.len() != subject::SUBJECT_KEY_LEN {
+                return Err(CryptoShredError::Crypto(
+                    "unwrapped subject key has wrong length".to_string(),
+                ));
+            }
+            // Re-wrap under the NEW cipher, binding the NEW version as AAD.
+            let new_aad = wrap_aad(&item.subject_id, new_version);
+            let new_blob = new_wrap_cipher
+                .encrypt(&raw, &new_aad)
+                .map_err(|e| CryptoShredError::Crypto(e.to_string()))?;
+            guard.set_wrapped_key(
+                &item.subject_id,
+                WrappedKey {
+                    key_version: new_version,
+                    wrapped: new_blob,
+                },
+            );
+            rewrapped += 1;
+        }
+
+        // v1 save-once: one atomic, durable write after re-wrapping all entries.
+        if rewrapped > 0
+            && let Some(path) = self.keyring_path()
+        {
+            keyring::save_keyring(path, &guard)?;
+        }
+        drop(guard);
+
+        // Invalidate the memoized subject-wrapping cipher so the next seal/unseal
+        // rebuilds it under the new MEK (the cached one was derived from the old
+        // MEK). Done unconditionally: even a zero-re-wrap pass (idempotent resume)
+        // may have run because the live MEK changed.
+        {
+            let mut wc = self
+                .wrap_cipher
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *wc = None;
+        }
+
+        Ok(rewrapped)
     }
 
     /// Seal the designated property values of an entity into `SUBJ` envelopes

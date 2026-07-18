@@ -186,6 +186,32 @@ fn derive_cold_dek(
         .map_err(|e| RotationError::KeyProvider(e.to_string()))
 }
 
+/// HKDF component label for the crypto-shred subject-wrapping DEK (Slice 5). Must
+/// match `crate::db::crypto_shred::api`'s `SUBJECT_WRAP_COMPONENT` so the rotation
+/// driver re-derives the exact cipher the seal/unseal path uses.
+#[cfg(feature = "audit-export")]
+const SUBJECT_WRAP_COMPONENT: &str = "subject-wrap";
+
+/// Derive the crypto-shred subject-wrapping DEK for a MEK using the shared HKDF
+/// context (Slice 5). Yields HKDF info string `aletheiadb-subject-wrap-dek-v1`.
+#[cfg(feature = "audit-export")]
+fn derive_subject_wrap_dek(
+    mek: Zeroizing<[u8; 32]>,
+) -> std::result::Result<Zeroizing<[u8; 32]>, RotationError> {
+    KeyDerivation::new(mek)
+        .derive_dek(SUBJECT_WRAP_COMPONENT)
+        .map_err(|e| RotationError::KeyProvider(e.to_string()))
+}
+
+/// Test-only fault-injection seam (Slice 5): when set, the next
+/// [`AletheiaDB::rotate_subject_keyring_layer`] returns an error BEFORE the
+/// re-wrap pass, simulating a crash after the ledger recorded
+/// `layer.subject_keyring=pending` but before the keyring was re-wrapped. The
+/// flag is cleared on read so a subsequent resume completes normally.
+#[cfg(all(test, feature = "audit-export"))]
+pub(crate) static FAIL_BEFORE_SUBJECT_KEYRING_REWRAP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Force-roll the WAL under the new DEK and retire the old-generation segments
 /// (Issue #3617). Shared by the forward driver and crash-resume.
 ///
@@ -260,6 +286,22 @@ pub(crate) fn mark_cold_complete(manager: &IndexPersistenceManager) -> Result<()
         && ledger.cold != LayerStatus::Complete
     {
         ledger.cold = LayerStatus::Complete;
+        write_ledger(manager, &ledger)?;
+    }
+    Ok(())
+}
+
+/// Rewrite the durable ledger flipping `layer.subject_keyring=complete` (Slice 5),
+/// preserving every other field. A no-op when no ledger is present. Modeled on
+/// [`mark_cold_complete`]: the completion is fsync'd (via `write_ledger`) before
+/// the caller clears the ledger, so a crash between the re-wrap's durable save
+/// and this mark re-runs the idempotent re-wrap pass on the next resume.
+#[cfg(feature = "audit-export")]
+pub(crate) fn mark_subject_keyring_complete(manager: &IndexPersistenceManager) -> Result<()> {
+    if let Some(mut ledger) = read_rotation_state(manager)?
+        && ledger.subject_keyring != LayerStatus::Complete
+    {
+        ledger.subject_keyring = LayerStatus::Complete;
         write_ledger(manager, &ledger)?;
     }
     Ok(())
@@ -745,6 +787,14 @@ impl AletheiaDB {
         {
             finalize_resumed_cold_rotation(&manager, &enc_cfg, tiered.cold_storage())?;
         }
+        // Subject-keyring layer (Slice 5): the LAST layer to settle — finish any
+        // pending re-wrap here (idempotent; skips already-rewrapped entries) and,
+        // if it was the only remaining pending layer, clear the ledger. Runs AFTER
+        // the cold finalize. A no-op when the layer is not in flight.
+        #[cfg(feature = "audit-export")]
+        if report.is_some() {
+            finalize_resumed_subject_keyring_rotation(&manager, &enc_cfg, &self.crypto_shred)?;
+        }
         Ok(report)
     }
 
@@ -807,6 +857,19 @@ impl AletheiaDB {
         // the cold DEK from the same MEK and must be bulk re-encrypted.
         let cold_in_scope =
             self.encryption_manager.is_some() && self.historical.read().has_tiered_storage();
+        // Subject-keyring layer (Slice 5): in scope when encryption is configured
+        // AND the crypto-shred keyring holds a wrapped DEK stamped below the target
+        // version (a new MEK re-derives the `subject-wrap` cipher, so those DEKs
+        // must be re-wrapped). No subjects, or all already at the target, → Skipped.
+        // Gated on `audit-export` (the crypto-shred module's feature); without it
+        // there is no subject keyring, so the layer is never in scope.
+        #[cfg(feature = "audit-export")]
+        let subject_keyring_in_scope = self.encryption_manager.is_some()
+            && self
+                .crypto_shred
+                .keyring_has_stale_wrapped_entries(new_version);
+        #[cfg(not(feature = "audit-export"))]
+        let subject_keyring_in_scope = false;
 
         // WAL-rotation invariant (Issue #3617): checkpoint BEFORE the ledger is
         // written. `persist_indexes` captures every committed entry into the
@@ -827,6 +890,7 @@ impl AletheiaDB {
                 new_key_source.clone(),
                 wal_in_scope,
                 cold_in_scope,
+                subject_keyring_in_scope,
             ),
         )?;
         self.emit_rotation_audit(&AuditEvent::RotationStarted {
@@ -863,6 +927,16 @@ impl AletheiaDB {
                 .map(|lc| Arc::clone(&lc.new))
                 .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
             self.rotate_cold_layer(manager, cold_new_cipher, new_version)?;
+        }
+
+        // Subject-keyring layer (Slice 5): re-wrap every per-subject wrapped DEK
+        // from the old MEK's `subject-wrap` cipher to the new one. Runs at the TAIL
+        // — after index/WAL/cold — so it settles last, immediately before the
+        // ledger is cleared. Both MEKs are still in scope here. A no-op when the
+        // keyring holds no stale-generation entries (layer recorded `Skipped`).
+        #[cfg(feature = "audit-export")]
+        if subject_keyring_in_scope {
+            self.rotate_subject_keyring_layer(manager, enc_cfg, &old_mek, &new_mek, new_version)?;
         }
 
         clear_rotation_state(manager);
@@ -984,6 +1058,55 @@ impl AletheiaDB {
         mark_cold_complete(manager)?;
         Ok(())
     }
+
+    /// Re-wrap the crypto-shred subject keyring to the new MEK's `subject-wrap`
+    /// cipher (Slice 5), then flip `layer.subject_keyring=complete`.
+    ///
+    /// A full-MEK rotation re-derives every per-component DEK, including the
+    /// `subject-wrap` DEK used to wrap the random per-subject DEKs in
+    /// `subject_keyring.dat`. Those wrapped DEKs are the ONLY durable copies of an
+    /// active subject's key, so they must be re-wrapped under the new MEK before
+    /// the operator drops the old key — otherwise the subjects (and every value
+    /// sealed under them) become undecryptable. Derives the old + new
+    /// subject-wrap ciphers from the two MEKs (already loaded in `run_rotation`),
+    /// runs the idempotent [`CryptoShredState::rewrap_keyring`] pass (which is a
+    /// no-op for erased subjects and for entries already at the target version),
+    /// and marks the ledger layer complete.
+    ///
+    /// # Operational contract (keep the OLD MEK until this completes)
+    /// Mirrors the cold layer's contract: while `layer.subject_keyring` is
+    /// `Pending`, the OLD MEK must remain available (the resume derives the old
+    /// subject-wrap cipher from it to unwrap the still-old-generation DEKs). A
+    /// reopen under the NEW key alone mid-pass surfaces a loud AEAD failure, never
+    /// silent wrong data; reopening under the OLD key lets the resume finish.
+    #[cfg(feature = "audit-export")]
+    fn rotate_subject_keyring_layer(
+        &self,
+        manager: &IndexPersistenceManager,
+        enc_cfg: &EncryptionConfig,
+        old_mek: &Zeroizing<[u8; 32]>,
+        new_mek: &Zeroizing<[u8; 32]>,
+        new_version: u32,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if FAIL_BEFORE_SUBJECT_KEYRING_REWRAP.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(StorageError::InconsistentState {
+                reason: "injected fault before subject-keyring re-wrap (test)".to_string(),
+            }
+            .into());
+        }
+
+        let old_dek = derive_subject_wrap_dek(old_mek.clone()).map_err(rotation_err)?;
+        let new_dek = derive_subject_wrap_dek(new_mek.clone()).map_err(rotation_err)?;
+        let old_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &old_dek));
+        let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
+
+        self.crypto_shred
+            .rewrap_keyring(old_cipher.as_ref(), new_cipher.as_ref(), new_version)
+            .map_err(|e| rotation_err(RotationError::KeyProvider(e.to_string())))?;
+        mark_subject_keyring_complete(manager)?;
+        Ok(())
+    }
 }
 
 // ── Durable rotation-state breadcrumb (crash-resume) ─────────────────
@@ -1083,6 +1206,16 @@ struct RotationLedger {
     /// plaintext WAL is deleted); `Skipped` for rotations and for an enable with no
     /// index snapshot.
     wal_retire: LayerStatus,
+    /// The crypto-shred subject-keyring re-wrap step (Slice 5): after a full-MEK
+    /// rotation re-keys the index/WAL/cold layers, every per-subject wrapped DEK
+    /// in `subject_keyring.dat` (still wrapped under the OLD MEK's `subject-wrap`
+    /// cipher) is re-wrapped under the NEW MEK's `subject-wrap` cipher. Recorded
+    /// `Pending` only for a forward rotation whose keyring holds stale-generation
+    /// wrapped DEKs; `Skipped` otherwise (no subjects, all already at the target
+    /// version, or for enable ledgers). A distinct per-field breadcrumb (mirroring
+    /// `wal_retire` / `cold`) so a crash mid-re-wrap re-runs it. Absent in any
+    /// pre-Slice-5 ledger, defaulting to `Skipped` on read.
+    subject_keyring: LayerStatus,
 }
 
 impl RotationLedger {
@@ -1103,6 +1236,8 @@ impl RotationLedger {
             wal: LayerStatus::Skipped,
             cold: LayerStatus::Skipped,
             wal_retire: LayerStatus::Skipped,
+            // The index-only PR1 path never re-wraps the subject keyring.
+            subject_keyring: LayerStatus::Skipped,
         }
     }
 
@@ -1116,6 +1251,7 @@ impl RotationLedger {
         new_source: KeyProviderConfig,
         wal_in_scope: bool,
         cold_in_scope: bool,
+        subject_keyring_in_scope: bool,
     ) -> Self {
         let scope = |in_scope: bool| {
             if in_scope {
@@ -1134,6 +1270,9 @@ impl RotationLedger {
             cold: scope(cold_in_scope),
             // A key rotation never retires pre-enable plaintext WAL (there is none).
             wal_retire: LayerStatus::Skipped,
+            // Slice 5: re-wrap the subject keyring when it holds stale-generation
+            // wrapped DEKs (else nothing to do — record Skipped).
+            subject_keyring: scope(subject_keyring_in_scope),
         }
     }
 
@@ -1171,6 +1310,10 @@ impl RotationLedger {
             // snapshot to durably hold the pre-enable state first (index in scope).
             // With no snapshot, retiring plaintext WAL could lose data, so Skip it.
             wal_retire: scope(index_in_scope),
+            // Enabling encryption from plaintext establishes the FIRST MEK; there
+            // is no prior subject-wrap generation to re-wrap from, so the
+            // subject-keyring re-wrap step never runs on an enable.
+            subject_keyring: LayerStatus::Skipped,
         }
     }
 }
@@ -1225,7 +1368,7 @@ fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> R
         }
     };
     let body = format!(
-        "version=2\ndirection={}\ntarget_version={}\nnew_source_kind={kind}\nnew_source_value={value}\nlayer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\nlayer.wal_retire={}\n",
+        "version=2\ndirection={}\ntarget_version={}\nnew_source_kind={kind}\nnew_source_value={value}\nlayer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\nlayer.wal_retire={}\nlayer.subject_keyring={}\n",
         ledger.direction.as_str(),
         ledger.new_version,
         ledger.index.as_str(),
@@ -1233,6 +1376,7 @@ fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> R
         ledger.wal.as_str(),
         ledger.cold.as_str(),
         ledger.wal_retire.as_str(),
+        ledger.subject_keyring.as_str(),
     );
     let base = manager.base_path();
     std::fs::create_dir_all(base)
@@ -1345,6 +1489,7 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
     let mut layer_wal = None;
     let mut layer_cold = None;
     let mut layer_wal_retire = None;
+    let mut layer_subject_keyring = None;
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -1379,6 +1524,9 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
             "layer.wal" => layer_wal = Some(parse_layer(v, "layer.wal")?),
             "layer.cold" => layer_cold = Some(parse_layer(v, "layer.cold")?),
             "layer.wal_retire" => layer_wal_retire = Some(parse_layer(v, "layer.wal_retire")?),
+            "layer.subject_keyring" => {
+                layer_subject_keyring = Some(parse_layer(v, "layer.subject_keyring")?)
+            }
             _ => {}
         }
     }
@@ -1425,6 +1573,11 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
         // defaults to `Skipped`: the plaintext-WAL-retire step did not exist, so a
         // resume must NOT delete any WAL segment based on an ambiguous absent field.
         wal_retire: layer_wal_retire.unwrap_or(LayerStatus::Skipped),
+        // Absent `layer.subject_keyring` (any pre-Slice-5 ledger) defaults to
+        // `Skipped`, mirroring `wal_retire`: a pre-Slice-5 rotation never re-wrapped
+        // the subject keyring, so a resume must never fabricate a Pending re-wrap
+        // pass from an ambiguous absent field.
+        subject_keyring: layer_subject_keyring.unwrap_or(LayerStatus::Skipped),
     }))
 }
 
@@ -1915,6 +2068,11 @@ pub fn resume_pending_rotation(
     // once the cold store exists. Both the live and startup resume paths honor
     // this by gating the clear below on `!cold_pending`.
     let cold_pending = matches!(ledger.cold, LayerStatus::Pending);
+    // Subject-keyring layer (Slice 5): the LAST layer to settle. When it is still
+    // `Pending`, this resume pass must NOT clear the ledger — the deferred
+    // `finalize_resumed_subject_keyring_rotation` (run after the cold finalize)
+    // performs the re-wrap and the final clear. Mirrors `cold_pending`.
+    let subject_keyring_pending = matches!(ledger.subject_keyring, LayerStatus::Pending);
     // DEFECT #3617-PR2: track whether the WAL layer actually finished retiring so
     // the final `clear_rotation_state` below is GATED on real completion (never
     // clears the ledger while an old-generation segment survives).
@@ -2006,7 +2164,7 @@ pub fn resume_pending_rotation(
             // window this fix closes. The index re-encrypt + `complete()` above
             // are durable and idempotent, so leaving the ledger for the finalize
             // pass is safe and re-entrant across another crash.
-            if !wal_finalize_deferred && !cold_pending {
+            if !wal_finalize_deferred && !cold_pending && !subject_keyring_pending {
                 clear_rotation_state(manager);
                 logger.log(&AuditEvent::RotationCompleted {
                     new_version: ledger.new_version,
@@ -2134,8 +2292,12 @@ pub fn finalize_resumed_wal_rotation(
     // Issue #3617 PR3: if the cold layer is still `Pending`, LEAVE the ledger for
     // `finalize_resumed_cold_rotation` (which runs after the cold store is built)
     // to complete cold and clear it. Clearing here would drop the ledger while
-    // cold values are still half-rotated, wedging a provider switch.
-    if !matches!(ledger.cold, LayerStatus::Pending) {
+    // cold values are still half-rotated, wedging a provider switch. Slice 5: the
+    // subject-keyring layer settles even later, so also defer while it is
+    // `Pending` (its finalize runs after the cold finalize and clears last).
+    if !matches!(ledger.cold, LayerStatus::Pending)
+        && !matches!(ledger.subject_keyring, LayerStatus::Pending)
+    {
         clear_rotation_state(manager);
     }
     Ok(())
@@ -2213,10 +2375,88 @@ pub fn finalize_resumed_cold_rotation(
     cold.install_cold_generation(ledger.new_version, new_cold_cipher)?;
 
     // Resume the bulk re-encrypt from the redb cursor (skips already-wrapped
-    // values), retire the old generation, then complete + clear the ledger.
+    // values), retire the old generation, then complete + clear the ledger —
+    // UNLESS the subject-keyring layer is still `Pending` (Slice 5), in which case
+    // leave the ledger for `finalize_resumed_subject_keyring_rotation` to settle
+    // last (mirrors how `finalize_resumed_wal_rotation` defers to cold).
     cold.reencrypt_cold_values(ledger.new_version)?;
     cold.retire_cold_generations(ledger.new_version)?;
     mark_cold_complete(manager)?;
+    if !matches!(ledger.subject_keyring, LayerStatus::Pending) {
+        clear_rotation_state(manager);
+    }
+    Ok(())
+}
+
+/// Finalize a startup- or live-resumed crypto-shred SUBJECT-KEYRING re-wrap
+/// (Slice 5), completing the re-wrap pass and clearing the rotation ledger.
+///
+/// The subject keyring is the LAST layer to settle in a full-MEK rotation: it
+/// runs after index / WAL / cold have all been re-keyed (each of those finalize
+/// passes now defers the ledger clear while `layer.subject_keyring` is
+/// `Pending`), so this function performs the final ledger clear. It is
+/// idempotent and resumable:
+///
+/// 1. re-derive the OLD subject-wrap cipher from the CURRENT (live) MEK — during
+///    a resume-under-old-key the encryption config still points at the old key —
+///    and the NEW subject-wrap cipher from the ledger's recorded new source;
+/// 2. run [`CryptoShredState::rewrap_keyring`], which skips erased subjects and
+///    entries already at the target version, so a crash mid-pass resumes with no
+///    double-wrap and no error;
+/// 3. mark `layer.subject_keyring=complete` and clear the ledger.
+///
+/// A no-op (`Ok(())`) when no ledger is present, the layer is not `Pending`, or
+/// the direction is `enable` — so `db::config` and the live resume can call it
+/// unconditionally.
+///
+/// # Crash caveat: keep the OLD MEK available until this completes
+///
+/// Identical in spirit to the cold layer's contract
+/// ([`finalize_resumed_cold_rotation`]): while `layer.subject_keyring` is
+/// `Pending`, the OLD MEK must remain the live encryption source so the old
+/// subject-wrap cipher can unwrap the still-old-generation per-subject DEKs
+/// during this resumed pass. If the operator instead reopens under the NEW key
+/// alone while the re-wrap crashed mid-pass, the surviving old-generation wrapped
+/// DEKs can no longer be unwrapped — a **loud** AEAD authentication failure, so
+/// the pass returns `Err` rather than silently corrupting the keyring. Recovery
+/// is lossless: reopen once under the OLD key so this resume completes (re-wrapping
+/// every entry at the new generation and clearing the ledger), after which the new
+/// key alone unwraps everything. The fault is availability-only, never data loss.
+///
+/// # Errors
+///
+/// Returns an error if the old or new MEK cannot be sourced, or the re-wrap pass
+/// fails (a genuine wrong/absent key surfaces loudly; the ledger is left
+/// `Pending` for a later resume).
+#[cfg(feature = "audit-export")]
+pub fn finalize_resumed_subject_keyring_rotation(
+    manager: &Arc<IndexPersistenceManager>,
+    enc_cfg: &EncryptionConfig,
+    crypto_shred: &crate::db::crypto_shred::CryptoShredState,
+) -> Result<()> {
+    let Some(ledger) = read_rotation_state(manager)? else {
+        return Ok(());
+    };
+    if matches!(ledger.direction, RotationDirection::Enable) {
+        return Ok(());
+    }
+    if !matches!(ledger.subject_keyring, LayerStatus::Pending) {
+        return Ok(());
+    }
+
+    // OLD subject-wrap cipher from the live (old) MEK; NEW from the ledger source.
+    let old_dek = derive_subject_wrap_dek(load_mek(&enc_cfg.key_provider).map_err(rotation_err)?)
+        .map_err(rotation_err)?;
+    let new_dek = derive_subject_wrap_dek(load_mek(&ledger.new_source).map_err(rotation_err)?)
+        .map_err(rotation_err)?;
+    let old_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &old_dek));
+    let new_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &new_dek));
+
+    crypto_shred
+        .rewrap_keyring(old_cipher.as_ref(), new_cipher.as_ref(), ledger.new_version)
+        .map_err(|e| rotation_err(RotationError::KeyProvider(e.to_string())))?;
+    mark_subject_keyring_complete(manager)?;
+    // The subject keyring settles last — clear the rotation ledger.
     clear_rotation_state(manager);
     Ok(())
 }
@@ -2858,6 +3098,7 @@ mod tests {
                     },
                     true,  // WAL in scope
                     false, // cold not in scope
+                    false, // subject keyring not in scope
                 ),
             )
             .unwrap();
@@ -3032,6 +3273,7 @@ mod tests {
                     },
                     true,
                     false, // cold not in scope
+                    false, // subject keyring not in scope
                 ),
             )
             .unwrap();
@@ -3527,6 +3769,7 @@ mod tests {
             wal: super::LayerStatus::Skipped,
             cold: super::LayerStatus::Pending,
             wal_retire: super::LayerStatus::Skipped,
+            subject_keyring: super::LayerStatus::Skipped,
         };
         super::write_ledger(&manager, &ledger).unwrap();
 
@@ -4024,6 +4267,7 @@ mod tests {
                 wal: super::LayerStatus::Skipped,
                 cold: super::LayerStatus::Skipped,
                 wal_retire: super::LayerStatus::Skipped,
+                subject_keyring: super::LayerStatus::Skipped,
             },
         )
         .unwrap();
@@ -4103,6 +4347,7 @@ mod tests {
                 wal: super::LayerStatus::Skipped,
                 cold: super::LayerStatus::Skipped,
                 wal_retire: super::LayerStatus::Skipped,
+                subject_keyring: super::LayerStatus::Skipped,
             },
         )
         .unwrap();
@@ -4379,6 +4624,7 @@ mod tests {
                     },
                     true,  // WAL in scope
                     false, // cold not in scope
+                    false, // subject keyring not in scope
                 ),
             )
             .unwrap();
@@ -4503,6 +4749,7 @@ mod tests {
                     },
                     true,
                     false, // cold not in scope
+                    false, // subject keyring not in scope
                 ),
             )
             .unwrap();
@@ -4540,5 +4787,457 @@ mod tests {
              install, a half-rotated WAL loses every write whose only durable copy is a \
              new-DEK segment."
         );
+    }
+
+    /// Slice 5 (legacy ledger): a v2 ledger written before Slice 5 (no
+    /// `layer.subject_keyring=` line) must parse with `subject_keyring == Skipped`
+    /// — never fabricate a Pending re-wrap pass — mirroring `wal_retire`.
+    #[test]
+    fn legacy_v2_ledger_without_subject_keyring_parses_as_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let path = data_dir.join("rotation.state");
+        std::fs::write(
+            &path,
+            b"version=2\ndirection=forward\ntarget_version=2\nnew_source_kind=file\n\
+              new_source_value=/k/new.key\nlayer.index=pending\nlayer.checkpoint=pending\n\
+              layer.wal=skipped\nlayer.cold=skipped\nlayer.wal_retire=skipped\n",
+        )
+        .unwrap();
+        let ledger = super::read_rotation_state_at(&path)
+            .unwrap()
+            .expect("ledger present");
+        assert_eq!(
+            ledger.subject_keyring,
+            super::LayerStatus::Skipped,
+            "absent layer.subject_keyring must default to Skipped"
+        );
+    }
+
+    /// Slice 5 rotation integration: subject-keyring re-wrap on full-MEK rotation.
+    /// Gated on `audit-export` (the crypto-shred feature).
+    #[cfg(feature = "audit-export")]
+    mod subject_keyring_rewrap {
+        use super::{build_db, seed};
+        use crate::core::property::{PropertyMapBuilder, PropertyValue};
+        use crate::db::AletheiaDB;
+        use crate::db::crypto_shred::{CryptoShredState, DesignationTarget, SubjectId};
+        use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
+        use crate::encryption::factory::{Algorithm, create_cipher};
+        use std::path::Path;
+        use std::sync::atomic::Ordering;
+        use tempfile::TempDir;
+
+        const KR_SECRET: &str = "SLICE5_SUBJECT_SECRET_VALUE_dead_beef";
+
+        fn gen_keys(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+            let old_key = root.join("old.key");
+            let new_key = root.join("new.key");
+            crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+            crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+            (old_key, new_key)
+        }
+
+        /// Create a node, designate `subject` over it, and seal a secret property.
+        fn seed_subject(db: &AletheiaDB, subject: &str) -> crate::core::NodeId {
+            let id = db
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new()
+                        .insert("stage", "placeholder")
+                        .build(),
+                )
+                .unwrap();
+            db.designate_subject(subject, vec![DesignationTarget::WholeNode(id.as_u64())])
+                .unwrap();
+            db.replace_node(
+                id,
+                "Person",
+                PropertyMapBuilder::new().insert("email", KR_SECRET).build(),
+            )
+            .unwrap();
+            db.persist_indexes().unwrap();
+            id
+        }
+
+        /// The durable keyring path for a `build_db`-rooted DB (chain_data_dir =
+        /// wal-dir parent = `root`).
+        fn keyring_path(root: &Path) -> std::path::PathBuf {
+            root.join(crate::db::crypto_shred::keyring::KEYRING_FILENAME)
+        }
+
+        /// Assert a subject's on-disk wrapped DEK unwraps under a subject-wrap
+        /// cipher derived from `key` at `version` — i.e. it is decryptable under
+        /// that MEK. Uses a FRESH keyring load (empty DEK cache) so the check
+        /// exercises the on-disk wrapped blob, not a cached key.
+        fn assert_decryptable_under(root: &Path, subject: &str, key: &Path, alg: Algorithm) {
+            let mek = super::super::load_mek(&KeyProviderConfig::File {
+                path: key.to_path_buf(),
+            })
+            .unwrap();
+            let dek = super::super::derive_subject_wrap_dek(mek).unwrap();
+            let cipher = create_cipher(alg, &dek);
+            let fresh = CryptoShredState::open(Some(keyring_path(root))).unwrap();
+            fresh
+                .subject_key(&SubjectId::new(subject).unwrap(), cipher.as_ref())
+                .expect("subject DEK must unwrap under the given key");
+        }
+
+        fn plant_keyring_pending_ledger(
+            manager: &crate::storage::index_persistence::IndexPersistenceManager,
+            new_key: &Path,
+        ) {
+            super::super::write_ledger(
+                manager,
+                &super::super::RotationLedger {
+                    direction: super::super::RotationDirection::Forward,
+                    new_version: 2,
+                    new_source: KeyProviderConfig::File {
+                        path: new_key.to_path_buf(),
+                    },
+                    index: super::super::LayerStatus::Skipped,
+                    checkpoint: super::super::LayerStatus::Skipped,
+                    wal: super::super::LayerStatus::Skipped,
+                    cold: super::super::LayerStatus::Skipped,
+                    wal_retire: super::super::LayerStatus::Skipped,
+                    subject_keyring: super::super::LayerStatus::Pending,
+                },
+            )
+            .unwrap();
+        }
+
+        /// Case 1: a full-MEK rotation re-wraps the subject keyring (key version
+        /// advances) and the sealed property still decrypts after a genuine reopen
+        /// under the new key.
+        #[test]
+        fn rotation_rewraps_keyring_value_decrypts_under_new_key() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let (old_key, new_key) = gen_keys(root);
+
+            let node_id = {
+                let db = build_db(root, &old_key);
+                let id = seed_subject(&db, "subj");
+                assert_eq!(
+                    db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                    Some(1)
+                );
+                let report = db
+                    .rotate_index_keys(KeyProviderConfig::File {
+                        path: new_key.clone(),
+                    })
+                    .unwrap();
+                assert_eq!(report.new_version, 2);
+                assert!(!root.join("data").join("rotation.state").exists());
+                assert_eq!(
+                    db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                    Some(2),
+                    "keyring re-wrapped to the new generation"
+                );
+                id
+            };
+
+            let db = build_db(root, &new_key);
+            assert!(db.crypto_shred.is_active("subj"));
+            let node = db.get_node(node_id).unwrap();
+            assert_eq!(
+                node.properties.get("email"),
+                Some(&PropertyValue::from(KR_SECRET.to_string())),
+                "sealed value decrypts under the new MEK after rotation"
+            );
+        }
+
+        /// Case 2: an erased subject stays erased across a rotation whose re-wrap
+        /// pass DOES run (a co-resident active subject makes the layer in scope) —
+        /// the wrapped blob never reappears and the attestation survives.
+        #[test]
+        fn rotation_leaves_erased_subject_erased() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let (old_key, new_key) = gen_keys(root);
+
+            let node_a = {
+                let db = build_db(root, &old_key);
+                let a = seed_subject(&db, "A");
+                let e = seed_subject(&db, "E");
+                db.erase_subject("E").unwrap();
+                db.persist_indexes().unwrap();
+                assert!(db.crypto_shred.is_erased("E"));
+                assert!(db.crypto_shred.subject_wrapped_dek_for_test("E").is_none());
+                let erased_at = db.crypto_shred.subject_erased_at("E");
+                assert!(erased_at.is_some(), "attestation/erased_at recorded");
+
+                // The active subject A makes the keyring layer in scope.
+                assert!(db.crypto_shred.keyring_has_stale_wrapped_entries(2));
+                let report = db
+                    .rotate_index_keys(KeyProviderConfig::File {
+                        path: new_key.clone(),
+                    })
+                    .unwrap();
+                assert_eq!(report.new_version, 2);
+
+                assert_eq!(
+                    db.crypto_shred.subject_wrapped_key_version_for_test("A"),
+                    Some(2),
+                    "active subject A re-wrapped"
+                );
+                assert!(db.crypto_shred.is_erased("E"), "E still erased");
+                assert!(
+                    db.crypto_shred.subject_wrapped_dek_for_test("E").is_none(),
+                    "erased subject's wrapped blob must never reappear"
+                );
+                assert_eq!(
+                    db.crypto_shred.subject_erased_at("E"),
+                    erased_at,
+                    "erased_at/attestation unchanged across rotation"
+                );
+                let _ = e;
+                a
+            };
+
+            let db = build_db(root, &new_key);
+            assert!(db.crypto_shred.is_active("A"));
+            assert!(db.crypto_shred.is_erased("E"));
+            assert_eq!(
+                db.get_node(node_a).unwrap().properties.get("email"),
+                Some(&PropertyValue::from(KR_SECRET.to_string()))
+            );
+        }
+
+        /// Case 3: a crash mid-re-wrap resumes via the STARTUP path
+        /// (`finalize_resumed_subject_keyring_rotation`, exactly what `db::config`
+        /// invokes) under the old key, completing the re-wrap and clearing the
+        /// ledger; every entry ends at the new generation and decrypts.
+        #[test]
+        fn crash_resume_startup_path_completes_rewrap() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let (old_key, new_key) = gen_keys(root);
+
+            let db = build_db(root, &old_key);
+            seed_subject(&db, "subj");
+            let manager = db.persistence_manager.as_ref().unwrap().clone();
+            plant_keyring_pending_ledger(&manager, &new_key);
+            assert_eq!(
+                db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                Some(1)
+            );
+
+            // Startup resume under the OLD key finishes the deferred re-wrap.
+            let enc_old = EncryptionConfig::file_based(&old_key);
+            super::super::finalize_resumed_subject_keyring_rotation(
+                &manager,
+                &enc_old,
+                db.crypto_shred.as_ref(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                Some(2),
+                "re-wrap completed on resume"
+            );
+            assert!(
+                !root.join("data").join("rotation.state").exists(),
+                "the keyring settles last and clears the ledger"
+            );
+            assert_decryptable_under(root, "subj", &new_key, enc_old.algorithm);
+        }
+
+        /// Case 4: a crash mid-re-wrap resumes via the LIVE path
+        /// (`resume_pending_index_rotation`). The rotation completes index+WAL,
+        /// faults before the keyring re-wrap, and the live resume finishes it.
+        #[test]
+        fn crash_resume_live_path_completes_rewrap() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let (old_key, new_key) = gen_keys(root);
+
+            let db = build_db(root, &old_key);
+            let node_id = seed_subject(&db, "subj");
+
+            super::super::FAIL_BEFORE_SUBJECT_KEYRING_REWRAP.store(true, Ordering::SeqCst);
+            let err = db
+                .rotate_index_keys(KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("injected"),
+                "expected injected fault: {err}"
+            );
+            assert!(
+                root.join("data").join("rotation.state").exists(),
+                "the ledger survives the fault with the keyring layer pending"
+            );
+            assert_eq!(
+                db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                Some(1),
+                "keyring not yet re-wrapped"
+            );
+
+            db.resume_pending_index_rotation()
+                .unwrap()
+                .expect("a pending rotation resumes");
+            assert!(
+                !root.join("data").join("rotation.state").exists(),
+                "live resume completes the re-wrap and clears the ledger"
+            );
+            assert_eq!(
+                db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                Some(2)
+            );
+
+            drop(db);
+            let db = build_db(root, &new_key);
+            assert_eq!(
+                db.get_node(node_id).unwrap().properties.get("email"),
+                Some(&PropertyValue::from(KR_SECRET.to_string())),
+                "graph + sealed value read under the new key after resume"
+            );
+        }
+
+        /// Case 5 (idempotent re-run) — see the focused unit tests in
+        /// `crypto_shred::tests` (`rewrap_keyring_is_idempotent_no_op_on_rerun`).
+        /// Case 6 (partial-version) — see
+        /// `rewrap_keyring_tolerates_mixed_versions_and_advances_only_stale`.
+        /// Case 9 (cache invalidation) — see
+        /// `rewrap_keyring_invalidates_memoized_wrap_cipher`, plus the cross-reopen
+        /// coverage in case 1 above (a reopen under the new key rebuilds the
+        /// subject-wrap cipher from scratch and reads sealed values).
+        #[test]
+        fn crash_resume_idempotent_when_ledger_already_settled() {
+            // Case 5 at the rotation seam: re-running the finalize after it already
+            // completed is a clean no-op (no ledger -> Ok, nothing re-wrapped).
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let (old_key, new_key) = gen_keys(root);
+            let db = build_db(root, &old_key);
+            seed_subject(&db, "subj");
+            let manager = db.persistence_manager.as_ref().unwrap().clone();
+            plant_keyring_pending_ledger(&manager, &new_key);
+            let enc_old = EncryptionConfig::file_based(&old_key);
+            super::super::finalize_resumed_subject_keyring_rotation(
+                &manager,
+                &enc_old,
+                db.crypto_shred.as_ref(),
+            )
+            .unwrap();
+            // Second run: ledger already cleared -> guarded no-op.
+            super::super::finalize_resumed_subject_keyring_rotation(
+                &manager,
+                &enc_old,
+                db.crypto_shred.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(
+                db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                Some(2)
+            );
+        }
+
+        /// Case 7: reopening under the NEW key alone mid-pass fails LOUDLY (AEAD
+        /// authentication error, never silent wrong data); reopening under the OLD
+        /// key finishes the resume.
+        #[test]
+        fn fail_closed_on_new_key_reopen_then_old_key_resumes() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let (old_key, new_key) = gen_keys(root);
+
+            let db = build_db(root, &old_key);
+            seed_subject(&db, "subj");
+            let manager = db.persistence_manager.as_ref().unwrap().clone();
+            plant_keyring_pending_ledger(&manager, &new_key);
+
+            // Reopen under the NEW key alone -> the old-generation wrapped DEK
+            // cannot be unwrapped -> loud error, ledger + keyring untouched.
+            let enc_new = EncryptionConfig::file_based(&new_key);
+            let err = super::super::finalize_resumed_subject_keyring_rotation(
+                &manager,
+                &enc_new,
+                db.crypto_shred.as_ref(),
+            )
+            .unwrap_err();
+            let _ = err;
+            assert!(
+                root.join("data").join("rotation.state").exists(),
+                "ledger must stay pending after a failed new-key resume"
+            );
+            assert_eq!(
+                db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                Some(1),
+                "keyring untouched after the loud failure"
+            );
+
+            // Reopen under the OLD key -> the resume completes losslessly.
+            let enc_old = EncryptionConfig::file_based(&old_key);
+            super::super::finalize_resumed_subject_keyring_rotation(
+                &manager,
+                &enc_old,
+                db.crypto_shred.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(
+                db.crypto_shred.subject_wrapped_key_version_for_test("subj"),
+                Some(2)
+            );
+            assert!(!root.join("data").join("rotation.state").exists());
+        }
+
+        /// Case 8a: a rotation of an encrypted DB with NO designated subjects skips
+        /// the keyring layer entirely (no keyring file is ever written).
+        #[test]
+        fn rotation_skips_keyring_when_no_subjects() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let (old_key, new_key) = gen_keys(root);
+            let db = build_db(root, &old_key);
+            seed(&db); // normal nodes, no designation
+            assert!(!db.crypto_shred.keyring_has_stale_wrapped_entries(2));
+
+            let report = db
+                .rotate_index_keys(KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .unwrap();
+            assert_eq!(report.new_version, 2);
+            assert!(!root.join("data").join("rotation.state").exists());
+            assert!(
+                !keyring_path(root).exists(),
+                "no subjects -> the keyring layer never writes subject_keyring.dat"
+            );
+        }
+
+        /// Case 8b: a rotation whose keyring holds ONLY erased subjects skips the
+        /// re-wrap (an erased subject has no wrapped DEK -> nothing stale) and the
+        /// subject stays erased.
+        #[test]
+        fn rotation_skips_keyring_when_all_erased() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let (old_key, new_key) = gen_keys(root);
+            let db = build_db(root, &old_key);
+            seed_subject(&db, "only");
+            db.erase_subject("only").unwrap();
+            db.persist_indexes().unwrap();
+            assert!(
+                !db.crypto_shred.keyring_has_stale_wrapped_entries(2),
+                "all-erased keyring has nothing stale to re-wrap"
+            );
+
+            let report = db
+                .rotate_index_keys(KeyProviderConfig::File {
+                    path: new_key.clone(),
+                })
+                .unwrap();
+            assert_eq!(report.new_version, 2);
+            assert!(db.crypto_shred.is_erased("only"));
+
+            drop(db);
+            let db = build_db(root, &new_key);
+            assert!(db.crypto_shred.is_erased("only"));
+        }
     }
 }

@@ -655,3 +655,206 @@ fn designate_without_encryption_is_failed_precondition() {
     assert!(matches!(err, CryptoShredError::EncryptionNotConfigured));
     assert_eq!(err.code(), "FAILED_PRECONDITION");
 }
+
+// ── Slice 5: subject-keyring re-wrap (rewrap_keyring) focused unit tests ──
+
+use super::CryptoShredState;
+use super::subject::SUBJECT_KEY_LEN;
+use super::wrap_aad;
+
+/// Recover a subject's DEK bytes by unwrapping its on-disk wrapped blob under
+/// `cipher` at `key_version` (test helper — the DEK is compared for equality
+/// only, never logged).
+fn recover_dek(
+    state: &CryptoShredState,
+    subject: &str,
+    cipher: &dyn crate::encryption::Cipher,
+    key_version: u32,
+) -> Vec<u8> {
+    let blob = state
+        .subject_wrapped_dek_for_test(subject)
+        .expect("subject has a wrapped DEK");
+    let raw = cipher
+        .decrypt(&blob, &wrap_aad(subject, key_version))
+        .expect("wrapped DEK unwraps under the expected cipher + version");
+    assert_eq!(raw.len(), SUBJECT_KEY_LEN);
+    raw
+}
+
+#[test]
+fn rewrap_keyring_advances_version_and_preserves_dek() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(keyring::KEYRING_FILENAME);
+    let state = CryptoShredState::open(Some(path)).unwrap();
+    let c_old = test_cipher(1);
+    let c_new = test_cipher(2);
+    let subj = SubjectId::new("s1").unwrap();
+    state
+        .designate(&subj, vec![DesignationTarget::WholeNode(1)], c_old.as_ref())
+        .unwrap();
+
+    // The DEK as wrapped under the OLD cipher at v1.
+    let dek_before = recover_dek(&state, "s1", c_old.as_ref(), 1);
+    assert!(state.keyring_has_stale_wrapped_entries(2));
+
+    let n = state
+        .rewrap_keyring(c_old.as_ref(), c_new.as_ref(), 2)
+        .unwrap();
+    assert_eq!(n, 1, "one entry re-wrapped");
+
+    // Now the DEK unwraps under the NEW cipher at v2, byte-identical.
+    let dek_after = recover_dek(&state, "s1", c_new.as_ref(), 2);
+    assert_eq!(
+        dek_before, dek_after,
+        "the random DEK is preserved, only the wrapping changed"
+    );
+    assert!(
+        !state.keyring_has_stale_wrapped_entries(2),
+        "no stale entries after re-wrap"
+    );
+}
+
+#[test]
+fn rewrap_keyring_is_idempotent_no_op_on_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(keyring::KEYRING_FILENAME);
+    let state = CryptoShredState::open(Some(path)).unwrap();
+    let c_old = test_cipher(1);
+    let c_new = test_cipher(2);
+    let subj = SubjectId::new("s1").unwrap();
+    state
+        .designate(&subj, vec![DesignationTarget::WholeNode(1)], c_old.as_ref())
+        .unwrap();
+
+    assert_eq!(
+        state
+            .rewrap_keyring(c_old.as_ref(), c_new.as_ref(), 2)
+            .unwrap(),
+        1
+    );
+    // Second run to the SAME target: every entry is already at v2 -> 0 re-wrapped,
+    // no error (the old cipher is never even consulted).
+    let c_bogus = test_cipher(9);
+    assert_eq!(
+        state
+            .rewrap_keyring(c_bogus.as_ref(), c_new.as_ref(), 2)
+            .unwrap(),
+        0,
+        "idempotent re-run re-wraps zero entries"
+    );
+    // Value still recovers under the v2 cipher.
+    recover_dek(&state, "s1", c_new.as_ref(), 2);
+}
+
+#[test]
+fn rewrap_keyring_tolerates_mixed_versions_and_advances_only_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(keyring::KEYRING_FILENAME);
+    let state = CryptoShredState::open(Some(path)).unwrap();
+    let c1 = test_cipher(1);
+    let c2 = test_cipher(2);
+    let c3 = test_cipher(3);
+
+    // s1 designated under c1 (v1), then advanced to v2 under c2.
+    state
+        .designate(
+            &SubjectId::new("s1").unwrap(),
+            vec![DesignationTarget::WholeNode(1)],
+            c1.as_ref(),
+        )
+        .unwrap();
+    assert_eq!(
+        state.rewrap_keyring(c1.as_ref(), c2.as_ref(), 2).unwrap(),
+        1
+    );
+    // s2 designated AFTER the rotation, so it starts at v1 wrapped under c2.
+    state
+        .designate(
+            &SubjectId::new("s2").unwrap(),
+            vec![DesignationTarget::WholeNode(2)],
+            c2.as_ref(),
+        )
+        .unwrap();
+
+    // Mixed: s1@v2, s2@v1. Re-wrap to target v2 advances ONLY the stale s2.
+    let n = state.rewrap_keyring(c2.as_ref(), c3.as_ref(), 2).unwrap();
+    assert_eq!(n, 1, "only the stale (v1) entry is advanced");
+    // s1 still at v2 under c2 (untouched); s2 now at v2 under c3.
+    recover_dek(&state, "s1", c2.as_ref(), 2);
+    recover_dek(&state, "s2", c3.as_ref(), 2);
+}
+
+#[test]
+fn rewrap_keyring_skips_erased_subject_and_never_resurrects_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(keyring::KEYRING_FILENAME);
+    let state = CryptoShredState::open(Some(path)).unwrap();
+    let c_old = test_cipher(1);
+    let c_new = test_cipher(2);
+    state
+        .designate(
+            &SubjectId::new("gone").unwrap(),
+            vec![DesignationTarget::WholeNode(1)],
+            c_old.as_ref(),
+        )
+        .unwrap();
+    state.erase(&SubjectId::new("gone").unwrap()).unwrap();
+    assert!(
+        state.subject_wrapped_dek_for_test("gone").is_none(),
+        "erased: wrapped key gone"
+    );
+
+    // Re-wrap must skip the erased subject and never re-introduce a wrapped key.
+    let n = state
+        .rewrap_keyring(c_old.as_ref(), c_new.as_ref(), 2)
+        .unwrap();
+    assert_eq!(n, 0, "erased subject is not re-wrapped");
+    assert!(
+        state.subject_wrapped_dek_for_test("gone").is_none(),
+        "erased key must stay gone"
+    );
+    assert!(state.is_erased("gone"));
+}
+
+#[test]
+fn keyring_has_stale_wrapped_entries_false_when_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(keyring::KEYRING_FILENAME);
+    let state = CryptoShredState::open(Some(path)).unwrap();
+    assert!(
+        !state.keyring_has_stale_wrapped_entries(2),
+        "no subjects -> nothing stale"
+    );
+}
+
+#[test]
+fn rewrap_keyring_invalidates_memoized_wrap_cipher() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(keyring::KEYRING_FILENAME);
+    let state = CryptoShredState::open(Some(path)).unwrap();
+    let c_old = test_cipher(1);
+    let c_new = test_cipher(2);
+    state
+        .designate(
+            &SubjectId::new("s1").unwrap(),
+            vec![DesignationTarget::WholeNode(1)],
+            c_old.as_ref(),
+        )
+        .unwrap();
+
+    // Populate the memoized wrap cipher (as a seal/unseal would).
+    state.cached_wrap_cipher(|| Ok(test_cipher(1))).unwrap();
+    assert!(
+        state.wrap_cipher_cached_for_test(),
+        "wrap cipher is memoized"
+    );
+
+    // Re-wrap invalidates the memoized cipher so the next seal/unseal rebuilds it.
+    state
+        .rewrap_keyring(c_old.as_ref(), c_new.as_ref(), 2)
+        .unwrap();
+    assert!(
+        !state.wrap_cipher_cached_for_test(),
+        "re-wrap must invalidate the memoized wrap cipher"
+    );
+}

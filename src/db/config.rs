@@ -1152,6 +1152,26 @@ impl AletheiaDB {
                 db.fail_if_pending_enable_cold_without_tier()?;
             }
 
+            // Crypto-shred subject-keyring re-wrap (Slice 5): the LAST layer of a
+            // full-MEK rotation to settle. Runs AFTER the index/WAL/cold resume
+            // passes above, unconditionally (whether or not a cold tier was built),
+            // so a rotation that crashed after the ledger recorded
+            // `layer.subject_keyring=pending` finishes here — re-wrapping every
+            // per-subject DEK under the new MEK and clearing the ledger. Idempotent
+            // and a guarded no-op when the layer is not in flight; requires the OLD
+            // MEK to still be the configured key source (reopen-under-old-key
+            // contract). Gated on `audit-export` (the crypto-shred feature).
+            #[cfg(feature = "audit-export")]
+            if let Some(ref manager) = persistence_manager
+                && config.encryption.enabled
+            {
+                crate::db::rotation::finalize_resumed_subject_keyring_rotation(
+                    manager,
+                    &config.encryption,
+                    db.crypto_shred.as_ref(),
+                )?;
+            }
+
             seed_startup_current_timestamp(&db)?;
 
             // Wire the opt-in provenance hash chain (Issue #3351). Constructed
