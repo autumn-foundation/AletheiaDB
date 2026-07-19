@@ -2039,6 +2039,85 @@ impl AletheiaMcpServer {
         )
     }
 
+    /// Parse the optional Issue #3372 `fusion_policy` object into a validated
+    /// [`FusionPolicy`](crate::db::fusion::FusionPolicy). Returns `Ok(None)`
+    /// when the param is absent/null (unchanged behavior). A wrong JSON type or
+    /// an invalid weight/parameter maps to `INVALID_ARGUMENT` (#3234,
+    /// `retriable:false`) — `FusionPolicyError` is not a `db::Error`, so it is
+    /// mapped directly here.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see
+    // `parse_provenance_filter`.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn parse_fusion_policy(
+        &self,
+        args: &serde_json::Value,
+    ) -> std::result::Result<Option<crate::db::fusion::FusionPolicy>, CallToolResult> {
+        let Some(obj) = args.as_object() else {
+            return Ok(None);
+        };
+        let policy_val = match obj.get("fusion_policy") {
+            None | Some(serde_json::Value::Null) => return Ok(None),
+            Some(serde_json::Value::Object(m)) => m,
+            Some(_) => {
+                return Err(self.invalid_argument(
+                    "Invalid 'fusion_policy': expected an object with optional numeric weights",
+                ));
+            }
+        };
+
+        // Read an optional finite f64 field, rejecting a wrong JSON type here so
+        // the caller gets a field-named INVALID_ARGUMENT rather than a silently
+        // ignored setting.
+        let read_num = |key: &str| -> std::result::Result<Option<f64>, CallToolResult> {
+            match policy_val.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::Number(n)) => Ok(Some(n.as_f64().unwrap_or(f64::NAN))),
+                Some(_) => Err(self.invalid_argument(&format!(
+                    "Invalid 'fusion_policy.{key}': expected a number"
+                ))),
+            }
+        };
+
+        let mut builder = crate::db::fusion::FusionPolicy::builder();
+        if let Some(v) = read_num("w_similarity")? {
+            builder = builder.w_similarity(v);
+        }
+        if let Some(v) = read_num("w_confidence")? {
+            builder = builder.w_confidence(v);
+        }
+        if let Some(v) = read_num("w_recency")? {
+            builder = builder.w_recency(v);
+        }
+        if let Some(v) = read_num("neutral_confidence")? {
+            builder = builder.neutral_confidence(v);
+        }
+        if let Some(v) = read_num("recency_half_life_secs")? {
+            builder = builder.recency_half_life_secs(v);
+        }
+
+        builder.build().map(Some).map_err(|e| {
+            self.error_result(
+                McpError::new(McpErrorCode::InvalidArgument, e.to_string())
+                    .details(json!({ "param": "fusion_policy" })),
+            )
+        })
+    }
+
+    /// Serialize a [`FusionBreakdown`](crate::db::fusion::FusionBreakdown) into
+    /// the per-result `score_breakdown` JSON (Issue #3372).
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn fusion_breakdown_to_json(b: &crate::db::fusion::FusionBreakdown) -> serde_json::Value {
+        json!({
+            "similarity": b.similarity,
+            "confidence": b.confidence,
+            "confidence_defaulted": b.confidence_defaulted,
+            "recency": b.recency,
+            "recency_defaulted": b.recency_defaulted,
+            "fused": b.fused,
+        })
+    }
+
     /// Parse a single MCP [`LineageRefRequest`] into a core
     /// [`LineageRef`](crate::core::lineage::LineageRef) (Issue #3371).
     ///
@@ -5380,6 +5459,21 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        // Issue #3372: when a `fusion_policy` is supplied, re-rank by the fused
+        // score and return here; otherwise fall through to the unchanged
+        // similarity-only path below. Feature-gated: the param is only
+        // advertised/parsed when `semantic-retrieval-fusion` is compiled.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        {
+            match self.parse_fusion_policy(&args) {
+                Ok(Some(policy)) => {
+                    return self.handle_find_similar_fused(&args, &policy, prov_filter.as_ref());
+                }
+                Ok(None) => {}
+                Err(result) => return result,
+            }
+        }
+
         let req: FindSimilarRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -5467,6 +5561,7 @@ impl AletheiaMcpServer {
                             self.db.get_node(node_id).ok().map(|node| SimilarityResult {
                                 node: self.node_to_response(&node, include_vectors, now),
                                 score,
+                                score_breakdown: None,
                             })
                         })
                         .filter(|r| filter.matches(r.node.provenance.as_ref()))
@@ -5484,6 +5579,7 @@ impl AletheiaMcpServer {
                             self.db.get_node(node_id).ok().map(|node| SimilarityResult {
                                 node: self.node_to_response(&node, include_vectors, now),
                                 score,
+                                score_breakdown: None,
                             })
                         })
                         .collect();
@@ -5549,6 +5645,7 @@ impl AletheiaMcpServer {
                 self.db.get_node(node_id).ok().map(|node| SimilarityResult {
                     node: self.node_to_response(&node, include_vectors, now),
                     score,
+                    score_breakdown: None,
                 })
             })
             .filter(|r| prov_filter.is_none_or(|f| f.matches(r.node.provenance.as_ref())))
@@ -5563,6 +5660,161 @@ impl AletheiaMcpServer {
         });
         Self::attach_completeness(&mut response, offset, k, has_more, None);
         self.success_json(response)
+    }
+
+    /// Provenance-weighted fused `find_similar` (Issue #3372). Re-ranks the
+    /// candidate set (scoped or unscoped, per #3349) by the fused score of
+    /// similarity × provenance-confidence × temporal-recency, attaching a
+    /// `score_breakdown` to each result. Composes with the #3348 provenance
+    /// filter (applied per-candidate before paging) and #3349 namespace scoping.
+    ///
+    /// v1: `find_similar` has no temporal params, so recency is evaluated
+    /// against the current wallclock (AS-OF fusion is satisfied on
+    /// `hybrid_query`). The queried index must use the Cosine metric.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn handle_find_similar_fused(
+        &self,
+        args: &serde_json::Value,
+        policy: &crate::db::fusion::FusionPolicy,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+    ) -> CallToolResult {
+        use crate::db::fusion::fused_horizon;
+
+        let req: FindSimilarRequest = match serde_json::from_value(args.clone()) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let offset = req
+            .offset
+            .unwrap_or(0)
+            .min(MAX_PAGINATION_OFFSET)
+            .min(MAX_VECTOR_K.saturating_sub(k));
+
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        if let Err(e) = self.validate_embedding_dimensions(&req.embedding, &req.property_name) {
+            return self.invalid_argument(&e);
+        }
+        // Fusion's similarity term assumes an already-`[0,1]` score, true only
+        // for Cosine; reject other metrics rather than distorting the term
+        // (mirrors `FusionError::UnsupportedMetric`).
+        if let Some(info) = self
+            .db
+            .list_vector_indexes()
+            .into_iter()
+            .find(|i| i.property_name == req.property_name)
+            && info.distance_metric != DistanceMetric::Cosine
+        {
+            return self.failed_precondition(&format!(
+                "provenance-weighted fusion requires a Cosine vector index; the index for '{}' \
+                 uses {:?}, whose scores are not in [0,1] (v1 supports Cosine only)",
+                req.property_name, info.distance_metric
+            ));
+        }
+
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+
+        // Over-fetch a `k`-scaled horizon (never a fixed page window) so a
+        // geometrically-far but high-trust candidate can still win (AC4).
+        let horizon = fused_horizon(k);
+        let candidates: Vec<(NodeId, f32)> =
+            if matches!(scope, crate::core::namespace::NamespaceScope::All) {
+                match self.db.similarity_search(
+                    crate::SimilarityQuery::from_embedding(req.embedding.clone()).k(horizon),
+                ) {
+                    Ok(r) => r,
+                    Err(e) => return self.db_error(e),
+                }
+            } else {
+                match self
+                    .db
+                    .find_similar_by_embedding_scoped(&req.embedding, horizon, &scope)
+                {
+                    Ok(r) => r,
+                    Err(e) => return self.db_error(e),
+                }
+            };
+
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let now = time::now();
+        let reference_now = now.wallclock();
+
+        // Fuse each candidate, keeping the fused score alongside the result so we
+        // can sort by it. Provenance-filter per-candidate (before paging).
+        let mut scored: Vec<(f64, NodeId, SimilarityResult)> = Vec::with_capacity(candidates.len());
+        for (node_id, similarity) in candidates {
+            let Ok(node) = self.db.get_node(node_id) else {
+                continue;
+            };
+            let response = self.node_to_response(&node, include_vectors, now);
+            if !prov_filter.is_none_or(|f| f.matches(response.provenance.as_ref())) {
+                continue;
+            }
+            let (confidence, valid_from_micros, recency_defaulted) =
+                self.node_fusion_inputs(node.current_version);
+            let recency = if recency_defaulted {
+                crate::db::fusion::DEFAULT_NEUTRAL_RECENCY
+            } else {
+                policy.recency(reference_now, valid_from_micros)
+            };
+            let mut breakdown = policy.fuse(f64::from(similarity), confidence, recency);
+            breakdown.recency_defaulted = recency_defaulted;
+            let result = SimilarityResult {
+                node: response,
+                score: similarity,
+                score_breakdown: Some(Self::fusion_breakdown_to_json(&breakdown)),
+            };
+            scored.push((breakdown.fused, node_id, result));
+        }
+
+        // Total-order sort by fused score (descending), stable node-id tie-break.
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+
+        let has_more = scored.len() > offset.saturating_add(k);
+        let page: Vec<SimilarityResult> = scored
+            .into_iter()
+            .skip(offset)
+            .take(k)
+            .map(|(_, _, r)| r)
+            .collect();
+        let count = page.len();
+        let mut response = json!({
+            "results": page,
+            "count": count,
+        });
+        Self::attach_completeness(&mut response, offset, k, has_more, None);
+        self.success_json(response)
+    }
+
+    /// Read a candidate node's fusion inputs — `(confidence, valid_from_micros,
+    /// recency_defaulted)` — from its current version (Issue #3372). Mirrors the
+    /// Rust-API `node_fusion_metadata`; when metadata cannot be loaded,
+    /// `recency_defaulted` is set so the caller substitutes a **neutral**
+    /// recency (never a maximum-recency boost).
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn node_fusion_inputs(&self, version_id: VersionId) -> (Option<f64>, i64, bool) {
+        match self.db.get_node_version_read_metadata(version_id) {
+            Ok(Some((provenance, interval))) => (
+                provenance.and_then(|p| p.confidence()),
+                interval.valid_time().start().wallclock(),
+                false,
+            ),
+            _ => (None, 0, true),
+        }
     }
 
     // ========================================================================
@@ -8144,6 +8396,15 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        // Issue #3372: parse the optional fusion policy (feature-gated) before
+        // consuming args. When present, results are re-ranked by the fused score
+        // and each carries a `score_breakdown`; omitting it is unchanged.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        let fusion_policy = match self.parse_fusion_policy(&args) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -8211,6 +8472,7 @@ impl AletheiaMcpServer {
                                         .collect()
                                 }),
                                 timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
+                                score_breakdown: None,
                             })
                         } else {
                             None
@@ -8250,6 +8512,7 @@ impl AletheiaMcpServer {
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: Some(vt.wallclock().to_string()),
+                                score_breakdown: None,
                             }]
                         } else {
                             Vec::new()
@@ -8293,6 +8556,7 @@ impl AletheiaMcpServer {
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: None,
+                                score_breakdown: None,
                             }]
                         } else {
                             Vec::new()
@@ -8314,7 +8578,17 @@ impl AletheiaMcpServer {
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
+                        #[allow(unused_mut)]
+                        let mut hybrid_results = rows_to_results(rows);
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
@@ -8364,6 +8638,18 @@ impl AletheiaMcpServer {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let mut hybrid_results = rows_to_results(rows);
+                        // Issue #3372: re-rank the candidate set by the fused
+                        // score BEFORE truncating to `limit`, so a high-trust
+                        // candidate below the similarity-only page still surfaces.
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         hybrid_results.truncate(limit);
                         self.success_json(json!({
                             "results": hybrid_results,
@@ -8383,7 +8669,17 @@ impl AletheiaMcpServer {
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
+                        #[allow(unused_mut)]
+                        let mut hybrid_results = rows_to_results(rows);
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
@@ -8398,6 +8694,71 @@ impl AletheiaMcpServer {
                 "Must specify either start_node_id, query_embedding, or filter_label",
             )
         }
+    }
+
+    /// Re-rank `results` by the provenance-weighted fused score (Issue #3372)
+    /// and attach a `score_breakdown` to each. Confidence/recency are read from
+    /// the version resolved at the bi-temporal coordinate when a full `(valid,
+    /// tx)` `AS OF` is set (AC6), else from the current version. Recency is
+    /// evaluated against the `valid_time` coordinate when set, else `now`.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn apply_fusion_to_hybrid(
+        &self,
+        results: &mut Vec<HybridQueryResult>,
+        policy: &crate::db::fusion::FusionPolicy,
+        valid_time: Option<Timestamp>,
+        tx_time: Option<Timestamp>,
+    ) {
+        let reference_now = valid_time.map_or_else(|| time::now().wallclock(), |t| t.wallclock());
+        let mut scored: Vec<(f64, HybridQueryResult)> = std::mem::take(results)
+            .into_iter()
+            .map(|mut r| {
+                let (confidence, valid_from_micros, recency_defaulted) =
+                    NodeId::new(r.node.id).ok().map_or((None, 0, true), |id| {
+                        self.hybrid_fusion_inputs(id, valid_time, tx_time)
+                    });
+                let recency = if recency_defaulted {
+                    crate::db::fusion::DEFAULT_NEUTRAL_RECENCY
+                } else {
+                    policy.recency(reference_now, valid_from_micros)
+                };
+                let similarity = r.similarity_score.map_or(0.0, f64::from);
+                let mut breakdown = policy.fuse(similarity, confidence, recency);
+                breakdown.recency_defaulted = recency_defaulted;
+                r.score_breakdown = Some(Self::fusion_breakdown_to_json(&breakdown));
+                (breakdown.fused, r)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.node.id.cmp(&b.1.node.id))
+        });
+        *results = scored.into_iter().map(|(_, r)| r).collect();
+    }
+
+    /// Resolve a hybrid result node's fusion inputs (Issue #3372): when a full
+    /// bi-temporal `(valid, tx)` coordinate is set, read from the version at
+    /// that coordinate (AC6); otherwise from the current version.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn hybrid_fusion_inputs(
+        &self,
+        id: NodeId,
+        valid_time: Option<Timestamp>,
+        tx_time: Option<Timestamp>,
+    ) -> (Option<f64>, i64, bool) {
+        let version_id = if let (Some(vt), Some(tt)) = (valid_time, tx_time) {
+            match self.db.get_node_at_time(id, vt, tt) {
+                Ok(node) => node.current_version,
+                Err(_) => return (None, 0, true),
+            }
+        } else {
+            match self.db.get_node(id) {
+                Ok(node) => node.current_version,
+                Err(_) => return (None, 0, true),
+            }
+        };
+        self.node_fusion_inputs(version_id)
     }
 
     // ========================================================================
@@ -10590,9 +10951,73 @@ fn tool_definitions() -> Vec<Tool> {
             desc.push_str(PROVENANCE_FILTER_TOOL_HINT);
             tool.description = Some(std::borrow::Cow::Owned(desc));
         }
+        // Advertise the Issue #3372 provenance-weighted fusion policy on
+        // `find_similar` / `hybrid_query`, only when the feature is compiled
+        // (so an unusable param is never advertised). Count-neutral: adds a
+        // param, not a tool.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        if is_fusion_policy_tool(&tool.name) {
+            inject_fusion_policy_schema_params(&mut tool.input_schema);
+            let mut desc = tool.description.as_deref().unwrap_or("").to_string();
+            desc.push_str(FUSION_POLICY_TOOL_HINT);
+            tool.description = Some(std::borrow::Cow::Owned(desc));
+        }
     }
     tools
 }
+
+/// The two tools that accept an optional Issue #3372 `fusion_policy` param.
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub(crate) const FUSION_POLICY_TOOLS: &[&str] = &["find_similar", "hybrid_query"];
+
+/// Whether `name` accepts the Issue #3372 `fusion_policy` param.
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub(crate) fn is_fusion_policy_tool(name: &str) -> bool {
+    FUSION_POLICY_TOOLS.contains(&name)
+}
+
+/// Inject the optional Issue #3372 `fusion_policy` object parameter into a
+/// tool's generated JSON `inputSchema.properties`. Optional, so `required` is
+/// untouched. Idempotent.
+#[cfg(feature = "semantic-retrieval-fusion")]
+fn inject_fusion_policy_schema_params(
+    schema: &mut Arc<serde_json::Map<String, serde_json::Value>>,
+) {
+    let schema = Arc::make_mut(schema);
+    let props = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(props) = props.as_object_mut() else {
+        return;
+    };
+    props.entry("fusion_policy".to_string()).or_insert_with(|| {
+        json!({
+            "type": "object",
+            "description": "Optional provenance-weighted fusion policy (Issue #3372): re-rank \
+                candidates by a weighted mean of vector similarity, provenance confidence, and \
+                temporal recency instead of similarity alone, attaching a per-result \
+                `score_breakdown`. Omit for unchanged (similarity-only) behavior. Invalid weights \
+                return INVALID_ARGUMENT.",
+            "properties": {
+                "w_similarity": { "type": "number", "minimum": 0 },
+                "w_confidence": { "type": "number", "minimum": 0 },
+                "w_recency": { "type": "number", "minimum": 0 },
+                "neutral_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "recency_half_life_secs": { "type": "number", "exclusiveMinimum": 0 }
+            }
+        })
+    });
+}
+
+/// Uniform description suffix documenting the `fusion_policy` parameter
+/// (Issue #3372), appended to `find_similar` / `hybrid_query`.
+#[cfg(feature = "semantic-retrieval-fusion")]
+const FUSION_POLICY_TOOL_HINT: &str = " Optional provenance-weighted fusion (Issue #3372): pass \
+    `fusion_policy` (an object with any of `w_similarity`, `w_confidence`, `w_recency` \
+    (each >= 0), `neutral_confidence` (in [0,1]), `recency_half_life_secs` (> 0)) to re-rank \
+    results by a weighted mean of vector similarity, provenance confidence, and temporal recency; \
+    each result then carries a `score_breakdown`. Invalid weights return INVALID_ARGUMENT. Omit \
+    for unchanged similarity-only behavior.";
 
 /// Inject the four optional Issue #3348 provenance-filter parameters into a
 /// tool's generated JSON `inputSchema.properties`, so a client introspecting

@@ -1976,6 +1976,11 @@ pub struct EdgeResponse {
 pub struct SimilarityResult {
     pub node: NodeResponse,
     pub score: f32,
+    /// Provenance-weighted fusion breakdown (Issue #3372), present only when a
+    /// `fusion_policy` was supplied on the request. Omitted (never a fabricated
+    /// `null`) otherwise, so omitting `fusion_policy` reproduces prior bytes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub score_breakdown: Option<serde_json::Value>,
 }
 
 /// Traversal result with path information.
@@ -1993,6 +1998,11 @@ pub struct HybridQueryResult {
     pub similarity_score: Option<f32>,
     pub traversal_path: Option<Vec<u64>>,
     pub timestamp: Option<String>,
+    /// Provenance-weighted fusion breakdown (Issue #3372), present only when a
+    /// `fusion_policy` was supplied on the request. Omitted otherwise so prior
+    /// behavior is byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub score_breakdown: Option<serde_json::Value>,
 }
 
 /// Information about a specific version in an entity's history.
