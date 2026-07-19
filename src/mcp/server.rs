@@ -2039,6 +2039,85 @@ impl AletheiaMcpServer {
         )
     }
 
+    /// Parse the optional Issue #3372 `fusion_policy` object into a validated
+    /// [`FusionPolicy`](crate::db::fusion::FusionPolicy). Returns `Ok(None)`
+    /// when the param is absent/null (unchanged behavior). A wrong JSON type or
+    /// an invalid weight/parameter maps to `INVALID_ARGUMENT` (#3234,
+    /// `retriable:false`) — `FusionPolicyError` is not a `db::Error`, so it is
+    /// mapped directly here.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see
+    // `parse_provenance_filter`.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn parse_fusion_policy(
+        &self,
+        args: &serde_json::Value,
+    ) -> std::result::Result<Option<crate::db::fusion::FusionPolicy>, CallToolResult> {
+        let Some(obj) = args.as_object() else {
+            return Ok(None);
+        };
+        let policy_val = match obj.get("fusion_policy") {
+            None | Some(serde_json::Value::Null) => return Ok(None),
+            Some(serde_json::Value::Object(m)) => m,
+            Some(_) => {
+                return Err(self.invalid_argument(
+                    "Invalid 'fusion_policy': expected an object with optional numeric weights",
+                ));
+            }
+        };
+
+        // Read an optional finite f64 field, rejecting a wrong JSON type here so
+        // the caller gets a field-named INVALID_ARGUMENT rather than a silently
+        // ignored setting.
+        let read_num = |key: &str| -> std::result::Result<Option<f64>, CallToolResult> {
+            match policy_val.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::Number(n)) => Ok(Some(n.as_f64().unwrap_or(f64::NAN))),
+                Some(_) => Err(self.invalid_argument(&format!(
+                    "Invalid 'fusion_policy.{key}': expected a number"
+                ))),
+            }
+        };
+
+        let mut builder = crate::db::fusion::FusionPolicy::builder();
+        if let Some(v) = read_num("w_similarity")? {
+            builder = builder.w_similarity(v);
+        }
+        if let Some(v) = read_num("w_confidence")? {
+            builder = builder.w_confidence(v);
+        }
+        if let Some(v) = read_num("w_recency")? {
+            builder = builder.w_recency(v);
+        }
+        if let Some(v) = read_num("neutral_confidence")? {
+            builder = builder.neutral_confidence(v);
+        }
+        if let Some(v) = read_num("recency_half_life_secs")? {
+            builder = builder.recency_half_life_secs(v);
+        }
+
+        builder.build().map(Some).map_err(|e| {
+            self.error_result(
+                McpError::new(McpErrorCode::InvalidArgument, e.to_string())
+                    .details(json!({ "param": "fusion_policy" })),
+            )
+        })
+    }
+
+    /// Serialize a [`FusionBreakdown`](crate::db::fusion::FusionBreakdown) into
+    /// the per-result `score_breakdown` JSON (Issue #3372).
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn fusion_breakdown_to_json(b: &crate::db::fusion::FusionBreakdown) -> serde_json::Value {
+        json!({
+            "similarity": b.similarity,
+            "confidence": b.confidence,
+            "confidence_defaulted": b.confidence_defaulted,
+            "recency": b.recency,
+            "recency_defaulted": b.recency_defaulted,
+            "fused": b.fused,
+        })
+    }
+
     /// Parse a single MCP [`LineageRefRequest`] into a core
     /// [`LineageRef`](crate::core::lineage::LineageRef) (Issue #3371).
     ///
@@ -4532,18 +4611,18 @@ impl AletheiaMcpServer {
         // (Issue #3391).
         let now = time::now();
 
-        // Issue #3349 (FIX2): resolve an omitted scope to the `default`
+        // Issue #3349 (FIX2 / PR3d): resolve an omitted scope to the `default`
         // namespace only (isolated-by-default). An explicit *non-default*
-        // narrowing scope routes through the boundary-enforcing scoped BFS (an
-        // edge is crossed only if the edge's own namespace AND the target node's
+        // narrowing scope routes through the boundary-enforcing scoped BFS (a hop
+        // is crossed only if the edge's own namespace AND the far node's
         // namespace are in scope, so a scope cannot leak via transit through an
-        // out-of-scope node; outgoing-only in v1). The `default` scope — whether
-        // omitted or explicit — and the `all` selector run the full unscoped DFS
-        // below, which preserves the path/depth result shape and every traversal
-        // direction; the `default` case then drops any non-default node from the
-        // returned page so an omitted read stays default-isolated (a
-        // pre-namespace database is all `default`, so nothing is dropped and the
-        // result is byte-identical).
+        // out-of-scope node) — now for all three directions (outgoing, incoming,
+        // both; PR3d). The `default` scope — whether omitted or explicit — and
+        // the `all` selector run the full unscoped DFS below, which preserves the
+        // path/depth result shape and every traversal direction; the `default`
+        // case then drops any non-default node from the returned page so an
+        // omitted read stays default-isolated (a pre-namespace database is all
+        // `default`, so nothing is dropped and the result is byte-identical).
         let scope = match self.parse_opt_scope(&req.namespace) {
             Ok(s) => s,
             Err(result) => return result,
@@ -4593,11 +4672,13 @@ impl AletheiaMcpServer {
         // the page (its response carries `Some(namespace)`; the default
         // namespace is elided to `None`). `page_window` above is the pre-filter
         // DFS page size, so `next_offset` still advances over the unfiltered DFS
-        // order (gap-free/dup-free), exactly like the provenance filter. v1
-        // caveat: this filters returned nodes, not the crossed edges, so it does
-        // not enforce the full scoped traversal boundary for incoming/both — the
-        // outgoing scoped BFS (explicit narrowing scope) does; this is a
-        // documented follow-up.
+        // order (gap-free/dup-free), exactly like the provenance filter.
+        // Semantics note (#3349): this `default` path filters returned nodes, not
+        // the crossed edges, so it preserves the path/depth DFS result shape for
+        // every direction. An explicit narrowing scope instead routes through the
+        // boundary-enforcing scoped BFS above (all directions, PR3d), which never
+        // crosses an out-of-scope edge/node; the two paths differ in shape by
+        // design (see `handle_traverse_scoped`).
         if default_only {
             results.retain(|r| r.node.namespace.is_none());
         }
@@ -4631,12 +4712,14 @@ impl AletheiaMcpServer {
     /// node's namespace are in scope — a scope can never leak across the
     /// boundary or via transit through an out-of-scope node.
     ///
-    /// v1 scope limitations vs the unscoped DFS: only `direction: "outgoing"` is
-    /// supported (incoming/both ⇒ `INVALID_ARGUMENT`); the scoped BFS returns
-    /// the reachable in-scope node set (sorted by id), so each result carries
-    /// its `node` (and `depth`/`path` are omitted — the boundary-correct set,
-    /// not per-path detail); it does not compose with the #3360 cursor /
-    /// #3353 token-budget shaping (offset paging applies).
+    /// All three directions (`outgoing`, `incoming`, `both`) are supported and
+    /// boundary-scoped (Issue #3349, PR3d): the boundary rule (edge.ns ∧
+    /// far-node.ns ∈ scope) applies symmetrically. The scoped BFS returns the
+    /// reachable in-scope node **set** (sorted by id), so each result carries its
+    /// `node` while `depth`/`path` are omitted — the boundary-correct set, not
+    /// per-path detail (unchanged from the shipped outgoing scoped path). It does
+    /// not compose with the #3360 cursor / #3353 token-budget shaping (offset
+    /// paging applies).
     #[allow(clippy::too_many_arguments)]
     fn handle_traverse_scoped(
         &self,
@@ -4651,20 +4734,40 @@ impl AletheiaMcpServer {
         prov_filter: Option<&crate::core::ProvenanceFilter>,
         now: Timestamp,
     ) -> CallToolResult {
-        if direction != "outgoing" {
-            return self.invalid_argument(
-                "namespace-scoped traverse supports only direction \"outgoing\" in v1; an \
-                 incoming/both scoped traversal is a follow-up.",
-            );
-        }
+        // Issue #3349 (PR3d): all three traversal directions are boundary-scoped.
+        // The boundary rule (edge.ns ∧ far-node.ns ∈ scope) applies symmetrically
+        // for outgoing (→ target), incoming (source →), and both.
+        let traverse_direction = match direction {
+            "outgoing" => crate::db::namespace_query::TraverseDirection::Outgoing,
+            "incoming" => crate::db::namespace_query::TraverseDirection::Incoming,
+            "both" => crate::db::namespace_query::TraverseDirection::Both,
+            other => {
+                return self.invalid_argument(&format!(
+                    "invalid traverse direction {other:?}; expected \"outgoing\", \"incoming\", \
+                     or \"both\""
+                ));
+            }
+        };
         // The scoped BFS takes an optional edge label; the MCP tool always
         // supplies one (a required field), so restrict to that relationship.
         let edge_label = Some(req.edge_label.as_str());
         let reachable = match temporal {
-            Some((vt, tt)) => self
-                .db
-                .traverse_scoped_as_of(start_id, edge_label, depth, vt, tt, scope),
-            None => self.db.traverse_scoped(start_id, edge_label, depth, scope),
+            Some((vt, tt)) => self.db.traverse_scoped_as_of_directed(
+                start_id,
+                edge_label,
+                traverse_direction,
+                depth,
+                vt,
+                tt,
+                scope,
+            ),
+            None => self.db.traverse_scoped_directed(
+                start_id,
+                edge_label,
+                traverse_direction,
+                depth,
+                scope,
+            ),
         };
         let reachable = match reachable {
             Ok(ids) => ids,
@@ -5356,6 +5459,21 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        // Issue #3372: when a `fusion_policy` is supplied, re-rank by the fused
+        // score and return here; otherwise fall through to the unchanged
+        // similarity-only path below. Feature-gated: the param is only
+        // advertised/parsed when `semantic-retrieval-fusion` is compiled.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        {
+            match self.parse_fusion_policy(&args) {
+                Ok(Some(policy)) => {
+                    return self.handle_find_similar_fused(&args, &policy, prov_filter.as_ref());
+                }
+                Ok(None) => {}
+                Err(result) => return result,
+            }
+        }
+
         let req: FindSimilarRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -5443,6 +5561,7 @@ impl AletheiaMcpServer {
                             self.db.get_node(node_id).ok().map(|node| SimilarityResult {
                                 node: self.node_to_response(&node, include_vectors, now),
                                 score,
+                                score_breakdown: None,
                             })
                         })
                         .filter(|r| filter.matches(r.node.provenance.as_ref()))
@@ -5460,6 +5579,7 @@ impl AletheiaMcpServer {
                             self.db.get_node(node_id).ok().map(|node| SimilarityResult {
                                 node: self.node_to_response(&node, include_vectors, now),
                                 score,
+                                score_breakdown: None,
                             })
                         })
                         .collect();
@@ -5525,6 +5645,7 @@ impl AletheiaMcpServer {
                 self.db.get_node(node_id).ok().map(|node| SimilarityResult {
                     node: self.node_to_response(&node, include_vectors, now),
                     score,
+                    score_breakdown: None,
                 })
             })
             .filter(|r| prov_filter.is_none_or(|f| f.matches(r.node.provenance.as_ref())))
@@ -5539,6 +5660,151 @@ impl AletheiaMcpServer {
         });
         Self::attach_completeness(&mut response, offset, k, has_more, None);
         self.success_json(response)
+    }
+
+    /// Provenance-weighted fused `find_similar` (Issue #3372). Re-ranks the
+    /// candidate set (scoped or unscoped, per #3349) by the fused score of
+    /// similarity × provenance-confidence × temporal-recency, attaching a
+    /// `score_breakdown` to each result. Composes with the #3348 provenance
+    /// filter (applied per-candidate before paging) and #3349 namespace scoping.
+    ///
+    /// v1: `find_similar` has no temporal params, so recency is evaluated
+    /// against the current wallclock (AS-OF fusion is satisfied on
+    /// `hybrid_query`). The queried index must use the Cosine metric.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn handle_find_similar_fused(
+        &self,
+        args: &serde_json::Value,
+        policy: &crate::db::fusion::FusionPolicy,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+    ) -> CallToolResult {
+        use crate::db::fusion::fused_horizon;
+
+        let req: FindSimilarRequest = match serde_json::from_value(args.clone()) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let offset = req
+            .offset
+            .unwrap_or(0)
+            .min(MAX_PAGINATION_OFFSET)
+            .min(MAX_VECTOR_K.saturating_sub(k));
+
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        if let Err(e) = self.validate_embedding_dimensions(&req.embedding, &req.property_name) {
+            return self.invalid_argument(&e);
+        }
+        // Fusion's similarity term assumes an already-`[0,1]` score, true only
+        // for Cosine; reject other metrics rather than distorting the term
+        // (mirrors `FusionError::UnsupportedMetric`).
+        if let Some(err) = self.fusion_metric_precondition(&req.property_name) {
+            return err;
+        }
+
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+
+        // Over-fetch a `k`-scaled horizon (never a fixed page window) so a
+        // geometrically-far but high-trust candidate can still win (AC4).
+        let horizon = fused_horizon(k);
+        let candidates: Vec<(NodeId, f32)> =
+            if matches!(scope, crate::core::namespace::NamespaceScope::All) {
+                match self.db.similarity_search(
+                    crate::SimilarityQuery::from_embedding(req.embedding.clone()).k(horizon),
+                ) {
+                    Ok(r) => r,
+                    Err(e) => return self.db_error(e),
+                }
+            } else {
+                match self
+                    .db
+                    .find_similar_by_embedding_scoped(&req.embedding, horizon, &scope)
+                {
+                    Ok(r) => r,
+                    Err(e) => return self.db_error(e),
+                }
+            };
+
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let now = time::now();
+        let reference_now = now.wallclock();
+
+        // Fuse each candidate, keeping the fused score alongside the result so we
+        // can sort by it. Provenance-filter per-candidate (before paging).
+        let mut scored: Vec<(f64, NodeId, SimilarityResult)> = Vec::with_capacity(candidates.len());
+        for (node_id, similarity) in candidates {
+            let Ok(node) = self.db.get_node(node_id) else {
+                continue;
+            };
+            let response = self.node_to_response(&node, include_vectors, now);
+            if !prov_filter.is_none_or(|f| f.matches(response.provenance.as_ref())) {
+                continue;
+            }
+            let (confidence, valid_from_micros, recency_defaulted) =
+                self.node_fusion_inputs(node.current_version);
+            let recency = if recency_defaulted {
+                crate::db::fusion::DEFAULT_NEUTRAL_RECENCY
+            } else {
+                policy.recency(reference_now, valid_from_micros)
+            };
+            let mut breakdown = policy.fuse(f64::from(similarity), confidence, recency);
+            breakdown.recency_defaulted = recency_defaulted;
+            let result = SimilarityResult {
+                node: response,
+                score: similarity,
+                score_breakdown: Some(Self::fusion_breakdown_to_json(&breakdown)),
+            };
+            scored.push((breakdown.fused, node_id, result));
+        }
+
+        // Total-order sort by fused score (descending), stable node-id tie-break.
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+
+        let has_more = scored.len() > offset.saturating_add(k);
+        let page: Vec<SimilarityResult> = scored
+            .into_iter()
+            .skip(offset)
+            .take(k)
+            .map(|(_, _, r)| r)
+            .collect();
+        let count = page.len();
+        let mut response = json!({
+            "results": page,
+            "count": count,
+        });
+        Self::attach_completeness(&mut response, offset, k, has_more, None);
+        self.success_json(response)
+    }
+
+    /// Read a candidate node's fusion inputs — `(confidence, valid_from_micros,
+    /// recency_defaulted)` — from its current version (Issue #3372). Mirrors the
+    /// Rust-API `node_fusion_metadata`; when metadata cannot be loaded,
+    /// `recency_defaulted` is set so the caller substitutes a **neutral**
+    /// recency (never a maximum-recency boost).
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn node_fusion_inputs(&self, version_id: VersionId) -> (Option<f64>, i64, bool) {
+        match self.db.get_node_version_read_metadata(version_id) {
+            Ok(Some((provenance, interval))) => (
+                provenance.and_then(|p| p.confidence()),
+                interval.valid_time().start().wallclock(),
+                false,
+            ),
+            _ => (None, 0, true),
+        }
     }
 
     // ========================================================================
@@ -7617,6 +7883,202 @@ impl AletheiaMcpServer {
         self.handle_lineage_query(args, false)
     }
 
+    // ========================================================================
+    // Belief-revision audit (Issue #3362)
+    //
+    // Advertised unconditionally (Design A). The real handler body lives under
+    // `#[cfg(feature = "semantic-temporal")]`; a `#[cfg(not(...))]` twin returns
+    // a structured `FAILED_PRECONDITION` (mirroring `semantic_search_unavailable`)
+    // so a caller on a build without the feature gets an actionable error rather
+    // than an "unknown tool".
+    // ========================================================================
+
+    /// Structured `FAILED_PRECONDITION` returned by `get_belief_revisions` when
+    /// the `semantic-temporal` feature is not compiled into this build.
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_get_belief_revisions(&self, _args: serde_json::Value) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                "Tool 'get_belief_revisions' requires the `semantic-temporal` feature, which is \
+                 not compiled into this build. Rebuild AletheiaDB with `--features \
+                 semantic-temporal` to enable it."
+                    .to_string(),
+            )
+            .details(json!({
+                "tool": "get_belief_revisions",
+                "required_feature": "semantic-temporal",
+            })),
+        )
+    }
+
+    /// Handle the `get_belief_revisions` tool (Issue #3362): classify an
+    /// entity's stored belief revisions and return the §9 JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_get_belief_revisions(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::core::id::EntityId;
+        use crate::experimental::temporal::belief_revision::RevisionOptions;
+
+        let req: GetBeliefRevisionsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Resolve the entity id (an out-of-range id is a caller fault →
+        // INVALID_ARGUMENT with the bare id-validation message).
+        let entity = match req.entity_kind.as_str() {
+            "node" => match NodeId::new(req.id) {
+                Ok(id) => EntityId::Node(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            "edge" => match EdgeId::new(req.id) {
+                Ok(id) => EntityId::Edge(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            other => {
+                return self.invalid_argument(&format!(
+                    "entity_kind must be 'node' or 'edge', got '{other}'"
+                ));
+            }
+        };
+
+        let mut options = RevisionOptions::new();
+        if let Some(ref key) = req.property_key {
+            options = options.with_property_key(key.clone());
+        }
+        if let Some(ref ts_str) = req.as_of_transaction_time {
+            let ts = match self.parse_timestamp(ts_str) {
+                Ok(t) => t,
+                Err(e) => return self.invalid_argument(&e),
+            };
+            options = options.with_as_of_transaction_time(ts);
+        }
+        if let Some(limit) = req.limit {
+            options = options.with_limit(limit);
+        }
+
+        match self.db.belief_revisions(entity, &options) {
+            Ok(log) => self.success_json(self.belief_revision_log_to_json(&log)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Serialize a [`BeliefRevisionLog`] into the Issue #3362 §9 JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn belief_revision_log_to_json(
+        &self,
+        log: &crate::experimental::temporal::belief_revision::BeliefRevisionLog,
+    ) -> serde_json::Value {
+        use crate::core::id::EntityId;
+
+        let (kind, id) = match log.entity {
+            EntityId::Node(nid) => ("node", nid.as_u64()),
+            EntityId::Edge(eid) => ("edge", eid.as_u64()),
+        };
+
+        let revisions: Vec<serde_json::Value> = log
+            .revisions
+            .iter()
+            .map(|r| self.revision_to_json(r))
+            .collect();
+
+        let confidence_trajectory: Vec<serde_json::Value> = log
+            .revisions
+            .iter()
+            .map(|r| match r.confidence {
+                Some(c) => json!(c),
+                None => serde_json::Value::Null,
+            })
+            .collect();
+
+        json!({
+            "entity": { "kind": kind, "id": id },
+            "property_key": log.property_key,
+            "as_of_transaction_time": log
+                .as_of_transaction_time
+                .map(Self::format_timestamp_rfc3339),
+            "revisions": revisions,
+            "confidence_trajectory": confidence_trajectory,
+            "has_more": log.has_more,
+        })
+    }
+
+    /// Serialize a single [`Revision`] entry (Issue #3362 §9).
+    #[cfg(feature = "semantic-temporal")]
+    fn revision_to_json(
+        &self,
+        rev: &crate::experimental::temporal::belief_revision::Revision,
+    ) -> serde_json::Value {
+        let changes: Vec<serde_json::Value> = rev
+            .changes
+            .iter()
+            .map(|c| {
+                json!({
+                    "key": c.key,
+                    "prior": c.prior.as_ref().map(Self::property_value_to_exported_json),
+                    "new": c.new.as_ref().map(Self::property_value_to_exported_json),
+                })
+            })
+            .collect();
+
+        let provenance = rev.provenance.as_ref().map(|p| {
+            json!({
+                "source": p.source(),
+                "confidence": p.confidence(),
+                "note": p.note(),
+                "correlation_id": p.correlation_id(),
+                "principal": p.principal(),
+            })
+        });
+
+        json!({
+            "version_number": rev.version_number,
+            "version_id": rev.version_id.as_u64(),
+            "transaction_time": Self::format_timestamp_rfc3339(rev.transaction_time),
+            "valid_from": Self::format_timestamp_rfc3339(rev.valid_from),
+            "valid_to": rev.valid_to.map(Self::format_timestamp_rfc3339),
+            "classification": rev.class.as_str(),
+            "changes": changes,
+            "provenance": provenance,
+            "confidence": rev.confidence,
+        })
+    }
+
+    /// Serialize a [`PropertyValue`] into the self-describing tagged shape used
+    /// by belief-revision `changes` (mirrors `audit::model::ExportedValue`:
+    /// `{"type": "...", "value": ...}`), independent of the `audit-export`
+    /// feature so it is available under a bare `semantic-temporal` build.
+    #[cfg(feature = "semantic-temporal")]
+    fn property_value_to_exported_json(value: &PropertyValue) -> serde_json::Value {
+        match value {
+            PropertyValue::Null => json!({ "type": "null" }),
+            PropertyValue::Bool(b) => json!({ "type": "bool", "value": b }),
+            PropertyValue::Int(i) => json!({ "type": "int", "value": i }),
+            PropertyValue::Float(f) => json!({ "type": "float", "value": f.to_string() }),
+            PropertyValue::String(s) => json!({ "type": "string", "value": s.to_string() }),
+            PropertyValue::Bytes(b) => {
+                json!({ "type": "bytes", "hex": crate::core::hex::encode(b) })
+            }
+            PropertyValue::Array(values) => json!({
+                "type": "array",
+                "values": values
+                    .iter()
+                    .map(Self::property_value_to_exported_json)
+                    .collect::<Vec<_>>(),
+            }),
+            PropertyValue::Vector(v) => json!({
+                "type": "vector",
+                "values": v.iter().map(|f| f64::from(*f).to_string()).collect::<Vec<_>>(),
+            }),
+            PropertyValue::SparseVector(sv) => json!({
+                "type": "sparse_vector",
+                "dimension": sv.dimension(),
+                "indices": sv.indices().to_vec(),
+                "values": sv.values().iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
     /// Handle the `audit_export` tool (Issue #3358).
     ///
     /// Produces a signed, offline-verifiable evidence artifact of an entity's
@@ -7883,22 +8345,53 @@ impl AletheiaMcpServer {
         self.failed_precondition(&e.to_string())
     }
 
-    fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
-        // Issue #3349: a filter-complete namespace scope over the vector ranking
-        // is not implemented for hybrid_query in v1; a narrowing scope is
-        // INVALID_ARGUMENT (never silently unscoped / incorrectly post-filtered).
-        if let Err(result) = self.reject_unsupported_scope(
-            &args.get("namespace").cloned(),
-            "hybrid_query does not support a namespace scope in v1 (a filter-complete scope over \
-             vector ranking is a follow-up). Use find_similar or traverse with a namespace scope \
-             instead, or \"all\".",
-        ) {
-            return result;
+    /// Thread a namespace read scope into a [`QueryBuilder`] (Issue #3349, PR3d).
+    ///
+    /// `All` becomes the explicit no-op `in_all_namespaces` (identical to the
+    /// pre-scope path); a single/union scope threads through
+    /// `in_namespace`/`in_namespaces` so the executor applies the source-leaf
+    /// filter + traversal boundary. Generic over the builder state so it composes
+    /// at any point in the fluent chain.
+    fn scoped_builder<S: crate::query::builder::QueryState>(
+        builder: crate::query::QueryBuilder<S>,
+        scope: &crate::core::namespace::NamespaceScope,
+    ) -> crate::query::QueryBuilder<S> {
+        use crate::core::namespace::NamespaceScope;
+        match scope {
+            NamespaceScope::All => builder.in_all_namespaces(),
+            NamespaceScope::Single(ns) => builder.in_namespace(ns.clone()),
+            NamespaceScope::List(list) => builder.in_namespaces(list.iter().cloned()),
         }
+    }
+
+    fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
+        // Issue #3349 (PR3d): real namespace scoping. Parse the optional
+        // `namespace` read scope (omitted ⇒ `default`-only, `"all"` ⇒ no filter),
+        // then validate it up front so unknown ns ⇒ NOT_FOUND / empty list ⇒
+        // INVALID_ARGUMENT is returned even on the single-node paths that don't
+        // route through the scope-validating executor.
+        let scope = match self.parse_opt_scope(&args.get("namespace").cloned()) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        if let Err(e) = self.db.validate_scope(&scope) {
+            return self.db_error(e);
+        }
+        let scope_is_restricting = !matches!(scope, crate::core::namespace::NamespaceScope::All);
 
         // Issue #3348: parse the optional provenance filter before consuming args.
         let prov_filter = match self.parse_provenance_filter(&args) {
             Ok(f) => f,
+            Err(result) => return result,
+        };
+
+        // Issue #3372: parse the optional fusion policy (feature-gated) before
+        // consuming args. When present, results are re-ranked by the fused score
+        // and each carries a `score_breakdown`; omitting it is unchanged.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        let fusion_policy = match self.parse_fusion_policy(&args) {
+            Ok(p) => p,
             Err(result) => return result,
         };
 
@@ -7969,6 +8462,7 @@ impl AletheiaMcpServer {
                                         .collect()
                                 }),
                                 timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
+                                score_breakdown: None,
                             })
                         } else {
                             None
@@ -7991,23 +8485,37 @@ impl AletheiaMcpServer {
                 // Temporal query for a single node
                 return match self.db.get_node_at_time(node_id, vt, tt) {
                     Ok(node) => {
+                        // Issue #3349 (PR3d): a start node outside the read scope
+                        // is filtered out (empty result), never leaked.
+                        let in_scope = !scope_is_restricting || scope.contains(&node.namespace());
                         let response = self.node_to_response(&node, include_vectors, now);
                         // Issue #3348: apply the provenance filter (evaluated on
                         // the version resolved at this coordinate) to the single
                         // result; a fail yields an empty result set, never a
                         // fabricated row.
-                        let results: Vec<HybridQueryResult> = if prov_filter_ref
-                            .is_none_or(|f| f.matches(response.provenance.as_ref()))
+                        #[allow(unused_mut)]
+                        let mut results: Vec<HybridQueryResult> = if in_scope
+                            && prov_filter_ref
+                                .is_none_or(|f| f.matches(response.provenance.as_ref()))
                         {
                             vec![HybridQueryResult {
                                 node: response,
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: Some(vt.wallclock().to_string()),
+                                score_breakdown: None,
                             }]
                         } else {
                             Vec::new()
                         };
+                        // Issue #3372 (MED-3): attach the fused `score_breakdown`
+                        // on the single-node AS-OF path too. Ranking is a no-op
+                        // for one result; AC6 confidence/recency are resolved at
+                        // the (valid, tx) coordinate here.
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(&mut results, policy, valid_time, tx_time);
+                        }
                         self.success_json(json!({
                             "results": results,
                             "count": results.len(),
@@ -8034,20 +8542,34 @@ impl AletheiaMcpServer {
                 // Just return the start node
                 return match self.db.get_node(node_id) {
                     Ok(node) => {
+                        // Issue #3349 (PR3d): filter an out-of-scope start node.
+                        let in_scope = !scope_is_restricting || scope.contains(&node.namespace());
                         let response = self.node_to_response(&node, include_vectors, now);
                         // Issue #3348: filter the single start node.
-                        let results: Vec<HybridQueryResult> = if prov_filter_ref
-                            .is_none_or(|f| f.matches(response.provenance.as_ref()))
+                        #[allow(unused_mut)]
+                        let mut results: Vec<HybridQueryResult> = if in_scope
+                            && prov_filter_ref
+                                .is_none_or(|f| f.matches(response.provenance.as_ref()))
                         {
                             vec![HybridQueryResult {
                                 node: response,
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: None,
+                                score_breakdown: None,
                             }]
                         } else {
                             Vec::new()
                         };
+                        // Issue #3372 (MED-3): attach the fused `score_breakdown`
+                        // on the single-node (no-traverse) path too. Ranking is a
+                        // no-op for one result; with no full (valid, tx) AS-OF
+                        // set here, confidence/recency resolve from the current
+                        // version (documented partial-coordinate limitation).
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(&mut results, policy, valid_time, tx_time);
+                        }
                         self.success_json(json!({
                             "results": results,
                             "count": results.len(),
@@ -8057,11 +8579,25 @@ impl AletheiaMcpServer {
                 };
             };
 
-            // Execute and collect results
+            // Execute and collect results. Issue #3349 (PR3d): thread the read
+            // scope through the executor (source-leaf filter + traversal
+            // boundary) so a graph-first hybrid never crosses an out-of-scope
+            // edge/node.
+            let builder = Self::scoped_builder(builder, &scope);
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
+                        #[allow(unused_mut)]
+                        let mut hybrid_results = rows_to_results(rows);
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
@@ -8089,22 +8625,66 @@ impl AletheiaMcpServer {
                 return self.invalid_argument(&e);
             }
 
-            // Issue #3348 (AC6): with a provenance filter, over-fetch the
-            // candidate horizon so the returned top rows are all
-            // filter-passing rather than a short post-truncation. Ranked order
-            // is preserved; the page is truncated back to `limit` after
-            // filtering.
-            let (fetch_k, fetch_limit) = if prov_filter.is_some() {
+            // Issue #3372 (MED-2): with a fusion policy, reject a non-Cosine
+            // index up front — mirroring `handle_find_similar_fused` — rather
+            // than feeding a distance whose scores are not in [0,1] into the
+            // fused score.
+            #[cfg(feature = "semantic-retrieval-fusion")]
+            if fusion_policy.is_some()
+                && let Some(err) = self.fusion_metric_precondition(property_name)
+            {
+                return err;
+            }
+
+            // Issue #3372 (HIGH-1): when a fusion policy is present, over-fetch
+            // the `k`-scaled fused horizon (never the similarity top-k) so a
+            // geometrically-far but high-trust candidate can still enter the
+            // fused ranking, rather than degenerating into a post-hoc re-sort of
+            // the similarity top-k. Mirrors `handle_find_similar_fused`'s
+            // `fused_horizon(k)` over-fetch.
+            #[cfg(feature = "semantic-retrieval-fusion")]
+            let fusion_fetch = fusion_policy
+                .as_ref()
+                .map(|_| crate::db::fusion::fused_horizon(k).min(MAX_VECTOR_K));
+            #[cfg(not(feature = "semantic-retrieval-fusion"))]
+            let fusion_fetch: Option<usize> = None;
+
+            // Issue #3348 (AC6) / #3349 (PR3d): with a provenance filter OR a
+            // restricting namespace scope, over-fetch the candidate horizon so
+            // the returned top rows are all filter-passing (filter-complete)
+            // rather than a short post-truncation — mirroring
+            // `find_similar_scoped`. Ranked order is preserved; the page is
+            // truncated back to `limit` after filtering. The namespace filter is
+            // applied by the executor (source-leaf scope filter) and stays
+            // ignorant of *why* a vector is absent (e.g. a crypto-shredded
+            // embedding is simply never a candidate), composing with GDPR HNSW
+            // exclusion.
+            let (fetch_k, fetch_limit) = if prov_filter.is_some() || scope_is_restricting {
                 (MAX_VECTOR_K, MAX_VECTOR_K)
+            } else if let Some(horizon) = fusion_fetch {
+                (horizon, horizon)
             } else {
                 (k, limit)
             };
             let builder = crate::query::QueryBuilder::new().find_similar(embedding, fetch_k);
+            let builder = Self::scoped_builder(builder, &scope);
 
             match builder.limit(fetch_limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let mut hybrid_results = rows_to_results(rows);
+                        // Issue #3372: re-rank the candidate set by the fused
+                        // score BEFORE truncating to `limit`, so a high-trust
+                        // candidate below the similarity-only page still surfaces.
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         hybrid_results.truncate(limit);
                         self.success_json(json!({
                             "results": hybrid_results,
@@ -8117,13 +8697,24 @@ impl AletheiaMcpServer {
                 Err(e) => self.db_error(e),
             }
         } else if let Some(ref label) = req.filter_label {
-            // Label scan query
+            // Label scan query. Issue #3349 (PR3d): thread the read scope.
             let builder = crate::query::QueryBuilder::new().scan_label(label);
+            let builder = Self::scoped_builder(builder, &scope);
 
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
+                        #[allow(unused_mut)]
+                        let mut hybrid_results = rows_to_results(rows);
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
@@ -8138,6 +8729,96 @@ impl AletheiaMcpServer {
                 "Must specify either start_node_id, query_embedding, or filter_label",
             )
         }
+    }
+
+    /// Reject a non-Cosine vector index for a provenance-weighted fused search
+    /// (Issue #3372). Fusion's similarity term assumes an already-`[0,1]` score,
+    /// true only for Cosine; a Euclidean/dot index would silently distort the
+    /// fused score. Returns the structured `FAILED_PRECONDITION`
+    /// (`FusionError::UnsupportedMetric`) when the queried property's index uses
+    /// another metric, else `None`. Shared by the `find_similar` and
+    /// `hybrid_query` fused paths.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn fusion_metric_precondition(&self, property_name: &str) -> Option<CallToolResult> {
+        if let Some(info) = self
+            .db
+            .list_vector_indexes()
+            .into_iter()
+            .find(|i| i.property_name == property_name)
+            && info.distance_metric != DistanceMetric::Cosine
+        {
+            return Some(self.failed_precondition(&format!(
+                "provenance-weighted fusion requires a Cosine vector index; the index for '{}' \
+                 uses {:?}, whose scores are not in [0,1] (v1 supports Cosine only)",
+                property_name, info.distance_metric
+            )));
+        }
+        None
+    }
+
+    /// Re-rank `results` by the provenance-weighted fused score (Issue #3372)
+    /// and attach a `score_breakdown` to each. Confidence/recency are read from
+    /// the version resolved at the bi-temporal coordinate when a full `(valid,
+    /// tx)` `AS OF` is set (AC6), else from the current version. Recency is
+    /// evaluated against the `valid_time` coordinate when set, else `now`.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn apply_fusion_to_hybrid(
+        &self,
+        results: &mut Vec<HybridQueryResult>,
+        policy: &crate::db::fusion::FusionPolicy,
+        valid_time: Option<Timestamp>,
+        tx_time: Option<Timestamp>,
+    ) {
+        let reference_now = valid_time.map_or_else(|| time::now().wallclock(), |t| t.wallclock());
+        let mut scored: Vec<(f64, HybridQueryResult)> = std::mem::take(results)
+            .into_iter()
+            .map(|mut r| {
+                let (confidence, valid_from_micros, recency_defaulted) =
+                    NodeId::new(r.node.id).ok().map_or((None, 0, true), |id| {
+                        self.hybrid_fusion_inputs(id, valid_time, tx_time)
+                    });
+                let recency = if recency_defaulted {
+                    crate::db::fusion::DEFAULT_NEUTRAL_RECENCY
+                } else {
+                    policy.recency(reference_now, valid_from_micros)
+                };
+                let similarity = r.similarity_score.map_or(0.0, f64::from);
+                let mut breakdown = policy.fuse(similarity, confidence, recency);
+                breakdown.recency_defaulted = recency_defaulted;
+                r.score_breakdown = Some(Self::fusion_breakdown_to_json(&breakdown));
+                (breakdown.fused, r)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.node.id.cmp(&b.1.node.id))
+        });
+        *results = scored.into_iter().map(|(_, r)| r).collect();
+    }
+
+    /// Resolve a hybrid result node's fusion inputs (Issue #3372): when a full
+    /// bi-temporal `(valid, tx)` coordinate is set, read from the version at
+    /// that coordinate (AC6); otherwise from the current version.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn hybrid_fusion_inputs(
+        &self,
+        id: NodeId,
+        valid_time: Option<Timestamp>,
+        tx_time: Option<Timestamp>,
+    ) -> (Option<f64>, i64, bool) {
+        let version_id = if let (Some(vt), Some(tt)) = (valid_time, tx_time) {
+            match self.db.get_node_at_time(id, vt, tt) {
+                Ok(node) => node.current_version,
+                Err(_) => return (None, 0, true),
+            }
+        } else {
+            match self.db.get_node(id) {
+                Ok(node) => node.current_version,
+                Err(_) => return (None, 0, true),
+            }
+        };
+        self.node_fusion_inputs(version_id)
     }
 
     // ========================================================================
@@ -8225,9 +8906,37 @@ impl AletheiaMcpServer {
     /// Map an engine error from query execution into a structured query-tool error.
     fn map_query_error(&self, error: crate::core::error::Error, language: &str) -> CallToolResult {
         use crate::core::error::{Error, QueryError};
+        use crate::core::namespace::NamespaceError;
         match error {
             Error::Query(QueryError::SyntaxError { message }) => {
                 self.query_error("parse_error", &message, None, Some(language))
+            }
+            // Issue #3349 (PR3d): a namespace scope error surfaces through the
+            // query envelope carrying `details.namespace` (the offending name),
+            // so a caller self-corrects exactly as on the structured scoped read
+            // tools. All namespace errors are caller faults (non-retriable).
+            Error::Namespace(ns_err) => {
+                let (kind, code, details) = match &ns_err {
+                    NamespaceError::NotFound { namespace } => (
+                        "runtime_error",
+                        McpErrorCode::NotFound,
+                        json!({ "namespace": namespace }),
+                    ),
+                    NamespaceError::InvalidName { name, .. } => (
+                        "invalid_params",
+                        McpErrorCode::InvalidArgument,
+                        json!({ "namespace": name }),
+                    ),
+                    NamespaceError::AlreadyExists { .. }
+                    | NamespaceError::ReservedPropertyKey { .. }
+                    | NamespaceError::Immutable => (
+                        "invalid_params",
+                        McpErrorCode::InvalidArgument,
+                        serde_json::Value::Null,
+                    ),
+                };
+                let message = Error::Namespace(ns_err).to_string();
+                self.query_error_with_details(kind, code, false, &message, Some(language), details)
             }
             Error::Query(QueryError::UnsupportedFeature { feature }) => self.query_error(
                 "unsupported_construct",
@@ -8440,17 +9149,17 @@ impl AletheiaMcpServer {
         // (Issue #3360); captured before `args` is consumed by deserialization.
         let cursor_requested = Self::cursor_requested(&args);
 
-        // Issue #3349: declarative (AQL/Cypher) namespace scoping is a follow-up;
-        // a narrowing scope is rejected (never silently unscoped). Captured
-        // before `args` is consumed by deserialization.
-        if let Err(result) = self.reject_unsupported_scope(
-            &args.get("namespace").cloned(),
-            "declarative (AQL/Cypher) namespace scoping is not supported by the query tool in v1; \
-             use USE NAMESPACE in the query language when it lands, or the structured scoped read \
-             tools. Pass \"all\" to run unscoped.",
-        ) {
-            return result;
+        // Issue #3349 (PR3d): real declarative (AQL/Cypher) namespace scoping.
+        // Parse the optional `namespace` read scope; an omitted scope resolves to
+        // the `default` namespace only (isolated-by-default, consistent with the
+        // structured scoped read tools), `"all"` imposes no filter. Captured
+        // before `args` is consumed by deserialization; validated (unknown ns ⇒
+        // NOT_FOUND, empty list ⇒ INVALID_ARGUMENT) inside the scoped executor.
+        let scope = match self.parse_opt_scope(&args.get("namespace").cloned()) {
+            Ok(s) => s,
+            Err(result) => return result,
         }
+        .unwrap_or_default();
 
         let req: QueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -8554,7 +9263,7 @@ impl AletheiaMcpServer {
             requested
         };
 
-        self.run_query_under_timeout(effective, language, req, row_limit)
+        self.run_query_under_timeout(effective, language, req, row_limit, scope)
     }
 
     /// Run the `query` tool's execution under the effective wall-clock timeout
@@ -8576,11 +9285,12 @@ impl AletheiaMcpServer {
         language: String,
         req: QueryRequest,
         row_limit: usize,
+        scope: crate::core::namespace::NamespaceScope,
     ) -> CallToolResult {
         if effective.timeout_ms == 0 {
             // Inline (unlimited-timeout) path: no worker thread is spawned, so
             // the in-flight guard does not apply (Issue #3368).
-            return self.execute_query_core(effective, &language, &req, row_limit);
+            return self.execute_query_core(effective, &language, &req, row_limit, &scope);
         }
 
         // Bounded in-flight-query DoS guard (Issue #3368): the timeout race
@@ -8597,7 +9307,7 @@ impl AletheiaMcpServer {
         let server = self.clone();
         let lang = language.clone();
         let outcome = self.race_deadline(effective.timeout_ms, guard, move || {
-            server.execute_query_core(effective, &lang, &req, row_limit)
+            server.execute_query_core(effective, &lang, &req, row_limit, &scope)
         });
         match outcome {
             RaceOutcome::Completed(result) => result,
@@ -8756,9 +9466,14 @@ impl AletheiaMcpServer {
         language: &str,
         req: &QueryRequest,
         row_limit: usize,
+        scope: &crate::core::namespace::NamespaceScope,
     ) -> CallToolResult {
         let has_params = req.params.as_ref().is_some_and(|p| !p.is_empty());
 
+        // Issue #3349 (PR3d): the query executes under the parsed namespace read
+        // scope (omitted ⇒ `default`-only, `"all"` ⇒ no filter). The scope rides
+        // the `Query` IR into the same executor source-leaf filter + traversal
+        // boundary the Rust builder uses.
         let execution = match language {
             "aql" => {
                 if has_params {
@@ -8770,14 +9485,20 @@ impl AletheiaMcpServer {
                         Some("aql"),
                     );
                 }
-                self.db.execute_aql(&req.query)
+                self.db.execute_aql_scoped(&req.query, scope.clone())
             }
             "cypher" => {
                 #[cfg(feature = "cypher")]
                 {
                     match self.json_to_cypher_params(req.params.as_ref()) {
-                        Ok(params) if params.is_empty() => self.db.execute_cypher(&req.query),
-                        Ok(params) => self.db.execute_cypher_with_params(&req.query, params),
+                        Ok(params) if params.is_empty() => {
+                            self.db.execute_cypher_scoped(&req.query, scope.clone())
+                        }
+                        Ok(params) => self.db.execute_cypher_with_params_scoped(
+                            &req.query,
+                            params,
+                            scope.clone(),
+                        ),
                         Err((parameter, reason)) => {
                             return self.query_error(
                                 "invalid_params",
@@ -9089,6 +9810,10 @@ impl AletheiaMcpServer {
             "get_edge_at_transaction_time" => self.handle_get_edge_at_transaction_time(args),
             "get_edge_history" => self.handle_get_edge_history(args),
             "diff_edge_versions" => self.handle_diff_edge_versions(args),
+            // Belief-revision audit (Issue #3362). Advertised and dispatched
+            // unconditionally (Design A); the handler body gates on the
+            // `semantic-temporal` feature.
+            "get_belief_revisions" => self.handle_get_belief_revisions(args),
             "hybrid_query" => self.handle_hybrid_query(args),
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
@@ -9961,6 +10686,16 @@ fn tool_definitions() -> Vec<Tool> {
             make_input_schema::<DiffEdgeVersionsRequest>(),
         ),
         Tool::new(
+            "get_belief_revisions",
+            "Audit when and why the database changed its mind about a node or edge \
+             (Issue #3362): classify each stored version transition as \
+             initial_assertion / correction / world_change / retraction / reaffirmation, \
+             with the provenance and confidence trajectory. Optionally scope to one \
+             property key or a transaction-time coordinate. Requires the \
+             `semantic-temporal` feature.",
+            make_input_schema::<GetBeliefRevisionsRequest>(),
+        ),
+        Tool::new(
             "hybrid_query",
             "Execute a hybrid query combining graph traversal, vector similarity, and \
                      temporal filtering. The `similarity_score` is always returned in full. \
@@ -10276,9 +11011,73 @@ fn tool_definitions() -> Vec<Tool> {
             desc.push_str(PROVENANCE_FILTER_TOOL_HINT);
             tool.description = Some(std::borrow::Cow::Owned(desc));
         }
+        // Advertise the Issue #3372 provenance-weighted fusion policy on
+        // `find_similar` / `hybrid_query`, only when the feature is compiled
+        // (so an unusable param is never advertised). Count-neutral: adds a
+        // param, not a tool.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        if is_fusion_policy_tool(&tool.name) {
+            inject_fusion_policy_schema_params(&mut tool.input_schema);
+            let mut desc = tool.description.as_deref().unwrap_or("").to_string();
+            desc.push_str(FUSION_POLICY_TOOL_HINT);
+            tool.description = Some(std::borrow::Cow::Owned(desc));
+        }
     }
     tools
 }
+
+/// The two tools that accept an optional Issue #3372 `fusion_policy` param.
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub(crate) const FUSION_POLICY_TOOLS: &[&str] = &["find_similar", "hybrid_query"];
+
+/// Whether `name` accepts the Issue #3372 `fusion_policy` param.
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub(crate) fn is_fusion_policy_tool(name: &str) -> bool {
+    FUSION_POLICY_TOOLS.contains(&name)
+}
+
+/// Inject the optional Issue #3372 `fusion_policy` object parameter into a
+/// tool's generated JSON `inputSchema.properties`. Optional, so `required` is
+/// untouched. Idempotent.
+#[cfg(feature = "semantic-retrieval-fusion")]
+fn inject_fusion_policy_schema_params(
+    schema: &mut Arc<serde_json::Map<String, serde_json::Value>>,
+) {
+    let schema = Arc::make_mut(schema);
+    let props = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(props) = props.as_object_mut() else {
+        return;
+    };
+    props.entry("fusion_policy".to_string()).or_insert_with(|| {
+        json!({
+            "type": "object",
+            "description": "Optional provenance-weighted fusion policy (Issue #3372): re-rank \
+                candidates by a weighted mean of vector similarity, provenance confidence, and \
+                temporal recency instead of similarity alone, attaching a per-result \
+                `score_breakdown`. Omit for unchanged (similarity-only) behavior. Invalid weights \
+                return INVALID_ARGUMENT.",
+            "properties": {
+                "w_similarity": { "type": "number", "minimum": 0 },
+                "w_confidence": { "type": "number", "minimum": 0 },
+                "w_recency": { "type": "number", "minimum": 0 },
+                "neutral_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "recency_half_life_secs": { "type": "number", "exclusiveMinimum": 0 }
+            }
+        })
+    });
+}
+
+/// Uniform description suffix documenting the `fusion_policy` parameter
+/// (Issue #3372), appended to `find_similar` / `hybrid_query`.
+#[cfg(feature = "semantic-retrieval-fusion")]
+const FUSION_POLICY_TOOL_HINT: &str = " Optional provenance-weighted fusion (Issue #3372): pass \
+    `fusion_policy` (an object with any of `w_similarity`, `w_confidence`, `w_recency` \
+    (each >= 0), `neutral_confidence` (in [0,1]), `recency_half_life_secs` (> 0)) to re-rank \
+    results by a weighted mean of vector similarity, provenance confidence, and temporal recency; \
+    each result then carries a `score_breakdown`. Invalid weights return INVALID_ARGUMENT. Omit \
+    for unchanged similarity-only behavior.";
 
 /// Inject the four optional Issue #3348 provenance-filter parameters into a
 /// tool's generated JSON `inputSchema.properties`, so a client introspecting
@@ -11325,9 +12124,15 @@ mod server_unit_tests {
                 PropertyMapBuilder::new().insert("name", "Acme").build(),
             )
             .unwrap();
+        // A multi-variable-pattern MATCH rejects any *restricting* namespace
+        // scope (v1, src/db/query.rs), and the MCP `query` tool defaults an
+        // omitted `namespace` to `default`-only (fail-closed / isolated-by-
+        // default, #3349 / PR3d #3731). This test must therefore pass
+        // `"namespace": "all"` to run the cartesian product unscoped.
         let result = server.handle_query(serde_json::json!({
             "language": "cypher",
-            "query": "MATCH (a:Person),(b:Company) RETURN a,b"
+            "query": "MATCH (a:Person),(b:Company) RETURN a,b",
+            "namespace": "all"
         }));
         let text = AletheiaMcpServer::extract_text(result);
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -11345,6 +12150,52 @@ mod server_unit_tests {
         assert!(
             cols.contains(&"a".to_string()) && cols.contains(&"b".to_string()),
             "columns must name the bound variables: {val}"
+        );
+    }
+
+    /// Fail-closed guard (companion to
+    /// `handle_query_multi_pattern_returns_non_null_bindings`): the SAME
+    /// multi-variable-pattern MATCH with NO `namespace` arg must be rejected,
+    /// not silently unscoped. An omitted `namespace` defaults to `default`-only
+    /// (#3349 / PR3d #3731), and a multi-variable-pattern MATCH rejects any
+    /// restricting scope (v1, src/db/query.rs), so the tool returns a
+    /// structured `unsupported_construct` / `INVALID_ARGUMENT` error. This pins
+    /// the fail-closed semantics so a future change can't silently unscope it.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_multi_pattern_omitted_scope_is_rejected() {
+        use crate::core::PropertyMapBuilder;
+        let server = make_server();
+        server
+            .db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        server
+            .db
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
+        // No `namespace` arg -> defaults to `default`-only (fail-closed).
+        let result = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (a:Person),(b:Company) RETURN a,b"
+        }));
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["error"]["code"].as_str(),
+            Some("INVALID_ARGUMENT"),
+            "got: {val}"
+        );
+        assert_eq!(
+            val["error"]["kind"].as_str(),
+            Some("unsupported_construct"),
+            "got: {val}"
         );
     }
 

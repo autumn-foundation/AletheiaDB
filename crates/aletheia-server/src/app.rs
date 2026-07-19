@@ -110,6 +110,7 @@ pub fn try_build_server_testapp(
             traverse_temporal_tools::get_edge_at_valid_time,
             traverse_temporal_tools::get_edge_at_transaction_time,
             traverse_temporal_tools::diff_edge_versions,
+            traverse_temporal_tools::get_belief_revisions,
             vector_query_tools::find_similar,
             vector_query_tools::hybrid_query,
             vector_query_tools::query,

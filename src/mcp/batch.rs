@@ -792,11 +792,34 @@ impl AletheiaMcpServer {
         match properties {
             None => Ok(PropertyMap::default()),
             Some(p) => self.json_to_property_map(p).map_err(|e| {
-                self.batch_invalid(
-                    index,
-                    format!("Operation {index}: invalid properties: {e}"),
-                    serde_json::Map::new(),
-                )
+                // A property-KEY interner-cap breach is a typed
+                // `StorageError::CapacityExceeded` (configurable interner cap,
+                // Issue #3716) that must render the SAME structured
+                // `FAILED_PRECONDITION` envelope the single-op create_node/HTTP
+                // surfaces emit — naming `persistence.max_interned_strings` with
+                // `{resource, current, limit}` details — not the generic
+                // `INVALID_ARGUMENT` this path previously flattened it to (Issue
+                // #3723). It is routed through `batch_db_error` (which reuses the
+                // same `McpError::from_db_error` mapping create_node uses) so the
+                // envelope is identical, plus the batch's `failed_op_index`.
+                //
+                // This runs in Phase 1 static pre-validation, before any
+                // transaction opens, so a breach leaves ZERO writes (all-or-
+                // nothing is trivially preserved). Every other property error
+                // (bad value, recursion depth) stays a caller-fault
+                // `INVALID_ARGUMENT`, preserving prior behavior.
+                if matches!(
+                    &e,
+                    Error::Storage(crate::core::error::StorageError::CapacityExceeded { .. })
+                ) {
+                    Box::new(self.batch_db_error(Some(index), &e))
+                } else {
+                    self.batch_invalid(
+                        index,
+                        format!("Operation {index}: invalid properties: {e}"),
+                        serde_json::Map::new(),
+                    )
+                }
             }),
         }
     }
@@ -1523,8 +1546,12 @@ impl AletheiaMcpServer {
     /// `failed_op_index`. Mirrors `db_error`'s unique-violation enrichment
     /// (structured details plus legacy top-level fields).
     fn batch_db_error(&self, index: Option<usize>, e: &Error) -> CallToolResult {
-        let mut details = serde_json::Map::new();
-        details.insert("failed_op_index".to_string(), json!(index));
+        // `with_detail` MERGES (rather than replaces), so any structured details
+        // the classifier already attached survive — e.g. a configurable
+        // interner-cap `CapacityExceeded` keeps its `{resource, current, limit}`
+        // (Issue #3723), byte-identical to the create_node/HTTP envelope, with
+        // the batch's `failed_op_index` added alongside.
+        let mut err = McpError::from_db_error(e).with_detail("failed_op_index", json!(index));
         let mut top_level = serde_json::Map::new();
 
         if let Some(crate::core::error::ConstraintError::UniqueViolation {
@@ -1534,13 +1561,11 @@ impl AletheiaMcpServer {
             existing_node_id,
         }) = e.as_constraint()
         {
-            details.insert("label".to_string(), json!(label));
-            details.insert("property".to_string(), json!(property));
-            details.insert("value".to_string(), json!(value));
-            details.insert(
-                "existing_node_id".to_string(),
-                json!(existing_node_id.as_u64()),
-            );
+            err = err
+                .with_detail("label", json!(label))
+                .with_detail("property", json!(property))
+                .with_detail("value", json!(value))
+                .with_detail("existing_node_id", json!(existing_node_id.as_u64()));
             top_level.insert("success".to_string(), json!(false));
             top_level.insert("constraint_violation".to_string(), json!(true));
             top_level.insert("label".to_string(), json!(label));
@@ -1552,10 +1577,7 @@ impl AletheiaMcpServer {
             );
         }
 
-        Self::error_result_with_top_level(
-            McpError::from_db_error(e).details(serde_json::Value::Object(details)),
-            top_level,
-        )
+        Self::error_result_with_top_level(err, top_level)
     }
 }
 

@@ -68,7 +68,7 @@ jobs:
           key: ${{ runner.os }}-v2-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --verbose --features "config-toml,mcp-server,sharding-rpc,simulation"
+        run: cargo test --verbose --features "config-toml,mcp-server,sharding-rpc,simulation,cypher"
 
       - name: Run doc tests
         run: cargo test --doc --verbose

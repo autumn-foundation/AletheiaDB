@@ -30,6 +30,37 @@ use crate::db::AletheiaDB;
 use crate::db::ops::NodesAtTime;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 
+/// The direction a namespace-scoped traversal follows edges (Issue #3349, PR3d).
+///
+/// The scope boundary rule is symmetric across all three: a hop is crossed only
+/// when the edge's namespace AND the node on the far end are both in scope. See
+/// [`AletheiaDB::traverse_scoped_directed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraverseDirection {
+    /// Follow outgoing edges (start → target).
+    Outgoing,
+    /// Follow incoming edges backwards (source → start).
+    Incoming,
+    /// Follow edges in both directions (the union).
+    Both,
+}
+
+impl TraverseDirection {
+    /// Whether this direction follows a node's outgoing edges.
+    #[inline]
+    #[must_use]
+    pub fn follows_outgoing(self) -> bool {
+        matches!(self, TraverseDirection::Outgoing | TraverseDirection::Both)
+    }
+
+    /// Whether this direction follows a node's incoming edges.
+    #[inline]
+    #[must_use]
+    pub fn follows_incoming(self) -> bool {
+        matches!(self, TraverseDirection::Incoming | TraverseDirection::Both)
+    }
+}
+
 impl AletheiaDB {
     /// Validate a read scope against the namespace registry (Issue #3349).
     ///
@@ -212,28 +243,57 @@ impl AletheiaDB {
     }
 
     /// Breadth-first traversal from `start`, honoring the namespace scope
-    /// **boundary** (Issue #3349, design §4 / test T4).
+    /// **boundary** (Issue #3349, design §4 / test T4). Follows **outgoing**
+    /// edges only — the [`Outgoing`](TraverseDirection::Outgoing) case of
+    /// [`traverse_scoped_directed`](Self::traverse_scoped_directed); see it for
+    /// the boundary rule, result shape, and errors.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn traverse_scoped(
+        &self,
+        start: NodeId,
+        edge_label: Option<&str>,
+        max_depth: usize,
+        scope: &NamespaceScope,
+    ) -> Result<Vec<NodeId>> {
+        self.traverse_scoped_directed(
+            start,
+            edge_label,
+            TraverseDirection::Outgoing,
+            max_depth,
+            scope,
+        )
+    }
+
+    /// Breadth-first traversal from `start` in a chosen `direction`, honoring the
+    /// namespace scope **boundary** (Issue #3349, design §4 / PR3d).
     ///
-    /// Follows outgoing edges only. An edge is crossed only when BOTH the
-    /// edge's own namespace ∈ `scope` AND the target node's namespace ∈
-    /// `scope`; a target node outside `scope` stops traversal there. With a
-    /// union scope, traversal proceeds within and between exactly the listed
-    /// namespaces. `edge_label` optionally restricts which relationship type is
-    /// followed.
+    /// The boundary rule is **symmetric** across directions: a hop is crossed
+    /// only when BOTH the edge's own namespace ∈ `scope` AND the namespace of the
+    /// node on the *other* end of that edge ∈ `scope`. For
+    /// [`Outgoing`](TraverseDirection::Outgoing) the other end is the edge's
+    /// target; for [`Incoming`](TraverseDirection::Incoming) it is the edge's
+    /// source (walking edges backwards); [`Both`](TraverseDirection::Both) is the
+    /// union of the two. A node outside `scope` is never reached, so a scope can
+    /// never leak across the boundary or via transit through an out-of-scope
+    /// node, in any direction. With a union scope, traversal proceeds within and
+    /// between exactly the listed namespaces. `edge_label` optionally restricts
+    /// which relationship type is followed.
     ///
     /// Returns the distinct set of nodes reachable within `max_depth` hops
-    /// (excluding `start`), sorted by node id. `max_depth == 0` returns an
-    /// empty vec.
+    /// (excluding `start`), sorted by node id. `max_depth == 0` returns an empty
+    /// vec. Like the outgoing scoped BFS, this returns the boundary-correct
+    /// reachable *set* (per-path detail — `path`/`depth` — is not tracked).
     ///
     /// # Errors
     ///
     /// - `NOT_FOUND` if `start` does not exist or is itself outside `scope`.
     /// - `NOT_FOUND` / `INVALID_ARGUMENT` if `scope` is invalid.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
-    pub fn traverse_scoped(
+    pub fn traverse_scoped_directed(
         &self,
         start: NodeId,
         edge_label: Option<&str>,
+        direction: TraverseDirection,
         max_depth: usize,
         scope: &NamespaceScope,
     ) -> Result<Vec<NodeId>> {
@@ -263,32 +323,63 @@ impl AletheiaDB {
             if depth >= max_depth {
                 continue;
             }
-            let edge_ids = match edge_label {
-                Some(label) => self.get_outgoing_edges_with_label(node, label),
-                None => self.get_outgoing_edges(node),
-            };
-            for edge_id in edge_ids {
-                // Boundary rule via O(1) membership probes (no full edge/node
-                // reconstruction): the edge's own namespace ∈ scope AND the
-                // target node's namespace ∈ scope. Namespace is immutable, so the
-                // current-state membership index is authoritative for the
-                // (current-state) traversal.
-                if !self.scope_contains_current_edge(edge_id, &resolved) {
-                    continue;
-                }
-                let Ok(target) = self.current.get_edge_target(edge_id) else {
-                    continue;
-                };
-                if !self.scope_contains_current_node(target, &resolved) {
-                    continue;
-                }
-                if seen.insert(target) {
-                    queue.push_back((target, depth + 1));
+            for neighbor in self.scoped_neighbors_current(node, edge_label, direction, &resolved) {
+                if seen.insert(neighbor) {
+                    queue.push_back((neighbor, depth + 1));
                 }
             }
         }
         seen.remove(&start);
         Ok(seen.into_iter().collect())
+    }
+
+    /// The in-scope neighbors of `node` in `direction` (current state), applying
+    /// the symmetric boundary rule via O(1) membership probes (no full edge/node
+    /// reconstruction). Namespace is immutable, so the current-state membership
+    /// index is authoritative for the current-state traversal.
+    fn scoped_neighbors_current(
+        &self,
+        node: NodeId,
+        edge_label: Option<&str>,
+        direction: TraverseDirection,
+        resolved: &ResolvedScope,
+    ) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        if direction.follows_outgoing() {
+            let edge_ids = match edge_label {
+                Some(label) => self.get_outgoing_edges_with_label(node, label),
+                None => self.get_outgoing_edges(node),
+            };
+            for edge_id in edge_ids {
+                if !self.scope_contains_current_edge(edge_id, resolved) {
+                    continue;
+                }
+                let Ok(target) = self.current.get_edge_target(edge_id) else {
+                    continue;
+                };
+                if self.scope_contains_current_node(target, resolved) {
+                    out.push(target);
+                }
+            }
+        }
+        if direction.follows_incoming() {
+            let edge_ids = match edge_label {
+                Some(label) => self.get_incoming_edges_with_label(node, label),
+                None => self.get_incoming_edges(node),
+            };
+            for edge_id in edge_ids {
+                if !self.scope_contains_current_edge(edge_id, resolved) {
+                    continue;
+                }
+                let Ok(source) = self.current.get_edge_source(edge_id) else {
+                    continue;
+                };
+                if self.scope_contains_current_node(source, resolved) {
+                    out.push(source);
+                }
+            }
+        }
+        out
     }
 
     /// The set of current node ids in an **explicit** scope, drawn from the
@@ -524,6 +615,43 @@ impl AletheiaDB {
         transaction_time: Timestamp,
         scope: &NamespaceScope,
     ) -> Result<Vec<NodeId>> {
+        self.traverse_scoped_as_of_directed(
+            start,
+            edge_label,
+            TraverseDirection::Outgoing,
+            max_depth,
+            valid_time,
+            transaction_time,
+            scope,
+        )
+    }
+
+    /// Breadth-first traversal from `start` in a chosen `direction` **as of** a
+    /// bi-temporal point, honoring the namespace scope boundary (Issue #3349,
+    /// PR3d). Composes
+    /// [`traverse_scoped_directed`](Self::traverse_scoped_directed)'s symmetric
+    /// boundary semantics with point-in-time reconstruction: a hop is crossed
+    /// only if the edge existed at `(valid_time, transaction_time)` AND its
+    /// namespace ∈ `scope` AND the node on the other end, reconstructed at that
+    /// point, exists and has namespace ∈ `scope`. Node/edge state (including
+    /// namespace, which is immutable) reflects that coordinate.
+    ///
+    /// # Errors
+    ///
+    /// - `NOT_FOUND` if `start` did not exist at that point or is outside `scope`.
+    /// - `NOT_FOUND` / `INVALID_ARGUMENT` if `scope` is invalid.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn traverse_scoped_as_of_directed(
+        &self,
+        start: NodeId,
+        edge_label: Option<&str>,
+        direction: TraverseDirection,
+        max_depth: usize,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+        scope: &NamespaceScope,
+    ) -> Result<Vec<NodeId>> {
         self.validate_scope(scope)?;
         // The start node must exist at the coordinate AND be in scope.
         let start_node = self.get_node_at_time(start, valid_time, transaction_time)?;
@@ -540,11 +668,20 @@ impl AletheiaDB {
             if depth >= max_depth {
                 continue;
             }
-            let edge_ids = match edge_label {
-                Some(label) => self.get_outgoing_edges_with_label(node, label),
-                None => self.get_outgoing_edges(node),
-            };
-            for edge_id in edge_ids {
+            let mut candidate_edges: Vec<EdgeId> = Vec::new();
+            if direction.follows_outgoing() {
+                candidate_edges.extend(match edge_label {
+                    Some(label) => self.get_outgoing_edges_with_label(node, label),
+                    None => self.get_outgoing_edges(node),
+                });
+            }
+            if direction.follows_incoming() {
+                candidate_edges.extend(match edge_label {
+                    Some(label) => self.get_incoming_edges_with_label(node, label),
+                    None => self.get_incoming_edges(node),
+                });
+            }
+            for edge_id in candidate_edges {
                 // Point-in-time edge reconstruction: an edge not visible at the
                 // coordinate is skipped, exactly like the AS OF executor.
                 let Ok(edge) = self.get_edge_at_time(edge_id, valid_time, transaction_time) else {
@@ -553,16 +690,25 @@ impl AletheiaDB {
                 if !scope.contains(&edge.namespace()) {
                     continue;
                 }
-                let target = edge.target;
-                let Ok(target_node) = self.get_node_at_time(target, valid_time, transaction_time)
+                // The node on the *other* end of this edge relative to `node`:
+                // the target when we arrived via an outgoing edge, the source
+                // when via an incoming edge. `Both` may surface the same edge
+                // from either side; the `seen` set dedups the resulting nodes.
+                let neighbor = if edge.source == node {
+                    edge.target
+                } else {
+                    edge.source
+                };
+                let Ok(neighbor_node) =
+                    self.get_node_at_time(neighbor, valid_time, transaction_time)
                 else {
                     continue;
                 };
-                if !scope.contains(&target_node.namespace()) {
+                if !scope.contains(&neighbor_node.namespace()) {
                     continue;
                 }
-                if seen.insert(target) {
-                    queue.push_back((target, depth + 1));
+                if seen.insert(neighbor) {
+                    queue.push_back((neighbor, depth + 1));
                 }
             }
         }

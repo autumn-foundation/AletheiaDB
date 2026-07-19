@@ -62,11 +62,12 @@ use crate::core::namespace::{
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData};
 use crate::storage::wal::LSN;
+use arc_swap::ArcSwapOption;
 use rayon::prelude::*;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,35 @@ const METADATA_TABLE: redb::TableDefinition<'static, &'static str, &'static [u8]
 
 /// Metadata keys stored in the metadata table.
 const FLUSHED_LSN_KEY: &str = "flushed_lsn";
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only instrumentation: the number of cold versions **actually decoded**
+    /// (decompressed + deserialized) on this thread since the last
+    /// [`reset_cold_decode_counter`]. Incremented once at every point a cold
+    /// `NodeVersion`/`EdgeVersion` is materialized from disk — inside
+    /// [`RedbColdStorage::scan_versions_into`] (the full-scan changefeed path) and inside
+    /// [`RedbColdStorage::get_entry_internal`] (single-version point reads).
+    ///
+    /// Used by the `#3677` changefeed pushdown tests to assert that a windowed
+    /// `list_changes` decodes only window candidates rather than every cold version. It is
+    /// **thread-local**, not a process-global static, on purpose: libtest runs each test on
+    /// its own thread and the decode happens synchronously on that same thread, so a test
+    /// reads exactly the count from its own call without racing concurrent tests.
+    static COLD_VERSIONS_DECODED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: reset this thread's cold-version decode counter to zero.
+#[cfg(test)]
+pub(crate) fn reset_cold_decode_counter() {
+    COLD_VERSIONS_DECODED.with(|c| c.set(0));
+}
+
+/// Test-only: read this thread's cold-version decode counter.
+#[cfg(test)]
+pub(crate) fn cold_decode_count() -> u64 {
+    COLD_VERSIONS_DECODED.with(std::cell::Cell::get)
+}
 
 /// Metadata key for the persisted cold-tier bi-temporal extent (Issue #3389).
 const TEMPORAL_EXTENT_KEY: &str = "temporal_extent";
@@ -907,19 +937,45 @@ pub struct RedbColdStorage {
     config: RedbConfig,
     /// Statistics tracker.
     stats: AtomicColdStorageStats,
-    /// Optional cold key ring for encrypting data at rest (Issue #3617 PR3).
+    /// Optional cold key ring for encrypting data at rest (Issue #3617 PR3),
+    /// held in a runtime-swappable presence cell (Issue #3708).
     ///
-    /// `None` when encryption is disabled (values stored as bare
+    /// Empty (`None`) when encryption is disabled (values stored as bare
     /// compressed bytes, unchanged from the unencrypted path). When present it
     /// holds one generation in the steady state and two during a full-MEK key
     /// rotation, so a half-rotated store reads every value under its own
     /// generation via the `ACV1` wrapper dispatch.
-    keyring: Option<ColdKeyring>,
+    ///
+    /// The cell is an [`ArcSwapOption`] so a keyring can be **installed at
+    /// runtime** (`None` -> `Some`, Issue #3708) into a live plaintext store —
+    /// the cold-tier mirror of the WAL's
+    /// [`install_wal_keyring`](crate::storage::wal::concurrent_system::ConcurrentWalSystem::install_wal_keyring)
+    /// seam (#3669) — without reopening the store. Every read path
+    /// (`is_encrypted`, `encrypt_if_needed`, `decrypt_if_needed`,
+    /// `prepare_batch`, ...) `load()`s it lock-free, so an install is observed
+    /// atomically and never as a torn read; the install itself is serialized by
+    /// [`install_lock`](Self::install_lock).
+    keyring: ArcSwapOption<ColdKeyring>,
+    /// Serializes runtime keyring installs (Issue #3708) so two concurrent
+    /// installers cannot both observe the cell as `None`, both pass the presence
+    /// check, and both store -- the second silently replacing the first keyring.
+    /// Held for the entire [`install_cold_keyring`](Self::install_cold_keyring)
+    /// body (presence check + store) so a second concurrent installer blocks,
+    /// then observes `Some`, and returns the existing rejection `Err`. A private
+    /// leaf taken only at the top of install; the hot read/write paths never
+    /// touch it.
+    install_lock: Mutex<()>,
     /// Fault injection flag for testing.
     #[cfg(test)]
     fail_writes: AtomicBool,
     #[cfg(test)]
     writes_attempted: AtomicBool,
+    /// Fault injection flag for the cold-change-cursor seed scan (Issue #3677). When set, the
+    /// streaming seed [`stream_change_cursors`](Self::stream_change_cursors) returns an error, so a
+    /// test can force the cold-change directory to fail its seed over a populated cold store and
+    /// assert the query path degrades to the full scan instead of dropping cold rows.
+    #[cfg(test)]
+    fail_change_cursor_scan: AtomicBool,
 }
 
 impl RedbColdStorage {
@@ -1019,11 +1075,14 @@ impl RedbColdStorage {
             db,
             config,
             stats,
-            keyring: None,
+            keyring: ArcSwapOption::empty(),
+            install_lock: Mutex::new(()),
             #[cfg(test)]
             fail_writes: AtomicBool::new(false),
             #[cfg(test)]
             writes_attempted: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_change_cursor_scan: AtomicBool::new(false),
         })
     }
 
@@ -1108,19 +1167,90 @@ impl RedbColdStorage {
     /// use [`with_cipher`](Self::with_cipher).
     #[must_use]
     pub fn with_cold_keyring(mut self, keyring: ColdKeyring) -> Self {
-        self.keyring = Some(keyring);
+        self.keyring = ArcSwapOption::from(Some(Arc::new(keyring)));
         self
     }
 
     /// Whether the cold store encrypts values at rest.
     pub fn is_encrypted(&self) -> bool {
-        self.keyring.is_some()
+        self.keyring.load().is_some()
     }
 
     /// The `key_version` freshly written cold values are stamped with, or `None`
     /// when encryption is disabled (Issue #3617 PR3).
     pub fn current_cold_key_version(&self) -> Option<u32> {
-        self.keyring.as_ref().map(ColdKeyring::current_version)
+        self.keyring
+            .load()
+            .as_deref()
+            .map(ColdKeyring::current_version)
+    }
+
+    /// Install a cold DEK keyring at runtime, flipping a live **plaintext** cold
+    /// store to **encrypted** (`None` -> `Some`, Issue #3708). This is the
+    /// cold-tier mirror of the WAL's
+    /// [`install_wal_keyring`](crate::storage::wal::concurrent_system::ConcurrentWalSystem::install_wal_keyring)
+    /// seam (#3669): the structural primitive a hot-live `encryption enable`
+    /// driver installs so the cold tier is re-keyed without reopening the store.
+    ///
+    /// # Transition
+    ///
+    /// Only the `None` -> `Some` transition is supported. Installing when a
+    /// keyring is already present is **rejected** with a structured error (never
+    /// a silent replace, so no generation is lost): rotation (`Some` -> `Some'`)
+    /// is the job of [`install_cold_generation`](Self::install_cold_generation),
+    /// not this seam.
+    ///
+    /// # Concurrency
+    ///
+    /// The whole body -- presence check and store -- runs under a dedicated leaf
+    /// [`install_lock`](Self::install_lock), so two concurrent installers cannot
+    /// both observe the cell as `None` and both store (the second silently
+    /// replacing the first): the loser blocks, then observes `Some`, and takes
+    /// the rejection path. Readers `load()` the cell lock-free, so an install is
+    /// observed atomically and never as a torn read.
+    ///
+    /// # Data at rest
+    ///
+    /// Unlike the WAL, no segment seal/reopen is required: cold values are
+    /// individually self-describing (`ACV1`), so values written **after** the
+    /// install are wrapped under the new keyring while values written before it
+    /// stay bare. Wrapping the pre-install plaintext corpus (via
+    /// [`wrap_plaintext_cold_values`](Self::wrap_plaintext_cold_values)) is the
+    /// enable **driver's** responsibility, exactly as the WAL seam leaves its
+    /// downstream migration to its driver -- installing the keyring alone does
+    /// NOT retroactively encrypt already-stored values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a keyring is already installed (a double-install).
+    // The production consumer is the hot-live plaintext -> encrypted enable
+    // engine (Issue #3708 follow-up), which drives this from `enable_encryption`
+    // after the WAL's `install_wal_keyring` and a bare -> `ACV1` wrap pass. A
+    // dedicated `StorageError` variant for the double-install rejection (so the
+    // enable engine can map ONLY it to `FAILED_PRECONDITION`, as the WAL seam's
+    // `WalKeyringAlreadyInstalled` allows) is a trivial follow-up for the
+    // enable lane; reusing `InconsistentState` here keeps the change within the
+    // cold-storage module.
+    pub fn install_cold_keyring(&self, keyring: ColdKeyring) -> Result<()> {
+        // Serialize the ENTIRE install -- presence check + store -- under a
+        // dedicated leaf mutex. Without it two concurrent installers could both
+        // observe `None`, both pass the check, and both store, the second
+        // silently replacing the first keyring.
+        let _install_guard = self.install_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Reject a double-install: presence is a one-way None -> Some transition.
+        if self.keyring.load().is_some() {
+            return Err(StorageError::InconsistentState {
+                reason: "a cold keyring is already installed; runtime install only \
+                         supports the plaintext -> encrypted (None -> Some) transition \
+                         (key rotation is install_cold_generation)"
+                    .to_string(),
+            }
+            .into());
+        }
+
+        self.keyring.store(Some(Arc::new(keyring)));
+        Ok(())
     }
 
     /// Install a new cold DEK generation for a key rotation (Issue #3617 PR3),
@@ -1136,7 +1266,8 @@ impl RedbColdStorage {
         key_version: u32,
         cipher: Arc<dyn crate::encryption::cipher::Cipher>,
     ) -> Result<()> {
-        let ring = self.keyring.as_ref().ok_or_else(|| {
+        let guard = self.keyring.load();
+        let ring = guard.as_deref().ok_or_else(|| {
             Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
                 reason: "cold storage is not encrypted; cannot install a key generation"
                     .to_string(),
@@ -1154,7 +1285,8 @@ impl RedbColdStorage {
     ///
     /// Returns an error if the store is not encrypted.
     pub fn retire_cold_generations(&self, key_version: u32) -> Result<()> {
-        let ring = self.keyring.as_ref().ok_or_else(|| {
+        let guard = self.keyring.load();
+        let ring = guard.as_deref().ok_or_else(|| {
             Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
                 reason: "cold storage is not encrypted; cannot retire key generations".to_string(),
             })
@@ -1170,8 +1302,9 @@ impl RedbColdStorage {
     /// half-rotated store distinguishes old- from new-generation values on read.
     /// A no-op (returns the input) when encryption is disabled.
     fn encrypt_if_needed(&self, data: Vec<u8>) -> Result<Vec<u8>> {
-        match self.keyring {
-            Some(ref ring) => {
+        let guard = self.keyring.load();
+        match guard.as_deref() {
+            Some(ring) => {
                 let (cipher, key_version) = ring.current().ok_or_else(|| {
                     Into::<crate::core::error::Error>::into(StorageError::Encryption(
                         "Cold storage keyring holds no generation".to_string(),
@@ -1199,7 +1332,8 @@ impl RedbColdStorage {
     /// [`keyring`](crate::storage::redb_cold_storage::keyring) for the collision
     /// argument. A no-op (returns a copy) when encryption is disabled.
     fn decrypt_if_needed(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let Some(ref ring) = self.keyring else {
+        let guard = self.keyring.load();
+        let Some(ring) = guard.as_deref() else {
             return Ok(data.to_vec());
         };
         // Wrapped iff ACV1 magic AND the stamped version names a held generation.
@@ -1277,9 +1411,10 @@ impl RedbColdStorage {
         // Resolve the current cold generation ONCE up front so the parallel
         // compression closure is `Sync` (no borrow of `self.keyring`'s lock) and
         // every value in the batch is wrapped under the same `key_version`.
+        let keyring_guard = self.keyring.load();
         let cold_generation: Option<(Arc<dyn crate::encryption::cipher::Cipher>, u32)> =
-            match self.keyring {
-                Some(ref ring) => Some(ring.current().ok_or_else(|| {
+            match keyring_guard.as_deref() {
+                Some(ring) => Some(ring.current().ok_or_else(|| {
                     Into::<crate::core::error::Error>::into(StorageError::Encryption(
                         "Cold storage keyring holds no generation".to_string(),
                     ))
@@ -1367,6 +1502,19 @@ impl RedbColdStorage {
     #[cfg(test)]
     pub fn was_write_attempted(&self) -> bool {
         self.writes_attempted.load(Ordering::SeqCst)
+    }
+
+    /// Set the fault injection flag for the cold-change-cursor seed scan (Issue #3677).
+    ///
+    /// When set to `true`, [`stream_change_cursors`](Self::stream_change_cursors) — the streaming
+    /// seed of the cold-change directory — returns an error, letting a test force a seed failure
+    /// over a populated cold store and verify the changefeed degrades to the full scan rather than
+    /// silently dropping cold rows.
+    ///
+    /// #[doc(hidden)]
+    #[cfg(test)]
+    pub(crate) fn set_fail_change_cursor_scan(&self, fail: bool) {
+        self.fail_change_cursor_scan.store(fail, Ordering::SeqCst);
     }
 
     /// Helper to check failure injection
@@ -1659,7 +1807,8 @@ impl RedbColdStorage {
     /// * a value fails to decrypt (a genuine wrong/absent key — surfaced loudly,
     ///   never silent wrong data) or a redb transaction fails.
     pub fn reencrypt_cold_values(&self, target_version: u32) -> Result<ColdReencryptStats> {
-        let ring = self.keyring.as_ref().ok_or_else(|| {
+        let guard = self.keyring.load();
+        let ring = guard.as_deref().ok_or_else(|| {
             Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
                 reason: "cold storage is not encrypted; cannot rotate cold keys".to_string(),
             })
@@ -1749,7 +1898,7 @@ impl RedbColdStorage {
     /// * a value fails to decrypt (a genuine wrong/absent key — surfaced loudly,
     ///   never silently left encrypted) or a redb transaction fails.
     pub fn unwrap_encrypted_cold_values(&self) -> Result<ColdUnwrapStats> {
-        if self.keyring.is_none() {
+        if self.keyring.load().is_none() {
             return Err(StorageError::InconsistentState {
                 reason: "cold storage is not encrypted; nothing to unwrap".to_string(),
             }
@@ -2217,6 +2366,8 @@ impl RedbColdStorage {
                     .fetch_add(decompressed.len() as u64, Ordering::Relaxed);
 
                 let version = decode_fn(&decompressed)?;
+                #[cfg(test)]
+                COLD_VERSIONS_DECODED.with(|c| c.set(c.get() + 1));
                 Ok(Some(version))
             }
             Ok(None) => Ok(None),
@@ -2293,6 +2444,15 @@ impl RedbColdStorage {
     /// decoded versions into a `Vec` — the caller's `emit` closure decides what (if anything) to
     /// keep. This is what lets the filtered changefeed scan hold only `O(bound)` survivors in
     /// memory instead of the whole table.
+    ///
+    /// # Test-only decode counter
+    ///
+    /// This helper deliberately does **not** increment the `COLD_VERSIONS_DECODED` counter — a
+    /// caller that wants its decodes counted (the full-scan changefeed path
+    /// [`collect_changes_filtered`](Self::collect_changes_filtered)) increments it inside its own
+    /// `emit`, while a caller that must stay off the counter (the one-time cold-change directory
+    /// seed [`stream_change_cursors`](Self::stream_change_cursors)) simply does not, so the
+    /// changefeed decode-count tests measure only query-time point reads, never the seed.
     fn scan_versions_into<V, D, E>(
         &self,
         table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
@@ -2331,7 +2491,8 @@ impl RedbColdStorage {
             let raw: &[u8] = value.value();
             let compressed = self.decrypt_if_needed(raw)?;
             let decompressed = self.decompress(&compressed)?;
-            emit(decode_fn(&decompressed)?);
+            let decoded = decode_fn(&decompressed)?;
+            emit(decoded);
         }
         Ok(())
     }
@@ -2399,6 +2560,10 @@ impl RedbColdStorage {
             NODE_VERSIONS_TABLE,
             decode_node_version,
             |v: NodeVersion| {
+                // Count this as a query-time cold decode (the full-scan changefeed path); the
+                // one-time directory seed decodes off this counter, see `scan_versions_into`.
+                #[cfg(test)]
+                COLD_VERSIONS_DECODED.with(|c| c.set(c.get() + 1));
                 let ns_id = Self::version_namespace_id(
                     &v.data,
                     v.node_id.as_u64(),
@@ -2426,6 +2591,8 @@ impl RedbColdStorage {
             EDGE_VERSIONS_TABLE,
             decode_edge_version,
             |v: EdgeVersion| {
+                #[cfg(test)]
+                COLD_VERSIONS_DECODED.with(|c| c.set(c.get() + 1));
                 let ns_id = Self::version_namespace_id(
                     &v.data,
                     v.edge_id.as_u64(),
@@ -2450,6 +2617,158 @@ impl RedbColdStorage {
         )?;
 
         Ok(acc.into_vec())
+    }
+
+    /// Materialize the changefeed rows for an explicit, ascending list of candidate cursors
+    /// (Issue #3677 — the cold-tier directory pushdown).
+    ///
+    /// Each candidate names one cold row (`kind_ord` + `version_id`). This point-reads that row
+    /// (decoding it — I/O is `O(candidates)`, not `O(N_cold)`) and feeds the decoded version
+    /// through the **same** [`consider_version`] the full scan uses, so the retained page is
+    /// byte-identical to [`collect_changes_filtered`](Self::collect_changes_filtered) for the same
+    /// arguments. Because candidates arrive in ascending [`ChangeCursor`] order and
+    /// `consider_version` keeps only the `bound`-smallest survivors, once the accumulator holds
+    /// `bound` rows no later candidate can displace one, so the walk early-stops.
+    ///
+    /// A candidate whose version_id is absent (raced eviction between directory read and point
+    /// read) is skipped, never an error.
+    pub(crate) fn collect_changes_from_cursors(
+        &self,
+        cursors: &[ChangeCursor],
+        tx_window: &TimeRange,
+        valid_window: Option<&TimeRange>,
+        label_filter: Option<&str>,
+        resume_after: Option<ChangeCursor>,
+        bound: usize,
+    ) -> Result<Vec<RawChange>> {
+        let mut acc = BoundedChanges::new(bound);
+
+        // Namespace resolution mirrors the full scan (`collect_changes_filtered`): an anchor's
+        // namespace is read from its own properties and recorded per entity; a delta reads its
+        // entity's namespace back from the map when its covering anchor was also point-read on this
+        // walk (in ascending-cursor order the anchor's earlier tx-time usually precedes the delta),
+        // else it is stamped with the fail-closed `UNRESOLVED_NAMESPACE` sentinel — never `default`.
+        // Any residual sentinel is re-derived tier-aware by the `HistoricalStorage` layer's
+        // `resolve_unresolved_namespaces`, exactly as for the full-scan path, so the retained page is
+        // byte-identical either way (see Issue #3349 PR3c).
+        let unresolved_ns_id = unresolved_namespace_id();
+        let mut node_ns: std::collections::HashMap<u64, NamespaceId> =
+            std::collections::HashMap::new();
+        let mut edge_ns: std::collections::HashMap<u64, NamespaceId> =
+            std::collections::HashMap::new();
+
+        for cursor in cursors {
+            // Early-stop: with a finite bound and ascending candidates, once `bound` survivors are
+            // retained no larger-cursor candidate can belong on the page.
+            if bound != usize::MAX && acc.len() >= bound {
+                break;
+            }
+
+            let version_id = VersionId::new_unchecked(cursor.version_id);
+            match EntityKind::from_ord(cursor.kind_ord) {
+                EntityKind::Node => {
+                    if let Some(v) = self.get_node_version(version_id)? {
+                        let ns_id = Self::version_namespace_id(
+                            &v.data,
+                            v.node_id.as_u64(),
+                            &mut node_ns,
+                            unresolved_ns_id,
+                        );
+                        consider_version(
+                            &mut acc,
+                            resume_after,
+                            v.id.as_u64(),
+                            v.node_id.as_u64(),
+                            EntityKind::Node,
+                            &v.temporal,
+                            v.label,
+                            v.prev_version.is_none(),
+                            tx_window,
+                            valid_window,
+                            label_filter,
+                            move || ns_id,
+                        );
+                    }
+                }
+                EntityKind::Edge => {
+                    if let Some(v) = self.get_edge_version(version_id)? {
+                        let ns_id = Self::version_namespace_id(
+                            &v.data,
+                            v.edge_id.as_u64(),
+                            &mut edge_ns,
+                            unresolved_ns_id,
+                        );
+                        consider_version(
+                            &mut acc,
+                            resume_after,
+                            v.id.as_u64(),
+                            v.edge_id.as_u64(),
+                            EntityKind::Edge,
+                            &v.temporal,
+                            v.label,
+                            v.prev_version.is_none(),
+                            tx_window,
+                            valid_window,
+                            label_filter,
+                            move || ns_id,
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(acc.into_vec())
+    }
+
+    /// Stream the [`ChangeCursor`] of every version currently held in cold storage, invoking `emit`
+    /// on each — the streaming seed of the in-memory cold-change directory (Issue #3677).
+    ///
+    /// Unlike a materializing scan this never accumulates a `Vec<NodeVersion>` / `Vec<EdgeVersion>`
+    /// or an uncapped `Vec<ChangeCursor>`: it decodes one cold version at a time, computes its
+    /// cursor, hands it to `emit`, and drops the decoded version. Peak memory is therefore whatever
+    /// `emit` retains (the directory caps that at `max_entries`), not `O(N_cold)` decoded versions.
+    /// This is the honest one-time `O(N_cold)` seed I/O, run lazily on first changefeed use.
+    ///
+    /// It walks the non-counter-incrementing [`scan_versions_into`](Self::scan_versions_into) path
+    /// so the changefeed decode-count tests measure only query-time point reads, never this seed.
+    ///
+    /// Returns `Err` on any cold I/O / decode failure (the caller then latches the directory
+    /// `Degraded` and every query degrades to the full scan — a failed seed is never served as a
+    /// complete empty answer).
+    pub(crate) fn stream_change_cursors<E>(&self, mut emit: E) -> Result<()>
+    where
+        E: FnMut(ChangeCursor),
+    {
+        #[cfg(test)]
+        if self.fail_change_cursor_scan.load(Ordering::SeqCst) {
+            return Err(StorageError::io_error("Simulated cold-change seed scan failure").into());
+        }
+
+        self.scan_versions_into(
+            NODE_VERSIONS_TABLE,
+            decode_node_version,
+            |v: NodeVersion| {
+                emit(ChangeCursor::for_version(
+                    v.temporal.transaction_time().start(),
+                    EntityKind::Node,
+                    v.node_id.as_u64(),
+                    v.id.as_u64(),
+                ));
+            },
+        )?;
+        self.scan_versions_into(
+            EDGE_VERSIONS_TABLE,
+            decode_edge_version,
+            |v: EdgeVersion| {
+                emit(ChangeCursor::for_version(
+                    v.temporal.transaction_time().start(),
+                    EntityKind::Edge,
+                    v.edge_id.as_u64(),
+                    v.id.as_u64(),
+                ));
+            },
+        )?;
+        Ok(())
     }
 
     /// Derive an entity version's interned [`NamespaceId`] during a cold-tier scan

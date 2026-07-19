@@ -187,6 +187,44 @@ impl ChangeCursor {
         .encode()
     }
 
+    /// The minimal [`ChangeCursor`] positioned at a transaction time `tx` (Issue #3677).
+    ///
+    /// All the cursor tie-breakers (`kind_ord`, `entity_id`, `version_id`) are zero, so this
+    /// sorts at or before every real version committed at `tx` and strictly after every version
+    /// committed before `tx`. Used by the cold-tier directory to bound a `[start, end)`
+    /// transaction-time window: `min_at(start)` (inclusive) and `min_at(end)` (exclusive) exactly
+    /// select the versions whose commit timestamp lies in the half-open window, mirroring
+    /// [`TimeRange::contains`](crate::core::temporal::TimeRange::contains).
+    pub(crate) fn min_at(tx: Timestamp) -> Self {
+        ChangeCursor {
+            tx_wallclock: tx.wallclock(),
+            tx_logical: tx.logical(),
+            kind_ord: 0,
+            entity_id: 0,
+            version_id: 0,
+        }
+    }
+
+    /// The [`ChangeCursor`] identifying a specific committed version (Issue #3677).
+    ///
+    /// Mirrors the cursor [`build_raw_change`] computes for the same version, so a directory entry
+    /// built from a migrated version is byte-identical to what the changefeed scan would produce.
+    /// `tx_start` is the version's transaction-time interval start.
+    pub(crate) fn for_version(
+        tx_start: Timestamp,
+        kind: EntityKind,
+        entity_id: u64,
+        version_id: u64,
+    ) -> Self {
+        ChangeCursor {
+            tx_wallclock: tx_start.wallclock(),
+            tx_logical: tx_start.logical(),
+            kind_ord: kind.ord(),
+            entity_id,
+            version_id,
+        }
+    }
+
     /// Decode an opaque continuation token produced by [`ChangeCursor::encode`].
     ///
     /// Returns a `QueryError::InvalidParameter` (never panics) when the token is malformed.
@@ -440,6 +478,18 @@ impl BoundedChanges {
                     heap.pop();
                 }
             }
+        }
+    }
+
+    /// Number of changes currently retained.
+    ///
+    /// Used by the cold-tier directory pushdown (Issue #3677) to early-stop a bounded,
+    /// ascending-cursor point-read walk: once `len() >= bound` no later (larger-cursor) candidate
+    /// can displace a retained survivor, so the walk may stop.
+    pub(crate) fn len(&self) -> usize {
+        match &self.inner {
+            BoundedInner::Unbounded(v) => v.len(),
+            BoundedInner::Bounded(heap) => heap.len(),
         }
     }
 

@@ -12,6 +12,10 @@ pub mod aura;
 /// changed (correction / world-change / retraction / reaffirmation) — Issue #3362.
 pub mod belief_revision;
 pub mod chronos;
+/// Temporal semantic drift alarms: watch embedding evolution against declared
+/// thresholds and surface "this concept changed meaning" as durable,
+/// bi-temporal, changefeed-delivered alarm events — Issue #3367.
+pub mod drift_alarm;
 pub mod echo;
 /// Knowledge half-life analytics: survival analysis over fact volatility —
 /// per-cohort half-lives, per-fact freshness, staleness inventories (Issue #3377).

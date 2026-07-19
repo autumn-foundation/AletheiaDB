@@ -150,9 +150,9 @@ pub struct TraverseQuery {
     /// #3349: namespace read scope — a single name, a comma-separated union
     /// (`a,b`), or `all`. Omitted = the `default` namespace only
     /// (isolated-by-default). Forwarded into dispatch so HTTP scopes identically
-    /// to the MCP twin (a narrowing scope is outgoing-only; incoming/both with a
-    /// narrowing scope is INVALID_ARGUMENT; a narrowing scope with `use_cursor`
-    /// fails closed).
+    /// to the MCP twin (a narrowing scope is boundary-enforced in every direction
+    /// — outgoing/incoming/both, PR3d; a narrowing scope with `use_cursor` fails
+    /// closed).
     pub namespace: Option<String>,
 }
 
@@ -467,6 +467,54 @@ pub async fn diff_node_versions(
     args.insert("from_version".to_string(), Value::from(req.from_version));
     args.insert("to_version".to_string(), Value::from(req.to_version));
     tool_json(server.dispatch_tool_json("diff_node_versions", Value::Object(args)))
+}
+
+/// Request body for [`get_belief_revisions`] — mirrors the main-crate
+/// `GetBeliefRevisionsRequest` (Issue #3362).
+#[derive(Debug, Deserialize)]
+pub struct BeliefRevisionsBody {
+    /// Entity kind to audit: `node` or `edge`.
+    pub entity_kind: String,
+    /// The unique identifier of the node or edge to audit.
+    pub id: u64,
+    /// Optional property key to scope the audit to.
+    #[serde(default)]
+    pub property_key: Option<String>,
+    /// Optional transaction-time coordinate (ISO 8601 / RFC 3339 or micros);
+    /// revisions recorded after it are excluded.
+    #[serde(default)]
+    pub as_of_transaction_time: Option<String>,
+    /// Maximum number of revisions to return (default 100, max 1000).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `get_belief_revisions` — audit when and why the database changed its mind
+/// about a node or edge (Issue #3362): a classified revision sequence plus the
+/// confidence trajectory. [`ReadClass`]. HTTP + MCP tool. Requires the
+/// `semantic-temporal` feature (returns `FAILED_PRECONDITION` otherwise).
+#[post("/belief_revisions")]
+#[api_doc(
+    description = "Audit when and why the database changed its mind about a node or edge: a classified revision sequence (initial_assertion/correction/world_change/retraction/reaffirmation) with provenance and confidence trajectory",
+    mcp
+)]
+pub async fn get_belief_revisions(
+    _auth: Authorized<ReadClass>,
+    state: ServerState,
+    Json(req): Json<BeliefRevisionsBody>,
+) -> Json<Value> {
+    let server = state.mcp_server();
+    let mut args = Map::new();
+    args.insert("entity_kind".to_string(), Value::from(req.entity_kind));
+    args.insert("id".to_string(), Value::from(req.id));
+    insert_opt(&mut args, "property_key", req.property_key.map(Value::from));
+    insert_opt(
+        &mut args,
+        "as_of_transaction_time",
+        req.as_of_transaction_time.map(Value::from),
+    );
+    insert_opt(&mut args, "limit", req.limit.map(Value::from));
+    tool_json(server.dispatch_tool_json("get_belief_revisions", Value::Object(args)))
 }
 
 /// Request body for [`get_edge_at_valid_time`] — mirrors the main-crate

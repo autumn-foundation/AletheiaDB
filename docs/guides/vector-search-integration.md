@@ -20,7 +20,7 @@ Add AletheiaDB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-aletheiadb = "0.1"
+aletheiadb = "0.2"
 ```
 
 ## Quick Start

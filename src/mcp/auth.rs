@@ -106,6 +106,8 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("get_edge_at_transaction_time", AccessClass::Read),
     ("get_edge_history", AccessClass::Read),
     ("diff_edge_versions", AccessClass::Read),
+    // Belief-revision audit (Issue #3362) — read-only.
+    ("get_belief_revisions", AccessClass::Read),
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),

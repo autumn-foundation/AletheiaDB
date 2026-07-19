@@ -260,14 +260,29 @@ max_batch_size = 1000
 > applied at `open()`. So the practical precedence is: on `open()`, config wins;
 > without `open()`, the env seed applies.
 >
-> **Multi-database caveat (process-global).** The interner and its cap are
-> **process-global**. In a process that opens multiple databases, the cap is
-> **last-open-wins**: a database opened *later* with a **lower** cap can refuse
-> new interns on an **earlier**-opened database whose data pushed the interner
-> past that lower bound. Existing ids are never evicted or renumbered (lowering
-> the cap only refuses *new* interns), but a shared low cap can starve a busy
-> earlier database. Prefer a single uniform cap across all databases in one
-> process.
+> **Multi-database semantics (process-global, Issue #3724).** The interner and its
+> cap are **process-global** — there is exactly one interner shared by every
+> database opened in the process, so there is exactly one effective cap. Rather
+> than last-open-wins (which would let a database opened *later* with a **lower**
+> cap refuse new interns on an **earlier**-opened database), the effective cap is a
+> **max-of-all-opens high-water mark**: the **first** `open()` establishes the
+> baseline (so a single database can still set a deliberately low DoS bound, even
+> below the 10M default), and each **subsequent** `open()` may only ever **raise**
+> the shared cap toward `max(current, requested)` — **never lower it**. A later,
+> lower requested cap is therefore **not applied** (a loud warning naming
+> `persistence.max_interned_strings` is emitted) so it can never shrink an
+> already-open database's write headroom. The honest tradeoff: in a multi-database
+> process the shared DoS bound is the **maximum** of the requested caps (weaker
+> isolation), never the minimum; writes are never broken, only the DoS ceiling
+> relaxes upward. Existing ids are never evicted or renumbered. Prefer a single
+> uniform cap across all databases in one process. (A truly per-database cap would
+> require a per-database interner and is out of scope.)
+>
+> This applies to **any** subsequent `open()` in the process, not only concurrent
+> multi-database use: even a **single** database opened, dropped, and reopened in
+> the same process with a *lower* cap keeps the higher established cap (and logs
+> the warning) — the high-water mark spans the whole process lifetime. To apply a
+> lower cap, use a fresh process.
 >
 > **When the cap is hit**, the write that would exceed it fails immediately with
 > a `FAILED_PRECONDITION` error (MCP and HTTP) whose message names
@@ -353,6 +368,18 @@ use aletheiadb::storage::redb_cold_storage::RedbConfig;
 // Smaller batches: lower memory + finer-grained rotation resume.
 let config = RedbConfig::new().with_reencrypt_batch_size(512);
 ```
+
+### Tiered Storage (Hot/Warm/Cold) Configuration
+
+`TieredStorageConfig` tunes the warm cache, version-chain prefetch, and the
+in-memory cold changefeed directory that backs the `list_changes` cold-tier
+pushdown (see the tiered-storage guide).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `warm_cache_size` | usize | 10,000 | Warm-cache entries retained per version type |
+| `prefetch_depth` | usize | 5 | Maximum versions prefetched along a version chain |
+| `cold_change_directory_max_entries` | usize | 1,000,000 | Memory budget (entry count) for the in-memory cold changefeed directory (each entry ≈ one `ChangeCursor`, ~5 machine words → ~40-50 MB at the default); `0` disables it so every cold `list_changes` scan degrades to the full scan (Issue #3677) |
 
 ## Configuration Presets
 
@@ -467,7 +494,7 @@ Enable TOML configuration file support:
 
 ```toml
 [dependencies]
-aletheiadb = "0.1.0"  # config-toml enabled by default
+aletheiadb = "0.2"  # config-toml enabled by default
 ```
 
 **Adds:**

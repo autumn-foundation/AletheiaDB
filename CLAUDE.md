@@ -318,7 +318,7 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Embeddings** | `embed_query`, `embed_text`, `semantic_search`, `create_node_with_embedding`, `update_node_embedding` (generate embeddings from text and run text-based semantic search; require the `embeddings` feature + a configured model, else return a structured unavailable/precondition error — see [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md#mcp-embedding-tools)) |
 | **Semantic** | `semantic_path`, `concept_analogy`, `concept_mean`, `find_duplicate_candidates`, `semantic_horizon`, `context_aspects` (read-only analysis over the stable `semantic-search` cohort; gated on the `semantic-search` feature — return `FAILED_PRECONDITION` with `required_feature` when absent; see [docs/guides/mcp-semantic-search-tools.md](docs/guides/mcp-semantic-search-tools.md)) |
-| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
+| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown), `get_belief_revisions` (audit when/why the database changed its mind about a node/edge — classified revision sequence + confidence trajectory; requires the `semantic-temporal` feature; see below) |
 | **Changefeed** | `list_changes` (pull: what changed in a tx-time window), `await_changes` (push long-poll: block for the next committed changes; see below) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
@@ -1419,6 +1419,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md)** - Authentication, RBAC roles, API-key lifecycle
 - **[docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)** - Canonical role/operation authorization matrix
 - **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Fact-to-fact derivation lineage: version-pinned upstream/downstream closures (Issue #3371)
+- **[docs/guides/namespaces-guide.md](docs/guides/namespaces-guide.md)** - Agent-scoped namespaces: shared knowledge base + private agent scratch, isolated-by-default read scoping (Issue #3349)
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.

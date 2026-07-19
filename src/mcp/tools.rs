@@ -1322,6 +1322,47 @@ pub struct GetNodeHistoryRequest {
     pub node_id: u64,
 }
 
+/// Request for a belief-revision audit of an entity (Issue #3362).
+///
+/// Reader-class. Scopes an entity's stored bi-temporal history into a
+/// classified revision sequence (correction / world-change / retraction /
+/// reaffirmation) plus its confidence trajectory.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetBeliefRevisionsRequest {
+    /// The entity kind to audit: `node` or `edge`.
+    #[schemars(description = "Entity kind to audit: 'node' or 'edge'")]
+    pub entity_kind: String,
+
+    /// The unique identifier of the node or edge to audit.
+    #[schemars(description = "The unique identifier of the node or edge to audit")]
+    pub id: u64,
+
+    /// Optionally scope the audit to a single property key. Only revisions that
+    /// touched this key are emitted; an unknown key is an `INVALID_ARGUMENT`.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional property key to scope the audit to; only revisions touching \
+                       this key are returned. A key the entity never had is an INVALID_ARGUMENT."
+    )]
+    pub property_key: Option<String>,
+
+    /// Optionally time-travel the audit itself: revisions recorded after this
+    /// transaction time are excluded (ISO 8601 / RFC 3339 or microseconds since
+    /// epoch).
+    #[serde(default)]
+    #[schemars(
+        description = "Optional transaction-time coordinate (ISO 8601 / RFC 3339 or microseconds \
+                       since epoch); revisions recorded after it are excluded"
+    )]
+    pub as_of_transaction_time: Option<String>,
+
+    /// Maximum number of revisions to return (default 100, max 1000). A `limit`
+    /// of 0 is an `INVALID_ARGUMENT`.
+    #[serde(default)]
+    #[schemars(description = "Maximum revisions to return (default 100, max 1000); 0 is rejected")]
+    pub limit: Option<usize>,
+}
+
 /// Request to produce a signed audit export of an entity's history (Issue #3358).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct AuditExportRequest {
@@ -1475,11 +1516,12 @@ pub struct HybridQueryRequest {
     /// Optional namespace read scope (Issue #3349).
     #[schemars(
         description = "Optional namespace read scope: a single namespace name (string), an array \
-                       of names (union), or \"all\" (no filter). NOTE: hybrid_query does not yet \
-                       compose a filter-complete namespace scope with its vector ranking in v1; \
-                       supplying a scope other than \"all\" returns a structured INVALID_ARGUMENT \
-                       rather than a silently-unscoped (or incorrectly post-filtered) result. Use \
-                       find_similar / traverse with a namespace scope instead."
+                       of names (union), or \"all\" (no filter). Results are filtered to the scope \
+                       and vector ranking is filter-complete (over-fetched so the returned top-k \
+                       are genuinely in-scope; scores/order preserved, results never dropped or \
+                       reordered to meet the scope). Omitted ⇒ the \"default\" namespace only \
+                       (isolated-by-default); unknown ns ⇒ NOT_FOUND; empty array ⇒ \
+                       INVALID_ARGUMENT."
     )]
     pub namespace: Option<serde_json::Value>,
 }
@@ -1533,11 +1575,13 @@ pub struct QueryRequest {
     /// Optional namespace read scope (Issue #3349).
     #[schemars(
         description = "Optional namespace read scope: a single namespace name (string), an array \
-                       of names (union), or \"all\" (no filter). NOTE: declarative (AQL/Cypher) \
-                       namespace scoping is a follow-up; supplying a scope other than \"all\" \
-                       returns a structured INVALID_ARGUMENT rather than a silently-unscoped \
-                       result. Use USE NAMESPACE in the query language when it lands, or the \
-                       structured scoped read tools."
+                       of names (union), or \"all\" (no filter). The query executes scoped — \
+                       produced entities are filtered to the scope and traversal never crosses an \
+                       out-of-scope edge/node. Omitted ⇒ the \"default\" namespace only \
+                       (isolated-by-default). Unknown namespace ⇒ NOT_FOUND; empty array ⇒ \
+                       INVALID_ARGUMENT. A restricting scope on a multi-variable-binding or \
+                       mutating statement returns a structured unsupported_construct error \
+                       (never silently unscoped)."
     )]
     pub namespace: Option<serde_json::Value>,
 }
@@ -1932,6 +1976,11 @@ pub struct EdgeResponse {
 pub struct SimilarityResult {
     pub node: NodeResponse,
     pub score: f32,
+    /// Provenance-weighted fusion breakdown (Issue #3372), present only when a
+    /// `fusion_policy` was supplied on the request. Omitted (never a fabricated
+    /// `null`) otherwise, so omitting `fusion_policy` reproduces prior bytes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub score_breakdown: Option<serde_json::Value>,
 }
 
 /// Traversal result with path information.
@@ -1949,6 +1998,11 @@ pub struct HybridQueryResult {
     pub similarity_score: Option<f32>,
     pub traversal_path: Option<Vec<u64>>,
     pub timestamp: Option<String>,
+    /// Provenance-weighted fusion breakdown (Issue #3372), present only when a
+    /// `fusion_policy` was supplied on the request. Omitted otherwise so prior
+    /// behavior is byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub score_breakdown: Option<serde_json::Value>,
 }
 
 /// Information about a specific version in an entity's history.
