@@ -20013,3 +20013,379 @@ mod namespace_tools_tests {
         assert_eq!(as_json(&created)["name"], "agent:y");
     }
 }
+
+// ============================================================================
+// Belief-revision audit (Issue #3362) + provenance-weighted fusion (#3372)
+// ============================================================================
+
+mod belief_revision_and_fusion_tests {
+    use super::*;
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("valid JSON response")
+    }
+
+    // ---- get_belief_revisions is advertised regardless of feature (Design A) --
+
+    #[test]
+    fn get_belief_revisions_is_advertised() {
+        let server = create_test_server();
+        assert!(
+            server
+                .list_tools_for_test()
+                .iter()
+                .any(|t| t == "get_belief_revisions"),
+            "get_belief_revisions must be advertised (Design A: unconditional)"
+        );
+    }
+
+    // ---- Feature-off twin: structured FAILED_PRECONDITION ---------------------
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    #[test]
+    fn get_belief_revisions_feature_off_is_failed_precondition() {
+        let server = create_test_server();
+        let out = server.dispatch_tool_json(
+            "get_belief_revisions",
+            serde_json::json!({ "entity_kind": "node", "id": 1 }),
+        );
+        let v = parse(&out);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("FAILED_PRECONDITION"),
+            "feature-off get_belief_revisions must be FAILED_PRECONDITION: {out}"
+        );
+        assert_eq!(
+            v.pointer("/error/details/required_feature")
+                .and_then(|c| c.as_str()),
+            Some("semantic-temporal"),
+            "must name the required feature: {out}"
+        );
+        assert_eq!(
+            v.pointer("/error/retriable"),
+            Some(&serde_json::json!(false)),
+            "feature-precondition is non-retriable: {out}"
+        );
+    }
+
+    // ---- Behavior under semantic-temporal ------------------------------------
+
+    #[cfg(feature = "semantic-temporal")]
+    fn node_with_worldchange_history(server: &AletheiaMcpServer) -> u64 {
+        // v1: initial assertion, valid from 2024-01-01, confidence 0.7.
+        let created = server.dispatch_tool_json(
+            "create_node",
+            serde_json::json!({
+                "label": "City",
+                "properties": { "status": "planned" },
+                "valid_time": "2024-01-01T00:00:00Z",
+                "provenance": { "source": "editor", "confidence": 0.7 }
+            }),
+        );
+        let id = parse(&created)
+            .get("id")
+            .and_then(|i| i.as_u64())
+            .expect("id");
+        // v2: a later-valid fact (valid_from advances) -> world_change.
+        server.dispatch_tool_json(
+            "update_node",
+            serde_json::json!({
+                "node_id": id,
+                "properties": { "status": "active" },
+                "valid_time": "2024-06-01T00:00:00Z",
+                "provenance": { "source": "editor", "confidence": 0.9 }
+            }),
+        );
+        id
+    }
+
+    #[cfg(feature = "semantic-temporal")]
+    #[test]
+    fn get_belief_revisions_returns_classified_revisions() {
+        let server = create_test_server();
+        let id = node_with_worldchange_history(&server);
+        let out = server.dispatch_tool_json(
+            "get_belief_revisions",
+            serde_json::json!({ "entity_kind": "node", "id": id }),
+        );
+        let v = parse(&out);
+        assert!(v.get("error").is_none(), "should succeed: {out}");
+        assert_eq!(
+            v.pointer("/entity/kind").and_then(|k| k.as_str()),
+            Some("node")
+        );
+        assert_eq!(v.pointer("/entity/id").and_then(|k| k.as_u64()), Some(id));
+
+        let revs = v
+            .get("revisions")
+            .and_then(|r| r.as_array())
+            .expect("revisions array");
+        assert_eq!(revs.len(), 2, "two versions -> two revisions: {out}");
+        assert_eq!(revs[0]["classification"], "initial_assertion");
+        assert_eq!(
+            revs[1]["classification"], "world_change",
+            "a later-valid fact is a world_change: {out}"
+        );
+
+        // Confidence trajectory mirrors per-revision confidence (AC3).
+        let traj = v
+            .get("confidence_trajectory")
+            .and_then(|t| t.as_array())
+            .expect("trajectory");
+        assert_eq!(traj.len(), 2);
+        assert_eq!(traj[0], serde_json::json!(0.7));
+        assert_eq!(traj[1], serde_json::json!(0.9));
+        assert_eq!(v.get("has_more"), Some(&serde_json::json!(false)));
+
+        // Provenance + changes carry the self-describing tagged value shape.
+        assert_eq!(
+            revs[1]
+                .pointer("/provenance/source")
+                .and_then(|s| s.as_str()),
+            Some("editor")
+        );
+        assert_eq!(revs[1]["changes"][0]["new"]["type"], "string");
+
+        // Deterministic: byte-identical on repeat.
+        let out2 = server.dispatch_tool_json(
+            "get_belief_revisions",
+            serde_json::json!({ "entity_kind": "node", "id": id }),
+        );
+        assert_eq!(out, out2, "belief-revision audit must be deterministic");
+    }
+
+    #[cfg(feature = "semantic-temporal")]
+    #[test]
+    fn get_belief_revisions_unknown_entity_is_not_found() {
+        let server = create_test_server();
+        let out = server.dispatch_tool_json(
+            "get_belief_revisions",
+            serde_json::json!({ "entity_kind": "node", "id": 999_999 }),
+        );
+        let v = parse(&out);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "unknown entity -> NOT_FOUND: {out}"
+        );
+        assert_eq!(
+            v.pointer("/error/retriable"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    #[cfg(feature = "semantic-temporal")]
+    #[test]
+    fn get_belief_revisions_limit_zero_is_invalid_argument() {
+        let server = create_test_server();
+        let id = node_with_worldchange_history(&server);
+        let out = server.dispatch_tool_json(
+            "get_belief_revisions",
+            serde_json::json!({ "entity_kind": "node", "id": id, "limit": 0 }),
+        );
+        assert_eq!(
+            parse(&out).pointer("/error/code").and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "limit:0 -> INVALID_ARGUMENT: {out}"
+        );
+    }
+
+    #[cfg(feature = "semantic-temporal")]
+    #[test]
+    fn get_belief_revisions_bad_entity_kind_is_invalid_argument() {
+        let server = create_test_server();
+        let out = server.dispatch_tool_json(
+            "get_belief_revisions",
+            serde_json::json!({ "entity_kind": "widget", "id": 1 }),
+        );
+        assert_eq!(
+            parse(&out).pointer("/error/code").and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "bad entity_kind -> INVALID_ARGUMENT: {out}"
+        );
+    }
+
+    #[cfg(feature = "semantic-temporal")]
+    #[test]
+    fn get_belief_revisions_unknown_property_key_is_invalid_argument() {
+        let server = create_test_server();
+        let id = node_with_worldchange_history(&server);
+        let out = server.dispatch_tool_json(
+            "get_belief_revisions",
+            serde_json::json!({
+                "entity_kind": "node", "id": id, "property_key": "nonexistent"
+            }),
+        );
+        assert_eq!(
+            parse(&out).pointer("/error/code").and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "unknown property_key -> INVALID_ARGUMENT: {out}"
+        );
+    }
+
+    // ---- Provenance-weighted fusion (Issue #3372) ----------------------------
+
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn setup_fusion_corpus(server: &AletheiaMcpServer) {
+        server.dispatch_tool_json(
+            "enable_vector_index",
+            serde_json::json!({
+                "property_name": "embedding", "dimensions": 4,
+                "distance_metric": "cosine"
+            }),
+        );
+        // "near" is the best similarity match but low-trust.
+        server.dispatch_tool_json(
+            "create_node",
+            serde_json::json!({
+                "label": "Doc",
+                "properties": { "name": "near", "embedding": [1.0, 0.0, 0.0, 0.0] },
+                "provenance": { "source": "rumor", "confidence": 0.05 }
+            }),
+        );
+        // "trusted" is slightly-worse similarity but high-trust; fusion should
+        // rank it first once confidence is weighted heavily.
+        server.dispatch_tool_json(
+            "create_node",
+            serde_json::json!({
+                "label": "Doc",
+                "properties": { "name": "trusted", "embedding": [0.9, 0.1, 0.0, 0.0] },
+                "provenance": { "source": "authority", "confidence": 0.99 }
+            }),
+        );
+    }
+
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn result_names(v: &serde_json::Value) -> Vec<String> {
+        v["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .map(|r| {
+                r["node"]["properties"]["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[test]
+    fn find_similar_without_fusion_has_no_breakdown_and_similarity_order() {
+        let server = create_test_server();
+        setup_fusion_corpus(&server);
+        let out = server.dispatch_tool_json(
+            "find_similar",
+            serde_json::json!({
+                "property_name": "embedding", "embedding": [1.0, 0.0, 0.0, 0.0], "k": 2
+            }),
+        );
+        let v = parse(&out);
+        let results = v["results"].as_array().expect("results");
+        assert!(!results.is_empty(), "should return candidates: {out}");
+        // Omitting fusion_policy is byte-for-byte prior behavior: no breakdown.
+        for r in results {
+            assert!(
+                r.get("score_breakdown").is_none(),
+                "no fusion_policy -> no score_breakdown: {out}"
+            );
+        }
+        // Pure similarity ranks "near" first.
+        assert_eq!(result_names(&v).first().map(String::as_str), Some("near"));
+    }
+
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[test]
+    fn find_similar_with_fusion_reorders_and_attaches_breakdown() {
+        let server = create_test_server();
+        setup_fusion_corpus(&server);
+        let out = server.dispatch_tool_json(
+            "find_similar",
+            serde_json::json!({
+                "property_name": "embedding", "embedding": [1.0, 0.0, 0.0, 0.0], "k": 2,
+                "fusion_policy": { "w_similarity": 1.0, "w_confidence": 5.0, "w_recency": 0.0 }
+            }),
+        );
+        let v = parse(&out);
+        assert!(v.get("error").is_none(), "fusion should succeed: {out}");
+        let results = v["results"].as_array().expect("results");
+        assert_eq!(results.len(), 2, "{out}");
+        // Heavy confidence weighting promotes the high-trust node to the top.
+        assert_eq!(
+            result_names(&v).first().map(String::as_str),
+            Some("trusted"),
+            "fusion must re-rank by fused score: {out}"
+        );
+        // Every result carries an auditable breakdown.
+        for r in results {
+            let b = r.get("score_breakdown").expect("score_breakdown present");
+            for key in ["similarity", "confidence", "recency", "fused"] {
+                assert!(
+                    b.get(key).and_then(|x| x.as_f64()).is_some(),
+                    "breakdown.{key}: {out}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[test]
+    fn find_similar_invalid_fusion_weight_is_invalid_argument() {
+        let server = create_test_server();
+        setup_fusion_corpus(&server);
+        for bad in [
+            serde_json::json!({ "w_confidence": -1.0 }),
+            serde_json::json!({ "w_similarity": 0.0, "w_confidence": 0.0, "w_recency": 0.0 }),
+            serde_json::json!({ "neutral_confidence": 1.5 }),
+            serde_json::json!({ "recency_half_life_secs": 0.0 }),
+        ] {
+            let out = server.dispatch_tool_json(
+                "find_similar",
+                serde_json::json!({
+                    "property_name": "embedding", "embedding": [1.0, 0.0, 0.0, 0.0], "k": 2,
+                    "fusion_policy": bad
+                }),
+            );
+            let v = parse(&out);
+            assert_eq!(
+                v.pointer("/error/code").and_then(|c| c.as_str()),
+                Some("INVALID_ARGUMENT"),
+                "invalid fusion policy must be INVALID_ARGUMENT: {out}"
+            );
+            assert_eq!(
+                v.pointer("/error/retriable"),
+                Some(&serde_json::json!(false))
+            );
+        }
+    }
+
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[test]
+    fn hybrid_query_with_fusion_attaches_breakdown() {
+        let server = create_test_server();
+        setup_fusion_corpus(&server);
+        let out = server.dispatch_tool_json(
+            "hybrid_query",
+            serde_json::json!({
+                "query_embedding": [1.0, 0.0, 0.0, 0.0],
+                "vector_property": "embedding",
+                "top_k": 2, "limit": 2,
+                "fusion_policy": { "w_similarity": 1.0, "w_confidence": 5.0, "w_recency": 0.0 }
+            }),
+        );
+        let v = parse(&out);
+        assert!(
+            v.get("error").is_none(),
+            "hybrid fusion should succeed: {out}"
+        );
+        let results = v["results"].as_array().expect("results");
+        assert!(!results.is_empty(), "should return candidates: {out}");
+        for r in results {
+            assert!(
+                r.get("score_breakdown").is_some(),
+                "hybrid fusion attaches score_breakdown: {out}"
+            );
+        }
+    }
+}
