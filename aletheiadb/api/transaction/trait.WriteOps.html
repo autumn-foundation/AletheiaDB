@@ -1,0 +1,641 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Write operations (only available in write transactions)"><title>WriteOps in aletheiadb::api::transaction - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">WriteOps</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Write<wbr>Ops</a></h2><h3><a href="#required-methods">Required Methods</a></h3><ul class="block"><li><a href="#tymethod.claim_with_lease_with_options" title="claim_with_lease_with_options">claim_with_lease_with_options</a></li><li><a href="#tymethod.compare_and_set_edge_with_options" title="compare_and_set_edge_with_options">compare_and_set_edge_with_options</a></li><li><a href="#tymethod.compare_and_set_node_with_options" title="compare_and_set_node_with_options">compare_and_set_node_with_options</a></li><li><a href="#tymethod.create_edge_with_options" title="create_edge_with_options">create_edge_with_options</a></li><li><a href="#tymethod.create_node_with_options" title="create_node_with_options">create_node_with_options</a></li><li><a href="#tymethod.delete_edge_with_options" title="delete_edge_with_options">delete_edge_with_options</a></li><li><a href="#tymethod.delete_node_cascade_with_options" title="delete_node_cascade_with_options">delete_node_cascade_with_options</a></li><li><a href="#tymethod.delete_node_with_options" title="delete_node_with_options">delete_node_with_options</a></li><li><a href="#tymethod.remove_edge_property" title="remove_edge_property">remove_edge_property</a></li><li><a href="#tymethod.remove_node_property" title="remove_node_property">remove_node_property</a></li><li><a href="#tymethod.replace_edge_with_options" title="replace_edge_with_options">replace_edge_with_options</a></li><li><a href="#tymethod.replace_node_with_options" title="replace_node_with_options">replace_node_with_options</a></li><li><a href="#tymethod.update_edge_with_options" title="update_edge_with_options">update_edge_with_options</a></li><li><a href="#tymethod.update_node_with_options" title="update_node_with_options">update_node_with_options</a></li></ul><h3><a href="#provided-methods">Provided Methods</a></h3><ul class="block"><li><a href="#method.claim_with_lease" title="claim_with_lease">claim_with_lease</a></li><li><a href="#method.compare_and_set_edge" title="compare_and_set_edge">compare_and_set_edge</a></li><li><a href="#method.compare_and_set_node" title="compare_and_set_node">compare_and_set_node</a></li><li><a href="#method.create_edge" title="create_edge">create_edge</a></li><li><a href="#method.create_edge_with_valid_time" title="create_edge_with_valid_time">create_edge_with_valid_time</a></li><li><a href="#method.create_node" title="create_node">create_node</a></li><li><a href="#method.create_node_with_valid_time" title="create_node_with_valid_time">create_node_with_valid_time</a></li><li><a href="#method.delete_edge" title="delete_edge">delete_edge</a></li><li><a href="#method.delete_edge_with_valid_time" title="delete_edge_with_valid_time">delete_edge_with_valid_time</a></li><li><a href="#method.delete_node" title="delete_node">delete_node</a></li><li><a href="#method.delete_node_cascade" title="delete_node_cascade">delete_node_cascade</a></li><li><a href="#method.delete_node_with_valid_time" title="delete_node_with_valid_time">delete_node_with_valid_time</a></li><li><a href="#method.replace_edge" title="replace_edge">replace_edge</a></li><li><a href="#method.replace_edge_with_valid_time" title="replace_edge_with_valid_time">replace_edge_with_valid_time</a></li><li><a href="#method.replace_node" title="replace_node">replace_node</a></li><li><a href="#method.replace_node_with_valid_time" title="replace_node_with_valid_time">replace_node_with_valid_time</a></li><li><a href="#method.update_edge" title="update_edge">update_edge</a></li><li><a href="#method.update_edge_with_valid_time" title="update_edge_with_valid_time">update_edge_with_valid_time</a></li><li><a href="#method.update_node" title="update_node">update_node</a></li><li><a href="#method.update_node_with_valid_time" title="update_node_with_valid_time">update_node_with_valid_time</a></li></ul><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>api::<wbr>transaction</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">api</a>::<wbr><a href="index.html">transaction</a></div><h1>Trait <span class="trait">Write<wbr>Ops</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/api/transaction/mod.rs.html#525-1341">Source</a> </span></div><pre class="rust item-decl"><code>pub trait WriteOps: <a class="trait" href="trait.ReadOps.html" title="trait aletheiadb::api::transaction::ReadOps">ReadOps</a> {
+<details class="toggle type-contents-toggle"><summary class="hideme"><span>Show 34 methods</span></summary>    // Required methods
+    fn <a href="#tymethod.create_node_with_options" class="fn">create_node_with_options</a>(
+        &amp;mut self,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.create_edge_with_options" class="fn">create_edge_with_options</a>(
+        &amp;mut self,
+        source: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        target: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.update_node_with_options" class="fn">update_node_with_options</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.compare_and_set_node_with_options" class="fn">compare_and_set_node_with_options</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.compare_and_set_edge_with_options" class="fn">compare_and_set_edge_with_options</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.claim_with_lease_with_options" class="fn">claim_with_lease_with_options</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+        lease_owner_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        lease_until_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        owner: <a class="enum" href="../../core/property/value/enum.PropertyValue.html" title="enum aletheiadb::core::property::value::PropertyValue">PropertyValue</a>,
+        lease_until: <a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.update_edge_with_options" class="fn">update_edge_with_options</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.delete_node_with_options" class="fn">delete_node_with_options</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.delete_node_cascade_with_options" class="fn">delete_node_cascade_with_options</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.delete_edge_with_options" class="fn">delete_edge_with_options</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.replace_node_with_options" class="fn">replace_node_with_options</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.replace_edge_with_options" class="fn">replace_edge_with_options</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.remove_node_property" class="fn">remove_node_property</a>(&amp;mut self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.remove_edge_property" class="fn">remove_edge_property</a>(&amp;mut self, edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>, key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+
+    // Provided methods
+    fn <a href="#method.create_node_with_valid_time" class="fn">create_node_with_valid_time</a>(
+        &amp;mut self,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.create_node" class="fn">create_node</a>(
+        &amp;mut self,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.create_edge_with_valid_time" class="fn">create_edge_with_valid_time</a>(
+        &amp;mut self,
+        source: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        target: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.create_edge" class="fn">create_edge</a>(
+        &amp;mut self,
+        source: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        target: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.update_node_with_valid_time" class="fn">update_node_with_valid_time</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.compare_and_set_node" class="fn">compare_and_set_node</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.compare_and_set_edge" class="fn">compare_and_set_edge</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.claim_with_lease" class="fn">claim_with_lease</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+        lease_owner_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        lease_until_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        owner: <a class="enum" href="../../core/property/value/enum.PropertyValue.html" title="enum aletheiadb::core::property::value::PropertyValue">PropertyValue</a>,
+        lease_until: <a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.update_node" class="fn">update_node</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.update_edge_with_valid_time" class="fn">update_edge_with_valid_time</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.update_edge" class="fn">update_edge</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.delete_node_with_valid_time" class="fn">delete_node_with_valid_time</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.delete_node" class="fn">delete_node</a>(&amp;mut self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.delete_node_cascade" class="fn">delete_node_cascade</a>(&amp;mut self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.delete_edge_with_valid_time" class="fn">delete_edge_with_valid_time</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.delete_edge" class="fn">delete_edge</a>(&amp;mut self, edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.replace_node_with_valid_time" class="fn">replace_node_with_valid_time</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.replace_node" class="fn">replace_node</a>(
+        &amp;mut self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.replace_edge_with_valid_time" class="fn">replace_edge_with_valid_time</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+        valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.replace_edge" class="fn">replace_edge</a>(
+        &amp;mut self,
+        edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+        properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+</details>}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Write operations (only available in write transactions)</p>
+</div></details><h2 id="required-methods" class="section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.create_node_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#598-603">Source</a><h4 class="code-header">fn <a href="#tymethod.create_node_with_options" class="fn">create_node_with_options</a>(
+    &amp;mut self,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>&gt;</h4></section></summary><div class="docblock"><p>Create a new node with an optional <a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle (backdated
+<code>valid_from</code> and/or a write-time <a href="../../core/provenance/struct.Provenance.html" title="struct aletheiadb::core::provenance::Provenance"><code>Provenance</code></a> bundle, Issue #3224).</p>
+<p>This is the most general node-creation method; all other
+<code>create_node*</code> methods delegate to it. Passing <code>WriteRequestOptions::default()</code>
+is identical to <a href="trait.WriteOps.html#method.create_node" title="method aletheiadb::api::transaction::WriteOps::create_node"><code>create_node</code></a>.</p>
+<h5 id="example"><a class="doc-anchor" href="#example">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>provenance = Provenance::builder().source(<span class="string">"hr-system"</span>).confidence(<span class="number">0.95</span>).build()<span class="question-mark">?</span>;
+<span class="kw">let </span>node_id = tx.create_node_with_options(
+    <span class="string">"Person"</span>,
+    <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice" </span>},
+    WriteRequestOptions::new().with_provenance(provenance),
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.create_edge_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#674-681">Source</a><h4 class="code-header">fn <a href="#tymethod.create_edge_with_options" class="fn">create_edge_with_options</a>(
+    &amp;mut self,
+    source: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    target: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;</h4></section></summary><div class="docblock"><p>Create a new edge with an optional <a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle (backdated
+<code>valid_from</code> and/or a write-time <a href="../../core/provenance/struct.Provenance.html" title="struct aletheiadb::core::provenance::Provenance"><code>Provenance</code></a> bundle, Issue #3224).</p>
+<p>This is the most general edge-creation method; all other
+<code>create_edge*</code> methods delegate to it.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.update_node_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#763-768">Source</a><h4 class="code-header">fn <a href="#tymethod.update_node_with_options" class="fn">update_node_with_options</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Update a node’s properties with an optional <a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle
+(backdated <code>valid_from</code> and/or a write-time <a href="../../core/provenance/struct.Provenance.html" title="struct aletheiadb::core::provenance::Provenance"><code>Provenance</code></a> bundle,
+Issue #3224).</p>
+<p>This is the most general node-update method; all other
+<code>update_node*</code> methods delegate to it. The provenance recorded here
+describes <em>this</em> version only – it is not inherited from the
+version being updated.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.compare_and_set_node_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#808-814">Source</a><h4 class="code-header">fn <a href="#tymethod.compare_and_set_node_with_options" class="fn">compare_and_set_node_with_options</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;</h4></section></summary><div class="docblock"><p><a href="trait.WriteOps.html#method.compare_and_set_node" title="method aletheiadb::api::transaction::WriteOps::compare_and_set_node"><code>compare_and_set_node</code></a> with a
+<a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle (backdated <code>valid_from</code> and/or write-time
+provenance parity with <code>update_node</code>). This is the most general node-CAS
+method; <code>compare_and_set_node</code> delegates to it.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.compare_and_set_edge_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#841-847">Source</a><h4 class="code-header">fn <a href="#tymethod.compare_and_set_edge_with_options" class="fn">compare_and_set_edge_with_options</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;</h4></section></summary><div class="docblock"><p><a href="trait.WriteOps.html#method.compare_and_set_edge" title="method aletheiadb::api::transaction::WriteOps::compare_and_set_edge"><code>compare_and_set_edge</code></a> with a
+<a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle. The most general edge-CAS method.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.claim_with_lease_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#890-900">Source</a><h4 class="code-header">fn <a href="#tymethod.claim_with_lease_with_options" class="fn">claim_with_lease_with_options</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+    lease_owner_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    lease_until_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    owner: <a class="enum" href="../../core/property/value/enum.PropertyValue.html" title="enum aletheiadb::core::property::value::PropertyValue">PropertyValue</a>,
+    lease_until: <a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;</h4></section></summary><div class="docblock"><p><a href="trait.WriteOps.html#method.claim_with_lease" title="method aletheiadb::api::transaction::WriteOps::claim_with_lease"><code>claim_with_lease</code></a> with a
+<a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle. The most general claim method.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.update_edge_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#974-979">Source</a><h4 class="code-header">fn <a href="#tymethod.update_edge_with_options" class="fn">update_edge_with_options</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Update an edge’s properties with an optional <a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle
+(backdated <code>valid_from</code> and/or a write-time <a href="../../core/provenance/struct.Provenance.html" title="struct aletheiadb::core::provenance::Provenance"><code>Provenance</code></a> bundle,
+Issue #3224).</p>
+<p>This is the most general edge-update method; all other
+<code>update_edge*</code> methods delegate to it. The provenance recorded here
+describes <em>this</em> version only – it is not inherited from the
+version being updated.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.delete_node_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1066-1070">Source</a><h4 class="code-header">fn <a href="#tymethod.delete_node_with_options" class="fn">delete_node_with_options</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Delete a node with an optional <a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle: a
+backdated deletion <code>valid_from</code> and/or a write-time <a href="../../core/provenance/struct.Provenance.html" title="struct aletheiadb::core::provenance::Provenance"><code>Provenance</code></a>
+bundle recording the acting principal on the tombstone version
+(Issue #3427).</p>
+<p>This is the most general non-cascade node-delete method; all other
+<code>delete_node*</code> (non-cascade) methods delegate to it. Passing
+<code>WriteRequestOptions::default()</code> is identical to
+<a href="trait.WriteOps.html#method.delete_node" title="method aletheiadb::api::transaction::WriteOps::delete_node"><code>delete_node</code></a> — no provenance, <code>valid_from</code>
+defaults to the transaction start time.</p>
+<h5 id="warning"><a class="doc-anchor" href="#warning">§</a>Warning</h5>
+<p>Like <a href="trait.WriteOps.html#method.delete_node" title="method aletheiadb::api::transaction::WriteOps::delete_node"><code>delete_node</code></a>, this does NOT delete connected
+edges. Prefer <a href="trait.WriteOps.html#method.delete_node_cascade" title="method aletheiadb::api::transaction::WriteOps::delete_node_cascade"><code>delete_node_cascade</code></a> /
+<a href="trait.WriteOps.html#tymethod.delete_node_cascade_with_options" title="method aletheiadb::api::transaction::WriteOps::delete_node_cascade_with_options"><code>delete_node_cascade_with_options</code></a>
+for referential safety.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.delete_node_cascade_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1140-1144">Source</a><h4 class="code-header">fn <a href="#tymethod.delete_node_cascade_with_options" class="fn">delete_node_cascade_with_options</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Delete a node and all connected edges (cascade delete) with an optional
+<a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle (Issue #3427).</p>
+<p>The same <code>options</code> (backdated <code>valid_from</code> and/or a write-time
+<a href="../../core/provenance/struct.Provenance.html" title="struct aletheiadb::core::provenance::Provenance"><code>Provenance</code></a> bundle recording the acting principal) is stamped onto
+the node’s tombstone <strong>and every co-deleted edge’s tombstone</strong>, so a
+cascade delete attributes every tombstone it creates, not just the node.
+Passing <code>WriteRequestOptions::default()</code> is identical to
+<a href="trait.WriteOps.html#method.delete_node_cascade" title="method aletheiadb::api::transaction::WriteOps::delete_node_cascade"><code>delete_node_cascade</code></a>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.delete_edge_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1187-1191">Source</a><h4 class="code-header">fn <a href="#tymethod.delete_edge_with_options" class="fn">delete_edge_with_options</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Delete an edge with an optional <a href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions"><code>WriteRequestOptions</code></a> bundle: a
+backdated deletion <code>valid_from</code> and/or a write-time <a href="../../core/provenance/struct.Provenance.html" title="struct aletheiadb::core::provenance::Provenance"><code>Provenance</code></a>
+bundle recording the acting principal on the tombstone version
+(Issue #3427).</p>
+<p>This is the most general edge-delete method; all other <code>delete_edge*</code>
+methods delegate to it. Passing <code>WriteRequestOptions::default()</code> is
+identical to <a href="trait.WriteOps.html#method.delete_edge" title="method aletheiadb::api::transaction::WriteOps::delete_edge"><code>delete_edge</code></a>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.replace_node_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1238-1244">Source</a><h4 class="code-header">fn <a href="#tymethod.replace_node_with_options" class="fn">replace_node_with_options</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Replace a node’s <strong>entire</strong> property map and label (non-PATCH overwrite).</p>
+<p>Unlike <a href="trait.WriteOps.html#method.update_node" title="method aletheiadb::api::transaction::WriteOps::update_node"><code>update_node</code></a> (PATCH: merges the incoming map
+onto the existing one), this performs a full overwrite: the node’s
+resulting property map is <em>exactly</em> <code>properties</code>, and its label becomes
+<code>label</code>. Any key present on the prior version but absent from
+<code>properties</code> is <strong>removed</strong> from current state — its history is
+preserved and still recallable <code>AS OF</code> an earlier bi-temporal coordinate
+(anchor <em>both</em> dimensions before the replace). Passing an empty map
+removes all properties while keeping the node in existence.</p>
+<p>Node label mutation is only possible through this method;
+<a href="trait.WriteOps.html#method.update_node" title="method aletheiadb::api::transaction::WriteOps::update_node"><code>update_node</code></a> preserves the label.</p>
+<p>This is the most general node-replace method; the other <code>replace_node*</code>
+methods delegate to it. The provenance recorded here describes <em>this</em>
+version only — it is not inherited from the version being replaced.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.replace_edge_with_options" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1291-1296">Source</a><h4 class="code-header">fn <a href="#tymethod.replace_edge_with_options" class="fn">replace_edge_with_options</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    options: <a class="struct" href="struct.WriteRequestOptions.html" title="struct aletheiadb::api::transaction::WriteRequestOptions">WriteRequestOptions</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Replace an edge’s <strong>entire</strong> property map (non-PATCH overwrite).</p>
+<p>Overwrites the property map exactly, like
+<a href="trait.WriteOps.html#tymethod.replace_node_with_options" title="method aletheiadb::api::transaction::WriteOps::replace_node_with_options"><code>replace_node_with_options</code></a>, but the
+edge’s <code>source</code>, <code>target</code>, and edge type (label) are <strong>immutable</strong> and
+preserved from the existing edge (edge-type mutation is out of scope).
+Any key absent from <code>properties</code> is removed from current state; history
+is preserved. Passing an empty map removes all properties.</p>
+<p>This is the most general edge-replace method; the other <code>replace_edge*</code>
+methods delegate to it.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.remove_node_property" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1333">Source</a><h4 class="code-header">fn <a href="#tymethod.remove_node_property" class="fn">remove_node_property</a>(&amp;mut self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Remove a single property key from a node (read-modify-replace).</p>
+<p>Reads the node’s current property map (read-your-own-writes within the
+transaction), drops <code>key</code>, and records a full replacement version with
+the reduced map and the node’s existing label. Removing a key that is
+<strong>absent</strong> is a no-op that still succeeds and records <strong>no</strong> new version.
+History is preserved: the removed key is still recallable <code>AS OF</code> an
+earlier bi-temporal coordinate.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.remove_edge_property" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1340">Source</a><h4 class="code-header">fn <a href="#tymethod.remove_edge_property" class="fn">remove_edge_property</a>(&amp;mut self, edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>, key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Remove a single property key from an edge (read-modify-replace).</p>
+<p>Edge counterpart of <a href="trait.WriteOps.html#tymethod.remove_node_property" title="method aletheiadb::api::transaction::WriteOps::remove_node_property"><code>remove_node_property</code></a>;
+the edge’s endpoints and type are preserved. Removing an absent key is a
+no-op success that records no new version.</p>
+</div></details></div><h2 id="provided-methods" class="section-header">Provided Methods<a href="#provided-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="method.create_node_with_valid_time" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#561-573">Source</a><h4 class="code-header">fn <a href="#method.create_node_with_valid_time" class="fn">create_node_with_valid_time</a>(
+    &amp;mut self,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>&gt;</h4></section></summary><div class="docblock"><p>Create a new node with optional backdated valid_from time.</p>
+<h5 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h5>
+<ul>
+<li><code>label</code> - Node label</li>
+<li><code>properties</code> - Node properties</li>
+<li><code>valid_from</code> - When the fact became valid (None = transaction time)</li>
+</ul>
+<h5 id="bi-temporal-semantics"><a class="doc-anchor" href="#bi-temporal-semantics">§</a>Bi-Temporal Semantics</h5>
+<ul>
+<li>If <code>valid_from</code> is None, <code>valid_time</code> starts at the <strong>transaction start time</strong>.</li>
+<li><code>transaction_time</code> always starts at the <strong>commit time</strong>.</li>
+<li>This means by default, facts are considered valid from the moment the transaction began.</li>
+<li>If <code>valid_from</code> is Some(ts), valid_time starts at <code>ts</code>.</li>
+</ul>
+<h5 id="example-1"><a class="doc-anchor" href="#example-1">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// Backdate a fact to 1 hour ago
+</span><span class="kw">let </span>one_hour_ago = time::now().wallclock() - <span class="number">3_600_000_000</span>;
+<span class="kw">let </span>valid_from = time::from_secs(one_hour_ago / <span class="number">1_000_000</span>);
+
+<span class="kw">let </span>node_id = tx.create_node_with_valid_time(
+    <span class="string">"Person"</span>,
+    <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice" </span>},
+    <span class="prelude-val">Some</span>(valid_from)
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.create_node" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#623-625">Source</a><h4 class="code-header">fn <a href="#method.create_node" class="fn">create_node</a>(
+    &amp;mut self,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>&gt;</h4></section></summary><div class="docblock"><p>Create a new node.</p>
+<p>This is a convenience method that sets <code>valid_from</code> to the <strong>transaction start time</strong>.</p>
+<h5 id="example-2"><a class="doc-anchor" href="#example-2">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>node_id = tx.create_node(
+    <span class="string">"Person"</span>,
+    <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice"</span>, <span class="string">"age" </span>=&gt; <span class="number">30 </span>}
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.create_edge_with_valid_time" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#653-667">Source</a><h4 class="code-header">fn <a href="#method.create_edge_with_valid_time" class="fn">create_edge_with_valid_time</a>(
+    &amp;mut self,
+    source: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    target: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;</h4></section></summary><div class="docblock"><p>Create a new edge with optional backdated valid_from time.</p>
+<p>Use this when loading historical data where relationships formed in the past.</p>
+<h5 id="example-3"><a class="doc-anchor" href="#example-3">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>past_time = time::from_secs(<span class="number">1609459200</span>); <span class="comment">// 2021-01-01
+
+</span><span class="kw">let </span>edge_id = tx.create_edge_with_valid_time(
+    alice,
+    bob,
+    <span class="string">"KNOWS"</span>,
+    <span class="macro">properties!</span> { <span class="string">"since" </span>=&gt; <span class="number">2021 </span>},
+    <span class="prelude-val">Some</span>(past_time)
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.create_edge" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#705-713">Source</a><h4 class="code-header">fn <a href="#method.create_edge" class="fn">create_edge</a>(
+    &amp;mut self,
+    source: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    target: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;</h4></section></summary><div class="docblock"><p>Create a new edge.</p>
+<p>This is a convenience method that sets <code>valid_from</code> to the <strong>transaction start time</strong>.</p>
+<h5 id="example-4"><a class="doc-anchor" href="#example-4">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>edge_id = tx.create_edge(
+    alice_id,
+    bob_id,
+    <span class="string">"KNOWS"</span>,
+    <span class="macro">properties!</span> { <span class="string">"since" </span>=&gt; <span class="number">2024 </span>}
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.update_node_with_valid_time" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#741-753">Source</a><h4 class="code-header">fn <a href="#method.update_node_with_valid_time" class="fn">update_node_with_valid_time</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Update a node’s properties with optional backdated valid_from time.</p>
+<p>This merges the new properties with existing ones (PATCH semantics).
+Existing properties not in the map are preserved.</p>
+<h5 id="example-5"><a class="doc-anchor" href="#example-5">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// Update address effective from yesterday
+</span><span class="kw">let </span>yesterday = time::now().wallclock() - <span class="number">86_400_000_000</span>;
+<span class="kw">let </span>valid_from = time::from_secs(yesterday / <span class="number">1_000_000</span>);
+
+tx.update_node_with_valid_time(
+    alice,
+    <span class="macro">properties!</span> { <span class="string">"city" </span>=&gt; <span class="string">"London" </span>},
+    <span class="prelude-val">Some</span>(valid_from)
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.compare_and_set_node" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#790-802">Source</a><h4 class="code-header">fn <a href="#method.compare_and_set_node" class="fn">compare_and_set_node</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;</h4></section></summary><div class="docblock"><p>Compare-and-set a node’s properties, conditional on its committed head
+still being <code>expected_version</code> (Issue #3577).</p>
+<p>This is a conditional <strong>full replace</strong> of the node’s property map (not a
+PATCH merge): the whole <code>properties</code> map becomes the new state, matching
+the “write the whole claim state” semantics the lease layer builds on.
+The label and node id are preserved.</p>
+<h5 id="semantics"><a class="doc-anchor" href="#semantics">§</a>Semantics</h5>
+<p>The precondition is enforced at <strong>commit time, under the
+commit-serialization guard</strong> — so two claimants opened on the same
+snapshot cannot both succeed (the second observes the first’s new version
+and aborts). On success the new version id is returned. On a lost claim
+the whole transaction aborts with
+<a href="../../core/error/enum.TransactionError.html#variant.CasMismatch" title="variant aletheiadb::core::error::TransactionError::CasMismatch"><code>TransactionError::CasMismatch</code></a>
+(a non-retriable precondition failure, distinct from the retriable
+<code>SerializationFailure</code>) and <strong>nothing is written</strong>. A CAS against a
+nonexistent or deleted node fails with <code>CasMismatch { actual: None }</code>
+rather than a <code>NodeNotFound</code>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.compare_and_set_edge" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#825-837">Source</a><h4 class="code-header">fn <a href="#method.compare_and_set_edge" class="fn">compare_and_set_edge</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;</h4></section></summary><div class="docblock"><p>Compare-and-set an edge’s properties, conditional on its committed head
+still being <code>expected_version</code> (Issue #3577).</p>
+<p>Like <a href="trait.WriteOps.html#method.compare_and_set_node" title="method aletheiadb::api::transaction::WriteOps::compare_and_set_node"><code>compare_and_set_node</code></a>, but for an
+edge: endpoints and type are immutable (only the property map is
+conditionally replaced, mirroring <code>replace_edge</code>). Returns the new
+version id on success; aborts with
+<a href="../../core/error/enum.TransactionError.html#variant.CasMismatch" title="variant aletheiadb::core::error::TransactionError::CasMismatch"><code>TransactionError::CasMismatch</code></a>
+on a version mismatch.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.claim_with_lease" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#865-885">Source</a><h4 class="code-header">fn <a href="#method.claim_with_lease" class="fn">claim_with_lease</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    expected_version: <a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>,
+    lease_owner_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    lease_until_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    owner: <a class="enum" href="../../core/property/value/enum.PropertyValue.html" title="enum aletheiadb::core::property::value::PropertyValue">PropertyValue</a>,
+    lease_until: <a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/id/struct.VersionId.html" title="struct aletheiadb::core::id::VersionId">VersionId</a>&gt;</h4></section></summary><div class="docblock"><p>Claim a node via a lease, succeeding iff the version still matches OR the
+existing lease is expired (Issue #3577).</p>
+<p>A thin convenience over <a href="trait.WriteOps.html#method.compare_and_set_node" title="method aletheiadb::api::transaction::WriteOps::compare_and_set_node"><code>compare_and_set_node</code></a>:
+it stamps <code>lease_owner_key = owner</code> and <code>lease_until_key = lease_until</code>
+(as integer microseconds since epoch) into <code>properties</code> (a full replace),
+then buffers a CAS whose commit-time precondition is
+<code>current_version == expected_version</code> <strong>OR</strong> the entity’s current
+<code>lease_until_key</code> property is <code>&lt;=</code> the commit timestamp (the lease is
+expired / unclaimed). The property key names are caller-supplied — this is
+a convention, not a hardcoded schema. Lease expiry is evaluated against
+the commit HLC timestamp, not the transaction snapshot. Returns the new
+version id on success; aborts with
+<a href="../../core/error/enum.TransactionError.html#variant.CasMismatch" title="variant aletheiadb::core::error::TransactionError::CasMismatch"><code>TransactionError::CasMismatch</code></a>
+when the version is stale AND the lease is still held.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.update_node" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#924-926">Source</a><h4 class="code-header">fn <a href="#method.update_node" class="fn">update_node</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Update a node’s properties.</p>
+<p>This performs a PATCH update: only the specified properties are updated;
+others are preserved. To delete a property, set it to <code>PropertyValue::Null</code> (future feature)
+or explicit delete (not yet implemented).</p>
+<h5 id="example-6"><a class="doc-anchor" href="#example-6">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// Only updates "age", preserves "name"
+</span>tx.update_node(
+    node_id,
+    <span class="macro">properties!</span> { <span class="string">"age" </span>=&gt; <span class="number">31 </span>}
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.update_edge_with_valid_time" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#952-964">Source</a><h4 class="code-header">fn <a href="#method.update_edge_with_valid_time" class="fn">update_edge_with_valid_time</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Update an edge’s properties with optional backdated valid_from time.</p>
+<p>This merges the new properties with existing ones (PATCH semantics).</p>
+<h5 id="example-7"><a class="doc-anchor" href="#example-7">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// Retroactively increase relationship strength
+</span><span class="kw">let </span>past_time = time::from_secs(<span class="number">1609459200</span>);
+
+tx.update_edge_with_valid_time(
+    edge_id,
+    <span class="macro">properties!</span> { <span class="string">"strength" </span>=&gt; <span class="number">0.8 </span>},
+    <span class="prelude-val">Some</span>(past_time)
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.update_edge" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1001-1003">Source</a><h4 class="code-header">fn <a href="#method.update_edge" class="fn">update_edge</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Update an edge’s properties.</p>
+<p>This performs a PATCH update: only the specified properties are updated;
+others are preserved.</p>
+<h5 id="example-8"><a class="doc-anchor" href="#example-8">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code>tx.update_edge(
+    edge_id,
+    <span class="macro">properties!</span> { <span class="string">"strength" </span>=&gt; <span class="number">0.95 </span>}
+)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.delete_node_with_valid_time" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1034-1047">Source</a><h4 class="code-header">fn <a href="#method.delete_node_with_valid_time" class="fn">delete_node_with_valid_time</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Delete a node with optional backdated valid_from time (without deleting connected edges).</p>
+<h5 id="warning-1"><a class="doc-anchor" href="#warning-1">§</a>Warning</h5>
+<p>This method does NOT delete edges connected to the node, which may leave
+orphaned edges in the graph. For most use cases, prefer
+<a href="trait.WriteOps.html#method.delete_node_cascade" title="method aletheiadb::api::transaction::WriteOps::delete_node_cascade"><code>delete_node_cascade</code></a> which automatically
+removes all connected edges to maintain referential integrity.</p>
+<p>Only use this method if you explicitly need to preserve edges for some
+specialized use case.</p>
+<h5 id="example-9"><a class="doc-anchor" href="#example-9">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// Mark node as deleted effective from 1 hour ago
+</span><span class="kw">let </span>one_hour_ago = time::now().wallclock() - <span class="number">3_600_000_000</span>;
+<span class="kw">let </span>valid_from = time::from_secs(one_hour_ago / <span class="number">1_000_000</span>);
+
+tx.delete_node_with_valid_time(alice, <span class="prelude-val">Some</span>(valid_from))<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.delete_node" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1095-1097">Source</a><h4 class="code-header">fn <a href="#method.delete_node" class="fn">delete_node</a>(&amp;mut self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Delete a node (leaves connected edges).</p>
+<p><strong>Warning</strong>: This leaves orphaned edges. Use <a href="trait.WriteOps.html#method.delete_node_cascade" title="method aletheiadb::api::transaction::WriteOps::delete_node_cascade"><code>delete_node_cascade</code></a>
+for safe deletion.</p>
+<h6 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h6>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+<span class="kw">let </span><span class="kw-2">mut </span>tx = db.write_transaction()<span class="question-mark">?</span>;
+
+<span class="kw">let </span>alice = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice" </span>})<span class="question-mark">?</span>;
+
+<span class="comment">// Delete the node
+</span>tx.delete_node(alice)<span class="question-mark">?</span>;
+
+tx.commit()<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.delete_node_cascade" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1127-1129">Source</a><h4 class="code-header">fn <a href="#method.delete_node_cascade" class="fn">delete_node_cascade</a>(&amp;mut self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Delete a node and all connected edges (cascade delete).</p>
+<p>This method deletes both the node and all edges where the node
+appears as either the source or target. This prevents orphaned edges
+and maintains referential integrity in the graph.</p>
+<h5 id="performance"><a class="doc-anchor" href="#performance">§</a>Performance</h5>
+<p>The cascade delete operation is efficient even for highly-connected nodes:</p>
+<ul>
+<li>O(degree) complexity where degree is the number of connected edges</li>
+<li>All edge deletions are buffered and applied atomically on commit</li>
+</ul>
+<h5 id="example-10"><a class="doc-anchor" href="#example-10">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>tx = db.write_transaction()<span class="question-mark">?</span>;
+<span class="kw">let </span>node_id = tx.create_node(<span class="string">"Person"</span>, properties)<span class="question-mark">?</span>;
+<span class="comment">// ... create edges ...
+</span>tx.delete_node_cascade(node_id)<span class="question-mark">?</span>; <span class="comment">// Deletes node and all connected edges
+</span>tx.commit()<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.delete_edge_with_valid_time" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1164-1177">Source</a><h4 class="code-header">fn <a href="#method.delete_edge_with_valid_time" class="fn">delete_edge_with_valid_time</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Delete an edge with optional backdated valid_from time</p>
+<h5 id="example-11"><a class="doc-anchor" href="#example-11">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// Mark edge as deleted in the past
+</span><span class="kw">let </span>past_time = time::from_secs(<span class="number">1609459200</span>);
+
+tx.delete_edge_with_valid_time(edge_id, <span class="prelude-val">Some</span>(past_time))<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.delete_edge" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1215-1217">Source</a><h4 class="code-header">fn <a href="#method.delete_edge" class="fn">delete_edge</a>(&amp;mut self, edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Delete an edge (delegates to <code>delete_edge_with_valid_time</code> with <code>None</code>).</p>
+<h6 id="examples-1"><a class="doc-anchor" href="#examples-1">§</a>Examples</h6>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+<span class="kw">let </span><span class="kw-2">mut </span>tx = db.write_transaction()<span class="question-mark">?</span>;
+
+<span class="kw">let </span>alice = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice" </span>})<span class="question-mark">?</span>;
+<span class="kw">let </span>bob = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Bob" </span>})<span class="question-mark">?</span>;
+<span class="kw">let </span>edge_id = tx.create_edge(alice, bob, <span class="string">"KNOWS"</span>, <span class="macro">properties!</span> {})<span class="question-mark">?</span>;
+
+<span class="comment">// Delete the edge
+</span>tx.delete_edge(edge_id)<span class="question-mark">?</span>;
+
+tx.commit()<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.replace_node_with_valid_time" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1248-1265">Source</a><h4 class="code-header">fn <a href="#method.replace_node_with_valid_time" class="fn">replace_node_with_valid_time</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Replace a node’s entire property map and label with an optional backdated
+<code>valid_from</code> time. See <a href="trait.WriteOps.html#tymethod.replace_node_with_options" title="method aletheiadb::api::transaction::WriteOps::replace_node_with_options"><code>replace_node_with_options</code></a>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.replace_node" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1271-1278">Source</a><h4 class="code-header">fn <a href="#method.replace_node" class="fn">replace_node</a>(
+    &amp;mut self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Replace a node’s entire property map and label (full overwrite).</p>
+<p>Convenience wrapper: <code>valid_from</code> defaults to the transaction start time.
+See <a href="trait.WriteOps.html#tymethod.replace_node_with_options" title="method aletheiadb::api::transaction::WriteOps::replace_node_with_options"><code>replace_node_with_options</code></a>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.replace_edge_with_valid_time" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1300-1315">Source</a><h4 class="code-header">fn <a href="#method.replace_edge_with_valid_time" class="fn">replace_edge_with_valid_time</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+    valid_from: <a class="enum" href="https://doc.rust-lang.org/1.97.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="type" href="../../core/temporal/type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Replace an edge’s entire property map with an optional backdated
+<code>valid_from</code> time. See <a href="trait.WriteOps.html#tymethod.replace_edge_with_options" title="method aletheiadb::api::transaction::WriteOps::replace_edge_with_options"><code>replace_edge_with_options</code></a>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.replace_edge" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#1321-1323">Source</a><h4 class="code-header">fn <a href="#method.replace_edge" class="fn">replace_edge</a>(
+    &amp;mut self,
+    edge_id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>,
+    properties: <a class="struct" href="../../core/property/map/struct.PropertyMap.html" title="struct aletheiadb::core::property::map::PropertyMap">PropertyMap</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Replace an edge’s entire property map (full overwrite; endpoints/type
+immutable). Convenience wrapper: <code>valid_from</code> defaults to the
+transaction start time. See
+<a href="trait.WriteOps.html#tymethod.replace_edge_with_options" title="method aletheiadb::api::transaction::WriteOps::replace_edge_with_options"><code>replace_edge_with_options</code></a>.</p>
+</div></details></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"><div class="negative-marker"></div><section id="impl-WriteOps-for-WriteTransaction" class="impl"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/write/mod.rs.html#1579-2298">Source</a><a href="#impl-WriteOps-for-WriteTransaction" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.WriteOps.html" title="trait aletheiadb::api::transaction::WriteOps">WriteOps</a> for <a class="struct" href="write/struct.WriteTransaction.html" title="struct aletheiadb::api::transaction::write::WriteTransaction">WriteTransaction</a></h3></section></div><script src="../../../trait.impl/aletheiadb/api/transaction/trait.WriteOps.js" async></script></section></div></main></body></html>

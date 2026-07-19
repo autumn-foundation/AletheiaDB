@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["ariadne","aura","belief_revision","chronos","echo","kairos","mnemosyne","sherlock","temporal_diff","temporal_narrative"]};

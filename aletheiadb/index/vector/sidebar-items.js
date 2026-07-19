@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DistanceMetric","Quantization","StorageMode"],"mod":["distributed","hnsw","sharded","sparse","temporal"],"struct":["CustomMetric"],"trait":["VectorIndex"],"type":["TemporalSearchResults"]};

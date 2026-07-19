@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Cost","CostModel","CostWeights","OperationCosts"]};

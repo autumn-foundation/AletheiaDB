@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SqlError","SqlParameterValue","TemporalClause"],"fn":["parse_sql","parse_sql_with_params"],"struct":["SqlConverter","SqlParser"]};

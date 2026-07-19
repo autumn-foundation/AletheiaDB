@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_ACCUMULATED_CHANGES","MAX_DELTA_CHAIN_DEPTH","MAX_SNAPSHOT_RETRIES","MIN_CAPACITY_ESTIMATE"],"enum":["DriftMetric","RetentionPolicy","SnapshotStrategy"],"struct":["TemporalVectorConfig"]};

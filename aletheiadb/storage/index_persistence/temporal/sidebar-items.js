@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["convert_edge_version","convert_node_version","load_temporal_index","load_temporal_index_with_cipher","materialize_version_data_for_persistence","needs_sparse_vector_materialization","new_temporal_index_data","restore_edge_version","restore_into_historical_storage","restore_node_version","save_temporal_index","save_temporal_index_with_cipher"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":[["properties",1]],"mod":["api","audit","auth","config","core","cypher","db","embeddings","encryption","experimental","fuzzing","http","index","mcp","observability","prelude","provenance_chain","query","semantic_search","simulation","sql","storage","test_utils"]};

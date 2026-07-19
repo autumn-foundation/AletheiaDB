@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_VECTOR_PROPERTIES"],"struct":["CurrentStats","CurrentStorage","IncomingEdgesIter","IncomingEdgesWithLabelIter","OutgoingEdgesIter","OutgoingEdgesWithLabelIter","VectorIndexInfo"]};

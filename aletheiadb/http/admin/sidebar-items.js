@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["admin_routes","create_key","list_keys","revoke_key"],"struct":["CreateKeyRequest","RevokeKeyRequest"]};

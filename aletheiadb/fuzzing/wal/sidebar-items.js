@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse_current_entry","serialize_entry"]};

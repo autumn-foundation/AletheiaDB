@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ConstraintError","Error","PersistenceErrorKind","QueryError","StorageError","TemporalError","TransactionError","VectorError"],"trait":["ResultExt"],"type":["Result"]};

@@ -1,0 +1,53 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Semantic Pathfinding Module (Experimental)"><title>aletheiadb::query::semantic_pathfinding - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module semantic_pathfinding</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module semantic_<wbr>pathfinding</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#features" title="Features">Features</a></li><li><a href="#examples" title="Examples">Examples</a></li><li><a href="#errors" title="Errors">Errors</a></li><li><a href="#panics" title="Panics">Panics</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>query</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">query</a></div><h1>Module <span>semantic_<wbr>pathfinding</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/query/semantic_pathfinding.rs.html#1-938">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Semantic Pathfinding Module (Experimental)</p>
+<p>This module implements pathfinding algorithms that consider semantic similarity
+(vector embeddings) as part of the cost function. Instead of just finding the shortest
+structural path between two nodes, semantic pathfinding finds the <em>most contextually relevant</em>
+path, allowing queries to be guided by a concept.</p>
+<h2 id="features"><a class="doc-anchor" href="#features">§</a>Features</h2>
+<ul>
+<li><strong>Semantic A</strong>*: Finds paths where intermediate nodes are semantically similar to a query concept.</li>
+<li><strong>Time-Travel Pathfinding</strong>: Finds paths that were valid at a specific historical point in time.</li>
+</ul>
+<h2 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::db::AletheiaDB;
+<span class="kw">use </span>aletheiadb::core::property::PropertyMapBuilder;
+<span class="kw">use </span>aletheiadb::query::semantic_pathfinding::SemanticPathfinder;
+<span class="kw">use </span>aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+<span class="kw">use </span>aletheiadb::api::transaction::WriteOps;
+
+<span class="comment">// 1. Setup Database with vector index
+</span><span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+db.vector_index(<span class="string">"embedding"</span>)
+    .hnsw(HnswConfig::new(<span class="number">3</span>, DistanceMetric::Cosine))
+    .enable()<span class="question-mark">?</span>;
+
+<span class="comment">// 2. Create nodes with vector embeddings
+</span><span class="kw">let </span>start = db.create_node(<span class="string">"Start"</span>, PropertyMapBuilder::new().insert_vector(<span class="string">"embedding"</span>, <span class="kw-2">&amp;</span>[<span class="number">0.5</span>, <span class="number">0.5</span>, <span class="number">0.0</span>]).build())<span class="question-mark">?</span>;
+<span class="kw">let </span>end = db.create_node(<span class="string">"End"</span>, PropertyMapBuilder::new().insert_vector(<span class="string">"embedding"</span>, <span class="kw-2">&amp;</span>[<span class="number">0.5</span>, <span class="number">0.5</span>, <span class="number">0.0</span>]).build())<span class="question-mark">?</span>;
+
+<span class="comment">// Intermediate nodes
+</span><span class="kw">let </span>apple = db.create_node(<span class="string">"Apple"</span>, PropertyMapBuilder::new().insert_vector(<span class="string">"embedding"</span>, <span class="kw-2">&amp;</span>[<span class="number">1.0</span>, <span class="number">0.0</span>, <span class="number">0.0</span>]).build())<span class="question-mark">?</span>; <span class="comment">// Fruit
+</span><span class="kw">let </span>laptop = db.create_node(<span class="string">"Laptop"</span>, PropertyMapBuilder::new().insert_vector(<span class="string">"embedding"</span>, <span class="kw-2">&amp;</span>[<span class="number">0.0</span>, <span class="number">1.0</span>, <span class="number">0.0</span>]).build())<span class="question-mark">?</span>; <span class="comment">// Tech
+
+// Create edges: Start -&gt; [Apple, Laptop] -&gt; End
+</span>db.create_edge(start, apple, <span class="string">"NEXT"</span>, PropertyMapBuilder::new().build())<span class="question-mark">?</span>;
+db.create_edge(apple, end, <span class="string">"NEXT"</span>, PropertyMapBuilder::new().build())<span class="question-mark">?</span>;
+db.create_edge(start, laptop, <span class="string">"NEXT"</span>, PropertyMapBuilder::new().build())<span class="question-mark">?</span>;
+db.create_edge(laptop, end, <span class="string">"NEXT"</span>, PropertyMapBuilder::new().build())<span class="question-mark">?</span>;
+
+<span class="comment">// 3. Find path using a query vector (e.g., "Banana", which is closer to "Apple" than "Laptop")
+</span><span class="kw">let </span>query_embedding = <span class="macro">vec!</span>[<span class="number">0.9</span>, <span class="number">0.1</span>, <span class="number">0.0</span>];
+<span class="kw">let </span>pathfinder = SemanticPathfinder::new(<span class="kw-2">&amp;</span>db, <span class="string">"embedding"</span>);
+
+<span class="comment">// The pathfinder will prefer the route through 'Apple' because it's semantically closer
+</span><span class="kw">let </span>path = pathfinder.find_path(start, end, <span class="kw-2">&amp;</span>query_embedding, <span class="number">10</span>, <span class="bool-val">false</span>)<span class="question-mark">?</span>.unwrap();
+<span class="macro">assert_eq!</span>(path, <span class="macro">vec!</span>[start, apple, end]);</code></pre></div><h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<p>Methods in this module will return a <a href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result"><code>Result</code></a> indicating failure if:</p>
+<ul>
+<li>An underlying database read operation fails.</li>
+<li>Property maps contain malformed vector properties.</li>
+</ul>
+<h2 id="panics"><a class="doc-anchor" href="#panics">§</a>Panics</h2>
+<p>This module does not intentionally panic. If any node has a vector that differs in dimension from the <code>query_embedding</code>,
+it treats the cost as infinite (effectively blocking the path) instead of panicking.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SemanticPathfinder.html" title="struct aletheiadb::query::semantic_pathfinding::SemanticPathfinder">Semantic<wbr>Pathfinder</a></dt><dd>A pathfinder that uses semantic similarity as a heuristic/cost.</dd></dl></section></div></main></body></html>

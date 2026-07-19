@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_BUFFER_CAPACITY","DEFAULT_MAX_PER_PRINCIPAL_SUBSCRIPTIONS","DEFAULT_MAX_SUBSCRIPTIONS"],"enum":["RecvError"],"struct":["ChangeFilter","ChangefeedBroadcaster","ChangefeedConfig","EmitTicket","Subscription"]};

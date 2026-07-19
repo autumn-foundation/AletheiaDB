@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CompactionScheduler","FrozenAdjacencyView","IncrementalAdjacencyIndex","IncrementalConfig","MergedAdjacencyGuard","Tombstone"]};

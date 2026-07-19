@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_VALID_ID"],"enum":["EntityId"],"struct":["EdgeId","IdGenerator","NodeId","TxId","TxIdGenerator","VersionId"]};

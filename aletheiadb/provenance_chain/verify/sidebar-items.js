@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["verify_against_anchor","verify_entity","verify_full"],"struct":["ChainVerification","EntityIndex"],"trait":["VersionSource"]};

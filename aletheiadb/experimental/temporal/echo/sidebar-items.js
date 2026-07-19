@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ActivityDensityResonator","EchoChamber","TemporalFingerprint"],"trait":["Resonator"]};

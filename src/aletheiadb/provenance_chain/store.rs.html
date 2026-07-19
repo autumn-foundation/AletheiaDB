@@ -1,0 +1,361 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/provenance_chain/store.rs`."><title>store.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">aletheiadb/provenance_chain/</div>store.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Append-only persistence for the provenance hash chain (Issue #3351).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Layout under the chain directory:
+<a href=#4 id=4 data-nosnippet>4</a>//! - `chain.log` — a header (`ALCHAIN1` magic + format-version `u32`) followed by
+<a href=#5 id=5 data-nosnippet>5</a>//!   length-prefixed [`ChainTxRecord`]s (`u32` big-endian frame length, then the
+<a href=#6 id=6 data-nosnippet>6</a>//!   record's binary payload).
+<a href=#7 id=7 data-nosnippet>7</a>//! - `head` — an atomically-rewritten [`ChainHead`] checkpoint (`ALCHEAD1` magic +
+<a href=#8 id=8 data-nosnippet>8</a>//!   version + payload), enabling fast startup without replaying the whole log.
+<a href=#9 id=9 data-nosnippet>9</a>//!
+<a href=#10 id=10 data-nosnippet>10</a>//! Torn-tail tolerance: [`ChainStore::load`] returns the longest valid prefix of
+<a href=#11 id=11 data-nosnippet>11</a>//! records. A partially-written trailing frame (crash mid-append) is dropped
+<a href=#12 id=12 data-nosnippet>12</a>//! rather than failing the load, mirroring WAL recovery.
+<a href=#13 id=13 data-nosnippet>13</a>
+<a href=#14 id=14 data-nosnippet>14</a></span><span class="kw">use </span>std::fs::{File, OpenOptions};
+<a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span>std::io::{Read, Write};
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span>std::path::{Path, PathBuf};
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span>std::sync::Mutex;
+<a href=#18 id=18 data-nosnippet>18</a>
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span><span class="kw">super</span>::config::ChainFsyncMode;
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span><span class="kw">super</span>::error::{ChainError, ChainResult};
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span><span class="kw">super</span>::record::{ChainHead, ChainTxRecord};
+<a href=#22 id=22 data-nosnippet>22</a>
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">const </span>LOG_MAGIC: <span class="kw-2">&amp;</span>[u8; <span class="number">8</span>] = <span class="string">b"ALCHAIN1"</span>;
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">const </span>HEAD_MAGIC: <span class="kw-2">&amp;</span>[u8; <span class="number">8</span>] = <span class="string">b"ALCHEAD1"</span>;
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">const </span>FORMAT_VERSION: u32 = <span class="number">1</span>;
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">const </span>HEADER_LEN: usize = <span class="number">12</span>; <span class="comment">// magic(8) + version(4)
+<a href=#27 id=27 data-nosnippet>27</a>
+<a href=#28 id=28 data-nosnippet>28</a></span><span class="doccomment">/// Append-only store for the sealed portion of a provenance hash chain.
+<a href=#29 id=29 data-nosnippet>29</a></span><span class="kw">pub struct </span>ChainStore {
+<a href=#30 id=30 data-nosnippet>30</a>    log_path: PathBuf,
+<a href=#31 id=31 data-nosnippet>31</a>    head_path: PathBuf,
+<a href=#32 id=32 data-nosnippet>32</a>    fsync: ChainFsyncMode,
+<a href=#33 id=33 data-nosnippet>33</a>    <span class="doccomment">/// Append handle guarded for cross-thread appends.
+<a href=#34 id=34 data-nosnippet>34</a>    </span>append: Mutex&lt;File&gt;,
+<a href=#35 id=35 data-nosnippet>35</a>}
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a><span class="kw">impl </span>ChainStore {
+<a href=#38 id=38 data-nosnippet>38</a>    <span class="doccomment">/// Open (creating if necessary) the chain store under `dir`.
+<a href=#39 id=39 data-nosnippet>39</a>    ///
+<a href=#40 id=40 data-nosnippet>40</a>    /// Creates the directory and writes a fresh log header if the log does not
+<a href=#41 id=41 data-nosnippet>41</a>    /// yet exist. If the log exists, its header is validated.
+<a href=#42 id=42 data-nosnippet>42</a>    </span><span class="kw">pub fn </span>open(dir: <span class="kw">impl </span>AsRef&lt;Path&gt;, fsync: ChainFsyncMode) -&gt; ChainResult&lt;<span class="self">Self</span>&gt; {
+<a href=#43 id=43 data-nosnippet>43</a>        <span class="kw">let </span>dir = dir.as_ref();
+<a href=#44 id=44 data-nosnippet>44</a>        std::fs::create_dir_all(dir)<span class="question-mark">?</span>;
+<a href=#45 id=45 data-nosnippet>45</a>        <span class="kw">let </span>log_path = dir.join(<span class="string">"chain.log"</span>);
+<a href=#46 id=46 data-nosnippet>46</a>        <span class="kw">let </span>head_path = dir.join(<span class="string">"head"</span>);
+<a href=#47 id=47 data-nosnippet>47</a>
+<a href=#48 id=48 data-nosnippet>48</a>        <span class="kw">if </span>!log_path.exists() {
+<a href=#49 id=49 data-nosnippet>49</a>            <span class="comment">// Create with header.
+<a href=#50 id=50 data-nosnippet>50</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>f = OpenOptions::new()
+<a href=#51 id=51 data-nosnippet>51</a>                .create_new(<span class="bool-val">true</span>)
+<a href=#52 id=52 data-nosnippet>52</a>                .write(<span class="bool-val">true</span>)
+<a href=#53 id=53 data-nosnippet>53</a>                .open(<span class="kw-2">&amp;</span>log_path)<span class="question-mark">?</span>;
+<a href=#54 id=54 data-nosnippet>54</a>            <span class="kw">let </span><span class="kw-2">mut </span>header = Vec::with_capacity(HEADER_LEN);
+<a href=#55 id=55 data-nosnippet>55</a>            header.extend_from_slice(LOG_MAGIC);
+<a href=#56 id=56 data-nosnippet>56</a>            header.extend_from_slice(<span class="kw-2">&amp;</span>FORMAT_VERSION.to_be_bytes());
+<a href=#57 id=57 data-nosnippet>57</a>            f.write_all(<span class="kw-2">&amp;</span>header)<span class="question-mark">?</span>;
+<a href=#58 id=58 data-nosnippet>58</a>            f.sync_all()<span class="question-mark">?</span>;
+<a href=#59 id=59 data-nosnippet>59</a>        } <span class="kw">else </span>{
+<a href=#60 id=60 data-nosnippet>60</a>            <span class="comment">// Validate the existing header eagerly.
+<a href=#61 id=61 data-nosnippet>61</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>f = File::open(<span class="kw-2">&amp;</span>log_path)<span class="question-mark">?</span>;
+<a href=#62 id=62 data-nosnippet>62</a>            <span class="kw">let </span><span class="kw-2">mut </span>header = [<span class="number">0u8</span>; HEADER_LEN];
+<a href=#63 id=63 data-nosnippet>63</a>            f.read_exact(<span class="kw-2">&amp;mut </span>header)
+<a href=#64 id=64 data-nosnippet>64</a>                .map_err(|<span class="kw">_</span>| ChainError::HeaderMismatch(<span class="string">"chain log too short for header"</span>.into()))<span class="question-mark">?</span>;
+<a href=#65 id=65 data-nosnippet>65</a>            validate_header(<span class="kw-2">&amp;</span>header)<span class="question-mark">?</span>;
+<a href=#66 id=66 data-nosnippet>66</a>        }
+<a href=#67 id=67 data-nosnippet>67</a>
+<a href=#68 id=68 data-nosnippet>68</a>        <span class="kw">let </span>append = OpenOptions::new().append(<span class="bool-val">true</span>).open(<span class="kw-2">&amp;</span>log_path)<span class="question-mark">?</span>;
+<a href=#69 id=69 data-nosnippet>69</a>        <span class="prelude-val">Ok</span>(ChainStore {
+<a href=#70 id=70 data-nosnippet>70</a>            log_path,
+<a href=#71 id=71 data-nosnippet>71</a>            head_path,
+<a href=#72 id=72 data-nosnippet>72</a>            fsync,
+<a href=#73 id=73 data-nosnippet>73</a>            append: Mutex::new(append),
+<a href=#74 id=74 data-nosnippet>74</a>        })
+<a href=#75 id=75 data-nosnippet>75</a>    }
+<a href=#76 id=76 data-nosnippet>76</a>
+<a href=#77 id=77 data-nosnippet>77</a>    <span class="doccomment">/// Append one sealed transaction record, flushing per the configured mode.
+<a href=#78 id=78 data-nosnippet>78</a>    </span><span class="kw">pub fn </span>append(<span class="kw-2">&amp;</span><span class="self">self</span>, record: <span class="kw-2">&amp;</span>ChainTxRecord) -&gt; ChainResult&lt;()&gt; {
+<a href=#79 id=79 data-nosnippet>79</a>        <span class="kw">let </span>payload = record.encode();
+<a href=#80 id=80 data-nosnippet>80</a>        <span class="kw">let </span>len = u32::try_from(payload.len())
+<a href=#81 id=81 data-nosnippet>81</a>            .map_err(|<span class="kw">_</span>| ChainError::BadFraming(<span class="string">"record too large to frame"</span>.into()))<span class="question-mark">?</span>;
+<a href=#82 id=82 data-nosnippet>82</a>
+<a href=#83 id=83 data-nosnippet>83</a>        <span class="kw">let </span><span class="kw-2">mut </span>framed = Vec::with_capacity(<span class="number">4 </span>+ payload.len());
+<a href=#84 id=84 data-nosnippet>84</a>        framed.extend_from_slice(<span class="kw-2">&amp;</span>len.to_be_bytes());
+<a href=#85 id=85 data-nosnippet>85</a>        framed.extend_from_slice(<span class="kw-2">&amp;</span>payload);
+<a href=#86 id=86 data-nosnippet>86</a>
+<a href=#87 id=87 data-nosnippet>87</a>        <span class="kw">let </span><span class="kw-2">mut </span>guard = <span class="self">self
+<a href=#88 id=88 data-nosnippet>88</a>            </span>.append
+<a href=#89 id=89 data-nosnippet>89</a>            .lock()
+<a href=#90 id=90 data-nosnippet>90</a>            .map_err(|<span class="kw">_</span>| ChainError::Io(<span class="string">"chain append lock poisoned"</span>.into()))<span class="question-mark">?</span>;
+<a href=#91 id=91 data-nosnippet>91</a>        guard.write_all(<span class="kw-2">&amp;</span>framed)<span class="question-mark">?</span>;
+<a href=#92 id=92 data-nosnippet>92</a>        <span class="kw">match </span><span class="self">self</span>.fsync {
+<a href=#93 id=93 data-nosnippet>93</a>            ChainFsyncMode::PerTransaction =&gt; guard.sync_all()<span class="question-mark">?</span>,
+<a href=#94 id=94 data-nosnippet>94</a>            ChainFsyncMode::Batched | ChainFsyncMode::Never =&gt; {}
+<a href=#95 id=95 data-nosnippet>95</a>        }
+<a href=#96 id=96 data-nosnippet>96</a>        <span class="prelude-val">Ok</span>(())
+<a href=#97 id=97 data-nosnippet>97</a>    }
+<a href=#98 id=98 data-nosnippet>98</a>
+<a href=#99 id=99 data-nosnippet>99</a>    <span class="doccomment">/// Atomically rewrite the entire log to `records` (header + framed records),
+<a href=#100 id=100 data-nosnippet>100</a>    /// replacing the append handle with one positioned at the new tail.
+<a href=#101 id=101 data-nosnippet>101</a>    ///
+<a href=#102 id=102 data-nosnippet>102</a>    /// Used by the sealer's rare out-of-order path (Issue #3351 finding 4): when
+<a href=#103 id=103 data-nosnippet>103</a>    /// a transaction arrives with a commit timestamp that sorts *before* an
+<a href=#104 id=104 data-nosnippet>104</a>    /// already-sealed record, the in-memory suffix is re-folded and the log is
+<a href=#105 id=105 data-nosnippet>105</a>    /// rewritten so the persisted order stays the canonical commit-timestamp
+<a href=#106 id=106 data-nosnippet>106</a>    /// order. The common in-order case still uses [`append`](Self::append).
+<a href=#107 id=107 data-nosnippet>107</a>    </span><span class="kw">pub fn </span>rewrite(<span class="kw-2">&amp;</span><span class="self">self</span>, records: <span class="kw-2">&amp;</span>[ChainTxRecord]) -&gt; ChainResult&lt;()&gt; {
+<a href=#108 id=108 data-nosnippet>108</a>        <span class="kw">let </span><span class="kw-2">mut </span>payload = Vec::new();
+<a href=#109 id=109 data-nosnippet>109</a>        payload.extend_from_slice(LOG_MAGIC);
+<a href=#110 id=110 data-nosnippet>110</a>        payload.extend_from_slice(<span class="kw-2">&amp;</span>FORMAT_VERSION.to_be_bytes());
+<a href=#111 id=111 data-nosnippet>111</a>        <span class="kw">for </span>record <span class="kw">in </span>records {
+<a href=#112 id=112 data-nosnippet>112</a>            <span class="kw">let </span>body = record.encode();
+<a href=#113 id=113 data-nosnippet>113</a>            <span class="kw">let </span>len = u32::try_from(body.len())
+<a href=#114 id=114 data-nosnippet>114</a>                .map_err(|<span class="kw">_</span>| ChainError::BadFraming(<span class="string">"record too large to frame"</span>.into()))<span class="question-mark">?</span>;
+<a href=#115 id=115 data-nosnippet>115</a>            payload.extend_from_slice(<span class="kw-2">&amp;</span>len.to_be_bytes());
+<a href=#116 id=116 data-nosnippet>116</a>            payload.extend_from_slice(<span class="kw-2">&amp;</span>body);
+<a href=#117 id=117 data-nosnippet>117</a>        }
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a>        <span class="kw">let </span>tmp_path = <span class="self">self</span>.log_path.with_extension(<span class="string">"log.tmp"</span>);
+<a href=#120 id=120 data-nosnippet>120</a>        {
+<a href=#121 id=121 data-nosnippet>121</a>            <span class="kw">let </span><span class="kw-2">mut </span>f = OpenOptions::new()
+<a href=#122 id=122 data-nosnippet>122</a>                .create(<span class="bool-val">true</span>)
+<a href=#123 id=123 data-nosnippet>123</a>                .truncate(<span class="bool-val">true</span>)
+<a href=#124 id=124 data-nosnippet>124</a>                .write(<span class="bool-val">true</span>)
+<a href=#125 id=125 data-nosnippet>125</a>                .open(<span class="kw-2">&amp;</span>tmp_path)<span class="question-mark">?</span>;
+<a href=#126 id=126 data-nosnippet>126</a>            f.write_all(<span class="kw-2">&amp;</span>payload)<span class="question-mark">?</span>;
+<a href=#127 id=127 data-nosnippet>127</a>            f.sync_all()<span class="question-mark">?</span>;
+<a href=#128 id=128 data-nosnippet>128</a>        }
+<a href=#129 id=129 data-nosnippet>129</a>        std::fs::rename(<span class="kw-2">&amp;</span>tmp_path, <span class="kw-2">&amp;</span><span class="self">self</span>.log_path)<span class="question-mark">?</span>;
+<a href=#130 id=130 data-nosnippet>130</a>
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="comment">// Re-point the append handle at the rewritten log.
+<a href=#132 id=132 data-nosnippet>132</a>        </span><span class="kw">let </span>new_append = OpenOptions::new().append(<span class="bool-val">true</span>).open(<span class="kw-2">&amp;</span><span class="self">self</span>.log_path)<span class="question-mark">?</span>;
+<a href=#133 id=133 data-nosnippet>133</a>        <span class="kw">let </span><span class="kw-2">mut </span>guard = <span class="self">self
+<a href=#134 id=134 data-nosnippet>134</a>            </span>.append
+<a href=#135 id=135 data-nosnippet>135</a>            .lock()
+<a href=#136 id=136 data-nosnippet>136</a>            .map_err(|<span class="kw">_</span>| ChainError::Io(<span class="string">"chain append lock poisoned"</span>.into()))<span class="question-mark">?</span>;
+<a href=#137 id=137 data-nosnippet>137</a>        <span class="kw-2">*</span>guard = new_append;
+<a href=#138 id=138 data-nosnippet>138</a>        <span class="kw">if </span><span class="self">self</span>.fsync == ChainFsyncMode::PerTransaction {
+<a href=#139 id=139 data-nosnippet>139</a>            guard.sync_all()<span class="question-mark">?</span>;
+<a href=#140 id=140 data-nosnippet>140</a>        }
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="prelude-val">Ok</span>(())
+<a href=#142 id=142 data-nosnippet>142</a>    }
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a>    <span class="doccomment">/// Force any buffered/os-cached writes to durable storage. Useful for
+<a href=#145 id=145 data-nosnippet>145</a>    /// [`ChainFsyncMode::Batched`] callers that batch appends and flush
+<a href=#146 id=146 data-nosnippet>146</a>    /// explicitly.
+<a href=#147 id=147 data-nosnippet>147</a>    </span><span class="kw">pub fn </span>flush(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; ChainResult&lt;()&gt; {
+<a href=#148 id=148 data-nosnippet>148</a>        <span class="kw">let </span>guard = <span class="self">self
+<a href=#149 id=149 data-nosnippet>149</a>            </span>.append
+<a href=#150 id=150 data-nosnippet>150</a>            .lock()
+<a href=#151 id=151 data-nosnippet>151</a>            .map_err(|<span class="kw">_</span>| ChainError::Io(<span class="string">"chain append lock poisoned"</span>.into()))<span class="question-mark">?</span>;
+<a href=#152 id=152 data-nosnippet>152</a>        guard.sync_all()<span class="question-mark">?</span>;
+<a href=#153 id=153 data-nosnippet>153</a>        <span class="prelude-val">Ok</span>(())
+<a href=#154 id=154 data-nosnippet>154</a>    }
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a>    <span class="doccomment">/// Load all valid records from the log, tolerating a torn trailing frame.
+<a href=#157 id=157 data-nosnippet>157</a>    </span><span class="kw">pub fn </span>load(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; ChainResult&lt;Vec&lt;ChainTxRecord&gt;&gt; {
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="kw">let </span>bytes = std::fs::read(<span class="kw-2">&amp;</span><span class="self">self</span>.log_path)<span class="question-mark">?</span>;
+<a href=#159 id=159 data-nosnippet>159</a>        <span class="kw">if </span>bytes.len() &lt; HEADER_LEN {
+<a href=#160 id=160 data-nosnippet>160</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(ChainError::HeaderMismatch(
+<a href=#161 id=161 data-nosnippet>161</a>                <span class="string">"chain log too short for header"</span>.into(),
+<a href=#162 id=162 data-nosnippet>162</a>            ));
+<a href=#163 id=163 data-nosnippet>163</a>        }
+<a href=#164 id=164 data-nosnippet>164</a>        validate_header(<span class="kw-2">&amp;</span>bytes[..HEADER_LEN])<span class="question-mark">?</span>;
+<a href=#165 id=165 data-nosnippet>165</a>
+<a href=#166 id=166 data-nosnippet>166</a>        <span class="kw">let </span><span class="kw-2">mut </span>records = Vec::new();
+<a href=#167 id=167 data-nosnippet>167</a>        <span class="kw">let </span><span class="kw-2">mut </span>pos = HEADER_LEN;
+<a href=#168 id=168 data-nosnippet>168</a>        <span class="kw">while </span>pos &lt; bytes.len() {
+<a href=#169 id=169 data-nosnippet>169</a>            <span class="comment">// Need at least 4 bytes for the frame length.
+<a href=#170 id=170 data-nosnippet>170</a>            </span><span class="kw">if </span>pos + <span class="number">4 </span>&gt; bytes.len() {
+<a href=#171 id=171 data-nosnippet>171</a>                <span class="comment">// Torn length prefix at the tail — drop it.
+<a href=#172 id=172 data-nosnippet>172</a>                </span><span class="kw">break</span>;
+<a href=#173 id=173 data-nosnippet>173</a>            }
+<a href=#174 id=174 data-nosnippet>174</a>            <span class="kw">let </span>len =
+<a href=#175 id=175 data-nosnippet>175</a>                u32::from_be_bytes([bytes[pos], bytes[pos + <span class="number">1</span>], bytes[pos + <span class="number">2</span>], bytes[pos + <span class="number">3</span>]])
+<a href=#176 id=176 data-nosnippet>176</a>                    <span class="kw">as </span>usize;
+<a href=#177 id=177 data-nosnippet>177</a>            <span class="kw">let </span>body_start = pos + <span class="number">4</span>;
+<a href=#178 id=178 data-nosnippet>178</a>            <span class="kw">let </span>body_end = <span class="kw">match </span>body_start.checked_add(len) {
+<a href=#179 id=179 data-nosnippet>179</a>                <span class="prelude-val">Some</span>(e) =&gt; e,
+<a href=#180 id=180 data-nosnippet>180</a>                <span class="prelude-val">None </span>=&gt; <span class="kw">break</span>, <span class="comment">// absurd length; stop
+<a href=#181 id=181 data-nosnippet>181</a>            </span>};
+<a href=#182 id=182 data-nosnippet>182</a>            <span class="kw">if </span>body_end &gt; bytes.len() {
+<a href=#183 id=183 data-nosnippet>183</a>                <span class="comment">// Torn record body at the tail — drop it and keep the prefix.
+<a href=#184 id=184 data-nosnippet>184</a>                </span><span class="kw">break</span>;
+<a href=#185 id=185 data-nosnippet>185</a>            }
+<a href=#186 id=186 data-nosnippet>186</a>            <span class="comment">// A corrupt (non-tail) record is a hard error, not a torn tail.
+<a href=#187 id=187 data-nosnippet>187</a>            </span><span class="kw">let </span>rec = ChainTxRecord::decode(<span class="kw-2">&amp;</span>bytes[body_start..body_end])<span class="question-mark">?</span>;
+<a href=#188 id=188 data-nosnippet>188</a>            records.push(rec);
+<a href=#189 id=189 data-nosnippet>189</a>            pos = body_end;
+<a href=#190 id=190 data-nosnippet>190</a>        }
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="prelude-val">Ok</span>(records)
+<a href=#192 id=192 data-nosnippet>192</a>    }
+<a href=#193 id=193 data-nosnippet>193</a>
+<a href=#194 id=194 data-nosnippet>194</a>    <span class="doccomment">/// Atomically write the head checkpoint (temp file + rename), fsyncing the
+<a href=#195 id=195 data-nosnippet>195</a>    /// temp file first.
+<a href=#196 id=196 data-nosnippet>196</a>    </span><span class="kw">pub fn </span>write_head_checkpoint(<span class="kw-2">&amp;</span><span class="self">self</span>, head: <span class="kw-2">&amp;</span>ChainHead) -&gt; ChainResult&lt;()&gt; {
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="kw">let </span><span class="kw-2">mut </span>payload = Vec::new();
+<a href=#198 id=198 data-nosnippet>198</a>        payload.extend_from_slice(HEAD_MAGIC);
+<a href=#199 id=199 data-nosnippet>199</a>        payload.extend_from_slice(<span class="kw-2">&amp;</span>FORMAT_VERSION.to_be_bytes());
+<a href=#200 id=200 data-nosnippet>200</a>        payload.extend_from_slice(<span class="kw-2">&amp;</span>head.encode());
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="kw">let </span>tmp_path = <span class="self">self</span>.head_path.with_extension(<span class="string">"tmp"</span>);
+<a href=#203 id=203 data-nosnippet>203</a>        {
+<a href=#204 id=204 data-nosnippet>204</a>            <span class="kw">let </span><span class="kw-2">mut </span>f = OpenOptions::new()
+<a href=#205 id=205 data-nosnippet>205</a>                .create(<span class="bool-val">true</span>)
+<a href=#206 id=206 data-nosnippet>206</a>                .truncate(<span class="bool-val">true</span>)
+<a href=#207 id=207 data-nosnippet>207</a>                .write(<span class="bool-val">true</span>)
+<a href=#208 id=208 data-nosnippet>208</a>                .open(<span class="kw-2">&amp;</span>tmp_path)<span class="question-mark">?</span>;
+<a href=#209 id=209 data-nosnippet>209</a>            f.write_all(<span class="kw-2">&amp;</span>payload)<span class="question-mark">?</span>;
+<a href=#210 id=210 data-nosnippet>210</a>            f.sync_all()<span class="question-mark">?</span>;
+<a href=#211 id=211 data-nosnippet>211</a>        }
+<a href=#212 id=212 data-nosnippet>212</a>        std::fs::rename(<span class="kw-2">&amp;</span>tmp_path, <span class="kw-2">&amp;</span><span class="self">self</span>.head_path)<span class="question-mark">?</span>;
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="prelude-val">Ok</span>(())
+<a href=#214 id=214 data-nosnippet>214</a>    }
+<a href=#215 id=215 data-nosnippet>215</a>
+<a href=#216 id=216 data-nosnippet>216</a>    <span class="doccomment">/// Read the head checkpoint, returning `None` if none has been written.
+<a href=#217 id=217 data-nosnippet>217</a>    </span><span class="kw">pub fn </span>read_head_checkpoint(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; ChainResult&lt;<span class="prelude-ty">Option</span>&lt;ChainHead&gt;&gt; {
+<a href=#218 id=218 data-nosnippet>218</a>        <span class="kw">let </span>bytes = <span class="kw">match </span>std::fs::read(<span class="kw-2">&amp;</span><span class="self">self</span>.head_path) {
+<a href=#219 id=219 data-nosnippet>219</a>            <span class="prelude-val">Ok</span>(b) =&gt; b,
+<a href=#220 id=220 data-nosnippet>220</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>e.kind() == std::io::ErrorKind::NotFound =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#221 id=221 data-nosnippet>221</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(e.into()),
+<a href=#222 id=222 data-nosnippet>222</a>        };
+<a href=#223 id=223 data-nosnippet>223</a>        <span class="kw">if </span>bytes.len() &lt; HEADER_LEN {
+<a href=#224 id=224 data-nosnippet>224</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(ChainError::Corrupt(<span class="string">"head checkpoint too short"</span>.into()));
+<a href=#225 id=225 data-nosnippet>225</a>        }
+<a href=#226 id=226 data-nosnippet>226</a>        <span class="kw">if </span><span class="kw-2">&amp;</span>bytes[..<span class="number">8</span>] != HEAD_MAGIC {
+<a href=#227 id=227 data-nosnippet>227</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(ChainError::HeaderMismatch(<span class="string">"bad head magic"</span>.into()));
+<a href=#228 id=228 data-nosnippet>228</a>        }
+<a href=#229 id=229 data-nosnippet>229</a>        <span class="kw">let </span>version = u32::from_be_bytes([bytes[<span class="number">8</span>], bytes[<span class="number">9</span>], bytes[<span class="number">10</span>], bytes[<span class="number">11</span>]]);
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">if </span>version != FORMAT_VERSION {
+<a href=#231 id=231 data-nosnippet>231</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(ChainError::HeaderMismatch(<span class="macro">format!</span>(
+<a href=#232 id=232 data-nosnippet>232</a>                <span class="string">"unsupported head version {version}"
+<a href=#233 id=233 data-nosnippet>233</a>            </span>)));
+<a href=#234 id=234 data-nosnippet>234</a>        }
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="kw">let </span>head = ChainHead::decode(<span class="kw-2">&amp;</span>bytes[HEADER_LEN..])<span class="question-mark">?</span>;
+<a href=#236 id=236 data-nosnippet>236</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(head))
+<a href=#237 id=237 data-nosnippet>237</a>    }
+<a href=#238 id=238 data-nosnippet>238</a>}
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a><span class="kw">fn </span>validate_header(header: <span class="kw-2">&amp;</span>[u8]) -&gt; ChainResult&lt;()&gt; {
+<a href=#241 id=241 data-nosnippet>241</a>    <span class="kw">if </span>header.len() &lt; HEADER_LEN {
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(ChainError::HeaderMismatch(<span class="string">"header too short"</span>.into()));
+<a href=#243 id=243 data-nosnippet>243</a>    }
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="kw">if </span><span class="kw-2">&amp;</span>header[..<span class="number">8</span>] != LOG_MAGIC {
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(ChainError::HeaderMismatch(<span class="string">"bad chain log magic"</span>.into()));
+<a href=#246 id=246 data-nosnippet>246</a>    }
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="kw">let </span>version = u32::from_be_bytes([header[<span class="number">8</span>], header[<span class="number">9</span>], header[<span class="number">10</span>], header[<span class="number">11</span>]]);
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="kw">if </span>version != FORMAT_VERSION {
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(ChainError::HeaderMismatch(<span class="macro">format!</span>(
+<a href=#250 id=250 data-nosnippet>250</a>            <span class="string">"unsupported chain log version {version}"
+<a href=#251 id=251 data-nosnippet>251</a>        </span>)));
+<a href=#252 id=252 data-nosnippet>252</a>    }
+<a href=#253 id=253 data-nosnippet>253</a>    <span class="prelude-val">Ok</span>(())
+<a href=#254 id=254 data-nosnippet>254</a>}
+<a href=#255 id=255 data-nosnippet>255</a>
+<a href=#256 id=256 data-nosnippet>256</a><span class="attr">#[cfg(test)]
+<a href=#257 id=257 data-nosnippet>257</a></span><span class="kw">mod </span>tests {
+<a href=#258 id=258 data-nosnippet>258</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#259 id=259 data-nosnippet>259</a>    <span class="kw">use </span><span class="kw">crate</span>::provenance_chain::canonical::EntityKind;
+<a href=#260 id=260 data-nosnippet>260</a>
+<a href=#261 id=261 data-nosnippet>261</a>    <span class="kw">fn </span>rec(seq: u64) -&gt; ChainTxRecord {
+<a href=#262 id=262 data-nosnippet>262</a>        ChainTxRecord {
+<a href=#263 id=263 data-nosnippet>263</a>            seq,
+<a href=#264 id=264 data-nosnippet>264</a>            commit_ts: <span class="number">1000 </span>+ seq <span class="kw">as </span>i64,
+<a href=#265 id=265 data-nosnippet>265</a>            commit_ts_logical: <span class="number">0</span>,
+<a href=#266 id=266 data-nosnippet>266</a>            tx_id: seq,
+<a href=#267 id=267 data-nosnippet>267</a>            anchor_lsn: seq,
+<a href=#268 id=268 data-nosnippet>268</a>            leaves: <span class="macro">vec!</span>[[seq <span class="kw">as </span>u8; <span class="number">32</span>]],
+<a href=#269 id=269 data-nosnippet>269</a>            entity_refs: <span class="macro">vec!</span>[(EntityKind::Node, seq, seq)],
+<a href=#270 id=270 data-nosnippet>270</a>            digest: [(seq + <span class="number">100</span>) <span class="kw">as </span>u8; <span class="number">32</span>],
+<a href=#271 id=271 data-nosnippet>271</a>        }
+<a href=#272 id=272 data-nosnippet>272</a>    }
+<a href=#273 id=273 data-nosnippet>273</a>
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="attr">#[test]
+<a href=#275 id=275 data-nosnippet>275</a>    </span><span class="kw">fn </span>append_and_load_round_trip() {
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="kw">let </span>dir = tempfile::tempdir().unwrap();
+<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">let </span>store = ChainStore::open(dir.path(), ChainFsyncMode::PerTransaction).unwrap();
+<a href=#278 id=278 data-nosnippet>278</a>        <span class="kw">let </span>records: Vec&lt;<span class="kw">_</span>&gt; = (<span class="number">1</span>..=<span class="number">5</span>).map(rec).collect();
+<a href=#279 id=279 data-nosnippet>279</a>        <span class="kw">for </span>r <span class="kw">in </span><span class="kw-2">&amp;</span>records {
+<a href=#280 id=280 data-nosnippet>280</a>            store.append(r).unwrap();
+<a href=#281 id=281 data-nosnippet>281</a>        }
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">let </span>loaded = store.load().unwrap();
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="macro">assert_eq!</span>(loaded, records);
+<a href=#284 id=284 data-nosnippet>284</a>    }
+<a href=#285 id=285 data-nosnippet>285</a>
+<a href=#286 id=286 data-nosnippet>286</a>    <span class="attr">#[test]
+<a href=#287 id=287 data-nosnippet>287</a>    </span><span class="kw">fn </span>reopen_appends_after_existing() {
+<a href=#288 id=288 data-nosnippet>288</a>        <span class="kw">let </span>dir = tempfile::tempdir().unwrap();
+<a href=#289 id=289 data-nosnippet>289</a>        {
+<a href=#290 id=290 data-nosnippet>290</a>            <span class="kw">let </span>store = ChainStore::open(dir.path(), ChainFsyncMode::Batched).unwrap();
+<a href=#291 id=291 data-nosnippet>291</a>            store.append(<span class="kw-2">&amp;</span>rec(<span class="number">1</span>)).unwrap();
+<a href=#292 id=292 data-nosnippet>292</a>            store.flush().unwrap();
+<a href=#293 id=293 data-nosnippet>293</a>        }
+<a href=#294 id=294 data-nosnippet>294</a>        <span class="kw">let </span>store = ChainStore::open(dir.path(), ChainFsyncMode::Batched).unwrap();
+<a href=#295 id=295 data-nosnippet>295</a>        store.append(<span class="kw-2">&amp;</span>rec(<span class="number">2</span>)).unwrap();
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="kw">let </span>loaded = store.load().unwrap();
+<a href=#297 id=297 data-nosnippet>297</a>        <span class="macro">assert_eq!</span>(loaded, <span class="macro">vec!</span>[rec(<span class="number">1</span>), rec(<span class="number">2</span>)]);
+<a href=#298 id=298 data-nosnippet>298</a>    }
+<a href=#299 id=299 data-nosnippet>299</a>
+<a href=#300 id=300 data-nosnippet>300</a>    <span class="attr">#[test]
+<a href=#301 id=301 data-nosnippet>301</a>    </span><span class="kw">fn </span>torn_trailing_record_yields_valid_prefix() {
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">let </span>dir = tempfile::tempdir().unwrap();
+<a href=#303 id=303 data-nosnippet>303</a>        <span class="kw">let </span>store = ChainStore::open(dir.path(), ChainFsyncMode::Never).unwrap();
+<a href=#304 id=304 data-nosnippet>304</a>        store.append(<span class="kw-2">&amp;</span>rec(<span class="number">1</span>)).unwrap();
+<a href=#305 id=305 data-nosnippet>305</a>        store.append(<span class="kw-2">&amp;</span>rec(<span class="number">2</span>)).unwrap();
+<a href=#306 id=306 data-nosnippet>306</a>        store.flush().unwrap();
+<a href=#307 id=307 data-nosnippet>307</a>
+<a href=#308 id=308 data-nosnippet>308</a>        <span class="comment">// Corrupt the tail: append a partial frame (a length prefix promising more
+<a href=#309 id=309 data-nosnippet>309</a>        // bytes than are present).
+<a href=#310 id=310 data-nosnippet>310</a>        </span><span class="kw">let </span>log_path = dir.path().join(<span class="string">"chain.log"</span>);
+<a href=#311 id=311 data-nosnippet>311</a>        <span class="kw">let </span><span class="kw-2">mut </span>f = OpenOptions::new().append(<span class="bool-val">true</span>).open(<span class="kw-2">&amp;</span>log_path).unwrap();
+<a href=#312 id=312 data-nosnippet>312</a>        f.write_all(<span class="kw-2">&amp;</span><span class="number">999u32</span>.to_be_bytes()).unwrap(); <span class="comment">// frame len = 999
+<a href=#313 id=313 data-nosnippet>313</a>        </span>f.write_all(<span class="kw-2">&amp;</span>[<span class="number">0xAB</span>, <span class="number">0xCD</span>]).unwrap(); <span class="comment">// only 2 bytes of body
+<a href=#314 id=314 data-nosnippet>314</a>        </span>f.sync_all().unwrap();
+<a href=#315 id=315 data-nosnippet>315</a>
+<a href=#316 id=316 data-nosnippet>316</a>        <span class="kw">let </span>loaded = store.load().unwrap();
+<a href=#317 id=317 data-nosnippet>317</a>        <span class="macro">assert_eq!</span>(loaded, <span class="macro">vec!</span>[rec(<span class="number">1</span>), rec(<span class="number">2</span>)], <span class="string">"torn tail must be dropped"</span>);
+<a href=#318 id=318 data-nosnippet>318</a>    }
+<a href=#319 id=319 data-nosnippet>319</a>
+<a href=#320 id=320 data-nosnippet>320</a>    <span class="attr">#[test]
+<a href=#321 id=321 data-nosnippet>321</a>    </span><span class="kw">fn </span>head_checkpoint_round_trip() {
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="kw">let </span>dir = tempfile::tempdir().unwrap();
+<a href=#323 id=323 data-nosnippet>323</a>        <span class="kw">let </span>store = ChainStore::open(dir.path(), ChainFsyncMode::Batched).unwrap();
+<a href=#324 id=324 data-nosnippet>324</a>        <span class="macro">assert!</span>(store.read_head_checkpoint().unwrap().is_none());
+<a href=#325 id=325 data-nosnippet>325</a>
+<a href=#326 id=326 data-nosnippet>326</a>        <span class="kw">let </span>head = ChainHead::genesis(<span class="number">3</span>, <span class="number">4242</span>);
+<a href=#327 id=327 data-nosnippet>327</a>        store.write_head_checkpoint(<span class="kw-2">&amp;</span>head).unwrap();
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw">let </span>read = store.read_head_checkpoint().unwrap().unwrap();
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="macro">assert_eq!</span>(read, head);
+<a href=#330 id=330 data-nosnippet>330</a>
+<a href=#331 id=331 data-nosnippet>331</a>        <span class="comment">// Overwrite is atomic and readable.
+<a href=#332 id=332 data-nosnippet>332</a>        </span><span class="kw">let </span>head2 = ChainHead {
+<a href=#333 id=333 data-nosnippet>333</a>            seq: <span class="number">9</span>,
+<a href=#334 id=334 data-nosnippet>334</a>            digest: [<span class="number">7u8</span>; <span class="number">32</span>],
+<a href=#335 id=335 data-nosnippet>335</a>            commit_ts: <span class="number">5000</span>,
+<a href=#336 id=336 data-nosnippet>336</a>            anchor_lsn: <span class="number">88</span>,
+<a href=#337 id=337 data-nosnippet>337</a>            genesis_digest: head.genesis_digest,
+<a href=#338 id=338 data-nosnippet>338</a>        };
+<a href=#339 id=339 data-nosnippet>339</a>        store.write_head_checkpoint(<span class="kw-2">&amp;</span>head2).unwrap();
+<a href=#340 id=340 data-nosnippet>340</a>        <span class="macro">assert_eq!</span>(store.read_head_checkpoint().unwrap().unwrap(), head2);
+<a href=#341 id=341 data-nosnippet>341</a>    }
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a>    <span class="attr">#[test]
+<a href=#344 id=344 data-nosnippet>344</a>    </span><span class="kw">fn </span>open_rejects_bad_magic() {
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">let </span>dir = tempfile::tempdir().unwrap();
+<a href=#346 id=346 data-nosnippet>346</a>        <span class="kw">let </span>log_path = dir.path().join(<span class="string">"chain.log"</span>);
+<a href=#347 id=347 data-nosnippet>347</a>        std::fs::write(<span class="kw-2">&amp;</span>log_path, <span class="string">b"XXXXXXXX\x00\x00\x00\x01"</span>).unwrap();
+<a href=#348 id=348 data-nosnippet>348</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#349 id=349 data-nosnippet>349</a>            ChainStore::open(dir.path(), ChainFsyncMode::Batched),
+<a href=#350 id=350 data-nosnippet>350</a>            <span class="prelude-val">Err</span>(ChainError::HeaderMismatch(<span class="kw">_</span>))
+<a href=#351 id=351 data-nosnippet>351</a>        ));
+<a href=#352 id=352 data-nosnippet>352</a>    }
+<a href=#353 id=353 data-nosnippet>353</a>
+<a href=#354 id=354 data-nosnippet>354</a>    <span class="attr">#[test]
+<a href=#355 id=355 data-nosnippet>355</a>    </span><span class="kw">fn </span>empty_chain_loads_empty() {
+<a href=#356 id=356 data-nosnippet>356</a>        <span class="kw">let </span>dir = tempfile::tempdir().unwrap();
+<a href=#357 id=357 data-nosnippet>357</a>        <span class="kw">let </span>store = ChainStore::open(dir.path(), ChainFsyncMode::Batched).unwrap();
+<a href=#358 id=358 data-nosnippet>358</a>        <span class="macro">assert!</span>(store.load().unwrap().is_empty());
+<a href=#359 id=359 data-nosnippet>359</a>    }
+<a href=#360 id=360 data-nosnippet>360</a>}
+</code></pre></div></section></main></body></html>

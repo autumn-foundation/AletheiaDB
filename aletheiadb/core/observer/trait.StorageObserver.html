@@ -1,0 +1,69 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Observer trait for receiving storage events."><title>StorageObserver in aletheiadb::core::observer - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">StorageObserver</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Storage<wbr>Observer</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#error-handling" title="Error Handling">Error Handling</a></li><li><a href="#thread-safety" title="Thread Safety">Thread Safety</a></li></ul><h3><a href="#required-methods">Required Methods</a></h3><ul class="block"><li><a href="#tymethod.on_event" title="on_event">on_event</a></li></ul><h3><a href="#provided-methods">Provided Methods</a></h3><ul class="block"><li><a href="#method.interested_in" title="interested_in">interested_in</a></li></ul><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>core::<wbr>observer</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">core</a>::<wbr><a href="index.html">observer</a></div><h1>Trait <span class="trait">Storage<wbr>Observer</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/core/observer.rs.html#301-361">Source</a> </span></div><pre class="rust item-decl"><code>pub trait StorageObserver: <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a> {
+    // Required method
+    fn <a href="#tymethod.on_event" class="fn">on_event</a>(&amp;self, event: &amp;<a class="enum" href="enum.StorageEvent.html" title="enum aletheiadb::core::observer::StorageEvent">StorageEvent</a>) -&gt; <a class="type" href="../error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+
+    // Provided method
+    fn <a href="#method.interested_in" class="fn">interested_in</a>(&amp;self, event: &amp;<a class="enum" href="enum.StorageEvent.html" title="enum aletheiadb::core::observer::StorageEvent">StorageEvent</a>) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.bool.html">bool</a> { ... }
+}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Observer trait for receiving storage events.</p>
+<p>Components implement this trait to react to storage operations.
+The observer pattern enables:</p>
+<ul>
+<li><strong>Loose coupling</strong>: Observers don’t depend on HistoricalStorage implementation</li>
+<li><strong>Multiple subscribers</strong>: Many observers can react to the same event</li>
+<li><strong>Extensibility</strong>: New event types don’t break existing observers</li>
+</ul>
+<h2 id="error-handling"><a class="doc-anchor" href="#error-handling">§</a>Error Handling</h2>
+<p>Observers should handle errors gracefully. If an observer returns an error:</p>
+<ul>
+<li>The error is logged but doesn’t fail the storage operation</li>
+<li>Other observers are still notified</li>
+<li>This ensures storage ACID guarantees are maintained</li>
+</ul>
+<h2 id="thread-safety"><a class="doc-anchor" href="#thread-safety">§</a>Thread Safety</h2>
+<p>Observers must be <code>Send + Sync</code> as they may be called from any thread.
+Use appropriate synchronization primitives if maintaining mutable state.</p>
+</div></details><h2 id="required-methods" class="section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.on_event" class="method"><a class="src rightside" href="../../../src/aletheiadb/core/observer.rs.html#329">Source</a><h4 class="code-header">fn <a href="#tymethod.on_event" class="fn">on_event</a>(&amp;self, event: &amp;<a class="enum" href="enum.StorageEvent.html" title="enum aletheiadb::core::observer::StorageEvent">StorageEvent</a>) -&gt; <a class="type" href="../error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Called when a storage event occurs.</p>
+<h5 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h5>
+<ul>
+<li><code>event</code>: The storage event that occurred</li>
+</ul>
+<h5 id="returns"><a class="doc-anchor" href="#returns">§</a>Returns</h5>
+<ul>
+<li><code>Ok(())</code>: Event processed successfully</li>
+<li><code>Err(...)</code>: Processing failed (logged, doesn’t block storage operation)</li>
+</ul>
+<h5 id="example"><a class="doc-anchor" href="#example">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">struct </span>VectorIndexObserver;
+
+<span class="kw">impl </span>StorageObserver <span class="kw">for </span>VectorIndexObserver {
+    <span class="kw">fn </span>on_event(<span class="kw-2">&amp;</span><span class="self">self</span>, event: <span class="kw-2">&amp;</span>StorageEvent) -&gt; aletheiadb::core::error::Result&lt;()&gt; {
+        <span class="kw">match </span>event {
+            StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } =&gt; {
+                <span class="comment">// Create vector snapshot aligned with this anchor
+                </span><span class="macro">println!</span>(<span class="string">"Creating vector snapshot for anchor {}"</span>, version_id);
+                <span class="prelude-val">Ok</span>(())
+            }
+            <span class="kw">_ </span>=&gt; <span class="prelude-val">Ok</span>(()), <span class="comment">// Ignore other events
+        </span>}
+    }
+}</code></pre></div></div></details></div><h2 id="provided-methods" class="section-header">Provided Methods<a href="#provided-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="method.interested_in" class="method"><a class="src rightside" href="../../../src/aletheiadb/core/observer.rs.html#356-360">Source</a><h4 class="code-header">fn <a href="#method.interested_in" class="fn">interested_in</a>(&amp;self, event: &amp;<a class="enum" href="enum.StorageEvent.html" title="enum aletheiadb::core::observer::StorageEvent">StorageEvent</a>) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.bool.html">bool</a></h4></section></summary><div class="docblock"><p>Optional: Filter events this observer cares about.</p>
+<p>By default, observers receive all events. Override this method to receive
+only specific event types, improving performance by avoiding unnecessary calls.</p>
+<h5 id="returns-1"><a class="doc-anchor" href="#returns-1">§</a>Returns</h5>
+<ul>
+<li><code>true</code>: Call <code>on_event()</code> for this event</li>
+<li><code>false</code>: Skip this observer for this event type</li>
+</ul>
+<h5 id="example-1"><a class="doc-anchor" href="#example-1">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">struct </span>AnchorOnlyObserver;
+
+<span class="kw">impl </span>StorageObserver <span class="kw">for </span>AnchorOnlyObserver {
+    <span class="kw">fn </span>on_event(<span class="kw-2">&amp;</span><span class="self">self</span>, event: <span class="kw-2">&amp;</span>StorageEvent) -&gt; aletheiadb::core::error::Result&lt;()&gt; {
+        <span class="comment">// Only called for anchor events due to filter
+        </span><span class="prelude-val">Ok</span>(())
+    }
+
+    <span class="kw">fn </span>interested_in(<span class="kw-2">&amp;</span><span class="self">self</span>, event: <span class="kw-2">&amp;</span>StorageEvent) -&gt; bool {
+        event.is_anchor_event()
+    }
+}</code></pre></div></div></details></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"><div class="negative-marker"></div><section id="impl-StorageObserver-for-VectorIndexObserver" class="impl"><a class="src rightside" href="../../../src/aletheiadb/index/vector/temporal/observer.rs.html#40-90">Source</a><a href="#impl-StorageObserver-for-VectorIndexObserver" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.StorageObserver.html" title="trait aletheiadb::core::observer::StorageObserver">StorageObserver</a> for <a class="struct" href="../../index/vector/temporal/observer/struct.VectorIndexObserver.html" title="struct aletheiadb::index::vector::temporal::observer::VectorIndexObserver">VectorIndexObserver</a></h3></section></div><script src="../../../trait.impl/aletheiadb/core/observer/trait.StorageObserver.js" async></script></section></div></main></body></html>

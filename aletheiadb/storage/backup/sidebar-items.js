@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BACKUP_FORMAT_VERSION","BACKUP_MAGIC"],"enum":["BackupError"],"struct":["BackupSummary"]};

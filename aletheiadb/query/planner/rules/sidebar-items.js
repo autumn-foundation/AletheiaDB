@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["default_rules"],"struct":["FilterScanFusion","LimitPushdown","OperationReordering","PredicatePushdown"],"trait":["OptimizationRule"]};

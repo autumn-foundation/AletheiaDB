@@ -1,0 +1,204 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Trait for vector indexes supporting approximate k-nearest neighbor search."><title>VectorIndex in aletheiadb::index::vector - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">VectorIndex</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Vector<wbr>Index</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#invariants" title="Invariants">Invariants</a></li><li><a href="#thread-safety" title="Thread Safety">Thread Safety</a></li><li><a href="#performance-expectations" title="Performance Expectations">Performance Expectations</a></li><li><a href="#error-handling" title="Error Handling">Error Handling</a></li></ul><h3><a href="#required-methods">Required Methods</a></h3><ul class="block"><li><a href="#tymethod.add" title="add">add</a></li><li><a href="#tymethod.dimensions" title="dimensions">dimensions</a></li><li><a href="#tymethod.distance_metric" title="distance_metric">distance_metric</a></li><li><a href="#tymethod.len" title="len">len</a></li><li><a href="#tymethod.remove" title="remove">remove</a></li><li><a href="#tymethod.search" title="search">search</a></li><li><a href="#tymethod.search_with_filter" title="search_with_filter">search_with_filter</a></li></ul><h3><a href="#provided-methods">Provided Methods</a></h3><ul class="block"><li><a href="#method.add_batch" title="add_batch">add_batch</a></li><li><a href="#method.add_batch_ref" title="add_batch_ref">add_batch_ref</a></li><li><a href="#method.compact" title="compact">compact</a></li><li><a href="#method.is_empty" title="is_empty">is_empty</a></li><li><a href="#method.memory_usage" title="memory_usage">memory_usage</a></li><li><a href="#method.quantization" title="quantization">quantization</a></li><li><a href="#method.remove_batch" title="remove_batch">remove_batch</a></li><li><a href="#method.save" title="save">save</a></li></ul><h3><a href="#dyn-compatibility">Dyn Compatibility</a></h3><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>index::<wbr>vector</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">index</a>::<wbr><a href="index.html">vector</a></div><h1>Trait <span class="trait">Vector<wbr>Index</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/index/vector/mod.rs.html#332-650">Source</a> </span></div><pre class="rust item-decl"><code>pub trait VectorIndex: <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a> {
+<details class="toggle type-contents-toggle"><summary class="hideme"><span>Show 15 methods</span></summary>    // Required methods
+    fn <a href="#tymethod.add" class="fn">add</a>(&amp;self, id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, vector: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>]) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.remove" class="fn">remove</a>(&amp;self, id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.search" class="fn">search</a>(&amp;self, query: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>], k: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;(<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>)&gt;&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.search_with_filter" class="fn">search_with_filter</a>&lt;F&gt;(
+        &amp;self,
+        query: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>],
+        k: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>,
+        predicate: F,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;(<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>)&gt;&gt;
+       <span class="where">where F: <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/ops/function/trait.Fn.html" title="trait core::ops::function::Fn">Fn</a>(&amp;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.bool.html">bool</a> + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a></span>;
+<span class="item-spacer"></span>    fn <a href="#tymethod.len" class="fn">len</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>;
+<span class="item-spacer"></span>    fn <a href="#tymethod.dimensions" class="fn">dimensions</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>;
+<span class="item-spacer"></span>    fn <a href="#tymethod.distance_metric" class="fn">distance_metric</a>(&amp;self) -&gt; <a class="enum" href="enum.DistanceMetric.html" title="enum aletheiadb::index::vector::DistanceMetric">DistanceMetric</a>;
+
+    // Provided methods
+    fn <a href="#method.is_empty" class="fn">is_empty</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.bool.html">bool</a> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.add_batch" class="fn">add_batch</a>(&amp;self, items: &amp;[(<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, <a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>&gt;)]) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.add_batch_ref" class="fn">add_batch_ref</a>(&amp;self, items: &amp;[(<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>])]) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.remove_batch" class="fn">remove_batch</a>(&amp;self, ids: &amp;[<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>]) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.save" class="fn">save</a>(&amp;self, _path: &amp;<a class="struct" href="https://doc.rust-lang.org/1.97.1/std/path/struct.Path.html" title="struct std::path::Path">Path</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.memory_usage" class="fn">memory_usage</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.quantization" class="fn">quantization</a>(&amp;self) -&gt; <a class="enum" href="enum.Quantization.html" title="enum aletheiadb::index::vector::Quantization">Quantization</a> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.compact" class="fn">compact</a>(&amp;self) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+</details>}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Trait for vector indexes supporting approximate k-nearest neighbor search.</p>
+<p>This trait abstracts over different vector index implementations, allowing
+AletheiaDB to support multiple ANN (Approximate Nearest Neighbor) algorithms
+while maintaining a consistent query interface.</p>
+<h2 id="invariants"><a class="doc-anchor" href="#invariants">§</a>Invariants</h2>
+<p>Implementations must maintain these invariants:</p>
+<ul>
+<li>All vectors in the index have the same dimensionality (returned by <code>dimensions()</code>)</li>
+<li><code>search()</code> returns at most <code>k</code> results, sorted by similarity (descending)</li>
+<li><code>search_with_filter()</code> only returns results where the predicate returns <code>true</code></li>
+<li><code>len()</code> returns the exact number of vectors currently in the index</li>
+<li>Adding the same NodeId twice replaces the previous vector</li>
+<li>The distance metric never changes after index creation</li>
+</ul>
+<h2 id="thread-safety"><a class="doc-anchor" href="#thread-safety">§</a>Thread Safety</h2>
+<p>Implementations must be thread-safe for both concurrent reads and writes.
+The trait methods take <code>&amp;self</code> (not <code>&amp;mut self</code>) to enable concurrent operations.
+Implementations should use interior mutability (e.g., internal locks, atomics) to
+coordinate concurrent access. For example, usearch supports concurrent insertions
+through internal locking while maintaining <code>&amp;self</code> semantics.</p>
+<h2 id="performance-expectations"><a class="doc-anchor" href="#performance-expectations">§</a>Performance Expectations</h2>
+<p>For HNSW implementation (Phase 2):</p>
+<ul>
+<li><strong>Insert</strong>: O(log n) average case with configurable ef_construction parameter</li>
+<li><strong>Search</strong>: O(log n) average case, O(n) worst case, with configurable ef_search</li>
+<li><strong>Memory</strong>: O(n * M * d) where M is connections per node, d is dimensions</li>
+<li><strong>Query latency</strong>: 100µs-1ms for typical datasets (&lt;10M vectors, 384-1536 dims)</li>
+<li><strong>Dimensionality impact</strong>: Linear scaling with dimensions for both time and memory</li>
+</ul>
+<h2 id="error-handling"><a class="doc-anchor" href="#error-handling">§</a>Error Handling</h2>
+<p>Methods return specific error variants for validation failures:</p>
+<ul>
+<li><code>Error::Vector(VectorError::DimensionMismatch { expected, actual })</code> - Wrong dimensions</li>
+<li><code>Error::Vector(VectorError::ContainsNaN { count })</code> - Vector contains NaN values</li>
+<li><code>Error::Vector(VectorError::ContainsInfinity { count })</code> - Vector contains Infinity</li>
+<li><code>Error::Vector(VectorError::DimensionTooLarge { ... })</code> - Vector too large</li>
+</ul>
+</div></details><h2 id="required-methods" class="section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.add" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#364">Source</a><h4 class="code-header">fn <a href="#tymethod.add" class="fn">add</a>(&amp;self, id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, vector: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>]) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Adds a vector to the index, associating it with the given node ID.</p>
+<p>If a vector with the same <code>id</code> already exists, it will be replaced.
+The vector dimensions must match the index’s configured dimensionality.</p>
+<h5 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h5>
+<ul>
+<li><code>id</code> - The node ID to associate with this vector</li>
+<li><code>vector</code> - The embedding vector (must match index dimensions)</li>
+</ul>
+<h5 id="returns"><a class="doc-anchor" href="#returns">§</a>Returns</h5>
+<ul>
+<li><code>Ok(())</code> if the vector was successfully added</li>
+<li><code>Err(Error::Vector(VectorError::DimensionMismatch))</code> if dimensions don’t match</li>
+<li><code>Err(Error::Vector(VectorError::ContainsNaN))</code> if vector contains NaN</li>
+<li><code>Err(Error::Vector(VectorError::ContainsInfinity))</code> if vector contains Infinity</li>
+</ul>
+<h5 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>node_id = NodeId::new(<span class="number">123</span>).unwrap();
+<span class="kw">let </span>embedding = <span class="macro">vec!</span>[<span class="number">0.1</span>, <span class="number">0.2</span>, <span class="number">0.3</span>, <span class="number">0.4</span>];
+index.add(node_id, <span class="kw-2">&amp;</span>embedding)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.remove" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#392">Source</a><h4 class="code-header">fn <a href="#tymethod.remove" class="fn">remove</a>(&amp;self, id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Removes a vector from the index by node ID.</p>
+<p>If the ID does not exist in the index, this is a no-op (returns Ok).</p>
+<h5 id="arguments-1"><a class="doc-anchor" href="#arguments-1">§</a>Arguments</h5>
+<ul>
+<li><code>id</code> - The node ID to remove</li>
+</ul>
+<h5 id="returns-1"><a class="doc-anchor" href="#returns-1">§</a>Returns</h5>
+<ul>
+<li><code>Ok(())</code> if the vector was removed or didn’t exist</li>
+<li><code>Err(_)</code> if the underlying index encounters an error</li>
+</ul>
+<h5 id="examples-1"><a class="doc-anchor" href="#examples-1">§</a>Examples</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>node_id = NodeId::new(<span class="number">123</span>).unwrap();
+index.remove(node_id)<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.search" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#433">Source</a><h4 class="code-header">fn <a href="#tymethod.search" class="fn">search</a>(&amp;self, query: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>], k: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;(<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>)&gt;&gt;</h4></section></summary><div class="docblock"><p>Searches for the k-nearest neighbors of the query vector.</p>
+<p>Returns up to <code>k</code> results sorted by similarity in descending order
+(highest similarity first). The similarity score interpretation depends on the
+configured distance metric (query via <code>distance_metric()</code>).</p>
+<h5 id="arguments-2"><a class="doc-anchor" href="#arguments-2">§</a>Arguments</h5>
+<ul>
+<li><code>query</code> - The query embedding vector (must match index dimensions)</li>
+<li><code>k</code> - Maximum number of results to return (implementations may cap this,
+e.g., at 10,000 to prevent DoS)</li>
+</ul>
+<h5 id="returns-2"><a class="doc-anchor" href="#returns-2">§</a>Returns</h5>
+<p>A vector of (NodeId, similarity) pairs, sorted by similarity (descending).
+May contain fewer than <code>k</code> results if the index has fewer vectors.</p>
+<h5 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h5>
+<ul>
+<li><code>Err(Error::Vector(VectorError::DimensionMismatch))</code> if query dimensions don’t match</li>
+<li><code>Err(Error::Vector(VectorError::ContainsNaN))</code> if query contains NaN</li>
+<li><code>Err(Error::Vector(VectorError::ContainsInfinity))</code> if query contains Infinity</li>
+</ul>
+<h5 id="examples-2"><a class="doc-anchor" href="#examples-2">§</a>Examples</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>query = <span class="macro">vec!</span>[<span class="number">0.5</span>, <span class="number">0.3</span>, <span class="number">0.1</span>, <span class="number">0.9</span>];
+<span class="kw">let </span>results = index.search(<span class="kw-2">&amp;</span>query, <span class="number">10</span>)<span class="question-mark">?</span>;
+
+<span class="kw">for </span>(node_id, similarity) <span class="kw">in </span>results {
+    <span class="macro">println!</span>(<span class="string">"Found node {:?} with similarity {}"</span>, node_id, similarity);
+}</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.search_with_filter" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#484-491">Source</a><h4 class="code-header">fn <a href="#tymethod.search_with_filter" class="fn">search_with_filter</a>&lt;F&gt;(
+    &amp;self,
+    query: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>],
+    k: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>,
+    predicate: F,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;(<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>)&gt;&gt;<div class="where">where
+    F: <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/ops/function/trait.Fn.html" title="trait core::ops::function::Fn">Fn</a>(&amp;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.bool.html">bool</a> + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a>,</div></h4></section></summary><div class="docblock"><p>Searches for k-nearest neighbors with a filter predicate.</p>
+<p>Like <code>search()</code>, but only returns results where <code>predicate(node_id)</code> returns <code>true</code>.
+This enables filtered search without materializing the full result set.</p>
+<h5 id="arguments-3"><a class="doc-anchor" href="#arguments-3">§</a>Arguments</h5>
+<ul>
+<li><code>query</code> - The query embedding vector (must match index dimensions)</li>
+<li><code>k</code> - Maximum number of results to return</li>
+<li><code>predicate</code> - Filter function that returns true for nodes to include</li>
+</ul>
+<h5 id="returns-3"><a class="doc-anchor" href="#returns-3">§</a>Returns</h5>
+<p>A vector of (NodeId, similarity) pairs where the predicate returned true,
+sorted by similarity (descending).</p>
+<h5 id="errors-1"><a class="doc-anchor" href="#errors-1">§</a>Errors</h5>
+<p>Same as <code>search()</code>.</p>
+<h5 id="performance"><a class="doc-anchor" href="#performance">§</a>Performance</h5>
+<p><strong>WARNING</strong>: Low-selectivity filters (&lt;1%) can degrade to nearly linear scan performance.
+The implementation must examine many candidates to find <code>k</code> results that satisfy
+the predicate. For example, with 1% selectivity, finding 100 results may require
+examining ~10,000 candidates.</p>
+<p><strong>Alternatives for better performance</strong>:</p>
+<ul>
+<li>Maintain separate indexes per category if filtering is common</li>
+<li>Use hybrid graph+vector queries to pre-filter via graph traversal</li>
+<li>Consider the <code>search()</code> method and filter results in-memory if selectivity is very low</li>
+</ul>
+<h5 id="examples-3"><a class="doc-anchor" href="#examples-3">§</a>Examples</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>query = <span class="macro">vec!</span>[<span class="number">0.5</span>, <span class="number">0.3</span>, <span class="number">0.1</span>, <span class="number">0.9</span>];
+<span class="kw">let </span>allowed = HashSet::from([NodeId::new(<span class="number">1</span>).unwrap(), NodeId::new(<span class="number">5</span>).unwrap(), NodeId::new(<span class="number">10</span>).unwrap()]);
+
+<span class="comment">// Only search within allowed nodes
+</span><span class="kw">let </span>results = index.search_with_filter(<span class="kw-2">&amp;</span>query, <span class="number">5</span>, |id| allowed.contains(id))<span class="question-mark">?</span>;</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.len" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#507">Source</a><h4 class="code-header">fn <a href="#tymethod.len" class="fn">len</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a></h4></section></summary><div class="docblock"><p>Returns the number of vectors currently in the index.</p>
+<h5 id="examples-4"><a class="doc-anchor" href="#examples-4">§</a>Examples</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="macro">println!</span>(<span class="string">"Index contains {} vectors"</span>, index.len());</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.dimensions" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#526">Source</a><h4 class="code-header">fn <a href="#tymethod.dimensions" class="fn">dimensions</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a></h4></section></summary><div class="docblock"><p>Returns the dimensionality of vectors in this index.</p>
+<p>All vectors added to the index must have this many dimensions.</p>
+<h5 id="examples-5"><a class="doc-anchor" href="#examples-5">§</a>Examples</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>dims = index.dimensions();
+<span class="macro">println!</span>(<span class="string">"This index accepts {}-dimensional vectors"</span>, dims);</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.distance_metric" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#562">Source</a><h4 class="code-header">fn <a href="#tymethod.distance_metric" class="fn">distance_metric</a>(&amp;self) -&gt; <a class="enum" href="enum.DistanceMetric.html" title="enum aletheiadb::index::vector::DistanceMetric">DistanceMetric</a></h4></section></summary><div class="docblock"><p>Returns the distance metric used by this index.</p>
+<p>The distance metric determines how similarity scores are computed and
+how to interpret the <code>f32</code> values returned by <code>search()</code> methods.</p>
+<h5 id="metric-interpretation"><a class="doc-anchor" href="#metric-interpretation">§</a>Metric Interpretation</h5>
+<ul>
+<li><strong>Cosine</strong>: Returns cosine similarity in range [-1, 1]. Higher is more similar.
+Typical threshold for “similar”: &gt;0.7</li>
+<li><strong>Euclidean</strong>: Returns negative squared L2 distance in range (-∞, 0]. Higher is more similar.
+(More negative = more distant, closer to 0 = more similar)
+Threshold depends on embedding magnitude and dimensionality.</li>
+<li><strong>DotProduct</strong>: Returns inner product in range (-∞, ∞). Higher is more similar.
+Threshold depends on embedding normalization.</li>
+</ul>
+<h5 id="examples-6"><a class="doc-anchor" href="#examples-6">§</a>Examples</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">match </span>index.distance_metric() {
+    DistanceMetric::Cosine =&gt; <span class="macro">println!</span>(<span class="string">"Using cosine similarity"</span>),
+    DistanceMetric::Euclidean =&gt; <span class="macro">println!</span>(<span class="string">"Using Euclidean distance"</span>),
+    DistanceMetric::DotProduct =&gt; <span class="macro">println!</span>(<span class="string">"Using dot product"</span>),
+    DistanceMetric::Haversine =&gt; <span class="macro">println!</span>(<span class="string">"Using Haversine distance"</span>),
+    DistanceMetric::Hamming =&gt; <span class="macro">println!</span>(<span class="string">"Using Hamming distance"</span>),
+    DistanceMetric::Tanimoto =&gt; <span class="macro">println!</span>(<span class="string">"Using Tanimoto similarity"</span>),
+}</code></pre></div></div></details></div><h2 id="provided-methods" class="section-header">Provided Methods<a href="#provided-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="method.is_empty" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#582-584">Source</a><h4 class="code-header">fn <a href="#method.is_empty" class="fn">is_empty</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.bool.html">bool</a></h4></section></summary><div class="docblock"><p>Returns true if the index is empty.</p>
+<p>Equivalent to <code>self.len() == 0</code>.</p>
+<h5 id="examples-7"><a class="doc-anchor" href="#examples-7">§</a>Examples</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">if </span>index.is_empty() {
+    <span class="macro">println!</span>(<span class="string">"No vectors indexed yet"</span>);
+}</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.add_batch" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#590-595">Source</a><h4 class="code-header">fn <a href="#method.add_batch" class="fn">add_batch</a>(&amp;self, items: &amp;[(<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, <a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>&gt;)]) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Adds multiple vectors in a batch operation.</p>
+<p>More efficient than calling <code>add()</code> repeatedly for bulk insertions.
+Default implementation calls <code>add()</code> sequentially.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.add_batch_ref" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#601-606">Source</a><h4 class="code-header">fn <a href="#method.add_batch_ref" class="fn">add_batch_ref</a>(&amp;self, items: &amp;[(<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>, &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>])]) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Adds multiple vectors in a batch operation using references.</p>
+<p>This allows adding vectors without transferring ownership, avoiding clones.
+Default implementation calls <code>add()</code> sequentially.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.remove_batch" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#611-616">Source</a><h4 class="code-header">fn <a href="#method.remove_batch" class="fn">remove_batch</a>(&amp;self, ids: &amp;[<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>]) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Removes multiple vectors in a batch operation.</p>
+<p>Default implementation calls <code>remove()</code> sequentially.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.save" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#621-627">Source</a><h4 class="code-header">fn <a href="#method.save" class="fn">save</a>(&amp;self, _path: &amp;<a class="struct" href="https://doc.rust-lang.org/1.97.1/std/path/struct.Path.html" title="struct std::path::Path">Path</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Saves the index to a file path.</p>
+<p>Returns <code>Err(UnsupportedOperation)</code> if the implementation doesn’t support persistence.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.memory_usage" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#632-634">Source</a><h4 class="code-header">fn <a href="#method.memory_usage" class="fn">memory_usage</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a></h4></section></summary><div class="docblock"><p>Returns the approximate memory usage of this index in bytes.</p>
+<p>Default returns 0 (unknown).</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.quantization" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#639-641">Source</a><h4 class="code-header">fn <a href="#method.quantization" class="fn">quantization</a>(&amp;self) -&gt; <a class="enum" href="enum.Quantization.html" title="enum aletheiadb::index::vector::Quantization">Quantization</a></h4></section></summary><div class="docblock"><p>Returns the quantization level of this index.</p>
+<p>Default returns F32 (full precision).</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.compact" class="method"><a class="src rightside" href="../../../src/aletheiadb/index/vector/mod.rs.html#647-649">Source</a><h4 class="code-header">fn <a href="#method.compact" class="fn">compact</a>(&amp;self) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Compacts the index, reclaiming space from deleted entries.</p>
+<p>For indexes that support native deletes, this may be a no-op.
+For indexes using soft deletes, this rebuilds the index.</p>
+</div></details></div><h2 id="dyn-compatibility" class="section-header">Dyn Compatibility<a href="#dyn-compatibility" class="anchor">§</a></h2><div class="dyn-compatibility-info"><p>This trait is <b>not</b> <a href="https://doc.rust-lang.org/1.97.1/reference/items/traits.html#dyn-compatibility">dyn compatible</a>.</p><p><i>In older versions of Rust, dyn compatibility was called "object safety", so this trait is not object safe.</i></p></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"><div class="negative-marker"></div><section id="impl-VectorIndex-for-HnswIndex" class="impl"><a class="src rightside" href="../../../src/aletheiadb/index/vector/hnsw/mod.rs.html#919-1340">Source</a><a href="#impl-VectorIndex-for-HnswIndex" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.VectorIndex.html" title="trait aletheiadb::index::vector::VectorIndex">VectorIndex</a> for <a class="struct" href="hnsw/struct.HnswIndex.html" title="struct aletheiadb::index::vector::hnsw::HnswIndex">HnswIndex</a></h3></section><section id="impl-VectorIndex-for-ShardedVectorIndex" class="impl"><a class="src rightside" href="../../../src/aletheiadb/index/vector/sharded.rs.html#566-771">Source</a><a href="#impl-VectorIndex-for-ShardedVectorIndex" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.VectorIndex.html" title="trait aletheiadb::index::vector::VectorIndex">VectorIndex</a> for <a class="struct" href="sharded/struct.ShardedVectorIndex.html" title="struct aletheiadb::index::vector::sharded::ShardedVectorIndex">ShardedVectorIndex</a></h3></section><section id="impl-VectorIndex-for-DistributedVectorIndex%3CC%3E" class="impl"><a class="src rightside" href="../../../src/aletheiadb/index/vector/distributed.rs.html#1111-1251">Source</a><a href="#impl-VectorIndex-for-DistributedVectorIndex%3CC%3E" class="anchor">§</a><h3 class="code-header">impl&lt;C: <a class="trait" href="distributed/trait.VectorNodeClient.html" title="trait aletheiadb::index::vector::distributed::VectorNodeClient">VectorNodeClient</a> + 'static&gt; <a class="trait" href="trait.VectorIndex.html" title="trait aletheiadb::index::vector::VectorIndex">VectorIndex</a> for <a class="struct" href="distributed/struct.DistributedVectorIndex.html" title="struct aletheiadb::index::vector::distributed::DistributedVectorIndex">DistributedVectorIndex</a>&lt;C&gt;</h3></section></div><script src="../../../trait.impl/aletheiadb/index/vector/trait.VectorIndex.js" async></script></section></div></main></body></html>

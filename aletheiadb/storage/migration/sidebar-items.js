@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["AtomicMigrationStats","DefaultMigrationCallback","MigrationCandidate","MigrationPolicy","MigrationPolicyBuilder","MigrationProgress","MigrationService","MigrationStats","MigrationWithLsnResult"],"trait":["MigrationCallback"]};

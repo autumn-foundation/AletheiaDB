@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BinaryOp","IndexHint","LogicalOp","OptionalStep","ScanOp","UnaryOp"],"struct":["LogicalPlan","QueryHints","TemporalContext"]};

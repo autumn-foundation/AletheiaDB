@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374). Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374)."><title>aletheiadb::db::pitr - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module pitr</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module pitr</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#tie-breaking" title="Tie-breaking">Tie-breaking</a></li><li><a href="#interner-vocabulary-guard-v1" title="Interner vocabulary guard (v1)">Interner vocabulary guard (v1)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>db</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">db</a></div><h1>Module <span>pitr</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/db/pitr.rs.html#1-1028">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374).
+Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374).</p>
+<p>Backup/restore (#3217) recovers a database to the exact moment a <code>.albk</code>
+backup was taken. PITR extends that to <em>any</em> transaction-time coordinate in
+between: given a base <code>.albk</code> backup <strong>plus an archived WAL chain</strong>, it
+materializes a fresh database whose recorded history ends exactly at an
+operator-chosen target (a timestamp or an LSN).</p>
+<p>The mechanism is a bounded, deterministic replay over the same
+crash-recovery machinery used at startup:</p>
+<ol>
+<li>materialize the base snapshot (state at <code>source_lsn</code>);</li>
+<li>read the archived WAL from <code>source_lsn</code> (inclusive);</li>
+<li>keep only the prefix of <strong>whole transaction bands</strong> committed
+at-or-before the target (never a partial band — see [<code>filter_bands</code>]);</li>
+<li>replay that prefix into the restored storage, mirroring the startup
+differential-replay start-LSN and finalization semantics;</li>
+<li>persist the target state so a subsequent reopen loads it.</li>
+</ol>
+<p>Inputs (the <code>.albk</code> and the WAL archive) are <strong>read-only</strong>: PITR never
+mutates them.</p>
+<h2 id="tie-breaking"><a class="doc-anchor" href="#tie-breaking">§</a>Tie-breaking</h2>
+<p>A target falling between two transactions resolves <strong>inclusively at-or-before</strong>
+the coordinate: every transaction committed at-or-before the target is
+present, every transaction after it is absent.</p>
+<h2 id="interner-vocabulary-guard-v1"><a class="doc-anchor" href="#interner-vocabulary-guard-v1">§</a>Interner vocabulary guard (v1)</h2>
+<p>The WAL stores node/edge <strong>labels</strong> and <strong>property keys</strong> as raw <code>u32</code>
+interner ids (not strings); property <em>values</em> are self-contained. The base
+backup carries the interner as of <code>source_lsn</code>, so a post-backup transaction
+that introduces a <strong>brand-new label or property key</strong> has an id <code>&gt;= K</code>, where
+<code>K</code> is the restored interner’s string count. Replaying such an id verbatim is
+<strong>silent data corruption</strong>, not a mere failed lookup: the id first dangles,
+then — because the restored interner’s <code>next_id</code> equals <code>K</code> — the first
+genuinely-new string a later write interns collides with the dangling id, so
+a replayed node/edge is <strong>mislabeled</strong> (e.g. “Manager” becomes the user’s new
+“Department”) or its property silently dropped.</p>
+<p>PITR therefore <strong>refuses</strong> such a window: before materializing anything, it
+scans the included band prefix and constraint-declaration slice for any
+interner id that references a string the base snapshot does not contain and,
+if found, fails with
+<a href="../../storage/backup/enum.BackupError.html#variant.WindowCrossesVocabularyChange" title="variant aletheiadb::storage::backup::BackupError::WindowCrossesVocabularyChange"><code>BackupError::WindowCrossesVocabularyChange</code></a>
+(mapped to <code>FAILED_PRECONDITION</code> at the MCP boundary). This converts silent
+mislabeling/dropping into a clean, honest error. Keep the label/key
+vocabulary stable across the window, take a fresh base backup that includes
+the new vocabulary, or target a coordinate before the change (a durable
+interner archive is a follow-up).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.PitrCoord.html" title="struct aletheiadb::db::pitr::PitrCoord">Pitr<wbr>Coord</a></dt><dd>A bi-coordinate (LSN + transaction time) describing a PITR stop point or a
+window bound. Serde-serializable for <code>--dry-run</code> JSON output.</dd><dt><a class="struct" href="struct.PitrPlan.html" title="struct aletheiadb::db::pitr::PitrPlan">Pitr<wbr>Plan</a></dt><dd>The plan a <code>--dry-run</code> PITR inspection produces without materializing or
+opening anything: the achievable window plus, for a given target, the
+resolved stop coordinate and applied/discarded transaction counts.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PitrTarget.html" title="enum aletheiadb::db::pitr::PitrTarget">Pitr<wbr>Target</a></dt><dd>A PITR stop target: an absolute transaction-time coordinate.</dd></dl></section></div></main></body></html>

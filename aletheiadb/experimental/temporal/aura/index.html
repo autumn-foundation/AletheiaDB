@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Aura: Semantic Essence over Time 🌟"><title>aletheiadb::experimental::temporal::aura - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module aura</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module aura</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#concepts" title="Concepts">Concepts</a></li><li><a href="#use-cases" title="Use Cases">Use Cases</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>experimental::<wbr>temporal</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">experimental</a>::<wbr><a href="../index.html">temporal</a></div><h1>Module <span>aura</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/experimental/temporal/aura.rs.html#1-348">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Aura: Semantic Essence over Time 🌟</p>
+<p>“Who are you, really?”</p>
+<p>The Aura Engine calculates the “Aura” of a node—an exponentially time-weighted
+average of its semantic vector over its entire history. While a node’s <em>current</em>
+vector represents what it is thinking or doing <em>right now</em>, its Aura represents
+its long-term identity or essence.</p>
+<h2 id="concepts"><a class="doc-anchor" href="#concepts">§</a>Concepts</h2>
+<ul>
+<li><strong>Aura Vector</strong>: The historical, time-weighted average vector. Recent states
+have more weight, but deep history still exerts a gravitational pull.</li>
+<li><strong>Divergence</strong>: The distance between a node’s Aura and its current vector.
+A high divergence means the node is acting “out of character”.</li>
+</ul>
+<h2 id="use-cases"><a class="doc-anchor" href="#use-cases">§</a>Use Cases</h2>
+<ul>
+<li><strong>Identity Hijack Detection</strong>: An LLM agent suddenly starts outputting vectors
+that are highly divergent from its established Aura.</li>
+<li><strong>Core Concept Extraction</strong>: Distilling a concept down to its most stable,
+enduring semantic meaning, filtering out recent noise.</li>
+</ul>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// Requires features = ["nova"]
+</span><span class="kw">use </span>aletheiadb::{AletheiaDB, PropertyMapBuilder};
+<span class="kw">use </span>aletheiadb::experimental::aura::AuraEngine;
+
+<span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+<span class="kw">let </span>subject_node = db.create_node(
+    <span class="string">"Subject"</span>,
+    PropertyMapBuilder::new()
+        .insert_vector(<span class="string">"embedding"</span>, <span class="kw-2">&amp;</span>[<span class="number">1.0</span>, <span class="number">0.0</span>])
+        .build(),
+)<span class="question-mark">?</span>;
+
+<span class="kw">let </span>engine = AuraEngine::new(<span class="kw-2">&amp;</span>db);
+<span class="comment">// Calculate the Aura using a half-life of 7 days
+</span><span class="kw">let </span>half_life_us = <span class="number">7 </span>* <span class="number">24 </span>* <span class="number">3600 </span>* <span class="number">1_000_000</span>;
+<span class="kw">let </span>result = engine.calculate_aura(subject_node, <span class="string">"embedding"</span>, half_life_us)<span class="question-mark">?</span>;
+
+<span class="kw">if let </span><span class="prelude-val">Some</span>(aura) = result.aura_vector {
+    <span class="macro">println!</span>(<span class="string">"Aura Divergence: {}"</span>, result.divergence_score);
+}</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AuraEngine.html" title="struct aletheiadb::experimental::temporal::aura::AuraEngine">Aura<wbr>Engine</a></dt><dd>The Aura Engine.</dd><dt><a class="struct" href="struct.AuraResult.html" title="struct aletheiadb::experimental::temporal::aura::AuraResult">Aura<wbr>Result</a></dt><dd>The result of an Aura calculation.</dd></dl></section></div></main></body></html>

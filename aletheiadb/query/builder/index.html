@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Fluent Query Builder"><title>aletheiadb::query::builder - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module builder</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module builder</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>query</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">query</a></div><h1>Module <span>builder</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/query/builder.rs.html#1-1834">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Fluent Query Builder</p>
+<p>Provides a type-safe, fluent API for constructing hybrid queries.
+The builder uses phantom types to track query state at compile time,
+preventing invalid query compositions.</p>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::query::QueryBuilder;
+<span class="kw">use </span>aletheiadb::core::NodeId;
+<span class="kw">use </span>aletheiadb::core::temporal::Timestamp;
+
+<span class="kw">let </span>alice_id = NodeId::new(<span class="number">1</span>)<span class="question-mark">?</span>;
+<span class="kw">let </span>bob_id = NodeId::new(<span class="number">2</span>)<span class="question-mark">?</span>;
+<span class="kw">let </span>node_id = NodeId::new(<span class="number">3</span>)<span class="question-mark">?</span>;
+<span class="kw">let </span>embedding = <span class="macro">vec!</span>[<span class="number">0.1</span>, <span class="number">0.2</span>, <span class="number">0.3</span>];
+<span class="kw">let </span>valid_time = Timestamp::new(<span class="number">1000</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+<span class="kw">let </span>tx_time = Timestamp::new(<span class="number">2000</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+
+<span class="comment">// Build a graph + vector query
+</span><span class="kw">let </span>query = QueryBuilder::new()
+    .start(alice_id)
+    .traverse(<span class="string">"KNOWS"</span>)
+    .rank_by_similarity(<span class="kw-2">&amp;</span>embedding, <span class="number">10</span>)
+    .build();
+
+<span class="comment">// Build a temporal query
+</span><span class="kw">let </span>query = QueryBuilder::new()
+    .as_of(valid_time, tx_time)
+    .start(node_id)
+    .build();
+
+<span class="comment">// Build a vector similarity query (simple)
+</span><span class="kw">let </span>query = QueryBuilder::new()
+    .start(alice_id)
+    .similar_to(bob_id, <span class="number">10</span>)
+    .build();
+
+<span class="comment">// Build a vector similarity query (advanced with builder)
+</span><span class="kw">let </span>query = QueryBuilder::new()
+    .start(alice_id)
+    .similar_to_builder(bob_id, <span class="number">10</span>)
+        .property(<span class="string">"custom_embedding"</span>)
+        .label_filter(<span class="string">"Person"</span>)
+        .finish()
+    .build();</code></pre></div></div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="state/index.html" title="mod aletheiadb::query::builder::state">state</a></dt><dd>Query builder states for compile-time safety.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.FindSimilarBuilder.html" title="struct aletheiadb::query::builder::FindSimilarBuilder">Find<wbr>Similar<wbr>Builder</a></dt><dd>Builder for configuring VectorSearch (find_similar) operations with optional parameters.</dd><dt><a class="struct" href="struct.Query.html" title="struct aletheiadb::query::builder::Query">Query</a></dt><dd>A fully constructed query ready for execution.</dd><dt><a class="struct" href="struct.QueryBuilder.html" title="struct aletheiadb::query::builder::QueryBuilder">Query<wbr>Builder</a></dt><dd>Fluent query builder with compile-time state tracking.</dd><dt><a class="struct" href="struct.RankBySimilarityBuilder.html" title="struct aletheiadb::query::builder::RankBySimilarityBuilder">Rank<wbr>BySimilarity<wbr>Builder</a></dt><dd>Builder for configuring RankBySimilarity operations with optional parameters.</dd><dt><a class="struct" href="struct.SimilarToBuilder.html" title="struct aletheiadb::query::builder::SimilarToBuilder">Similar<wbr>ToBuilder</a></dt><dd>Builder for configuring SimilarTo operations with optional parameters.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.QueryState.html" title="trait aletheiadb::query::builder::QueryState">Query<wbr>State</a></dt><dd>Marker trait for query builder states.</dd></dl></section></div></main></body></html>

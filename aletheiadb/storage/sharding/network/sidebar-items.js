@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CircuitState","NetworkError"],"struct":["AbortResponse","CircuitBreaker","CircuitBreakerConfig","CommitResponse","ConnectionPool","EdgeData","MigrationBatch","MigrationResponse","MockShardClient","NodeData","PoolConfig","PoolStats","PrepareResponse"],"trait":["ShardClient"],"type":["NetworkResult"]};

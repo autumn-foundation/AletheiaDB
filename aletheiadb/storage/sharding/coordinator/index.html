@@ -1,0 +1,46 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Shard coordinator for managing distributed operations."><title>aletheiadb::storage::sharding::coordinator - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module coordinator</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module coordinator</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#key-responsibilities" title="Key Responsibilities">Key Responsibilities</a></li><li><a href="#two-phase-commit-2pc-flow" title="Two-Phase Commit (2PC) Flow">Two-Phase Commit (2PC) Flow</a></li><li><a href="#-performance-warning-sequential-2pc" title="⚠️ Performance Warning: Sequential 2PC">⚠️ Performance Warning: Sequential 2PC</a></li><li><a href="#recovery" title="Recovery">Recovery</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>storage::<wbr>sharding</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">sharding</a></div><h1>Module <span>coordinator</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/storage/sharding/coordinator.rs.html#1-2009">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Shard coordinator for managing distributed operations.</p>
+<p>The <code>ShardCoordinator</code> is the central component responsible for orchestrating
+distributed transactions across multiple shards in AletheiaDB. It ensures
+ACID properties (Atomicity, Consistency, Isolation, Durability) are maintained
+even when data is partitioned across different nodes.</p>
+<h2 id="key-responsibilities"><a class="doc-anchor" href="#key-responsibilities">§</a>Key Responsibilities</h2>
+<ol>
+<li><strong>Transaction Coordination</strong>: Manages the lifecycle of distributed transactions using
+the Two-Phase Commit (2PC) protocol.</li>
+<li><strong>Query Routing</strong>: Uses the <code>ShardRouter</code> to direct queries to the appropriate shards.</li>
+<li><strong>Time Synchronization</strong>: Maintains a Hybrid Logical Clock (HLC) to assign consistent
+timestamps for cross-shard operations.</li>
+<li><strong>Failure Recovery</strong>: Detects failed transactions and orchestrates recovery or abortion.</li>
+</ol>
+<h2 id="two-phase-commit-2pc-flow"><a class="doc-anchor" href="#two-phase-commit-2pc-flow">§</a>Two-Phase Commit (2PC) Flow</h2>
+<ol>
+<li><strong>Begin</strong>: A transaction ID is generated.</li>
+<li><strong>Prepare</strong>: The coordinator asks all participating shards to prepare.
+<ul>
+<li>If all vote YES, the transaction proceeds to commit.</li>
+<li>If any vote NO or timeout, the transaction is aborted.</li>
+</ul>
+</li>
+<li><strong>Commit</strong>:
+<ul>
+<li>The decision is logged to the <code>TwoPhaseCommitLog</code> (WAL).</li>
+<li>The coordinator tells all participants to commit.</li>
+<li>Once all acknowledge, the decision log is cleared.</li>
+</ul>
+</li>
+</ol>
+<h2 id="-performance-warning-sequential-2pc"><a class="doc-anchor" href="#-performance-warning-sequential-2pc">§</a>⚠️ Performance Warning: Sequential 2PC</h2>
+<p>Currently, the 2PC protocol phases (Prepare and Commit) are executed <strong>sequentially</strong>
+across participants.</p>
+<ul>
+<li><strong>Latency</strong>: The commit latency is the <em>sum</em> of participant latencies, not the max.</li>
+<li><strong>Lock Duration</strong>: Locks are held on early participants while waiting for later ones.</li>
+<li><strong>Scalability</strong>: Transaction throughput may degrade linearly with the number of participants.</li>
+</ul>
+<p>This design prioritizes simplicity and determinism over concurrency in the current
+version. Future versions will introduce parallel 2PC execution.</p>
+<h2 id="recovery"><a class="doc-anchor" href="#recovery">§</a>Recovery</h2>
+<p>If the coordinator crashes during the Commit phase, the <code>recover_pending_transactions</code>
+method replays the pending decisions from the log, ensuring that all participants
+eventually reach a consistent state.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DeadLetteredTransaction.html" title="struct aletheiadb::storage::sharding::coordinator::DeadLetteredTransaction">Dead<wbr>Lettered<wbr>Transaction</a></dt><dd>A transaction that failed recovery and requires manual intervention.</dd><dt><a class="struct" href="struct.RecoveryResult.html" title="struct aletheiadb::storage::sharding::coordinator::RecoveryResult">Recovery<wbr>Result</a></dt><dd>Result of recovery operation.</dd><dt><a class="struct" href="struct.ShardConnection.html" title="struct aletheiadb::storage::sharding::coordinator::ShardConnection">Shard<wbr>Connection</a></dt><dd>Connection to a shard (placeholder for actual network implementation).</dd><dt><a class="struct" href="struct.ShardCoordinator.html" title="struct aletheiadb::storage::sharding::coordinator::ShardCoordinator">Shard<wbr>Coordinator</a></dt><dd>Coordinator for managing shards and distributed operations.</dd></dl></section></div></main></body></html>

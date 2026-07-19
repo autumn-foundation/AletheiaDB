@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_BACKWARD_DRIFT_US","MAX_FORWARD_JUMP_US"],"enum":["ClockSkewDirection","SendWithSelfHealError"],"fn":["evaluate_clock_skew","is_clock_skew_self_heal_enabled","send_with_overflow_self_heal"],"struct":["ClockSkewDecision","ClockSkewViolation","HybridTimestamp"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["changefeed","changefeed_subscription","constraint","error","graph","hasher","hex","history","hlc","id","interning","lineage","namespace","observer","property","provenance","temporal","vector","version"]};

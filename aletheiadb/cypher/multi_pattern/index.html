@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Multi-variable, multi-pattern `MATCH` evaluation (Issue #549)."><title>aletheiadb::cypher::multi_pattern - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module multi_pattern</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module multi_<wbr>pattern</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#v1-semantics" title="v1 semantics">v1 semantics</a></li><li><a href="#house-rule" title="House rule">House rule</a></li><li><a href="#remaining-v1-limitations" title="Remaining v1 limitations">Remaining v1 limitations</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>cypher</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">cypher</a></div><h1>Module <span>multi_<wbr>pattern</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/cypher/multi_pattern.rs.html#1-1329">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Multi-variable, multi-pattern <code>MATCH</code> evaluation (Issue #549).</p>
+<p>AletheiaDB’s standard query pipeline is a Volcano pull-iterator tree whose
+rows carry exactly <strong>one</strong> entity (<a href="../../query/executor/struct.QueryRow.html#structfield.entity" title="field aletheiadb::query::executor::QueryRow::entity"><code>QueryRow::entity</code></a>). That single-entity
+shape cannot represent a query that binds and returns more than one variable
+(<code>MATCH (a),(b) RETURN a, b</code>) or joins several comma-separated patterns, so
+routing such a query through the standard converter silently drops variables
+or concatenates un-joined scans – a wrong answer.</p>
+<p>This module is a <strong>contained</strong> Cypher-level evaluator for the read-only
+multi-variable subset. It reuses the database’s public primitives (label
+scans, adjacency, property access) and materializes rows carrying
+<a href="../../query/executor/struct.QueryRow.html#structfield.bindings" title="field aletheiadb::query::executor::QueryRow::bindings"><code>QueryRow::bindings</code></a> (named <code>variable -&gt; entity</code>) and/or
+<a href="../../query/executor/struct.QueryRow.html#structfield.columns" title="field aletheiadb::query::executor::QueryRow::columns"><code>QueryRow::columns</code></a> (scalar projections). It never disturbs the existing
+single-entity path: only queries the router
+(<a href="../exec/fn.needs_multi_binding.html" title="fn aletheiadb::cypher::exec::needs_multi_binding"><code>super::exec::needs_multi_binding</code></a>) classifies as multi-variable reach it.</p>
+<h2 id="v1-semantics"><a class="doc-anchor" href="#v1-semantics">§</a>v1 semantics</h2>
+<ul>
+<li><strong>Relationship-uniqueness (openCypher isomorphism).</strong> Each relationship is
+traversed <strong>at most once</strong> within a single <code>MATCH</code> clause – both inside one
+pattern and across the comma-separated patterns of the clause. The set of
+already-traversed edge ids is threaded through every candidate binding
+branch (see [<code>PartialBinding</code>]); reusing an edge yields no match, exactly
+as openCypher requires (<code>MATCH (x)-[:R]-(y)-[:R]-(z)</code> over a single edge
+returns zero rows).</li>
+<li><strong>Three-valued <code>WHERE</code>.</strong> Predicate evaluation is Kleene three-valued
+([<code>Tri</code>]): a comparison with a null/absent operand is <code>Null</code>, <code>NOT Null</code> is
+<code>Null</code>, and a row is kept <strong>iff</strong> its predicate evaluates to <code>True</code> (both
+<code>Null</code> and <code>False</code> drop it). This makes <code>WHERE NOT (a.x = 5)</code> drop a row
+whose <code>a.x</code> is absent, per openCypher.</li>
+<li><strong>Bounded materialization.</strong> The intermediate binding set is capped at the
+configured <code>max_schema_as_of_entities</code> limit (see FIX #6) so a pathological
+Cartesian product (<code>MATCH (a),(b),(c)</code>) cannot exhaust memory; exceeding
+the cap is a structured <a href="../enum.CypherError.html" title="enum aletheiadb::cypher::CypherError"><code>CypherError</code></a>, never an OOM.</li>
+</ul>
+<h2 id="house-rule"><a class="doc-anchor" href="#house-rule">§</a>House rule</h2>
+<p>Anything this evaluator cannot answer <strong>correctly</strong> is rejected with a
+structured <a href="../enum.CypherError.html#variant.UnsupportedFeature" title="variant aletheiadb::cypher::CypherError::UnsupportedFeature"><code>CypherError::UnsupportedFeature</code></a>; it never returns a
+silently-wrong row. v1 rejects: <code>OPTIONAL MATCH</code>, <code>WITH</code>, temporal <code>AS OF</code>,
+aggregates in <code>RETURN</code>, and variable-length relationships inside a bound
+pattern.</p>
+<h2 id="remaining-v1-limitations"><a class="doc-anchor" href="#remaining-v1-limitations">§</a>Remaining v1 limitations</h2>
+<p>Bindings carry cloned entities (not ids) through the Cartesian product, so a
+wide product clones each entity per branch – a deliberate simplicity/perf
+tradeoff. Carrying ids and resolving lazily is tracked as a follow-up
+(<code>TODO(perf #549-followup)</code>).</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.evaluate.html" title="fn aletheiadb::cypher::multi_pattern::evaluate">evaluate</a></dt><dd>Entry point: evaluate a multi-variable <code>MATCH</code> statement into result rows.</dd></dl></section></div></main></body></html>

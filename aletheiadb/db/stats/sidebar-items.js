@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ChangefeedStats","ColdStorageDetails","ColdStorageTierStats","CurrentStateStats","DatabaseStats","HistoricalDepthStats","LastVerifiedStats","PrincipalSubscriptionStat","ProvenanceChainStats","TierAccessStats","WalStateStats"]};

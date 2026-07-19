@@ -1,0 +1,66 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Temporal vector index for time-aware semantic search."><title>aletheiadb::index::vector::temporal - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module temporal</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module temporal</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#snapshot-strategy" title="Snapshot Strategy">Snapshot Strategy</a></li><li><a href="#delta-snapshots-performance-optimization" title="Delta Snapshots (Performance Optimization)">Delta Snapshots (Performance Optimization)</a></li><li><a href="#examples" title="Examples">Examples</a></li><li><a href="#design" title="Design">Design</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>index::<wbr>vector</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">index</a>::<wbr><a href="../index.html">vector</a></div><h1>Module <span>temporal</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/index/vector/temporal/mod.rs.html#1-3707">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Temporal vector index for time-aware semantic search.</p>
+<p>This module implements temporal vector indexing using snapshot-based HNSW indexes,
+enabling point-in-time vector queries and semantic drift tracking. This is Phase 3
+of AletheiaDB’s vector search integration.</p>
+<h2 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h2>
+<p>The temporal vector index uses a dual-path design:</p>
+<ul>
+<li><strong>Current index</strong>: Live HNSW index for present-time queries</li>
+<li><strong>Snapshot indexes</strong>: Historical HNSW snapshots at configurable intervals</li>
+</ul>
+<p>This mirrors AletheiaDB’s hybrid storage architecture (see ADR-0001) where current
+state is optimized separately from historical data.</p>
+<h2 id="snapshot-strategy"><a class="doc-anchor" href="#snapshot-strategy">§</a>Snapshot Strategy</h2>
+<p>Snapshots are created based on configurable triggers (see <a href="config/enum.SnapshotStrategy.html" title="enum aletheiadb::index::vector::temporal::config::SnapshotStrategy"><code>SnapshotStrategy</code></a>):</p>
+<ul>
+<li><strong>TransactionInterval</strong>: Create snapshot every N write transactions (default: 10)</li>
+<li><strong>TimeInterval</strong>: Create snapshot at fixed time intervals (e.g., hourly)</li>
+<li><strong>ChangeThreshold</strong>: Create snapshot when X% of vectors have changed</li>
+<li><strong>Hybrid</strong>: Use whichever trigger fires first</li>
+</ul>
+<h2 id="delta-snapshots-performance-optimization"><a class="doc-anchor" href="#delta-snapshots-performance-optimization">§</a>Delta Snapshots (Performance Optimization)</h2>
+<p>To optimize memory usage and creation time, we use a Delta-based snapshot approach:</p>
+<ul>
+<li><strong>Full Snapshots</strong>: Created periodically (e.g., every 10 snapshots). Contain full HNSW index.</li>
+<li><strong>Delta Snapshots</strong>: Created in between. Contain only vectors changed since the last Full snapshot.</li>
+</ul>
+<p>This reduces snapshot creation time from O(N log N) to O(M log M) where M is the number of changes.
+Query performance is maintained by searching both Delta and Base indexes and merging results.</p>
+<h2 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig, SnapshotStrategy, RetentionPolicy};
+<span class="kw">use </span>aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+<span class="kw">use </span>aletheiadb::core::id::NodeId;
+<span class="kw">use </span>aletheiadb::core::temporal::TimeRange;
+
+<span class="comment">// Create temporal index configuration
+</span><span class="kw">let </span>hnsw_config = HnswConfig::new(<span class="number">384</span>, DistanceMetric::Cosine);
+<span class="kw">let </span>config = TemporalVectorConfig {
+    snapshot_strategy: SnapshotStrategy::TransactionInterval(<span class="number">10</span>),
+    retention_policy: RetentionPolicy::KeepN(<span class="number">100</span>),
+    max_snapshots: <span class="number">100</span>,
+    full_snapshot_interval: <span class="number">10</span>,
+    hnsw_config: <span class="prelude-val">Some</span>(hnsw_config),
+};
+
+<span class="comment">// Create temporal index
+</span><span class="kw">let </span>index = TemporalVectorIndex::new(config)<span class="question-mark">?</span>;
+
+<span class="comment">// Find similar vectors at specific point in time
+</span><span class="kw">let </span>query = <span class="macro">vec!</span>[<span class="number">0.1f32</span>; <span class="number">384</span>];
+<span class="kw">let </span>timestamp = <span class="number">1234567890000000</span>; <span class="comment">// microseconds since epoch
+</span><span class="kw">let </span>results = index.find_similar_as_of(<span class="kw-2">&amp;</span>query, <span class="number">10</span>, timestamp.into())<span class="question-mark">?</span>;
+
+<span class="comment">// Track semantic drift over time
+</span><span class="kw">let </span>node_id = NodeId::new(<span class="number">42</span>).unwrap();
+<span class="kw">let </span>reference_embedding = <span class="macro">vec!</span>[<span class="number">0.5f32</span>; <span class="number">384</span>];
+<span class="kw">let </span>time_range = TimeRange::new(<span class="number">1000000</span>.into(), <span class="number">2000000</span>.into()).unwrap();
+<span class="kw">let </span>drift = index.track_semantic_drift(node_id, <span class="kw-2">&amp;</span>reference_embedding, time_range)<span class="question-mark">?</span>;</code></pre></div><h2 id="design"><a class="doc-anchor" href="#design">§</a>Design</h2>
+<p>For complete design rationale and trade-offs, see:</p>
+<ul>
+<li><code>docs/adr/0017-temporal-vector-strategy.md</code> - Design decisions</li>
+<li><code>docs/VECTOR_SEARCH_DESIGN.md</code> - Overall vector search architecture</li>
+</ul>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.DriftMetric"><code>pub use config::<a class="enum" href="config/enum.DriftMetric.html" title="enum aletheiadb::index::vector::temporal::config::DriftMetric">DriftMetric</a>;</code></dt><dt id="reexport.RetentionPolicy"><code>pub use config::<a class="enum" href="config/enum.RetentionPolicy.html" title="enum aletheiadb::index::vector::temporal::config::RetentionPolicy">RetentionPolicy</a>;</code></dt><dt id="reexport.SnapshotStrategy"><code>pub use config::<a class="enum" href="config/enum.SnapshotStrategy.html" title="enum aletheiadb::index::vector::temporal::config::SnapshotStrategy">SnapshotStrategy</a>;</code></dt><dt id="reexport.TemporalVectorConfig"><code>pub use config::<a class="struct" href="config/struct.TemporalVectorConfig.html" title="struct aletheiadb::index::vector::temporal::config::TemporalVectorConfig">TemporalVectorConfig</a>;</code></dt><dt id="reexport.VectorIndexObserver"><code>pub use observer::<a class="struct" href="observer/struct.VectorIndexObserver.html" title="struct aletheiadb::index::vector::temporal::observer::VectorIndexObserver">VectorIndexObserver</a>;</code></dt><dt id="reexport.MemoryStats"><code>pub use stats::<a class="struct" href="stats/struct.MemoryStats.html" title="struct aletheiadb::index::vector::temporal::stats::MemoryStats">MemoryStats</a>;</code></dt><dt id="reexport.SnapshotInfo"><code>pub use stats::<a class="struct" href="stats/struct.SnapshotInfo.html" title="struct aletheiadb::index::vector::temporal::stats::SnapshotInfo">SnapshotInfo</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="config/index.html" title="mod aletheiadb::index::vector::temporal::config">config</a></dt><dd>Configuration types for temporal vector indexing.
+Configuration types for temporal vector indexing.</dd><dt><a class="mod" href="observer/index.html" title="mod aletheiadb::index::vector::temporal::observer">observer</a></dt><dd>Observers for reacting to storage events.
+Observers for reacting to storage events.</dd><dt><a class="mod" href="stats/index.html" title="mod aletheiadb::index::vector::temporal::stats">stats</a></dt><dd>Statistics and monitoring types.
+Statistics and monitoring types.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.TemporalVectorIndex.html" title="struct aletheiadb::index::vector::temporal::TemporalVectorIndex">Temporal<wbr>Vector<wbr>Index</a></dt><dd>Thread Safety</dd></dl></section></div></main></body></html>

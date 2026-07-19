@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["VectorDelta","VersionData"],"struct":["AnchorConfig","EdgeVersion","NodeVersion","PropertyDelta","VersionMetadata"],"trait":["EntityVersion","TemporalVersion"],"type":["FastHashMap","FastHashSet"]};

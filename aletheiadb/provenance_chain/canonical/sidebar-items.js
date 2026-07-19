@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CHAIN_GENESIS_DOMAIN","CHAIN_LEAF_DOMAIN","CHAIN_NODE_DOMAIN","CHAIN_TX_DOMAIN"],"enum":["EntityKind"],"fn":["chain_step","from_hex_32","genesis_digest","to_hex","tx_digest","version_leaf"],"struct":["ProvenanceHashInput","VersionHashInput"]};

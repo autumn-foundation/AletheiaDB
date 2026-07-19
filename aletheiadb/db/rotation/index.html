@@ -1,0 +1,57 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Index-layer key rotation orchestration (Issue #488). Index-layer key rotation orchestration (Issue #488)."><title>aletheiadb::db::rotation - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module rotation</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module rotation</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#v1-scope--limitations" title="v1 scope / limitations">v1 scope / limitations</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>db</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">db</a></div><h1>Module <span>rotation</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/db/rotation.rs.html#1-6042">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Index-layer key rotation orchestration (Issue #488).
+Index-layer key rotation orchestration (Issue #488).</p>
+<p>Wires the index re-encryption engine
+(<a href="../../storage/index_persistence/reencrypt/struct.IndexKeyRotation.html" title="struct aletheiadb::storage::index_persistence::reencrypt::IndexKeyRotation"><code>IndexKeyRotation</code></a>)
+into <a href="../struct.AletheiaDB.html" title="struct aletheiadb::db::AletheiaDB"><code>AletheiaDB</code></a> behind a synchronous API. A rotation:</p>
+<ol>
+<li>sources the current MEK (from the retained startup config) and the new
+MEK (from the caller-supplied key source), derives both index DEKs, and
+refuses if they are equal (rotating to the same key is a no-op that risks
+nonce reuse) or if encryption / index persistence is not configured;</li>
+<li>adds the new generation to the persistence manager’s live keyring — so
+reads immediately dispatch on each file’s header <code>key_version</code> and writes
+stamp the new version — and records a durable <code>rotation.state</code> breadcrumb;</li>
+<li>re-encrypts every old-key index file to the new key, atomically per file;</li>
+<li>verifies zero old-key files remain, retires the old generation, and
+removes the breadcrumb.</li>
+</ol>
+<p>A crash mid-rotation leaves the breadcrumb and a mix of old/new files;
+[<code>resume_pending_rotation</code>] re-runs the idempotent pass on the next startup.</p>
+<h3 id="v1-scope--limitations"><a class="doc-anchor" href="#v1-scope--limitations">§</a>v1 scope / limitations</h3>
+<ul>
+<li><strong>Index layer only — and ONLY when it is the sole encrypted-at-rest
+surface.</strong> All per-layer DEKs (WAL, index, cold, checkpoint) derive from a
+single MEK. Re-encrypting only the index tree to a <em>new</em> MEK would leave
+the WAL/checkpoint/cold files under the old MEK’s DEKs; a subsequent
+key-provider switch would render them undecryptable. To make that
+impossible, <a href="../struct.AletheiaDB.html#method.rotate_index_keys" title="method aletheiadb::db::AletheiaDB::rotate_index_keys"><code>rotate_index_keys</code></a>
+<strong>hard-refuses</strong> (with
+[<code>RotationError::UnsupportedWhileEncryptedLayersPresent</code>]) whenever the
+WAL, cold storage, or a checkpoint is encrypted under the current MEK.
+Full-MEK rotation across every layer (which would also re-key the WAL,
+cold, and checkpoint files, so switching the provider is safe) is a
+documented follow-up; <strong>there is no supported operator action that changes
+the <code>key_provider</code> config after an index-only rotation.</strong></li>
+<li>The rotation is driven synchronously and expects the caller to quiesce
+heavy index persistence for its duration; live reads stay correct
+throughout (keyring dispatch), and any concurrent index write uses the new
+generation (the manager’s keyring is already switched). A concurrent index
+persist can leave a file under an unrecognized <code>key_version</code> that wedges
+the rotation fail-closed ([<code>RotationError::ForeignKeyVersionFile</code>]).</li>
+<li>A durable, ordered <code>rotation.state</code> breadcrumb (fsync’d, then fsync’d
+parent dir, published BEFORE the first re-encrypted file) records that a
+rotation is in flight so an <em>interrupted</em> one resumes on the next startup.
+A second rotation started while a breadcrumb exists is refused
+([<code>RotationError::AlreadyInProgress</code>]) — resume or cancel the pending one.</li>
+<li>Audit events (<code>key.rotation.*</code>) are emitted through the
+<a href="../../encryption/manager/struct.EncryptionManager.html" title="struct aletheiadb::encryption::manager::EncryptionManager"><code>EncryptionManager</code></a>’s configured
+audit logger (Issue #489), honoring the <code>[encryption.audit]</code> config; no key
+material is ever logged.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.RotationReport.html" title="struct aletheiadb::db::rotation::RotationReport">Rotation<wbr>Report</a></dt><dd>Summary of a completed index key rotation.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.finalize_resumed_cold_rotation.html" title="fn aletheiadb::db::rotation::finalize_resumed_cold_rotation">finalize_<wbr>resumed_<wbr>cold_<wbr>rotation</a></dt><dd>Finalize a startup-resumed COLD (redb) key rotation (Issue #3617 PR3),
+completing the transactional bulk re-encrypt and clearing the ledger.</dd><dt><a class="fn" href="fn.finalize_resumed_subject_keyring_rotation.html" title="fn aletheiadb::db::rotation::finalize_resumed_subject_keyring_rotation">finalize_<wbr>resumed_<wbr>subject_<wbr>keyring_<wbr>rotation</a></dt><dd>Finalize a startup- or live-resumed crypto-shred SUBJECT-KEYRING re-wrap
+(Slice 5), completing the re-wrap pass and clearing the rotation ledger.</dd><dt><a class="fn" href="fn.finalize_resumed_wal_rotation.html" title="fn aletheiadb::db::rotation::finalize_resumed_wal_rotation">finalize_<wbr>resumed_<wbr>wal_<wbr>rotation</a></dt><dd>Phase 2 of a startup-resumed WAL key rotation (Issue #3617 PR2): retire the
+old-generation WAL segments and clear the ledger, AFTER the startup replay has
+been captured by a synchronous persist.</dd><dt><a class="fn" href="fn.install_pending_wal_generations.html" title="fn aletheiadb::db::rotation::install_pending_wal_generations">install_<wbr>pending_<wbr>wal_<wbr>generations</a></dt><dd>Install BOTH WAL key generations into the live WAL keyring when a rotation
+ledger is PENDING at startup — BEFORE the startup replay read (Issue #3617
+PR2 crash-consistency).</dd><dt><a class="fn" href="fn.resume_pending_rotation.html" title="fn aletheiadb::db::rotation::resume_pending_rotation">resume_<wbr>pending_<wbr>rotation</a></dt><dd>Resume an interrupted index key rotation on startup (Issue #488).</dd></dl></section></div></main></body></html>

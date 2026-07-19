@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ChangeType","EntityChange"],"struct":["DiffReport","PropertyDiff","TemporalDiff"]};

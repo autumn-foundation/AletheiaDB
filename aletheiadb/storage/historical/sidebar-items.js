@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_AVG_DELTA_CHAIN","DEFAULT_MAX_SCHEMA_AS_OF_ENTITIES","DEFAULT_MAX_VERSIONS_PER_ENTITY","DEFAULT_MAX_VERSION_AGE_MS","MAX_RECONSTRUCTION_DEPTH"],"enum":["SnapshotPolicy"],"struct":["CacheMetrics","HistoricalStats","HistoricalStorage","HookMetricsSnapshot","RetentionPolicy"],"type":["PreAnchorHook"]};

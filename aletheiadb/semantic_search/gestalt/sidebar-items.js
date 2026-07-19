@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["GestaltMatcher","Match","Pattern","PatternEdge","PatternNode","VectorConstraint"]};

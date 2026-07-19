@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_REVISION_LIMIT","MAX_REVISION_LIMIT"],"enum":["RevisionClass"],"struct":["BeliefRevisionLog","BeliefRevisions","PropertyChange","Revision","RevisionOptions"]};

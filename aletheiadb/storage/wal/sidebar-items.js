@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["concurrent","concurrent_system","durability","entry","flush_coordinator","group_commit","lsn_allocator","ring_buffer","segment_reader","serialization","stripe"]};

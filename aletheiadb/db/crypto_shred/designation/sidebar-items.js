@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RESERVED_KEY_PREFIX","SHRED_KEY_PREFIX"],"enum":["DesignationTarget"],"fn":["any_should_seal","is_reserved_key"]};

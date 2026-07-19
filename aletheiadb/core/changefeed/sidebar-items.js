@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ChangeType","EntityKind"],"struct":["ChangeFeedPage","ChangeFeedQuery","ChangeRecord"]};

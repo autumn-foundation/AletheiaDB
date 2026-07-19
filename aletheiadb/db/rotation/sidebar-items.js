@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["finalize_resumed_cold_rotation","finalize_resumed_subject_keyring_rotation","finalize_resumed_wal_rotation","install_pending_wal_generations","resume_pending_rotation"],"struct":["RotationReport"]};

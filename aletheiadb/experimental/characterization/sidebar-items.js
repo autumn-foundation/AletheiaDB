@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["archetype","graph_context","gravity","kaleidoscope","papyrus","prism","starlight","sybil","synapse"]};

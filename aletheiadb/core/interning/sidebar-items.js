@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COMMON_STRINGS","DEFAULT_MAX_INTERNED_STRINGS","MAX_INTERNED_STRINGS_ENV"],"static":["GLOBAL_INTERNER"],"struct":["InternedString","StringInterner"]};

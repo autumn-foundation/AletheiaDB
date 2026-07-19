@@ -1,0 +1,52 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Named snapshots for reproducible reads (Issue #3370). Named snapshots for reproducible reads (Issue #3370)."><title>aletheiadb::db::snapshot - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module snapshot</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module snapshot</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#a-snapshot-is-a-coordinate-not-a-held-resource" title="A snapshot is a coordinate, not a held resource">A snapshot is a coordinate, not a held resource</a></li><li><a href="#defaulting-the-coordinate-now" title="Defaulting the coordinate (“now”)">Defaulting the coordinate (“now”)</a></li><li><a href="#scope-this-wave-is-rust-api-only" title="Scope (this wave is Rust-API-only)">Scope (this wave is Rust-API-only)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>db</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">db</a></div><h1>Module <span>snapshot</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/db/snapshot.rs.html#1-1058">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Named snapshots for reproducible reads (Issue #3370).
+Named snapshots for reproducible reads (Issue #3370).</p>
+<p>A <em>named snapshot</em> pins a human-readable name to a bi-temporal coordinate
+<code>(valid_time, transaction_time)</code>. Reads issued through the resulting
+<a href="struct.Snapshot.html" title="struct aletheiadb::db::snapshot::Snapshot"><code>Snapshot</code></a> handle are evaluated at that coordinate via the deterministic
+historical (<code>*_at_time</code>) read path, so the same handle returns identical
+results regardless of writes that land afterward.</p>
+<h2 id="a-snapshot-is-a-coordinate-not-a-held-resource"><a class="doc-anchor" href="#a-snapshot-is-a-coordinate-not-a-held-resource">§</a>A snapshot is a coordinate, not a held resource</h2>
+<p>Creating a snapshot records two timestamps in a small sidecar registry. It
+<strong>pins no storage</strong> and adds no lasting overhead to the write path
+(<code>create_node</code>/<code>create_edge</code> never touch the registry). Creation itself
+takes the commit-clock lock (<code>current_timestamp</code>) just long enough to copy a
+single <code>Timestamp</code> — nanosecond-scale contention on the hot commit path, not
+literally zero — so it is effectively free but not a true no-op against
+concurrent committers. This mirrors the #3360 cursor, which likewise
+captures a <code>(vt, tt)</code> pair once and re-reads deterministically. The tradeoff
+is that a snapshot enjoys no retention guarantee: if the versions it observes
+are later evicted (cold tier not configured, or history truncated) a read
+through the handle can return “not found” for a fact that was visible at
+creation. This is the same visibility caveat that governs <code>temporal_extent</code>
+(#3238) and every other point-in-time read.</p>
+<p>A snapshot <strong>created at an instant that races an in-flight commit</strong> inherits
+the engine’s standard committed-but-not-yet-applied visibility window: the
+same caveat that #3225 / #3236 point-in-time reads carry. Once created, the
+coordinate is fixed and every read through it is deterministic.</p>
+<h2 id="defaulting-the-coordinate-now"><a class="doc-anchor" href="#defaulting-the-coordinate-now">§</a>Defaulting the coordinate (“now”)</h2>
+<p><a href="../struct.AletheiaDB.html#method.create_snapshot" title="method aletheiadb::db::AletheiaDB::create_snapshot"><code>AletheiaDB::create_snapshot</code></a> defaults the two dimensions <strong>differently</strong>,
+each to the correct notion of “now”:</p>
+<ul>
+<li><strong>transaction time</strong> = the database’s authoritative commit frontier (the
+value under <code>current_timestamp</code>). Because the commit path advances that
+frontier strictly monotonically under the same lock, every already-committed
+transaction has a transaction-time start <code>&lt;=</code> the frontier (visible) and
+every future commit a start strictly <code>&gt;</code> it (invisible) — a race-free
+monotonic pin. The frontier equals “now” for all committed data but is
+chosen over wallclock precisely for that race-safety.</li>
+<li><strong>valid time</strong> = wallclock <code>time::now()</code>, matching the engine’s “now”
+convention (<code>get_node_at_valid_time</code>, <code>find_nodes_at_time</code>). This ensures a
+default “now” snapshot sees every fact actually valid at creation, rather
+than silently excluding facts the (idle-lagging) frontier has not yet
+reached.</li>
+</ul>
+<p>So “as of the moment of creation” is precise: valid-time-now =
+wallclock-now, transaction-time-now = the commit frontier. Note the same
+future-valid caveat point-in-time reads carry: a fact whose <code>valid_from</code>
+lies in the future of the pinned valid time is not visible through it.</p>
+<h2 id="scope-this-wave-is-rust-api-only"><a class="doc-anchor" href="#scope-this-wave-is-rust-api-only">§</a>Scope (this wave is Rust-API-only)</h2>
+<p>Surfacing named snapshots through MCP and an <code>AS OF SNAPSHOT &lt;name&gt;</code> query
+DDL clause is a deliberately coordinated follow-up; this module adds only
+the Rust API, registry, and durable persistence.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.NamedSnapshot.html" title="struct aletheiadb::db::snapshot::NamedSnapshot">Named<wbr>Snapshot</a></dt><dd>A named, reproducible bi-temporal snapshot coordinate (Issue #3370).</dd><dt><a class="struct" href="struct.Snapshot.html" title="struct aletheiadb::db::snapshot::Snapshot">Snapshot</a></dt><dd>A read-only, borrowed handle that pins every read to a
+<a href="struct.NamedSnapshot.html" title="struct aletheiadb::db::snapshot::NamedSnapshot"><code>NamedSnapshot</code></a>’s bi-temporal coordinate (Issue #3370).</dd></dl></section></div></main></body></html>

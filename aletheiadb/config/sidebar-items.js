@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CONFIG_ENV","DATA_DIR_ENV"],"enum":["ConfigError"],"fn":["config_path_from_env","data_dir_from_env","durable_config_for_data_dir"],"struct":["AletheiaDBConfig","AletheiaDBConfigBuilder","HistoricalConfig","HistoricalConfigBuilder","VectorIndexConfig","VectorIndexConfigBuilder","WalConfig","WalConfigBuilder"]};

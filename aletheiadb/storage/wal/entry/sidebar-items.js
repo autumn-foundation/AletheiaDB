@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_WAL_ENTRY_SIZE"],"enum":["WalOperation"],"struct":["LSN","WalEntry"]};

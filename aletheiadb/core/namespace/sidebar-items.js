@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ALETHEIA_RESERVED_PREFIX","MAX_NAMESPACE_LEN","NAMESPACE_KEY","SHRED_RESERVED_PREFIX","UNRESOLVED_NAMESPACE"],"enum":["NamespaceError","NamespaceScope","ResolvedScope"],"fn":["intern_namespace","is_reserved_property_key","resolve_namespace_id"],"struct":["Namespace","NamespaceId"]};

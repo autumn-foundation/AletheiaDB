@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_RING_BUFFER_CAPACITY"],"struct":["BackpressureConfig","CompletionHandle","CompletionNotifier","PendingEntry","WalRingBuffer"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ShardingStrategy"],"struct":["EdgeCutAnalysis","EdgeTypeConfig","LatencyEstimates","ShardingSimulation","SimulationConfig","SimulationResult","StorageAnalysis"]};

@@ -1,0 +1,66 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AletheiaDB HTTP Server Binary"><title>aletheia_server - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="aletheia_server" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate aletheia_server</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../aletheia_server/index.html">aletheia_<wbr>server</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#usage" title="Usage">Usage</a></li><li><a href="#environment-variables" title="Environment Variables">Environment Variables</a></li><li><a href="#endpoints" title="Endpoints">Endpoints</a></li><li><a href="#security-notes" title="Security Notes">Security Notes</a></li><li><a href="#graceful-shutdown" title="Graceful Shutdown">Graceful Shutdown</a></li></ul><h3><a href="#functions">Crate Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>aletheia_<wbr>server</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/aletheia_server/server.rs.html#1-179">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AletheiaDB HTTP Server Binary</p>
+<p>This binary launches the AletheiaDB HTTP server, providing a REST API
+for interacting with the database.</p>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2><div class="example-wrap"><pre class="language-bash"><code># Run with default settings (port 1963, restrictive CORS)
+cargo run --bin aletheia-server --features http-server
+
+# Run with custom port
+ALETHEIADB_PORT=3000 cargo run --bin aletheia-server --features http-server
+
+# Run with permissive CORS (development only!)
+ALETHEIADB_CORS_PERMISSIVE=true cargo run --bin aletheia-server --features http-server
+
+# Health check (auth is required by default: pass a valid API key)
+curl -H &quot;x-api-key: $ALETHEIADB_BOOTSTRAP_ADMIN_KEY&quot; http://localhost:1963/status</code></pre></div><h2 id="environment-variables"><a class="doc-anchor" href="#environment-variables">§</a>Environment Variables</h2>
+<ul>
+<li><code>ALETHEIADB_PORT</code>: Port to listen on (default: 1963)</li>
+<li><code>ALETHEIADB_HOST</code>: Host to bind to (default: 0.0.0.0)</li>
+<li><code>ALETHEIADB_CORS_PERMISSIVE</code>: Set to “true” to allow any origin (default: false)</li>
+<li><code>ALETHEIADB_CORS_ORIGINS</code>: Comma-separated list of allowed origins</li>
+<li><code>ALETHEIADB_CONFIG</code>: Path to a TOML config file consumed by
+[<code>AletheiaDBConfig::from_toml_file</code>]. Takes precedence over
+<code>ALETHEIADB_DATA_DIR</code>.</li>
+<li><code>ALETHEIADB_DATA_DIR</code>: Directory for WAL + index persistence. When set,
+the server persists state across restarts. When unset (and <code>ALETHEIADB_CONFIG</code>
+is also unset), runs in-memory (ephemeral — useful for demos, useless
+for production).</li>
+<li><code>ALETHEIADB_AUTH_MODE</code>: <code>required</code> (default) or <code>anonymous</code>. In
+<code>required</code> mode every request must present a valid API key
+(<code>Authorization: Bearer &lt;key&gt;</code> or <code>x-api-key</code>), and the server refuses
+to start with zero credentials. <code>anonymous</code> disables authentication
+entirely (explicit opt-in; a prominent warning is logged). Invalid
+values fall back to <code>required</code> (fail-closed) with a warning.</li>
+<li><code>ALETHEIADB_BOOTSTRAP_ADMIN_KEY</code>: Plaintext admin key installed at
+startup as principal <code>bootstrap-admin</code> (role <code>admin</code>). Memory-only —
+re-supply it on every start, or use it once to mint persisted keys via
+<code>POST /admin/keys</code> (persisted under <code>{data_dir}/auth/keys.json</code> when a
+data dir is configured).</li>
+</ul>
+<h2 id="endpoints"><a class="doc-anchor" href="#endpoints">§</a>Endpoints</h2>
+<p>All AletheiaDB endpoints require a credential in <code>required</code> mode
+(<code>Authorization: Bearer &lt;key&gt;</code> or <code>x-api-key</code>); see
+<code>docs/guides/access-control-matrix.md</code> for role classes.</p>
+<ul>
+<li><code>GET /status</code> - Health check endpoint (metrics class), returns
+<code>{"status": "healthy"}</code></li>
+<li><code>POST /query</code> - JSON query API (<code>find_node</code>, <code>create_node</code>, bulk ops,
+<code>execute_query</code>, …); read or write class per operation</li>
+<li><code>POST /admin/keys</code> - Mint an API key (admin class)</li>
+<li><code>GET /admin/keys</code> - List principals, masked (admin class)</li>
+<li><code>POST /admin/keys/revoke</code> - Revoke a key by principal id (admin class)</li>
+</ul>
+<p>The autumn-web framework additionally serves unauthenticated
+health/metadata routes (<code>/health</code>, <code>/live</code>, <code>/ready</code>, <code>/startup</code>,
+<code>/actuator/health|info|metrics|a11y|ui</code>); its sensitive actuator group is
+force-disabled in every profile. See
+<code>docs/guides/security-quickstart.md</code>.</p>
+<h2 id="security-notes"><a class="doc-anchor" href="#security-notes">§</a>Security Notes</h2>
+<ul>
+<li>By default, CORS is restrictive (only localhost:3000 allowed)</li>
+<li>Set <code>ALETHEIADB_CORS_ORIGINS</code> to configure allowed origins for production</li>
+<li>Only use <code>ALETHEIADB_CORS_PERMISSIVE=true</code> in development environments</li>
+</ul>
+<h2 id="graceful-shutdown"><a class="doc-anchor" href="#graceful-shutdown">§</a>Graceful Shutdown</h2>
+<p>The server handles SIGTERM and SIGINT signals for graceful shutdown,
+allowing in-flight requests to complete before terminating.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.main.html" title="fn aletheia_server::main">main</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.parse_bootstrap_admin_key.html" title="fn aletheia_server::parse_bootstrap_admin_key">parse_<wbr>bootstrap_<wbr>admin_<wbr>key</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Parse <code>ALETHEIADB_BOOTSTRAP_ADMIN_KEY</code> into a redacted secret, if set.</dd><dt><a class="fn" href="fn.parse_cors_config.html" title="fn aletheia_server::parse_cors_config">parse_<wbr>cors_<wbr>config</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Parse CORS configuration from environment variables.</dd><dt><a class="fn" href="fn.parse_data_dir.html" title="fn aletheia_server::parse_data_dir">parse_<wbr>data_<wbr>dir</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Parse the data directory env var into an optional <code>PathBuf</code>.</dd><dt><a class="fn" href="fn.parse_host.html" title="fn aletheia_server::parse_host">parse_<wbr>host</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Parse host from environment variable.</dd><dt><a class="fn" href="fn.parse_port.html" title="fn aletheia_server::parse_port">parse_<wbr>port</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Parse port from environment variable with warning on invalid values.</dd></dl></section></div></main></body></html>

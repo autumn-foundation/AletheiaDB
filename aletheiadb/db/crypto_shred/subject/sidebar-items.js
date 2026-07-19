@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_SUBJECT_ID_LEN","SUBJECT_KEY_LEN"],"struct":["SubjectId","SubjectKey"]};

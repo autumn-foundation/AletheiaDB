@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_ALIGN_INSTANTS"],"enum":["AlignCoordinate","AlignError","AlignMode"],"fn":["align_events","align_overlap"],"struct":["AlignedRow","ChangePoint","Participant","PresenceIntervals","Timeline"]};

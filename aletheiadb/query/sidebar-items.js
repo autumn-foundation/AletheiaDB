@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["ast","builder","converter","executor","hybrid","ir","lexer","parser","plan","planner","read_only","result","semantic_pathfinding","temporal_join","temporal_window","traits"]};

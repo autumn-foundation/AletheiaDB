@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Semantic Navigator"><title>aletheiadb::semantic_search::semantic_navigator - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module semantic_navigator</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module semantic_<wbr>navigator</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#how-it-works" title="How it works">How it works</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>semantic_<wbr>search</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">semantic_search</a></div><h1>Module <span>semantic_<wbr>navigator</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/semantic_search/semantic_navigator.rs.html#1-539">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Semantic Navigator</p>
+<p>This experimental module implements A* pathfinding on the graph using vector similarity
+as the heuristic and cost function. It enables finding “semantically smooth” paths
+between concepts, prioritizing edges that maintain semantic coherence.</p>
+<h2 id="how-it-works"><a class="doc-anchor" href="#how-it-works">§</a>How it works</h2>
+<p>The navigator treats the graph as a state space where:</p>
+<ul>
+<li><strong>Nodes</strong> are states.</li>
+<li><strong>Edges</strong> are transitions.</li>
+<li><strong>Cost</strong> of a transition (A -&gt; B) is <code>1.0 - cosine_similarity(A, B)</code>.</li>
+<li><strong>Heuristic</strong> (h-score) for a node N to goal G is <code>1.0 - cosine_similarity(N, G)</code>.</li>
+</ul>
+<p>This approach favors paths where adjacent nodes are semantically similar, and where
+the path moves progressively closer to the goal’s semantic meaning.</p>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// 1. Setup database
+</span><span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+
+<span class="comment">// 2. Create nodes with embeddings
+// A: "King" -&gt; B: "Queen" -&gt; C: "Royalty"
+// ( Simplified vectors for illustration )
+</span><span class="kw">let </span>vec_a = <span class="macro">vec!</span>[<span class="number">1.0</span>, <span class="number">0.0</span>];
+<span class="kw">let </span>vec_b = <span class="macro">vec!</span>[<span class="number">0.9</span>, <span class="number">0.1</span>]; <span class="comment">// Similar to A
+</span><span class="kw">let </span>vec_c = <span class="macro">vec!</span>[<span class="number">0.8</span>, <span class="number">0.2</span>]; <span class="comment">// Similar to B
+
+</span><span class="kw">let </span>a = db.create_node(<span class="string">"Word"</span>, PropertyMapBuilder::new().insert_vector(<span class="string">"vec"</span>, <span class="kw-2">&amp;</span>vec_a).build())<span class="question-mark">?</span>;
+<span class="kw">let </span>b = db.create_node(<span class="string">"Word"</span>, PropertyMapBuilder::new().insert_vector(<span class="string">"vec"</span>, <span class="kw-2">&amp;</span>vec_b).build())<span class="question-mark">?</span>;
+<span class="kw">let </span>c = db.create_node(<span class="string">"Word"</span>, PropertyMapBuilder::new().insert_vector(<span class="string">"vec"</span>, <span class="kw-2">&amp;</span>vec_c).build())<span class="question-mark">?</span>;
+
+db.create_edge(a, b, <span class="string">"RELATED"</span>, Default::default())<span class="question-mark">?</span>;
+db.create_edge(b, c, <span class="string">"RELATED"</span>, Default::default())<span class="question-mark">?</span>;
+
+<span class="comment">// 3. Find semantic path
+</span><span class="kw">let </span>navigator = SemanticNavigator::new(<span class="kw-2">&amp;</span>db);
+<span class="kw">let </span>path = navigator.find_path(a, c, <span class="string">"vec"</span>)<span class="question-mark">?</span>;
+
+<span class="macro">assert_eq!</span>(path, <span class="macro">vec!</span>[a, b, c]);</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SemanticNavigator.html" title="struct aletheiadb::semantic_search::semantic_navigator::SemanticNavigator">Semantic<wbr>Navigator</a></dt><dd>A navigator that finds semantically meaningful paths through the graph.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PathSearchOutcome.html" title="enum aletheiadb::semantic_search::semantic_navigator::PathSearchOutcome">Path<wbr>Search<wbr>Outcome</a></dt><dd>Outcome of a bounded semantic path search.</dd></dl></section></div></main></body></html>

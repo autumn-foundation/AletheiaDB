@@ -1,0 +1,60 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Computes cosine similarity between pre-normalized (unit) vectors."><title>cosine_similarity_normalized in aletheiadb::core::vector::ops - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">cosine_similarity_normalized</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">cosine_<wbr>similarity_<wbr>normalized</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#performance" title="Performance">Performance</a></li><li><a href="#arguments" title="Arguments">Arguments</a></li><li><a href="#returns" title="Returns">Returns</a></li><li><a href="#panics-debug-mode" title="Panics (Debug Mode)">Panics (Debug Mode)</a></li><li><a href="#safety-contract" title="Safety Contract">Safety Contract</a></li><li><a href="#example" title="Example">Example</a></li><li><a href="#when-to-use" title="When to Use">When to Use</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>core::<wbr>vector::<wbr>ops</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">core</a>::<wbr><a href="../index.html">vector</a>::<wbr><a href="index.html">ops</a></div><h1>Function <span class="fn">cosine_<wbr>similarity_<wbr>normalized</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/core/vector/ops.rs.html#243-281">Source</a> </span></div><pre class="rust item-decl"><code>pub fn cosine_similarity_normalized(a: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>], b: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>]) -&gt; <a class="type" href="../../error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.f32.html">f32</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Computes cosine similarity between pre-normalized (unit) vectors.</p>
+<p>This is an optimized version of <a href="fn.cosine_similarity.html" title="fn aletheiadb::core::vector::ops::cosine_similarity"><code>cosine_similarity</code></a> for vectors that have
+already been L2-normalized (i.e., <code>||a|| = ||b|| = 1.0</code>). Since the magnitudes
+are known to be 1.0, this function skips the magnitude computation entirely
+and simply computes the dot product.</p>
+<h2 id="performance"><a class="doc-anchor" href="#performance">§</a>Performance</h2>
+<p>This function provides approximately <strong>2x speedup</strong> compared to the general
+<a href="fn.cosine_similarity.html" title="fn aletheiadb::core::vector::ops::cosine_similarity"><code>cosine_similarity</code></a> function because it:</p>
+<ul>
+<li>Skips computing <code>||a||²</code> and <code>||b||²</code></li>
+<li>Skips the <code>sqrt()</code> call for the magnitude product</li>
+<li>Skips the division (or rather, divides by 1.0 implicitly)</li>
+</ul>
+<h2 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h2>
+<ul>
+<li><code>a</code> - First unit vector (must be L2-normalized: <code>||a|| = 1.0</code>)</li>
+<li><code>b</code> - Second unit vector (must be L2-normalized: <code>||b|| = 1.0</code>)</li>
+</ul>
+<h2 id="returns"><a class="doc-anchor" href="#returns">§</a>Returns</h2>
+<ul>
+<li><code>Ok(f32)</code> - The cosine similarity (equivalent to dot product for unit vectors)</li>
+<li><code>Err</code> - If vectors have different dimensions</li>
+</ul>
+<h2 id="panics-debug-mode"><a class="doc-anchor" href="#panics-debug-mode">§</a>Panics (Debug Mode)</h2>
+<p>In debug builds, this function asserts that both vectors are approximately
+unit length. If a vector’s magnitude differs from 1.0 by more than 1e-4,
+the assertion will fail.</p>
+<h2 id="safety-contract"><a class="doc-anchor" href="#safety-contract">§</a>Safety Contract</h2>
+<p>The caller <strong>must ensure</strong> that both vectors are L2-normalized. If this
+precondition is violated:</p>
+<ul>
+<li>Results will be mathematically incorrect</li>
+<li>The debug assertion will catch this in debug builds</li>
+<li>Release builds will silently produce wrong results</li>
+</ul>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::core::vector::cosine_similarity_normalized;
+
+<span class="comment">// Pre-normalize vectors
+</span><span class="kw">let </span>a = <span class="macro">vec!</span>[<span class="number">1.0</span>, <span class="number">0.0</span>, <span class="number">0.0</span>];  <span class="comment">// Already unit length
+</span><span class="kw">let </span>b_raw = <span class="macro">vec!</span>[<span class="number">1.0</span>, <span class="number">1.0</span>, <span class="number">0.0</span>];
+<span class="kw">let </span>b_mag = (b_raw.iter().map(|x| x * x).sum::&lt;f32&gt;()).sqrt();
+<span class="kw">let </span>b: Vec&lt;f32&gt; = b_raw.iter().map(|x| x / b_mag).collect();
+
+<span class="kw">let </span>sim = cosine_similarity_normalized(<span class="kw-2">&amp;</span>a, <span class="kw-2">&amp;</span>b).unwrap();
+<span class="comment">// sim ≈ cos(45°) ≈ 0.707
+</span><span class="macro">assert!</span>((sim - <span class="number">0.707</span>).abs() &lt; <span class="number">0.01</span>);</code></pre></div><h2 id="when-to-use"><a class="doc-anchor" href="#when-to-use">§</a>When to Use</h2>
+<p>Use this function when:</p>
+<ul>
+<li>You pre-normalize vectors at ingestion time (common practice)</li>
+<li>You’re doing many similarity comparisons against the same query vector</li>
+<li>Performance is critical and you can guarantee unit vectors</li>
+</ul>
+<p>Use <a href="fn.cosine_similarity.html" title="fn aletheiadb::core::vector::ops::cosine_similarity"><code>cosine_similarity</code></a> instead when:</p>
+<ul>
+<li>Vectors may not be normalized</li>
+<li>You’re unsure about vector magnitudes</li>
+<li>Correctness is more important than performance</li>
+</ul>
+</div></details></section></div></main></body></html>

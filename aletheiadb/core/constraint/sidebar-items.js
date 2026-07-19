@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_CONFORMANCE_SAMPLE_IDS"],"enum":["DeclaredType","ValueKey"],"struct":["ConformanceReport","ConformanceViolation","ConstraintRegistry","PropertyConstraint","PropertyConstraintDescriptor","ReservationGuard","ReservationKey","SchemaConstraintDescriptor","UniqueConstraintDescriptor"]};

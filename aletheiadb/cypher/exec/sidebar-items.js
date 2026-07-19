@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CypherExecution"],"fn":["needs_multi_binding","plan_cypher","plan_cypher_with_params"]};

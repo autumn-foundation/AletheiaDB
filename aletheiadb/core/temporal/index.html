@@ -1,0 +1,65 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Temporal primitives for bi-temporal graph database."><title>aletheiadb::core::temporal - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module temporal</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module temporal</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-bi-temporal-story" title="The Bi-Temporal Story">The Bi-Temporal Story</a></li><li><a href="#gotchas--corner-cases-" title="Gotchas &#38; Corner Cases ⚠️">Gotchas &amp; Corner Cases ⚠️</a></li><li><a href="#common-pitfalls-" title="Common Pitfalls 🕳️">Common Pitfalls 🕳️</a><ul><li><a href="#-off-by-one-range-exclusion" title="❌ OFF-BY-ONE: Range Exclusion">❌ OFF-BY-ONE: Range Exclusion</a></li><li><a href="#-max_valid_timestamp-violation" title="❌ MAX_VALID_TIMESTAMP Violation">❌ MAX_VALID_TIMESTAMP Violation</a></li></ul></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">core</a></div><h1>Module <span>temporal</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/core/temporal.rs.html#1-2037">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Temporal primitives for bi-temporal graph database.</p>
+<p>This module implements the core temporal types that enable bi-temporality:</p>
+<ul>
+<li>Valid time: when facts were true in the real world</li>
+<li>Transaction time: when facts were recorded in the database</li>
+</ul>
+<p>Every graph element (node/edge version) has a BiTemporalInterval that tracks
+both dimensions of time.</p>
+<h2 id="the-bi-temporal-story"><a class="doc-anchor" href="#the-bi-temporal-story">§</a>The Bi-Temporal Story</h2>
+<p>Imagine a company updates an employee’s salary retroactively.
+The <code>Valid Time</code> captures <em>when</em> that raise actually goes into effect
+in the real world. But what if someone queries the database asking,
+“What was their salary reported <em>yesterday</em>?”</p>
+<p>By tracking <code>Transaction Time</code>, the database knows <em>when</em> it learned the fact.
+This allows AletheiaDB to accurately reconstruct what the database “knew”
+at any arbitrary point in history, protecting against overwritten realities.</p>
+<h2 id="gotchas--corner-cases-"><a class="doc-anchor" href="#gotchas--corner-cases-">§</a>Gotchas &amp; Corner Cases ⚠️</h2>
+<p>Temporal logic is tricky. Here are common pitfalls to avoid:</p>
+<ol>
+<li>
+<p><strong>MAX_VALID_TIMESTAMP</strong>: Timestamps are capped at <a href="constant.MAX_VALID_TIMESTAMP.html" title="constant aletheiadb::core::temporal::MAX_VALID_TIMESTAMP"><code>MAX_VALID_TIMESTAMP</code></a> (<code>i64::MAX - 1000</code>).
+Attempts to create a <code>TimeRange</code> exceeding this will fail. This prevents DoS attacks and
+ensures reserved space for sentinels.</p>
+</li>
+<li>
+<p><strong>Range Containment</strong>: <code>TimeRange::contains_range(other)</code> is reflexive (a range contains itself)
+and handles exact matches. Be careful with “off-by-one” errors at boundaries.</p>
+<ul>
+<li><code>[100, 200)</code> contains <code>[100, 200)</code> -&gt; true</li>
+<li><code>[100, 200)</code> contains <code>[100, 101)</code> -&gt; true</li>
+</ul>
+</li>
+<li>
+<p><strong>Visibility Logic</strong>: <a href="struct.BiTemporalInterval.html#method.is_visible_at" title="method aletheiadb::core::temporal::BiTemporalInterval::is_visible_at"><code>BiTemporalInterval::is_visible_at</code></a> requires <em>both</em> dimensions to be satisfied.
+A fact might be valid in the real world (valid time) but not yet known to the database
+(transaction time) at a specific query point.</p>
+</li>
+<li>
+<p><strong>Half-Open Intervals</strong>: All ranges are <code>[start, end)</code>, meaning <code>start</code> is inclusive and
+<code>end</code> is exclusive. <code>contains(end)</code> will always return false.</p>
+</li>
+</ol>
+<h2 id="common-pitfalls-"><a class="doc-anchor" href="#common-pitfalls-">§</a>Common Pitfalls 🕳️</h2><h3 id="-off-by-one-range-exclusion"><a class="doc-anchor" href="#-off-by-one-range-exclusion">§</a>❌ OFF-BY-ONE: Range Exclusion</h3>
+<p>The end of a <code>TimeRange</code> is <strong>exclusive</strong>.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>start = time::from_secs(<span class="number">100</span>);
+<span class="kw">let </span>end = time::from_secs(<span class="number">200</span>);
+<span class="kw">let </span>range = TimeRange::new(start, end)<span class="question-mark">?</span>;
+
+<span class="comment">// ❌ Pitfall: Expecting the end timestamp to be included
+</span><span class="macro">assert_eq!</span>(range.contains(end), <span class="bool-val">false</span>);
+
+<span class="comment">// ✅ Correct: Use end-1 or check &lt; end
+</span><span class="macro">assert_eq!</span>(range.contains(time::from_secs(<span class="number">199</span>)), <span class="bool-val">true</span>);</code></pre></div><h3 id="-max_valid_timestamp-violation"><a class="doc-anchor" href="#-max_valid_timestamp-violation">§</a>❌ MAX_VALID_TIMESTAMP Violation</h3>
+<p>Timestamps cannot exceed <code>MAX_VALID_TIMESTAMP</code>.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// ❌ Pitfall: Trying to create a timestamp &gt; MAX_VALID_TIMESTAMP
+</span><span class="kw">let </span>too_big_val = i64::MAX;
+<span class="comment">// This will return an error (except for internal sentinels)
+</span><span class="macro">assert!</span>(HybridTimestamp::new(too_big_val, <span class="number">0</span>).is_err());
+
+<span class="comment">// ✅ Correct: Use TimeRange::from(start) for open ranges
+</span><span class="kw">let </span>start = time::from_secs(<span class="number">100</span>);
+<span class="kw">let </span>range = TimeRange::from(start); <span class="comment">// Automatically uses TIMESTAMP_MAX
+</span><span class="macro">assert!</span>(range.is_current());</code></pre></div></div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="time/index.html" title="mod aletheiadb::core::temporal::time">time</a></dt><dd>Helper functions for working with timestamps.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.BiTemporalInterval.html" title="struct aletheiadb::core::temporal::BiTemporalInterval">BiTemporal<wbr>Interval</a></dt><dd>Bi-temporal interval tracking both valid time and transaction time.</dd><dt><a class="struct" href="struct.TimeRange.html" title="struct aletheiadb::core::temporal::TimeRange">Time<wbr>Range</a></dt><dd>Represents a continuous range of time [start, end).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_VALID_TIMESTAMP.html" title="constant aletheiadb::core::temporal::MAX_VALID_TIMESTAMP">MAX_<wbr>VALID_<wbr>TIMESTAMP</a></dt><dd>Maximum valid timestamp wallclock value for user data.</dd><dt><a class="constant" href="constant.TIMESTAMP_MAX.html" title="constant aletheiadb::core::temporal::TIMESTAMP_MAX">TIMESTAMP_<wbr>MAX</a></dt><dd>Sentinel value representing “infinity” or “current” timestamp.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.Timestamp.html" title="type aletheiadb::core::temporal::Timestamp">Timestamp</a></dt><dd>Timestamp represented as Hybrid Logical Clock (HLC).</dd></dl></section></div></main></body></html>

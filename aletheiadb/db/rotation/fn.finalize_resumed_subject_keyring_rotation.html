@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Finalize a startup- or live-resumed crypto-shred SUBJECT-KEYRING re-wrap (Slice 5), completing the re-wrap pass and clearing the rotation ledger."><title>finalize_resumed_subject_keyring_rotation in aletheiadb::db::rotation - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">finalize_resumed_subject_keyring_rotation</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">finalize_<wbr>resumed_<wbr>subject_<wbr>keyring_<wbr>rotation</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#crash-caveat-keep-the-old-mek-available-until-this-completes" title="Crash caveat: keep the OLD MEK available until this completes">Crash caveat: keep the OLD MEK available until this completes</a></li><li><a href="#errors" title="Errors">Errors</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>db::<wbr>rotation</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">db</a>::<wbr><a href="index.html">rotation</a></div><h1>Function <span class="fn">finalize_<wbr>resumed_<wbr>subject_<wbr>keyring_<wbr>rotation</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/db/rotation.rs.html#2811-2852">Source</a> </span></div><pre class="rust item-decl"><code>pub fn finalize_resumed_subject_keyring_rotation(
+    manager: &amp;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;<a class="struct" href="../../storage/index_persistence/loader/struct.IndexPersistenceManager.html" title="struct aletheiadb::storage::index_persistence::loader::IndexPersistenceManager">IndexPersistenceManager</a>&gt;,
+    enc_cfg: &amp;<a class="struct" href="../../encryption/config/struct.EncryptionConfig.html" title="struct aletheiadb::encryption::config::EncryptionConfig">EncryptionConfig</a>,
+    crypto_shred: &amp;<a class="struct" href="../crypto_shred/struct.CryptoShredState.html" title="struct aletheiadb::db::crypto_shred::CryptoShredState">CryptoShredState</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Finalize a startup- or live-resumed crypto-shred SUBJECT-KEYRING re-wrap
+(Slice 5), completing the re-wrap pass and clearing the rotation ledger.</p>
+<p>The subject keyring is the LAST layer to settle in a full-MEK rotation: it
+runs after index / WAL / cold have all been re-keyed (each of those finalize
+passes now defers the ledger clear while <code>layer.subject_keyring</code> is
+<code>Pending</code>), so this function performs the final ledger clear. It is
+idempotent and resumable:</p>
+<ol>
+<li>re-derive the OLD subject-wrap cipher from the CURRENT (live) MEK — during
+a resume-under-old-key the encryption config still points at the old key —
+and the NEW subject-wrap cipher from the ledger’s recorded new source;</li>
+<li>run [<code>CryptoShredState::rewrap_keyring</code>], which skips erased subjects and
+entries already at the target version, so a crash mid-pass resumes with no
+double-wrap and no error;</li>
+<li>mark <code>layer.subject_keyring=complete</code> and clear the ledger.</li>
+</ol>
+<p>A no-op (<code>Ok(())</code>) when no ledger is present, the layer is not <code>Pending</code>, or
+the direction is <code>enable</code> — so <code>db::config</code> and the live resume can call it
+unconditionally.</p>
+<h2 id="crash-caveat-keep-the-old-mek-available-until-this-completes"><a class="doc-anchor" href="#crash-caveat-keep-the-old-mek-available-until-this-completes">§</a>Crash caveat: keep the OLD MEK available until this completes</h2>
+<p>Identical in spirit to the cold layer’s contract
+(<a href="fn.finalize_resumed_cold_rotation.html" title="fn aletheiadb::db::rotation::finalize_resumed_cold_rotation"><code>finalize_resumed_cold_rotation</code></a>): while <code>layer.subject_keyring</code> is
+<code>Pending</code>, the OLD MEK must remain the live encryption source so the old
+subject-wrap cipher can unwrap the still-old-generation per-subject DEKs
+during this resumed pass. If the operator instead reopens under the NEW key
+alone while the re-wrap crashed mid-pass, the surviving old-generation wrapped
+DEKs can no longer be unwrapped — a <strong>loud</strong> AEAD authentication failure, so
+the pass returns <code>Err</code> rather than silently corrupting the keyring. Recovery
+is lossless: reopen once under the OLD key so this resume completes (re-wrapping
+every entry at the new generation and clearing the ledger), after which the new
+key alone unwraps everything. The fault is availability-only, never data loss.</p>
+<h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<p>Returns an error if the old or new MEK cannot be sourced, or the re-wrap pass
+fails (a genuine wrong/absent key surfaces loudly; the ledger is left
+<code>Pending</code> for a later resume).</p>
+</div></details></section></div></main></body></html>

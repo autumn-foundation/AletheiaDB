@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["load_manifest","load_manifest_with_cipher","save_manifest","save_manifest_with_cipher"]};

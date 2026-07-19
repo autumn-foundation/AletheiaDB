@@ -1,0 +1,153 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Observable pattern for storage events."><title>aletheiadb::core::observer - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module observer</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module observer</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#example" title="Example">Example</a></li><li><a href="#hooks-vs-observers-when-to-use-each" title="Hooks vs Observers: When to Use Each">Hooks vs Observers: When to Use Each</a><ul><li><a href="#post-commit-observers-this-module" title="Post-Commit Observers (This Module)">Post-Commit Observers (This Module)</a></li><li><a href="#pre-anchor-hooks-see-historicalpreanchorhook" title="Pre-Anchor Hooks (See `historical::PreAnchorHook`)">Pre-Anchor Hooks (See <code>historical::PreAnchorHook</code>)</a></li><li><a href="#architecture-hybrid-pattern-vs-047" title="Architecture: Hybrid Pattern (VS-047)">Architecture: Hybrid Pattern (VS-047)</a></li><li><a href="#decision-tree-which-pattern-to-use" title="Decision Tree: Which Pattern to Use?">Decision Tree: Which Pattern to Use?</a></li><li><a href="#example-temporal-vector-integration-vs-047" title="Example: Temporal Vector Integration (VS-047)">Example: Temporal Vector Integration (VS-047)</a></li><li><a href="#key-takeaways" title="Key Takeaways">Key Takeaways</a></li></ul></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">core</a></div><h1>Module <span>observer</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/core/observer.rs.html#1-701">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Observable pattern for storage events.</p>
+<p>This module provides an event-driven architecture for components to react to
+storage operations without tight coupling. Components implement the <code>StorageObserver</code>
+trait to receive notifications about anchors, deletes, checkpoints, and other events.</p>
+<h2 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h2><div class="example-wrap"><pre class="language-text"><code>┌─────────────────────┐
+│ HistoricalStorage   │
+│  (Event Publisher)  │
+└──────────┬──────────┘
+           │ notify()
+           │
+    ┌──────┴───────┬──────────────┐
+    │              │              │
+┌───▼────┐   ┌────▼─────┐   ┌───▼──────┐
+│ Vector │   │ Metrics  │   │  WAL     │
+│ Index  │   │ System   │   │ Logger   │
+└────────┘   └──────────┘   └──────────┘
+  (Observer)   (Observer)     (Observer)</code></pre></div><h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::core::observer::{StorageObserver, StorageEvent};
+<span class="kw">use </span>aletheiadb::storage::historical::HistoricalStorage;
+<span class="kw">use </span>std::sync::Arc;
+
+<span class="kw">struct </span>MetricsCollector;
+
+<span class="kw">impl </span>StorageObserver <span class="kw">for </span>MetricsCollector {
+    <span class="kw">fn </span>on_event(<span class="kw-2">&amp;</span><span class="self">self</span>, event: <span class="kw-2">&amp;</span>StorageEvent) -&gt; aletheiadb::core::error::Result&lt;()&gt; {
+        <span class="kw">match </span>event {
+            StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } =&gt; {
+                <span class="macro">println!</span>(<span class="string">"Anchor created: {} at {}"</span>, version_id, timestamp);
+            }
+            <span class="kw">_ </span>=&gt; {}
+        }
+        <span class="prelude-val">Ok</span>(())
+    }
+}
+
+<span class="kw">let </span><span class="kw-2">mut </span>storage = HistoricalStorage::new();
+storage.add_observer(Arc::new(MetricsCollector));</code></pre></div><h2 id="hooks-vs-observers-when-to-use-each"><a class="doc-anchor" href="#hooks-vs-observers-when-to-use-each">§</a>Hooks vs Observers: When to Use Each</h2>
+<p>AletheiaDB uses <strong>both</strong> pre-anchor hooks and post-commit observers as complementary
+patterns for storage event handling. Understanding when to use each is critical for
+correct integration.</p>
+<h3 id="post-commit-observers-this-module"><a class="doc-anchor" href="#post-commit-observers-this-module">§</a>Post-Commit Observers (This Module)</h3>
+<p><strong>When</strong>: AFTER the storage operation completes
+<strong>Purpose</strong>: Notifications for metrics, logging, monitoring, auditing
+<strong>Returns</strong>: <code>Result&lt;()&gt;</code> - cannot return data to caller
+<strong>Characteristics</strong>:</p>
+<ul>
+<li>✅ Extensible: Multiple observers can subscribe to same events</li>
+<li>✅ Non-blocking: Observer errors don’t fail the storage operation</li>
+<li>✅ Decoupled: Observers don’t affect storage logic</li>
+<li>❌ Cannot return data: Can’t influence what gets stored</li>
+<li>❌ Post-commit: Data already persisted when observer fires</li>
+</ul>
+<p><strong>Use cases</strong>:</p>
+<ul>
+<li>Logging anchor creation events</li>
+<li>Collecting metrics (anchor count, delta count, etc.)</li>
+<li>Triggering background jobs (compaction, backup, etc.)</li>
+<li>Notifying monitoring systems</li>
+<li>Future: Triggering alerts, webhooks, etc.</li>
+</ul>
+<h3 id="pre-anchor-hooks-see-historicalpreanchorhook"><a class="doc-anchor" href="#pre-anchor-hooks-see-historicalpreanchorhook">§</a>Pre-Anchor Hooks (See <code>historical::PreAnchorHook</code>)</h3>
+<p><strong>When</strong>: BEFORE the storage operation (specifically before anchor creation)
+<strong>Purpose</strong>: Synchronize related state that must be atomically linked to anchors
+<strong>Returns</strong>: <code>Result&lt;Option&lt;T&gt;&gt;</code> - can return data (e.g., snapshot IDs)
+<strong>Characteristics</strong>:</p>
+<ul>
+<li>✅ Can return data: Returned values stored with the anchor</li>
+<li>✅ Strong consistency: No consistency window between hook and storage</li>
+<li>✅ Graceful degradation: Hook errors don’t block anchor creation</li>
+<li>❌ Single hook per entity type: Not extensible like observers</li>
+<li>❌ Must be fast: Blocks anchor creation until hook completes</li>
+</ul>
+<p><strong>Use cases</strong>:</p>
+<ul>
+<li>Creating vector snapshots synchronized with anchors (VS-047)</li>
+<li>Generating snapshot IDs for provenance tracking</li>
+<li>Creating auxiliary indexes that must be 1:1 with anchors</li>
+<li>Future: Checkpoint coordination, distributed transaction coordination</li>
+</ul>
+<h3 id="architecture-hybrid-pattern-vs-047"><a class="doc-anchor" href="#architecture-hybrid-pattern-vs-047">§</a>Architecture: Hybrid Pattern (VS-047)</h3>
+<p>For temporal vector integration, we use <strong>both</strong> patterns together:</p>
+<div class="example-wrap"><pre class="language-text"><code>┌─────────────────────────────────────────────────────┐
+│        HistoricalStorage.add_node_version()         │
+└─────────────────────────────────────────────────────┘
+                        │
+    ┌───────────────────┴───────────────────┐
+    │ Is Anchor?                            │
+    └───────────────────┬───────────────────┘
+                        │
+         ┌──────────────▼───────────────┐
+         │ BEFORE Storage                │
+         │ 1. Call pre_anchor_hook()     │
+         │ 2. Get snapshot_id            │
+         │ 3. Set in anchor data         │
+         └──────────────┬───────────────┘
+                        │
+         ┌──────────────▼───────────────┐
+         │ Storage                       │
+         │ Store anchor WITH snapshot_id │
+         └──────────────┬───────────────┘
+                        │
+         ┌──────────────▼───────────────┐
+         │ AFTER Storage                 │
+         │ 1. notify_observers()         │
+         │ 2. Observers react (metrics)  │
+         └───────────────────────────────┘</code></pre></div><h3 id="decision-tree-which-pattern-to-use"><a class="doc-anchor" href="#decision-tree-which-pattern-to-use">§</a>Decision Tree: Which Pattern to Use?</h3><div class="example-wrap"><pre class="language-text"><code>Does your component need to:
+├─ Return data to be stored with the anchor?
+│  └─ YES → Use Pre-Anchor Hook
+│     Example: Vector snapshot IDs, checkpoint IDs
+│
+└─ Just be notified after storage completes?
+   └─ YES → Use Post-Commit Observer
+      Example: Metrics, logging, monitoring, audit trails
+
+Need both? → Register both (hybrid pattern)
+  - Hook for data return (snapshot ID)
+  - Observer for notifications (metrics)</code></pre></div><h3 id="example-temporal-vector-integration-vs-047"><a class="doc-anchor" href="#example-temporal-vector-integration-vs-047">§</a>Example: Temporal Vector Integration (VS-047)</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code>
+<span class="comment">// Pre-Anchor Hook: Create snapshot BEFORE anchor storage, return ID
+</span><span class="kw">let </span>index = Arc::new(TemporalVectorIndex::new(config)<span class="question-mark">?</span>);
+<span class="kw">let </span>node_hook: PreAnchorHook = Arc::new({
+    <span class="kw">let </span>index = Arc::clone(<span class="kw-2">&amp;</span>index);
+    <span class="kw">move </span>|_entity_type, _entity_id, timestamp, _properties| {
+        <span class="comment">// Returns Option&lt;snapshot_id&gt; to be stored in anchor
+        </span>index.create_snapshot_for_anchor(timestamp)
+    }
+});
+
+<span class="kw">let </span><span class="kw-2">mut </span>storage = HistoricalStorage::new();
+storage.register_pre_node_anchor_hook(node_hook);
+
+<span class="comment">// Post-Commit Observer: Collect metrics AFTER anchor storage
+</span><span class="kw">struct </span>VectorMetricsObserver;
+<span class="kw">impl </span>StorageObserver <span class="kw">for </span>VectorMetricsObserver {
+    <span class="kw">fn </span>on_event(<span class="kw-2">&amp;</span><span class="self">self</span>, event: <span class="kw-2">&amp;</span>StorageEvent) -&gt; aletheiadb::core::error::Result&lt;()&gt; {
+        <span class="kw">if let </span>StorageEvent::NodeAnchorCreated { .. } = event {
+            <span class="comment">// Log metrics, update counters, etc.
+        </span>}
+        <span class="prelude-val">Ok</span>(())
+    }
+}
+
+storage.add_observer(Arc::new(VectorMetricsObserver));
+
+<span class="comment">// Result: Anchor stored with snapshot_id + observers notified</span></code></pre></div><h3 id="key-takeaways"><a class="doc-anchor" href="#key-takeaways">§</a>Key Takeaways</h3>
+<ol>
+<li><strong>Observers</strong> = Post-commit notifications (this module)</li>
+<li><strong>Hooks</strong> = Pre-storage data return (see <code>historical::PreAnchorHook</code>)</li>
+<li><strong>Both</strong> can coexist for complementary functionality</li>
+<li><strong>Observers</strong> are for extensibility, <strong>hooks</strong> are for consistency</li>
+<li>See <strong>ADR-0018</strong> for complete architecture and design rationale</li>
+</ol>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.StorageEvent.html" title="enum aletheiadb::core::observer::StorageEvent">Storage<wbr>Event</a></dt><dd>Events emitted by the storage layer.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.StorageObserver.html" title="trait aletheiadb::core::observer::StorageObserver">Storage<wbr>Observer</a></dt><dd>Observer trait for receiving storage events.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.notify_observers.html" title="fn aletheiadb::core::observer::notify_observers">notify_<wbr>observers</a></dt><dd>Helper for notifying multiple observers of an event.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.Observer.html" title="type aletheiadb::core::observer::Observer">Observer</a></dt><dd>Type alias for thread-safe observer references.</dd></dl></section></div></main></body></html>

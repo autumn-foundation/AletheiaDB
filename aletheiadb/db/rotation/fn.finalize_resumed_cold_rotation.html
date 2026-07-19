@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Finalize a startup-resumed COLD (redb) key rotation (Issue #3617 PR3), completing the transactional bulk re-encrypt and clearing the ledger."><title>finalize_resumed_cold_rotation in aletheiadb::db::rotation - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">finalize_resumed_cold_rotation</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">finalize_<wbr>resumed_<wbr>cold_<wbr>rotation</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#crash-caveat-resume-under-the-old-key-then-switch-inherited-from-pr2" title="Crash caveat: resume under the OLD key, THEN switch (inherited from PR2)">Crash caveat: resume under the OLD key, THEN switch (inherited from PR2)</a></li><li><a href="#errors" title="Errors">Errors</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>db::<wbr>rotation</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">db</a>::<wbr><a href="index.html">rotation</a></div><h1>Function <span class="fn">finalize_<wbr>resumed_<wbr>cold_<wbr>rotation</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/db/rotation.rs.html#2726-2768">Source</a> </span></div><pre class="rust item-decl"><code>pub fn finalize_resumed_cold_rotation(
+    manager: &amp;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;<a class="struct" href="../../storage/index_persistence/loader/struct.IndexPersistenceManager.html" title="struct aletheiadb::storage::index_persistence::loader::IndexPersistenceManager">IndexPersistenceManager</a>&gt;,
+    enc_cfg: &amp;<a class="struct" href="../../encryption/config/struct.EncryptionConfig.html" title="struct aletheiadb::encryption::config::EncryptionConfig">EncryptionConfig</a>,
+    cold: &amp;<a class="struct" href="../../storage/redb_cold_storage/struct.RedbColdStorage.html" title="struct aletheiadb::storage::redb_cold_storage::RedbColdStorage">RedbColdStorage</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Finalize a startup-resumed COLD (redb) key rotation (Issue #3617 PR3),
+completing the transactional bulk re-encrypt and clearing the ledger.</p>
+<p>The cold store is constructed on the durable <code>open()</code> path AFTER
+<a href="fn.resume_pending_rotation.html" title="fn aletheiadb::db::rotation::resume_pending_rotation"><code>resume_pending_rotation</code></a> and <a href="fn.finalize_resumed_wal_rotation.html" title="fn aletheiadb::db::rotation::finalize_resumed_wal_rotation"><code>finalize_resumed_wal_rotation</code></a> have run
+(index + WAL are re-keyed before the cold tier is wired), so cold is the LAST
+layer to settle and this function performs the final ledger clear. It is
+idempotent and resumable:</p>
+<ol>
+<li>re-derive + install the new cold DEK generation (the old generation is
+already the cold store’s provisioned single generation);</li>
+<li>run <a href="../../storage/redb_cold_storage/struct.RedbColdStorage.html#method.reencrypt_cold_values" title="method aletheiadb::storage::redb_cold_storage::RedbColdStorage::reencrypt_cold_values"><code>RedbColdStorage::reencrypt_cold_values</code></a>, which resumes from the
+durable redb cursor and skips any value already wrapped at the target
+version — so a crash mid-batch resumes with no double-encrypt;</li>
+<li>retire the old cold generation, mark <code>layer.cold=complete</code>, and clear the
+ledger (every layer has now settled).</li>
+</ol>
+<p>A no-op (<code>Ok(())</code>) when no ledger is present, the cold layer is not <code>Pending</code>,
+or the cold store is unencrypted — so <code>db::config</code> can call it unconditionally
+on the encrypted-persistent startup path.</p>
+<h2 id="crash-caveat-resume-under-the-old-key-then-switch-inherited-from-pr2"><a class="doc-anchor" href="#crash-caveat-resume-under-the-old-key-then-switch-inherited-from-pr2">§</a>Crash caveat: resume under the OLD key, THEN switch (inherited from PR2)</h2>
+<p>This is the inherent “resume under old key, then switch” contract of a
+full-MEK rotation, structurally identical to PR2’s WAL resume contract
+(<code>install_pending_wal_generations</code>). While a rotation is <code>Pending</code>, the
+<strong>old</strong> MEK must remain available to finish it: the cold store is opened at
+its provisioned OLD generation, and the still-half-rotated <code>ACV1@base</code>
+(old-DEK) values are decrypted with that old cold DEK during the resumed bulk
+pass. If instead the operator reopens under the <strong>new</strong> key alone while a
+rotation crashed mid-cold-pass, the surviving old-DEK values can no longer be
+decrypted — the read is a <strong>loud</strong> AEAD authentication failure, so <code>open()</code>
+returns <code>Err</code> and the DB is unopenable rather than silently returning wrong
+data. Recovery is straightforward and lossless: reopen once under the OLD key
+so this resume completes (re-wrapping every value at the new generation and
+clearing the ledger), after which the new key alone reads everything. The
+fault is therefore availability-only and fully recoverable, never integrity
+loss.</p>
+<h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<p>Returns an error if the recorded new key source cannot be sourced or the bulk
+re-encrypt pass fails (a genuine wrong/absent key surfaces loudly; the ledger
+is left <code>Pending</code> for a later resume).</p>
+</div></details></section></div></main></body></html>

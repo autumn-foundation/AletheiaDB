@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ENVELOPE_FORMAT_VERSION","ENVELOPE_HEADER_LEN","ENVELOPE_MAGIC"],"fn":["is_envelope","parse_header","seal","seal_property_value","unseal","unseal_property_value"],"struct":["EnvelopeHeader"]};

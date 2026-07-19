@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cosine_similarity","cosine_similarity_normalized","dot_product","euclidean_distance","is_normalized","is_normalized_default","magnitude","normalize","normalize_in_place","squared_euclidean_distance","squared_magnitude"]};

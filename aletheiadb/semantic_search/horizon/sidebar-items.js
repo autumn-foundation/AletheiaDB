@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_HORIZON_VISITED_NODES"],"struct":["HorizonEngine","HorizonResult"]};

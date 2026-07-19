@@ -1,0 +1,81 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AletheiaDB MCP Server binary."><title>aletheia_mcp - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="aletheia_mcp" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate aletheia_mcp</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../aletheia_mcp/index.html">aletheia_<wbr>mcp</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#usage" title="Usage">Usage</a></li><li><a href="#available-tools" title="Available Tools">Available Tools</a><ul><li><a href="#node-operations" title="Node Operations">Node Operations</a></li><li><a href="#edge-operations" title="Edge Operations">Edge Operations</a></li><li><a href="#graph-traversal" title="Graph Traversal">Graph Traversal</a></li><li><a href="#vector-search" title="Vector Search">Vector Search</a></li><li><a href="#temporal-queries" title="Temporal Queries">Temporal Queries</a></li><li><a href="#hybrid-queries" title="Hybrid Queries">Hybrid Queries</a></li><li><a href="#declarative-query" title="Declarative Query">Declarative Query</a></li></ul></li><li><a href="#authentication-issue-3350" title="Authentication (Issue #3350)">Authentication (Issue #3350)</a></li></ul><h3><a href="#functions">Crate Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>aletheia_<wbr>mcp</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/aletheia_mcp/mcp_server.rs.html#1-169">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AletheiaDB MCP Server binary.</p>
+<p>This binary exposes AletheiaDB’s bi-temporal graph database capabilities
+through the Model Context Protocol (MCP), enabling LLMs like Claude to
+interact with the database.</p>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2><div class="example-wrap"><pre class="language-bash"><code>cargo run --bin aletheia-mcp --features mcp-server</code></pre></div>
+<p>The server communicates over stdio using the MCP protocol.</p>
+<h2 id="available-tools"><a class="doc-anchor" href="#available-tools">§</a>Available Tools</h2><h3 id="node-operations"><a class="doc-anchor" href="#node-operations">§</a>Node Operations</h3>
+<ul>
+<li><code>get_node</code>: Get a node by ID</li>
+<li><code>create_node</code>: Create a new node with label and properties</li>
+<li><code>update_node</code>: Update node properties</li>
+<li><code>delete_node</code>: Delete a node</li>
+<li><code>list_nodes</code>: List nodes with optional filtering</li>
+<li><code>count_nodes</code>: Count nodes</li>
+</ul>
+<h3 id="edge-operations"><a class="doc-anchor" href="#edge-operations">§</a>Edge Operations</h3>
+<ul>
+<li><code>get_edge</code>: Get an edge by ID</li>
+<li><code>create_edge</code>: Create an edge between nodes</li>
+<li><code>update_edge</code>: Update edge properties</li>
+<li><code>delete_edge</code>: Delete an edge</li>
+<li><code>list_edges</code>: List edges with optional filtering</li>
+<li><code>count_edges</code>: Count edges</li>
+<li><code>get_outgoing_edges</code>: Get outgoing edges from a node</li>
+<li><code>get_incoming_edges</code>: Get incoming edges to a node</li>
+</ul>
+<h3 id="graph-traversal"><a class="doc-anchor" href="#graph-traversal">§</a>Graph Traversal</h3>
+<ul>
+<li><code>traverse</code>: Traverse the graph from a starting node</li>
+</ul>
+<h3 id="vector-search"><a class="doc-anchor" href="#vector-search">§</a>Vector Search</h3>
+<ul>
+<li><code>find_similar</code>: Find similar nodes by embedding</li>
+<li><code>enable_vector_index</code>: Enable vector indexing on a property</li>
+<li><code>list_vector_indexes</code>: List enabled vector indexes</li>
+</ul>
+<h3 id="temporal-queries"><a class="doc-anchor" href="#temporal-queries">§</a>Temporal Queries</h3>
+<ul>
+<li><code>get_node_at_time</code>: Get node state at a specific time</li>
+<li><code>get_edge_at_time</code>: Get edge state at a specific time</li>
+</ul>
+<h3 id="hybrid-queries"><a class="doc-anchor" href="#hybrid-queries">§</a>Hybrid Queries</h3>
+<ul>
+<li><code>hybrid_query</code>: Combined graph + vector + temporal query</li>
+</ul>
+<h3 id="declarative-query"><a class="doc-anchor" href="#declarative-query">§</a>Declarative Query</h3>
+<ul>
+<li><code>query</code>: Execute a single read-only Cypher/AQL statement (with optional
+<code>$param</code> bindings) and get structured rows back. Mutating statements are
+rejected before execution. Cypher requires the <code>cypher</code> feature; AQL is
+always available.</li>
+</ul>
+<h2 id="authentication-issue-3350"><a class="doc-anchor" href="#authentication-issue-3350">§</a>Authentication (Issue #3350)</h2>
+<p>The MCP transport is stdio, so the credential is <strong>session-scoped</strong>:
+supplied once at process start and re-verified on every tool call (a
+revocation in the shared key store takes effect on the next call).</p>
+<p>Environment variables:</p>
+<ul>
+<li><code>ALETHEIADB_AUTH_MODE</code>: <code>required</code> (default) or <code>anonymous</code>. In
+<code>required</code> mode every tool call is authorized against the session
+principal’s role, and the server refuses to start with zero
+credentials. <code>anonymous</code> disables authentication entirely (explicit
+opt-in; a prominent warning is printed to stderr). Invalid values fall
+back to <code>required</code> (fail-closed) with a warning.</li>
+<li><code>ALETHEIADB_MCP_API_KEY</code>: The session credential. In <code>required</code> mode a
+missing/unknown/revoked key does not stop the server — every tool call
+then returns the uniform <code>UNAUTHENTICATED</code> error.</li>
+<li><code>ALETHEIADB_BOOTSTRAP_ADMIN_KEY</code>: Plaintext admin key installed at
+startup as principal <code>bootstrap-admin</code> (role <code>admin</code>). Memory-only —
+re-supply it on every start, or use it once against the HTTP server’s
+<code>POST /admin/keys</code> to mint persisted keys.</li>
+<li>Key persistence: when <code>ALETHEIADB_DATA_DIR</code> is set, keys are loaded
+from <code>{data_dir}/auth/keys.json</code> — the same path the HTTP server uses,
+so keys minted via the HTTP admin endpoints work here when both point
+at the same data directory.</li>
+</ul>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.build_auth_store.html" title="fn aletheia_mcp::build_auth_store">build_<wbr>auth_<wbr>store</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Build the auth key store: persisted under <code>{data_dir}/auth/keys.json</code>
+when <code>ALETHEIADB_DATA_DIR</code> is set (the same derivation the HTTP server
+uses), memory-only otherwise. Installs the bootstrap admin key
+(memory-only, never persisted) when configured.</dd><dt><a class="fn" href="fn.main.html" title="fn aletheia_mcp::main">main</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.parse_secret_env.html" title="fn aletheia_mcp::parse_secret_env">parse_<wbr>secret_<wbr>env</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Read a secret-bearing env var into a redacted <a href="../aletheiadb/auth/struct.SecretString.html" title="struct aletheiadb::auth::SecretString"><code>SecretString</code></a>, if set
+and non-empty.</dd></dl></section></div></main></body></html>

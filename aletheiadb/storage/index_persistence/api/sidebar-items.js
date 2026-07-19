@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["IndexStatus","PersistenceConfig","PersistenceStats","PersistenceStatus","VectorIndexStatus"]};

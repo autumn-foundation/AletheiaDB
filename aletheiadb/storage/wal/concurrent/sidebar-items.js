@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_NUM_STRIPES","DEFAULT_STRIPE_CAPACITY"],"struct":["ConcurrentWal","ConcurrentWalConfig","ConcurrentWalMetrics"]};

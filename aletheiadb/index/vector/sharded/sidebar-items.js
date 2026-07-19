@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ShardingStrategy"],"struct":["RebalanceConfig","ShardStats","ShardedVectorConfig","ShardedVectorIndex"]};

@@ -1,0 +1,252 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Common read operations available in all transaction types"><title>ReadOps in aletheiadb::api::transaction - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">ReadOps</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">ReadOps</a></h2><h3><a href="#required-methods">Required Methods</a></h3><ul class="block"><li><a href="#tymethod.edge_count" title="edge_count">edge_count</a></li><li><a href="#tymethod.find_nodes_by_property" title="find_nodes_by_property">find_nodes_by_property</a></li><li><a href="#tymethod.get_edge" title="get_edge">get_edge</a></li><li><a href="#tymethod.get_incoming_edges" title="get_incoming_edges">get_incoming_edges</a></li><li><a href="#tymethod.get_node" title="get_node">get_node</a></li><li><a href="#tymethod.get_outgoing_edges" title="get_outgoing_edges">get_outgoing_edges</a></li><li><a href="#tymethod.get_outgoing_edges_with_label" title="get_outgoing_edges_with_label">get_outgoing_edges_with_label</a></li><li><a href="#tymethod.node_count" title="node_count">node_count</a></li></ul><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>api::<wbr>transaction</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">api</a>::<wbr><a href="index.html">transaction</a></div><h1>Trait <span class="trait">ReadOps</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/api/transaction/mod.rs.html#166-522">Source</a> </span></div><pre class="rust item-decl"><code>pub trait ReadOps {
+    // Required methods
+    fn <a href="#tymethod.get_node" class="fn">get_node</a>(&amp;self, id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/graph/struct.Node.html" title="struct aletheiadb::core::graph::Node">Node</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.get_edge" class="fn">get_edge</a>(&amp;self, id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/graph/struct.Edge.html" title="struct aletheiadb::core::graph::Edge">Edge</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.get_outgoing_edges" class="fn">get_outgoing_edges</a>(&amp;self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.get_incoming_edges" class="fn">get_incoming_edges</a>(&amp;self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.get_outgoing_edges_with_label" class="fn">get_outgoing_edges_with_label</a>(
+        &amp;self,
+        node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    ) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.node_count" class="fn">node_count</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>;
+<span class="item-spacer"></span>    fn <a href="#tymethod.edge_count" class="fn">edge_count</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>;
+<span class="item-spacer"></span>    fn <a href="#tymethod.find_nodes_by_property" class="fn">find_nodes_by_property</a>(
+        &amp;self,
+        label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        property_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+        property_value: &amp;<a class="enum" href="../../core/property/value/enum.PropertyValue.html" title="enum aletheiadb::core::property::value::PropertyValue">PropertyValue</a>,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>&gt;;
+}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Common read operations available in all transaction types</p>
+</div></details><h2 id="required-methods" class="section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.get_node" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#195">Source</a><h4 class="code-header">fn <a href="#tymethod.get_node" class="fn">get_node</a>(&amp;self, id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/graph/struct.Node.html" title="struct aletheiadb::core::graph::Node">Node</a>&gt;</h4></section></summary><div class="docblock"><p>Get a node by ID.</p>
+<p>This returns the node state visible in the current transaction snapshot.</p>
+<h5 id="snapshot-isolation"><a class="doc-anchor" href="#snapshot-isolation">§</a>Snapshot Isolation</h5>
+<p>If the node has been modified or deleted by another transaction after this
+transaction started, <code>get_node</code> will return the version visible at the start
+of this transaction (Snapshot Isolation).</p>
+<h5 id="performance"><a class="doc-anchor" href="#performance">§</a>Performance</h5>
+<ul>
+<li><strong>Fast Path</strong>: O(1) lookup in current storage (hash map)</li>
+<li><strong>Slow Path</strong>: O(log N) lookup in historical storage if not found in current (or version not visible)</li>
+</ul>
+<h5 id="example"><a class="doc-anchor" href="#example">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>node = tx.get_node(node_id)<span class="question-mark">?</span>;
+<span class="macro">println!</span>(<span class="string">"Node label: {:?}"</span>, node.label);</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.get_edge" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#220">Source</a><h4 class="code-header">fn <a href="#tymethod.get_edge" class="fn">get_edge</a>(&amp;self, id: <a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../../core/graph/struct.Edge.html" title="struct aletheiadb::core::graph::Edge">Edge</a>&gt;</h4></section></summary><div class="docblock"><p>Get an edge by ID.</p>
+<p>This returns the edge state visible in the current transaction snapshot.</p>
+<h5 id="snapshot-isolation-1"><a class="doc-anchor" href="#snapshot-isolation-1">§</a>Snapshot Isolation</h5>
+<p>If the edge has been modified or deleted by another transaction after this
+transaction started, <code>get_edge</code> will return the version visible at the start
+of this transaction (Snapshot Isolation).</p>
+<h5 id="example-1"><a class="doc-anchor" href="#example-1">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>edge = tx.get_edge(edge_id)<span class="question-mark">?</span>;
+<span class="macro">println!</span>(<span class="string">"Edge label: {:?}"</span>, edge.label);</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.get_outgoing_edges" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#305">Source</a><h4 class="code-header">fn <a href="#tymethod.get_outgoing_edges" class="fn">get_outgoing_edges</a>(&amp;self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;&gt;</h4></section></summary><div class="docblock"><p>Get outgoing edges from a node.</p>
+<p>Returns all edges where <code>source == node_id</code> that are visible in the current snapshot.</p>
+<h5 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h5>
+<ul>
+<li><code>node_id</code> - The source node to get edges from</li>
+</ul>
+<h5 id="returns"><a class="doc-anchor" href="#returns">§</a>Returns</h5>
+<ul>
+<li><code>Ok(edge_ids)</code> - The node exists (is visible in this transaction’s snapshot).
+The vector is <strong>empty if the node has no outgoing edges</strong> - that is a valid
+state, not an error.</li>
+<li><code>Err(NodeNotFound)</code> - The node does not exist (or is not visible in this
+transaction’s snapshot).</li>
+</ul>
+<p>This mirrors <a href="trait.ReadOps.html#tymethod.get_node" title="method aletheiadb::api::transaction::ReadOps::get_node"><code>get_node</code></a>: the same condition (a missing node)
+produces an error, so callers can distinguish “node has no edges” from
+“node doesn’t exist” (Issue #359).</p>
+<h5 id="ordering"><a class="doc-anchor" href="#ordering">§</a>Ordering</h5>
+<p>The order of edges is <strong>not guaranteed</strong>. Do not rely on edges being returned
+in insertion order or sorted by ID. The internal storage may reorder edges
+during compaction or persistence.</p>
+<h5 id="snapshot-isolation-2"><a class="doc-anchor" href="#snapshot-isolation-2">§</a>Snapshot Isolation</h5>
+<p>In a read transaction, this method filters edges to ensure only those visible
+in the current transaction snapshot are returned. Edges created by concurrent
+transactions will not be seen.</p>
+<h5 id="write-transactions"><a class="doc-anchor" href="#write-transactions">§</a>Write transactions</h5>
+<p>In a write transaction, only the <strong>node existence check</strong> is buffer-aware;
+the returned edge list is read directly from committed current storage
+<strong>without snapshot filtering</strong>. Consequently:</p>
+<ul>
+<li>edges committed by concurrent transactions after this transaction
+started <strong>are</strong> returned,</li>
+<li>edges created in this transaction (still buffered, not yet committed)
+are <strong>not</strong> returned, and</li>
+<li>edges deleted in this transaction are <strong>still</strong> listed until commit.</li>
+</ul>
+<h5 id="performance-1"><a class="doc-anchor" href="#performance-1">§</a>Performance</h5>
+<ul>
+<li><strong>Time</strong>: O(degree) to collect visible edges, plus a node existence check
+(O(1) fast path; may consult historical storage, O(log N), on a miss)</li>
+<li><strong>Space</strong>: Allocates a new <code>Vec</code> containing all edge IDs</li>
+</ul>
+<h5 id="example-2"><a class="doc-anchor" href="#example-2">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>(alice, bob) = db.write(|tx| {
+    <span class="kw">let </span>alice = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice" </span>})<span class="question-mark">?</span>;
+    <span class="kw">let </span>bob = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Bob" </span>})<span class="question-mark">?</span>;
+    tx.create_edge(alice, bob, <span class="string">"KNOWS"</span>, <span class="macro">properties!</span> {})<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, aletheiadb::Error&gt;((alice, bob))
+})<span class="question-mark">?</span>;
+
+<span class="kw">let </span>tx = db.read_transaction()<span class="question-mark">?</span>;
+
+<span class="comment">// Alice has one outgoing edge:
+</span><span class="kw">let </span>edges = tx.get_outgoing_edges(alice)<span class="question-mark">?</span>;
+<span class="macro">assert_eq!</span>(edges.len(), <span class="number">1</span>);
+<span class="kw">for </span>edge_id <span class="kw">in </span>edges {
+    <span class="kw">let </span>edge = tx.get_edge(edge_id)<span class="question-mark">?</span>;
+    <span class="macro">assert_eq!</span>(edge.target, bob);
+}
+
+<span class="comment">// Bob exists but has no outgoing edges: Ok(empty), not an error.
+</span><span class="macro">assert!</span>(tx.get_outgoing_edges(bob)<span class="question-mark">?</span>.is_empty());
+
+<span class="comment">// A node that doesn't exist is an error, distinguishable from "no edges".
+</span><span class="kw">let </span>missing = NodeId::new(<span class="number">999_999</span>)<span class="question-mark">?</span>;
+<span class="macro">assert!</span>(tx.get_outgoing_edges(missing).is_err());</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.get_incoming_edges" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#374">Source</a><h4 class="code-header">fn <a href="#tymethod.get_incoming_edges" class="fn">get_incoming_edges</a>(&amp;self, node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;&gt;</h4></section></summary><div class="docblock"><p>Get incoming edges to a node.</p>
+<p>Returns all edges where <code>target == node_id</code> that are visible in the current snapshot.</p>
+<h5 id="arguments-1"><a class="doc-anchor" href="#arguments-1">§</a>Arguments</h5>
+<ul>
+<li><code>node_id</code> - The target node to get edges to</li>
+</ul>
+<h5 id="returns-1"><a class="doc-anchor" href="#returns-1">§</a>Returns</h5>
+<ul>
+<li><code>Ok(edge_ids)</code> - The node exists (is visible in this transaction’s snapshot).
+The vector is <strong>empty if the node has no incoming edges</strong> - that is a valid
+state, not an error.</li>
+<li><code>Err(NodeNotFound)</code> - The node does not exist (or is not visible in this
+transaction’s snapshot).</li>
+</ul>
+<h5 id="ordering-1"><a class="doc-anchor" href="#ordering-1">§</a>Ordering</h5>
+<p>The order of edges is <strong>not guaranteed</strong>.</p>
+<h5 id="snapshot-isolation-3"><a class="doc-anchor" href="#snapshot-isolation-3">§</a>Snapshot Isolation</h5>
+<p>In a read transaction, this method filters edges to ensure only those visible
+in the current transaction snapshot are returned.</p>
+<h5 id="write-transactions-1"><a class="doc-anchor" href="#write-transactions-1">§</a>Write transactions</h5>
+<p>In a write transaction, only the <strong>node existence check</strong> is buffer-aware;
+the returned edge list is read directly from committed current storage
+<strong>without snapshot filtering</strong>. Consequently:</p>
+<ul>
+<li>edges committed by concurrent transactions after this transaction
+started <strong>are</strong> returned,</li>
+<li>edges created in this transaction (still buffered, not yet committed)
+are <strong>not</strong> returned, and</li>
+<li>edges deleted in this transaction are <strong>still</strong> listed until commit.</li>
+</ul>
+<h5 id="performance-2"><a class="doc-anchor" href="#performance-2">§</a>Performance</h5>
+<ul>
+<li><strong>Time</strong>: O(degree) to collect visible edges, plus a node existence check
+(O(1) fast path; may consult historical storage, O(log N), on a miss)</li>
+<li><strong>Space</strong>: Allocates a new <code>Vec</code> containing all edge IDs</li>
+</ul>
+<h5 id="example-3"><a class="doc-anchor" href="#example-3">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>(alice, bob) = db.write(|tx| {
+    <span class="kw">let </span>alice = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice" </span>})<span class="question-mark">?</span>;
+    <span class="kw">let </span>bob = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Bob" </span>})<span class="question-mark">?</span>;
+    tx.create_edge(alice, bob, <span class="string">"KNOWS"</span>, <span class="macro">properties!</span> {})<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, aletheiadb::Error&gt;((alice, bob))
+})<span class="question-mark">?</span>;
+
+<span class="kw">let </span>tx = db.read_transaction()<span class="question-mark">?</span>;
+
+<span class="comment">// Bob has one incoming edge (from Alice):
+</span><span class="macro">assert_eq!</span>(tx.get_incoming_edges(bob)<span class="question-mark">?</span>.len(), <span class="number">1</span>);
+
+<span class="comment">// Alice exists but has no incoming edges: Ok(empty), not an error.
+</span><span class="macro">assert!</span>(tx.get_incoming_edges(alice)<span class="question-mark">?</span>.is_empty());</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.get_outgoing_edges_with_label" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#441">Source</a><h4 class="code-header">fn <a href="#tymethod.get_outgoing_edges_with_label" class="fn">get_outgoing_edges_with_label</a>(
+    &amp;self,
+    node_id: <a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="../../core/id/struct.EdgeId.html" title="struct aletheiadb::core::id::EdgeId">EdgeId</a>&gt;&gt;</h4></section></summary><div class="docblock"><p>Get outgoing edges with a specific label.</p>
+<p>Returns all edges where <code>source == node_id</code> AND <code>label == label</code> that are
+visible in the current snapshot.</p>
+<h5 id="arguments-2"><a class="doc-anchor" href="#arguments-2">§</a>Arguments</h5>
+<ul>
+<li><code>node_id</code> - The source node</li>
+<li><code>label</code> - Edge label to filter by (e.g., “KNOWS”, “CREATED”)</li>
+</ul>
+<h5 id="returns-2"><a class="doc-anchor" href="#returns-2">§</a>Returns</h5>
+<ul>
+<li><code>Ok(edge_ids)</code> - The node exists (is visible in this transaction’s snapshot).
+The vector is <strong>empty if no outgoing edges carry the given label</strong> - the
+label is a filter, not an existence check, so an unmatched label on an
+existing node is a valid state, not an error.</li>
+<li><code>Err(NodeNotFound)</code> - The node does not exist (or is not visible in this
+transaction’s snapshot).</li>
+</ul>
+<h5 id="ordering-2"><a class="doc-anchor" href="#ordering-2">§</a>Ordering</h5>
+<p>The order of edges is <strong>not guaranteed</strong>.</p>
+<h5 id="write-transactions-2"><a class="doc-anchor" href="#write-transactions-2">§</a>Write transactions</h5>
+<p>In a write transaction, only the <strong>node existence check</strong> is buffer-aware;
+the returned edge list is read directly from committed current storage
+<strong>without snapshot filtering</strong>. Consequently:</p>
+<ul>
+<li>edges committed by concurrent transactions after this transaction
+started <strong>are</strong> returned,</li>
+<li>edges created in this transaction (still buffered, not yet committed)
+are <strong>not</strong> returned, and</li>
+<li>edges deleted in this transaction are <strong>still</strong> listed until commit.</li>
+</ul>
+<h5 id="performance-3"><a class="doc-anchor" href="#performance-3">§</a>Performance</h5>
+<ul>
+<li><strong>Time</strong>: O(degree) scan with label filtering, plus a node existence check
+(O(1) fast path; may consult historical storage, O(log N), on a miss)</li>
+<li><strong>Space</strong>: Allocates a new <code>Vec</code> containing matching edge IDs</li>
+</ul>
+<h5 id="example-4"><a class="doc-anchor" href="#example-4">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>(alice, bob) = db.write(|tx| {
+    <span class="kw">let </span>alice = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice" </span>})<span class="question-mark">?</span>;
+    <span class="kw">let </span>bob = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Bob" </span>})<span class="question-mark">?</span>;
+    tx.create_edge(alice, bob, <span class="string">"KNOWS"</span>, <span class="macro">properties!</span> {})<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, aletheiadb::Error&gt;((alice, bob))
+})<span class="question-mark">?</span>;
+
+<span class="kw">let </span>tx = db.read_transaction()<span class="question-mark">?</span>;
+
+<span class="comment">// One outgoing KNOWS edge:
+</span><span class="macro">assert_eq!</span>(tx.get_outgoing_edges_with_label(alice, <span class="string">"KNOWS"</span>)<span class="question-mark">?</span>.len(), <span class="number">1</span>);
+
+<span class="comment">// No FOLLOWS edges, but Alice exists: Ok(empty), not an error.
+</span><span class="macro">assert!</span>(tx.get_outgoing_edges_with_label(alice, <span class="string">"FOLLOWS"</span>)<span class="question-mark">?</span>.is_empty());</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.node_count" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#473">Source</a><h4 class="code-header">fn <a href="#tymethod.node_count" class="fn">node_count</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a></h4></section></summary><div class="docblock"><p>Get the approximate number of nodes in the database.</p>
+<h5 id="returns-3"><a class="doc-anchor" href="#returns-3">§</a>Returns</h5>
+<p>The count of nodes currently committed in the storage engine. Returns <code>0</code>
+for an empty database. Deleted nodes are not counted. Nodes created in
+this transaction but not yet committed are <strong>not</strong> included. Conversely,
+nodes deleted in this transaction but not yet committed are still included.</p>
+<h5 id="consistency-note"><a class="doc-anchor" href="#consistency-note">§</a>Consistency Note</h5>
+<p>This returns the <strong>current</strong> count of committed nodes in the storage engine.
+Unlike <code>get_node()</code>, this count is <strong>NOT snapshot-isolated</strong>. It may include
+nodes created by transactions that committed after this read transaction started.</p>
+<p>This design choice enables O(1) performance without scanning the entire
+database to filter visibility for every node.</p>
+<h5 id="example-5"><a class="doc-anchor" href="#example-5">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>count = tx.node_count();
+<span class="macro">println!</span>(<span class="string">"Database contains {} nodes"</span>, count);</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.edge_count" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#505">Source</a><h4 class="code-header">fn <a href="#tymethod.edge_count" class="fn">edge_count</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a></h4></section></summary><div class="docblock"><p>Get the approximate number of edges in the database.</p>
+<h5 id="returns-4"><a class="doc-anchor" href="#returns-4">§</a>Returns</h5>
+<p>The count of edges currently committed in the storage engine. Returns <code>0</code>
+for an empty database. Deleted edges are not counted. Edges created in
+this transaction but not yet committed are <strong>not</strong> included. Conversely,
+edges deleted in this transaction but not yet committed are still included.</p>
+<h5 id="consistency-note-1"><a class="doc-anchor" href="#consistency-note-1">§</a>Consistency Note</h5>
+<p>This returns the <strong>current</strong> count of committed edges in the storage engine.
+Unlike <code>get_edge()</code>, this count is <strong>NOT snapshot-isolated</strong>. It may include
+edges created by transactions that committed after this read transaction started.</p>
+<p>This design choice enables O(1) performance without scanning the entire
+database to filter visibility for every edge.</p>
+<h5 id="example-6"><a class="doc-anchor" href="#example-6">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>count = tx.edge_count();
+<span class="macro">println!</span>(<span class="string">"Database contains {} edges"</span>, count);</code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="tymethod.find_nodes_by_property" class="method"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/mod.rs.html#516-521">Source</a><h4 class="code-header">fn <a href="#tymethod.find_nodes_by_property" class="fn">find_nodes_by_property</a>(
+    &amp;self,
+    label: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    property_key: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    property_value: &amp;<a class="enum" href="../../core/property/value/enum.PropertyValue.html" title="enum aletheiadb::core::property::value::PropertyValue">PropertyValue</a>,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="../../core/id/struct.NodeId.html" title="struct aletheiadb::core::id::NodeId">NodeId</a>&gt;</h4></section></summary><div class="docblock"><p>Find nodes by label and property value.</p>
+<p>Returns the IDs of all nodes with the given label whose specified property
+equals the given value. Only nodes visible in the current snapshot are returned.</p>
+<h5 id="performance-4"><a class="doc-anchor" href="#performance-4">§</a>Performance</h5>
+<ul>
+<li><strong>Time</strong>: O(N) where N = nodes with the given label</li>
+<li><strong>Space</strong>: O(M) where M = number of matching nodes</li>
+</ul>
+</div></details></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"><div class="negative-marker"></div><section id="impl-ReadOps-for-ReadTransaction" class="impl"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/read_tx.rs.html#253-364">Source</a><a href="#impl-ReadOps-for-ReadTransaction" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.ReadOps.html" title="trait aletheiadb::api::transaction::ReadOps">ReadOps</a> for <a class="struct" href="read_tx/struct.ReadTransaction.html" title="struct aletheiadb::api::transaction::read_tx::ReadTransaction">ReadTransaction</a></h3></section><section id="impl-ReadOps-for-WriteTransaction" class="impl"><a class="src rightside" href="../../../src/aletheiadb/api/transaction/write/mod.rs.html#1390-1538">Source</a><a href="#impl-ReadOps-for-WriteTransaction" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.ReadOps.html" title="trait aletheiadb::api::transaction::ReadOps">ReadOps</a> for <a class="struct" href="write/struct.WriteTransaction.html" title="struct aletheiadb::api::transaction::write::WriteTransaction">WriteTransaction</a></h3></section></div><script src="../../../trait.impl/aletheiadb/api/transaction/trait.ReadOps.js" async></script></section></div></main></body></html>

@@ -1,0 +1,36 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Ripple: Semantic Causality Detector."><title>aletheiadb::experimental::diagnostics::ripple - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module ripple</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module ripple</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#concept" title="Concept">Concept</a></li><li><a href="#use-cases" title="Use Cases">Use Cases</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>experimental::<wbr>diagnostics</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">experimental</a>::<wbr><a href="../index.html">diagnostics</a></div><h1>Module <span>ripple</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/experimental/diagnostics/ripple.rs.html#1-427">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Ripple: Semantic Causality Detector.</p>
+<p>“Does a change in A cause a Ripple in B?”</p>
+<p>The Ripple Detector identifies causal relationships between nodes by analyzing
+the time-lagged correlation of their semantic flux (rate of vector change).</p>
+<h2 id="concept"><a class="doc-anchor" href="#concept">§</a>Concept</h2>
+<p>If Node A moves in vector space (high flux) and Node B consistently moves
+in vector space shortly after (lagged flux), there may be a causal link.</p>
+<h2 id="use-cases"><a class="doc-anchor" href="#use-cases">§</a>Use Cases</h2>
+<ul>
+<li><strong>Causal Inference</strong>: “Did the news article (A) cause the stock price (B) to move?”</li>
+<li><strong>Leading Indicators</strong>: Identifying nodes that predict future activity in others.</li>
+<li><strong>Propagation Analysis</strong>: Tracing how information flows through the graph.</li>
+</ul>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::AletheiaDB;
+<span class="kw">use </span>aletheiadb::experimental::ripple::{RippleDetector, RippleConfig};
+<span class="kw">use </span>aletheiadb::core::temporal::{TimeRange, time};
+
+<span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+
+<span class="kw">let </span>detector = RippleDetector::new(<span class="kw-2">&amp;</span>db);
+
+<span class="comment">// Look for causal ripples in the last hour, with 1-minute resolution
+</span><span class="kw">let </span>end = time::now();
+<span class="kw">let </span>start = (end.wallclock() - <span class="number">3600 </span>* <span class="number">1_000_000</span>).into();
+<span class="kw">let </span>config = RippleConfig {
+    window: TimeRange::new(start, end)<span class="question-mark">?</span>,
+    bin_size_us: <span class="number">60 </span>* <span class="number">1_000_000</span>, <span class="comment">// 1 minute
+    </span>max_lag_bins: <span class="number">10</span>,            <span class="comment">// Check lag up to 10 minutes
+    </span>min_correlation: <span class="number">0.5</span>,        <span class="comment">// Minimum correlation to report
+</span>};
+
+<span class="kw">if let </span><span class="prelude-val">Some</span>(ripple) = detector.detect_causality(source, target, <span class="kw-2">&amp;</span>config, <span class="string">"embedding"</span>)<span class="question-mark">? </span>{
+    <span class="macro">println!</span>(<span class="string">"Found Ripple! Lag: {} mins, Correlation: {:.2}"</span>,
+        ripple.lag_bins, ripple.correlation);
+}</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.RippleConfig.html" title="struct aletheiadb::experimental::diagnostics::ripple::RippleConfig">Ripple<wbr>Config</a></dt><dd>Configuration for Ripple detection.</dd><dt><a class="struct" href="struct.RippleDetector.html" title="struct aletheiadb::experimental::diagnostics::ripple::RippleDetector">Ripple<wbr>Detector</a></dt><dd>The Ripple Detector engine.</dd><dt><a class="struct" href="struct.RippleEffect.html" title="struct aletheiadb::experimental::diagnostics::ripple::RippleEffect">Ripple<wbr>Effect</a></dt><dd>A detected causal ripple.</dd></dl></section></div></main></body></html>

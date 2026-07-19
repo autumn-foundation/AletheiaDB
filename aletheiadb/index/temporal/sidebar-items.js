@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DeduplicationPolicy"],"struct":["IndexTemporalExtent","TemporalIndexConfig","TemporalIndexes","TimelineVersionMetadata"],"type":["IndexVec","TimelineVersionMetadataIndex"]};

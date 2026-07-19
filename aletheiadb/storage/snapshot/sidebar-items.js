@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CurrentEdgeIterator","CurrentNodeIterator","CurrentStorageSnapshot","HistoricalEdgeVersionIterator","HistoricalNodeVersionIterator","HistoricalStorageSnapshot"]};

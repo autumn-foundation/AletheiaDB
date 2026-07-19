@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["reset_simulated_read_count","simulated_read_count"],"struct":["ClockInjectionGuard","SimulatedClock"]};

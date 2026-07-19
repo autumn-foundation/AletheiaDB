@@ -1,0 +1,514 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/http/server.rs`."><title>server.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">aletheiadb/http/</div>server.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! HTTP server creation and bootstrap.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! AletheiaDB's HTTP surface is built on [`autumn-web`](autumn_web), which in
+<a href=#4 id=4 data-nosnippet>4</a>//! turn wraps [`axum`]. This module assembles the routes, state, and
+<a href=#5 id=5 data-nosnippet>5</a>//! middleware stack once, and exposes:
+<a href=#6 id=6 data-nosnippet>6</a>//!
+<a href=#7 id=7 data-nosnippet>7</a>//! - [`run_server`] — bind and serve in the `aletheia-server` binary,
+<a href=#8 id=8 data-nosnippet>8</a>//! - [`build_test_router`] — a fully-wired `axum::Router` for integration
+<a href=#9 id=9 data-nosnippet>9</a>//!   tests using [`autumn_web::test::TestApp::from_router`].
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! `run_server` applies middleware via autumn's `AppBuilder::layer` (so
+<a href=#12 id=12 data-nosnippet>12</a>//! autumn's native middleware — request IDs, security headers, etc. — still
+<a href=#13 id=13 data-nosnippet>13</a>//! runs). `build_test_router` rebuilds just our routes + middleware as a
+<a href=#14 id=14 data-nosnippet>14</a>//! plain axum Router so tests can exercise it through
+<a href=#15 id=15 data-nosnippet>15</a>//! [`tower::ServiceExt::oneshot`] without autumn's lifecycle.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! **Rate limiting status**: the pre-migration actix stack shipped
+<a href=#18 id=18 data-nosnippet>18</a>//! `actix-governor` for per-IP rate limiting. autumn 0.2 does not yet ship
+<a href=#19 id=19 data-nosnippet>19</a>//! rate limiting out of the box, and `tower-governor` 0.8 does not satisfy
+<a href=#20 id=20 data-nosnippet>20</a>//! autumn's sealed `IntoAppLayer` bound (its `S::Response: From&lt;GovernorError&gt;`
+<a href=#21 id=21 data-nosnippet>21</a>//! constraint doesn't propagate through autumn's strict service signature).
+<a href=#22 id=22 data-nosnippet>22</a>//! Rather than write a short-lived shim, rate limiting is not applied at the
+<a href=#23 id=23 data-nosnippet>23</a>//! HTTP layer in this PR. `RateLimitConfig` is preserved in the public API;
+<a href=#24 id=24 data-nosnippet>24</a>//! it will be wired to autumn's native per-IP limiter when 0.3 ships. In the
+<a href=#25 id=25 data-nosnippet>25</a>//! interim, operators should enforce rate limits at the reverse-proxy layer
+<a href=#26 id=26 data-nosnippet>26</a>//! (nginx, Caddy, Envoy). See ADR 0055 for the full trade-off.
+<a href=#27 id=27 data-nosnippet>27</a>
+<a href=#28 id=28 data-nosnippet>28</a></span><span class="kw">use </span>std::sync::Arc;
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">use </span>std::time::Duration;
+<a href=#30 id=30 data-nosnippet>30</a>
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">use </span>autumn_web::prelude::AppState <span class="kw">as </span>AutumnAppState;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">use </span>axum::Router;
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">use </span>axum::extract::DefaultBodyLimit;
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">use </span>axum::http::{HeaderName, HeaderValue, Method};
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">use </span>tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">use </span>tower_http::set_header::SetResponseHeaderLayer;
+<a href=#37 id=37 data-nosnippet>37</a><span class="kw">use </span>tower_http::trace::TraceLayer;
+<a href=#38 id=38 data-nosnippet>38</a>
+<a href=#39 id=39 data-nosnippet>39</a><span class="comment">// NOTE: tower-http layers (SetResponseHeaderLayer, CorsLayer, TraceLayer) are
+<a href=#40 id=40 data-nosnippet>40</a>// kept imported for `build_test_router`, which constructs a plain axum::Router
+<a href=#41 id=41 data-nosnippet>41</a>// and is not subject to autumn's `IntoAppLayer` bound.
+<a href=#42 id=42 data-nosnippet>42</a>
+<a href=#43 id=43 data-nosnippet>43</a></span><span class="kw">use </span><span class="kw">crate</span>::AletheiaDB;
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span><span class="kw">crate</span>::auth::{AuthMode, AuthStore, Role};
+<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span><span class="kw">crate</span>::http::auth::{AuthState, validate_auth_startup};
+<a href=#46 id=46 data-nosnippet>46</a><span class="kw">use </span><span class="kw">crate</span>::http::config::{CorsConfig, ServerConfig};
+<a href=#47 id=47 data-nosnippet>47</a><span class="kw">use </span><span class="kw">crate</span>::http::handlers::all_routes;
+<a href=#48 id=48 data-nosnippet>48</a><span class="kw">use </span><span class="kw">crate</span>::http::state::AppState;
+<a href=#49 id=49 data-nosnippet>49</a>
+<a href=#50 id=50 data-nosnippet>50</a><span class="comment">// ============================================================================
+<a href=#51 id=51 data-nosnippet>51</a>// Public entry points
+<a href=#52 id=52 data-nosnippet>52</a>// ============================================================================
+<a href=#53 id=53 data-nosnippet>53</a>
+<a href=#54 id=54 data-nosnippet>54</a></span><span class="doccomment">/// Run the HTTP server to completion.
+<a href=#55 id=55 data-nosnippet>55</a>///
+<a href=#56 id=56 data-nosnippet>56</a>/// Creates a fresh `AletheiaDB`, wires it into shared state, assembles the
+<a href=#57 id=57 data-nosnippet>57</a>/// autumn app, and hands control to `autumn_web::app`
+<a href=#58 id=58 data-nosnippet>58</a>/// — which handles the TCP listener, graceful shutdown on SIGINT/SIGTERM, and
+<a href=#59 id=59 data-nosnippet>59</a>/// startup/shutdown tracing. Returns only after the server exits cleanly.
+<a href=#60 id=60 data-nosnippet>60</a>///
+<a href=#61 id=61 data-nosnippet>61</a>/// # Environment variables consumed
+<a href=#62 id=62 data-nosnippet>62</a>///
+<a href=#63 id=63 data-nosnippet>63</a>/// | Name | Purpose | Default |
+<a href=#64 id=64 data-nosnippet>64</a>/// |------|---------|---------|
+<a href=#65 id=65 data-nosnippet>65</a>/// | `ALETHEIADB_PORT` | Listening port | `1963` (in honor of the first Doctor Who broadcast, 23 Nov 1963) |
+<a href=#66 id=66 data-nosnippet>66</a>/// | `ALETHEIADB_HOST` | Bind address | `0.0.0.0` |
+<a href=#67 id=67 data-nosnippet>67</a>/// | `ALETHEIADB_CORS_PERMISSIVE` | Allow any origin | `false` |
+<a href=#68 id=68 data-nosnippet>68</a>/// | `ALETHEIADB_CORS_ORIGINS` | Comma-separated CORS allow-list | — |
+<a href=#69 id=69 data-nosnippet>69</a>///
+<a href=#70 id=70 data-nosnippet>70</a>/// All of these are parsed by the binary entry point into [`ServerConfig`]
+<a href=#71 id=71 data-nosnippet>71</a>/// before reaching this function — `run_server` itself reads no environment
+<a href=#72 id=72 data-nosnippet>72</a>/// variables of its own.
+<a href=#73 id=73 data-nosnippet>73</a>///
+<a href=#74 id=74 data-nosnippet>74</a>/// # Errors
+<a href=#75 id=75 data-nosnippet>75</a>///
+<a href=#76 id=76 data-nosnippet>76</a>/// Returns an IO error if the database fails to initialize or if the
+<a href=#77 id=77 data-nosnippet>77</a>/// rate-limit configuration is invalid. Autumn's own startup failures
+<a href=#78 id=78 data-nosnippet>78</a>/// (e.g. failing to bind the port) terminate the process via
+<a href=#79 id=79 data-nosnippet>79</a>/// [`std::process::exit`]; they are not surfaced as `Err` here.
+<a href=#80 id=80 data-nosnippet>80</a></span><span class="kw">pub async fn </span>run_server(config: ServerConfig) -&gt; std::io::Result&lt;()&gt; {
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="comment">// Install OpenTelemetry tracing from the standard OTEL_* environment
+<a href=#82 id=82 data-nosnippet>82</a>    // (Issue #3376). Disabled unless ALETHEIADB_OTEL is truthy or an OTLP
+<a href=#83 id=83 data-nosnippet>83</a>    // endpoint is configured; the guard flushes + shuts the exporter down when
+<a href=#84 id=84 data-nosnippet>84</a>    // `run_server` returns. A subscriber-already-installed error is non-fatal
+<a href=#85 id=85 data-nosnippet>85</a>    // (the host process may own the subscriber).
+<a href=#86 id=86 data-nosnippet>86</a>    </span><span class="attr">#[cfg(feature = <span class="string">"otel"</span>)]
+<a href=#87 id=87 data-nosnippet>87</a>    </span><span class="kw">let </span>_otel_guard =
+<a href=#88 id=88 data-nosnippet>88</a>        <span class="kw">match </span><span class="kw">crate</span>::observability::otel::init(<span class="kw-2">&amp;</span><span class="kw">crate</span>::observability::otel::OtelConfig::from_env())
+<a href=#89 id=89 data-nosnippet>89</a>        {
+<a href=#90 id=90 data-nosnippet>90</a>            <span class="prelude-val">Ok</span>(guard) =&gt; guard,
+<a href=#91 id=91 data-nosnippet>91</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#92 id=92 data-nosnippet>92</a>                <span class="macro">eprintln!</span>(<span class="string">"WARNING: OpenTelemetry tracing not installed: {e}"</span>);
+<a href=#93 id=93 data-nosnippet>93</a>                <span class="prelude-val">None
+<a href=#94 id=94 data-nosnippet>94</a>            </span>}
+<a href=#95 id=95 data-nosnippet>95</a>        };
+<a href=#96 id=96 data-nosnippet>96</a>
+<a href=#97 id=97 data-nosnippet>97</a>    <span class="comment">// Validate config before wiring anything else.
+<a href=#98 id=98 data-nosnippet>98</a>    </span>config
+<a href=#99 id=99 data-nosnippet>99</a>        .rate_limit()
+<a href=#100 id=100 data-nosnippet>100</a>        .validate()
+<a href=#101 id=101 data-nosnippet>101</a>        .map_err(std::io::Error::other)<span class="question-mark">?</span>;
+<a href=#102 id=102 data-nosnippet>102</a>
+<a href=#103 id=103 data-nosnippet>103</a>    <span class="comment">// Assemble the auth store: persisted keys (if a path is configured or
+<a href=#104 id=104 data-nosnippet>104</a>    // derivable from data_dir), plus an optional env/config bootstrap admin
+<a href=#105 id=105 data-nosnippet>105</a>    // key (memory-only, never persisted).
+<a href=#106 id=106 data-nosnippet>106</a>    </span><span class="kw">let </span>auth_state = build_auth_state(<span class="kw-2">&amp;</span>config).map_err(std::io::Error::other)<span class="question-mark">?</span>;
+<a href=#107 id=107 data-nosnippet>107</a>    <span class="kw">match </span>auth_state.mode() {
+<a href=#108 id=108 data-nosnippet>108</a>        AuthMode::Anonymous =&gt; {
+<a href=#109 id=109 data-nosnippet>109</a>            <span class="comment">// PROMINENT warning: the operator explicitly opted out of auth.
+<a href=#110 id=110 data-nosnippet>110</a>            </span><span class="macro">eprintln!</span>(
+<a href=#111 id=111 data-nosnippet>111</a>                <span class="string">"WARNING: AUTHENTICATION IS DISABLED (auth mode: anonymous). \
+<a href=#112 id=112 data-nosnippet>112</a>                 Every request has full, unauthenticated access to the database. \
+<a href=#113 id=113 data-nosnippet>113</a>                 Do not expose this server to untrusted networks."
+<a href=#114 id=114 data-nosnippet>114</a>            </span>);
+<a href=#115 id=115 data-nosnippet>115</a>            <span class="macro">tracing::warn!</span>(
+<a href=#116 id=116 data-nosnippet>116</a>                <span class="string">"authentication disabled (auth mode: anonymous); every request has full access"
+<a href=#117 id=117 data-nosnippet>117</a>            </span>);
+<a href=#118 id=118 data-nosnippet>118</a>        }
+<a href=#119 id=119 data-nosnippet>119</a>        AuthMode::Required =&gt; {
+<a href=#120 id=120 data-nosnippet>120</a>            <span class="comment">// Conservative default: refuse to start with zero credentials.
+<a href=#121 id=121 data-nosnippet>121</a>            </span>validate_auth_startup(AuthMode::Required, auth_state.store())
+<a href=#122 id=122 data-nosnippet>122</a>                .map_err(std::io::Error::other)<span class="question-mark">?</span>;
+<a href=#123 id=123 data-nosnippet>123</a>        }
+<a href=#124 id=124 data-nosnippet>124</a>    }
+<a href=#125 id=125 data-nosnippet>125</a>
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="kw">let </span>db = Arc::new(build_database(<span class="kw-2">&amp;</span>config)<span class="question-mark">?</span>);
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="comment">// Deliver the per-query resource limits (Issue #3368) to handlers via
+<a href=#128 id=128 data-nosnippet>128</a>    // shared state, exactly as the request-body-size limit is delivered via
+<a href=#129 id=129 data-nosnippet>129</a>    // config into the layer stack below.
+<a href=#130 id=130 data-nosnippet>130</a>    </span><span class="kw">let </span>our_state = AppState::new(db).with_query_limits(config.query_limits().clone());
+<a href=#131 id=131 data-nosnippet>131</a>    <span class="kw">let </span>startup_state = our_state.clone();
+<a href=#132 id=132 data-nosnippet>132</a>    <span class="kw">let </span>startup_auth = auth_state.clone();
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="kw">let </span>shutdown_state = our_state.clone();
+<a href=#134 id=134 data-nosnippet>134</a>    <span class="kw">let </span>persist_on_shutdown = config.data_dir().is_some();
+<a href=#135 id=135 data-nosnippet>135</a>
+<a href=#136 id=136 data-nosnippet>136</a>    <span class="macro">eprintln!</span>(
+<a href=#137 id=137 data-nosnippet>137</a>        <span class="string">"Starting AletheiaDB HTTP server on {}"</span>,
+<a href=#138 id=138 data-nosnippet>138</a>        config.bind_address()
+<a href=#139 id=139 data-nosnippet>139</a>    );
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="kw">match </span>config.data_dir() {
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="prelude-val">Some</span>(path) =&gt; <span class="macro">eprintln!</span>(<span class="string">"Data directory: {}"</span>, path.display()),
+<a href=#142 id=142 data-nosnippet>142</a>        <span class="prelude-val">None </span>=&gt; <span class="macro">eprintln!</span>(
+<a href=#143 id=143 data-nosnippet>143</a>            <span class="string">"WARNING: no data directory configured — running in-memory; state is lost on shutdown."
+<a href=#144 id=144 data-nosnippet>144</a>        </span>),
+<a href=#145 id=145 data-nosnippet>145</a>    }
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="kw">if </span>config.cors().is_permissive() {
+<a href=#147 id=147 data-nosnippet>147</a>        <span class="macro">eprintln!</span>(
+<a href=#148 id=148 data-nosnippet>148</a>            <span class="string">"WARNING: CORS is configured in permissive mode (any origin allowed). \
+<a href=#149 id=149 data-nosnippet>149</a>             This is not recommended for production."
+<a href=#150 id=150 data-nosnippet>150</a>        </span>);
+<a href=#151 id=151 data-nosnippet>151</a>    }
+<a href=#152 id=152 data-nosnippet>152</a>
+<a href=#153 id=153 data-nosnippet>153</a>    <span class="comment">// Bridge our ServerConfig into autumn's config via its AUTUMN_*__* env
+<a href=#154 id=154 data-nosnippet>154</a>    // vars (host/port/CORS/CSRF; the actuator hardening below goes through
+<a href=#155 id=155 data-nosnippet>155</a>    // a ConfigLoader because `[actuator]` has no AUTUMN_* env mapping).
+<a href=#156 id=156 data-nosnippet>156</a>    //
+<a href=#157 id=157 data-nosnippet>157</a>    // TODO: fold this env-var bridge into `HardenedConfigLoader` — it's
+<a href=#158 id=158 data-nosnippet>158</a>    // cleaner and retires the `unsafe` block.
+<a href=#159 id=159 data-nosnippet>159</a>    //
+<a href=#160 id=160 data-nosnippet>160</a>    // SAFETY: `set_var` is unsafe in edition 2024 because concurrent reads
+<a href=#161 id=161 data-nosnippet>161</a>    // from other threads are UB. These calls happen before any autumn code
+<a href=#162 id=162 data-nosnippet>162</a>    // runs (autumn's own startup reads env only inside `.run()`), and
+<a href=#163 id=163 data-nosnippet>163</a>    // AletheiaDB performs no env reads on other threads during this window.
+<a href=#164 id=164 data-nosnippet>164</a>    </span><span class="kw">unsafe </span>{
+<a href=#165 id=165 data-nosnippet>165</a>        apply_autumn_env(<span class="kw-2">&amp;</span>config);
+<a href=#166 id=166 data-nosnippet>166</a>    }
+<a href=#167 id=167 data-nosnippet>167</a>
+<a href=#168 id=168 data-nosnippet>168</a>    <span class="comment">// Framework endpoints autumn mounts outside our AuthContext extractor
+<a href=#169 id=169 data-nosnippet>169</a>    // (they never see AletheiaDB credentials). With the sensitive actuator
+<a href=#170 id=170 data-nosnippet>170</a>    // group forced off by `HardenedConfigLoader`, what remains is
+<a href=#171 id=171 data-nosnippet>171</a>    // health/metadata only — but operators should still block them at the
+<a href=#172 id=172 data-nosnippet>172</a>    // reverse proxy if they must not be publicly reachable.
+<a href=#173 id=173 data-nosnippet>173</a>    </span><span class="macro">eprintln!</span>(
+<a href=#174 id=174 data-nosnippet>174</a>        <span class="string">"Note: framework endpoints served WITHOUT AletheiaDB authentication: \
+<a href=#175 id=175 data-nosnippet>175</a>         /health, /live, /ready, /startup, /actuator/health, /actuator/info, \
+<a href=#176 id=176 data-nosnippet>176</a>         /actuator/metrics, /actuator/a11y, /actuator/ui, /actuator/ui/metrics. \
+<a href=#177 id=177 data-nosnippet>177</a>         Sensitive actuator endpoints (/actuator/env, /actuator/configprops, \
+<a href=#178 id=178 data-nosnippet>178</a>         /actuator/loggers, /actuator/tasks, /actuator/jobs, /actuator/prometheus) \
+<a href=#179 id=179 data-nosnippet>179</a>         are disabled in every profile. Block /actuator and the probe paths at \
+<a href=#180 id=180 data-nosnippet>180</a>         your reverse proxy if they must not be publicly reachable."
+<a href=#181 id=181 data-nosnippet>181</a>    </span>);
+<a href=#182 id=182 data-nosnippet>182</a>
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="comment">// TODO(autumn-0.3): wire per-IP rate limiting here when autumn ships it
+<a href=#184 id=184 data-nosnippet>184</a>    // natively. See the module-level doc.
+<a href=#185 id=185 data-nosnippet>185</a>    //
+<a href=#186 id=186 data-nosnippet>186</a>    // Request tracing, metrics, and security headers are provided by autumn's
+<a href=#187 id=187 data-nosnippet>187</a>    // baseline middleware. CORS is driven by the AUTUMN_CORS__* env vars set
+<a href=#188 id=188 data-nosnippet>188</a>    // in `apply_autumn_env` above, so operator-facing `ALETHEIADB_CORS_*`
+<a href=#189 id=189 data-nosnippet>189</a>    // settings flow end-to-end into autumn's CorsLayer.
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a>    </span>autumn_web::app()
+<a href=#192 id=192 data-nosnippet>192</a>        .with_config_loader(HardenedConfigLoader)
+<a href=#193 id=193 data-nosnippet>193</a>        .on_startup(<span class="kw">move </span>|autumn_state| {
+<a href=#194 id=194 data-nosnippet>194</a>            <span class="kw">let </span>installed = startup_state.clone();
+<a href=#195 id=195 data-nosnippet>195</a>            <span class="kw">let </span>installed_auth = startup_auth.clone();
+<a href=#196 id=196 data-nosnippet>196</a>            <span class="kw">async move </span>{
+<a href=#197 id=197 data-nosnippet>197</a>                autumn_state.insert_extension(installed);
+<a href=#198 id=198 data-nosnippet>198</a>                autumn_state.insert_extension(installed_auth);
+<a href=#199 id=199 data-nosnippet>199</a>                <span class="prelude-val">Ok</span>(())
+<a href=#200 id=200 data-nosnippet>200</a>            }
+<a href=#201 id=201 data-nosnippet>201</a>        })
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="comment">// Graceful-shutdown checkpoint. Without this, SIGTERM leaves the
+<a href=#203 id=203 data-nosnippet>203</a>        // string interner and index state behind at the last
+<a href=#204 id=204 data-nosnippet>204</a>        // mutation-threshold snapshot (defaults: 500 new strings / 5-10
+<a href=#205 id=205 data-nosnippet>205</a>        // minute cadence). A Docker-style stop/start workflow would lose
+<a href=#206 id=206 data-nosnippet>206</a>        // label strings until a checkpoint happened organically, which
+<a href=#207 id=207 data-nosnippet>207</a>        // manifests as `label: "&lt;unknown:N&gt;"` after restart. Flushing on
+<a href=#208 id=208 data-nosnippet>208</a>        // shutdown makes restart semantics feel like postgres: stop, start,
+<a href=#209 id=209 data-nosnippet>209</a>        // your data is exactly as you left it.
+<a href=#210 id=210 data-nosnippet>210</a>        </span>.on_shutdown(<span class="kw">move </span>|| {
+<a href=#211 id=211 data-nosnippet>211</a>            <span class="kw">let </span>db = shutdown_state.db_arc();
+<a href=#212 id=212 data-nosnippet>212</a>            <span class="kw">let </span>should_persist = persist_on_shutdown;
+<a href=#213 id=213 data-nosnippet>213</a>            <span class="kw">async move </span>{
+<a href=#214 id=214 data-nosnippet>214</a>                <span class="kw">if </span>!should_persist {
+<a href=#215 id=215 data-nosnippet>215</a>                    <span class="kw">return</span>;
+<a href=#216 id=216 data-nosnippet>216</a>                }
+<a href=#217 id=217 data-nosnippet>217</a>                <span class="kw">match </span>tokio::task::spawn_blocking(<span class="kw">move </span>|| db.persist_indexes()).<span class="kw">await </span>{
+<a href=#218 id=218 data-nosnippet>218</a>                    <span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(())) =&gt; <span class="macro">eprintln!</span>(<span class="string">"Shutdown: indexes persisted."</span>),
+<a href=#219 id=219 data-nosnippet>219</a>                    <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(e)) =&gt; <span class="macro">eprintln!</span>(<span class="string">"Shutdown: persist_indexes failed: {e}"</span>),
+<a href=#220 id=220 data-nosnippet>220</a>                    <span class="prelude-val">Err</span>(e) =&gt; <span class="macro">eprintln!</span>(<span class="string">"Shutdown: persist_indexes task panicked: {e}"</span>),
+<a href=#221 id=221 data-nosnippet>221</a>                }
+<a href=#222 id=222 data-nosnippet>222</a>            }
+<a href=#223 id=223 data-nosnippet>223</a>        })
+<a href=#224 id=224 data-nosnippet>224</a>        .routes(all_routes())
+<a href=#225 id=225 data-nosnippet>225</a>        <span class="comment">// Reject oversized request bodies with 413 before they are buffered /
+<a href=#226 id=226 data-nosnippet>226</a>        // deserialized (payload-amplification DoS prevention — Issue #3108).
+<a href=#227 id=227 data-nosnippet>227</a>        // `DefaultBodyLimit` is axum-native and keeps the request type as
+<a href=#228 id=228 data-nosnippet>228</a>        // `axum::extract::Request`, so it satisfies autumn's `IntoAppLayer`
+<a href=#229 id=229 data-nosnippet>229</a>        // bound (unlike `RequestBodyLimitLayer`, which rewrites the body type).
+<a href=#230 id=230 data-nosnippet>230</a>        </span>.layer(DefaultBodyLimit::max(config.max_request_body_bytes()))
+<a href=#231 id=231 data-nosnippet>231</a>        .run()
+<a href=#232 id=232 data-nosnippet>232</a>        .<span class="kw">await</span>;
+<a href=#233 id=233 data-nosnippet>233</a>
+<a href=#234 id=234 data-nosnippet>234</a>    <span class="prelude-val">Ok</span>(())
+<a href=#235 id=235 data-nosnippet>235</a>}
+<a href=#236 id=236 data-nosnippet>236</a>
+<a href=#237 id=237 data-nosnippet>237</a><span class="doccomment">/// Autumn [`ConfigLoader`](autumn_web::config::ConfigLoader) that runs the
+<a href=#238 id=238 data-nosnippet>238</a>/// default five-layer load (framework defaults → profile smart defaults →
+<a href=#239 id=239 data-nosnippet>239</a>/// `autumn.toml` → `autumn-{profile}.toml` → `AUTUMN_*` env vars) and then
+<a href=#240 id=240 data-nosnippet>240</a>/// forces security-relevant framework settings to safe values.
+<a href=#241 id=241 data-nosnippet>241</a>///
+<a href=#242 id=242 data-nosnippet>242</a>/// Autumn mounts its own routes (probes, actuator) *outside* AletheiaDB's
+<a href=#243 id=243 data-nosnippet>243</a>/// `AuthContext` extractor, so they are never authenticated by our API-key
+<a href=#244 id=244 data-nosnippet>244</a>/// layer. Its `dev` profile smart default sets `actuator.sensitive = true`,
+<a href=#245 id=245 data-nosnippet>245</a>/// which additionally exposes `/actuator/env`, `/actuator/configprops`, an
+<a href=#246 id=246 data-nosnippet>246</a>/// unauthenticated `PUT /actuator/loggers/{name}`, `/actuator/tasks`,
+<a href=#247 id=247 data-nosnippet>247</a>/// `/actuator/jobs`, and `/actuator/prometheus` — and `[actuator]` has **no**
+<a href=#248 id=248 data-nosnippet>248</a>/// `AUTUMN_*` env-var mapping, so `AUTUMN_ACTUATOR__SENSITIVE=false` cannot
+<a href=#249 id=249 data-nosnippet>249</a>/// turn it off. This loader pins `actuator.sensitive = false` in every
+<a href=#250 id=250 data-nosnippet>250</a>/// profile: the config-dump and log-mutation endpoints are never served,
+<a href=#251 id=251 data-nosnippet>251</a>/// debug build or not. The remaining always-mounted framework endpoints
+<a href=#252 id=252 data-nosnippet>252</a>/// (health probes, `/actuator/health|info|metrics|a11y|ui`) are documented in
+<a href=#253 id=253 data-nosnippet>253</a>/// `docs/guides/security-quickstart.md` with reverse-proxy guidance.
+<a href=#254 id=254 data-nosnippet>254</a></span><span class="kw">struct </span>HardenedConfigLoader;
+<a href=#255 id=255 data-nosnippet>255</a>
+<a href=#256 id=256 data-nosnippet>256</a><span class="kw">impl </span>autumn_web::config::ConfigLoader <span class="kw">for </span>HardenedConfigLoader {
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="kw">async fn </span>load(
+<a href=#258 id=258 data-nosnippet>258</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#259 id=259 data-nosnippet>259</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;autumn_web::config::AutumnConfig, autumn_web::config::ConfigError&gt; {
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="kw">let </span><span class="kw-2">mut </span>config = autumn_web::config::TomlEnvConfigLoader::new()
+<a href=#261 id=261 data-nosnippet>261</a>            .load()
+<a href=#262 id=262 data-nosnippet>262</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="comment">// Never serve the sensitive actuator group, regardless of profile
+<a href=#264 id=264 data-nosnippet>264</a>        // or operator TOML: these endpoints bypass AletheiaDB auth entirely.
+<a href=#265 id=265 data-nosnippet>265</a>        </span>config.actuator.sensitive = <span class="bool-val">false</span>;
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="prelude-val">Ok</span>(config)
+<a href=#267 id=267 data-nosnippet>267</a>    }
+<a href=#268 id=268 data-nosnippet>268</a>}
+<a href=#269 id=269 data-nosnippet>269</a>
+<a href=#270 id=270 data-nosnippet>270</a><span class="doccomment">/// Assemble the [`AuthState`] a [`ServerConfig`] implies.
+<a href=#271 id=271 data-nosnippet>271</a>///
+<a href=#272 id=272 data-nosnippet>272</a>/// - Loads the persisted key store from
+<a href=#273 id=273 data-nosnippet>273</a>///   [`ServerConfig::resolved_auth_persist_path`] when one is configured or
+<a href=#274 id=274 data-nosnippet>274</a>///   derivable, otherwise starts a memory-only store.
+<a href=#275 id=275 data-nosnippet>275</a>/// - Installs the bootstrap admin key (principal name `bootstrap-admin`,
+<a href=#276 id=276 data-nosnippet>276</a>///   role `admin`) when configured. Bootstrap keys are memory-only: they are
+<a href=#277 id=277 data-nosnippet>277</a>///   re-supplied via env/config on every start and never persisted.
+<a href=#278 id=278 data-nosnippet>278</a>///
+<a href=#279 id=279 data-nosnippet>279</a>/// Startup *refusal* (required mode with zero credentials) is enforced by
+<a href=#280 id=280 data-nosnippet>280</a>/// [`run_server`], not here — `build_test_router` deliberately skips it so
+<a href=#281 id=281 data-nosnippet>281</a>/// tests can exercise the uniform-401 behavior of a keyless required-mode
+<a href=#282 id=282 data-nosnippet>282</a>/// server.
+<a href=#283 id=283 data-nosnippet>283</a></span><span class="kw">fn </span>build_auth_state(config: <span class="kw-2">&amp;</span>ServerConfig) -&gt; <span class="prelude-ty">Result</span>&lt;AuthState, String&gt; {
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="kw">let </span>store = <span class="kw">match </span>config.resolved_auth_persist_path() {
+<a href=#285 id=285 data-nosnippet>285</a>        <span class="prelude-val">Some</span>(path) =&gt; AuthStore::with_persistence(<span class="kw-2">&amp;</span>path)
+<a href=#286 id=286 data-nosnippet>286</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"failed to open auth key store: {e}"</span>))<span class="question-mark">?</span>,
+<a href=#287 id=287 data-nosnippet>287</a>        <span class="prelude-val">None </span>=&gt; AuthStore::new(),
+<a href=#288 id=288 data-nosnippet>288</a>    };
+<a href=#289 id=289 data-nosnippet>289</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(key) = config.bootstrap_admin_key() {
+<a href=#290 id=290 data-nosnippet>290</a>        store
+<a href=#291 id=291 data-nosnippet>291</a>            .insert_bootstrap_key(<span class="string">"bootstrap-admin"</span>, Role::Admin, key.expose())
+<a href=#292 id=292 data-nosnippet>292</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"failed to install bootstrap admin key: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#293 id=293 data-nosnippet>293</a>    }
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="prelude-val">Ok</span>(AuthState::new(Arc::new(store), config.auth_mode()))
+<a href=#295 id=295 data-nosnippet>295</a>}
+<a href=#296 id=296 data-nosnippet>296</a>
+<a href=#297 id=297 data-nosnippet>297</a><span class="doccomment">/// Construct the [`AletheiaDB`] instance the HTTP server will share.
+<a href=#298 id=298 data-nosnippet>298</a>///
+<a href=#299 id=299 data-nosnippet>299</a>/// Resolution order:
+<a href=#300 id=300 data-nosnippet>300</a>/// 1. If `ALETHEIADB_CONFIG` or `ALETHEIADB_DATA_DIR` is set in the environment,
+<a href=#301 id=301 data-nosnippet>301</a>///    delegate to [`AletheiaDB::open_from_env`] so the server picks up the same
+<a href=#302 id=302 data-nosnippet>302</a>///    config the MCP server, CLI, and Python SDK do.
+<a href=#303 id=303 data-nosnippet>303</a>/// 2. Otherwise use [`ServerConfig::to_unified_config`] — this is the path
+<a href=#304 id=304 data-nosnippet>304</a>///    integration tests take when they pass `data_dir` programmatically without
+<a href=#305 id=305 data-nosnippet>305</a>///    touching the environment.
+<a href=#306 id=306 data-nosnippet>306</a></span><span class="kw">fn </span>build_database(config: <span class="kw-2">&amp;</span>ServerConfig) -&gt; std::io::Result&lt;AletheiaDB&gt; {
+<a href=#307 id=307 data-nosnippet>307</a>    <span class="kw">if </span><span class="kw">crate</span>::config::config_path_from_env().is_some()
+<a href=#308 id=308 data-nosnippet>308</a>        || <span class="kw">crate</span>::config::data_dir_from_env().is_some()
+<a href=#309 id=309 data-nosnippet>309</a>    {
+<a href=#310 id=310 data-nosnippet>310</a>        <span class="kw">return </span>AletheiaDB::open_from_env().map_err(|e| std::io::Error::other(e.to_string()));
+<a href=#311 id=311 data-nosnippet>311</a>    }
+<a href=#312 id=312 data-nosnippet>312</a>    <span class="kw">match </span>config.to_unified_config() {
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="prelude-val">None </span>=&gt; AletheiaDB::new().map_err(|e| std::io::Error::other(e.to_string())),
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="prelude-val">Some</span>(unified) =&gt; AletheiaDB::with_unified_config(unified)
+<a href=#315 id=315 data-nosnippet>315</a>            .map_err(|e| std::io::Error::other(e.to_string())),
+<a href=#316 id=316 data-nosnippet>316</a>    }
+<a href=#317 id=317 data-nosnippet>317</a>}
+<a href=#318 id=318 data-nosnippet>318</a>
+<a href=#319 id=319 data-nosnippet>319</a><span class="doccomment">/// Set the `AUTUMN_SERVER__*` and `AUTUMN_CORS__*` environment variables
+<a href=#320 id=320 data-nosnippet>320</a>/// autumn's config loader reads, based on our [`ServerConfig`].
+<a href=#321 id=321 data-nosnippet>321</a>///
+<a href=#322 id=322 data-nosnippet>322</a>/// # Safety
+<a href=#323 id=323 data-nosnippet>323</a>///
+<a href=#324 id=324 data-nosnippet>324</a>/// Calls [`std::env::set_var`], which is `unsafe` under Rust edition 2024
+<a href=#325 id=325 data-nosnippet>325</a>/// because concurrent reads from other threads result in UB. Callers must
+<a href=#326 id=326 data-nosnippet>326</a>/// ensure no other thread is reading environment variables concurrently.
+<a href=#327 id=327 data-nosnippet>327</a>/// [`run_server`] calls this exactly once, before handing control to autumn.
+<a href=#328 id=328 data-nosnippet>328</a></span><span class="kw">unsafe fn </span>apply_autumn_env(config: <span class="kw-2">&amp;</span>ServerConfig) {
+<a href=#329 id=329 data-nosnippet>329</a>    <span class="comment">// SAFETY: see function-level docs; ordering is the caller's responsibility.
+<a href=#330 id=330 data-nosnippet>330</a>    </span><span class="kw">unsafe </span>{
+<a href=#331 id=331 data-nosnippet>331</a>        std::env::set_var(<span class="string">"AUTUMN_SERVER__HOST"</span>, config.host());
+<a href=#332 id=332 data-nosnippet>332</a>        std::env::set_var(<span class="string">"AUTUMN_SERVER__PORT"</span>, config.port().to_string());
+<a href=#333 id=333 data-nosnippet>333</a>
+<a href=#334 id=334 data-nosnippet>334</a>        <span class="kw">let </span>cors = config.cors();
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="comment">// `permissive` maps to wildcard origin. `restrictive` with zero explicit
+<a href=#336 id=336 data-nosnippet>336</a>        // origins would disable CORS entirely, which is fine.
+<a href=#337 id=337 data-nosnippet>337</a>        </span><span class="kw">let </span>origins: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = <span class="kw">if </span>cors.is_permissive() {
+<a href=#338 id=338 data-nosnippet>338</a>            <span class="macro">vec!</span>[<span class="string">"*"</span>]
+<a href=#339 id=339 data-nosnippet>339</a>        } <span class="kw">else </span>{
+<a href=#340 id=340 data-nosnippet>340</a>            cors.allowed_origins().iter().map(String::as_str).collect()
+<a href=#341 id=341 data-nosnippet>341</a>        };
+<a href=#342 id=342 data-nosnippet>342</a>        std::env::set_var(<span class="string">"AUTUMN_CORS__ALLOWED_ORIGINS"</span>, origins.join(<span class="string">","</span>));
+<a href=#343 id=343 data-nosnippet>343</a>        std::env::set_var(
+<a href=#344 id=344 data-nosnippet>344</a>            <span class="string">"AUTUMN_CORS__ALLOWED_METHODS"</span>,
+<a href=#345 id=345 data-nosnippet>345</a>            cors.get_allowed_methods().join(<span class="string">","</span>),
+<a href=#346 id=346 data-nosnippet>346</a>        );
+<a href=#347 id=347 data-nosnippet>347</a>        std::env::set_var(
+<a href=#348 id=348 data-nosnippet>348</a>            <span class="string">"AUTUMN_CORS__ALLOWED_HEADERS"</span>,
+<a href=#349 id=349 data-nosnippet>349</a>            cors.get_allowed_headers().join(<span class="string">","</span>),
+<a href=#350 id=350 data-nosnippet>350</a>        );
+<a href=#351 id=351 data-nosnippet>351</a>        std::env::set_var(<span class="string">"AUTUMN_CORS__MAX_AGE_SECS"</span>, cors.get_max_age().to_string());
+<a href=#352 id=352 data-nosnippet>352</a>
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="comment">// Disable CSRF protection. autumn's `prod` profile enables it by
+<a href=#354 id=354 data-nosnippet>354</a>        // default (appropriate for session-authenticated browser forms),
+<a href=#355 id=355 data-nosnippet>355</a>        // but AletheiaDB's `/query` endpoint is a token-less JSON API —
+<a href=#356 id=356 data-nosnippet>356</a>        // no sessions, no forms, nothing a cross-site POST could
+<a href=#357 id=357 data-nosnippet>357</a>        // impersonate. CSRF protection adds no security here and only
+<a href=#358 id=358 data-nosnippet>358</a>        // breaks legitimate POSTs. When the dashboard PR lands with
+<a href=#359 id=359 data-nosnippet>359</a>        // session-backed routes, it should re-enable CSRF scoped to those
+<a href=#360 id=360 data-nosnippet>360</a>        // routes rather than flipping this flag globally.
+<a href=#361 id=361 data-nosnippet>361</a>        </span>std::env::set_var(<span class="string">"AUTUMN_SECURITY__CSRF__ENABLED"</span>, <span class="string">"false"</span>);
+<a href=#362 id=362 data-nosnippet>362</a>    }
+<a href=#363 id=363 data-nosnippet>363</a>}
+<a href=#364 id=364 data-nosnippet>364</a>
+<a href=#365 id=365 data-nosnippet>365</a><span class="doccomment">/// Build a fully-wired `axum::Router` suitable for integration tests.
+<a href=#366 id=366 data-nosnippet>366</a>///
+<a href=#367 id=367 data-nosnippet>367</a>/// Registers the crate's HTTP routes on a fresh [`autumn_web::prelude::AppState`]
+<a href=#368 id=368 data-nosnippet>368</a>/// with the provided [`AppState`] pre-installed as an extension, then resolves
+<a href=#369 id=369 data-nosnippet>369</a>/// the state via [`Router::with_state`]. Pass the result to
+<a href=#370 id=370 data-nosnippet>370</a>/// [`autumn_web::test::TestApp::from_router`] to get a `TestClient`.
+<a href=#371 id=371 data-nosnippet>371</a>///
+<a href=#372 id=372 data-nosnippet>372</a>/// `RateLimitConfig` validation still runs so tests catch misconfiguration,
+<a href=#373 id=373 data-nosnippet>373</a>/// but no rate-limit layer is attached (see the module doc).
+<a href=#374 id=374 data-nosnippet>374</a>///
+<a href=#375 id=375 data-nosnippet>375</a>/// Auth state is derived from `config` (mode, bootstrap key, persist path),
+<a href=#376 id=376 data-nosnippet>376</a>/// exactly as `run_server` derives it — but *without* `run_server`'s
+<a href=#377 id=377 data-nosnippet>377</a>/// "required mode needs at least one credential" startup refusal, so tests
+<a href=#378 id=378 data-nosnippet>378</a>/// can exercise the uniform 401 of a keyless required-mode server. Use
+<a href=#379 id=379 data-nosnippet>379</a>/// [`build_test_router_with_auth`] to inject a pre-populated
+<a href=#380 id=380 data-nosnippet>380</a>/// [`AuthState`]/[`AuthStore`] instead.
+<a href=#381 id=381 data-nosnippet>381</a>///
+<a href=#382 id=382 data-nosnippet>382</a>/// # Errors
+<a href=#383 id=383 data-nosnippet>383</a>///
+<a href=#384 id=384 data-nosnippet>384</a>/// Returns an error string if the rate-limit or auth configuration is invalid.
+<a href=#385 id=385 data-nosnippet>385</a></span><span class="kw">pub fn </span>build_test_router(state: AppState, config: <span class="kw-2">&amp;</span>ServerConfig) -&gt; <span class="prelude-ty">Result</span>&lt;Router, String&gt; {
+<a href=#386 id=386 data-nosnippet>386</a>    <span class="kw">let </span>auth_state = build_auth_state(config)<span class="question-mark">?</span>;
+<a href=#387 id=387 data-nosnippet>387</a>    build_test_router_with_auth(state, auth_state, config)
+<a href=#388 id=388 data-nosnippet>388</a>}
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a><span class="doccomment">/// [`build_test_router`] with an explicit [`AuthState`] — for tests that
+<a href=#391 id=391 data-nosnippet>391</a>/// create/revoke keys against a shared [`AuthStore`] handle.
+<a href=#392 id=392 data-nosnippet>392</a>///
+<a href=#393 id=393 data-nosnippet>393</a>/// # Errors
+<a href=#394 id=394 data-nosnippet>394</a>///
+<a href=#395 id=395 data-nosnippet>395</a>/// Returns an error string if the rate-limit configuration is invalid.
+<a href=#396 id=396 data-nosnippet>396</a></span><span class="kw">pub fn </span>build_test_router_with_auth(
+<a href=#397 id=397 data-nosnippet>397</a>    state: AppState,
+<a href=#398 id=398 data-nosnippet>398</a>    auth_state: AuthState,
+<a href=#399 id=399 data-nosnippet>399</a>    config: <span class="kw-2">&amp;</span>ServerConfig,
+<a href=#400 id=400 data-nosnippet>400</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Router, String&gt; {
+<a href=#401 id=401 data-nosnippet>401</a>    config.rate_limit().validate()<span class="question-mark">?</span>;
+<a href=#402 id=402 data-nosnippet>402</a>
+<a href=#403 id=403 data-nosnippet>403</a>    <span class="comment">// Fold the per-query resource limits (Issue #3368) from `config` into the
+<a href=#404 id=404 data-nosnippet>404</a>    // shared state, mirroring how `run_server` wires them — so tests that pass
+<a href=#405 id=405 data-nosnippet>405</a>    // a custom `QueryLimitsConfig` through `ServerConfig` see it enforced.
+<a href=#406 id=406 data-nosnippet>406</a>    </span><span class="kw">let </span>state = state.with_query_limits(config.query_limits().clone());
+<a href=#407 id=407 data-nosnippet>407</a>
+<a href=#408 id=408 data-nosnippet>408</a>    <span class="kw">let </span>autumn_state = AutumnAppState::detached();
+<a href=#409 id=409 data-nosnippet>409</a>    autumn_state.insert_extension(state);
+<a href=#410 id=410 data-nosnippet>410</a>    autumn_state.insert_extension(auth_state);
+<a href=#411 id=411 data-nosnippet>411</a>
+<a href=#412 id=412 data-nosnippet>412</a>    <span class="kw">let </span><span class="kw-2">mut </span>router: Router&lt;AutumnAppState&gt; = Router::new();
+<a href=#413 id=413 data-nosnippet>413</a>    <span class="kw">for </span>route <span class="kw">in </span>all_routes() {
+<a href=#414 id=414 data-nosnippet>414</a>        router = router.route(route.path, route.handler);
+<a href=#415 id=415 data-nosnippet>415</a>    }
+<a href=#416 id=416 data-nosnippet>416</a>
+<a href=#417 id=417 data-nosnippet>417</a>    <span class="comment">// Layer order matches run_server (minus the rate limiter).
+<a href=#418 id=418 data-nosnippet>418</a>    </span><span class="kw">let </span>router = router
+<a href=#419 id=419 data-nosnippet>419</a>        .layer(SetResponseHeaderLayer::if_not_present(
+<a href=#420 id=420 data-nosnippet>420</a>            HeaderName::from_static(<span class="string">"x-content-type-options"</span>),
+<a href=#421 id=421 data-nosnippet>421</a>            HeaderValue::from_static(<span class="string">"nosniff"</span>),
+<a href=#422 id=422 data-nosnippet>422</a>        ))
+<a href=#423 id=423 data-nosnippet>423</a>        .layer(SetResponseHeaderLayer::if_not_present(
+<a href=#424 id=424 data-nosnippet>424</a>            HeaderName::from_static(<span class="string">"x-frame-options"</span>),
+<a href=#425 id=425 data-nosnippet>425</a>            HeaderValue::from_static(<span class="string">"DENY"</span>),
+<a href=#426 id=426 data-nosnippet>426</a>        ))
+<a href=#427 id=427 data-nosnippet>427</a>        .layer(SetResponseHeaderLayer::if_not_present(
+<a href=#428 id=428 data-nosnippet>428</a>            HeaderName::from_static(<span class="string">"content-security-policy"</span>),
+<a href=#429 id=429 data-nosnippet>429</a>            HeaderValue::from_static(<span class="string">"default-src 'none'; frame-ancestors 'none'"</span>),
+<a href=#430 id=430 data-nosnippet>430</a>        ))
+<a href=#431 id=431 data-nosnippet>431</a>        .layer(build_cors_layer(config.cors()))
+<a href=#432 id=432 data-nosnippet>432</a>        .layer(TraceLayer::new_for_http())
+<a href=#433 id=433 data-nosnippet>433</a>        <span class="comment">// Reject oversized request bodies with 413 before they are buffered /
+<a href=#434 id=434 data-nosnippet>434</a>        // deserialized, bounding the memory a single request can force us to
+<a href=#435 id=435 data-nosnippet>435</a>        // allocate (payload-amplification DoS prevention — Issue #3108).
+<a href=#436 id=436 data-nosnippet>436</a>        </span>.layer(DefaultBodyLimit::max(config.max_request_body_bytes()));
+<a href=#437 id=437 data-nosnippet>437</a>
+<a href=#438 id=438 data-nosnippet>438</a>    <span class="prelude-val">Ok</span>(router.with_state(autumn_state))
+<a href=#439 id=439 data-nosnippet>439</a>}
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a><span class="comment">// ============================================================================
+<a href=#442 id=442 data-nosnippet>442</a>// Middleware builders
+<a href=#443 id=443 data-nosnippet>443</a>// ============================================================================
+<a href=#444 id=444 data-nosnippet>444</a>
+<a href=#445 id=445 data-nosnippet>445</a></span><span class="doccomment">/// Build a tower-http CORS layer from our [`CorsConfig`].
+<a href=#446 id=446 data-nosnippet>446</a></span><span class="kw">fn </span>build_cors_layer(cors: <span class="kw-2">&amp;</span>CorsConfig) -&gt; CorsLayer {
+<a href=#447 id=447 data-nosnippet>447</a>    <span class="kw">let </span>origin = <span class="kw">if </span>cors.is_permissive() {
+<a href=#448 id=448 data-nosnippet>448</a>        AllowOrigin::any()
+<a href=#449 id=449 data-nosnippet>449</a>    } <span class="kw">else </span>{
+<a href=#450 id=450 data-nosnippet>450</a>        <span class="kw">let </span>values: Vec&lt;HeaderValue&gt; = cors
+<a href=#451 id=451 data-nosnippet>451</a>            .allowed_origins()
+<a href=#452 id=452 data-nosnippet>452</a>            .iter()
+<a href=#453 id=453 data-nosnippet>453</a>            .filter_map(|o| HeaderValue::from_str(o).ok())
+<a href=#454 id=454 data-nosnippet>454</a>            .collect();
+<a href=#455 id=455 data-nosnippet>455</a>        AllowOrigin::list(values)
+<a href=#456 id=456 data-nosnippet>456</a>    };
+<a href=#457 id=457 data-nosnippet>457</a>
+<a href=#458 id=458 data-nosnippet>458</a>    <span class="kw">let </span>methods: Vec&lt;Method&gt; = cors
+<a href=#459 id=459 data-nosnippet>459</a>        .get_allowed_methods()
+<a href=#460 id=460 data-nosnippet>460</a>        .iter()
+<a href=#461 id=461 data-nosnippet>461</a>        .filter_map(|m| m.parse().ok())
+<a href=#462 id=462 data-nosnippet>462</a>        .collect();
+<a href=#463 id=463 data-nosnippet>463</a>
+<a href=#464 id=464 data-nosnippet>464</a>    <span class="kw">let </span>headers: Vec&lt;HeaderName&gt; = cors
+<a href=#465 id=465 data-nosnippet>465</a>        .get_allowed_headers()
+<a href=#466 id=466 data-nosnippet>466</a>        .iter()
+<a href=#467 id=467 data-nosnippet>467</a>        .filter_map(|h| h.parse().ok())
+<a href=#468 id=468 data-nosnippet>468</a>        .collect();
+<a href=#469 id=469 data-nosnippet>469</a>
+<a href=#470 id=470 data-nosnippet>470</a>    CorsLayer::new()
+<a href=#471 id=471 data-nosnippet>471</a>        .allow_origin(origin)
+<a href=#472 id=472 data-nosnippet>472</a>        .allow_methods(AllowMethods::list(methods))
+<a href=#473 id=473 data-nosnippet>473</a>        .allow_headers(AllowHeaders::list(headers))
+<a href=#474 id=474 data-nosnippet>474</a>        .max_age(Duration::from_secs(u64::from(cors.get_max_age())))
+<a href=#475 id=475 data-nosnippet>475</a>}
+<a href=#476 id=476 data-nosnippet>476</a>
+<a href=#477 id=477 data-nosnippet>477</a><span class="comment">// ============================================================================
+<a href=#478 id=478 data-nosnippet>478</a>// Tests
+<a href=#479 id=479 data-nosnippet>479</a>// ============================================================================
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a></span><span class="attr">#[cfg(test)]
+<a href=#482 id=482 data-nosnippet>482</a></span><span class="kw">mod </span>tests {
+<a href=#483 id=483 data-nosnippet>483</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#484 id=484 data-nosnippet>484</a>    <span class="kw">use </span><span class="kw">crate</span>::http::config::RateLimitConfig;
+<a href=#485 id=485 data-nosnippet>485</a>
+<a href=#486 id=486 data-nosnippet>486</a>    <span class="attr">#[test]
+<a href=#487 id=487 data-nosnippet>487</a>    </span><span class="kw">fn </span>build_test_router_succeeds_with_default_config() {
+<a href=#488 id=488 data-nosnippet>488</a>        <span class="kw">let </span>db = Arc::new(AletheiaDB::new().unwrap());
+<a href=#489 id=489 data-nosnippet>489</a>        <span class="kw">let </span>state = AppState::new(db);
+<a href=#490 id=490 data-nosnippet>490</a>        <span class="kw">let </span>config = ServerConfig::default();
+<a href=#491 id=491 data-nosnippet>491</a>        <span class="macro">assert!</span>(build_test_router(state, <span class="kw-2">&amp;</span>config).is_ok());
+<a href=#492 id=492 data-nosnippet>492</a>    }
+<a href=#493 id=493 data-nosnippet>493</a>
+<a href=#494 id=494 data-nosnippet>494</a>    <span class="attr">#[test]
+<a href=#495 id=495 data-nosnippet>495</a>    </span><span class="kw">fn </span>build_test_router_rejects_invalid_rate_limit() {
+<a href=#496 id=496 data-nosnippet>496</a>        <span class="kw">let </span>db = Arc::new(AletheiaDB::new().unwrap());
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="kw">let </span>state = AppState::new(db);
+<a href=#498 id=498 data-nosnippet>498</a>        <span class="kw">let </span>config = ServerConfig::builder()
+<a href=#499 id=499 data-nosnippet>499</a>            .rate_limit(RateLimitConfig::new(<span class="number">0</span>, <span class="number">1</span>))
+<a href=#500 id=500 data-nosnippet>500</a>            .build();
+<a href=#501 id=501 data-nosnippet>501</a>        <span class="macro">assert!</span>(build_test_router(state, <span class="kw-2">&amp;</span>config).is_err());
+<a href=#502 id=502 data-nosnippet>502</a>    }
+<a href=#503 id=503 data-nosnippet>503</a>
+<a href=#504 id=504 data-nosnippet>504</a>    <span class="attr">#[test]
+<a href=#505 id=505 data-nosnippet>505</a>    </span><span class="kw">fn </span>build_cors_layer_permissive_runs() {
+<a href=#506 id=506 data-nosnippet>506</a>        <span class="kw">let _ </span>= build_cors_layer(<span class="kw-2">&amp;</span>CorsConfig::permissive());
+<a href=#507 id=507 data-nosnippet>507</a>    }
+<a href=#508 id=508 data-nosnippet>508</a>
+<a href=#509 id=509 data-nosnippet>509</a>    <span class="attr">#[test]
+<a href=#510 id=510 data-nosnippet>510</a>    </span><span class="kw">fn </span>build_cors_layer_restrictive_runs() {
+<a href=#511 id=511 data-nosnippet>511</a>        <span class="kw">let _ </span>= build_cors_layer(<span class="kw-2">&amp;</span>CorsConfig::restrictive());
+<a href=#512 id=512 data-nosnippet>512</a>    }
+<a href=#513 id=513 data-nosnippet>513</a>}
+</code></pre></div></section></main></body></html>

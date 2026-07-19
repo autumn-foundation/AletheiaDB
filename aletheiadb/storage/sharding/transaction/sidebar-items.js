@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DistributedTxError","ParticipantState","TransactionPhase"],"struct":["CommitDecision","DistributedTransaction","TwoPhaseCommitLog"]};

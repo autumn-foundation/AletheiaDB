@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Restore the persisted strings into `GLOBAL_INTERNER`, returning a `InternerRemap` that translates persisted file-space ids to live ids."><title>restore_string_interner in aletheiadb::storage::index_persistence::strings - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">restore_string_interner</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">restore_<wbr>string_<wbr>interner</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#file-id-vs-live-id-contract" title="File-id vs live-id contract">File-id vs live-id contract</a></li><li><a href="#examples" title="Examples">Examples</a></li><li><a href="#errors" title="Errors">Errors</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>storage::<wbr>index_<wbr>persistence::<wbr>strings</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">index_persistence</a>::<wbr><a href="index.html">strings</a></div><h1>Function <span class="fn">restore_<wbr>string_<wbr>interner</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/storage/index_persistence/strings.rs.html#482-503">Source</a> </span></div><pre class="rust item-decl"><code>pub fn restore_string_interner(
+    data: &amp;<a class="struct" href="../formats/struct.StringInternerData.html" title="struct aletheiadb::storage::index_persistence::formats::StringInternerData">StringInternerData</a>,
+) -&gt; <a class="type" href="../type.Result.html" title="type aletheiadb::storage::index_persistence::Result">Result</a>&lt;<a class="struct" href="struct.InternerRemap.html" title="struct aletheiadb::storage::index_persistence::strings::InternerRemap">InternerRemap</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Restore the persisted strings into <code>GLOBAL_INTERNER</code>, returning a
+<a href="struct.InternerRemap.html" title="struct aletheiadb::storage::index_persistence::strings::InternerRemap"><code>InternerRemap</code></a> that translates persisted file-space ids to live ids.</p>
+<p>This must be called before loading any other indexes since they reference
+string indices — but, crucially (Issue #3490), the caller must translate
+every persisted <code>u32</code> interner id through the returned <a href="struct.InternerRemap.html" title="struct aletheiadb::storage::index_persistence::strings::InternerRemap"><code>InternerRemap</code></a>
+(via <a href="struct.InternerRemap.html#method.remap_graph_index_data" title="method aletheiadb::storage::index_persistence::strings::InternerRemap::remap_graph_index_data"><code>InternerRemap::remap_graph_index_data</code></a> /
+<a href="struct.InternerRemap.html#method.remap_temporal_index_data" title="method aletheiadb::storage::index_persistence::strings::InternerRemap::remap_temporal_index_data"><code>InternerRemap::remap_temporal_index_data</code></a>) rather than resolving raw
+persisted ids directly against the live interner.</p>
+<h2 id="file-id-vs-live-id-contract"><a class="doc-anchor" href="#file-id-vs-live-id-contract">§</a>File-id vs live-id contract</h2>
+<p>Each saved string is re-interned into the (possibly already-populated) live
+interner. Because WAL replay may have interned property keys in a different
+order before this runs, the live id assigned to the string at file position
+<code>i</code> is generally <strong>not</strong> <code>i</code>. This function records <code>file_position -&gt; live id</code> for every saved string and returns it as the remap. It does <strong>not</strong>
+assert positional identity (the pre-#3490 behavior that spuriously failed
+with <code>InternerMismatch</code> and silently dropped the graph index).</p>
+<p>Empty strings are interned like any other string; a saved <code>""</code> is a real
+interned empty string (holes are already filtered out by
+<a href="../../../core/interning/struct.StringInterner.html#method.get_all_strings" title="method aletheiadb::core::interning::StringInterner::get_all_strings"><code>StringInterner::get_all_strings</code></a>
+before save), so its file position still needs a live mapping in case data
+references it.</p>
+<h2 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::storage::index_persistence::strings::{save_string_interner, load_string_interner, restore_string_interner};
+<span class="kw">use </span>tempfile::tempdir;
+
+<span class="kw">let </span>dir = tempdir().unwrap();
+<span class="kw">let </span>path = dir.path().join(<span class="string">"interner.idx"</span>);
+
+<span class="comment">// Save current state
+</span>save_string_interner(<span class="kw-2">&amp;</span>path).unwrap();
+
+<span class="comment">// Load data
+</span><span class="kw">let </span>data = load_string_interner(<span class="kw-2">&amp;</span>path).unwrap();
+
+<span class="comment">// Restore (re-interns all strings) and obtain the file-id -&gt; live-id remap.
+</span><span class="kw">let </span>remap = restore_string_interner(<span class="kw-2">&amp;</span>data).unwrap();
+<span class="kw">let _ </span>= remap; <span class="comment">// apply to loaded graph/temporal indexes before resolving ids</span></code></pre></div><h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<p>Currently infallible (returns <code>Ok</code>): persisted strings are re-admitted via
+<code>intern_unchecked</code>, which bypasses the runtime capacity cap, so a reopen
+under a cap lower than the persisted count loads cleanly instead of wedging.
+The <code>Result</code> return is retained for signature stability with the callers’
+<code>?</code> chains and to leave room for future validation.</p>
+</div></details></section></div></main></body></html>

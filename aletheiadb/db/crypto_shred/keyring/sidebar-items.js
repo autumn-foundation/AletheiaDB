@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BREADCRUMB_FILENAME","INITIAL_SUBJECT_KEY_VERSION","KEYRING_FILENAME","KEYRING_SIDECAR_VERSION"],"enum":["SubjectState"],"fn":["clear_breadcrumb","load_keyring","read_breadcrumb","save_keyring","write_breadcrumb"],"struct":["SubjectEntry","SubjectKeyring","SubjectKeyringSidecar","WrappedKey"]};

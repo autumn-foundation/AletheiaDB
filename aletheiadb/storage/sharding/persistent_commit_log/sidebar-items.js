@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CommitLogError","EntryType"],"struct":["CommitLogConfig","CommitLogEntry","CommitLogStats","PersistentCommitLog"],"type":["CommitLogResult"]};

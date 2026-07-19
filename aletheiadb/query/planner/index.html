@@ -1,0 +1,59 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Query Planner"><title>aletheiadb::query::planner - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module planner</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module planner</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#life-of-a-query" title="Life of a Query">Life of a Query</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>query</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">query</a></div><h1>Module <span>planner</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/query/planner/mod.rs.html#1-2584">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Query Planner</p>
+<p>Transforms logical plans into optimized physical plans for execution.
+The planner applies optimization rules and uses a cost model to choose
+the best execution strategy.</p>
+<h2 id="life-of-a-query"><a class="doc-anchor" href="#life-of-a-query">§</a>Life of a Query</h2>
+<ol>
+<li>
+<p><strong>Logical Planning</strong>: The <code>Query</code> struct (IR) is converted into a <code>LogicalPlan</code>.
+This represents <em>what</em> to compute without specifying <em>how</em>.</p>
+<ul>
+<li>Example: <code>Scan(Person) -&gt; Filter(age &gt; 30)</code></li>
+</ul>
+</li>
+<li>
+<p><strong>Optimization</strong>: The planner applies a series of <code>OptimizationRule</code>s to the logical plan.</p>
+<ul>
+<li><strong>Filter Pushdown</strong>: Moves filters closer to the data source.</li>
+<li><strong>Join Reordering</strong>: Reorders joins to minimize intermediate result sizes.</li>
+<li><strong>Cost-Based Decisions</strong>: Uses <code>Statistics</code> and a <code>CostModel</code> to estimate the cost of different plans.</li>
+</ul>
+</li>
+<li>
+<p><strong>Physical Planning</strong>: The optimized logical plan is converted into a <code>PhysicalPlan</code>.
+This represents the actual execution strategy (e.g., “Index Scan” vs “Full Scan”).</p>
+<ul>
+<li>Example: <code>IndexScan(Person, age &gt; 30)</code></li>
+</ul>
+</li>
+<li>
+<p><strong>Execution</strong>: The <code>PhysicalPlan</code> is handed off to the <code>Executor</code> (not part of this module).</p>
+</li>
+</ol>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>std::sync::Arc;
+<span class="kw">use </span>aletheiadb::query::planner::{QueryPlanner, Statistics};
+<span class="kw">use </span>aletheiadb::storage::CurrentStorage;
+<span class="kw">use </span>aletheiadb::query::builder::QueryBuilder;
+<span class="kw">use </span>aletheiadb::core::NodeId;
+
+<span class="comment">// 1. Setup dependencies
+</span><span class="kw">let </span>storage = Arc::new(CurrentStorage::new());
+<span class="kw">let </span>stats = Arc::new(Statistics::default());
+<span class="kw">let </span>planner = QueryPlanner::new(stats, storage);
+
+<span class="comment">// 2. Build a query
+</span><span class="kw">let </span>query = QueryBuilder::new()
+    .start(NodeId::new(<span class="number">1</span>).unwrap())
+    .traverse(<span class="string">"KNOWS"</span>)
+    .filter(aletheiadb::query::ir::Predicate::eq(<span class="string">"name"</span>, <span class="string">"Alice"</span>))
+    .build();
+
+<span class="comment">// 3. Plan the query
+</span><span class="kw">match </span>planner.plan(query) {
+    <span class="prelude-val">Ok</span>(physical_plan) =&gt; {
+        <span class="macro">println!</span>(<span class="string">"Plan created with cost: {:?}"</span>, physical_plan.estimated_cost);
+        <span class="comment">// Pass physical_plan to Executor...
+    </span>}
+    <span class="prelude-val">Err</span>(e) =&gt; <span class="macro">eprintln!</span>(<span class="string">"Planning failed: {}"</span>, e),
+}</code></pre></div></div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.Cost"><code>pub use cost::<a class="struct" href="cost/struct.Cost.html" title="struct aletheiadb::query::planner::cost::Cost">Cost</a>;</code></dt><dt id="reexport.CostModel"><code>pub use cost::<a class="struct" href="cost/struct.CostModel.html" title="struct aletheiadb::query::planner::cost::CostModel">CostModel</a>;</code></dt><dt id="reexport.PhysicalOp"><code>pub use physical::<a class="enum" href="physical/enum.PhysicalOp.html" title="enum aletheiadb::query::planner::physical::PhysicalOp">PhysicalOp</a>;</code></dt><dt id="reexport.PhysicalPlan"><code>pub use physical::<a class="struct" href="physical/struct.PhysicalPlan.html" title="struct aletheiadb::query::planner::physical::PhysicalPlan">PhysicalPlan</a>;</code></dt><dt id="reexport.OptimizationRule"><code>pub use rules::<a class="trait" href="rules/trait.OptimizationRule.html" title="trait aletheiadb::query::planner::rules::OptimizationRule">OptimizationRule</a>;</code></dt><dt id="reexport.Statistics"><code>pub use stats::<a class="struct" href="stats/struct.Statistics.html" title="struct aletheiadb::query::planner::stats::Statistics">Statistics</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="cost/index.html" title="mod aletheiadb::query::planner::cost">cost</a></dt><dd>Cost Model for Query Optimization</dd><dt><a class="mod" href="physical/index.html" title="mod aletheiadb::query::planner::physical">physical</a></dt><dd>Physical Query Plan</dd><dt><a class="mod" href="rules/index.html" title="mod aletheiadb::query::planner::rules">rules</a></dt><dd>Query Optimization Rules</dd><dt><a class="mod" href="stats/index.html" title="mod aletheiadb::query::planner::stats">stats</a></dt><dd>Statistics Collection for Query Optimization</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.QueryPlanner.html" title="struct aletheiadb::query::planner::QueryPlanner">Query<wbr>Planner</a></dt><dd>Query planner that transforms queries into executable physical plans.</dd></dl></section></div></main></body></html>

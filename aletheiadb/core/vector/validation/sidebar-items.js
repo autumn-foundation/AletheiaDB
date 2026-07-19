@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check_dimensions_match","validate_vector","validate_vector_with_bounds"]};

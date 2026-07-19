@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompressionAlgorithm"],"fn":["decode_edge_version","decode_node_version","encode_edge_version","encode_node_version"],"struct":["AtomicColdStorageStats","ColdKeyring","ColdReencryptStats","ColdStorageConfig","ColdStorageStats","ColdTemporalExtentBounds","ColdUnwrapStats","RedbColdStorage","RedbConfig"]};

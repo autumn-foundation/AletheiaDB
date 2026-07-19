@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_WINDOWS"],"enum":["WindowError","WindowUnit"],"fn":["format_rfc3339","generate_windows","parse_boundary_micros","window_start_timestamp"],"struct":["Window","WindowGranularity"]};

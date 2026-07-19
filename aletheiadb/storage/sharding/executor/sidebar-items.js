@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AggregationStrategy","ExecutorError"],"struct":["DistributedQuery","ExecutorConfig","ExecutorStats","QueryExecutor","QueryResult","ShardResult"],"type":["ExecutorResult"]};

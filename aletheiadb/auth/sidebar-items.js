@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["KEY_SCHEME_PREFIX"],"enum":["AccessClass","AuthError","AuthMode","Role"],"fn":["auth_mode_from_env","parse_auth_mode_value"],"struct":["AuthStore","Principal","RoleParseError","SecretString"]};

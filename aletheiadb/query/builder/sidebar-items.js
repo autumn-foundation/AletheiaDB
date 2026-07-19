@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["state"],"struct":["FindSimilarBuilder","Query","QueryBuilder","RankBySimilarityBuilder","SimilarToBuilder"],"trait":["QueryState"]};

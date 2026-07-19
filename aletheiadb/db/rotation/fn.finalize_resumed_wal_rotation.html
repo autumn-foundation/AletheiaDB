@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Phase 2 of a startup-resumed WAL key rotation (Issue #3617 PR2): retire the old-generation WAL segments and clear the ledger, AFTER the startup replay has been captured by a synchronous persist."><title>finalize_resumed_wal_rotation in aletheiadb::db::rotation - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">finalize_resumed_wal_rotation</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">finalize_<wbr>resumed_<wbr>wal_<wbr>rotation</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#errors" title="Errors">Errors</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>db::<wbr>rotation</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">db</a>::<wbr><a href="index.html">rotation</a></div><h1>Function <span class="fn">finalize_<wbr>resumed_<wbr>wal_<wbr>rotation</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/db/rotation.rs.html#2622-2680">Source</a> </span></div><pre class="rust item-decl"><code>pub fn finalize_resumed_wal_rotation(
+    manager: &amp;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;<a class="struct" href="../../storage/index_persistence/loader/struct.IndexPersistenceManager.html" title="struct aletheiadb::storage::index_persistence::loader::IndexPersistenceManager">IndexPersistenceManager</a>&gt;,
+    enc_cfg: &amp;<a class="struct" href="../../encryption/config/struct.EncryptionConfig.html" title="struct aletheiadb::encryption::config::EncryptionConfig">EncryptionConfig</a>,
+    wal: &amp;<a class="struct" href="../../storage/wal/concurrent_system/struct.ConcurrentWalSystem.html" title="struct aletheiadb::storage::wal::concurrent_system::ConcurrentWalSystem">ConcurrentWalSystem</a>,
+    persist: impl <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/ops/function/trait.FnOnce.html" title="trait core::ops::function::FnOnce">FnOnce</a>() -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Phase 2 of a startup-resumed WAL key rotation (Issue #3617 PR2): retire the
+old-generation WAL segments and clear the ledger, AFTER the startup replay has
+been captured by a synchronous persist.</p>
+<p>This closes the resume-path double-crash data-loss window. On the startup
+path <a href="fn.resume_pending_rotation.html" title="fn aletheiadb::db::rotation::resume_pending_rotation"><code>resume_pending_rotation</code></a> (called with <code>wal_persist = None</code>) installs
+both WAL generations but does NOT retire — because at that point the index
+state is not loaded, so a persist would snapshot empty state and retiring the
+old-generation segments would strand the <code>[checkpoint, seal)</code> writes that live
+only in the in-RAM replay buffer. Once <code>db::config</code> has loaded the snapshot
+and replayed the WAL into current state, it calls this function, which:</p>
+<ol>
+<li>re-installs the new WAL generation (idempotent),</li>
+<li>force-rolls under the new DEK, runs <code>persist</code> (a SYNCHRONOUS
+<code>persist_indexes()</code> capturing the now-replayed state) AFTER the seal and
+BEFORE the retire — reusing the forward-path <code>roll_and_retire_wal</code>
+ordering verbatim — then retires the sealed old-generation segments, and</li>
+<li>once no old-generation segment remains, marks the WAL layer complete and
+clears the ledger.</li>
+</ol>
+<p>So no old-generation WAL segment is ever deleted until its entries are durable
+in the index snapshot — on BOTH the forward and resume paths.</p>
+<p>A no-op (returns <code>Ok(())</code>) when no ledger is present, the WAL layer is not
+<code>Pending</code>, or the WAL is unencrypted — so <code>db::config</code> can call it
+unconditionally on the encrypted-persistent startup path. Completion-gated
+exactly like the forward path: if a stale old-generation segment cannot be
+retired, the ledger is left PENDING and an error is surfaced so a later resume
+finishes it (never reports success while a stranded old-DEK tail survives).</p>
+<h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<p>Returns an error if the recorded new key source cannot be sourced, the persist
+fails, the roll/retire fails, or a stale old-generation segment survives
+retirement (ledger left pending).</p>
+</div></details></section></div></main></body></html>

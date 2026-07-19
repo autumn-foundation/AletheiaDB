@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Algorithm"],"fn":["algorithm_from_id","create_cipher"]};

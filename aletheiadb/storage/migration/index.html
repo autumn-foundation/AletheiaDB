@@ -1,0 +1,51 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Migration service for tiered storage."><title>aletheiadb::storage::migration - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module migration</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module migration</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#architecture" title="Architecture">Architecture</a><ul><li><a href="#components" title="Components">Components</a></li></ul></li><li><a href="#usage" title="Usage">Usage</a></li><li><a href="#safety-and-crash-recovery" title="Safety and Crash Recovery">Safety and Crash Recovery</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>storage</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">storage</a></div><h1>Module <span>migration</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/storage/migration.rs.html#1-3124">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Migration service for tiered storage.</p>
+<p>This module implements the background migration service that automatically moves
+historical versions from the hot tier (in-memory) to the cold tier (disk-based Redb).</p>
+<h2 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h2>
+<p>The migration service operates as a background worker that orchestrates data movement
+between storage tiers. It is designed to be:</p>
+<ul>
+<li><strong>Non-blocking</strong>: Migration happens in the background without stalling read/write operations.</li>
+<li><strong>Policy-driven</strong>: Configurable policies determine <em>when</em> and <em>what</em> to migrate.</li>
+<li><strong>Safe</strong>: Ensures data integrity through atomic batch writes and LSN coordination.</li>
+</ul>
+<h3 id="components"><a class="doc-anchor" href="#components">§</a>Components</h3>
+<ol>
+<li><strong>MigrationPolicy</strong>: Defines thresholds (age, memory usage) for triggering migration.</li>
+<li><strong>MigrationService</strong>: Manages the background worker and execution logic.</li>
+<li><strong>RedbColdStorage</strong>: The destination for migrated data.</li>
+<li><strong>FlushCoordinator</strong>: (Optional) Coordinates WAL truncation after successful migration.</li>
+</ol>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::storage::migration::{MigrationPolicy, MigrationService};
+<span class="kw">use </span>aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+<span class="kw">use </span>std::sync::Arc;
+<span class="kw">use </span>std::time::Duration;
+
+<span class="comment">// 1. Configure the cold storage backend
+</span><span class="kw">let </span>cold_storage = Arc::new(RedbColdStorage::new(<span class="string">"data/cold.redb"</span>, RedbConfig::default())<span class="question-mark">?</span>);
+
+<span class="comment">// 2. Define a migration policy
+</span><span class="kw">let </span>policy = MigrationPolicy::builder()
+    .age_threshold(Duration::from_secs(<span class="number">7 </span>* <span class="number">24 </span>* <span class="number">60 </span>* <span class="number">60</span>)) <span class="comment">// Migrate versions older than 7 days
+    </span>.memory_threshold_bytes(<span class="number">1024 </span>* <span class="number">1024 </span>* <span class="number">1024</span>)           <span class="comment">// or when hot tier exceeds 1GB
+    </span>.min_hot_versions(<span class="number">1</span>)                                  <span class="comment">// Always keep current version hot
+    </span>.build();
+
+<span class="comment">// 3. Create and start the service
+</span><span class="kw">let </span>service = MigrationService::new(cold_storage, policy);
+service.start();
+
+<span class="comment">// The service now runs in the background.
+// To gracefully stop it:
+</span>service.stop();</code></pre></div><h2 id="safety-and-crash-recovery"><a class="doc-anchor" href="#safety-and-crash-recovery">§</a>Safety and Crash Recovery</h2>
+<p>The migration service integrates with the Write-Ahead Log (WAL) to ensure crash consistency.
+When <code>migrate_batch_with_lsn</code> is used:</p>
+<ol>
+<li><strong>Atomic Write</strong>: Data is written to cold storage along with the Log Sequence Number (LSN).</li>
+<li><strong>Verification</strong>: The flushed LSN is verified to ensure durability.</li>
+<li><strong>Truncation</strong>: Only then is the WAL truncated up to that LSN.</li>
+</ol>
+<p>This invariant (<code>WAL_truncation_lsn &lt;= cold_storage.get_flushed_lsn()</code>) ensures that
+data is never removed from the WAL before it is safely persisted in cold storage.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AtomicMigrationStats.html" title="struct aletheiadb::storage::migration::AtomicMigrationStats">Atomic<wbr>Migration<wbr>Stats</a></dt><dd>Atomic statistics tracker for migration.</dd><dt><a class="struct" href="struct.DefaultMigrationCallback.html" title="struct aletheiadb::storage::migration::DefaultMigrationCallback">Default<wbr>Migration<wbr>Callback</a></dt><dd>Default callback that allows all migrations.</dd><dt><a class="struct" href="struct.MigrationCandidate.html" title="struct aletheiadb::storage::migration::MigrationCandidate">Migration<wbr>Candidate</a></dt><dd>A version candidate for migration.</dd><dt><a class="struct" href="struct.MigrationPolicy.html" title="struct aletheiadb::storage::migration::MigrationPolicy">Migration<wbr>Policy</a></dt><dd>Policy for determining when to migrate versions from hot to cold tier.</dd><dt><a class="struct" href="struct.MigrationPolicyBuilder.html" title="struct aletheiadb::storage::migration::MigrationPolicyBuilder">Migration<wbr>Policy<wbr>Builder</a></dt><dd>Builder for constructing a <code>MigrationPolicy</code>.</dd><dt><a class="struct" href="struct.MigrationProgress.html" title="struct aletheiadb::storage::migration::MigrationProgress">Migration<wbr>Progress</a></dt><dd>Progress information during a migration operation.</dd><dt><a class="struct" href="struct.MigrationService.html" title="struct aletheiadb::storage::migration::MigrationService">Migration<wbr>Service</a></dt><dd>Migration service that moves versions from hot to cold storage.</dd><dt><a class="struct" href="struct.MigrationStats.html" title="struct aletheiadb::storage::migration::MigrationStats">Migration<wbr>Stats</a></dt><dd>aggregated statistics for migration operations.</dd><dt><a class="struct" href="struct.MigrationWithLsnResult.html" title="struct aletheiadb::storage::migration::MigrationWithLsnResult">Migration<wbr>With<wbr>LsnResult</a></dt><dd>Result of a migration batch with LSN tracking.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.MigrationCallback.html" title="trait aletheiadb::storage::migration::MigrationCallback">Migration<wbr>Callback</a></dt><dd>Callback for migration events.</dd></dl></section></div></main></body></html>

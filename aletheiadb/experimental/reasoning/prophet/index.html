@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Prophet: Link Prediction Engine."><title>aletheiadb::experimental::reasoning::prophet - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module prophet</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module prophet</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-algorithm" title="The Algorithm">The Algorithm</a></li><li><a href="#examples" title="Examples">Examples</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>experimental::<wbr>reasoning</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">experimental</a>::<wbr><a href="../index.html">reasoning</a></div><h1>Module <span>prophet</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/experimental/reasoning/prophet.rs.html#1-451">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Prophet: Link Prediction Engine.</p>
+<p>Why do some nodes connect while others remain isolated? The <a href="struct.Prophet.html" title="struct aletheiadb::experimental::reasoning::prophet::Prophet"><code>Prophet</code></a> engine attempts to
+answer this by predicting missing links in the graph. Unlike traditional link prediction
+that relies solely on graph topology (like mutual friends), <code>Prophet</code> bridges the gap
+between <strong>structural topology</strong> and <strong>semantic vector similarity</strong>.</p>
+<p>It combines the Adamic-Adar index (which measures topological closeness) with cosine
+similarity of the nodes’ vector embeddings. This means it recommends connections not just
+because nodes share a neighborhood, but because they are structurally positioned <em>and</em>
+conceptually aligned to connect.</p>
+<h2 id="the-algorithm"><a class="doc-anchor" href="#the-algorithm">§</a>The Algorithm</h2>
+<p>The prediction score between two unconnected nodes $A$ and $B$ is calculated as:</p>
+<p><code>Score(A, B) = AdamicAdar(A, B) * (1.0 + VectorSimilarity(A, B))</code></p>
+<ul>
+<li><strong>Adamic-Adar:</strong> Sum of $\frac{1}{\log(degree(z))}$ for all shared neighbors $z$.</li>
+<li><strong>Vector Similarity:</strong> Cosine similarity of the vector embeddings between $A$ and $B$.</li>
+</ul>
+<p>If vectors are perfectly orthogonal, the score reverts to standard Adamic-Adar. If they
+are similar, the topological score is boosted, surfacing structurally valid but semantically
+richer recommendations.</p>
+<h2 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h2>
+<blockquote>
+<p>⚠️ <strong>REQUIRES FEATURE: nova</strong></p>
+</blockquote>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// [dependencies]
+// aletheiadb = { version = "0.1", features = ["nova"] }
+
+</span><span class="kw">use </span>aletheiadb::AletheiaDB;
+<span class="kw">use </span>aletheiadb::experimental::prophet::Prophet;
+<span class="kw">use </span>aletheiadb::core::property::PropertyMapBuilder;
+
+<span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+
+<span class="comment">// Assume we have a graph of users and their interests.
+// We want to recommend new connections for User A.
+
+</span><span class="kw">let </span>prophet = Prophet::new(<span class="kw-2">&amp;</span>db);
+
+<span class="comment">// Predict the top 5 most likely future connections for node_a
+</span><span class="kw">let </span>predictions = prophet.predict_links(node_a, <span class="number">5</span>)<span class="question-mark">?</span>;
+
+<span class="kw">for </span>(target_node, score) <span class="kw">in </span>predictions {
+    <span class="macro">println!</span>(<span class="string">"Predicted connection to node {} with confidence score {}"</span>, target_node, score);
+}</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Prophet.html" title="struct aletheiadb::experimental::reasoning::prophet::Prophet">Prophet</a></dt><dd>The engine for predicting missing or future connections in the graph.</dd></dl></section></div></main></body></html>

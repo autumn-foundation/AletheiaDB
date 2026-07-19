@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="WAL stripe - a single partition in the striped WAL architecture."><title>aletheiadb::storage::wal::stripe - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module stripe</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module stripe</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#performance" title="Performance">Performance</a></li><li><a href="#thread-safety" title="Thread Safety">Thread Safety</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>storage::<wbr>wal</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">wal</a></div><h1>Module <span>stripe</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/storage/wal/stripe.rs.html#1-492">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>WAL stripe - a single partition in the striped WAL architecture.</p>
+<p>Each stripe contains:</p>
+<ul>
+<li>A lock-free <a href="../ring_buffer/struct.WalRingBuffer.html" title="struct aletheiadb::storage::wal::ring_buffer::WalRingBuffer"><code>WalRingBuffer</code></a> (<code>ring_buffer</code> module) for pending entries</li>
+<li>Per-stripe metrics for monitoring</li>
+</ul>
+<p>Writers are assigned to stripes using thread-local affinity to minimize
+cache contention. The flush coordinator drains all stripes and merges
+entries in LSN order.</p>
+<h2 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h2>
+<p>A stripe is the unit of parallelism inside the concurrent WAL.  The
+<a href="../concurrent/struct.ConcurrentWal.html" title="struct aletheiadb::storage::wal::concurrent::ConcurrentWal"><code>ConcurrentWal</code></a> maintains <code>N</code> stripes; each writer
+is pinned to one stripe via a thread-local index, which keeps cache lines
+hot and avoids false-sharing between writers on different cores.</p>
+<div class="example-wrap"><pre class="language-text"><code> Writer threads
+  │   │   │   │
+  ▼   ▼   ▼   ▼   (thread-local stripe affinity)
+┌──────────────────────────────────┐
+│  WalStripe (this module)         │
+│  ┌────────────────────────────┐  │
+│  │  WalRingBuffer (ring_buffer)│  │  ← lock-free MPSC buffer
+│  └────────────────────────────┘  │
+│  per-stripe metrics              │
+└──────────────────────────────────┘
+             │
+             ▼  (flush coordinator drains all stripes, sorts by LSN)</code></pre></div>
+<p>See the <a href="../ring_buffer/index.html" title="mod aletheiadb::storage::wal::ring_buffer"><code>ring_buffer</code></a> module for the lock-free
+buffer implementation, and
+<a href="../flush_coordinator/index.html" title="mod aletheiadb::storage::wal::flush_coordinator"><code>flush_coordinator</code></a> for how stripes are drained.</p>
+<h2 id="performance"><a class="doc-anchor" href="#performance">§</a>Performance</h2>
+<ul>
+<li><strong>Append latency</strong>: ~50–100 ns (single CAS in the ring buffer)</li>
+<li><strong>Contention</strong>: Each stripe is independent, so <code>N</code> stripes give
+near-linear scaling up to ~64 concurrent writers</li>
+<li><strong>Memory</strong>: <code>stripe_capacity × size_of::&lt;PendingEntry&gt;()</code> per stripe
+(default 1 024 slots ≈ 40 KB/stripe)</li>
+</ul>
+<h2 id="thread-safety"><a class="doc-anchor" href="#thread-safety">§</a>Thread Safety</h2>
+<p>Multiple threads can append to the same stripe concurrently (the ring
+buffer handles synchronization). Only the flush coordinator should drain.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.StripeMetrics.html" title="struct aletheiadb::storage::wal::stripe::StripeMetrics">Stripe<wbr>Metrics</a></dt><dd>Metrics for a WAL stripe.</dd><dt><a class="struct" href="struct.WalStripe.html" title="struct aletheiadb::storage::wal::stripe::WalStripe">WalStripe</a></dt><dd>A single stripe in the concurrent WAL.</dd></dl></section></div></main></body></html>

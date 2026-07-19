@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_VALID_TIMESTAMP","TIMESTAMP_MAX"],"mod":["time"],"struct":["BiTemporalInterval","TimeRange"],"type":["Timestamp"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["characterization","diagnostics","reasoning","temporal"]};

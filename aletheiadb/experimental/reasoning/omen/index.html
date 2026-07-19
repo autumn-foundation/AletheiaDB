@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Omen: Semantic Collision Detection."><title>aletheiadb::experimental::reasoning::omen - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module omen</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module omen</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#concepts" title="Concepts">Concepts</a></li><li><a href="#logic" title="Logic">Logic</a></li><li><a href="#examples" title="Examples">Examples</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>experimental::<wbr>reasoning</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">experimental</a>::<wbr><a href="../index.html">reasoning</a></div><h1>Module <span>omen</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/experimental/reasoning/omen.rs.html#1-509">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Omen: Semantic Collision Detection.</p>
+<p>“I have a bad feeling about this…”</p>
+<p>Omen predicts the future interaction of two concepts by analyzing their
+semantic trajectories. It answers questions like:</p>
+<ul>
+<li>“Will ‘Artificial Intelligence’ and ‘Ethics’ collide soon?”</li>
+<li>“Is ‘Project X’ moving away from its ‘Original Goal’?”</li>
+</ul>
+<h2 id="concepts"><a class="doc-anchor" href="#concepts">§</a>Concepts</h2>
+<ul>
+<li><strong>Trajectory</strong>: The path a node is taking through semantic space, modeled as a velocity vector.</li>
+<li><strong>Encounter</strong>: The point in time (future or past) where two trajectories are closest.</li>
+</ul>
+<h2 id="logic"><a class="doc-anchor" href="#logic">§</a>Logic</h2>
+<p>Given two nodes A and B with positions $P_a, P_b$ and velocities $V_a, V_b$:</p>
+<ol>
+<li>Relative Position: $P = P_b - P_a$</li>
+<li>Relative Velocity: $V = V_b - V_a$</li>
+<li>Distance Squared at time $t$: $D^2(t) = ||P + V*t||^2$</li>
+<li>Minimized when derivative is 0: $t = -(P \cdot V) / ||V||^2$</li>
+</ol>
+<h2 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::AletheiaDB;
+<span class="kw">use </span>aletheiadb::experimental::omen::Omen;
+<span class="kw">use </span>aletheiadb::core::temporal::{TimeRange, time};
+
+<span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+<span class="kw">let </span>omen = Omen::new(<span class="kw-2">&amp;</span>db);
+
+<span class="comment">// Analyze last hour
+</span><span class="kw">let </span>start = time::from_secs(time::now().wallclock() / <span class="number">1_000_000 </span>- <span class="number">3600</span>);
+<span class="kw">let </span>window = TimeRange::new(start, time::now())<span class="question-mark">?</span>;
+
+<span class="kw">if let </span><span class="prelude-val">Some</span>(encounter) = omen.predict_encounter(node_a, node_b, window, <span class="string">"embedding"</span>)<span class="question-mark">? </span>{
+    <span class="macro">println!</span>(<span class="string">"Predicted encounter in {:.2} seconds."</span>, encounter.time_to_encounter.as_secs_f32());
+    <span class="macro">println!</span>(<span class="string">"Closest distance: {:.4}"</span>, encounter.predicted_distance);
+}</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Encounter.html" title="struct aletheiadb::experimental::reasoning::omen::Encounter">Encounter</a></dt><dd>The predicted outcome of two trajectories.</dd><dt><a class="struct" href="struct.Omen.html" title="struct aletheiadb::experimental::reasoning::omen::Omen">Omen</a></dt><dd>The Omen Engine.</dd></dl></section></div></main></body></html>

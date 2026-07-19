@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_NEUTRAL_CONFIDENCE","DEFAULT_NEUTRAL_RECENCY","DEFAULT_RECENCY_HALF_LIFE_SECS","FUSION_MAX_HORIZON","FUSION_OVERFETCH_HORIZON"],"enum":["FusionError","FusionPolicyError"],"fn":["fused_horizon"],"struct":["FusedHit","FusionBreakdown","FusionPolicy","FusionPolicyBuilder"]};

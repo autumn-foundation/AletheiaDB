@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["QueryRequest"],"fn":["all_routes","handle_query","health_check"],"struct":["ApiResponse","CreateNodeInput","ExecuteQueryInput","HealthResponse","ProvenanceFilterParams","QueryEnvelope","UpdateNodeInput"]};

@@ -1,0 +1,275 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/storage/redb_cold_storage/keyring.rs`."><title>keyring.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">aletheiadb/storage/redb_cold_storage/</div>keyring.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Cold-tier (redb) key ring and self-describing value wrapper (Issue #3617 PR3).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! A full-MEK key rotation re-keys the cold tier by a **transactional bulk
+<a href=#4 id=4 data-nosnippet>4</a>//! re-encrypt** of every stored value: each `node_versions`/`edge_versions`
+<a href=#5 id=5 data-nosnippet>5</a>//! value is decrypted under the OLD cold DEK and re-encrypted under the NEW cold
+<a href=#6 id=6 data-nosnippet>6</a>//! DEK. To read correctly during (and after) such a rotation the cold store must
+<a href=#7 id=7 data-nosnippet>7</a>//! hold BOTH generations at once and select per value, exactly like the WAL
+<a href=#8 id=8 data-nosnippet>8</a>//! ([`WalKeyring`](crate::encryption::wal_encryption::WalKeyring)) and index
+<a href=#9 id=9 data-nosnippet>9</a>//! ([`IndexKeyring`](crate::storage::index_persistence::common::IndexKeyring))
+<a href=#10 id=10 data-nosnippet>10</a>//! keyrings. [`ColdKeyring`] is that holder, deliberately mirroring their shape
+<a href=#11 id=11 data-nosnippet>11</a>//! (a small `Vec` of generations, a `current` stamped into freshly written
+<a href=#12 id=12 data-nosnippet>12</a>//! values, and a single-cipher `match_any` back-compat mode).
+<a href=#13 id=13 data-nosnippet>13</a>//!
+<a href=#14 id=14 data-nosnippet>14</a>//! # Self-describing value wrapper (`ACV1`)
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! Cold values are compress-then-encrypt with empty AAD, and a legacy value is
+<a href=#17 id=17 data-nosnippet>17</a>//! opaque AEAD ciphertext whose leading bytes are effectively random — so a bare
+<a href=#18 id=18 data-nosnippet>18</a>//! 1-byte discriminator would be ambiguous. Re-encrypted values are therefore
+<a href=#19 id=19 data-nosnippet>19</a>//! prefixed with an 8-byte self-describing header:
+<a href=#20 id=20 data-nosnippet>20</a>//!
+<a href=#21 id=21 data-nosnippet>21</a>//! ```text
+<a href=#22 id=22 data-nosnippet>22</a>//! Wrapped value:  [magic "ACV1":4][key_version:u32 LE:4][ AEAD(compress(record)) ]
+<a href=#23 id=23 data-nosnippet>23</a>//! Legacy value:   [ AEAD(compress(record)) ]            # exactly the pre-#3617 format
+<a href=#24 id=24 data-nosnippet>24</a>//! ```
+<a href=#25 id=25 data-nosnippet>25</a>//!
+<a href=#26 id=26 data-nosnippet>26</a>//! Read dispatch ([`parse_cold_wrapper`] in front of decrypt): a value is
+<a href=#27 id=27 data-nosnippet>27</a>//! treated as wrapped ONLY IF it begins with `ACV1` **and** the following `u32`
+<a href=#28 id=28 data-nosnippet>28</a>//! names a generation the live keyring holds ([`has_version`](ColdKeyring::has_version));
+<a href=#29 id=29 data-nosnippet>29</a>//! otherwise it is treated as a legacy bare ciphertext and decrypted under the
+<a href=#30 id=30 data-nosnippet>30</a>//! oldest (pre-rotation) cold generation.
+<a href=#31 id=31 data-nosnippet>31</a>//!
+<a href=#32 id=32 data-nosnippet>32</a>//! ## False-positive probability (be precise: it depends on the keyring mode)
+<a href=#33 id=33 data-nosnippet>33</a>//!
+<a href=#34 id=34 data-nosnippet>34</a>//! How much the second check (the held-version test) actually discriminates
+<a href=#35 id=35 data-nosnippet>35</a>//! depends on whether the keyring is in `match_any` or strict mode — and the
+<a href=#36 id=36 data-nosnippet>36</a>//! common case is the *weaker* one:
+<a href=#37 id=37 data-nosnippet>37</a>//!
+<a href=#38 id=38 data-nosnippet>38</a>//! * **Single-generation `match_any` keyring** — the never-rotated steady state,
+<a href=#39 id=39 data-nosnippet>39</a>//!   and the post-provider-switch state after a completed rotation (the operator
+<a href=#40 id=40 data-nosnippet>40</a>//!   reopens under the new key alone). Here [`has_version`](ColdKeyring::has_version)
+<a href=#41 id=41 data-nosnippet>41</a>//!   **short-circuits `true` for every `key_version`**, so the held-version test
+<a href=#42 id=42 data-nosnippet>42</a>//!   adds **no** discrimination: a legacy bare ciphertext is misclassified as
+<a href=#43 id=43 data-nosnippet>43</a>//!   wrapped as soon as its first 4 bytes happen to equal the `ACV1` magic —
+<a href=#44 id=44 data-nosnippet>44</a>//!   probability **~2⁻³²** (NOT 2⁻⁶⁴). The trailing `u32` is irrelevant to the
+<a href=#45 id=45 data-nosnippet>45</a>//!   classification in this mode.
+<a href=#46 id=46 data-nosnippet>46</a>//! * **Strict (mid-rotation, 2-generation) keyring** — only here does the
+<a href=#47 id=47 data-nosnippet>47</a>//!   held-version test bite: the leading 4 bytes must equal `ACV1` (~2⁻³²) AND
+<a href=#48 id=48 data-nosnippet>48</a>//!   the next 4 bytes must equal one of the tiny set of currently-held key
+<a href=#49 id=49 data-nosnippet>49</a>//!   versions (~2⁻³²), a combined **~2⁻⁶⁴** event. The 2⁻⁶⁴ figure applies to
+<a href=#50 id=50 data-nosnippet>50</a>//!   this mode ONLY.
+<a href=#51 id=51 data-nosnippet>51</a>//!
+<a href=#52 id=52 data-nosnippet>52</a>//! Crucially, in **either** mode a misclassification is a **loud AEAD
+<a href=#53 id=53 data-nosnippet>53</a>//! authentication failure** — the wrong byte slice is fed to `decrypt`, the tag
+<a href=#54 id=54 data-nosnippet>54</a>//! check fails, and the read returns an `Err` (a read *availability* fault). It
+<a href=#55 id=55 data-nosnippet>55</a>//! is **NEVER** silent wrong data or integrity loss: a corrupted/misparsed value
+<a href=#56 id=56 data-nosnippet>56</a>//! cannot forge a valid AEAD tag, so no plaintext is ever returned for it. The
+<a href=#57 id=57 data-nosnippet>57</a>//! ~2⁻³² event therefore costs *availability of that one value* (recoverable by
+<a href=#58 id=58 data-nosnippet>58</a>//! reopening under the correct key), not correctness. The same 4-byte-magic
+<a href=#59 id=59 data-nosnippet>59</a>//! collision argument is used one layer down by [`COLD_RECORD_MAGIC_V2`](super)
+<a href=#60 id=60 data-nosnippet>60</a>//! for the in-record provenance tag.
+<a href=#61 id=61 data-nosnippet>61</a>//!
+<a href=#62 id=62 data-nosnippet>62</a>//! No key material is ever written into the wrapper (a `key_version` integer
+<a href=#63 id=63 data-nosnippet>63</a>//! only), logged, or rendered by `Debug`.
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a></span><span class="kw">use </span>std::sync::{Arc, RwLock};
+<a href=#66 id=66 data-nosnippet>66</a>
+<a href=#67 id=67 data-nosnippet>67</a><span class="kw">use </span><span class="kw">crate</span>::encryption::Cipher;
+<a href=#68 id=68 data-nosnippet>68</a>
+<a href=#69 id=69 data-nosnippet>69</a><span class="doccomment">/// Magic prefix identifying an `ACV1`-wrapped cold value. Deliberately the
+<a href=#70 id=70 data-nosnippet>70</a>/// printable ASCII `b"ACV1"` (**A**letheia **C**old **V**alue v**1**), distinct
+<a href=#71 id=71 data-nosnippet>71</a>/// from the record-level [`COLD_RECORD_MAGIC_V2`](super::COLD_RECORD_MAGIC_V2)
+<a href=#72 id=72 data-nosnippet>72</a>/// `[0xA1,0x37,0xC0,0xDE]` / [`COLD_RECORD_MAGIC_V3`](super::COLD_RECORD_MAGIC_V3)
+<a href=#73 id=73 data-nosnippet>73</a>/// `[0xB2,0x48,0xD1,0xEF]` — those tag the *record* inside the ciphertext, this
+<a href=#74 id=74 data-nosnippet>74</a>/// tags the *stored value* outside it, so they never occupy the same byte
+<a href=#75 id=75 data-nosnippet>75</a>/// position, but keeping the values disjoint avoids any reviewer confusion.
+<a href=#76 id=76 data-nosnippet>76</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>COLD_VALUE_MAGIC: [u8; <span class="number">4</span>] = <span class="kw-2">*</span><span class="string">b"ACV1"</span>;
+<a href=#77 id=77 data-nosnippet>77</a>
+<a href=#78 id=78 data-nosnippet>78</a><span class="doccomment">/// Total length of the `ACV1` wrapper prefix (4-byte magic + 4-byte key_version).
+<a href=#79 id=79 data-nosnippet>79</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>COLD_VALUE_WRAPPER_LEN: usize = <span class="number">8</span>;
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a><span class="doccomment">/// The `key_version` a fresh (never-rotated) encrypted cold store stamps into
+<a href=#82 id=82 data-nosnippet>82</a>/// its `ACV1` value wrappers. Mirrors [`INITIAL_WAL_KEY_VERSION`] /
+<a href=#83 id=83 data-nosnippet>83</a>/// `ENC_INDEX_KEY_VERSION_V1` so all three layers number their first generation
+<a href=#84 id=84 data-nosnippet>84</a>/// identically.
+<a href=#85 id=85 data-nosnippet>85</a>///
+<a href=#86 id=86 data-nosnippet>86</a>/// [`INITIAL_WAL_KEY_VERSION`]: crate::encryption::wal_encryption::INITIAL_WAL_KEY_VERSION
+<a href=#87 id=87 data-nosnippet>87</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>INITIAL_COLD_KEY_VERSION: u32 = <span class="number">1</span>;
+<a href=#88 id=88 data-nosnippet>88</a>
+<a href=#89 id=89 data-nosnippet>89</a><span class="doccomment">/// Prepend the `ACV1` wrapper to an AEAD ciphertext, stamping `key_version`.
+<a href=#90 id=90 data-nosnippet>90</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>wrap_cold_value(key_version: u32, ciphertext: <span class="kw-2">&amp;</span>[u8]) -&gt; Vec&lt;u8&gt; {
+<a href=#91 id=91 data-nosnippet>91</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = Vec::with_capacity(COLD_VALUE_WRAPPER_LEN + ciphertext.len());
+<a href=#92 id=92 data-nosnippet>92</a>    out.extend_from_slice(<span class="kw-2">&amp;</span>COLD_VALUE_MAGIC);
+<a href=#93 id=93 data-nosnippet>93</a>    out.extend_from_slice(<span class="kw-2">&amp;</span>key_version.to_le_bytes());
+<a href=#94 id=94 data-nosnippet>94</a>    out.extend_from_slice(ciphertext);
+<a href=#95 id=95 data-nosnippet>95</a>    out
+<a href=#96 id=96 data-nosnippet>96</a>}
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a><span class="doccomment">/// If `value` begins with the `ACV1` magic and is long enough to carry the
+<a href=#99 id=99 data-nosnippet>99</a>/// key-version, return `(key_version, ciphertext_without_wrapper)`; otherwise
+<a href=#100 id=100 data-nosnippet>100</a>/// `None` (a legacy, unwrapped value). This does NOT consult the keyring — the
+<a href=#101 id=101 data-nosnippet>101</a>/// caller checks whether the returned `key_version` names a held generation and
+<a href=#102 id=102 data-nosnippet>102</a>/// falls back to the legacy path if not.
+<a href=#103 id=103 data-nosnippet>103</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>parse_cold_wrapper(value: <span class="kw-2">&amp;</span>[u8]) -&gt; <span class="prelude-ty">Option</span>&lt;(u32, <span class="kw-2">&amp;</span>[u8])&gt; {
+<a href=#104 id=104 data-nosnippet>104</a>    <span class="kw">if </span>value.len() &lt; COLD_VALUE_WRAPPER_LEN || value[..<span class="number">4</span>] != COLD_VALUE_MAGIC {
+<a href=#105 id=105 data-nosnippet>105</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#106 id=106 data-nosnippet>106</a>    }
+<a href=#107 id=107 data-nosnippet>107</a>    <span class="kw">let </span>key_version = u32::from_le_bytes([value[<span class="number">4</span>], value[<span class="number">5</span>], value[<span class="number">6</span>], value[<span class="number">7</span>]]);
+<a href=#108 id=108 data-nosnippet>108</a>    <span class="prelude-val">Some</span>((key_version, <span class="kw-2">&amp;</span>value[COLD_VALUE_WRAPPER_LEN..]))
+<a href=#109 id=109 data-nosnippet>109</a>}
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a><span class="attr">#[derive(Clone)]
+<a href=#112 id=112 data-nosnippet>112</a></span><span class="kw">struct </span>ColdKeyGeneration {
+<a href=#113 id=113 data-nosnippet>113</a>    key_version: u32,
+<a href=#114 id=114 data-nosnippet>114</a>    cipher: Arc&lt;<span class="kw">dyn </span>Cipher&gt;,
+<a href=#115 id=115 data-nosnippet>115</a>}
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a><span class="kw">struct </span>ColdKeyringInner {
+<a href=#118 id=118 data-nosnippet>118</a>    <span class="doccomment">/// All live generations (1 before rotation, 2 during, 1 after). Small.
+<a href=#119 id=119 data-nosnippet>119</a>    </span>generations: Vec&lt;ColdKeyGeneration&gt;,
+<a href=#120 id=120 data-nosnippet>120</a>    <span class="doccomment">/// Version stamped into freshly written values (the newest generation).
+<a href=#121 id=121 data-nosnippet>121</a>    </span>current_version: u32,
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="doccomment">/// Back-compat mode: a lone generation created from a single cipher decrypts
+<a href=#123 id=123 data-nosnippet>123</a>    /// ANY value (any `key_version`, or a legacy value carrying no wrapper) with
+<a href=#124 id=124 data-nosnippet>124</a>    /// that one cipher. This is the never-rotated steady state and, crucially,
+<a href=#125 id=125 data-nosnippet>125</a>    /// the post-provider-switch state: after a completed rotation the operator
+<a href=#126 id=126 data-nosnippet>126</a>    /// reopens under the new key alone, so the single new-DEK keyring must still
+<a href=#127 id=127 data-nosnippet>127</a>    /// read the new-DEK values regardless of the `key_version` they were stamped
+<a href=#128 id=128 data-nosnippet>128</a>    /// with during the rotation.
+<a href=#129 id=129 data-nosnippet>129</a>    </span>match_any: bool,
+<a href=#130 id=130 data-nosnippet>130</a>}
+<a href=#131 id=131 data-nosnippet>131</a>
+<a href=#132 id=132 data-nosnippet>132</a><span class="doccomment">/// A cheaply-cloneable, shared-mutable set of cold DEK ciphers addressed by
+<a href=#133 id=133 data-nosnippet>133</a>/// `key_version` (Issue #3617 PR3).
+<a href=#134 id=134 data-nosnippet>134</a>///
+<a href=#135 id=135 data-nosnippet>135</a>/// Clones share the same underlying state, so the rotation driver can advance
+<a href=#136 id=136 data-nosnippet>136</a>/// the current generation (making new writes stamp + encrypt under the new DEK)
+<a href=#137 id=137 data-nosnippet>137</a>/// while readers holding clones observe the change immediately. Never exposes
+<a href=#138 id=138 data-nosnippet>138</a>/// key material; `Debug` is redacted.
+<a href=#139 id=139 data-nosnippet>139</a></span><span class="attr">#[derive(Clone)]
+<a href=#140 id=140 data-nosnippet>140</a></span><span class="kw">pub struct </span>ColdKeyring {
+<a href=#141 id=141 data-nosnippet>141</a>    inner: Arc&lt;RwLock&lt;ColdKeyringInner&gt;&gt;,
+<a href=#142 id=142 data-nosnippet>142</a>}
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a><span class="kw">impl </span>std::fmt::Debug <span class="kw">for </span>ColdKeyring {
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#146 id=146 data-nosnippet>146</a>        <span class="comment">// Never render key material — only opaque generation metadata.
+<a href=#147 id=147 data-nosnippet>147</a>        </span><span class="kw">let </span>inner = <span class="self">self</span>.inner.read().unwrap_or_else(|e| e.into_inner());
+<a href=#148 id=148 data-nosnippet>148</a>        f.debug_struct(<span class="string">"ColdKeyring"</span>)
+<a href=#149 id=149 data-nosnippet>149</a>            .field(<span class="string">"generations"</span>, <span class="kw-2">&amp;</span>inner.generations.len())
+<a href=#150 id=150 data-nosnippet>150</a>            .field(<span class="string">"current_version"</span>, <span class="kw-2">&amp;</span>inner.current_version)
+<a href=#151 id=151 data-nosnippet>151</a>            .field(<span class="string">"match_any"</span>, <span class="kw-2">&amp;</span>inner.match_any)
+<a href=#152 id=152 data-nosnippet>152</a>            .finish()
+<a href=#153 id=153 data-nosnippet>153</a>    }
+<a href=#154 id=154 data-nosnippet>154</a>}
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a><span class="kw">impl </span>ColdKeyring {
+<a href=#157 id=157 data-nosnippet>157</a>    <span class="doccomment">/// A single-generation keyring from one cipher (the non-rotation path).
+<a href=#158 id=158 data-nosnippet>158</a>    ///
+<a href=#159 id=159 data-nosnippet>159</a>    /// Reads decrypt any value (any wrapper `key_version`, or a legacy value with
+<a href=#160 id=160 data-nosnippet>160</a>    /// no wrapper) with this cipher and writes stamp
+<a href=#161 id=161 data-nosnippet>161</a>    /// [`INITIAL_COLD_KEY_VERSION`].
+<a href=#162 id=162 data-nosnippet>162</a>    </span><span class="kw">pub fn </span>single(cipher: Arc&lt;<span class="kw">dyn </span>Cipher&gt;) -&gt; <span class="self">Self </span>{
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="self">Self</span>::single_versioned(cipher, INITIAL_COLD_KEY_VERSION)
+<a href=#164 id=164 data-nosnippet>164</a>    }
+<a href=#165 id=165 data-nosnippet>165</a>
+<a href=#166 id=166 data-nosnippet>166</a>    <span class="doccomment">/// A single-generation cold keyring pinned to an explicit `key_version`
+<a href=#167 id=167 data-nosnippet>167</a>    /// (Issue #488 version-provisioning parity). Reads decrypt every value with
+<a href=#168 id=168 data-nosnippet>168</a>    /// this one cipher (`match_any`, byte-identical to [`Self::single`]); only
+<a href=#169 id=169 data-nosnippet>169</a>    /// the write-stamp / reported [`current_version`](Self::current_version) is
+<a href=#170 id=170 data-nosnippet>170</a>    /// pinned to `key_version`. The durable `open()` path builds the cold keyring
+<a href=#171 id=171 data-nosnippet>171</a>    /// at the provisioned key version so freshly written values stamp the real
+<a href=#172 id=172 data-nosnippet>172</a>    /// version instead of a stale [`INITIAL_COLD_KEY_VERSION`], keeping the cold
+<a href=#173 id=173 data-nosnippet>173</a>    /// layer in lockstep with index/WAL after a rotate-then-reopen.
+<a href=#174 id=174 data-nosnippet>174</a>    </span><span class="kw">pub fn </span>single_versioned(cipher: Arc&lt;<span class="kw">dyn </span>Cipher&gt;, key_version: u32) -&gt; <span class="self">Self </span>{
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="self">Self </span>{
+<a href=#176 id=176 data-nosnippet>176</a>            inner: Arc::new(RwLock::new(ColdKeyringInner {
+<a href=#177 id=177 data-nosnippet>177</a>                generations: <span class="macro">vec!</span>[ColdKeyGeneration {
+<a href=#178 id=178 data-nosnippet>178</a>                    key_version,
+<a href=#179 id=179 data-nosnippet>179</a>                    cipher,
+<a href=#180 id=180 data-nosnippet>180</a>                }],
+<a href=#181 id=181 data-nosnippet>181</a>                current_version: key_version,
+<a href=#182 id=182 data-nosnippet>182</a>                match_any: <span class="bool-val">true</span>,
+<a href=#183 id=183 data-nosnippet>183</a>            })),
+<a href=#184 id=184 data-nosnippet>184</a>        }
+<a href=#185 id=185 data-nosnippet>185</a>    }
+<a href=#186 id=186 data-nosnippet>186</a>
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="doccomment">/// The current (write) cipher and the `key_version` it stamps into new value
+<a href=#188 id=188 data-nosnippet>188</a>    /// wrappers, or `None` if the keyring somehow holds no generation.
+<a href=#189 id=189 data-nosnippet>189</a>    </span><span class="kw">pub fn </span>current(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;(Arc&lt;<span class="kw">dyn </span>Cipher&gt;, u32)&gt; {
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">let </span>inner = <span class="self">self</span>.inner.read().unwrap_or_else(|e| e.into_inner());
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="kw">let </span>v = inner.current_version;
+<a href=#192 id=192 data-nosnippet>192</a>        inner
+<a href=#193 id=193 data-nosnippet>193</a>            .generations
+<a href=#194 id=194 data-nosnippet>194</a>            .iter()
+<a href=#195 id=195 data-nosnippet>195</a>            .find(|g| g.key_version == v)
+<a href=#196 id=196 data-nosnippet>196</a>            .map(|g| (g.cipher.clone(), v))
+<a href=#197 id=197 data-nosnippet>197</a>    }
+<a href=#198 id=198 data-nosnippet>198</a>
+<a href=#199 id=199 data-nosnippet>199</a>    <span class="doccomment">/// The version freshly written values are stamped with.
+<a href=#200 id=200 data-nosnippet>200</a>    </span><span class="kw">pub fn </span>current_version(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; u32 {
+<a href=#201 id=201 data-nosnippet>201</a>        <span class="self">self</span>.inner
+<a href=#202 id=202 data-nosnippet>202</a>            .read()
+<a href=#203 id=203 data-nosnippet>203</a>            .unwrap_or_else(|e| e.into_inner())
+<a href=#204 id=204 data-nosnippet>204</a>            .current_version
+<a href=#205 id=205 data-nosnippet>205</a>    }
+<a href=#206 id=206 data-nosnippet>206</a>
+<a href=#207 id=207 data-nosnippet>207</a>    <span class="doccomment">/// Resolve the decryption cipher for a value, given the `key_version` read
+<a href=#208 id=208 data-nosnippet>208</a>    /// from its wrapper (`Some` for an `ACV1`-wrapped value, `None` for a legacy
+<a href=#209 id=209 data-nosnippet>209</a>    /// value that carries no wrapper).
+<a href=#210 id=210 data-nosnippet>210</a>    ///
+<a href=#211 id=211 data-nosnippet>211</a>    /// * `match_any` (single-cipher) keyring → the sole cipher for every value
+<a href=#212 id=212 data-nosnippet>212</a>    ///   (never-rotated / post-switch steady state).
+<a href=#213 id=213 data-nosnippet>213</a>    /// * strict keyring, legacy value (`None`) → the OLDEST (minimum-version,
+<a href=#214 id=214 data-nosnippet>214</a>    ///   i.e. pre-rotation) generation — the DEK legacy values were written under
+<a href=#215 id=215 data-nosnippet>215</a>    ///   before the rotation advanced the generation.
+<a href=#216 id=216 data-nosnippet>216</a>    /// * strict keyring, `Some(kv)` → the generation stamped `kv`, or `None` when
+<a href=#217 id=217 data-nosnippet>217</a>    ///   no such generation is held (a genuine wrong/absent key surfaces as a loud
+<a href=#218 id=218 data-nosnippet>218</a>    ///   AEAD failure downstream rather than silent wrong data).
+<a href=#219 id=219 data-nosnippet>219</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>cipher_for_value(<span class="kw-2">&amp;</span><span class="self">self</span>, key_version: <span class="prelude-ty">Option</span>&lt;u32&gt;) -&gt; <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>Cipher&gt;&gt; {
+<a href=#220 id=220 data-nosnippet>220</a>        <span class="kw">let </span>inner = <span class="self">self</span>.inner.read().unwrap_or_else(|e| e.into_inner());
+<a href=#221 id=221 data-nosnippet>221</a>        <span class="kw">if </span>inner.match_any {
+<a href=#222 id=222 data-nosnippet>222</a>            <span class="kw">return </span>inner.generations.first().map(|g| g.cipher.clone());
+<a href=#223 id=223 data-nosnippet>223</a>        }
+<a href=#224 id=224 data-nosnippet>224</a>        <span class="kw">match </span>key_version {
+<a href=#225 id=225 data-nosnippet>225</a>            <span class="prelude-val">Some</span>(kv) =&gt; inner
+<a href=#226 id=226 data-nosnippet>226</a>                .generations
+<a href=#227 id=227 data-nosnippet>227</a>                .iter()
+<a href=#228 id=228 data-nosnippet>228</a>                .find(|g| g.key_version == kv)
+<a href=#229 id=229 data-nosnippet>229</a>                .map(|g| g.cipher.clone()),
+<a href=#230 id=230 data-nosnippet>230</a>            <span class="prelude-val">None </span>=&gt; inner
+<a href=#231 id=231 data-nosnippet>231</a>                .generations
+<a href=#232 id=232 data-nosnippet>232</a>                .iter()
+<a href=#233 id=233 data-nosnippet>233</a>                .min_by_key(|g| g.key_version)
+<a href=#234 id=234 data-nosnippet>234</a>                .map(|g| g.cipher.clone()),
+<a href=#235 id=235 data-nosnippet>235</a>        }
+<a href=#236 id=236 data-nosnippet>236</a>    }
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="doccomment">/// Whether a generation with `key_version` is currently held (a `match_any`
+<a href=#239 id=239 data-nosnippet>239</a>    /// single keyring holds every version).
+<a href=#240 id=240 data-nosnippet>240</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>has_version(<span class="kw-2">&amp;</span><span class="self">self</span>, key_version: u32) -&gt; bool {
+<a href=#241 id=241 data-nosnippet>241</a>        <span class="kw">let </span>inner = <span class="self">self</span>.inner.read().unwrap_or_else(|e| e.into_inner());
+<a href=#242 id=242 data-nosnippet>242</a>        inner.match_any
+<a href=#243 id=243 data-nosnippet>243</a>            || inner
+<a href=#244 id=244 data-nosnippet>244</a>                .generations
+<a href=#245 id=245 data-nosnippet>245</a>                .iter()
+<a href=#246 id=246 data-nosnippet>246</a>                .any(|g| g.key_version == key_version)
+<a href=#247 id=247 data-nosnippet>247</a>    }
+<a href=#248 id=248 data-nosnippet>248</a>
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="doccomment">/// Add a new generation and make it current. Switches the keyring to strict
+<a href=#250 id=250 data-nosnippet>250</a>    /// per-version dispatch (leaving `match_any`). Idempotent for a version
+<a href=#251 id=251 data-nosnippet>251</a>    /// already present (its cipher is replaced). Used by the rotation driver to
+<a href=#252 id=252 data-nosnippet>252</a>    /// install the new cold DEK before the bulk re-encrypt pass.
+<a href=#253 id=253 data-nosnippet>253</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>add_generation(<span class="kw-2">&amp;</span><span class="self">self</span>, key_version: u32, cipher: Arc&lt;<span class="kw">dyn </span>Cipher&gt;) {
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="kw">let </span><span class="kw-2">mut </span>inner = <span class="self">self</span>.inner.write().unwrap_or_else(|e| e.into_inner());
+<a href=#255 id=255 data-nosnippet>255</a>        inner.match_any = <span class="bool-val">false</span>;
+<a href=#256 id=256 data-nosnippet>256</a>        inner.generations.retain(|g| g.key_version != key_version);
+<a href=#257 id=257 data-nosnippet>257</a>        inner.generations.push(ColdKeyGeneration {
+<a href=#258 id=258 data-nosnippet>258</a>            key_version,
+<a href=#259 id=259 data-nosnippet>259</a>            cipher,
+<a href=#260 id=260 data-nosnippet>260</a>        });
+<a href=#261 id=261 data-nosnippet>261</a>        inner.current_version = key_version;
+<a href=#262 id=262 data-nosnippet>262</a>    }
+<a href=#263 id=263 data-nosnippet>263</a>
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="doccomment">/// Retire every generation except `key_version`, which becomes the sole,
+<a href=#265 id=265 data-nosnippet>265</a>    /// current generation. Used by the rotation driver at completion once every
+<a href=#266 id=266 data-nosnippet>266</a>    /// value is re-wrapped under the new generation, so the old cold DEK can be
+<a href=#267 id=267 data-nosnippet>267</a>    /// dropped.
+<a href=#268 id=268 data-nosnippet>268</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>retain_only(<span class="kw-2">&amp;</span><span class="self">self</span>, key_version: u32) {
+<a href=#269 id=269 data-nosnippet>269</a>        <span class="kw">let </span><span class="kw-2">mut </span>inner = <span class="self">self</span>.inner.write().unwrap_or_else(|e| e.into_inner());
+<a href=#270 id=270 data-nosnippet>270</a>        inner.generations.retain(|g| g.key_version == key_version);
+<a href=#271 id=271 data-nosnippet>271</a>        inner.current_version = key_version;
+<a href=#272 id=272 data-nosnippet>272</a>        inner.match_any = <span class="bool-val">false</span>;
+<a href=#273 id=273 data-nosnippet>273</a>    }
+<a href=#274 id=274 data-nosnippet>274</a>}
+</code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["load_snapshot_meta","load_vector_index","load_vector_index_with_cipher","load_vector_mappings","load_vector_mappings_with_cipher","load_vector_meta","load_vector_meta_with_cipher","new_vector_mappings","new_vector_meta","save_snapshot_meta","save_vector_mappings","save_vector_mappings_with_cipher","save_vector_meta","save_vector_meta_with_cipher"]};

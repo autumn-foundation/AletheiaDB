@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StorageEvent"],"fn":["notify_observers"],"trait":["StorageObserver"],"type":["Observer"]};

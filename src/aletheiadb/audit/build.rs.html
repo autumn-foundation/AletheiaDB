@@ -1,0 +1,546 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/audit/build.rs`."><title>build.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">aletheiadb/audit/</div>build.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Building a signed audit export from live database history (Issue #3358).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! This is a read-only path: it consumes the existing history reads
+<a href=#4 id=4 data-nosnippet>4</a>//! (`get_node_history` / `get_edge_history`) plus current adjacency for the
+<a href=#5 id=5 data-nosnippet>5</a>//! neighborhood scope, and never mutates the database — so it takes no
+<a href=#6 id=6 data-nosnippet>6</a>//! write-path locks.
+<a href=#7 id=7 data-nosnippet>7</a>
+<a href=#8 id=8 data-nosnippet>8</a></span><span class="kw">use </span>std::collections::BTreeSet;
+<a href=#9 id=9 data-nosnippet>9</a>
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span><span class="kw">crate</span>::audit::canonical;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span><span class="kw">crate</span>::audit::error::{AuditError, AuditResult};
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span><span class="kw">crate</span>::audit::model::{
+<a href=#13 id=13 data-nosnippet>13</a>    AUDIT_FORMAT_VERSION, AuditExport, ChainAnchor, ChainProof, CoordinateRecord, EntityIdRecord,
+<a href=#14 id=14 data-nosnippet>14</a>    ExportMetadata, ExportedEntity, ExportedProperty, ExportedProvenance, ExportedValue,
+<a href=#15 id=15 data-nosnippet>15</a>    ExportedVersion, HASH_ALGORITHM, NotIncludedRecord, SIGNATURE_ALGORITHM, SIGNED_DESCRIPTION,
+<a href=#16 id=16 data-nosnippet>16</a>    ScopeRecord, SignatureBlock, f64_to_token,
+<a href=#17 id=17 data-nosnippet>17</a>};
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span><span class="kw">crate</span>::audit::signing::AuditSigningKey;
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span><span class="kw">crate</span>::core::history::{EntityHistory, VersionInfo};
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span><span class="kw">crate</span>::core::interning::GLOBAL_INTERNER;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span><span class="kw">crate</span>::core::property::PropertyValue;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">use </span><span class="kw">crate</span>::core::temporal::{TIMESTAMP_MAX, Timestamp, time};
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">use </span><span class="kw">crate</span>::core::{EdgeId, NodeId};
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">use </span><span class="kw">crate</span>::db::AletheiaDB;
+<a href=#25 id=25 data-nosnippet>25</a>
+<a href=#26 id=26 data-nosnippet>26</a><span class="doccomment">/// A reference to a single node or edge for export.
+<a href=#27 id=27 data-nosnippet>27</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#28 id=28 data-nosnippet>28</a></span><span class="kw">pub enum </span>EntityRef {
+<a href=#29 id=29 data-nosnippet>29</a>    <span class="doccomment">/// A node, by id.
+<a href=#30 id=30 data-nosnippet>30</a>    </span>Node(NodeId),
+<a href=#31 id=31 data-nosnippet>31</a>    <span class="doccomment">/// An edge, by id.
+<a href=#32 id=32 data-nosnippet>32</a>    </span>Edge(EdgeId),
+<a href=#33 id=33 data-nosnippet>33</a>}
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a><span class="doccomment">/// What to export (AC5): a single entity, an explicit set, or a neighborhood.
+<a href=#36 id=36 data-nosnippet>36</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#37 id=37 data-nosnippet>37</a></span><span class="kw">pub enum </span>AuditScope {
+<a href=#38 id=38 data-nosnippet>38</a>    <span class="doccomment">/// A single node or edge.
+<a href=#39 id=39 data-nosnippet>39</a>    </span>SingleEntity(EntityRef),
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="doccomment">/// An explicit list of entities.
+<a href=#41 id=41 data-nosnippet>41</a>    </span>EntitySet(Vec&lt;EntityRef&gt;),
+<a href=#42 id=42 data-nosnippet>42</a>    <span class="doccomment">/// A node plus its N-hop neighborhood at a bi-temporal coordinate.
+<a href=#43 id=43 data-nosnippet>43</a>    </span>Neighborhood {
+<a href=#44 id=44 data-nosnippet>44</a>        <span class="doccomment">/// The entity to start from.
+<a href=#45 id=45 data-nosnippet>45</a>        </span>start: NodeId,
+<a href=#46 id=46 data-nosnippet>46</a>        <span class="doccomment">/// Hop radius.
+<a href=#47 id=47 data-nosnippet>47</a>        </span>hops: u32,
+<a href=#48 id=48 data-nosnippet>48</a>        <span class="doccomment">/// Valid-time coordinate (defaults to now when omitted).
+<a href=#49 id=49 data-nosnippet>49</a>        </span>valid_time: <span class="prelude-ty">Option</span>&lt;Timestamp&gt;,
+<a href=#50 id=50 data-nosnippet>50</a>        <span class="doccomment">/// Transaction-time coordinate (defaults to now when omitted).
+<a href=#51 id=51 data-nosnippet>51</a>        </span>transaction_time: <span class="prelude-ty">Option</span>&lt;Timestamp&gt;,
+<a href=#52 id=52 data-nosnippet>52</a>    },
+<a href=#53 id=53 data-nosnippet>53</a>}
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a><span class="kw">impl </span>AuditScope {
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="doccomment">/// Convenience: export a single node.
+<a href=#57 id=57 data-nosnippet>57</a>    </span><span class="attr">#[must_use]
+<a href=#58 id=58 data-nosnippet>58</a>    </span><span class="kw">pub fn </span>node(id: NodeId) -&gt; <span class="self">Self </span>{
+<a href=#59 id=59 data-nosnippet>59</a>        AuditScope::SingleEntity(EntityRef::Node(id))
+<a href=#60 id=60 data-nosnippet>60</a>    }
+<a href=#61 id=61 data-nosnippet>61</a>
+<a href=#62 id=62 data-nosnippet>62</a>    <span class="doccomment">/// Convenience: export a single edge.
+<a href=#63 id=63 data-nosnippet>63</a>    </span><span class="attr">#[must_use]
+<a href=#64 id=64 data-nosnippet>64</a>    </span><span class="kw">pub fn </span>edge(id: EdgeId) -&gt; <span class="self">Self </span>{
+<a href=#65 id=65 data-nosnippet>65</a>        AuditScope::SingleEntity(EntityRef::Edge(id))
+<a href=#66 id=66 data-nosnippet>66</a>    }
+<a href=#67 id=67 data-nosnippet>67</a>}
+<a href=#68 id=68 data-nosnippet>68</a>
+<a href=#69 id=69 data-nosnippet>69</a><span class="doccomment">/// Options controlling an export: database identity + redaction (AC6/AC8).
+<a href=#70 id=70 data-nosnippet>70</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#71 id=71 data-nosnippet>71</a></span><span class="kw">pub struct </span>ExportOptions {
+<a href=#72 id=72 data-nosnippet>72</a>    database_id: String,
+<a href=#73 id=73 data-nosnippet>73</a>    redact_keys: Vec&lt;String&gt;,
+<a href=#74 id=74 data-nosnippet>74</a>}
+<a href=#75 id=75 data-nosnippet>75</a>
+<a href=#76 id=76 data-nosnippet>76</a><span class="kw">impl </span>ExportOptions {
+<a href=#77 id=77 data-nosnippet>77</a>    <span class="doccomment">/// New options with the given operator-supplied database identity.
+<a href=#78 id=78 data-nosnippet>78</a>    </span><span class="attr">#[must_use]
+<a href=#79 id=79 data-nosnippet>79</a>    </span><span class="kw">pub fn </span>new(database_id: <span class="kw">impl </span>Into&lt;String&gt;) -&gt; <span class="self">Self </span>{
+<a href=#80 id=80 data-nosnippet>80</a>        <span class="self">Self </span>{
+<a href=#81 id=81 data-nosnippet>81</a>            database_id: database_id.into(),
+<a href=#82 id=82 data-nosnippet>82</a>            redact_keys: Vec::new(),
+<a href=#83 id=83 data-nosnippet>83</a>        }
+<a href=#84 id=84 data-nosnippet>84</a>    }
+<a href=#85 id=85 data-nosnippet>85</a>
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="doccomment">/// Redact the given property keys at export (their values are omitted, but
+<a href=#87 id=87 data-nosnippet>87</a>    /// the redaction is recorded and verifiable — never silent).
+<a href=#88 id=88 data-nosnippet>88</a>    </span><span class="attr">#[must_use]
+<a href=#89 id=89 data-nosnippet>89</a>    </span><span class="kw">pub fn </span>redact&lt;I, S&gt;(<span class="kw-2">mut </span><span class="self">self</span>, keys: I) -&gt; <span class="self">Self
+<a href=#90 id=90 data-nosnippet>90</a>    </span><span class="kw">where
+<a href=#91 id=91 data-nosnippet>91</a>        </span>I: IntoIterator&lt;Item = S&gt;,
+<a href=#92 id=92 data-nosnippet>92</a>        S: Into&lt;String&gt;,
+<a href=#93 id=93 data-nosnippet>93</a>    {
+<a href=#94 id=94 data-nosnippet>94</a>        <span class="self">self</span>.redact_keys
+<a href=#95 id=95 data-nosnippet>95</a>            .extend(keys.into_iter().map(std::convert::Into::into));
+<a href=#96 id=96 data-nosnippet>96</a>        <span class="self">self
+<a href=#97 id=97 data-nosnippet>97</a>    </span>}
+<a href=#98 id=98 data-nosnippet>98</a>}
+<a href=#99 id=99 data-nosnippet>99</a>
+<a href=#100 id=100 data-nosnippet>100</a><span class="kw">impl </span>AletheiaDB {
+<a href=#101 id=101 data-nosnippet>101</a>    <span class="doccomment">/// Produce a signed, self-contained audit export of an entity's (or a set
+<a href=#102 id=102 data-nosnippet>102</a>    /// or neighborhood's) complete bi-temporal history (Issue #3358).
+<a href=#103 id=103 data-nosnippet>103</a>    ///
+<a href=#104 id=104 data-nosnippet>104</a>    /// The result verifies OFFLINE with only the signer's public key. See the
+<a href=#105 id=105 data-nosnippet>105</a>    /// [`crate::audit`] module docs and `docs/guides/audit-export.md` for the
+<a href=#106 id=106 data-nosnippet>106</a>    /// artifact format and verification contract.
+<a href=#107 id=107 data-nosnippet>107</a>    ///
+<a href=#108 id=108 data-nosnippet>108</a>    /// # Errors
+<a href=#109 id=109 data-nosnippet>109</a>    /// Returns [`AuditError::NoHistory`] if a single requested entity has no
+<a href=#110 id=110 data-nosnippet>110</a>    /// retrievable history, or [`AuditError::DatabaseRead`] on a read failure.
+<a href=#111 id=111 data-nosnippet>111</a>    </span><span class="kw">pub fn </span>audit_export(
+<a href=#112 id=112 data-nosnippet>112</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#113 id=113 data-nosnippet>113</a>        scope: AuditScope,
+<a href=#114 id=114 data-nosnippet>114</a>        signing_key: <span class="kw-2">&amp;</span>AuditSigningKey,
+<a href=#115 id=115 data-nosnippet>115</a>        options: <span class="kw-2">&amp;</span>ExportOptions,
+<a href=#116 id=116 data-nosnippet>116</a>    ) -&gt; AuditResult&lt;AuditExport&gt; {
+<a href=#117 id=117 data-nosnippet>117</a>        <span class="kw">let </span>redact: BTreeSet&lt;String&gt; = options.redact_keys.iter().cloned().collect();
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a>        <span class="kw">let </span>(kind_str, requested, entities, not_included, coordinate, hops) =
+<a href=#120 id=120 data-nosnippet>120</a>            <span class="self">self</span>.resolve_scope(<span class="kw-2">&amp;</span>scope, <span class="kw-2">&amp;</span>redact)<span class="question-mark">?</span>;
+<a href=#121 id=121 data-nosnippet>121</a>
+<a href=#122 id=122 data-nosnippet>122</a>        <span class="kw">let </span>included: Vec&lt;EntityIdRecord&gt; = entities
+<a href=#123 id=123 data-nosnippet>123</a>            .iter()
+<a href=#124 id=124 data-nosnippet>124</a>            .map(|e| EntityIdRecord {
+<a href=#125 id=125 data-nosnippet>125</a>                kind: e.kind.clone(),
+<a href=#126 id=126 data-nosnippet>126</a>                id: e.id,
+<a href=#127 id=127 data-nosnippet>127</a>            })
+<a href=#128 id=128 data-nosnippet>128</a>            .collect();
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a>        <span class="kw">let </span>version_count: usize = entities.iter().map(|e| e.versions.len()).sum();
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="kw">let </span><span class="kw-2">mut </span>redacted_keys: Vec&lt;String&gt; = redact.into_iter().collect();
+<a href=#132 id=132 data-nosnippet>132</a>        redacted_keys.sort();
+<a href=#133 id=133 data-nosnippet>133</a>
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="kw">let </span>metadata = ExportMetadata {
+<a href=#135 id=135 data-nosnippet>135</a>            database_id: options.database_id.clone(),
+<a href=#136 id=136 data-nosnippet>136</a>            exported_at: format_timestamp(time::now()),
+<a href=#137 id=137 data-nosnippet>137</a>            tool_version: <span class="macro">env!</span>(<span class="string">"CARGO_PKG_VERSION"</span>).to_string(),
+<a href=#138 id=138 data-nosnippet>138</a>            scope_description: describe_scope(<span class="kw-2">&amp;</span>scope),
+<a href=#139 id=139 data-nosnippet>139</a>            scope: ScopeRecord {
+<a href=#140 id=140 data-nosnippet>140</a>                kind: kind_str,
+<a href=#141 id=141 data-nosnippet>141</a>                requested,
+<a href=#142 id=142 data-nosnippet>142</a>                included,
+<a href=#143 id=143 data-nosnippet>143</a>                not_included,
+<a href=#144 id=144 data-nosnippet>144</a>                coordinate,
+<a href=#145 id=145 data-nosnippet>145</a>                hops,
+<a href=#146 id=146 data-nosnippet>146</a>            },
+<a href=#147 id=147 data-nosnippet>147</a>            chain_anchor: ChainAnchor {
+<a href=#148 id=148 data-nosnippet>148</a>                source_lsn: <span class="self">self</span>.stats().wal.current_lsn,
+<a href=#149 id=149 data-nosnippet>149</a>                description: <span class="string">"WAL LSN at export time (chain-head position, #3351 anchor)"
+<a href=#150 id=150 data-nosnippet>150</a>                    </span>.to_string(),
+<a href=#151 id=151 data-nosnippet>151</a>            },
+<a href=#152 id=152 data-nosnippet>152</a>            redacted_keys,
+<a href=#153 id=153 data-nosnippet>153</a>            entity_count: entities.len(),
+<a href=#154 id=154 data-nosnippet>154</a>            version_count,
+<a href=#155 id=155 data-nosnippet>155</a>            hash_algorithm: HASH_ALGORITHM.to_string(),
+<a href=#156 id=156 data-nosnippet>156</a>            signature_algorithm: SIGNATURE_ALGORITHM.to_string(),
+<a href=#157 id=157 data-nosnippet>157</a>        };
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a>        <span class="comment">// Integrity: per-version leaves + folded chain root, then sign the root.
+<a href=#160 id=160 data-nosnippet>160</a>        </span><span class="kw">let </span>(leaves, root) = canonical::compute_chain(<span class="kw-2">&amp;</span>metadata, <span class="kw-2">&amp;</span>entities);
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="kw">let </span>signature = signing_key.sign_root(<span class="kw-2">&amp;</span>root);
+<a href=#162 id=162 data-nosnippet>162</a>        <span class="kw">let </span>public_key = signing_key.public_key();
+<a href=#163 id=163 data-nosnippet>163</a>
+<a href=#164 id=164 data-nosnippet>164</a>        <span class="prelude-val">Ok</span>(AuditExport {
+<a href=#165 id=165 data-nosnippet>165</a>            format_version: AUDIT_FORMAT_VERSION,
+<a href=#166 id=166 data-nosnippet>166</a>            metadata,
+<a href=#167 id=167 data-nosnippet>167</a>            entities,
+<a href=#168 id=168 data-nosnippet>168</a>            chain: ChainProof {
+<a href=#169 id=169 data-nosnippet>169</a>                algorithm: HASH_ALGORITHM.to_string(),
+<a href=#170 id=170 data-nosnippet>170</a>                leaves: leaves.iter().map(canonical::to_hex).collect(),
+<a href=#171 id=171 data-nosnippet>171</a>                root: canonical::to_hex(<span class="kw-2">&amp;</span>root),
+<a href=#172 id=172 data-nosnippet>172</a>            },
+<a href=#173 id=173 data-nosnippet>173</a>            signature: SignatureBlock {
+<a href=#174 id=174 data-nosnippet>174</a>                algorithm: SIGNATURE_ALGORITHM.to_string(),
+<a href=#175 id=175 data-nosnippet>175</a>                public_key: public_key.to_hex(),
+<a href=#176 id=176 data-nosnippet>176</a>                signature: <span class="kw">crate</span>::core::hex::encode(<span class="kw-2">&amp;</span>signature),
+<a href=#177 id=177 data-nosnippet>177</a>                signed: SIGNED_DESCRIPTION.to_string(),
+<a href=#178 id=178 data-nosnippet>178</a>            },
+<a href=#179 id=179 data-nosnippet>179</a>        })
+<a href=#180 id=180 data-nosnippet>180</a>    }
+<a href=#181 id=181 data-nosnippet>181</a>
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="doccomment">/// Resolve a scope into the concrete entities to export plus scope metadata.
+<a href=#183 id=183 data-nosnippet>183</a>    </span><span class="attr">#[allow(clippy::type_complexity)]
+<a href=#184 id=184 data-nosnippet>184</a>    </span><span class="kw">fn </span>resolve_scope(
+<a href=#185 id=185 data-nosnippet>185</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#186 id=186 data-nosnippet>186</a>        scope: <span class="kw-2">&amp;</span>AuditScope,
+<a href=#187 id=187 data-nosnippet>187</a>        redact: <span class="kw-2">&amp;</span>BTreeSet&lt;String&gt;,
+<a href=#188 id=188 data-nosnippet>188</a>    ) -&gt; AuditResult&lt;(
+<a href=#189 id=189 data-nosnippet>189</a>        String,
+<a href=#190 id=190 data-nosnippet>190</a>        Vec&lt;EntityIdRecord&gt;,
+<a href=#191 id=191 data-nosnippet>191</a>        Vec&lt;ExportedEntity&gt;,
+<a href=#192 id=192 data-nosnippet>192</a>        Vec&lt;NotIncludedRecord&gt;,
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="prelude-ty">Option</span>&lt;CoordinateRecord&gt;,
+<a href=#194 id=194 data-nosnippet>194</a>        <span class="prelude-ty">Option</span>&lt;u32&gt;,
+<a href=#195 id=195 data-nosnippet>195</a>    )&gt; {
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">match </span>scope {
+<a href=#197 id=197 data-nosnippet>197</a>            AuditScope::SingleEntity(entity_ref) =&gt; {
+<a href=#198 id=198 data-nosnippet>198</a>                <span class="kw">let </span>kind = <span class="kw">match </span>entity_ref {
+<a href=#199 id=199 data-nosnippet>199</a>                    EntityRef::Node(<span class="kw">_</span>) =&gt; <span class="string">"single_node"</span>,
+<a href=#200 id=200 data-nosnippet>200</a>                    EntityRef::Edge(<span class="kw">_</span>) =&gt; <span class="string">"single_edge"</span>,
+<a href=#201 id=201 data-nosnippet>201</a>                };
+<a href=#202 id=202 data-nosnippet>202</a>                <span class="kw">let </span>requested = <span class="macro">vec!</span>[entity_id_record(<span class="kw-2">*</span>entity_ref)];
+<a href=#203 id=203 data-nosnippet>203</a>                <span class="kw">let </span>exported = <span class="self">self
+<a href=#204 id=204 data-nosnippet>204</a>                    </span>.export_one(<span class="kw-2">*</span>entity_ref, redact)<span class="question-mark">?
+<a href=#205 id=205 data-nosnippet>205</a>                    </span>.ok_or_else(|| AuditError::NoHistory(describe_entity(<span class="kw-2">*</span>entity_ref)))<span class="question-mark">?</span>;
+<a href=#206 id=206 data-nosnippet>206</a>                <span class="prelude-val">Ok</span>((
+<a href=#207 id=207 data-nosnippet>207</a>                    kind.to_string(),
+<a href=#208 id=208 data-nosnippet>208</a>                    requested,
+<a href=#209 id=209 data-nosnippet>209</a>                    <span class="macro">vec!</span>[exported],
+<a href=#210 id=210 data-nosnippet>210</a>                    Vec::new(),
+<a href=#211 id=211 data-nosnippet>211</a>                    <span class="prelude-val">None</span>,
+<a href=#212 id=212 data-nosnippet>212</a>                    <span class="prelude-val">None</span>,
+<a href=#213 id=213 data-nosnippet>213</a>                ))
+<a href=#214 id=214 data-nosnippet>214</a>            }
+<a href=#215 id=215 data-nosnippet>215</a>            AuditScope::EntitySet(refs) =&gt; {
+<a href=#216 id=216 data-nosnippet>216</a>                <span class="kw">let </span>requested: Vec&lt;EntityIdRecord&gt; =
+<a href=#217 id=217 data-nosnippet>217</a>                    refs.iter().map(|r| entity_id_record(<span class="kw-2">*</span>r)).collect();
+<a href=#218 id=218 data-nosnippet>218</a>                <span class="kw">let </span><span class="kw-2">mut </span>entities = Vec::new();
+<a href=#219 id=219 data-nosnippet>219</a>                <span class="kw">let </span><span class="kw-2">mut </span>not_included = Vec::new();
+<a href=#220 id=220 data-nosnippet>220</a>                <span class="kw">for </span>r <span class="kw">in </span>refs {
+<a href=#221 id=221 data-nosnippet>221</a>                    <span class="kw">match </span><span class="self">self</span>.export_one(<span class="kw-2">*</span>r, redact)<span class="question-mark">? </span>{
+<a href=#222 id=222 data-nosnippet>222</a>                        <span class="prelude-val">Some</span>(e) =&gt; entities.push(e),
+<a href=#223 id=223 data-nosnippet>223</a>                        <span class="prelude-val">None </span>=&gt; {
+<a href=#224 id=224 data-nosnippet>224</a>                            <span class="kw">let </span>rec = entity_id_record(<span class="kw-2">*</span>r);
+<a href=#225 id=225 data-nosnippet>225</a>                            not_included.push(NotIncludedRecord {
+<a href=#226 id=226 data-nosnippet>226</a>                                kind: rec.kind,
+<a href=#227 id=227 data-nosnippet>227</a>                                id: rec.id,
+<a href=#228 id=228 data-nosnippet>228</a>                                reason: <span class="string">"no_history"</span>.to_string(),
+<a href=#229 id=229 data-nosnippet>229</a>                            });
+<a href=#230 id=230 data-nosnippet>230</a>                        }
+<a href=#231 id=231 data-nosnippet>231</a>                    }
+<a href=#232 id=232 data-nosnippet>232</a>                }
+<a href=#233 id=233 data-nosnippet>233</a>                <span class="prelude-val">Ok</span>((
+<a href=#234 id=234 data-nosnippet>234</a>                    <span class="string">"entity_set"</span>.to_string(),
+<a href=#235 id=235 data-nosnippet>235</a>                    requested,
+<a href=#236 id=236 data-nosnippet>236</a>                    entities,
+<a href=#237 id=237 data-nosnippet>237</a>                    not_included,
+<a href=#238 id=238 data-nosnippet>238</a>                    <span class="prelude-val">None</span>,
+<a href=#239 id=239 data-nosnippet>239</a>                    <span class="prelude-val">None</span>,
+<a href=#240 id=240 data-nosnippet>240</a>                ))
+<a href=#241 id=241 data-nosnippet>241</a>            }
+<a href=#242 id=242 data-nosnippet>242</a>            AuditScope::Neighborhood {
+<a href=#243 id=243 data-nosnippet>243</a>                start,
+<a href=#244 id=244 data-nosnippet>244</a>                hops,
+<a href=#245 id=245 data-nosnippet>245</a>                valid_time,
+<a href=#246 id=246 data-nosnippet>246</a>                transaction_time,
+<a href=#247 id=247 data-nosnippet>247</a>            } =&gt; {
+<a href=#248 id=248 data-nosnippet>248</a>                <span class="kw">let </span>vt = valid_time.unwrap_or_else(time::now);
+<a href=#249 id=249 data-nosnippet>249</a>                <span class="kw">let </span>tt = transaction_time.unwrap_or_else(time::now);
+<a href=#250 id=250 data-nosnippet>250</a>                <span class="kw">let </span>(node_ids, edge_ids) = <span class="self">self</span>.collect_neighborhood(<span class="kw-2">*</span>start, <span class="kw-2">*</span>hops, vt, tt);
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a>                <span class="kw">let </span><span class="kw-2">mut </span>entities = Vec::new();
+<a href=#253 id=253 data-nosnippet>253</a>                <span class="kw">for </span>n <span class="kw">in </span>node_ids {
+<a href=#254 id=254 data-nosnippet>254</a>                    <span class="kw">if let </span><span class="prelude-val">Some</span>(e) = <span class="self">self</span>.export_one(EntityRef::Node(n), redact)<span class="question-mark">? </span>{
+<a href=#255 id=255 data-nosnippet>255</a>                        entities.push(e);
+<a href=#256 id=256 data-nosnippet>256</a>                    }
+<a href=#257 id=257 data-nosnippet>257</a>                }
+<a href=#258 id=258 data-nosnippet>258</a>                <span class="kw">for </span>ed <span class="kw">in </span>edge_ids {
+<a href=#259 id=259 data-nosnippet>259</a>                    <span class="kw">if let </span><span class="prelude-val">Some</span>(e) = <span class="self">self</span>.export_one(EntityRef::Edge(ed), redact)<span class="question-mark">? </span>{
+<a href=#260 id=260 data-nosnippet>260</a>                        entities.push(e);
+<a href=#261 id=261 data-nosnippet>261</a>                    }
+<a href=#262 id=262 data-nosnippet>262</a>                }
+<a href=#263 id=263 data-nosnippet>263</a>                <span class="kw">let </span>coordinate = <span class="prelude-val">Some</span>(CoordinateRecord {
+<a href=#264 id=264 data-nosnippet>264</a>                    valid_time: <span class="prelude-val">Some</span>(format_timestamp(vt)),
+<a href=#265 id=265 data-nosnippet>265</a>                    transaction_time: <span class="prelude-val">Some</span>(format_timestamp(tt)),
+<a href=#266 id=266 data-nosnippet>266</a>                });
+<a href=#267 id=267 data-nosnippet>267</a>                <span class="prelude-val">Ok</span>((
+<a href=#268 id=268 data-nosnippet>268</a>                    <span class="string">"neighborhood"</span>.to_string(),
+<a href=#269 id=269 data-nosnippet>269</a>                    <span class="macro">vec!</span>[entity_id_record(EntityRef::Node(<span class="kw-2">*</span>start))],
+<a href=#270 id=270 data-nosnippet>270</a>                    entities,
+<a href=#271 id=271 data-nosnippet>271</a>                    Vec::new(),
+<a href=#272 id=272 data-nosnippet>272</a>                    coordinate,
+<a href=#273 id=273 data-nosnippet>273</a>                    <span class="prelude-val">Some</span>(<span class="kw-2">*</span>hops),
+<a href=#274 id=274 data-nosnippet>274</a>                ))
+<a href=#275 id=275 data-nosnippet>275</a>            }
+<a href=#276 id=276 data-nosnippet>276</a>        }
+<a href=#277 id=277 data-nosnippet>277</a>    }
+<a href=#278 id=278 data-nosnippet>278</a>
+<a href=#279 id=279 data-nosnippet>279</a>    <span class="doccomment">/// Export a single entity's full history, or `None` if it has no history.
+<a href=#280 id=280 data-nosnippet>280</a>    </span><span class="kw">fn </span>export_one(
+<a href=#281 id=281 data-nosnippet>281</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#282 id=282 data-nosnippet>282</a>        entity_ref: EntityRef,
+<a href=#283 id=283 data-nosnippet>283</a>        redact: <span class="kw-2">&amp;</span>BTreeSet&lt;String&gt;,
+<a href=#284 id=284 data-nosnippet>284</a>    ) -&gt; AuditResult&lt;<span class="prelude-ty">Option</span>&lt;ExportedEntity&gt;&gt; {
+<a href=#285 id=285 data-nosnippet>285</a>        <span class="kw">match </span>entity_ref {
+<a href=#286 id=286 data-nosnippet>286</a>            EntityRef::Node(id) =&gt; {
+<a href=#287 id=287 data-nosnippet>287</a>                <span class="kw">let </span>history = <span class="kw">match </span><span class="self">self</span>.get_node_history(id) {
+<a href=#288 id=288 data-nosnippet>288</a>                    <span class="prelude-val">Ok</span>(h) =&gt; h,
+<a href=#289 id=289 data-nosnippet>289</a>                    <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#290 id=290 data-nosnippet>290</a>                };
+<a href=#291 id=291 data-nosnippet>291</a>                <span class="kw">if </span>history.version_count() == <span class="number">0 </span>{
+<a href=#292 id=292 data-nosnippet>292</a>                    <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#293 id=293 data-nosnippet>293</a>                }
+<a href=#294 id=294 data-nosnippet>294</a>                <span class="kw">let </span>label = history
+<a href=#295 id=295 data-nosnippet>295</a>                    .current_version()
+<a href=#296 id=296 data-nosnippet>296</a>                    .or_else(|| history.first_version())
+<a href=#297 id=297 data-nosnippet>297</a>                    .map(|v| v.label.clone());
+<a href=#298 id=298 data-nosnippet>298</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(ExportedEntity {
+<a href=#299 id=299 data-nosnippet>299</a>                    kind: <span class="string">"node"</span>.to_string(),
+<a href=#300 id=300 data-nosnippet>300</a>                    id: id.as_u64(),
+<a href=#301 id=301 data-nosnippet>301</a>                    label,
+<a href=#302 id=302 data-nosnippet>302</a>                    source: <span class="prelude-val">None</span>,
+<a href=#303 id=303 data-nosnippet>303</a>                    target: <span class="prelude-val">None</span>,
+<a href=#304 id=304 data-nosnippet>304</a>                    versions: convert_versions(<span class="kw-2">&amp;</span>history, redact),
+<a href=#305 id=305 data-nosnippet>305</a>                }))
+<a href=#306 id=306 data-nosnippet>306</a>            }
+<a href=#307 id=307 data-nosnippet>307</a>            EntityRef::Edge(id) =&gt; {
+<a href=#308 id=308 data-nosnippet>308</a>                <span class="kw">let </span>history = <span class="kw">match </span><span class="self">self</span>.get_edge_history(id) {
+<a href=#309 id=309 data-nosnippet>309</a>                    <span class="prelude-val">Ok</span>(h) =&gt; h,
+<a href=#310 id=310 data-nosnippet>310</a>                    <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#311 id=311 data-nosnippet>311</a>                };
+<a href=#312 id=312 data-nosnippet>312</a>                <span class="kw">if </span>history.version_count() == <span class="number">0 </span>{
+<a href=#313 id=313 data-nosnippet>313</a>                    <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#314 id=314 data-nosnippet>314</a>                }
+<a href=#315 id=315 data-nosnippet>315</a>                <span class="kw">let </span>label = history
+<a href=#316 id=316 data-nosnippet>316</a>                    .current_version()
+<a href=#317 id=317 data-nosnippet>317</a>                    .or_else(|| history.first_version())
+<a href=#318 id=318 data-nosnippet>318</a>                    .map(|v| v.label.clone());
+<a href=#319 id=319 data-nosnippet>319</a>                <span class="comment">// Endpoints are informational; recover them if the edge still
+<a href=#320 id=320 data-nosnippet>320</a>                // resolves (deleted edges leave them unknown → None).
+<a href=#321 id=321 data-nosnippet>321</a>                </span><span class="kw">let </span>(source, target) = <span class="kw">match </span><span class="self">self</span>.get_edge(id) {
+<a href=#322 id=322 data-nosnippet>322</a>                    <span class="prelude-val">Ok</span>(edge) =&gt; (<span class="prelude-val">Some</span>(edge.source.as_u64()), <span class="prelude-val">Some</span>(edge.target.as_u64())),
+<a href=#323 id=323 data-nosnippet>323</a>                    <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>),
+<a href=#324 id=324 data-nosnippet>324</a>                };
+<a href=#325 id=325 data-nosnippet>325</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(ExportedEntity {
+<a href=#326 id=326 data-nosnippet>326</a>                    kind: <span class="string">"edge"</span>.to_string(),
+<a href=#327 id=327 data-nosnippet>327</a>                    id: id.as_u64(),
+<a href=#328 id=328 data-nosnippet>328</a>                    label,
+<a href=#329 id=329 data-nosnippet>329</a>                    source,
+<a href=#330 id=330 data-nosnippet>330</a>                    target,
+<a href=#331 id=331 data-nosnippet>331</a>                    versions: convert_versions(<span class="kw-2">&amp;</span>history, redact),
+<a href=#332 id=332 data-nosnippet>332</a>                }))
+<a href=#333 id=333 data-nosnippet>333</a>            }
+<a href=#334 id=334 data-nosnippet>334</a>        }
+<a href=#335 id=335 data-nosnippet>335</a>    }
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="doccomment">/// BFS the current graph from `start` up to `hops`, keeping only nodes/edges
+<a href=#338 id=338 data-nosnippet>338</a>    /// valid at the given bi-temporal coordinate. Returns `(nodes, edges)`.
+<a href=#339 id=339 data-nosnippet>339</a>    </span><span class="kw">fn </span>collect_neighborhood(
+<a href=#340 id=340 data-nosnippet>340</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#341 id=341 data-nosnippet>341</a>        start: NodeId,
+<a href=#342 id=342 data-nosnippet>342</a>        hops: u32,
+<a href=#343 id=343 data-nosnippet>343</a>        vt: Timestamp,
+<a href=#344 id=344 data-nosnippet>344</a>        tt: Timestamp,
+<a href=#345 id=345 data-nosnippet>345</a>    ) -&gt; (Vec&lt;NodeId&gt;, Vec&lt;EdgeId&gt;) {
+<a href=#346 id=346 data-nosnippet>346</a>        <span class="kw">let </span><span class="kw-2">mut </span>nodes: BTreeSet&lt;u64&gt; = BTreeSet::new();
+<a href=#347 id=347 data-nosnippet>347</a>        <span class="kw">let </span><span class="kw-2">mut </span>edges: BTreeSet&lt;u64&gt; = BTreeSet::new();
+<a href=#348 id=348 data-nosnippet>348</a>        <span class="kw">let </span><span class="kw-2">mut </span>frontier: Vec&lt;NodeId&gt; = Vec::new();
+<a href=#349 id=349 data-nosnippet>349</a>
+<a href=#350 id=350 data-nosnippet>350</a>        <span class="kw">if </span><span class="self">self</span>.get_node_at_time(start, vt, tt).is_ok() {
+<a href=#351 id=351 data-nosnippet>351</a>            nodes.insert(start.as_u64());
+<a href=#352 id=352 data-nosnippet>352</a>            frontier.push(start);
+<a href=#353 id=353 data-nosnippet>353</a>        }
+<a href=#354 id=354 data-nosnippet>354</a>
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="kw">for _ in </span><span class="number">0</span>..hops {
+<a href=#356 id=356 data-nosnippet>356</a>            <span class="kw">let </span><span class="kw-2">mut </span>next = Vec::new();
+<a href=#357 id=357 data-nosnippet>357</a>            <span class="kw">for </span>node <span class="kw">in </span>std::mem::take(<span class="kw-2">&amp;mut </span>frontier) {
+<a href=#358 id=358 data-nosnippet>358</a>                <span class="kw">for </span>edge_id <span class="kw">in </span><span class="self">self
+<a href=#359 id=359 data-nosnippet>359</a>                    </span>.get_outgoing_edges(node)
+<a href=#360 id=360 data-nosnippet>360</a>                    .into_iter()
+<a href=#361 id=361 data-nosnippet>361</a>                    .chain(<span class="self">self</span>.get_incoming_edges(node))
+<a href=#362 id=362 data-nosnippet>362</a>                {
+<a href=#363 id=363 data-nosnippet>363</a>                    <span class="kw">if </span><span class="self">self</span>.get_edge_at_time(edge_id, vt, tt).is_err() {
+<a href=#364 id=364 data-nosnippet>364</a>                        <span class="kw">continue</span>;
+<a href=#365 id=365 data-nosnippet>365</a>                    }
+<a href=#366 id=366 data-nosnippet>366</a>                    edges.insert(edge_id.as_u64());
+<a href=#367 id=367 data-nosnippet>367</a>                    <span class="kw">for </span>endpoint <span class="kw">in </span>[
+<a href=#368 id=368 data-nosnippet>368</a>                        <span class="self">self</span>.get_edge_source(edge_id).ok(),
+<a href=#369 id=369 data-nosnippet>369</a>                        <span class="self">self</span>.get_edge_target(edge_id).ok(),
+<a href=#370 id=370 data-nosnippet>370</a>                    ]
+<a href=#371 id=371 data-nosnippet>371</a>                    .into_iter()
+<a href=#372 id=372 data-nosnippet>372</a>                    .flatten()
+<a href=#373 id=373 data-nosnippet>373</a>                    {
+<a href=#374 id=374 data-nosnippet>374</a>                        <span class="kw">if </span><span class="self">self</span>.get_node_at_time(endpoint, vt, tt).is_ok()
+<a href=#375 id=375 data-nosnippet>375</a>                            &amp;&amp; nodes.insert(endpoint.as_u64())
+<a href=#376 id=376 data-nosnippet>376</a>                        {
+<a href=#377 id=377 data-nosnippet>377</a>                            next.push(endpoint);
+<a href=#378 id=378 data-nosnippet>378</a>                        }
+<a href=#379 id=379 data-nosnippet>379</a>                    }
+<a href=#380 id=380 data-nosnippet>380</a>                }
+<a href=#381 id=381 data-nosnippet>381</a>            }
+<a href=#382 id=382 data-nosnippet>382</a>            frontier = next;
+<a href=#383 id=383 data-nosnippet>383</a>        }
+<a href=#384 id=384 data-nosnippet>384</a>
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="kw">let </span>node_ids = nodes
+<a href=#386 id=386 data-nosnippet>386</a>            .into_iter()
+<a href=#387 id=387 data-nosnippet>387</a>            .filter_map(|id| NodeId::new(id).ok())
+<a href=#388 id=388 data-nosnippet>388</a>            .collect();
+<a href=#389 id=389 data-nosnippet>389</a>        <span class="kw">let </span>edge_ids = edges
+<a href=#390 id=390 data-nosnippet>390</a>            .into_iter()
+<a href=#391 id=391 data-nosnippet>391</a>            .filter_map(|id| EdgeId::new(id).ok())
+<a href=#392 id=392 data-nosnippet>392</a>            .collect();
+<a href=#393 id=393 data-nosnippet>393</a>        (node_ids, edge_ids)
+<a href=#394 id=394 data-nosnippet>394</a>    }
+<a href=#395 id=395 data-nosnippet>395</a>}
+<a href=#396 id=396 data-nosnippet>396</a>
+<a href=#397 id=397 data-nosnippet>397</a><span class="doccomment">/// Convert an entity's history into exported versions (oldest first).
+<a href=#398 id=398 data-nosnippet>398</a></span><span class="kw">fn </span>convert_versions(history: <span class="kw-2">&amp;</span>EntityHistory, redact: <span class="kw-2">&amp;</span>BTreeSet&lt;String&gt;) -&gt; Vec&lt;ExportedVersion&gt; {
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">let </span>now = time::now();
+<a href=#400 id=400 data-nosnippet>400</a>    history
+<a href=#401 id=401 data-nosnippet>401</a>        .versions
+<a href=#402 id=402 data-nosnippet>402</a>        .iter()
+<a href=#403 id=403 data-nosnippet>403</a>        .map(|v| convert_version(v, redact, now))
+<a href=#404 id=404 data-nosnippet>404</a>        .collect()
+<a href=#405 id=405 data-nosnippet>405</a>}
+<a href=#406 id=406 data-nosnippet>406</a>
+<a href=#407 id=407 data-nosnippet>407</a><span class="kw">fn </span>convert_version(v: <span class="kw-2">&amp;</span>VersionInfo, redact: <span class="kw-2">&amp;</span>BTreeSet&lt;String&gt;, now: Timestamp) -&gt; ExportedVersion {
+<a href=#408 id=408 data-nosnippet>408</a>    <span class="kw">let </span>valid = v.temporal.valid_time();
+<a href=#409 id=409 data-nosnippet>409</a>    <span class="kw">let </span>tx = v.temporal.transaction_time();
+<a href=#410 id=410 data-nosnippet>410</a>
+<a href=#411 id=411 data-nosnippet>411</a>    <span class="kw">let </span>(valid_to_micros, valid_to_logical) = closed_bound(valid.end());
+<a href=#412 id=412 data-nosnippet>412</a>    <span class="kw">let </span>(tx_to_micros, tx_to_logical) = closed_bound(tx.end());
+<a href=#413 id=413 data-nosnippet>413</a>    <span class="kw">let </span>is_current = tx.is_current() &amp;&amp; valid.contains(now);
+<a href=#414 id=414 data-nosnippet>414</a>
+<a href=#415 id=415 data-nosnippet>415</a>    <span class="kw">let </span><span class="kw-2">mut </span>properties: Vec&lt;ExportedProperty&gt; = v
+<a href=#416 id=416 data-nosnippet>416</a>        .properties
+<a href=#417 id=417 data-nosnippet>417</a>        .iter()
+<a href=#418 id=418 data-nosnippet>418</a>        .map(|(key, value)| {
+<a href=#419 id=419 data-nosnippet>419</a>            <span class="kw">let </span>key_str = GLOBAL_INTERNER
+<a href=#420 id=420 data-nosnippet>420</a>                .resolve_with(<span class="kw-2">*</span>key, std::string::ToString::to_string)
+<a href=#421 id=421 data-nosnippet>421</a>                .unwrap_or_else(|| <span class="string">"&lt;unknown-key&gt;"</span>.to_string());
+<a href=#422 id=422 data-nosnippet>422</a>            <span class="kw">if </span>redact.contains(<span class="kw-2">&amp;</span>key_str) {
+<a href=#423 id=423 data-nosnippet>423</a>                ExportedProperty {
+<a href=#424 id=424 data-nosnippet>424</a>                    key: key_str,
+<a href=#425 id=425 data-nosnippet>425</a>                    value: <span class="prelude-val">None</span>,
+<a href=#426 id=426 data-nosnippet>426</a>                    redacted: <span class="bool-val">true</span>,
+<a href=#427 id=427 data-nosnippet>427</a>                }
+<a href=#428 id=428 data-nosnippet>428</a>            } <span class="kw">else </span>{
+<a href=#429 id=429 data-nosnippet>429</a>                ExportedProperty {
+<a href=#430 id=430 data-nosnippet>430</a>                    key: key_str,
+<a href=#431 id=431 data-nosnippet>431</a>                    value: <span class="prelude-val">Some</span>(property_value_to_exported(value)),
+<a href=#432 id=432 data-nosnippet>432</a>                    redacted: <span class="bool-val">false</span>,
+<a href=#433 id=433 data-nosnippet>433</a>                }
+<a href=#434 id=434 data-nosnippet>434</a>            }
+<a href=#435 id=435 data-nosnippet>435</a>        })
+<a href=#436 id=436 data-nosnippet>436</a>        .collect();
+<a href=#437 id=437 data-nosnippet>437</a>    properties.sort_by(|a, b| a.key.cmp(<span class="kw-2">&amp;</span>b.key));
+<a href=#438 id=438 data-nosnippet>438</a>
+<a href=#439 id=439 data-nosnippet>439</a>    ExportedVersion {
+<a href=#440 id=440 data-nosnippet>440</a>        version_number: v.version_number,
+<a href=#441 id=441 data-nosnippet>441</a>        version_id: v.version_id.as_u64(),
+<a href=#442 id=442 data-nosnippet>442</a>        label: v.label.clone(),
+<a href=#443 id=443 data-nosnippet>443</a>        valid_from_micros: valid.start().wallclock(),
+<a href=#444 id=444 data-nosnippet>444</a>        valid_from_logical: valid.start().logical(),
+<a href=#445 id=445 data-nosnippet>445</a>        valid_to_micros,
+<a href=#446 id=446 data-nosnippet>446</a>        valid_to_logical,
+<a href=#447 id=447 data-nosnippet>447</a>        transaction_from_micros: tx.start().wallclock(),
+<a href=#448 id=448 data-nosnippet>448</a>        transaction_from_logical: tx.start().logical(),
+<a href=#449 id=449 data-nosnippet>449</a>        transaction_to_micros: tx_to_micros,
+<a href=#450 id=450 data-nosnippet>450</a>        transaction_to_logical: tx_to_logical,
+<a href=#451 id=451 data-nosnippet>451</a>        is_current,
+<a href=#452 id=452 data-nosnippet>452</a>        provenance: v.provenance.as_ref().map(convert_provenance),
+<a href=#453 id=453 data-nosnippet>453</a>        properties,
+<a href=#454 id=454 data-nosnippet>454</a>    }
+<a href=#455 id=455 data-nosnippet>455</a>}
+<a href=#456 id=456 data-nosnippet>456</a>
+<a href=#457 id=457 data-nosnippet>457</a><span class="doccomment">/// `None` for an open-ended (`TIMESTAMP_MAX`) bound, else its `(micros, logical)`.
+<a href=#458 id=458 data-nosnippet>458</a></span><span class="kw">fn </span>closed_bound(end: Timestamp) -&gt; (<span class="prelude-ty">Option</span>&lt;i64&gt;, <span class="prelude-ty">Option</span>&lt;u32&gt;) {
+<a href=#459 id=459 data-nosnippet>459</a>    <span class="kw">if </span>end == TIMESTAMP_MAX {
+<a href=#460 id=460 data-nosnippet>460</a>        (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>)
+<a href=#461 id=461 data-nosnippet>461</a>    } <span class="kw">else </span>{
+<a href=#462 id=462 data-nosnippet>462</a>        (<span class="prelude-val">Some</span>(end.wallclock()), <span class="prelude-val">Some</span>(end.logical()))
+<a href=#463 id=463 data-nosnippet>463</a>    }
+<a href=#464 id=464 data-nosnippet>464</a>}
+<a href=#465 id=465 data-nosnippet>465</a>
+<a href=#466 id=466 data-nosnippet>466</a><span class="kw">fn </span>convert_provenance(p: <span class="kw-2">&amp;</span><span class="kw">crate</span>::core::provenance::Provenance) -&gt; ExportedProvenance {
+<a href=#467 id=467 data-nosnippet>467</a>    ExportedProvenance {
+<a href=#468 id=468 data-nosnippet>468</a>        source: p.source().map(std::string::ToString::to_string),
+<a href=#469 id=469 data-nosnippet>469</a>        confidence: p.confidence(),
+<a href=#470 id=470 data-nosnippet>470</a>        note: p.note().map(std::string::ToString::to_string),
+<a href=#471 id=471 data-nosnippet>471</a>        correlation_id: p.correlation_id().map(std::string::ToString::to_string),
+<a href=#472 id=472 data-nosnippet>472</a>        principal: p.principal().map(std::string::ToString::to_string),
+<a href=#473 id=473 data-nosnippet>473</a>    }
+<a href=#474 id=474 data-nosnippet>474</a>}
+<a href=#475 id=475 data-nosnippet>475</a>
+<a href=#476 id=476 data-nosnippet>476</a><span class="kw">fn </span>property_value_to_exported(value: <span class="kw-2">&amp;</span>PropertyValue) -&gt; ExportedValue {
+<a href=#477 id=477 data-nosnippet>477</a>    <span class="kw">match </span>value {
+<a href=#478 id=478 data-nosnippet>478</a>        PropertyValue::Null =&gt; ExportedValue::Null,
+<a href=#479 id=479 data-nosnippet>479</a>        PropertyValue::Bool(b) =&gt; ExportedValue::Bool { value: <span class="kw-2">*</span>b },
+<a href=#480 id=480 data-nosnippet>480</a>        PropertyValue::Int(i) =&gt; ExportedValue::Int { value: <span class="kw-2">*</span>i },
+<a href=#481 id=481 data-nosnippet>481</a>        PropertyValue::Float(f) =&gt; ExportedValue::Float { value: <span class="kw-2">*</span>f },
+<a href=#482 id=482 data-nosnippet>482</a>        PropertyValue::String(s) =&gt; ExportedValue::String {
+<a href=#483 id=483 data-nosnippet>483</a>            value: s.to_string(),
+<a href=#484 id=484 data-nosnippet>484</a>        },
+<a href=#485 id=485 data-nosnippet>485</a>        PropertyValue::Bytes(b) =&gt; ExportedValue::Bytes {
+<a href=#486 id=486 data-nosnippet>486</a>            hex: <span class="kw">crate</span>::core::hex::encode(b),
+<a href=#487 id=487 data-nosnippet>487</a>        },
+<a href=#488 id=488 data-nosnippet>488</a>        PropertyValue::Array(values) =&gt; ExportedValue::Array {
+<a href=#489 id=489 data-nosnippet>489</a>            values: values.iter().map(property_value_to_exported).collect(),
+<a href=#490 id=490 data-nosnippet>490</a>        },
+<a href=#491 id=491 data-nosnippet>491</a>        PropertyValue::Vector(v) =&gt; ExportedValue::Vector {
+<a href=#492 id=492 data-nosnippet>492</a>            values: v.iter().map(|f| f64_to_token(f64::from(<span class="kw-2">*</span>f))).collect(),
+<a href=#493 id=493 data-nosnippet>493</a>        },
+<a href=#494 id=494 data-nosnippet>494</a>        PropertyValue::SparseVector(sv) =&gt; ExportedValue::SparseVector {
+<a href=#495 id=495 data-nosnippet>495</a>            dimension: sv.dimension(),
+<a href=#496 id=496 data-nosnippet>496</a>            indices: sv.indices().to_vec(),
+<a href=#497 id=497 data-nosnippet>497</a>            values: sv
+<a href=#498 id=498 data-nosnippet>498</a>                .values()
+<a href=#499 id=499 data-nosnippet>499</a>                .iter()
+<a href=#500 id=500 data-nosnippet>500</a>                .map(|f| f64_to_token(f64::from(<span class="kw-2">*</span>f)))
+<a href=#501 id=501 data-nosnippet>501</a>                .collect(),
+<a href=#502 id=502 data-nosnippet>502</a>        },
+<a href=#503 id=503 data-nosnippet>503</a>    }
+<a href=#504 id=504 data-nosnippet>504</a>}
+<a href=#505 id=505 data-nosnippet>505</a>
+<a href=#506 id=506 data-nosnippet>506</a><span class="kw">fn </span>entity_id_record(r: EntityRef) -&gt; EntityIdRecord {
+<a href=#507 id=507 data-nosnippet>507</a>    <span class="kw">match </span>r {
+<a href=#508 id=508 data-nosnippet>508</a>        EntityRef::Node(id) =&gt; EntityIdRecord {
+<a href=#509 id=509 data-nosnippet>509</a>            kind: <span class="string">"node"</span>.to_string(),
+<a href=#510 id=510 data-nosnippet>510</a>            id: id.as_u64(),
+<a href=#511 id=511 data-nosnippet>511</a>        },
+<a href=#512 id=512 data-nosnippet>512</a>        EntityRef::Edge(id) =&gt; EntityIdRecord {
+<a href=#513 id=513 data-nosnippet>513</a>            kind: <span class="string">"edge"</span>.to_string(),
+<a href=#514 id=514 data-nosnippet>514</a>            id: id.as_u64(),
+<a href=#515 id=515 data-nosnippet>515</a>        },
+<a href=#516 id=516 data-nosnippet>516</a>    }
+<a href=#517 id=517 data-nosnippet>517</a>}
+<a href=#518 id=518 data-nosnippet>518</a>
+<a href=#519 id=519 data-nosnippet>519</a><span class="kw">fn </span>describe_entity(r: EntityRef) -&gt; String {
+<a href=#520 id=520 data-nosnippet>520</a>    <span class="kw">match </span>r {
+<a href=#521 id=521 data-nosnippet>521</a>        EntityRef::Node(id) =&gt; <span class="macro">format!</span>(<span class="string">"node {}"</span>, id.as_u64()),
+<a href=#522 id=522 data-nosnippet>522</a>        EntityRef::Edge(id) =&gt; <span class="macro">format!</span>(<span class="string">"edge {}"</span>, id.as_u64()),
+<a href=#523 id=523 data-nosnippet>523</a>    }
+<a href=#524 id=524 data-nosnippet>524</a>}
+<a href=#525 id=525 data-nosnippet>525</a>
+<a href=#526 id=526 data-nosnippet>526</a><span class="kw">fn </span>describe_scope(scope: <span class="kw-2">&amp;</span>AuditScope) -&gt; String {
+<a href=#527 id=527 data-nosnippet>527</a>    <span class="kw">match </span>scope {
+<a href=#528 id=528 data-nosnippet>528</a>        AuditScope::SingleEntity(EntityRef::Node(id)) =&gt; {
+<a href=#529 id=529 data-nosnippet>529</a>            <span class="macro">format!</span>(<span class="string">"single_node: node {}"</span>, id.as_u64())
+<a href=#530 id=530 data-nosnippet>530</a>        }
+<a href=#531 id=531 data-nosnippet>531</a>        AuditScope::SingleEntity(EntityRef::Edge(id)) =&gt; {
+<a href=#532 id=532 data-nosnippet>532</a>            <span class="macro">format!</span>(<span class="string">"single_edge: edge {}"</span>, id.as_u64())
+<a href=#533 id=533 data-nosnippet>533</a>        }
+<a href=#534 id=534 data-nosnippet>534</a>        AuditScope::EntitySet(refs) =&gt; <span class="macro">format!</span>(<span class="string">"entity_set: {} entities requested"</span>, refs.len()),
+<a href=#535 id=535 data-nosnippet>535</a>        AuditScope::Neighborhood { start, hops, .. } =&gt; {
+<a href=#536 id=536 data-nosnippet>536</a>            <span class="macro">format!</span>(<span class="string">"neighborhood: {} hops around node {}"</span>, hops, start.as_u64())
+<a href=#537 id=537 data-nosnippet>537</a>        }
+<a href=#538 id=538 data-nosnippet>538</a>    }
+<a href=#539 id=539 data-nosnippet>539</a>}
+<a href=#540 id=540 data-nosnippet>540</a>
+<a href=#541 id=541 data-nosnippet>541</a><span class="doccomment">/// Format a timestamp as RFC 3339 (UTC), falling back to raw micros if it is
+<a href=#542 id=542 data-nosnippet>542</a>/// outside chrono's representable range.
+<a href=#543 id=543 data-nosnippet>543</a></span><span class="kw">fn </span>format_timestamp(ts: Timestamp) -&gt; String {
+<a href=#544 id=544 data-nosnippet>544</a>    <span class="kw">crate</span>::audit::model::rfc3339_micros(ts.wallclock())
+<a href=#545 id=545 data-nosnippet>545</a>}
+</code></pre></div></section></main></body></html>

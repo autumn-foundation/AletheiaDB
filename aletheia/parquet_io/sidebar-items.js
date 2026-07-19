@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_edge_mapping","build_node_mapping","handle_export","handle_import","label_source","parse_column_type","parse_properties","positional","require_parquet_format","usage_export","usage_import"]};

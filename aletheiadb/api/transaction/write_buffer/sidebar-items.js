@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_OPERATIONS"],"enum":["BufferedWrite"],"struct":["WriteBuffer"]};

@@ -1,0 +1,80 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Plaintext → encrypted-at-rest migration engine — `encryption enable` (Issue #3616 PR3). Plaintext → encrypted-at-rest migration engine (Issue #3616 PR3)."><title>aletheiadb::db::encryption_enable - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module encryption_enable</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module encryption_<wbr>enable</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#migration-ordering-the-crux--do-not-reorder" title="Migration ordering (the crux — do not reorder)">Migration ordering (the crux — do not reorder)</a></li><li><a href="#in-scope-vs-deferred" title="In scope vs deferred">In scope vs deferred</a></li><li><a href="#security-caveats-defense-in-depth-documented" title="Security caveats (defense-in-depth, documented)">Security caveats (defense-in-depth, documented)</a></li><li><a href="#crash-resume" title="Crash resume">Crash resume</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>db</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">db</a></div><h1>Module <span>encryption_<wbr>enable</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/db/encryption_enable.rs.html#1-1796">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Plaintext → encrypted-at-rest migration engine — <code>encryption enable</code> (Issue #3616 PR3).
+Plaintext → encrypted-at-rest migration engine (Issue #3616 PR3).</p>
+<p>This is the engine behind <code>aletheia encryption enable</code>: it takes a database
+that was created <strong>plaintext</strong> and migrates the WAL through the cipher, then
+flips the durable <a href="crate::db::encryption_state"><code>encryption.state</code></a> authority
+so the <em>next</em> <a href="../struct.AletheiaDB.html#method.open" title="associated function aletheiadb::db::AletheiaDB::open"><code>open()</code></a> comes up encrypted.</p>
+<p>It composes the two foundations that already landed:</p>
+<ul>
+<li><strong>PR1 (#3657)</strong> — the durable [<code>encryption.state</code>] authority the migration
+flips (authority WINS over the operator’s TOML/env config).</li>
+<li><strong>PR2 (#3669)</strong> — the WAL runtime
+<a href="../../storage/wal/concurrent_system/struct.ConcurrentWalSystem.html#method.install_wal_keyring" title="method aletheiadb::storage::wal::concurrent_system::ConcurrentWalSystem::install_wal_keyring"><code>install_wal_keyring</code></a>
+seam that flips a live plaintext WAL to encrypted (<code>None → Some</code>) crash-consistently.</li>
+</ul>
+<h2 id="migration-ordering-the-crux--do-not-reorder"><a class="doc-anchor" href="#migration-ordering-the-crux--do-not-reorder">§</a>Migration ordering (the crux — do not reorder)</h2>
+<ol>
+<li><strong>Quiesce the background index-persistence thread FIRST</strong> (stop + join).
+While a live keyring is still <code>None</code>, a background persist could overwrite
+a freshly-encrypted file with plaintext. The stop happens while the whole
+database is still plaintext, so the worker’s shutdown final-persist is a
+safe plaintext write.</li>
+<li><strong>Migrate every in-scope at-rest layer</strong>, recording progress as a per-field
+<a href="../rotation/index.html" title="mod aletheiadb::db::rotation"><code>LayerStatus</code></a> in a durable <code>direction=enable</code>
+rotation ledger so a crash mid-migration resumes idempotently:
+<ul>
+<li><strong>WAL</strong> — install the DEK keyring via the PR2 seam (which seals the
+plaintext segment and force-rolls to a fresh encrypted v16 segment).</li>
+<li><strong>Index + checkpoint</strong> — a plaintext → <code>AEIX</code> wrap pass rewrites every
+bare index file under the index DEK (checkpoints ride the index DEK and
+format, so they are covered by the same pass).</li>
+<li><strong>Cold</strong> — a bare → <code>ACV1</code> wrap-only pass rewrites every stored cold value
+wrapped under the cold DEK (only when a cold tier is present).</li>
+</ul>
+</li>
+<li><strong>Flip the [<code>encryption.state</code>] authority to <code>enabled</code> BEFORE clearing the
+ledger.</strong> This binding order closes the crash gap: were the ledger cleared
+first and a crash struck before the authority flip, the next <code>open()</code> would
+read the unchanged plaintext config over now-encrypted bytes and mis-read
+(undecodable) ciphertext as plaintext. With the authority flipped first, a
+crash between the two steps leaves a still-present ledger that
+[<code>resume_pending_enable</code>] reconciles on the next <code>open()</code>.</li>
+<li><strong>Clear the ledger.</strong></li>
+</ol>
+<h2 id="in-scope-vs-deferred"><a class="doc-anchor" href="#in-scope-vs-deferred">§</a>In scope vs deferred</h2>
+<p>In scope: <strong>WAL</strong>, <strong>index</strong>, <strong>checkpoint</strong>, and <strong>cold</strong>. Each layer’s
+migration is byte-preserving and reader-compatible on reopen (the index reader
+header-sniffs <code>AEIX</code>; the cold reader dispatches on the <code>ACV1</code> wrapper).</p>
+<p>Deferred (NOT migrated by v1): <code>.albk</code> backups, <code>snapshots.json</code>, auth
+<code>keys.json</code>, <code>schema_constraints.dat</code>.</p>
+<h2 id="security-caveats-defense-in-depth-documented"><a class="doc-anchor" href="#security-caveats-defense-in-depth-documented">§</a>Security caveats (defense-in-depth, documented)</h2>
+<ul>
+<li><strong>In-place overwrite does not shred freed plaintext blocks.</strong> The index wrap
+writes ciphertext to a temp file and <code>rename</code>s it over the plaintext file, and
+the cold wrap <code>insert</code>s over the bare redb value; in both cases the OLD
+plaintext data blocks are merely <em>freed</em>, not zeroed (redb is copy-on-write and
+is not compacted here). Enable protects against the “logical FS read / stolen
+disk image” threat model, but it is NOT a plaintext-shredding operation:
+forensic recovery of freed blocks can still resurrect pre-enable plaintext. A
+compaction/vacuum step is a follow-up for callers that require shredding.</li>
+<li><strong>Coarse AEAD associated-data binding (inherited formats).</strong> The <code>AEIX</code> format
+binds only its 10-byte header as AAD; the <code>ACV1</code> cold wrapper uses empty AAD
+(the <code>key_version</code> in the wrapper is not authenticated). Neither binds the
+ciphertext to its file identity / redb key / entity id, so wrapped blobs are
+<em>relocatable</em> by an attacker with write access (confidentiality and per-blob
+integrity still hold; only cross-entity placement is unauthenticated). This is
+a property of the reused #481/#3617 formats, not introduced here; binding file
+id / redb key (and the <code>key_version</code>) into the AAD is a defense-in-depth
+follow-up.</li>
+</ul>
+<h2 id="crash-resume"><a class="doc-anchor" href="#crash-resume">§</a>Crash resume</h2>
+<p>An interrupted enable has NOT yet flipped the authority, so
+<code>config.encryption.enabled</code> is still <code>false</code> — which means the rotation resume
+paths (<a href="../rotation/index.html" title="mod aletheiadb::db::rotation"><code>resume_pending_rotation</code></a>, which gate on
+<code>enabled == true</code>) will NOT fire, and they additionally skip any
+<code>direction=enable</code> ledger outright. That is why this module ships its own
+[<code>resume_pending_enable</code>] reconciler (plus the pre-replay
+<a href="crate::db::rotation::install_pending_enable_wal_keyring"><code>install_pending_enable_wal_keyring</code></a>
+hook that lets the startup replay read decrypt an already-rolled WAL), both
+wired into <code>open()</code>.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.EnableReport.html" title="struct aletheiadb::db::encryption_enable::EnableReport">Enable<wbr>Report</a></dt><dd>Outcome of a completed plaintext → encrypted enable migration.</dd></dl></section></div></main></body></html>

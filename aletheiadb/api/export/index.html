@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Columnar Parquet export of the graph for analytics interoperability (Issue #3364). Columnar Parquet export of the graph for analytics interoperability (Issue #3364)."><title>aletheiadb::api::export - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module export</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module export</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#streaming-and-memory" title="Streaming and memory">Streaming and memory</a></li><li><a href="#documented-lossy-items" title="Documented lossy items">Documented lossy items</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>api</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">api</a></div><h1>Module <span>export</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/api/export/mod.rs.html#1-169">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Columnar Parquet export of the graph for analytics interoperability (Issue #3364).
+Columnar Parquet export of the graph for analytics interoperability (Issue #3364).</p>
+<p>This is the export half of the Parquet import/export layer; the import half lives
+in <a href="../import/index.html" title="mod aletheiadb::api::import"><code>crate::api::import</code></a> and shares the same columnar schema so that an
+export → import round-trip reproduces the graph. Two modes are offered:</p>
+<ul>
+<li><strong>Current-state export</strong> (<a href="struct.Exporter.html#method.nodes_to_parquet" title="method aletheiadb::api::export::Exporter::nodes_to_parquet"><code>Exporter::nodes_to_parquet</code></a> /
+<a href="struct.Exporter.html#method.edges_to_parquet" title="method aletheiadb::api::export::Exporter::edges_to_parquet"><code>Exporter::edges_to_parquet</code></a>) writes the live graph with a stable, documented
+schema: an <code>id</code>/<code>label</code> (or <code>edge_type</code>/<code>source_key</code>/<code>target_key</code>) header, a
+nullable <code>valid_time</code> column, and one typed column per property key discovered by
+scanning the database. The column layout is identical to what the importer’s
+<a href="../import/struct.NodeMapping.html" title="struct aletheiadb::api::import::NodeMapping"><code>NodeMapping</code></a> /
+<a href="../import/struct.EdgeMapping.html" title="struct aletheiadb::api::import::EdgeMapping"><code>EdgeMapping</code></a> expect, so the file re-imports
+losslessly for scalars, timestamps, and <code>list&lt;float32&gt;</code> embeddings.</li>
+<li><strong>Full bi-temporal history export</strong> (<a href="struct.Exporter.html#method.node_history_to_parquet" title="method aletheiadb::api::export::Exporter::node_history_to_parquet"><code>Exporter::node_history_to_parquet</code></a> /
+<a href="struct.Exporter.html#method.edge_history_to_parquet" title="method aletheiadb::api::export::Exporter::edge_history_to_parquet"><code>Exporter::edge_history_to_parquet</code></a>) writes <strong>one row per version</strong> with
+<code>valid_from</code>, <code>valid_to</code> (<strong>null = open interval</strong>, never a sentinel),
+<code>transaction_time</code>, a <code>tombstone</code> marker, and the five provenance columns.</li>
+</ul>
+<h2 id="streaming-and-memory"><a class="doc-anchor" href="#streaming-and-memory">§</a>Streaming and memory</h2>
+<p>Both modes stream: the database is scanned once to discover the property schema,
+then a second time to emit rows in <a href="struct.ExportConfig.html#structfield.batch_size" title="field aletheiadb::api::export::ExportConfig::batch_size"><code>ExportConfig::batch_size</code></a>-row Arrow
+<code>RecordBatch</code>es, each flushed as a Parquet row group before the next is built. Peak
+memory is therefore bounded to roughly one batch of decoded cells plus the set of
+distinct property keys, not the whole graph (target: 1M nodes in well under 1 GB).</p>
+<h2 id="documented-lossy-items"><a class="doc-anchor" href="#documented-lossy-items">§</a>Documented lossy items</h2>
+<ul>
+<li>The HLC <strong>logical counter</strong> (the sub-microsecond tiebreaker of a
+<a href="../../core/hlc/struct.HybridTimestamp.html" title="struct aletheiadb::core::hlc::HybridTimestamp"><code>HybridTimestamp</code></a>) is dropped; only the
+microsecond wallclock is written.</li>
+<li>Property values that have no natural columnar type — [<code>PropertyValue::Bytes</code>],
+heterogeneous [<code>PropertyValue::Array</code>], and [<code>PropertyValue::SparseVector</code>] — and
+any property <strong>key whose observed type conflicts across rows</strong> are routed to a
+single <code>properties_json</code> overflow column (a reversible tagged-JSON encoding), not
+a native typed column. The default importer decodes native columns; re-importing
+the overflow column requires custom mapping (see the guide).</li>
+<li>History export enumerates entities through the whole-window <strong>changefeed</strong>, so an
+entity that was deleted or retracted (and is no longer in current state) is still
+exported with its full version history and tombstone. A deleted <strong>edge</strong>’s
+endpoints are not carried on a historical version, so <code>source_key</code>/<code>target_key</code> are
+written as null for an edge that is no longer live; the residual completeness caveat
+is the changefeed’s own (see the guide).</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ExportConfig.html" title="struct aletheiadb::api::export::ExportConfig">Export<wbr>Config</a></dt><dd>Tunables for an export run.</dd><dt><a class="struct" href="struct.ExportReport.html" title="struct aletheiadb::api::export::ExportReport">Export<wbr>Report</a></dt><dd>Summary of a single <code>*_to_parquet</code> call.</dd><dt><a class="struct" href="struct.Exporter.html" title="struct aletheiadb::api::export::Exporter">Exporter</a></dt><dd>A stateless Parquet exporter obtained via <a href="../../db/struct.AletheiaDB.html#method.export" title="method aletheiadb::db::AletheiaDB::export"><code>AletheiaDB::export</code></a>.</dd></dl></section></div></main></body></html>

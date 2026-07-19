@@ -1,0 +1,603 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/api/import/xtdb.rs`."><title>xtdb.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">aletheiadb/api/import/</div>xtdb.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! XTDB entity-history EDN importer (Issue #3384).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Replays an XTDB `xt/entity-history` export taken with `:with-docs? true`,
+<a href=#4 id=4 data-nosnippet>4</a>//! preserving valid-time, transaction-time provenance, supersession, and
+<a href=#5 id=5 data-nosnippet>5</a>//! deletes. The export is a single top-level EDN vector of **per-entity history
+<a href=#6 id=6 data-nosnippet>6</a>//! maps**:
+<a href=#7 id=7 data-nosnippet>7</a>//!
+<a href=#8 id=8 data-nosnippet>8</a>//! ```clojure
+<a href=#9 id=9 data-nosnippet>9</a>//! [{:xt/id :alice
+<a href=#10 id=10 data-nosnippet>10</a>//!   :history
+<a href=#11 id=11 data-nosnippet>11</a>//!   [{:xtdb.api/valid-time #inst "2021-03-01T00:00:00Z"
+<a href=#12 id=12 data-nosnippet>12</a>//!     :xtdb.api/tx-time    #inst "2021-03-01T09:00:00Z"
+<a href=#13 id=13 data-nosnippet>13</a>//!     :xtdb.api/tx-id 42
+<a href=#14 id=14 data-nosnippet>14</a>//!     :xtdb.api/doc {:xt/id :alice :type "Person" :name "Alice" :title "Engineer"}}
+<a href=#15 id=15 data-nosnippet>15</a>//!    ...]}]
+<a href=#16 id=16 data-nosnippet>16</a>//! ```
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! # Mapping
+<a href=#19 id=19 data-nosnippet>19</a>//!
+<a href=#20 id=20 data-nosnippet>20</a>//! | Source | AletheiaDB |
+<a href=#21 id=21 data-nosnippet>21</a>//! |--------|-----------|
+<a href=#22 id=22 data-nosnippet>22</a>//! | history map `:xt/id` | business key + `xt/id` property |
+<a href=#23 id=23 data-nosnippet>23</a>//! | `:xtdb.api/doc` (map) | **Node**; label from [`XtdbOptions::label_field`] (default `type`) |
+<a href=#24 id=24 data-nosnippet>24</a>//! | doc field detected as a ref | **Edge** (see ref detection) |
+<a href=#25 id=25 data-nosnippet>25</a>//! | `:xtdb.api/valid-time` | `valid_from` |
+<a href=#26 id=26 data-nosnippet>26</a>//! | `:xtdb.api/valid-to` | interval close (retraction) |
+<a href=#27 id=27 data-nosnippet>27</a>//! | `:xtdb.api/tx-time` + `:xtdb.api/tx-id` | provenance |
+<a href=#28 id=28 data-nosnippet>28</a>//! | `:xtdb.api/doc` = nil / absent | delete → `retract_node_detach` |
+<a href=#29 id=29 data-nosnippet>29</a>//!
+<a href=#30 id=30 data-nosnippet>30</a>//! Keys are matched by **local name** ignoring namespace, so both the canonical
+<a href=#31 id=31 data-nosnippet>31</a>//! `:xtdb.api/valid-time` and a short `:xt/valid-time` are accepted.
+<a href=#32 id=32 data-nosnippet>32</a>
+<a href=#33 id=33 data-nosnippet>33</a></span><span class="kw">use </span>std::collections::HashSet;
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">use </span>std::path::Path;
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">use </span><span class="kw">super</span>::edn::{<span class="self">self</span>, Edn};
+<a href=#37 id=37 data-nosnippet>37</a><span class="kw">use </span><span class="kw">super</span>::history::{
+<a href=#38 id=38 data-nosnippet>38</a>    ImportFidelityReport, PreparedEntity, PreparedRefEdge, PreparedRetraction, PreparedVersion,
+<a href=#39 id=39 data-nosnippet>39</a>    replay,
+<a href=#40 id=40 data-nosnippet>40</a>};
+<a href=#41 id=41 data-nosnippet>41</a><span class="kw">use super</span>::{Importer, RowError};
+<a href=#42 id=42 data-nosnippet>42</a><span class="kw">use </span><span class="kw">crate</span>::core::error::{Error, <span class="prelude-ty">Result</span>};
+<a href=#43 id=43 data-nosnippet>43</a><span class="kw">use </span><span class="kw">crate</span>::core::property::{PropertyMapBuilder, PropertyValue};
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span><span class="kw">crate</span>::core::provenance::Provenance;
+<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span><span class="kw">crate</span>::core::temporal::Timestamp;
+<a href=#46 id=46 data-nosnippet>46</a>
+<a href=#47 id=47 data-nosnippet>47</a><span class="doccomment">/// Options controlling an XTDB entity-history import (Issue #3384).
+<a href=#48 id=48 data-nosnippet>48</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#49 id=49 data-nosnippet>49</a></span><span class="kw">pub struct </span>XtdbOptions {
+<a href=#50 id=50 data-nosnippet>50</a>    <span class="doccomment">/// Doc field (local name) whose value becomes the node label
+<a href=#51 id=51 data-nosnippet>51</a>    /// (default `"type"`).
+<a href=#52 id=52 data-nosnippet>52</a>    </span><span class="kw">pub </span>label_field: String,
+<a href=#53 id=53 data-nosnippet>53</a>    <span class="doccomment">/// Label used when the `label_field` is absent (default `"Entity"`).
+<a href=#54 id=54 data-nosnippet>54</a>    </span><span class="kw">pub </span>default_label: String,
+<a href=#55 id=55 data-nosnippet>55</a>    <span class="doccomment">/// Property key under which the `:xt/id` business key is stored
+<a href=#56 id=56 data-nosnippet>56</a>    /// (default `"xt/id"`).
+<a href=#57 id=57 data-nosnippet>57</a>    </span><span class="kw">pub </span>id_property: String,
+<a href=#58 id=58 data-nosnippet>58</a>    <span class="doccomment">/// When `true` (default), a scalar doc field whose value resolves to another
+<a href=#59 id=59 data-nosnippet>59</a>    /// entity's `:xt/id` is promoted to an edge automatically.
+<a href=#60 id=60 data-nosnippet>60</a>    </span><span class="kw">pub </span>auto_detect_refs: bool,
+<a href=#61 id=61 data-nosnippet>61</a>    <span class="doccomment">/// Explicit `field-name → edge-label` overrides. A field named here is
+<a href=#62 id=62 data-nosnippet>62</a>    /// always treated as a ref, and the mapped value is the edge label.
+<a href=#63 id=63 data-nosnippet>63</a>    </span><span class="kw">pub </span>ref_fields: std::collections::HashMap&lt;String, String&gt;,
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="doccomment">/// Abort on the first bad entity, or skip-and-report.
+<a href=#65 id=65 data-nosnippet>65</a>    </span><span class="kw">pub </span>failure_mode: <span class="kw">super</span>::FailureMode,
+<a href=#66 id=66 data-nosnippet>66</a>}
+<a href=#67 id=67 data-nosnippet>67</a>
+<a href=#68 id=68 data-nosnippet>68</a><span class="kw">impl </span>Default <span class="kw">for </span>XtdbOptions {
+<a href=#69 id=69 data-nosnippet>69</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#70 id=70 data-nosnippet>70</a>        XtdbOptions {
+<a href=#71 id=71 data-nosnippet>71</a>            label_field: <span class="string">"type"</span>.to_string(),
+<a href=#72 id=72 data-nosnippet>72</a>            default_label: <span class="string">"Entity"</span>.to_string(),
+<a href=#73 id=73 data-nosnippet>73</a>            id_property: <span class="string">"xt/id"</span>.to_string(),
+<a href=#74 id=74 data-nosnippet>74</a>            auto_detect_refs: <span class="bool-val">true</span>,
+<a href=#75 id=75 data-nosnippet>75</a>            ref_fields: std::collections::HashMap::new(),
+<a href=#76 id=76 data-nosnippet>76</a>            failure_mode: <span class="kw">super</span>::FailureMode::Abort,
+<a href=#77 id=77 data-nosnippet>77</a>        }
+<a href=#78 id=78 data-nosnippet>78</a>    }
+<a href=#79 id=79 data-nosnippet>79</a>}
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a><span class="kw">impl </span>XtdbOptions {
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="doccomment">/// Create default XTDB import options.
+<a href=#83 id=83 data-nosnippet>83</a>    </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#84 id=84 data-nosnippet>84</a>        <span class="self">Self</span>::default()
+<a href=#85 id=85 data-nosnippet>85</a>    }
+<a href=#86 id=86 data-nosnippet>86</a>
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="doccomment">/// Set the doc field used as the node label.
+<a href=#88 id=88 data-nosnippet>88</a>    </span><span class="attr">#[must_use]
+<a href=#89 id=89 data-nosnippet>89</a>    </span><span class="kw">pub fn </span>label_field(<span class="kw-2">mut </span><span class="self">self</span>, field: <span class="kw">impl </span>Into&lt;String&gt;) -&gt; <span class="self">Self </span>{
+<a href=#90 id=90 data-nosnippet>90</a>        <span class="self">self</span>.label_field = field.into();
+<a href=#91 id=91 data-nosnippet>91</a>        <span class="self">self
+<a href=#92 id=92 data-nosnippet>92</a>    </span>}
+<a href=#93 id=93 data-nosnippet>93</a>
+<a href=#94 id=94 data-nosnippet>94</a>    <span class="doccomment">/// Set the fallback label used when the label field is absent.
+<a href=#95 id=95 data-nosnippet>95</a>    </span><span class="attr">#[must_use]
+<a href=#96 id=96 data-nosnippet>96</a>    </span><span class="kw">pub fn </span>default_label(<span class="kw-2">mut </span><span class="self">self</span>, label: <span class="kw">impl </span>Into&lt;String&gt;) -&gt; <span class="self">Self </span>{
+<a href=#97 id=97 data-nosnippet>97</a>        <span class="self">self</span>.default_label = label.into();
+<a href=#98 id=98 data-nosnippet>98</a>        <span class="self">self
+<a href=#99 id=99 data-nosnippet>99</a>    </span>}
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a>    <span class="doccomment">/// Declare an explicit ref field with its edge label.
+<a href=#102 id=102 data-nosnippet>102</a>    </span><span class="attr">#[must_use]
+<a href=#103 id=103 data-nosnippet>103</a>    </span><span class="kw">pub fn </span>ref_field(<span class="kw-2">mut </span><span class="self">self</span>, field: <span class="kw">impl </span>Into&lt;String&gt;, label: <span class="kw">impl </span>Into&lt;String&gt;) -&gt; <span class="self">Self </span>{
+<a href=#104 id=104 data-nosnippet>104</a>        <span class="self">self</span>.ref_fields.insert(field.into(), label.into());
+<a href=#105 id=105 data-nosnippet>105</a>        <span class="self">self
+<a href=#106 id=106 data-nosnippet>106</a>    </span>}
+<a href=#107 id=107 data-nosnippet>107</a>
+<a href=#108 id=108 data-nosnippet>108</a>    <span class="doccomment">/// Enable or disable automatic ref detection.
+<a href=#109 id=109 data-nosnippet>109</a>    </span><span class="attr">#[must_use]
+<a href=#110 id=110 data-nosnippet>110</a>    </span><span class="kw">pub fn </span>auto_detect_refs(<span class="kw-2">mut </span><span class="self">self</span>, on: bool) -&gt; <span class="self">Self </span>{
+<a href=#111 id=111 data-nosnippet>111</a>        <span class="self">self</span>.auto_detect_refs = on;
+<a href=#112 id=112 data-nosnippet>112</a>        <span class="self">self
+<a href=#113 id=113 data-nosnippet>113</a>    </span>}
+<a href=#114 id=114 data-nosnippet>114</a>
+<a href=#115 id=115 data-nosnippet>115</a>    <span class="doccomment">/// Set the failure mode.
+<a href=#116 id=116 data-nosnippet>116</a>    </span><span class="attr">#[must_use]
+<a href=#117 id=117 data-nosnippet>117</a>    </span><span class="kw">pub fn </span>failure_mode(<span class="kw-2">mut </span><span class="self">self</span>, mode: <span class="kw">super</span>::FailureMode) -&gt; <span class="self">Self </span>{
+<a href=#118 id=118 data-nosnippet>118</a>        <span class="self">self</span>.failure_mode = mode;
+<a href=#119 id=119 data-nosnippet>119</a>        <span class="self">self
+<a href=#120 id=120 data-nosnippet>120</a>    </span>}
+<a href=#121 id=121 data-nosnippet>121</a>}
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a><span class="doccomment">/// Canonicalize an EDN scalar into a business-key string. Keywords use their
+<a href=#124 id=124 data-nosnippet>124</a>/// local (namespace-stripped) name so a `:xt/id :alice` entity and an
+<a href=#125 id=125 data-nosnippet>125</a>/// `:employer :alice` ref both resolve to `"alice"`.
+<a href=#126 id=126 data-nosnippet>126</a></span><span class="kw">fn </span>business_key(v: <span class="kw-2">&amp;</span>Edn) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="kw">match </span>v {
+<a href=#128 id=128 data-nosnippet>128</a>        Edn::Keyword(k) =&gt; <span class="prelude-val">Some</span>(edn::keyword_local(k).to_string()),
+<a href=#129 id=129 data-nosnippet>129</a>        Edn::Str(s) =&gt; <span class="prelude-val">Some</span>(s.clone()),
+<a href=#130 id=130 data-nosnippet>130</a>        Edn::Int(i) =&gt; <span class="prelude-val">Some</span>(i.to_string()),
+<a href=#131 id=131 data-nosnippet>131</a>        Edn::Uuid(u) =&gt; <span class="prelude-val">Some</span>(u.clone()),
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#133 id=133 data-nosnippet>133</a>    }
+<a href=#134 id=134 data-nosnippet>134</a>}
+<a href=#135 id=135 data-nosnippet>135</a>
+<a href=#136 id=136 data-nosnippet>136</a><span class="doccomment">/// Convert an EDN scalar / scalar-array into a [`PropertyValue`]. Nested maps
+<a href=#137 id=137 data-nosnippet>137</a>/// and `nil` yield `None` (absent property).
+<a href=#138 id=138 data-nosnippet>138</a></span><span class="kw">fn </span>edn_to_property(v: <span class="kw-2">&amp;</span>Edn) -&gt; <span class="prelude-ty">Option</span>&lt;PropertyValue&gt; {
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="kw">match </span>v {
+<a href=#140 id=140 data-nosnippet>140</a>        Edn::Str(s) =&gt; <span class="prelude-val">Some</span>(PropertyValue::string(s)),
+<a href=#141 id=141 data-nosnippet>141</a>        Edn::Int(i) =&gt; <span class="prelude-val">Some</span>(PropertyValue::Int(<span class="kw-2">*</span>i)),
+<a href=#142 id=142 data-nosnippet>142</a>        Edn::Float(f) =&gt; <span class="prelude-val">Some</span>(PropertyValue::Float(<span class="kw-2">*</span>f)),
+<a href=#143 id=143 data-nosnippet>143</a>        Edn::Bool(b) =&gt; <span class="prelude-val">Some</span>(PropertyValue::Bool(<span class="kw-2">*</span>b)),
+<a href=#144 id=144 data-nosnippet>144</a>        Edn::Keyword(k) =&gt; <span class="prelude-val">Some</span>(PropertyValue::string(k)),
+<a href=#145 id=145 data-nosnippet>145</a>        Edn::Uuid(u) =&gt; <span class="prelude-val">Some</span>(PropertyValue::string(u)),
+<a href=#146 id=146 data-nosnippet>146</a>        Edn::Inst(m) =&gt; <span class="prelude-val">Some</span>(PropertyValue::Int(<span class="kw-2">*</span>m)),
+<a href=#147 id=147 data-nosnippet>147</a>        Edn::Nil =&gt; <span class="prelude-val">None</span>,
+<a href=#148 id=148 data-nosnippet>148</a>        Edn::Symbol(s) =&gt; <span class="prelude-val">Some</span>(PropertyValue::string(s)),
+<a href=#149 id=149 data-nosnippet>149</a>        Edn::Vector(items) | Edn::List(items) | Edn::Set(items) =&gt; {
+<a href=#150 id=150 data-nosnippet>150</a>            <span class="kw">let </span>vals: Vec&lt;PropertyValue&gt; = items.iter().filter_map(edn_to_property).collect();
+<a href=#151 id=151 data-nosnippet>151</a>            <span class="prelude-val">Some</span>(PropertyValue::array(vals))
+<a href=#152 id=152 data-nosnippet>152</a>        }
+<a href=#153 id=153 data-nosnippet>153</a>        Edn::Map(<span class="kw">_</span>) =&gt; <span class="prelude-val">None</span>,
+<a href=#154 id=154 data-nosnippet>154</a>    }
+<a href=#155 id=155 data-nosnippet>155</a>}
+<a href=#156 id=156 data-nosnippet>156</a>
+<a href=#157 id=157 data-nosnippet>157</a><span class="doccomment">/// Uppercase-snake a field name for a default edge label (`employer` → `EMPLOYER`).
+<a href=#158 id=158 data-nosnippet>158</a></span><span class="kw">fn </span>screaming_snake(field: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = String::with_capacity(field.len());
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="kw">for </span>c <span class="kw">in </span>field.chars() {
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="kw">if </span>c.is_alphanumeric() {
+<a href=#162 id=162 data-nosnippet>162</a>            out.extend(c.to_uppercase());
+<a href=#163 id=163 data-nosnippet>163</a>        } <span class="kw">else </span>{
+<a href=#164 id=164 data-nosnippet>164</a>            out.push(<span class="string">'_'</span>);
+<a href=#165 id=165 data-nosnippet>165</a>        }
+<a href=#166 id=166 data-nosnippet>166</a>    }
+<a href=#167 id=167 data-nosnippet>167</a>    out
+<a href=#168 id=168 data-nosnippet>168</a>}
+<a href=#169 id=169 data-nosnippet>169</a>
+<a href=#170 id=170 data-nosnippet>170</a><span class="doccomment">/// Build the provenance bundle stamped on every version of an entity.
+<a href=#171 id=171 data-nosnippet>171</a></span><span class="kw">fn </span>xtdb_provenance(
+<a href=#172 id=172 data-nosnippet>172</a>    file: <span class="kw-2">&amp;</span>str,
+<a href=#173 id=173 data-nosnippet>173</a>    tx_id: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#174 id=174 data-nosnippet>174</a>    tx_time_micros: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#175 id=175 data-nosnippet>175</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Provenance&gt; {
+<a href=#176 id=176 data-nosnippet>176</a>    <span class="kw">let </span><span class="kw-2">mut </span>builder = Provenance::builder()
+<a href=#177 id=177 data-nosnippet>177</a>        .source(<span class="macro">format!</span>(<span class="string">"xtdb-import::{file}"</span>))
+<a href=#178 id=178 data-nosnippet>178</a>        .confidence(<span class="number">1.0</span>);
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="kw">let </span>tx_id_str = tx_id
+<a href=#180 id=180 data-nosnippet>180</a>        .map(|i| i.to_string())
+<a href=#181 id=181 data-nosnippet>181</a>        .unwrap_or_else(|| <span class="string">"?"</span>.to_string());
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="kw">let </span>tx_time_str = tx_time_micros
+<a href=#183 id=183 data-nosnippet>183</a>        .map(|m| m.to_string())
+<a href=#184 id=184 data-nosnippet>184</a>        .unwrap_or_else(|| <span class="string">"?"</span>.to_string());
+<a href=#185 id=185 data-nosnippet>185</a>    builder = builder.note(<span class="macro">format!</span>(<span class="string">"xtdb tx-id={tx_id_str} tx-time={tx_time_str}"</span>));
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(id) = tx_id {
+<a href=#187 id=187 data-nosnippet>187</a>        builder = builder.correlation_id(<span class="macro">format!</span>(<span class="string">"xt:tx:{id}"</span>));
+<a href=#188 id=188 data-nosnippet>188</a>    }
+<a href=#189 id=189 data-nosnippet>189</a>    builder.build().map_err(|e| Error::other(e.to_string()))
+<a href=#190 id=190 data-nosnippet>190</a>}
+<a href=#191 id=191 data-nosnippet>191</a>
+<a href=#192 id=192 data-nosnippet>192</a><span class="doccomment">/// The basename used for the provenance `source`.
+<a href=#193 id=193 data-nosnippet>193</a></span><span class="kw">fn </span>file_basename(path: <span class="kw-2">&amp;</span>Path) -&gt; String {
+<a href=#194 id=194 data-nosnippet>194</a>    path.file_name()
+<a href=#195 id=195 data-nosnippet>195</a>        .map(|n| n.to_string_lossy().to_string())
+<a href=#196 id=196 data-nosnippet>196</a>        .unwrap_or_else(|| path.to_string_lossy().to_string())
+<a href=#197 id=197 data-nosnippet>197</a>}
+<a href=#198 id=198 data-nosnippet>198</a>
+<a href=#199 id=199 data-nosnippet>199</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>&gt; Importer&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#200 id=200 data-nosnippet>200</a>    <span class="doccomment">/// Replay a full XTDB entity-history EDN export, preserving valid-time and
+<a href=#201 id=201 data-nosnippet>201</a>    /// provenance (Issue #3384).
+<a href=#202 id=202 data-nosnippet>202</a>    ///
+<a href=#203 id=203 data-nosnippet>203</a>    /// # Errors
+<a href=#204 id=204 data-nosnippet>204</a>    ///
+<a href=#205 id=205 data-nosnippet>205</a>    /// Returns an error if the file cannot be read; the EDN is malformed
+<a href=#206 id=206 data-nosnippet>206</a>    /// (a typed [`edn::EdnError`](super::edn::EdnError) surfaced with position);
+<a href=#207 id=207 data-nosnippet>207</a>    /// an entity is already present in this session (re-import refusal); or — in
+<a href=#208 id=208 data-nosnippet>208</a>    /// the default [`FailureMode::Abort`](super::FailureMode::Abort) — the first
+<a href=#209 id=209 data-nosnippet>209</a>    /// malformed entity or unresolved ref endpoint.
+<a href=#210 id=210 data-nosnippet>210</a>    </span><span class="kw">pub fn </span>xtdb_import(
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#212 id=212 data-nosnippet>212</a>        path: <span class="kw">impl </span>AsRef&lt;Path&gt;,
+<a href=#213 id=213 data-nosnippet>213</a>        opts: <span class="kw-2">&amp;</span>XtdbOptions,
+<a href=#214 id=214 data-nosnippet>214</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;ImportFidelityReport&gt; {
+<a href=#215 id=215 data-nosnippet>215</a>        <span class="kw">let </span>path = path.as_ref();
+<a href=#216 id=216 data-nosnippet>216</a>        <span class="kw">let </span>text = std::fs::read_to_string(path)
+<a href=#217 id=217 data-nosnippet>217</a>            .map_err(|e| Error::other(<span class="macro">format!</span>(<span class="string">"reading {}: {e}"</span>, path.display())))<span class="question-mark">?</span>;
+<a href=#218 id=218 data-nosnippet>218</a>        <span class="kw">let </span>file = file_basename(path);
+<a href=#219 id=219 data-nosnippet>219</a>        <span class="self">self</span>.xtdb_import_from_str(<span class="kw-2">&amp;</span>text, <span class="kw-2">&amp;</span>file, opts)
+<a href=#220 id=220 data-nosnippet>220</a>    }
+<a href=#221 id=221 data-nosnippet>221</a>
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="doccomment">/// Parse and replay an XTDB entity-history export already in memory. Shared
+<a href=#223 id=223 data-nosnippet>223</a>    /// by [`xtdb_import`](Self::xtdb_import) and the test suite.
+<a href=#224 id=224 data-nosnippet>224</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>xtdb_import_from_str(
+<a href=#225 id=225 data-nosnippet>225</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#226 id=226 data-nosnippet>226</a>        text: <span class="kw-2">&amp;</span>str,
+<a href=#227 id=227 data-nosnippet>227</a>        file: <span class="kw-2">&amp;</span>str,
+<a href=#228 id=228 data-nosnippet>228</a>        opts: <span class="kw-2">&amp;</span>XtdbOptions,
+<a href=#229 id=229 data-nosnippet>229</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;ImportFidelityReport&gt; {
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="comment">// Keep the shared replay driver's failure-mode in step with the options.
+<a href=#231 id=231 data-nosnippet>231</a>        </span><span class="self">self</span>.config.failure_mode = opts.failure_mode;
+<a href=#232 id=232 data-nosnippet>232</a>        <span class="kw">let </span><span class="kw-2">mut </span>report = ImportFidelityReport::new(<span class="string">"xtdb"</span>);
+<a href=#233 id=233 data-nosnippet>233</a>        <span class="kw">let </span>entity_maps =
+<a href=#234 id=234 data-nosnippet>234</a>            edn::parse_top_vector(text).map_err(|e| Error::other(<span class="macro">format!</span>(<span class="string">"EDN parse: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#235 id=235 data-nosnippet>235</a>
+<a href=#236 id=236 data-nosnippet>236</a>        <span class="comment">// First pass: collect all business keys so ref detection can resolve
+<a href=#237 id=237 data-nosnippet>237</a>        // intra-export references.
+<a href=#238 id=238 data-nosnippet>238</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>known_keys: HashSet&lt;String&gt; = HashSet::new();
+<a href=#239 id=239 data-nosnippet>239</a>        <span class="kw">for </span>m <span class="kw">in </span><span class="kw-2">&amp;</span>entity_maps {
+<a href=#240 id=240 data-nosnippet>240</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(id) = m.map_get_local(<span class="string">"id"</span>).and_then(business_key) {
+<a href=#241 id=241 data-nosnippet>241</a>                known_keys.insert(id);
+<a href=#242 id=242 data-nosnippet>242</a>            }
+<a href=#243 id=243 data-nosnippet>243</a>        }
+<a href=#244 id=244 data-nosnippet>244</a>
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="kw">let </span><span class="kw-2">mut </span>prepared: Vec&lt;PreparedEntity&gt; = Vec::with_capacity(entity_maps.len());
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="kw">for </span>(idx, entity_map) <span class="kw">in </span>entity_maps.iter().enumerate() {
+<a href=#247 id=247 data-nosnippet>247</a>            report.entities_read += <span class="number">1</span>;
+<a href=#248 id=248 data-nosnippet>248</a>            <span class="kw">match </span><span class="self">self</span>.prepare_xtdb_entity(
+<a href=#249 id=249 data-nosnippet>249</a>                entity_map,
+<a href=#250 id=250 data-nosnippet>250</a>                opts,
+<a href=#251 id=251 data-nosnippet>251</a>                file,
+<a href=#252 id=252 data-nosnippet>252</a>                <span class="kw-2">&amp;</span>known_keys,
+<a href=#253 id=253 data-nosnippet>253</a>                <span class="kw-2">&amp;mut </span>report,
+<a href=#254 id=254 data-nosnippet>254</a>                idx + <span class="number">1</span>,
+<a href=#255 id=255 data-nosnippet>255</a>            ) {
+<a href=#256 id=256 data-nosnippet>256</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(entity)) =&gt; prepared.push(entity),
+<a href=#257 id=257 data-nosnippet>257</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; {}
+<a href=#258 id=258 data-nosnippet>258</a>                <span class="prelude-val">Err</span>(row_err) =&gt; <span class="kw">match </span>opts.failure_mode {
+<a href=#259 id=259 data-nosnippet>259</a>                    <span class="kw">super</span>::FailureMode::Abort =&gt; {
+<a href=#260 id=260 data-nosnippet>260</a>                        <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="kw">super</span>::ImportError::Row(row_err).into());
+<a href=#261 id=261 data-nosnippet>261</a>                    }
+<a href=#262 id=262 data-nosnippet>262</a>                    <span class="kw">super</span>::FailureMode::SkipAndReport =&gt; report.skipped.push(row_err),
+<a href=#263 id=263 data-nosnippet>263</a>                },
+<a href=#264 id=264 data-nosnippet>264</a>            }
+<a href=#265 id=265 data-nosnippet>265</a>        }
+<a href=#266 id=266 data-nosnippet>266</a>
+<a href=#267 id=267 data-nosnippet>267</a>        replay(<span class="self">self</span>, <span class="kw-2">&amp;</span>prepared, <span class="kw-2">&amp;mut </span>report, <span class="kw-2">&amp;</span>opts.id_property)<span class="question-mark">?</span>;
+<a href=#268 id=268 data-nosnippet>268</a>        report.finalize();
+<a href=#269 id=269 data-nosnippet>269</a>        <span class="prelude-val">Ok</span>(report)
+<a href=#270 id=270 data-nosnippet>270</a>    }
+<a href=#271 id=271 data-nosnippet>271</a>
+<a href=#272 id=272 data-nosnippet>272</a>    <span class="doccomment">/// Prepare one per-entity history map into a [`PreparedEntity`], or `None`
+<a href=#273 id=273 data-nosnippet>273</a>    /// if it carried no live version (pure tombstone with nothing to create).
+<a href=#274 id=274 data-nosnippet>274</a>    </span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#275 id=275 data-nosnippet>275</a>    </span><span class="kw">fn </span>prepare_xtdb_entity(
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#277 id=277 data-nosnippet>277</a>        entity_map: <span class="kw-2">&amp;</span>Edn,
+<a href=#278 id=278 data-nosnippet>278</a>        opts: <span class="kw-2">&amp;</span>XtdbOptions,
+<a href=#279 id=279 data-nosnippet>279</a>        file: <span class="kw-2">&amp;</span>str,
+<a href=#280 id=280 data-nosnippet>280</a>        known_keys: <span class="kw-2">&amp;</span>HashSet&lt;String&gt;,
+<a href=#281 id=281 data-nosnippet>281</a>        report: <span class="kw-2">&amp;mut </span>ImportFidelityReport,
+<a href=#282 id=282 data-nosnippet>282</a>        row: usize,
+<a href=#283 id=283 data-nosnippet>283</a>    ) -&gt; std::result::Result&lt;<span class="prelude-ty">Option</span>&lt;PreparedEntity&gt;, RowError&gt; {
+<a href=#284 id=284 data-nosnippet>284</a>        <span class="kw">let </span>err = |msg: String| RowError::new(row, msg);
+<a href=#285 id=285 data-nosnippet>285</a>
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="kw">let </span>id_value = entity_map
+<a href=#287 id=287 data-nosnippet>287</a>            .map_get_local(<span class="string">"id"</span>)
+<a href=#288 id=288 data-nosnippet>288</a>            .ok_or_else(|| err(<span class="string">"entity map has no :xt/id"</span>.to_string()))<span class="question-mark">?</span>;
+<a href=#289 id=289 data-nosnippet>289</a>        <span class="kw">let </span>key = business_key(id_value)
+<a href=#290 id=290 data-nosnippet>290</a>            .ok_or_else(|| err(<span class="macro">format!</span>(<span class="string">"unsupported :xt/id value ({})"</span>, id_value.kind())))<span class="question-mark">?</span>;
+<a href=#291 id=291 data-nosnippet>291</a>
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="kw">let </span>history = entity_map
+<a href=#293 id=293 data-nosnippet>293</a>            .map_get_local(<span class="string">"history"</span>)
+<a href=#294 id=294 data-nosnippet>294</a>            .and_then(Edn::as_seq)
+<a href=#295 id=295 data-nosnippet>295</a>            .ok_or_else(|| err(<span class="string">"entity map has no :history vector"</span>.to_string()))<span class="question-mark">?</span>;
+<a href=#296 id=296 data-nosnippet>296</a>
+<a href=#297 id=297 data-nosnippet>297</a>        <span class="comment">// Defensive sort by (valid-time, tx-id) ascending — the producer claims
+<a href=#298 id=298 data-nosnippet>298</a>        // ascending, but a mis-ordered replay would fail the downstream
+<a href=#299 id=299 data-nosnippet>299</a>        // valid_from-not-before-creation check, so we normalize here (AC5).
+<a href=#300 id=300 data-nosnippet>300</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>segments: Vec&lt;<span class="kw-2">&amp;</span>Edn&gt; = history.iter().collect();
+<a href=#301 id=301 data-nosnippet>301</a>        segments.sort_by_key(|seg| {
+<a href=#302 id=302 data-nosnippet>302</a>            <span class="kw">let </span>vt = seg.map_get_local(<span class="string">"valid-time"</span>).and_then(inst_micros);
+<a href=#303 id=303 data-nosnippet>303</a>            <span class="kw">let </span>tx = seg.map_get_local(<span class="string">"tx-id"</span>).and_then(as_int);
+<a href=#304 id=304 data-nosnippet>304</a>            (vt.unwrap_or(i64::MIN), tx.unwrap_or(i64::MIN))
+<a href=#305 id=305 data-nosnippet>305</a>        });
+<a href=#306 id=306 data-nosnippet>306</a>
+<a href=#307 id=307 data-nosnippet>307</a>        <span class="kw">let </span><span class="kw-2">mut </span>versions: Vec&lt;PreparedVersion&gt; = Vec::new();
+<a href=#308 id=308 data-nosnippet>308</a>        <span class="kw">let </span><span class="kw-2">mut </span>ref_edges: Vec&lt;PreparedRefEdge&gt; = Vec::new();
+<a href=#309 id=309 data-nosnippet>309</a>        <span class="kw">let </span><span class="kw-2">mut </span>seen_refs: HashSet&lt;(String, String)&gt; = HashSet::new();
+<a href=#310 id=310 data-nosnippet>310</a>        <span class="kw">let </span><span class="kw-2">mut </span>retraction: <span class="prelude-ty">Option</span>&lt;PreparedRetraction&gt; = <span class="prelude-val">None</span>;
+<a href=#311 id=311 data-nosnippet>311</a>        <span class="kw">let </span><span class="kw-2">mut </span>last_live_valid_to: <span class="prelude-ty">Option</span>&lt;i64&gt; = <span class="prelude-val">None</span>;
+<a href=#312 id=312 data-nosnippet>312</a>
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">let </span>n = segments.len();
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="kw">let </span><span class="kw-2">mut </span>i = <span class="number">0</span>;
+<a href=#315 id=315 data-nosnippet>315</a>        <span class="kw">while </span>i &lt; n {
+<a href=#316 id=316 data-nosnippet>316</a>            <span class="kw">let </span>seg = segments[i];
+<a href=#317 id=317 data-nosnippet>317</a>            report.versions_read += <span class="number">1</span>;
+<a href=#318 id=318 data-nosnippet>318</a>            <span class="kw">let </span>valid_from = seg
+<a href=#319 id=319 data-nosnippet>319</a>                .map_get_local(<span class="string">"valid-time"</span>)
+<a href=#320 id=320 data-nosnippet>320</a>                .and_then(inst_micros)
+<a href=#321 id=321 data-nosnippet>321</a>                .ok_or_else(|| err(<span class="string">"history segment has no :xtdb.api/valid-time"</span>.to_string()))<span class="question-mark">?</span>;
+<a href=#322 id=322 data-nosnippet>322</a>            <span class="kw">let </span>tx_id = seg.map_get_local(<span class="string">"tx-id"</span>).and_then(as_int);
+<a href=#323 id=323 data-nosnippet>323</a>            <span class="kw">let </span>tx_time = seg.map_get_local(<span class="string">"tx-time"</span>).and_then(inst_micros);
+<a href=#324 id=324 data-nosnippet>324</a>            <span class="kw">let </span>provenance = xtdb_provenance(file, tx_id, tx_time)
+<a href=#325 id=325 data-nosnippet>325</a>                .map_err(|e| err(<span class="macro">format!</span>(<span class="string">"provenance: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#326 id=326 data-nosnippet>326</a>
+<a href=#327 id=327 data-nosnippet>327</a>            <span class="kw">let </span>doc = seg.map_get_local(<span class="string">"doc"</span>);
+<a href=#328 id=328 data-nosnippet>328</a>            <span class="kw">let </span>is_delete = <span class="macro">matches!</span>(doc, <span class="prelude-val">None </span>| <span class="prelude-val">Some</span>(Edn::Nil));
+<a href=#329 id=329 data-nosnippet>329</a>
+<a href=#330 id=330 data-nosnippet>330</a>            <span class="kw">if </span>is_delete {
+<a href=#331 id=331 data-nosnippet>331</a>                <span class="comment">// Tombstone: close the entity's valid interval at this segment's
+<a href=#332 id=332 data-nosnippet>332</a>                // valid-time (detach co-retracts any edges).
+<a href=#333 id=333 data-nosnippet>333</a>                </span>retraction = <span class="prelude-val">Some</span>(PreparedRetraction {
+<a href=#334 id=334 data-nosnippet>334</a>                    valid_to: Timestamp::from(valid_from),
+<a href=#335 id=335 data-nosnippet>335</a>                    provenance: <span class="prelude-val">Some</span>(provenance),
+<a href=#336 id=336 data-nosnippet>336</a>                    detach: <span class="bool-val">true</span>,
+<a href=#337 id=337 data-nosnippet>337</a>                });
+<a href=#338 id=338 data-nosnippet>338</a>                last_live_valid_to = <span class="prelude-val">None</span>;
+<a href=#339 id=339 data-nosnippet>339</a>                i += <span class="number">1</span>;
+<a href=#340 id=340 data-nosnippet>340</a>                <span class="kw">continue</span>;
+<a href=#341 id=341 data-nosnippet>341</a>            }
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a>            <span class="kw">let </span>doc = doc.ok_or_else(|| err(<span class="string">"delete/live classification error"</span>.to_string()))<span class="question-mark">?</span>;
+<a href=#344 id=344 data-nosnippet>344</a>            <span class="kw">if </span>doc.as_map().is_none() {
+<a href=#345 id=345 data-nosnippet>345</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(err(<span class="macro">format!</span>(
+<a href=#346 id=346 data-nosnippet>346</a>                    <span class="string">"history segment :doc must be a map, got {}"</span>,
+<a href=#347 id=347 data-nosnippet>347</a>                    doc.kind()
+<a href=#348 id=348 data-nosnippet>348</a>                )));
+<a href=#349 id=349 data-nosnippet>349</a>            }
+<a href=#350 id=350 data-nosnippet>350</a>
+<a href=#351 id=351 data-nosnippet>351</a>            <span class="kw">let </span>(label, properties, prop_count) =
+<a href=#352 id=352 data-nosnippet>352</a>                build_xtdb_node(doc, <span class="kw-2">&amp;</span>key, opts, known_keys, report, <span class="kw-2">&amp;</span>err)<span class="question-mark">?</span>;
+<a href=#353 id=353 data-nosnippet>353</a>
+<a href=#354 id=354 data-nosnippet>354</a>            <span class="comment">// Collect ref edges (deduped across versions; earliest valid_from).
+<a href=#355 id=355 data-nosnippet>355</a>            </span>collect_xtdb_refs(
+<a href=#356 id=356 data-nosnippet>356</a>                doc,
+<a href=#357 id=357 data-nosnippet>357</a>                opts,
+<a href=#358 id=358 data-nosnippet>358</a>                known_keys,
+<a href=#359 id=359 data-nosnippet>359</a>                valid_from,
+<a href=#360 id=360 data-nosnippet>360</a>                <span class="kw-2">&amp;</span>provenance,
+<a href=#361 id=361 data-nosnippet>361</a>                <span class="kw-2">&amp;mut </span>ref_edges,
+<a href=#362 id=362 data-nosnippet>362</a>                <span class="kw-2">&amp;mut </span>seen_refs,
+<a href=#363 id=363 data-nosnippet>363</a>                report,
+<a href=#364 id=364 data-nosnippet>364</a>            );
+<a href=#365 id=365 data-nosnippet>365</a>
+<a href=#366 id=366 data-nosnippet>366</a>            <span class="kw">let </span>is_create = versions.is_empty();
+<a href=#367 id=367 data-nosnippet>367</a>            <span class="kw">if </span>is_create {
+<a href=#368 id=368 data-nosnippet>368</a>                report.note_mapping(<span class="string">"document"</span>, <span class="kw-2">&amp;</span>key, <span class="string">"node"</span>, <span class="kw-2">&amp;</span>label);
+<a href=#369 id=369 data-nosnippet>369</a>            }
+<a href=#370 id=370 data-nosnippet>370</a>            versions.push(PreparedVersion {
+<a href=#371 id=371 data-nosnippet>371</a>                label,
+<a href=#372 id=372 data-nosnippet>372</a>                properties,
+<a href=#373 id=373 data-nosnippet>373</a>                valid_from: Timestamp::from(valid_from),
+<a href=#374 id=374 data-nosnippet>374</a>                provenance: <span class="prelude-val">Some</span>(provenance),
+<a href=#375 id=375 data-nosnippet>375</a>                is_create,
+<a href=#376 id=376 data-nosnippet>376</a>                property_count: prop_count,
+<a href=#377 id=377 data-nosnippet>377</a>            });
+<a href=#378 id=378 data-nosnippet>378</a>
+<a href=#379 id=379 data-nosnippet>379</a>            <span class="kw">let </span>this_valid_to = seg.map_get_local(<span class="string">"valid-to"</span>).and_then(inst_micros);
+<a href=#380 id=380 data-nosnippet>380</a>            last_live_valid_to = this_valid_to;
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>            <span class="comment">// Disjoint-interval detection: this live segment explicitly ends
+<a href=#383 id=383 data-nosnippet>383</a>            // (`::xt/valid-to`) strictly BEFORE the next segment begins — a gap.
+<a href=#384 id=384 data-nosnippet>384</a>            // The engine cannot reincarnate a retracted node (retraction removes
+<a href=#385 id=385 data-nosnippet>385</a>            // it from current storage), so we honor THIS close (making the in-gap
+<a href=#386 id=386 data-nosnippet>386</a>            // coordinate correctly absent instead of returning a stale fact) and
+<a href=#387 id=387 data-nosnippet>387</a>            // report every un-revivable later segment rather than dropping it
+<a href=#388 id=388 data-nosnippet>388</a>            // silently.
+<a href=#389 id=389 data-nosnippet>389</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(vt) = this_valid_to
+<a href=#390 id=390 data-nosnippet>390</a>                &amp;&amp; i + <span class="number">1 </span>&lt; n
+<a href=#391 id=391 data-nosnippet>391</a>            {
+<a href=#392 id=392 data-nosnippet>392</a>                <span class="kw">let </span>next_vf = segments[i + <span class="number">1</span>]
+<a href=#393 id=393 data-nosnippet>393</a>                    .map_get_local(<span class="string">"valid-time"</span>)
+<a href=#394 id=394 data-nosnippet>394</a>                    .and_then(inst_micros)
+<a href=#395 id=395 data-nosnippet>395</a>                    .unwrap_or(i64::MIN);
+<a href=#396 id=396 data-nosnippet>396</a>                <span class="kw">if </span>next_vf &gt; vt {
+<a href=#397 id=397 data-nosnippet>397</a>                    <span class="kw">let </span>close_prov = xtdb_provenance(file, tx_id, tx_time)
+<a href=#398 id=398 data-nosnippet>398</a>                        .map_err(|e| err(<span class="macro">format!</span>(<span class="string">"provenance: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#399 id=399 data-nosnippet>399</a>                    retraction = <span class="prelude-val">Some</span>(PreparedRetraction {
+<a href=#400 id=400 data-nosnippet>400</a>                        valid_to: Timestamp::from(vt),
+<a href=#401 id=401 data-nosnippet>401</a>                        provenance: <span class="prelude-val">Some</span>(close_prov),
+<a href=#402 id=402 data-nosnippet>402</a>                        detach: <span class="bool-val">true</span>,
+<a href=#403 id=403 data-nosnippet>403</a>                    });
+<a href=#404 id=404 data-nosnippet>404</a>                    <span class="kw">for </span>_skipped <span class="kw">in </span><span class="kw-2">&amp;</span>segments[i + <span class="number">1</span>..] {
+<a href=#405 id=405 data-nosnippet>405</a>                        report.versions_read += <span class="number">1</span>;
+<a href=#406 id=406 data-nosnippet>406</a>                        report.note_unsupported(
+<a href=#407 id=407 data-nosnippet>407</a>                            <span class="string">"disjoint_reincarnation"</span>,
+<a href=#408 id=408 data-nosnippet>408</a>                            <span class="kw-2">&amp;</span><span class="macro">format!</span>(
+<a href=#409 id=409 data-nosnippet>409</a>                                <span class="string">"{key}: a valid segment after a gap (closed at {vt}) cannot be \
+<a href=#410 id=410 data-nosnippet>410</a>                                 reincarnated — the engine removes a retracted node from current \
+<a href=#411 id=411 data-nosnippet>411</a>                                 state; segment reported, not silently dropped"
+<a href=#412 id=412 data-nosnippet>412</a>                            </span>),
+<a href=#413 id=413 data-nosnippet>413</a>                        );
+<a href=#414 id=414 data-nosnippet>414</a>                    }
+<a href=#415 id=415 data-nosnippet>415</a>                    <span class="kw">break</span>;
+<a href=#416 id=416 data-nosnippet>416</a>                }
+<a href=#417 id=417 data-nosnippet>417</a>            }
+<a href=#418 id=418 data-nosnippet>418</a>            i += <span class="number">1</span>;
+<a href=#419 id=419 data-nosnippet>419</a>        }
+<a href=#420 id=420 data-nosnippet>420</a>
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="comment">// A trailing live segment with an explicit valid-to closes the interval
+<a href=#422 id=422 data-nosnippet>422</a>        // (only when no later delete/gap already set a retraction).
+<a href=#423 id=423 data-nosnippet>423</a>        </span><span class="kw">if </span>retraction.is_none()
+<a href=#424 id=424 data-nosnippet>424</a>            &amp;&amp; <span class="kw">let </span><span class="prelude-val">Some</span>(valid_to) = last_live_valid_to
+<a href=#425 id=425 data-nosnippet>425</a>        {
+<a href=#426 id=426 data-nosnippet>426</a>            <span class="kw">let </span>provenance =
+<a href=#427 id=427 data-nosnippet>427</a>                xtdb_provenance(file, <span class="prelude-val">None</span>, <span class="prelude-val">None</span>).map_err(|e| err(<span class="macro">format!</span>(<span class="string">"provenance: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#428 id=428 data-nosnippet>428</a>            retraction = <span class="prelude-val">Some</span>(PreparedRetraction {
+<a href=#429 id=429 data-nosnippet>429</a>                valid_to: Timestamp::from(valid_to),
+<a href=#430 id=430 data-nosnippet>430</a>                provenance: <span class="prelude-val">Some</span>(provenance),
+<a href=#431 id=431 data-nosnippet>431</a>                detach: <span class="bool-val">true</span>,
+<a href=#432 id=432 data-nosnippet>432</a>            });
+<a href=#433 id=433 data-nosnippet>433</a>        }
+<a href=#434 id=434 data-nosnippet>434</a>
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw">if </span>versions.is_empty() {
+<a href=#436 id=436 data-nosnippet>436</a>            <span class="comment">// Pure tombstone with no live version to create — nothing to do.
+<a href=#437 id=437 data-nosnippet>437</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#438 id=438 data-nosnippet>438</a>        }
+<a href=#439 id=439 data-nosnippet>439</a>
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="kw">let </span>id_value = PropertyValue::string(<span class="kw-2">&amp;</span>key);
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(PreparedEntity {
+<a href=#442 id=442 data-nosnippet>442</a>            key,
+<a href=#443 id=443 data-nosnippet>443</a>            id_value,
+<a href=#444 id=444 data-nosnippet>444</a>            versions,
+<a href=#445 id=445 data-nosnippet>445</a>            ref_edges,
+<a href=#446 id=446 data-nosnippet>446</a>            retraction,
+<a href=#447 id=447 data-nosnippet>447</a>        }))
+<a href=#448 id=448 data-nosnippet>448</a>    }
+<a href=#449 id=449 data-nosnippet>449</a>}
+<a href=#450 id=450 data-nosnippet>450</a>
+<a href=#451 id=451 data-nosnippet>451</a><span class="doccomment">/// Resolve the ref targets of a doc field: the (target_key, resolves) pairs the
+<a href=#452 id=452 data-nosnippet>452</a>/// field promotes to edges. Empty when the field is a plain property. This is
+<a href=#453 id=453 data-nosnippet>453</a>/// the single source of truth shared by property-building (skip a ref field) and
+<a href=#454 id=454 data-nosnippet>454</a>/// edge-collection (emit the edges).
+<a href=#455 id=455 data-nosnippet>455</a></span><span class="kw">fn </span>field_ref_targets(
+<a href=#456 id=456 data-nosnippet>456</a>    local: <span class="kw-2">&amp;</span>str,
+<a href=#457 id=457 data-nosnippet>457</a>    v: <span class="kw-2">&amp;</span>Edn,
+<a href=#458 id=458 data-nosnippet>458</a>    opts: <span class="kw-2">&amp;</span>XtdbOptions,
+<a href=#459 id=459 data-nosnippet>459</a>    known_keys: <span class="kw-2">&amp;</span>HashSet&lt;String&gt;,
+<a href=#460 id=460 data-nosnippet>460</a>) -&gt; Vec&lt;(String, bool)&gt; {
+<a href=#461 id=461 data-nosnippet>461</a>    <span class="kw">let </span>explicit = opts.ref_fields.contains_key(local);
+<a href=#462 id=462 data-nosnippet>462</a>    <span class="kw">let </span>candidates: Vec&lt;<span class="kw-2">&amp;</span>Edn&gt; = <span class="kw">match </span>v {
+<a href=#463 id=463 data-nosnippet>463</a>        Edn::Vector(items) | Edn::List(items) | Edn::Set(items) =&gt; items.iter().collect(),
+<a href=#464 id=464 data-nosnippet>464</a>        other =&gt; <span class="macro">vec!</span>[other],
+<a href=#465 id=465 data-nosnippet>465</a>    };
+<a href=#466 id=466 data-nosnippet>466</a>    <span class="kw">let </span><span class="kw-2">mut </span>targets = Vec::new();
+<a href=#467 id=467 data-nosnippet>467</a>    <span class="kw">for </span>cand <span class="kw">in </span>candidates {
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(target_key) = business_key(cand) <span class="kw">else </span>{
+<a href=#469 id=469 data-nosnippet>469</a>            <span class="kw">continue</span>;
+<a href=#470 id=470 data-nosnippet>470</a>        };
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="kw">let </span>resolves = known_keys.contains(<span class="kw-2">&amp;</span>target_key);
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="kw">if </span>explicit || (opts.auto_detect_refs &amp;&amp; resolves) {
+<a href=#473 id=473 data-nosnippet>473</a>            targets.push((target_key, resolves));
+<a href=#474 id=474 data-nosnippet>474</a>        }
+<a href=#475 id=475 data-nosnippet>475</a>    }
+<a href=#476 id=476 data-nosnippet>476</a>    targets
+<a href=#477 id=477 data-nosnippet>477</a>}
+<a href=#478 id=478 data-nosnippet>478</a>
+<a href=#479 id=479 data-nosnippet>479</a><span class="doccomment">/// Whether a doc field is treated as a ref (and thus excluded from properties).
+<a href=#480 id=480 data-nosnippet>480</a></span><span class="kw">fn </span>is_ref_field(local: <span class="kw-2">&amp;</span>str, v: <span class="kw-2">&amp;</span>Edn, opts: <span class="kw-2">&amp;</span>XtdbOptions, known_keys: <span class="kw-2">&amp;</span>HashSet&lt;String&gt;) -&gt; bool {
+<a href=#481 id=481 data-nosnippet>481</a>    !field_ref_targets(local, v, opts, known_keys).is_empty()
+<a href=#482 id=482 data-nosnippet>482</a>}
+<a href=#483 id=483 data-nosnippet>483</a>
+<a href=#484 id=484 data-nosnippet>484</a><span class="doccomment">/// Build a node label + property map from a doc, excluding the id / label /
+<a href=#485 id=485 data-nosnippet>485</a>/// content-hash / ref fields.
+<a href=#486 id=486 data-nosnippet>486</a></span><span class="kw">fn </span>build_xtdb_node(
+<a href=#487 id=487 data-nosnippet>487</a>    doc: <span class="kw-2">&amp;</span>Edn,
+<a href=#488 id=488 data-nosnippet>488</a>    key: <span class="kw-2">&amp;</span>str,
+<a href=#489 id=489 data-nosnippet>489</a>    opts: <span class="kw-2">&amp;</span>XtdbOptions,
+<a href=#490 id=490 data-nosnippet>490</a>    known_keys: <span class="kw-2">&amp;</span>HashSet&lt;String&gt;,
+<a href=#491 id=491 data-nosnippet>491</a>    report: <span class="kw-2">&amp;mut </span>ImportFidelityReport,
+<a href=#492 id=492 data-nosnippet>492</a>    err: <span class="kw-2">&amp;</span><span class="kw">impl </span>Fn(String) -&gt; RowError,
+<a href=#493 id=493 data-nosnippet>493</a>) -&gt; std::result::Result&lt;(String, <span class="kw">crate</span>::core::property::PropertyMap, usize), RowError&gt; {
+<a href=#494 id=494 data-nosnippet>494</a>    <span class="kw">let </span>label = <span class="kw">match </span>doc.map_get_local(<span class="kw-2">&amp;</span>opts.label_field) {
+<a href=#495 id=495 data-nosnippet>495</a>        <span class="prelude-val">Some</span>(Edn::Str(s)) =&gt; s.to_string(),
+<a href=#496 id=496 data-nosnippet>496</a>        <span class="prelude-val">Some</span>(Edn::Keyword(k)) =&gt; edn::keyword_local(k).to_string(),
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="kw">_ </span>=&gt; {
+<a href=#498 id=498 data-nosnippet>498</a>            report.note_coerced(<span class="string">"default_label"</span>, <span class="kw-2">&amp;</span>opts.default_label);
+<a href=#499 id=499 data-nosnippet>499</a>            opts.default_label.clone()
+<a href=#500 id=500 data-nosnippet>500</a>        }
+<a href=#501 id=501 data-nosnippet>501</a>    };
+<a href=#502 id=502 data-nosnippet>502</a>
+<a href=#503 id=503 data-nosnippet>503</a>    <span class="kw">let </span><span class="kw-2">mut </span>builder = PropertyMapBuilder::new();
+<a href=#504 id=504 data-nosnippet>504</a>    <span class="kw">let </span><span class="kw-2">mut </span>prop_count = <span class="number">0usize</span>;
+<a href=#505 id=505 data-nosnippet>505</a>    <span class="comment">// Always store the business key as the id property.
+<a href=#506 id=506 data-nosnippet>506</a>    </span>builder = builder
+<a href=#507 id=507 data-nosnippet>507</a>        .try_insert(<span class="kw-2">&amp;</span>opts.id_property, PropertyValue::string(key))
+<a href=#508 id=508 data-nosnippet>508</a>        .map_err(|e| err(e.to_string()))<span class="question-mark">?</span>;
+<a href=#509 id=509 data-nosnippet>509</a>    prop_count += <span class="number">1</span>;
+<a href=#510 id=510 data-nosnippet>510</a>
+<a href=#511 id=511 data-nosnippet>511</a>    <span class="kw">let </span>entries = doc.as_map().unwrap_or(<span class="kw-2">&amp;</span>[]);
+<a href=#512 id=512 data-nosnippet>512</a>    <span class="kw">for </span>(k, v) <span class="kw">in </span>entries {
+<a href=#513 id=513 data-nosnippet>513</a>        <span class="kw">let </span>Edn::Keyword(kw) = k <span class="kw">else </span>{
+<a href=#514 id=514 data-nosnippet>514</a>            <span class="kw">continue</span>;
+<a href=#515 id=515 data-nosnippet>515</a>        };
+<a href=#516 id=516 data-nosnippet>516</a>        <span class="kw">let </span>local = edn::keyword_local(kw);
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="comment">// Skip structural / already-handled fields.
+<a href=#518 id=518 data-nosnippet>518</a>        </span><span class="kw">if </span>local == <span class="string">"id" </span>|| local == opts.label_field || local == <span class="string">"content-hash" </span>{
+<a href=#519 id=519 data-nosnippet>519</a>            <span class="kw">continue</span>;
+<a href=#520 id=520 data-nosnippet>520</a>        }
+<a href=#521 id=521 data-nosnippet>521</a>        <span class="comment">// Skip fields that are refs (they become edges).
+<a href=#522 id=522 data-nosnippet>522</a>        </span><span class="kw">if </span>is_ref_field(local, v, opts, known_keys) {
+<a href=#523 id=523 data-nosnippet>523</a>            <span class="kw">continue</span>;
+<a href=#524 id=524 data-nosnippet>524</a>        }
+<a href=#525 id=525 data-nosnippet>525</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(value) = edn_to_property(v) {
+<a href=#526 id=526 data-nosnippet>526</a>            <span class="kw">if </span><span class="macro">matches!</span>(value, PropertyValue::Null) {
+<a href=#527 id=527 data-nosnippet>527</a>                <span class="kw">continue</span>;
+<a href=#528 id=528 data-nosnippet>528</a>            }
+<a href=#529 id=529 data-nosnippet>529</a>            builder = builder
+<a href=#530 id=530 data-nosnippet>530</a>                .try_insert(local, value)
+<a href=#531 id=531 data-nosnippet>531</a>                .map_err(|e| err(e.to_string()))<span class="question-mark">?</span>;
+<a href=#532 id=532 data-nosnippet>532</a>            prop_count += <span class="number">1</span>;
+<a href=#533 id=533 data-nosnippet>533</a>            report.note_mapping(<span class="string">"property"</span>, local, <span class="string">"property"</span>, local);
+<a href=#534 id=534 data-nosnippet>534</a>        }
+<a href=#535 id=535 data-nosnippet>535</a>    }
+<a href=#536 id=536 data-nosnippet>536</a>
+<a href=#537 id=537 data-nosnippet>537</a>    <span class="prelude-val">Ok</span>((label, builder.build(), prop_count))
+<a href=#538 id=538 data-nosnippet>538</a>}
+<a href=#539 id=539 data-nosnippet>539</a>
+<a href=#540 id=540 data-nosnippet>540</a><span class="doccomment">/// Collect ref edges from a doc's ref fields, deduped by (field, target).
+<a href=#541 id=541 data-nosnippet>541</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#542 id=542 data-nosnippet>542</a></span><span class="kw">fn </span>collect_xtdb_refs(
+<a href=#543 id=543 data-nosnippet>543</a>    doc: <span class="kw-2">&amp;</span>Edn,
+<a href=#544 id=544 data-nosnippet>544</a>    opts: <span class="kw-2">&amp;</span>XtdbOptions,
+<a href=#545 id=545 data-nosnippet>545</a>    known_keys: <span class="kw-2">&amp;</span>HashSet&lt;String&gt;,
+<a href=#546 id=546 data-nosnippet>546</a>    valid_from: i64,
+<a href=#547 id=547 data-nosnippet>547</a>    provenance: <span class="kw-2">&amp;</span>Provenance,
+<a href=#548 id=548 data-nosnippet>548</a>    ref_edges: <span class="kw-2">&amp;mut </span>Vec&lt;PreparedRefEdge&gt;,
+<a href=#549 id=549 data-nosnippet>549</a>    seen_refs: <span class="kw-2">&amp;mut </span>HashSet&lt;(String, String)&gt;,
+<a href=#550 id=550 data-nosnippet>550</a>    report: <span class="kw-2">&amp;mut </span>ImportFidelityReport,
+<a href=#551 id=551 data-nosnippet>551</a>) {
+<a href=#552 id=552 data-nosnippet>552</a>    <span class="kw">let </span>entries = doc.as_map().unwrap_or(<span class="kw-2">&amp;</span>[]);
+<a href=#553 id=553 data-nosnippet>553</a>    <span class="kw">for </span>(k, v) <span class="kw">in </span>entries {
+<a href=#554 id=554 data-nosnippet>554</a>        <span class="kw">let </span>Edn::Keyword(kw) = k <span class="kw">else </span>{
+<a href=#555 id=555 data-nosnippet>555</a>            <span class="kw">continue</span>;
+<a href=#556 id=556 data-nosnippet>556</a>        };
+<a href=#557 id=557 data-nosnippet>557</a>        <span class="kw">let </span>local = edn::keyword_local(kw);
+<a href=#558 id=558 data-nosnippet>558</a>        <span class="kw">if </span>local == <span class="string">"id" </span>|| local == opts.label_field || local == <span class="string">"content-hash" </span>{
+<a href=#559 id=559 data-nosnippet>559</a>            <span class="kw">continue</span>;
+<a href=#560 id=560 data-nosnippet>560</a>        }
+<a href=#561 id=561 data-nosnippet>561</a>        <span class="kw">let </span>edge_label = opts
+<a href=#562 id=562 data-nosnippet>562</a>            .ref_fields
+<a href=#563 id=563 data-nosnippet>563</a>            .get(local)
+<a href=#564 id=564 data-nosnippet>564</a>            .cloned()
+<a href=#565 id=565 data-nosnippet>565</a>            .unwrap_or_else(|| screaming_snake(local));
+<a href=#566 id=566 data-nosnippet>566</a>
+<a href=#567 id=567 data-nosnippet>567</a>        <span class="kw">for </span>(target_key, resolves) <span class="kw">in </span>field_ref_targets(local, v, opts, known_keys) {
+<a href=#568 id=568 data-nosnippet>568</a>            <span class="kw">if </span>!resolves {
+<a href=#569 id=569 data-nosnippet>569</a>                report.note_coerced(<span class="string">"unresolved_ref"</span>, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{local} -&gt; {target_key}"</span>));
+<a href=#570 id=570 data-nosnippet>570</a>            }
+<a href=#571 id=571 data-nosnippet>571</a>            <span class="kw">let </span>dedup_key = (local.to_string(), target_key.clone());
+<a href=#572 id=572 data-nosnippet>572</a>            <span class="kw">if </span>!seen_refs.insert(dedup_key) {
+<a href=#573 id=573 data-nosnippet>573</a>                <span class="kw">continue</span>;
+<a href=#574 id=574 data-nosnippet>574</a>            }
+<a href=#575 id=575 data-nosnippet>575</a>            report.note_coerced(<span class="string">"ref_to_edge"</span>, local);
+<a href=#576 id=576 data-nosnippet>576</a>            ref_edges.push(PreparedRefEdge {
+<a href=#577 id=577 data-nosnippet>577</a>                target_key,
+<a href=#578 id=578 data-nosnippet>578</a>                label: edge_label.clone(),
+<a href=#579 id=579 data-nosnippet>579</a>                source_field: local.to_string(),
+<a href=#580 id=580 data-nosnippet>580</a>                valid_from: Timestamp::from(valid_from),
+<a href=#581 id=581 data-nosnippet>581</a>                provenance: <span class="prelude-val">Some</span>(provenance.clone()),
+<a href=#582 id=582 data-nosnippet>582</a>                retract_at: <span class="prelude-val">None</span>,
+<a href=#583 id=583 data-nosnippet>583</a>            });
+<a href=#584 id=584 data-nosnippet>584</a>        }
+<a href=#585 id=585 data-nosnippet>585</a>    }
+<a href=#586 id=586 data-nosnippet>586</a>}
+<a href=#587 id=587 data-nosnippet>587</a>
+<a href=#588 id=588 data-nosnippet>588</a><span class="doccomment">/// Extract epoch micros from an `#inst` value.
+<a href=#589 id=589 data-nosnippet>589</a></span><span class="kw">fn </span>inst_micros(v: <span class="kw-2">&amp;</span>Edn) -&gt; <span class="prelude-ty">Option</span>&lt;i64&gt; {
+<a href=#590 id=590 data-nosnippet>590</a>    <span class="kw">match </span>v {
+<a href=#591 id=591 data-nosnippet>591</a>        Edn::Inst(m) =&gt; <span class="prelude-val">Some</span>(<span class="kw-2">*</span>m),
+<a href=#592 id=592 data-nosnippet>592</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#593 id=593 data-nosnippet>593</a>    }
+<a href=#594 id=594 data-nosnippet>594</a>}
+<a href=#595 id=595 data-nosnippet>595</a>
+<a href=#596 id=596 data-nosnippet>596</a><span class="doccomment">/// Extract an i64 from an EDN int.
+<a href=#597 id=597 data-nosnippet>597</a></span><span class="kw">fn </span>as_int(v: <span class="kw-2">&amp;</span>Edn) -&gt; <span class="prelude-ty">Option</span>&lt;i64&gt; {
+<a href=#598 id=598 data-nosnippet>598</a>    <span class="kw">match </span>v {
+<a href=#599 id=599 data-nosnippet>599</a>        Edn::Int(i) =&gt; <span class="prelude-val">Some</span>(<span class="kw-2">*</span>i),
+<a href=#600 id=600 data-nosnippet>600</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#601 id=601 data-nosnippet>601</a>    }
+<a href=#602 id=602 data-nosnippet>602</a>}
+</code></pre></div></section></main></body></html>

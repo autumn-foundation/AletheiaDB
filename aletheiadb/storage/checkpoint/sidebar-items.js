@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_ZSTD_LEVEL","MAX_ZSTD_LEVEL","MIN_ZSTD_LEVEL"],"struct":["CheckpointConfig","CheckpointManager","CheckpointStats","RecoveryResult"]};

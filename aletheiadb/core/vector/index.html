@@ -1,0 +1,73 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Vector utilities for AletheiaDB."><title>aletheiadb::core::vector - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module vector</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module vector</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#usage" title="Usage">Usage</a></li><li><a href="#design-notes" title="Design Notes">Design Notes</a></li><li><a href="#type-safety" title="Type Safety">Type Safety</a></li><li><a href="#implemented-functions" title="Implemented Functions">Implemented Functions</a></li><li><a href="#future-additions" title="Future Additions">Future Additions</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">core</a></div><h1>Module <span>vector</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/core/vector/mod.rs.html#1-126">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Vector utilities for AletheiaDB.</p>
+<p>This module provides types and functions for working with dense vectors
+(embeddings) used in semantic search and similarity operations.</p>
+<h2 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h2>
+<p>AletheiaDB supports storing vectors as property values on nodes via
+<a href="../property/value/enum.PropertyValue.html#variant.Vector" title="variant aletheiadb::core::property::value::PropertyValue::Vector"><code>crate::core::PropertyValue::Vector</code></a>. This module provides the utilities needed
+to work with those vectors effectively:</p>
+<ul>
+<li><strong>Type definitions</strong>: <a href="types/struct.VectorDimension.html" title="struct aletheiadb::core::vector::types::VectorDimension"><code>VectorDimension</code></a> for expressing vector sizes</li>
+<li><strong>Similarity functions</strong>: <a href="ops/fn.cosine_similarity.html" title="fn aletheiadb::core::vector::ops::cosine_similarity"><code>cosine_similarity</code></a>, <a href="ops/fn.cosine_similarity_normalized.html" title="fn aletheiadb::core::vector::ops::cosine_similarity_normalized"><code>cosine_similarity_normalized</code></a></li>
+<li><strong>Distance functions</strong>: <a href="ops/fn.euclidean_distance.html" title="fn aletheiadb::core::vector::ops::euclidean_distance"><code>euclidean_distance</code></a>, <a href="ops/fn.squared_euclidean_distance.html" title="fn aletheiadb::core::vector::ops::squared_euclidean_distance"><code>squared_euclidean_distance</code></a></li>
+<li><strong>Inner product</strong>: <a href="ops/fn.dot_product.html" title="fn aletheiadb::core::vector::ops::dot_product"><code>dot_product</code></a> for pre-normalized vectors or projections</li>
+<li><strong>Normalization</strong>: <a href="ops/fn.magnitude.html" title="fn aletheiadb::core::vector::ops::magnitude"><code>magnitude</code></a>, <a href="ops/fn.squared_magnitude.html" title="fn aletheiadb::core::vector::ops::squared_magnitude"><code>squared_magnitude</code></a>, <a href="ops/fn.normalize.html" title="fn aletheiadb::core::vector::ops::normalize"><code>normalize</code></a>, <a href="ops/fn.normalize_in_place.html" title="fn aletheiadb::core::vector::ops::normalize_in_place"><code>normalize_in_place</code></a>, <a href="ops/fn.is_normalized.html" title="fn aletheiadb::core::vector::ops::is_normalized"><code>is_normalized</code></a></li>
+<li><strong>Validation</strong>: <a href="validation/fn.validate_vector.html" title="fn aletheiadb::core::vector::validation::validate_vector"><code>validate_vector</code></a>, <a href="validation/fn.check_dimensions_match.html" title="fn aletheiadb::core::vector::validation::check_dimensions_match"><code>check_dimensions_match</code></a> for NaN/Inf detection and dimension checking</li>
+</ul>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::core::vector::VectorDimension;
+<span class="kw">use </span>aletheiadb::core::PropertyValue;
+
+<span class="comment">// Create a vector property
+</span><span class="kw">let </span>embedding: Vec&lt;f32&gt; = <span class="macro">vec!</span>[<span class="number">0.1</span>, <span class="number">0.2</span>, <span class="number">0.3</span>, <span class="number">0.4</span>];
+<span class="kw">let </span>dim = VectorDimension::new(embedding.len());
+<span class="kw">let </span>prop = PropertyValue::vector(embedding);
+
+<span class="comment">// Access the vector
+</span><span class="kw">if let </span><span class="prelude-val">Some</span>(vec) = prop.as_vector() {
+    <span class="macro">assert_eq!</span>(vec.len(), dim.as_usize());
+}</code></pre></div><h2 id="design-notes"><a class="doc-anchor" href="#design-notes">§</a>Design Notes</h2>
+<p>Vectors in AletheiaDB are stored as <code>Arc&lt;[f32]&gt;</code> within <a href="../property/value/enum.PropertyValue.html#variant.Vector" title="variant aletheiadb::core::property::value::PropertyValue::Vector"><code>crate::core::PropertyValue::Vector</code></a>.
+This design enables:</p>
+<ul>
+<li><strong>Efficient cloning</strong>: Multiple versions can share the same vector data</li>
+<li><strong>Memory efficiency</strong>: f32 provides good precision with half the memory of f64</li>
+<li><strong>Temporal compatibility</strong>: Unchanged vectors across versions share storage</li>
+</ul>
+<p>For similarity computations, vectors should typically be L2-normalized to enable
+fast cosine similarity via dot product.</p>
+<h2 id="type-safety"><a class="doc-anchor" href="#type-safety">§</a>Type Safety</h2>
+<p><a href="types/struct.VectorDimension.html" title="struct aletheiadb::core::vector::types::VectorDimension"><code>VectorDimension</code></a> is implemented as a newtype struct rather than a type alias.
+This provides stronger type safety by preventing accidental interchange with
+other <code>usize</code> values (e.g., byte counts, array indices).</p>
+<h2 id="implemented-functions"><a class="doc-anchor" href="#implemented-functions">§</a>Implemented Functions</h2>
+<ul>
+<li><strong><a href="ops/fn.cosine_similarity.html" title="fn aletheiadb::core::vector::ops::cosine_similarity"><code>cosine_similarity</code></a></strong>: Measures angle between vectors, range <code>[-1, 1]</code></li>
+<li><strong><a href="ops/fn.cosine_similarity_normalized.html" title="fn aletheiadb::core::vector::ops::cosine_similarity_normalized"><code>cosine_similarity_normalized</code></a></strong>: Optimized for pre-normalized (unit) vectors</li>
+<li><strong><a href="ops/fn.euclidean_distance.html" title="fn aletheiadb::core::vector::ops::euclidean_distance"><code>euclidean_distance</code></a></strong>: L2 distance between vectors</li>
+<li><strong><a href="ops/fn.squared_euclidean_distance.html" title="fn aletheiadb::core::vector::ops::squared_euclidean_distance"><code>squared_euclidean_distance</code></a></strong>: Squared L2 distance (faster for comparisons)</li>
+<li><strong><a href="ops/fn.dot_product.html" title="fn aletheiadb::core::vector::ops::dot_product"><code>dot_product</code></a></strong>: Inner product, useful for pre-normalized vectors</li>
+<li><strong><a href="ops/fn.magnitude.html" title="fn aletheiadb::core::vector::ops::magnitude"><code>magnitude</code></a></strong>: L2 norm of a vector</li>
+<li><strong><a href="ops/fn.squared_magnitude.html" title="fn aletheiadb::core::vector::ops::squared_magnitude"><code>squared_magnitude</code></a></strong>: Squared L2 norm (faster for comparisons)</li>
+<li><strong><a href="ops/fn.normalize.html" title="fn aletheiadb::core::vector::ops::normalize"><code>normalize</code></a></strong>: Returns new unit vector with magnitude 1.0</li>
+<li><strong><a href="ops/fn.normalize_in_place.html" title="fn aletheiadb::core::vector::ops::normalize_in_place"><code>normalize_in_place</code></a></strong>: Normalizes vector in place</li>
+<li><strong><a href="ops/fn.is_normalized.html" title="fn aletheiadb::core::vector::ops::is_normalized"><code>is_normalized</code></a></strong>: Checks if vector has unit magnitude</li>
+</ul>
+<p>All functions use SIMD acceleration via the <code>simsimd</code> crate when the
+<code>simsimd</code> feature is enabled (x86 AVX2/AVX-512 and ARM NEON/SVE, selected at
+runtime), and a portable scalar fallback otherwise (Issue #426).</p>
+<h2 id="future-additions"><a class="doc-anchor" href="#future-additions">§</a>Future Additions</h2>
+<p>This module will be expanded to include:</p>
+<ul>
+<li>Manhattan distance</li>
+<li>Dimension validation helpers</li>
+<li>Sparse vector support</li>
+</ul>
+<p>See <code>docs/VECTOR_SEARCH_DESIGN.md</code> for the complete design.</p>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt><code>pub use <a class="mod" href="constants/index.html" title="mod aletheiadb::core::vector::constants">constants</a>::*;</code></dt><dt><code>pub use <a class="mod" href="metric/index.html" title="mod aletheiadb::core::vector::metric">metric</a>::*;</code></dt><dt><code>pub use <a class="mod" href="ops/index.html" title="mod aletheiadb::core::vector::ops">ops</a>::*;</code></dt><dt><code>pub use <a class="mod" href="serialization/index.html" title="mod aletheiadb::core::vector::serialization">serialization</a>::*;</code></dt><dt><code>pub use <a class="mod" href="sparse/index.html" title="mod aletheiadb::core::vector::sparse">sparse</a>::*;</code></dt><dt><code>pub use <a class="mod" href="types/index.html" title="mod aletheiadb::core::vector::types">types</a>::*;</code></dt><dt><code>pub use <a class="mod" href="validation/index.html" title="mod aletheiadb::core::vector::validation">validation</a>::*;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="constants/index.html" title="mod aletheiadb::core::vector::constants">constants</a></dt><dd>Constants and thresholds.
+Defines global constants and limits used in vector math and indexing.</dd><dt><a class="mod" href="metric/index.html" title="mod aletheiadb::core::vector::metric">metric</a></dt><dd>Distance metrics for vector comparison.
+Defines distance metrics (e.g., Cosine, Euclidean) for vector comparisons.</dd><dt><a class="mod" href="ops/index.html" title="mod aletheiadb::core::vector::ops">ops</a></dt><dd>High-level vector operations (similarity, normalization, etc.).
+General arithmetic operations and transformations for vectors.</dd><dt><a class="mod" href="serialization/index.html" title="mod aletheiadb::core::vector::serialization">serialization</a></dt><dd>Serialization utilities for vectors.
+Serialization utilities for vector properties.</dd><dt><a class="mod" href="sparse/index.html" title="mod aletheiadb::core::vector::sparse">sparse</a></dt><dd>Sparse vector implementation.
+Implements sparse vector structures and operations.</dd><dt><a class="mod" href="types/index.html" title="mod aletheiadb::core::vector::types">types</a></dt><dd>Type definitions for vector dimensions.
+Defines core vector types and type aliases used in vector search.</dd><dt><a class="mod" href="validation/index.html" title="mod aletheiadb::core::vector::validation">validation</a></dt><dd>Validation utilities for vectors.
+Utility functions for validating vector dimensionality and normalization.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["cost","physical","rules","stats"],"struct":["QueryPlanner"]};

@@ -1,0 +1,55 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Sharded vector index for managing large vector collections."><title>aletheiadb::index::vector::sharded - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module sharded</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module sharded</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#sharding-strategy" title="Sharding Strategy">Sharding Strategy</a></li><li><a href="#important-fixed-shard-count" title="Important: Fixed Shard Count">Important: Fixed Shard Count</a></li><li><a href="#performance-characteristics" title="Performance Characteristics">Performance Characteristics</a></li><li><a href="#examples" title="Examples">Examples</a></li><li><a href="#thread-safety" title="Thread Safety">Thread Safety</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>index::<wbr>vector</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">index</a>::<wbr><a href="../index.html">vector</a></div><h1>Module <span>sharded</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/index/vector/sharded.rs.html#1-1623">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Sharded vector index for managing large vector collections.</p>
+<p>This module provides a sharded implementation of the <code>VectorIndex</code> trait,
+distributing vectors across multiple underlying HNSW indexes for scalability.</p>
+<h2 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h2>
+<p>The <code>ShardedVectorIndex</code> partitions vectors across multiple shards using
+consistent hashing on NodeId. This enables:</p>
+<ul>
+<li><strong>Horizontal scalability</strong>: Handle larger datasets by adding more shards</li>
+<li><strong>Parallel search</strong>: Query all shards concurrently and merge results</li>
+<li><strong>Memory distribution</strong>: Spread memory usage across shards</li>
+</ul>
+<h2 id="sharding-strategy"><a class="doc-anchor" href="#sharding-strategy">§</a>Sharding Strategy</h2>
+<p>Vectors are assigned to shards using hash-based partitioning:</p>
+<div class="example-wrap"><pre class="language-text"><code>shard_index = hash(node_id) % num_shards</code></pre></div>
+<p>This provides even distribution regardless of NodeId patterns.</p>
+<h2 id="important-fixed-shard-count"><a class="doc-anchor" href="#important-fixed-shard-count">§</a>Important: Fixed Shard Count</h2>
+<p>The number of shards is <strong>fixed at construction time</strong> and cannot be changed
+dynamically. This is because hash-based routing depends on the modulo of the
+shard count - changing it would cause existing vectors to be routed to wrong
+shards on lookup.</p>
+<p>To scale to more shards, create a new index with the desired count and
+migrate data.</p>
+<h2 id="performance-characteristics"><a class="doc-anchor" href="#performance-characteristics">§</a>Performance Characteristics</h2>
+<ul>
+<li><strong>Add operation</strong>: Same as single HNSW (~1-10µs per vector)</li>
+<li><strong>Search operation</strong>: Parallel search across shards, merge top-k results</li>
+<li><strong>Memory</strong>: Distributed across shards, ~(dimensions + M) * 4 bytes per vector</li>
+</ul>
+<h2 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::index::vector::sharded::{ShardedVectorIndex, ShardedVectorConfig, ShardingStrategy};
+<span class="kw">use </span>aletheiadb::index::vector::{HnswConfig, DistanceMetric, VectorIndex};
+<span class="kw">use </span>aletheiadb::core::id::NodeId;
+
+<span class="comment">// Create a sharded index with 4 shards
+</span><span class="kw">let </span>config = ShardedVectorConfig::new(<span class="number">4</span>)
+    .with_hnsw_config(HnswConfig::new(<span class="number">384</span>, DistanceMetric::Cosine))
+    .with_strategy(ShardingStrategy::HashBased);
+
+<span class="kw">let </span>index = ShardedVectorIndex::new(config)<span class="question-mark">?</span>;
+
+<span class="comment">// Add vectors - automatically routed to appropriate shard
+</span><span class="kw">let </span>node1 = NodeId::new(<span class="number">1</span>).unwrap();
+<span class="kw">let </span>embedding1 = <span class="macro">vec!</span>[<span class="number">0.1f32</span>; <span class="number">384</span>];
+index.add(node1, <span class="kw-2">&amp;</span>embedding1)<span class="question-mark">?</span>;
+
+<span class="comment">// Search across all shards
+</span><span class="kw">let </span>query = <span class="macro">vec!</span>[<span class="number">0.15f32</span>; <span class="number">384</span>];
+<span class="kw">let </span>results = index.search(<span class="kw-2">&amp;</span>query, <span class="number">10</span>)<span class="question-mark">?</span>;</code></pre></div><h2 id="thread-safety"><a class="doc-anchor" href="#thread-safety">§</a>Thread Safety</h2>
+<p><code>ShardedVectorIndex</code> is fully thread-safe:</p>
+<ul>
+<li>Multiple threads can add vectors simultaneously</li>
+<li>Multiple threads can search simultaneously</li>
+<li>Searches can run concurrently with additions</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.RebalanceConfig.html" title="struct aletheiadb::index::vector::sharded::RebalanceConfig">Rebalance<wbr>Config</a></dt><dd>Configuration for rebalancing shards.</dd><dt><a class="struct" href="struct.ShardStats.html" title="struct aletheiadb::index::vector::sharded::ShardStats">Shard<wbr>Stats</a></dt><dd>Statistics for the sharded index.</dd><dt><a class="struct" href="struct.ShardedVectorConfig.html" title="struct aletheiadb::index::vector::sharded::ShardedVectorConfig">Sharded<wbr>Vector<wbr>Config</a></dt><dd>Configuration for the sharded vector index.</dd><dt><a class="struct" href="struct.ShardedVectorIndex.html" title="struct aletheiadb::index::vector::sharded::ShardedVectorIndex">Sharded<wbr>Vector<wbr>Index</a></dt><dd>A sharded vector index distributing vectors across multiple HNSW indexes.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ShardingStrategy.html" title="enum aletheiadb::index::vector::sharded::ShardingStrategy">Sharding<wbr>Strategy</a></dt><dd>Strategy for assigning vectors to shards.</dd></dl></section></div></main></body></html>

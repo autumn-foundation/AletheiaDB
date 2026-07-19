@@ -1,0 +1,59 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Experimental features (“Nova” playground)."><title>aletheiadb::experimental - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module experimental</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module experimental</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-nova-philosophy-" title="The “Nova” Philosophy 🌟">The “Nova” Philosophy 🌟</a></li><li><a href="#enabling-nova" title="Enabling Nova">Enabling Nova</a></li><li><a href="#categories" title="Categories">Categories</a></li><li><a href="#example-detecting-suspicious-patterns-with-sherlock" title="Example: Detecting Suspicious Patterns with Sherlock">Example: Detecting Suspicious Patterns with Sherlock</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate aletheiadb</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">aletheiadb</a></div><h1>Module <span>experimental</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/aletheiadb/experimental/mod.rs.html#1-108">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Experimental features (“Nova” playground).</p>
+<p>This module hosts experimental features whose APIs are not yet stable.
+Modules are organized into category subfolders, each gated by its own
+feature flag so users can opt into a slice of experimentation rather than
+the whole blob.</p>
+<h2 id="the-nova-philosophy-"><a class="doc-anchor" href="#the-nova-philosophy-">§</a>The “Nova” Philosophy 🌟</h2>
+<p>“Nova” is AletheiaDB’s R&amp;D playground — radical ideas like semantic physics,
+narrative generation, and counterfactual graph analysis live here while we
+validate them.</p>
+<p><strong>These features are:</strong></p>
+<ul>
+<li>🧪 <strong>Experimental</strong>: APIs may change or break without warning.</li>
+<li>🚀 <strong>Innovative</strong>: Cutting-edge features for AI/LLM integration.</li>
+<li>🚩 <strong>Opt-in</strong>: You must explicitly enable them.</li>
+</ul>
+<p>Once a category proves itself, it graduates to a top-level stable feature
+(see <code>crate::semantic_search</code> for the first graduation).</p>
+<h2 id="enabling-nova"><a class="doc-anchor" href="#enabling-nova">§</a>Enabling Nova</h2>
+<p>Flip the umbrella flag to enable every category:</p>
+<div class="example-wrap"><pre class="language-toml"><code>[dependencies]
+aletheiadb = { version = &quot;0.1&quot;, features = [&quot;nova&quot;] }</code></pre></div>
+<p>Or pick a single category:</p>
+<div class="example-wrap"><pre class="language-toml"><code>[dependencies]
+aletheiadb = { version = &quot;0.1&quot;, features = [&quot;semantic-temporal&quot;] }</code></pre></div>
+<blockquote>
+<p>⚠️ <strong>Breaking change in 0.1:</strong> the <code>nova</code> umbrella no longer enables the
+graduated semantic-search cohort. Add <code>"semantic-search"</code> alongside <code>"nova"</code>
+if you want every former-nova module compiled.</p>
+</blockquote>
+<h2 id="categories"><a class="doc-anchor" href="#categories">§</a>Categories</h2><div><table><thead><tr><th>Flag</th><th>What it gates</th><th>Modules</th></tr></thead><tbody>
+<tr><td><code>reasoning</code> (<code>semantic-reasoning</code>)</td><td>Prediction, synthesis, counterfactuals</td><td>prophet, dreamer, omen, oracle, hindsight, muse, luna, metaphor, synergy, chimera, alchemy</td></tr>
+<tr><td><code>temporal</code> (<code>semantic-temporal</code>)</td><td>Bi-temporal + semantic</td><td>sherlock, chronos, echo, kairos, temporal_narrative, temporal_diff, aura, mnemosyne, ariadne</td></tr>
+<tr><td><code>diagnostics</code> (<code>semantic-diagnostics</code>)</td><td>Anomaly, validation, health</td><td>dissonance, sentinel, fossil, tremor, polygraph, wormhole, ripple, entanglement, thermos, paradox</td></tr>
+<tr><td><code>characterization</code> (<code>semantic-characterization</code>)</td><td>Describe concepts + export</td><td>archetype, prism, gravity, sybil, synapse, kaleidoscope, papyrus, graph_context, wildfire</td></tr>
+</tbody></table>
+</div>
+<p>For convenience, every submodule is re-exported at this module’s path —
+existing code using <code>aletheiadb::experimental::sherlock::Sherlock</code> keeps
+working as long as the corresponding category flag is enabled.</p>
+<h2 id="example-detecting-suspicious-patterns-with-sherlock"><a class="doc-anchor" href="#example-detecting-suspicious-patterns-with-sherlock">§</a>Example: Detecting Suspicious Patterns with Sherlock</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::AletheiaDB;
+<span class="kw">use </span>aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
+<span class="kw">use </span>aletheiadb::core::property::PropertyValue;
+<span class="kw">use </span>std::time::Duration;
+
+<span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+
+<span class="kw">let </span>mystery = Mystery::new(Duration::from_secs(<span class="number">1</span>))
+    .add_clue(Clue::PropertyState {
+        key: <span class="string">"status"</span>.to_string(),
+        value: <span class="prelude-val">Some</span>(PropertyValue::from(<span class="string">"LoggedIn"</span>)),
+    })
+    .add_clue(Clue::PropertyState {
+        key: <span class="string">"action"</span>.to_string(),
+        value: <span class="prelude-val">Some</span>(PropertyValue::from(<span class="string">"DeleteFile"</span>)),
+    });
+
+<span class="kw">let </span>sherlock = Sherlock::new(<span class="kw-2">&amp;</span>db);
+<span class="kw">let </span>_detections = sherlock.investigate(node_id, <span class="kw-2">&amp;</span>mystery)<span class="question-mark">?</span>;</code></pre></div></div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt><code>pub use <a class="mod" href="reasoning/index.html" title="mod aletheiadb::experimental::reasoning">reasoning</a>::*;</code></dt><dt><code>pub use <a class="mod" href="temporal/index.html" title="mod aletheiadb::experimental::temporal">temporal</a>::*;</code></dt><dt><code>pub use <a class="mod" href="diagnostics/index.html" title="mod aletheiadb::experimental::diagnostics">diagnostics</a>::*;</code></dt><dt><code>pub use <a class="mod" href="characterization/index.html" title="mod aletheiadb::experimental::characterization">characterization</a>::*;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="characterization/index.html" title="mod aletheiadb::experimental::characterization">characterization</a></dt><dd>Characterization: describe concepts + LLM/visualization export.</dd><dt><a class="mod" href="diagnostics/index.html" title="mod aletheiadb::experimental::diagnostics">diagnostics</a></dt><dd>Diagnostics: anomaly detection, validation, health monitoring.</dd><dt><a class="mod" href="reasoning/index.html" title="mod aletheiadb::experimental::reasoning">reasoning</a></dt><dd>Reasoning: prediction, synthesis, counterfactual simulation.</dd><dt><a class="mod" href="temporal/index.html" title="mod aletheiadb::experimental::temporal">temporal</a></dt><dd>Temporal: bi-temporal + semantic analysis.</dd></dl></section></div></main></body></html>

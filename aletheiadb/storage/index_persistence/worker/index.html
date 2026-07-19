@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Background persistence worker thread. Background persistence worker."><title>aletheiadb::storage::index_persistence::worker - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module worker</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module worker</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#responsibilities" title="Responsibilities">Responsibilities</a></li><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#persistence-loop" title="Persistence Loop">Persistence Loop</a></li><li><a href="#crash-safety" title="Crash Safety">Crash Safety</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>storage::<wbr>index_<wbr>persistence</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">index_persistence</a></div><h1>Module <span>worker</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/storage/index_persistence/worker.rs.html#1-720">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Background persistence worker thread.
+Background persistence worker.</p>
+<p>This module manages the background thread responsible for automatic index persistence.
+It implements the persistence loop, policy checking, and crash safety mechanisms.</p>
+<h2 id="responsibilities"><a class="doc-anchor" href="#responsibilities">§</a>Responsibilities</h2>
+<ul>
+<li><strong>Policy Enforcement</strong>: Monitors mutation counts and time elapsed for each index type.</li>
+<li><strong>Automatic Triggering</strong>: Executes persistence operations when thresholds are met.</li>
+<li><strong>Graceful Shutdown</strong>: Ensures all indexes are saved one last time on shutdown.</li>
+<li><strong>Crash Safety</strong>: Isolates persistence failures from the main application thread.</li>
+</ul>
+<h2 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h2><div class="example-wrap"><pre class="language-text"><code>┌──────────────────────┐
+│  PersistenceTracker  │◄───────┐
+│ (Mutation Counters)  │        │ Checks
+└──────────────────────┘        │ Counters
+                                │
+┌──────────────────────┐   ┌────┴────────────┐
+│   Main Thread        │   │ Background      │
+│ (Writes/Mutations)   │   │ Persistence     │
+└──────────────────────┘   │ Worker Thread   │
+                           └────┬────────────┘
+                                │
+                                │ Triggers
+                                │ Save
+                                ▼
+                       ┌──────────────────────┐
+                       │ Operations Module    │
+                       │ (persist_*_index)    │
+                       └──────────────────────┘</code></pre></div><h2 id="persistence-loop"><a class="doc-anchor" href="#persistence-loop">§</a>Persistence Loop</h2>
+<p>The worker thread runs in a loop with a 1-second sleep interval. In each iteration:</p>
+<ol>
+<li>Checks for shutdown signal.</li>
+<li>Evaluates policies for each index type (vector, graph, temporal, strings).</li>
+<li>If a threshold is met (mutations or time), triggers persistence for that index.</li>
+<li>Logs any errors but continues running (unless it panics).</li>
+</ol>
+<h2 id="crash-safety"><a class="doc-anchor" href="#crash-safety">§</a>Crash Safety</h2>
+<p>The entire worker loop is wrapped in <code>std::panic::catch_unwind</code>. If the persistence
+logic panics (e.g., due to a bug or memory corruption):</p>
+<ol>
+<li>The panic is caught and logged to stderr.</li>
+<li>The <code>stopped_flag</code> is set to <code>true</code>.</li>
+<li>The main application continues running, but automatic persistence stops.</li>
+<li>Users are warned via stderr that persistence has failed.</li>
+</ol>
+<p>This ensures that a bug in the persistence layer doesn’t crash the database.</p>
+</div></details></section></div></main></body></html>

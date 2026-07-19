@@ -1,0 +1,27 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Serialization logic for WAL entries."><title>aletheiadb::storage::wal::serialization - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module serialization</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module serialization</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-a-custom-format" title="Why a Custom Format?">Why a Custom Format?</a></li><li><a href="#binary-layout" title="Binary Layout">Binary Layout</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>storage::<wbr>wal</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">wal</a></div><h1>Module <span>serialization</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/storage/wal/serialization.rs.html#1-1353">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Serialization logic for WAL entries.</p>
+<p>This module implements a highly optimized, zero-allocation binary format
+specifically designed for the Write-Ahead Log (WAL).</p>
+<h2 id="why-a-custom-format"><a class="doc-anchor" href="#why-a-custom-format">§</a>Why a Custom Format?</h2>
+<p>AletheiaDB requires extreme write throughput (~100K+ writes/sec). General-purpose
+serialization formats like JSON, Bincode, or Protobuf introduce unacceptable
+overhead due to intermediate allocations, schema encoding, or lack of
+precise capacity prediction.</p>
+<p>By using a custom, tightly packed byte-level format, we achieve:</p>
+<ol>
+<li><strong>Zero-Allocation Hot Paths</strong>: By predicting exact sizes using <code>estimate_entry_capacity</code>,
+we pre-allocate a single buffer and stream bytes directly into it via <code>serialize_operation_into</code>.
+This prevents heap fragmentation under heavy write load.</li>
+<li><strong>Ring Buffer Compatibility</strong>: The fixed-size headers and predictable payloads
+allow us to write directly into the memory-mapped <code>RingBuffer</code> used by the
+concurrent WAL system.</li>
+<li><strong>Built-in Integrity</strong>: Every record is suffixed with a CRC32 checksum over its
+contents (including the <code>LSN</code> and <code>Timestamp</code>). This guarantees that partial
+writes or disk corruption are detected during recovery before they can corrupt
+the database state.</li>
+</ol>
+<h2 id="binary-layout"><a class="doc-anchor" href="#binary-layout">§</a>Binary Layout</h2>
+<p>Every WAL entry has a fixed 24-byte overhead, followed by a variable-length payload:</p>
+<p><code>[LSN: 8 bytes] [Timestamp: 12 bytes] [Checksum: 4 bytes] [Payload: ...]</code></p>
+<p>The Payload always begins with a 1-byte Operation Tag (e.g., <code>OP_CREATE_NODE</code>),
+followed by the specific fields for that operation.</p>
+</div></details></section></div></main></body></html>

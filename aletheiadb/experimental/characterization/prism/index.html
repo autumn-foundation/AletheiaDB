@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Prism: Semantic Spectroscopy for Vectors."><title>aletheiadb::experimental::characterization::prism - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module prism</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module prism</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#use-cases" title="Use Cases">Use Cases</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>experimental::<wbr>characterization</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">experimental</a>::<wbr><a href="../index.html">characterization</a></div><h1>Module <span>prism</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/experimental/characterization/prism.rs.html#1-545">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Prism: Semantic Spectroscopy for Vectors.</p>
+<p>“Unbox the Black Box.”</p>
+<p>The Prism decomposes a vector embedding into named semantic components (facets).
+It allows you to understand <em>why</em> a vector is positioned where it is by projecting
+it onto a set of user-defined axes (concepts).</p>
+<h2 id="use-cases"><a class="doc-anchor" href="#use-cases">§</a>Use Cases</h2>
+<ul>
+<li><strong>Explainability</strong>: Why did the search retrieve this? “It’s 80% ‘Sci-Fi’ and 20% ‘Romance’.”</li>
+<li><strong>Debugging</strong>: Detect if a vector has drifted into an unwanted semantic region (e.g., “NSFW”).</li>
+<li><strong>Filtering</strong>: “Show me nodes that are high in ‘Innovation’ but low in ‘Risk’.”</li>
+</ul>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::AletheiaDB;
+<span class="kw">use </span>aletheiadb::experimental::prism::Prism;
+<span class="kw">use </span>aletheiadb::core::property::PropertyMapBuilder;
+
+<span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+
+<span class="comment">// Create dummy nodes for the example
+</span><span class="kw">let </span>props = PropertyMapBuilder::new().insert_vector(<span class="string">"embedding"</span>, <span class="kw-2">&amp;</span>[<span class="number">1.0</span>, <span class="number">0.0</span>]).build();
+<span class="kw">let </span>tech_node_id = db.create_node(<span class="string">"Concept"</span>, props)<span class="question-mark">?</span>;
+
+<span class="kw">let </span>props = PropertyMapBuilder::new().insert_vector(<span class="string">"embedding"</span>, <span class="kw-2">&amp;</span>[<span class="number">0.0</span>, <span class="number">1.0</span>]).build();
+<span class="kw">let </span>magic_node_id = db.create_node(<span class="string">"Concept"</span>, props)<span class="question-mark">?</span>;
+
+<span class="kw">let </span>props = PropertyMapBuilder::new().insert_vector(<span class="string">"embedding"</span>, <span class="kw-2">&amp;</span>[<span class="number">0.5</span>, <span class="number">0.5</span>]).build();
+<span class="kw">let </span>target_node_id = db.create_node(<span class="string">"Target"</span>, props)<span class="question-mark">?</span>;
+
+<span class="kw">let </span><span class="kw-2">mut </span>prism = Prism::new(<span class="kw-2">&amp;</span>db).with_vector_property(<span class="string">"embedding"</span>);
+
+<span class="comment">// Define the "lens"
+</span>prism.add_axis_from_node(<span class="string">"Tech"</span>, tech_node_id)<span class="question-mark">?</span>;
+prism.add_axis_from_node(<span class="string">"Magic"</span>, magic_node_id)<span class="question-mark">?</span>;
+
+<span class="comment">// Analyze a target
+</span><span class="kw">let </span>spectrum = prism.analyze_node(target_node_id)<span class="question-mark">?</span>;
+
+<span class="macro">println!</span>(<span class="string">"Tech: {:.2}"</span>, spectrum.get(<span class="string">"Tech"</span>).unwrap_or(<span class="kw-2">&amp;</span><span class="number">0.0</span>));
+<span class="macro">println!</span>(<span class="string">"Magic: {:.2}"</span>, spectrum.get(<span class="string">"Magic"</span>).unwrap_or(<span class="kw-2">&amp;</span><span class="number">0.0</span>));</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.EvolutionPoint.html" title="struct aletheiadb::experimental::characterization::prism::EvolutionPoint">Evolution<wbr>Point</a></dt><dd>A point in the semantic evolution of a node.</dd><dt><a class="struct" href="struct.Prism.html" title="struct aletheiadb::experimental::characterization::prism::Prism">Prism</a></dt><dd>The Prism engine for vector decomposition.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["LinearPropagation","Sybil"],"trait":["PropagationModel"],"type":["PropagationState"]};

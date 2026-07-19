@@ -1,0 +1,51 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Parse an AQL query string with parameters and convert it to a Query."><title>parse_query_with_params in aletheiadb::query::converter - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">parse_query_with_params</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">parse_<wbr>query_<wbr>with_<wbr>params</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#arguments" title="Arguments">Arguments</a></li><li><a href="#returns" title="Returns">Returns</a></li><li><a href="#example" title="Example">Example</a></li><li><a href="#parameter-types" title="Parameter Types">Parameter Types</a></li><li><a href="#errors" title="Errors">Errors</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In aletheiadb::<wbr>query::<wbr>converter</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">query</a>::<wbr><a href="index.html">converter</a></div><h1>Function <span class="fn">parse_<wbr>query_<wbr>with_<wbr>params</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/query/converter.rs.html#2256-2267">Source</a> </span></div><pre class="rust item-decl"><code>pub fn parse_query_with_params(
+    aql: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.str.html">str</a>,
+    params: <a class="struct" href="https://doc.rust-lang.org/1.97.1/std/collections/hash/map/struct.HashMap.html" title="struct std::collections::hash::map::HashMap">HashMap</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.1/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>, <a class="enum" href="enum.ParameterValue.html" title="enum aletheiadb::query::converter::ParameterValue">ParameterValue</a>&gt;,
+) -&gt; <a class="type" href="../../core/error/type.Result.html" title="type aletheiadb::core::error::Result">Result</a>&lt;<a class="struct" href="../builder/struct.Query.html" title="struct aletheiadb::query::builder::Query">Query</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Parse an AQL query string with parameters and convert it to a Query.</p>
+<p>Use this function when your query contains parameter references (<code>$name</code>).
+Parameters allow dynamic values without string concatenation, which:</p>
+<ul>
+<li>Prevents injection vulnerabilities</li>
+<li>Enables query plan caching</li>
+<li>Provides type safety</li>
+</ul>
+<h2 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h2>
+<ul>
+<li><code>aql</code> - An AQL query string with parameter references</li>
+<li><code>params</code> - A map of parameter names to values</li>
+</ul>
+<h2 id="returns"><a class="doc-anchor" href="#returns">§</a>Returns</h2>
+<ul>
+<li><code>Ok(Query)</code> - The converted query with parameters resolved</li>
+<li><code>Err(Error)</code> - Parse error, conversion error, or missing parameter</li>
+</ul>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::query::{parse_query_with_params, ParameterValue};
+<span class="kw">use </span>std::collections::HashMap;
+<span class="kw">use </span>std::sync::Arc;
+
+<span class="comment">// Vector search with embedding parameter
+</span><span class="kw">let </span><span class="kw-2">mut </span>params = HashMap::new();
+params.insert(
+    <span class="string">"embedding"</span>.to_string(),
+    ParameterValue::Embedding(Arc::from([<span class="number">0.1f32</span>, <span class="number">0.2</span>, <span class="number">0.3</span>].as_slice())),
+);
+
+<span class="kw">let </span>query = parse_query_with_params(
+    <span class="string">"SIMILAR TO $embedding LIMIT 10"</span>,
+    params,
+).unwrap();</code></pre></div><h2 id="parameter-types"><a class="doc-anchor" href="#parameter-types">§</a>Parameter Types</h2>
+<p>Different query contexts require different parameter types:</p>
+<div><table><thead><tr><th>Context</th><th>Required Type</th><th>Example</th></tr></thead><tbody>
+<tr><td><code>SIMILAR TO $param</code></td><td><code>Embedding</code></td><td><code>ParameterValue::Embedding(Arc::from(...))</code></td></tr>
+<tr><td><code>FIND SIMILAR TO ($param)</code></td><td><code>NodeId</code></td><td><code>ParameterValue::NodeId(NodeId::new(42)?)</code></td></tr>
+<tr><td><code>WHERE n.prop = $param</code></td><td><code>Value</code></td><td><code>ParameterValue::Value(PredicateValue::Int(21))</code></td></tr>
+</tbody></table>
+</div><h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<p>Returns an error if:</p>
+<ul>
+<li>The AQL string has syntax errors</li>
+<li>A referenced parameter is not in the <code>params</code> map</li>
+<li>A parameter has the wrong type for its context</li>
+</ul>
+</div></details></section></div></main></body></html>

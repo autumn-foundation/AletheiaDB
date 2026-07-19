@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ScoringMethod"],"fn":["hybrid_fusion","reciprocal_rank_fusion"],"struct":["SparseIndexConfig","SparseIndexStats","SparseVectorIndex"]};

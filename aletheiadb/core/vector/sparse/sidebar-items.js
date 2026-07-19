@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["sparse_cosine_similarity","sparse_dot_product","sparse_euclidean_distance","sparse_squared_euclidean_distance"],"struct":["SparseVec"]};

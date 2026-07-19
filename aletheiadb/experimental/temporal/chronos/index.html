@@ -1,0 +1,77 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Chronos: Temporal Graph Analysis &#38; Pathfinding."><title>aletheiadb::experimental::temporal::chronos - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module chronos</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module chronos</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#features" title="Features">Features</a></li><li><a href="#algorithm-path-stability" title="Algorithm: Path Stability">Algorithm: Path Stability</a></li><li><a href="#example-the-time-traveling-detective-" title="Example: The Time-Traveling Detective 🕵️">Example: The Time-Traveling Detective 🕵️</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>experimental::<wbr>temporal</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">aletheiadb</a>::<wbr><a href="../../index.html">experimental</a>::<wbr><a href="../index.html">temporal</a></div><h1>Module <span>chronos</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/aletheiadb/experimental/temporal/chronos.rs.html#1-553">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Chronos: Temporal Graph Analysis &amp; Pathfinding.</p>
+<p>This module implements tools for analyzing the graph’s evolution over time
+and navigating it at specific historical snapshots.</p>
+<h2 id="features"><a class="doc-anchor" href="#features">§</a>Features</h2>
+<ul>
+<li><strong>Snapshot Pathfinding</strong>: Find paths as they existed at a specific point in time
+using BFS on a consistent graph snapshot.</li>
+<li><strong>Volatility Analysis</strong>: Measure how frequently a node changes (updates/sec).</li>
+<li><strong>Path Stability</strong>: Calculate the percentage of time a path remains fully valid
+over a given window by intersecting the validity intervals of all edges.</li>
+</ul>
+<h2 id="algorithm-path-stability"><a class="doc-anchor" href="#algorithm-path-stability">§</a>Algorithm: Path Stability</h2>
+<p>To calculate path stability over a window <code>W</code>:</p>
+<ol>
+<li>For each edge <code>e</code> in the path:
+<ul>
+<li>Retrieve its history.</li>
+<li>Compute the set of valid time intervals <code>I_e</code> where the edge existed within <code>W</code>.</li>
+</ul>
+</li>
+<li>Compute the intersection of all interval sets: <code>I_path = ⋂ I_e</code>.
+<ul>
+<li>This results in a set of disjoint intervals where <em>every</em> edge in the path was valid.</li>
+</ul>
+</li>
+<li>Sum the duration of intervals in <code>I_path</code> and divide by the duration of <code>W</code>.</li>
+</ol>
+<h2 id="example-the-time-traveling-detective-"><a class="doc-anchor" href="#example-the-time-traveling-detective-">§</a>Example: The Time-Traveling Detective 🕵️</h2>
+<blockquote>
+<p>⚠️ <strong>REQUIRES FEATURE ‘NOVA’</strong></p>
+</blockquote>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>aletheiadb::{AletheiaDB, properties, ReadOps, WriteOps, Error};
+<span class="kw">use </span>aletheiadb::core::temporal::time;
+<span class="kw">use </span>aletheiadb::experimental::chronos::Chronos;
+
+<span class="kw">let </span>db = AletheiaDB::new()<span class="question-mark">?</span>;
+
+<span class="comment">// 1. Establish the scene
+</span><span class="kw">let </span>(alice, bob, charlie) = db.write(|tx| {
+    <span class="kw">let </span>a = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Alice" </span>})<span class="question-mark">?</span>;
+    <span class="kw">let </span>b = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Bob" </span>})<span class="question-mark">?</span>;
+    <span class="kw">let </span>c = tx.create_node(<span class="string">"Person"</span>, <span class="macro">properties!</span> { <span class="string">"name" </span>=&gt; <span class="string">"Charlie" </span>})<span class="question-mark">?</span>;
+
+    <span class="comment">// Path: Alice -&gt; Bob -&gt; Charlie
+    </span>tx.create_edge(a, b, <span class="string">"KNOWS"</span>, <span class="macro">properties!</span> {})<span class="question-mark">?</span>;
+    tx.create_edge(b, c, <span class="string">"KNOWS"</span>, <span class="macro">properties!</span> {})<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, Error&gt;((a, b, c))
+})<span class="question-mark">?</span>;
+
+<span class="comment">// Capture the moment "Then" (T1)
+</span><span class="kw">let </span>t1 = time::now();
+
+<span class="comment">// 2. Time passes... The bridge burns
+</span>std::thread::sleep(std::time::Duration::from_millis(<span class="number">10</span>));
+<span class="kw">let </span>t2 = time::now();
+
+db.write(|tx| {
+    <span class="comment">// Delete the link between Bob and Charlie
+    </span><span class="kw">let </span>edges = tx.get_outgoing_edges(bob)<span class="question-mark">?</span>;
+    <span class="kw">for </span>e <span class="kw">in </span>edges { tx.delete_edge(e)<span class="question-mark">?</span>; }
+    <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, Error&gt;(())
+})<span class="question-mark">?</span>;
+
+<span class="comment">// 3. Analyze history with Chronos
+</span><span class="kw">let </span>chronos = Chronos::new(<span class="kw-2">&amp;</span>db);
+
+<span class="comment">// At T2 (present), the path is broken
+</span><span class="kw">let </span>path_now = chronos.find_path_at_time(alice, charlie, time::now(), time::now())<span class="question-mark">?</span>;
+<span class="macro">assert!</span>(path_now.is_none());
+
+<span class="comment">// At T1 (past), the path existed!
+</span><span class="kw">let </span>path_then = chronos.find_path_at_time(alice, charlie, t1, t1)<span class="question-mark">?</span>;
+<span class="macro">assert_eq!</span>(path_then.unwrap(), <span class="macro">vec!</span>[alice, bob, charlie]);
+
+<span class="macro">println!</span>(<span class="string">"🕵️ Chronos confirmed: The connection existed in the past!"</span>);</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Chronos.html" title="struct aletheiadb::experimental::temporal::chronos::Chronos">Chronos</a></dt><dd>The Time Lord of the Graph.
+An experimental engine for advanced temporal analytics.</dd></dl></section></div></main></body></html>

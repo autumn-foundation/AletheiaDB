@@ -1,0 +1,73 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Encrypted → plaintext migration engine — `encryption disable` (Issue #3616 PR4). Encrypted → plaintext migration engine (Issue #3616 PR4)."><title>aletheiadb::db::encryption_disable - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="aletheiadb" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module encryption_disable</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../aletheiadb/index.html">aletheiadb</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module encryption_<wbr>disable</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#migration-ordering-the-crux--the-crash-safe-inverse-of-enable" title="Migration ordering (the crux — the crash-safe inverse of enable)">Migration ordering (the crux — the crash-safe inverse of enable)</a></li><li><a href="#crash-resume" title="Crash resume">Crash resume</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In aletheiadb::<wbr>db</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">aletheiadb</a>::<wbr><a href="../index.html">db</a></div><h1>Module <span>encryption_<wbr>disable</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/aletheiadb/db/encryption_disable.rs.html#1-1414">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Encrypted → plaintext migration engine — <code>encryption disable</code> (Issue #3616 PR4).
+Encrypted → plaintext migration engine (Issue #3616 PR4).</p>
+<p>This is the engine behind <code>aletheia encryption disable</code>: the exact inverse of
+<a href="../encryption_enable/index.html" title="mod aletheiadb::db::encryption_enable"><code>enable_encryption</code></a> — it takes a database that
+is encrypted-at-rest and strips the cipher from every at-rest layer, then flips
+the durable <a href="crate::db::encryption_state"><code>encryption.state</code></a> authority to
+<code>disabled</code> so the <em>next</em> <a href="../struct.AletheiaDB.html#method.open" title="associated function aletheiadb::db::AletheiaDB::open"><code>open()</code></a> comes up plaintext.</p>
+<p>It composes the seams that already landed:</p>
+<ul>
+<li><strong>PR1 (#3657)</strong> — the durable [<code>encryption.state</code>] authority (the migration
+flips it to <code>disabled</code>).</li>
+<li><strong>slice 2 (#3616 PR4)</strong> — the WAL runtime
+<a href="../../storage/wal/concurrent_system/struct.ConcurrentWalSystem.html#method.uninstall_wal_keyring" title="method aletheiadb::storage::wal::concurrent_system::ConcurrentWalSystem::uninstall_wal_keyring"><code>uninstall_wal_keyring</code></a>
+seam that strips a live encrypted WAL to plaintext (<code>Some → None</code>).</li>
+<li><strong>slice 3 (#3616 PR4)</strong> — the
+<a href="crate::storage::index_persistence::reencrypt::unwrap_encrypted_index_dir"><code>unwrap_encrypted_index_dir</code></a>
+and
+<a href="../../storage/redb_cold_storage/struct.RedbColdStorage.html#method.unwrap_encrypted_cold_values" title="method aletheiadb::storage::redb_cold_storage::RedbColdStorage::unwrap_encrypted_cold_values"><code>unwrap_encrypted_cold_values</code></a>
+passes that rewrite <code>AEIX</code> index files / <code>ACV1</code> cold values back to plaintext.</li>
+</ul>
+<h2 id="migration-ordering-the-crux--the-crash-safe-inverse-of-enable"><a class="doc-anchor" href="#migration-ordering-the-crux--the-crash-safe-inverse-of-enable">§</a>Migration ordering (the crux — the crash-safe inverse of enable)</h2>
+<ol>
+<li><strong>Quiesce the background index-persistence thread FIRST</strong> (stop + join),
+while the whole database is still encrypted, so its shutdown final-persist
+is a safe <em>encrypted</em> write into the durable <code>AEIX</code> snapshot.</li>
+<li><strong>Synchronous full persist while STILL ENCRYPTED</strong> — capture all current
+state into the durable (<code>AEIX</code>) index snapshot NOW, so retiring the
+encrypted WAL segments below loses nothing (reopen reconstructs from the
+snapshot, which the index-unwrap pass turns into plaintext).</li>
+<li><strong>Migrate every in-scope at-rest layer</strong>, recording progress as a per-field
+<a href="../rotation/index.html" title="mod aletheiadb::db::rotation"><code>LayerStatus</code></a> in a durable <code>direction=disable</code>
+rotation ledger so a crash mid-migration resumes idempotently:
+<ul>
+<li><strong>WAL</strong> — [<code>uninstall_wal_keyring</code>] (seals the encrypted segment, stores
+<code>None</code>, reopens a fresh plaintext segment), then retire the now-undecryptable
+encrypted segments.</li>
+<li><strong>Index + checkpoint</strong> — an <code>AEIX</code> → plaintext unwrap pass rewrites every
+wrapped index file back to its bare body under the index DEK.</li>
+<li><strong>Cold</strong> — an <code>ACV1</code> → bare unwrap pass rewrites every wrapped cold value
+back to plaintext (only when a cold tier is present).</li>
+</ul>
+</li>
+<li><strong>Flip the [<code>encryption.state</code>] authority to <code>disabled</code> BEFORE clearing the
+ledger.</strong> This binding order is the inverse of enable: the authority MUST
+stay <code>enabled</code> until every encrypted byte is unwrapped, so a mid-disable
+crash reopens under the authority still reading <code>enabled</code> and can DECRYPT the
+remaining ciphertext to finish the migration. The flip to <code>disabled</code> is the
+commit point; a crash between the flip and the clear leaves a still-present
+ledger that <a href="../struct.AletheiaDB.html#method.resume_pending_disable" title="method aletheiadb::db::AletheiaDB::resume_pending_disable"><code>resume_pending_disable</code></a>
+clears on the next <code>open()</code>.</li>
+<li><strong>Clear the ledger.</strong></li>
+</ol>
+<h2 id="crash-resume"><a class="doc-anchor" href="#crash-resume">§</a>Crash resume</h2>
+<p>An interrupted disable has NOT yet flipped the authority, so it still records
+<code>enabled</code> and <code>open()</code> would normally bring every layer up ENCRYPTED. But the
+disable end state is PLAINTEXT, and a live encrypted index manager / cold store
+would re-encrypt over the freshly-unwrapped bytes on the next background
+persist. So <code>db::config</code>, on detecting a pending disable ledger, builds every
+at-rest layer PLAINTEXT (the end state) and threads the recorded key source
+into the transient resume read passes: the pre-replay
+<a href="crate::db::rotation::install_pending_disable_wal_keyring"><code>install_pending_disable_wal_keyring</code></a>
+hook installs the decrypt keyring so the startup replay decrypts the
+still-encrypted WAL segments, and [<code>resume_pending_disable</code>] finishes the WAL
+uninstall + retire and the index/cold unwraps before flipping the authority.</p>
+<p>WAL and index resumes yield a fully-usable session. The COLD layer has one
+sharp edge: the cold store is built with the decrypt keyring so the resume can
+unwrap its <code>ACV1</code> values, but the cold read path decrypts by keyring presence,
+so bare (just-unwrapped) values are unreadable through that keyring’d store —
+the disable durably completes (values bare, authority <code>disabled</code>, ledger
+cleared) but a crashed disable WITH a cold tier wants <strong>one more reopen</strong> for
+cold reads to work (the next <code>open()</code> builds a plaintext cold store). See
+<a href="../struct.AletheiaDB.html#method.resume_pending_disable_cold" title="method aletheiadb::db::AletheiaDB::resume_pending_disable_cold"><code>resume_pending_disable_cold</code></a>.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DisableReport.html" title="struct aletheiadb::db::encryption_disable::DisableReport">Disable<wbr>Report</a></dt><dd>Outcome of a completed encrypted → plaintext disable migration.</dd></dl></section></div></main></body></html>

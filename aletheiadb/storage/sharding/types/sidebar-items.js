@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_SHARD_ID"],"enum":["ShardStatus"],"struct":["RemoteEdgeRef","RemoteNodeRef","ShardId","ShardMetrics","ShardState"]};

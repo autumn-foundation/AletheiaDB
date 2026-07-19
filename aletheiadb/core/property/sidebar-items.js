@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_ARRAY_ELEMENTS","MAX_PROPERTY_MAP_CAPACITY","MAX_RECURSION_DEPTH","TAG_ARRAY","TAG_BOOL","TAG_BYTES","TAG_FLOAT","TAG_INT","TAG_NULL","TAG_STRING"],"mod":["map","value"],"type":["PropertyKey"]};
