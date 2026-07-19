@@ -429,6 +429,13 @@ fn classify_storage_error(e: &StorageError) -> (McpErrorCode, bool) {
         StorageError::IndexKeyringAlreadyInstalled { .. } => {
             (McpErrorCode::FailedPrecondition, false)
         }
+        // Enabling encryption on an already-encrypted cold tier is a caller
+        // precondition failure, not an internal fault (Issue #3708) — the
+        // cold-tier mirror of the WAL/index already-installed rejections,
+        // likewise non-retriable.
+        StorageError::ColdKeyringAlreadyInstalled { .. } => {
+            (McpErrorCode::FailedPrecondition, false)
+        }
         // A per-principal changefeed quota breach (Issue #3678) is a transient
         // fairness limit: another of this principal's subscriptions may drop, so
         // retrying with backoff can succeed → RESOURCE_EXHAUSTED, retriable.
