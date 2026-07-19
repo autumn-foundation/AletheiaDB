@@ -151,6 +151,30 @@ impl McpError {
         self
     }
 
+    /// Merge a single `key`/`value` into the existing `error.details` object,
+    /// preserving any structured details already present (e.g. the
+    /// `{resource, current, limit}` a `from_db_error` capacity error carries).
+    ///
+    /// If no details object exists yet — or the existing details is not a JSON
+    /// object — a fresh single-key object is created. This is the additive
+    /// counterpart to [`Self::details`] (which replaces): call sites that need
+    /// to enrich a classified error with call-site metadata (e.g. the batch
+    /// surface's `failed_op_index`) use this so the classifier's own details are
+    /// not clobbered.
+    pub fn with_detail(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        match &mut self.details {
+            Some(serde_json::Value::Object(map)) => {
+                map.insert(key.into(), value);
+            }
+            _ => {
+                let mut map = serde_json::Map::new();
+                map.insert(key.into(), value);
+                self.details = Some(serde_json::Value::Object(map));
+            }
+        }
+        self
+    }
+
     /// Replace the message (e.g. to add call-site context around the
     /// classified error's own text) without changing the classification.
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
