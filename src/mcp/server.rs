@@ -7893,13 +7893,6 @@ impl AletheiaMcpServer {
         self.handle_lineage_query(args, false)
     }
 
-    /// Handle the `audit_export` tool (Issue #3358).
-    ///
-    /// Produces a signed, offline-verifiable evidence artifact of an entity's
-    /// complete bi-temporal history. The Ed25519 signing key is operator-
-    /// provided out of band via the `ALETHEIADB_AUDIT_SIGNING_KEY` environment
-    /// variable (a 32-byte hex seed); the secret is never returned or logged —
-    /// only the public key travels in the artifact.
     // ========================================================================
     // Belief-revision audit (Issue #3362)
     //
@@ -8096,6 +8089,13 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Handle the `audit_export` tool (Issue #3358).
+    ///
+    /// Produces a signed, offline-verifiable evidence artifact of an entity's
+    /// complete bi-temporal history. The Ed25519 signing key is operator-
+    /// provided out of band via the `ALETHEIADB_AUDIT_SIGNING_KEY` environment
+    /// variable (a 32-byte hex seed); the secret is never returned or logged —
+    /// only the public key travels in the artifact.
     fn handle_audit_export(&self, args: serde_json::Value) -> CallToolResult {
         use crate::audit::{AuditScope, AuditSigningKey, ExportOptions, SIGNING_KEY_ENV};
 
