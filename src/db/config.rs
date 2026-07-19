@@ -1329,6 +1329,13 @@ impl AletheiaDB {
                 crate::db::schema_constraint::load_sidecar(path, &db.constraint_registry);
             }
 
+            // Drift monitors (Issue #3367): if the sidecar was quarantined at
+            // open, reseed `next_id` above any orphaned `__drift_alarm` node's
+            // `monitor_id` now that index/WAL load has made alarm nodes
+            // queryable, so reused ids cannot collide (robustness MINOR-4).
+            #[cfg(feature = "semantic-temporal")]
+            db.reseed_drift_registry_after_quarantine();
+
             Ok(db)
         })();
         result.record_error_metric()

@@ -470,7 +470,10 @@ pub fn evaluate_monitor(
     // The past comparison anchor is the transaction-time coordinate
     // `now - window`; `e_past` is the embedding on record then (see the
     // reconstruction-dimension note above), read at the current valid coord.
-    let window_micros = i128::from(monitor.spec.window.as_micros() as i64);
+    // Checked conversion (robustness MINOR-5): `Duration::as_micros()` is `u128`;
+    // an out-of-range window saturates to `i128::MAX` rather than wrapping to a
+    // negative value that would invert the lookback window.
+    let window_micros = i128::try_from(monitor.spec.window.as_micros()).unwrap_or(i128::MAX);
     let now_wall = i128::from(now.wallclock());
     let past_wall = now_wall.saturating_sub(window_micros);
     let past_tx = Timestamp::new(clamp_micros(past_wall), 0).unwrap_or_else(|_| Timestamp::from(0));
@@ -700,12 +703,15 @@ fn metric_token(metric: DriftMetric) -> &'static str {
     }
 }
 
-/// Parse a [`DriftMetric`] token; unknown tokens fall back to `Cosine`.
-fn metric_from_token(token: &str) -> DriftMetric {
+/// Parse a [`DriftMetric`] token. An unrecognized token returns `None` (the
+/// caller skips the record/monitor rather than silently coercing a
+/// forward-version or bit-flipped token to a default — robustness MINOR-7).
+fn metric_from_token(token: &str) -> Option<DriftMetric> {
     match token {
-        "euclidean" => DriftMetric::Euclidean,
-        "angular" => DriftMetric::Angular,
-        _ => DriftMetric::Cosine,
+        "cosine" => Some(DriftMetric::Cosine),
+        "euclidean" => Some(DriftMetric::Euclidean),
+        "angular" => Some(DriftMetric::Angular),
+        _ => None,
     }
 }
 
@@ -717,6 +723,14 @@ pub(crate) struct DriftMonitorRegistry {
     next_id: AtomicU64,
     persist_path: Option<std::path::PathBuf>,
     save_lock: parking_lot::Mutex<()>,
+    /// Per-monitor evaluation locks that serialize `evaluate_drift_monitor_now`
+    /// for one monitor id, closing the TOCTOU double-fire window between the
+    /// unresolved-alarm query and the alarm-node create (concurrency MAJOR-1).
+    eval_locks: parking_lot::Mutex<std::collections::HashMap<u64, Arc<parking_lot::Mutex<()>>>>,
+    /// Set when [`open`](Self::open) quarantined a corrupt sidecar, so a
+    /// post-load pass can reseed `next_id` above any orphaned alarm's
+    /// `monitor_id` before ids are reused (robustness MINOR-4).
+    quarantined: AtomicBool,
 }
 
 /// serde envelope for the sidecar. Foreign types (`DriftMetric`, `NodeId`,
@@ -761,6 +775,8 @@ impl DriftMonitorRegistry {
             next_id: AtomicU64::new(1),
             persist_path: None,
             save_lock: parking_lot::Mutex::new(()),
+            eval_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            quarantined: AtomicBool::new(false),
         }
     }
 
@@ -774,6 +790,8 @@ impl DriftMonitorRegistry {
             next_id: AtomicU64::new(1),
             persist_path: path.clone(),
             save_lock: parking_lot::Mutex::new(()),
+            eval_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            quarantined: AtomicBool::new(false),
         };
         #[cfg(feature = "serde")]
         if let Some(path) = path {
@@ -788,12 +806,22 @@ impl DriftMonitorRegistry {
                                 entries.insert(monitor.id.get(), monitor);
                             }
                         }
-                        registry.next_id.store(max_id + 1, Ordering::SeqCst);
+                        // NIT-8: `saturating_add` guards the (unreachable)
+                        // u64::MAX-monitors edge from a debug panic / release wrap.
+                        registry
+                            .next_id
+                            .store(max_id.saturating_add(1), Ordering::SeqCst);
                     }
-                    _ => quarantine(&path),
+                    _ => {
+                        quarantine(&path);
+                        registry.quarantined.store(true, Ordering::SeqCst);
+                    }
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => quarantine(&path),
+                Err(_) => {
+                    quarantine(&path);
+                    registry.quarantined.store(true, Ordering::SeqCst);
+                }
             }
         }
         Ok(registry)
@@ -844,7 +872,37 @@ impl DriftMonitorRegistry {
             self.entries.write().insert(id.get(), removed);
             return Err(e);
         }
+        // Drop the per-monitor evaluation lock; a future id reuse starts fresh.
+        self.eval_locks.lock().remove(&id.get());
         Ok(())
+    }
+
+    /// The per-monitor evaluation lock (created on first use), serializing
+    /// `evaluate_drift_monitor_now` for one monitor id (concurrency MAJOR-1).
+    /// A leaf lock: acquired only by the evaluation entry point, never from the
+    /// write path, so it adds no edge to the documented lock-acquisition order.
+    pub(crate) fn eval_lock(&self, id: MonitorId) -> Arc<parking_lot::Mutex<()>> {
+        let mut locks = self.eval_locks.lock();
+        Arc::clone(
+            locks
+                .entry(id.get())
+                .or_insert_with(|| Arc::new(parking_lot::Mutex::new(()))),
+        )
+    }
+
+    /// Whether [`open`](Self::open) quarantined a corrupt sidecar this session.
+    pub(crate) fn was_quarantined(&self) -> bool {
+        self.quarantined.load(Ordering::SeqCst)
+    }
+
+    /// Raise `next_id` above `max_monitor_id` (monotonic, idempotent) and clear
+    /// the quarantined flag. Used after a corrupt-sidecar quarantine so a reused
+    /// id cannot collide with an orphaned alarm's `monitor_id` (robustness
+    /// MINOR-4). `saturating_add` (NIT-8).
+    pub(crate) fn ensure_next_id_above(&self, max_monitor_id: u64) {
+        self.next_id
+            .fetch_max(max_monitor_id.saturating_add(1), Ordering::SeqCst);
+        self.quarantined.store(false, Ordering::SeqCst);
     }
 
     /// Durable-write body, assuming `save_lock` is held. No-op when no path.
@@ -911,7 +969,9 @@ fn monitor_to_persisted(monitor: &DriftMonitor) -> PersistedMonitor {
         EvalMode::OnWrite => (monitor.spec.target.as_str().to_string(), None),
         EvalMode::Scheduled { interval } => (
             monitor.spec.target.as_str().to_string(),
-            Some(interval.as_micros() as u64),
+            // Checked conversion: an out-of-range interval saturates rather than
+            // wrapping to a bogus (possibly tiny) value (robustness MINOR-5).
+            Some(u64::try_from(interval.as_micros()).unwrap_or(u64::MAX)),
         ),
     };
     PersistedMonitor {
@@ -925,7 +985,10 @@ fn monitor_to_persisted(monitor: &DriftMonitor) -> PersistedMonitor {
             .map(|e| e.iter().map(|n| n.as_u64()).collect()),
         metric: metric_token(monitor.spec.metric).to_string(),
         threshold: monitor.spec.threshold,
-        window_micros: monitor.spec.window.as_micros() as u64,
+        // Checked conversion (robustness MINOR-5): an out-of-range window
+        // saturates rather than wrapping. `create_drift_monitor` already rejects
+        // windows exceeding `i64::MAX` micros, so this only guards forged input.
+        window_micros: u64::try_from(monitor.spec.window.as_micros()).unwrap_or(u64::MAX),
         target,
         scheduled_interval_micros,
         created_wallclock: monitor.created_at.wallclock(),
@@ -935,9 +998,12 @@ fn monitor_to_persisted(monitor: &DriftMonitor) -> PersistedMonitor {
 
 #[cfg(feature = "serde")]
 fn persisted_to_monitor(pm: PersistedMonitor) -> Option<DriftMonitor> {
+    // An unrecognized target/metric token skips the monitor rather than
+    // silently coercing to a default (robustness MINOR-7).
     let target = match pm.target.as_str() {
+        "per_entity" => DriftTarget::PerEntity,
         "label_centroid" => DriftTarget::LabelCentroid,
-        _ => DriftTarget::PerEntity,
+        _ => return None,
     };
     let mode = match pm.scheduled_interval_micros {
         Some(micros) => EvalMode::Scheduled {
@@ -957,7 +1023,7 @@ fn persisted_to_monitor(pm: PersistedMonitor) -> Option<DriftMonitor> {
             property_key: pm.property_key,
             label: pm.label,
             entities,
-            metric: metric_from_token(&pm.metric),
+            metric: metric_from_token(&pm.metric)?,
             threshold: pm.threshold,
             window: Duration::from_micros(pm.window_micros),
             target,
@@ -1134,17 +1200,27 @@ impl DriftAlarmEngine {
     ///
     /// Fails if the changefeed subscription cannot be established.
     pub fn start(&self) -> Result<()> {
-        let mut state = self.state.lock();
-        if state.running.is_some() {
-            return Ok(());
+        // Fast idempotency check under a short-lived guard: an already-running
+        // engine is a no-op. We release `state` immediately so the DB calls below
+        // (list + subscribe) do NOT run while holding `state` — keeping `state`
+        // the pure leaf its type doc claims (concurrency MINOR-1).
+        {
+            let state = self.state.lock();
+            if state.running.is_some() {
+                return Ok(());
+            }
         }
 
-        // Snapshot the monitor set: partition on-write (changefeed-driven) from
-        // scheduled (ticker-driven).
+        // Snapshot the monitor set WITHOUT holding `state`. Partition on-write
+        // (changefeed-driven) from scheduled (ticker-driven). Entity-scoped
+        // (unlabeled) on-write monitors are indexed by watched node id so the
+        // dispatcher enqueues them only for their own entities (concurrency
+        // MINOR-3), and a label-less entity-less monitor is inert (skipped).
         let monitors = self.db.list_drift_monitors();
         let mut labeled_on_write: std::collections::HashMap<String, Vec<MonitorId>> =
             std::collections::HashMap::new();
-        let mut unlabeled_on_write: Vec<MonitorId> = Vec::new();
+        let mut entity_on_write: std::collections::HashMap<u64, Vec<MonitorId>> =
+            std::collections::HashMap::new();
         let mut scheduled: Vec<(MonitorId, Duration)> = Vec::new();
         for monitor in &monitors {
             match monitor.spec.mode {
@@ -1153,7 +1229,18 @@ impl DriftAlarmEngine {
                         .entry(label.clone())
                         .or_default()
                         .push(monitor.id),
-                    None => unlabeled_on_write.push(monitor.id),
+                    None => {
+                        if let Some(entities) = &monitor.spec.entities {
+                            for nid in entities {
+                                entity_on_write
+                                    .entry(nid.as_u64())
+                                    .or_default()
+                                    .push(monitor.id);
+                            }
+                        }
+                        // label = None AND entities = None is inert (no entity
+                        // set to evaluate); it is intentionally not dispatched.
+                    }
                 },
                 EvalMode::Scheduled { interval } => {
                     if !interval.is_zero() {
@@ -1163,38 +1250,55 @@ impl DriftAlarmEngine {
             }
         }
 
+        // Establish the subscription (a DB call) BEFORE taking `state`.
+        let has_on_write = !labeled_on_write.is_empty() || !entity_on_write.is_empty();
+        let subscription_setup = if has_on_write {
+            // If any on-write monitor is entity-scoped (no label), we cannot
+            // restrict the subscription by label — subscribe to all node changes
+            // and filter in the dispatcher. Otherwise restrict to the watched
+            // labels (the reserved alarm label is never among them, so alarm
+            // materialization never reaches this subscription).
+            let filter = if entity_on_write.is_empty() {
+                let labels: Vec<String> = labeled_on_write.keys().cloned().collect();
+                crate::core::changefeed_subscription::ChangeFilter::all().with_node_labels(labels)
+            } else {
+                crate::core::changefeed_subscription::ChangeFilter::all()
+            };
+            let subscription = self.db.subscribe_changes(filter.clone())?;
+            Some((filter, subscription))
+        } else {
+            None
+        };
+
+        // Publish handles under `state`, re-checking `running` for a start/start
+        // race. On a lost race, drop the just-made subscription (deregistering
+        // it) and return.
+        let mut state = self.state.lock();
+        if state.running.is_some() {
+            return Ok(());
+        }
+
         let running = Arc::new(AtomicBool::new(true));
         // Bounded evaluation queue: `try_send` never blocks the producer; a full
         // queue yields `TrySendError::Full`, which the producers count as a shed.
         let (tx, rx) = std::sync::mpsc::sync_channel::<MonitorId>(self.capacity);
         let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
-        // Dispatcher: only needed if there is at least one on-write monitor.
-        let has_on_write = !labeled_on_write.is_empty() || !unlabeled_on_write.is_empty();
-        if has_on_write {
-            // If any on-write monitor is entity-scoped (no label), we cannot
-            // restrict the subscription by label — subscribe to all node changes
-            // and filter in the dispatcher. Otherwise restrict to the watched
-            // labels (the reserved alarm label is never among them, so alarm
-            // materialization never reaches this subscription).
-            let filter = if unlabeled_on_write.is_empty() {
-                let labels: Vec<String> = labeled_on_write.keys().cloned().collect();
-                crate::core::changefeed_subscription::ChangeFilter::all().with_node_labels(labels)
-            } else {
-                crate::core::changefeed_subscription::ChangeFilter::all()
-            };
-            let subscription = self.db.subscribe_changes(filter)?;
+        if let Some((filter, subscription)) = subscription_setup {
+            let dispatcher_db = Arc::clone(&self.db);
             let dispatcher_tx = tx.clone();
             let dispatcher_running = Arc::clone(&running);
             let dispatcher_shed = Arc::clone(&self.shed_count);
             handles.push(std::thread::spawn(move || {
                 dispatcher_loop(
-                    &subscription,
+                    &dispatcher_db,
+                    &filter,
+                    subscription,
                     &dispatcher_tx,
                     &dispatcher_running,
                     &dispatcher_shed,
                     &labeled_on_write,
-                    &unlabeled_on_write,
+                    &entity_on_write,
                 );
             }));
         }
@@ -1221,9 +1325,15 @@ impl DriftAlarmEngine {
                 worker_pause.wait_while_paused();
                 match rx.recv() {
                     // Best-effort: a since-deleted monitor or transient read
-                    // error is dropped; the next change/tick re-drives it.
+                    // error is dropped; the next change/tick re-drives it. A
+                    // PANIC inside one evaluation must NOT unwind the worker and
+                    // permanently disconnect the queue (concurrency MINOR-2), so
+                    // each task runs inside `catch_unwind`; a caught panic is
+                    // dropped and the worker continues.
                     Ok(id) => {
-                        let _ = worker_db.evaluate_drift_monitor_now(id);
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _ = worker_db.evaluate_drift_monitor_now(id);
+                        }));
                     }
                     // Every sender dropped (shutdown): exit.
                     Err(_) => break,
@@ -1278,14 +1388,21 @@ impl Drop for DriftAlarmEngine {
 /// Drain the changefeed subscription and enqueue monitor evaluations, shedding
 /// (incrementing `shed`) when the bounded queue is full. Never blocks the
 /// producer side of the queue.
+#[allow(clippy::too_many_arguments)]
 fn dispatcher_loop(
-    subscription: &crate::core::changefeed_subscription::Subscription,
+    db: &Arc<AletheiaDB>,
+    filter: &crate::core::changefeed_subscription::ChangeFilter,
+    mut subscription: crate::core::changefeed_subscription::Subscription,
     tx: &std::sync::mpsc::SyncSender<MonitorId>,
     running: &AtomicBool,
     shed: &AtomicU64,
     labeled: &std::collections::HashMap<String, Vec<MonitorId>>,
-    unlabeled: &[MonitorId],
+    entity_index: &std::collections::HashMap<u64, Vec<MonitorId>>,
 ) {
+    // `running` is loaded `Relaxed` here (and in the ticker) while `stop` stores
+    // it `SeqCst`: this flag guards no other shared data, its visibility is
+    // bounded by the poll interval, and the intentional asymmetry keeps the poll
+    // cheap (NIT-1).
     while running.load(Ordering::Relaxed) {
         match subscription.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
             Ok(records) => {
@@ -1296,23 +1413,39 @@ fn dispatcher_loop(
                     if record.label == DRIFT_ALARM_LABEL {
                         continue;
                     }
+                    // Only NODE changes drive monitor evaluation; skip edges to
+                    // cut queue pressure on the all-node fallback (MINOR-3).
+                    if record.kind != crate::core::changefeed::EntityKind::Node {
+                        continue;
+                    }
                     if let Some(ids) = labeled.get(&record.label) {
                         for &id in ids {
                             enqueue_or_shed(tx, id, shed);
                         }
                     }
-                    for &id in unlabeled {
-                        enqueue_or_shed(tx, id, shed);
+                    // Entity-scoped monitors fire only for their own node ids
+                    // (a record whose id no entity monitor watches is skipped).
+                    if let Some(ids) = entity_index.get(&record.entity_id) {
+                        for &id in ids {
+                            enqueue_or_shed(tx, id, shed);
+                        }
                     }
                 }
             }
             // Timeout with nothing buffered: loop to re-check the shutdown flag.
             Err(crate::core::changefeed_subscription::RecvError::Lagged { .. }) => {
-                // The subscription overflowed (the dispatcher itself never lags in
-                // practice, since enqueue is non-blocking). Nothing more will
-                // arrive on this handle; stop draining. Evaluation for any missed
-                // change is re-driven by the next change or a scheduled tick.
-                break;
+                // The subscription buffer overflowed. Do NOT die — that would
+                // leave the engine `running` but permanently deaf (concurrency
+                // MAJOR-2). Drop the lagged handle and RESUBSCRIBE with a fresh
+                // baseline, then continue. The rebaseline may miss the lagged
+                // events (the documented best-effort / at-least-once contract);
+                // the next matching change or scheduled tick re-drives evaluation.
+                match db.subscribe_changes(filter.clone()) {
+                    Ok(fresh) => subscription = fresh,
+                    // Transient inability to resubscribe (e.g. cap): back off and
+                    // retry while still running.
+                    Err(_) => std::thread::sleep(SHUTDOWN_POLL_INTERVAL),
+                }
             }
         }
         // `recv_timeout` returns `Ok(vec![])` on a plain timeout, so the loop
@@ -1328,6 +1461,8 @@ fn enqueue_or_shed(tx: &std::sync::mpsc::SyncSender<MonitorId>, id: MonitorId, s
     match tx.try_send(id) {
         Ok(()) => {}
         Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            // Relaxed is correct: `shed_count` is a standalone monotonic counter
+            // with no happens-before dependency on other shared data (NIT-2).
             shed.fetch_add(1, Ordering::Relaxed);
         }
         // Worker gone: nothing to do (the loop's `running` check will exit).
@@ -1421,7 +1556,7 @@ fn alarm_from_node(
     let monitor_id = MonitorId::new(prop_int(props, P_MONITOR_ID)? as u64);
     let measured_distance = prop_float(props, P_DISTANCE)? as f32;
     let threshold = prop_float(props, P_THRESHOLD)? as f32;
-    let metric = metric_from_token(&prop_string(props, P_METRIC)?);
+    let metric = metric_from_token(&prop_string(props, P_METRIC)?)?;
     let compared_now = Timestamp::new(
         prop_int(props, P_NOW_WALL)?,
         prop_int(props, P_NOW_LOG).unwrap_or(0) as u32,
@@ -1474,6 +1609,34 @@ impl AletheiaDB {
             return Err(invalid_argument(
                 "window",
                 "window must be a positive duration",
+            ));
+        }
+        // Window must fit `i64` microseconds so the lookback arithmetic and the
+        // durable sidecar conversion never wrap/overflow (AC8 overflow guard).
+        if i64::try_from(spec.window.as_micros()).is_err() {
+            return Err(invalid_argument(
+                "window",
+                "window is too large (exceeds i64::MAX microseconds)",
+            ));
+        }
+        // A label-centroid monitor REQUIRES a label: without one every centroid
+        // firing is `(entity: None, label: None)`, which the suppression match
+        // can never dedup, so the monitor would re-fire on every evaluation
+        // (unbounded `__drift_alarm` node creation). Reject at creation (AC8).
+        if spec.target == DriftTarget::LabelCentroid && spec.label.is_none() {
+            return Err(invalid_argument(
+                "label",
+                "label is required for a label-centroid monitor",
+            ));
+        }
+        // An explicit but EMPTY entity set makes the monitor silently inert
+        // (never fires) with no diagnostic; reject it (AC8).
+        if let Some(entities) = &spec.entities
+            && entities.is_empty()
+        {
+            return Err(invalid_argument(
+                "entities",
+                "explicit entity set must not be empty",
             ));
         }
         // The property must have a temporal vector index; its metric must be
@@ -1552,31 +1715,26 @@ impl AletheiaDB {
     /// `NOT_FOUND` for an unknown monitor; evaluation/persistence errors.
     pub fn evaluate_drift_monitor_now(&self, id: MonitorId) -> Result<Vec<DriftAlarm>> {
         let monitor = self.get_drift_monitor(id)?;
+        // Serialize evaluations of THIS monitor so two concurrent manual /
+        // scheduled calls cannot both observe zero unresolved alarms and both
+        // fire (TOCTOU double-fire, concurrency MAJOR-1). The lock spans the
+        // whole query-unresolved -> persist window. It is a leaf (acquired only
+        // here, never from the write path), so it adds no lock-order edge.
+        let eval_lock = self.drift_monitors.eval_lock(id);
+        let _eval_guard = eval_lock.lock();
+
         let now = crate::core::temporal::time::now();
         let firings = evaluate_monitor(self, &monitor, now)?;
         if firings.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Suppression set: entities / labels with an outstanding unresolved alarm.
-        let existing = self.query_drift_alarms(&DriftAlarmFilter {
-            monitor_id: Some(id),
-            resolved: Some(false),
-            limit: MAX_ALARM_QUERY_LIMIT,
-            ..DriftAlarmFilter::default()
-        })?;
-        let mut unresolved_entities: std::collections::HashSet<u64> =
-            std::collections::HashSet::new();
-        let mut unresolved_labels: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for a in existing {
-            if let Some(e) = a.entity {
-                unresolved_entities.insert(e.as_u64());
-            }
-            if let Some(l) = a.label {
-                unresolved_labels.insert(l);
-            }
-        }
+        // Suppression set: entities / labels with an outstanding unresolved
+        // alarm. This scan is COMPLETE (uncapped) — a monitor with more than
+        // `MAX_ALARM_QUERY_LIMIT` outstanding alarms must still be fully
+        // suppressed (rule 3), so it must not truncate (robustness MAJOR-2).
+        let (mut unresolved_entities, mut unresolved_labels) =
+            self.unresolved_suppression_sets(id)?;
 
         let mut created = Vec::new();
         for firing in firings {
@@ -1599,6 +1757,64 @@ impl AletheiaDB {
             created.push(alarm);
         }
         Ok(created)
+    }
+
+    /// Full (uncapped) scan of the UNRESOLVED alarms for `monitor_id`, returning
+    /// the `(entity ids, labels)` suppression sets. Unlike the capped
+    /// [`query_drift_alarms`](Self::query_drift_alarms), it never truncates, so a
+    /// monitor with more than [`MAX_ALARM_QUERY_LIMIT`] outstanding alarms is
+    /// still fully suppressed (robustness MAJOR-2). Cost is O(total alarm nodes)
+    /// in v1 (alarm nodes are append-only with no per-monitor index yet — a
+    /// documented follow-up), but correctness (no double-fire) takes precedence
+    /// over the scan cost.
+    fn unresolved_suppression_sets(
+        &self,
+        monitor_id: MonitorId,
+    ) -> Result<(
+        std::collections::HashSet<u64>,
+        std::collections::HashSet<String>,
+    )> {
+        let mut entities: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for id in self.scan_nodes_by_label(DRIFT_ALARM_LABEL) {
+            let Ok(node) = self.get_node(id) else {
+                continue;
+            };
+            let Some(alarm) = alarm_from_node(id, &node.properties) else {
+                continue;
+            };
+            if alarm.monitor_id != monitor_id || alarm.resolved {
+                continue;
+            }
+            if let Some(e) = alarm.entity {
+                entities.insert(e.as_u64());
+            }
+            if let Some(l) = alarm.label {
+                labels.insert(l);
+            }
+        }
+        Ok((entities, labels))
+    }
+
+    /// After a corrupt-sidecar quarantine at open, raise the monitor registry's
+    /// `next_id` above any `monitor_id` still stamped on an orphaned
+    /// `__drift_alarm` node, so a reused id cannot collide with the alarms of a
+    /// since-lost monitor (robustness MINOR-4). A no-op unless the sidecar was
+    /// quarantined. Called once after startup index/WAL load, when alarm nodes
+    /// are queryable.
+    pub(crate) fn reseed_drift_registry_after_quarantine(&self) {
+        if !self.drift_monitors.was_quarantined() {
+            return;
+        }
+        let mut max_monitor_id = 0u64;
+        for id in self.scan_nodes_by_label(DRIFT_ALARM_LABEL) {
+            if let Ok(node) = self.get_node(id)
+                && let Some(alarm) = alarm_from_node(id, &node.properties)
+            {
+                max_monitor_id = max_monitor_id.max(alarm.monitor_id.get());
+            }
+        }
+        self.drift_monitors.ensure_next_id_above(max_monitor_id);
     }
 
     /// Materialize one firing as an append-only `__drift_alarm` bi-temporal node
@@ -2021,14 +2237,13 @@ mod tests {
         m
     }
 
-    /// A DB with a Cosine temporal vector index on `"embedding"` (dim `dim`),
+    /// Enable a Cosine temporal vector index on `"embedding"` (dim `dim`),
     /// needed by `create_drift_monitor` for the persistence-path fixtures.
-    fn db_with_index(dim: usize) -> AletheiaDB {
+    fn enable_index(db: &AletheiaDB, dim: usize) {
         use crate::index::vector::temporal::{
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
         use crate::index::vector::{DistanceMetric, HnswConfig};
-        let db = AletheiaDB::new().expect("db");
         let config = TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
             retention_policy: RetentionPolicy::KeepAll,
@@ -2038,7 +2253,34 @@ mod tests {
         };
         db.enable_temporal_vector_index("embedding", config)
             .expect("enable temporal vector index");
+    }
+
+    /// An ephemeral DB with a Cosine temporal vector index on `"embedding"`.
+    fn db_with_index(dim: usize) -> AletheiaDB {
+        let db = AletheiaDB::new().expect("db");
+        enable_index(&db, dim);
         db
+    }
+
+    /// Insert a minimal well-formed `__drift_alarm` node directly (bypassing
+    /// evaluation) so a test can populate many outstanding alarms cheaply.
+    fn insert_raw_alarm(db: &AletheiaDB, monitor_id: u64, entity_id: u64) {
+        let props = PropertyMapBuilder::new()
+            .insert(P_MONITOR_ID, monitor_id as i64)
+            .insert(P_ENTITY_ID, entity_id as i64)
+            .insert(P_DISTANCE, 1.0f64)
+            .insert(P_THRESHOLD, 0.5f64)
+            .insert(P_METRIC, "cosine")
+            .insert(P_NOW_WALL, T0)
+            .insert(P_NOW_LOG, 0i64)
+            .insert(P_PAST_WALL, T0)
+            .insert(P_PAST_LOG, 0i64)
+            .insert(P_RESOLVED, false)
+            .insert(P_FIRED_WALL, T0)
+            .insert(P_FIRED_LOG, 0i64)
+            .build();
+        db.create_node(DRIFT_ALARM_LABEL, props)
+            .expect("insert raw alarm node");
     }
 
     // ---- Distinguishing window fixtures (pure evaluate_monitor) --------------
@@ -2315,6 +2557,24 @@ mod tests {
             alarm.from_version, alarm.to_version,
             "from/to version refs name distinct versions"
         );
+        // Version-ref correctness (review lens 4 #19): the refs name the ACTUAL
+        // endpoint versions, not just "some" version. `to_version` is the node's
+        // current version; `from_version` is the version current at the exact
+        // reconstructed past coordinate `(compared_now valid, compared_past tx)`.
+        let current_v = db.get_node(node).expect("get current").current_version;
+        assert_eq!(
+            alarm.to_version,
+            Some(current_v),
+            "to_version names the current (drifted) version"
+        );
+        let past_node = db
+            .get_node_at_time(node, alarm.compared_now, alarm.compared_past)
+            .expect("reconstruct past endpoint");
+        assert_eq!(
+            alarm.from_version,
+            Some(past_node.current_version),
+            "from_version names the past endpoint version"
+        );
         let queried = db
             .query_drift_alarms(&DriftAlarmFilter::for_monitor(monitor.id))
             .expect("query alarms");
@@ -2544,5 +2804,310 @@ mod tests {
             fired[0].entity.is_none(),
             "label alarm has no single entity"
         );
+    }
+
+    // ---- AC8 validation specificity (robustness review, #18) ----------------
+
+    /// A label-centroid monitor with no label is rejected with the `label`
+    /// parameter (would otherwise re-fire unbounded — robustness MAJOR-1).
+    #[test]
+    fn label_centroid_without_label_is_invalid_argument_label() {
+        let db = db_with_index(4);
+        let spec = DriftMonitorSpec {
+            property_key: "embedding".to_string(),
+            label: None,
+            entities: Some(vec![nid(1)]),
+            metric: DriftMetric::Cosine,
+            threshold: 0.5,
+            window: Duration::from_secs(3600),
+            target: DriftTarget::LabelCentroid,
+            mode: EvalMode::OnWrite,
+        };
+        match db.create_drift_monitor(spec) {
+            Err(Error::Query(QueryError::InvalidParameter { parameter, .. })) => {
+                assert_eq!(
+                    parameter, "label",
+                    "label-centroid requires the `label` param"
+                );
+            }
+            other => panic!("expected InvalidParameter(label), got {other:?}"),
+        }
+    }
+
+    /// An explicit but empty entity set is rejected with the `entities` param.
+    #[test]
+    fn empty_entities_is_invalid_argument_entities() {
+        let db = db_with_index(4);
+        let spec = DriftMonitorSpec {
+            property_key: "embedding".to_string(),
+            label: Some("Doc".to_string()),
+            entities: Some(vec![]),
+            metric: DriftMetric::Cosine,
+            threshold: 0.5,
+            window: Duration::from_secs(3600),
+            target: DriftTarget::PerEntity,
+            mode: EvalMode::OnWrite,
+        };
+        match db.create_drift_monitor(spec) {
+            Err(Error::Query(QueryError::InvalidParameter { parameter, .. })) => {
+                assert_eq!(
+                    parameter, "entities",
+                    "empty entity set rejected on `entities`"
+                );
+            }
+            other => panic!("expected InvalidParameter(entities), got {other:?}"),
+        }
+    }
+
+    /// A window whose microseconds exceed `i64::MAX` is rejected with the
+    /// `window` param (AC8 overflow guard).
+    #[test]
+    fn window_overflow_is_invalid_argument_window() {
+        let db = db_with_index(4);
+        let mut spec = per_entity_monitor_for("Doc", 0.5, 3600).spec;
+        // `Duration::from_secs(u64::MAX).as_micros()` far exceeds `i64::MAX`.
+        spec.window = Duration::from_secs(u64::MAX);
+        match db.create_drift_monitor(spec) {
+            Err(Error::Query(QueryError::InvalidParameter { parameter, .. })) => {
+                assert_eq!(
+                    parameter, "window",
+                    "overflowing window rejected on `window`"
+                );
+            }
+            other => panic!("expected InvalidParameter(window), got {other:?}"),
+        }
+    }
+
+    /// A deleted monitor no longer evaluates: the cadence entry point errors
+    /// `NOT_FOUND` rather than silently firing (#20).
+    #[test]
+    fn deleted_monitor_does_not_evaluate() {
+        let db = db_with_index(4);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create");
+        db.delete_drift_monitor(monitor.id).expect("delete");
+        let err = db
+            .evaluate_drift_monitor_now(monitor.id)
+            .expect_err("deleted monitor must not evaluate");
+        assert!(
+            matches!(err, Error::Storage(_)),
+            "evaluating a deleted monitor is NOT_FOUND, got {err:?}"
+        );
+    }
+
+    // ---- Concurrency: TOCTOU double-fire guard (concurrency MAJOR-1, #16) ----
+
+    /// N threads evaluate the SAME above-threshold monitor at the same simulated
+    /// instant. Without the per-monitor eval lock two could both pass the
+    /// unresolved-alarm check and double-fire; with it, exactly ONE alarm exists.
+    #[test]
+    fn concurrent_evaluate_fires_exactly_one_alarm() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = Arc::new(db_with_index(4));
+        let node = make_node(&db, "Doc", &a);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        let id = monitor.id;
+
+        const THREADS: usize = 8;
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let db = Arc::clone(&db);
+            handles.push(std::thread::spawn(move || {
+                // Each worker thread injects its OWN simulated clock (the clock is
+                // thread-local) at the same evaluation instant, so all see the
+                // same above-threshold drift.
+                let clock = SimulatedClock::new(T0 + 3 * HOUR_US);
+                let _g = clock.inject();
+                let _ = db.evaluate_drift_monitor_now(id);
+            }));
+        }
+        for h in handles {
+            h.join().expect("evaluation thread");
+        }
+        let alarms = db
+            .query_drift_alarms(&DriftAlarmFilter::for_monitor(id))
+            .expect("query");
+        assert_eq!(
+            alarms.len(),
+            1,
+            "exactly one alarm despite {THREADS} concurrent evaluations"
+        );
+    }
+
+    // ---- Suppression is complete beyond the query cap (MAJOR-2, #17) --------
+
+    /// The unresolved-alarm suppression scan must be COMPLETE, not truncated at
+    /// `MAX_ALARM_QUERY_LIMIT`. Populate more outstanding alarms than the cap and
+    /// assert every one appears in the suppression set (so none would re-fire),
+    /// while the capped public query clamps — proving the two paths differ.
+    #[test]
+    fn suppression_is_complete_beyond_query_cap() {
+        let db = AletheiaDB::new().expect("db");
+        let monitor_id = 1u64;
+        let count = MAX_ALARM_QUERY_LIMIT + 5;
+        for e in 0..count as u64 {
+            insert_raw_alarm(&db, monitor_id, e + 1);
+        }
+        let (entities, _labels) = db
+            .unresolved_suppression_sets(MonitorId::new(monitor_id))
+            .expect("suppression scan");
+        assert_eq!(
+            entities.len(),
+            count,
+            "suppression scan is uncapped (not truncated at MAX_ALARM_QUERY_LIMIT)"
+        );
+        let capped = db
+            .query_drift_alarms(&DriftAlarmFilter {
+                resolved: Some(false),
+                limit: MAX_ALARM_QUERY_LIMIT,
+                ..DriftAlarmFilter::for_monitor(MonitorId::new(monitor_id))
+            })
+            .expect("capped query");
+        assert_eq!(
+            capped.len(),
+            MAX_ALARM_QUERY_LIMIT,
+            "the public query clamps to the cap (distinct from the suppression scan)"
+        );
+    }
+
+    // ---- Durability across restart (AC4/AC5, #14) ---------------------------
+
+    /// Monitors reload from the sidecar and fired alarm nodes persist + remain
+    /// queryable/resolvable across a durable reopen from the same data dir.
+    #[test]
+    fn monitors_and_alarms_survive_restart() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+
+        let (monitor_id, alarm_id) = {
+            let db = AletheiaDB::open(&path).expect("open durable db");
+            enable_index(&db, 4);
+            let node = make_node(&db, "Doc", &a);
+            let monitor = db
+                .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+                .expect("create monitor");
+            clock.jump_to(T0 + 2 * HOUR_US);
+            update_vec(&db, node, &b);
+            clock.jump_to(T0 + 3 * HOUR_US);
+            let fired = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+            assert_eq!(fired.len(), 1, "one alarm fires before restart");
+            (monitor.id, fired[0].alarm_id)
+        }; // `db` dropped here, releasing WAL/index locks.
+
+        let db2 = AletheiaDB::open(&path).expect("reopen durable db");
+        let reloaded = db2.get_drift_monitor(monitor_id).expect("monitor reloads");
+        assert_eq!(
+            reloaded.id, monitor_id,
+            "monitor id preserved across restart"
+        );
+        assert!((reloaded.spec.threshold - 0.5).abs() < 1e-6);
+        assert_eq!(reloaded.spec.target, DriftTarget::PerEntity);
+        assert_eq!(reloaded.spec.property_key, "embedding");
+
+        let alarms = db2
+            .query_drift_alarms(&DriftAlarmFilter::for_monitor(monitor_id))
+            .expect("query reloaded alarms");
+        assert!(
+            alarms.iter().any(|x| x.alarm_id == alarm_id && !x.resolved),
+            "the unresolved alarm node persists and is queryable after restart"
+        );
+        let resolved = db2
+            .resolve_drift_alarm(alarm_id)
+            .expect("resolve after restart");
+        assert!(
+            resolved.resolved,
+            "persisted alarm is resolvable after restart"
+        );
+    }
+
+    // ---- Corrupt-sidecar quarantine + next_id reseed (MINOR-4, #15) ---------
+
+    /// A garbage sidecar is quarantined (`*.corrupt`) with an empty registry on
+    /// reopen, and `next_id` is reseeded above any orphaned alarm's `monitor_id`
+    /// so a fresh monitor cannot reuse an id that still labels orphaned alarms.
+    #[test]
+    fn corrupt_sidecar_quarantine_reseeds_next_id() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        let orphan_monitor_id;
+        {
+            let mut clock = SimulatedClock::new(T0);
+            let _g = clock.inject();
+            let db = AletheiaDB::open(&path).expect("open durable db");
+            enable_index(&db, 4);
+            let node = make_node(&db, "Doc", &a);
+            let monitor = db
+                .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+                .expect("create monitor");
+            orphan_monitor_id = monitor.id.get();
+            clock.jump_to(T0 + 2 * HOUR_US);
+            update_vec(&db, node, &b);
+            clock.jump_to(T0 + 3 * HOUR_US);
+            let fired = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+            assert_eq!(fired.len(), 1, "one orphaned alarm exists");
+        } // `db` dropped.
+
+        // Corrupt the sidecar the first session wrote.
+        let sidecar = path.join("indexes").join("drift_monitors.json");
+        std::fs::write(&sidecar, b"{ not valid json ]").expect("write garbage sidecar");
+
+        let db2 = AletheiaDB::open(&path).expect("reopen despite corrupt sidecar");
+        assert!(
+            db2.list_drift_monitors().is_empty(),
+            "corrupt sidecar => empty registry (startup not bricked)"
+        );
+        assert!(
+            path.join("indexes")
+                .join("drift_monitors.json.corrupt")
+                .exists(),
+            "corrupt sidecar quarantined aside"
+        );
+
+        // A newly created monitor must get an id ABOVE the orphaned alarm's id.
+        enable_index(&db2, 4);
+        let fresh = db2
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create fresh monitor");
+        assert!(
+            fresh.id.get() > orphan_monitor_id,
+            "reseeded next_id avoids colliding with orphaned alarm's monitor_id \
+             (orphan={orphan_monitor_id}, fresh={})",
+            fresh.id.get()
+        );
+    }
+
+    // ---- Scheduled cadence smoke + lifecycle (#20) --------------------------
+
+    /// An engine with only a scheduled monitor spawns the ticker (no dispatcher)
+    /// and starts/stops cleanly, including an idempotent restart.
+    #[test]
+    fn scheduled_monitor_engine_starts_and_stops_cleanly() {
+        let db = Arc::new(db_with_index(4));
+        let mut spec = per_entity_monitor_for("Doc", 0.5, 5400).spec;
+        spec.mode = EvalMode::Scheduled {
+            interval: Duration::from_millis(10),
+        };
+        db.create_drift_monitor(spec)
+            .expect("create scheduled monitor");
+        let engine = DriftAlarmEngine::new(Arc::clone(&db));
+        engine.start().expect("start engine (ticker only)");
+        engine.stop();
+        // Idempotent restart works.
+        engine.start().expect("restart engine");
+        engine.stop();
     }
 }
