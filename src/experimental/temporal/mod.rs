@@ -13,6 +13,9 @@ pub mod aura;
 pub mod belief_revision;
 pub mod chronos;
 pub mod echo;
+/// Knowledge half-life analytics: survival analysis over fact volatility —
+/// per-cohort half-lives, per-fact freshness, staleness inventories (Issue #3377).
+pub mod half_life;
 pub mod kairos;
 pub mod mnemosyne;
 pub mod sherlock;
