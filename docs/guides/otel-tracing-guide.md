@@ -20,7 +20,7 @@ all of its call sites do not exist.
 
 ```toml
 # Cargo.toml
-aletheiadb = { version = "0.3", features = ["http-server", "otel"] }
+aletheiadb = { version = "0.2", features = ["http-server", "otel"] }
 ```
 
 Even compiled in, tracing stays **off** until initialized. The HTTP server

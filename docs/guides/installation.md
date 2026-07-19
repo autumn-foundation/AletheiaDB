@@ -19,7 +19,7 @@ Add AletheiaDB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-aletheiadb = "0.3"
+aletheiadb = "0.2"
 ```
 
 This gives you the core database with TOML config support. Feature flags are additive — enable only what you need.

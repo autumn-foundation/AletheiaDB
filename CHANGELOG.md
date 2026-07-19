@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-07-18
+## [0.2.0] - 2026-07-18
 
-First crates.io release since 0.1.1. Version 0.2.0
-was developed on trunk but never published to crates.io; this release ships
-the accumulated work as 0.3.0 (SemVer minor bumps are mandated by the breaking
-changes below; skipping 0.2.0 on crates.io is intentional and allowed). MSRV:
-Rust 1.92, edition 2024. License: MIT OR Apache-2.0.
+First crates.io release since 0.1.1. This release ships the trunk work
+accumulated since 0.1.1 as 0.2.0. Under 0.x SemVer, any breaking public-API
+change forces a minor bump, and there are several (see Breaking changes below),
+so a minor bump off 0.1.x is mandatory. MSRV: Rust 1.92, edition 2024. License:
+MIT OR Apache-2.0.
 
 ### ⚠️ Breaking changes
 

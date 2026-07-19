@@ -17,7 +17,7 @@ Both directions live behind the optional `parquet` feature (off by default, so t
 
 ```toml
 [dependencies]
-aletheiadb = { version = "0.3", features = ["parquet"] }
+aletheiadb = { version = "0.2", features = ["parquet"] }
 ```
 
 The `parquet` feature implies the `import` feature (Issue #3211), whose
