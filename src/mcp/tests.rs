@@ -19969,10 +19969,10 @@ mod namespace_tools_tests {
     }
 
     #[test]
-    fn three_tools_present_in_live_catalog_of_63() {
+    fn three_tools_present_in_live_catalog_of_64() {
         let server = create_test_server();
         let tools = server.list_tools_for_test();
-        assert_eq!(tools.len(), 63, "the live catalog must be exactly 63 tools");
+        assert_eq!(tools.len(), 64, "the live catalog must be exactly 64 tools");
         for name in ["create_namespace", "list_namespaces", "describe_namespace"] {
             assert!(
                 tools.iter().any(|t| t == name),

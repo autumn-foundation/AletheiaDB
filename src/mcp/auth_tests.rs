@@ -1109,26 +1109,26 @@ fn classification_uses_known_classes_only() {
 // 6. Live tool-inventory golden (drift detection for the external mirror)
 //
 // The external `tests/parity_mcp.rs::tool_inventory_golden_is_stable` test can
-// only validate a hardcoded 63-tool constant against itself, because the live
+// only validate a hardcoded 64-tool constant against itself, because the live
 // registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)` and
 // unreachable from an external test crate. This in-crate test closes that gap:
 // it derives the LIVE advertised `(tool_name, access_class)` set from the
-// registry and asserts it equals a hardcoded golden snapshot of the 63 pairs.
+// registry and asserts it equals a hardcoded golden snapshot of the 64 pairs.
 // A tool that is added, removed, renamed, or reclassified FAILS here — the
 // authoritative drift detector the external mirror points back to.
 // ============================================================================
 
 /// AC3 (drift): the LIVE advertised MCP tool inventory — every name paired
 /// with the `AccessClass` the registry assigns it — must equal this hardcoded
-/// golden set of exactly 63 pairs. Adding, dropping, renaming, or
+/// golden set of exactly 64 pairs. Adding, dropping, renaming, or
 /// reclassifying a tool changes the live set and fails this assertion; update
 /// the golden here AND the external mirror (`tests/parity_mcp.rs`) +
 /// `tests/parity/inventory.json` deliberately when that happens.
 #[test]
 fn live_tool_inventory_matches_golden() {
-    /// The 63 `(tool_name, access_class)` pairs the server is expected to
+    /// The 64 `(tool_name, access_class)` pairs the server is expected to
     /// advertise, derived from the current live `TOOL_ACCESS_CLASSES`.
-    const GOLDEN: [(&str, AccessClass); 63] = [
+    const GOLDEN: [(&str, AccessClass); 64] = [
         // Read (45)
         ("get_node", AccessClass::Read),
         ("list_nodes", AccessClass::Read),
@@ -1166,6 +1166,8 @@ fn live_tool_inventory_matches_golden() {
         ("get_edge_at_transaction_time", AccessClass::Read),
         ("get_edge_history", AccessClass::Read),
         ("diff_edge_versions", AccessClass::Read),
+        // Belief-revision audit (Issue #3362).
+        ("get_belief_revisions", AccessClass::Read),
         ("hybrid_query", AccessClass::Read),
         ("query", AccessClass::Read),
         ("get_schema", AccessClass::Read),
@@ -1207,7 +1209,7 @@ fn live_tool_inventory_matches_golden() {
         .iter()
         .map(|(name, class)| ((*name).to_string(), class.to_string()))
         .collect();
-    assert_eq!(golden.len(), 63, "golden must be 63 unique tool names");
+    assert_eq!(golden.len(), 64, "golden must be 64 unique tool names");
 
     // Live set derived from the advertised registry + classification table.
     let server = AletheiaMcpServer::new(db());
@@ -1225,7 +1227,7 @@ fn live_tool_inventory_matches_golden() {
     assert_eq!(
         live, golden,
         "the LIVE advertised MCP tool inventory drifted from the golden \
-         63-pair set — a tool was added, removed, renamed, or reclassified. \
+         64-pair set — a tool was added, removed, renamed, or reclassified. \
          Update GOLDEN here, tests/parity_mcp.rs::TOOL_INVENTORY, and \
          tests/parity/inventory.json deliberately."
     );

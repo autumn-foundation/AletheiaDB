@@ -909,6 +909,21 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
                 move |_| json!({"edge_id": id})
             }
         ),
+        // Belief-revision audit (Issue #3362). The bench build lacks the
+        // `semantic-temporal` feature, so this returns a tolerated
+        // FAILED_PRECONDITION (isError) — present only to satisfy the runtime
+        // registry-completeness assertion, like `semantic__semantic_path`.
+        s!(
+            "temporal__get_belief_revisions",
+            "get_belief_revisions",
+            "temporal",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"entity_kind": "node", "id": id})
+            }
+        ),
         // ---- Traversal depth sweep (AC3) ----
         s!(
             "traverse__depth1",

@@ -7648,6 +7648,202 @@ impl AletheiaMcpServer {
     /// provided out of band via the `ALETHEIADB_AUDIT_SIGNING_KEY` environment
     /// variable (a 32-byte hex seed); the secret is never returned or logged —
     /// only the public key travels in the artifact.
+    // ========================================================================
+    // Belief-revision audit (Issue #3362)
+    //
+    // Advertised unconditionally (Design A). The real handler body lives under
+    // `#[cfg(feature = "semantic-temporal")]`; a `#[cfg(not(...))]` twin returns
+    // a structured `FAILED_PRECONDITION` (mirroring `semantic_search_unavailable`)
+    // so a caller on a build without the feature gets an actionable error rather
+    // than an "unknown tool".
+    // ========================================================================
+
+    /// Structured `FAILED_PRECONDITION` returned by `get_belief_revisions` when
+    /// the `semantic-temporal` feature is not compiled into this build.
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_get_belief_revisions(&self, _args: serde_json::Value) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                "Tool 'get_belief_revisions' requires the `semantic-temporal` feature, which is \
+                 not compiled into this build. Rebuild AletheiaDB with `--features \
+                 semantic-temporal` to enable it."
+                    .to_string(),
+            )
+            .details(json!({
+                "tool": "get_belief_revisions",
+                "required_feature": "semantic-temporal",
+            })),
+        )
+    }
+
+    /// Handle the `get_belief_revisions` tool (Issue #3362): classify an
+    /// entity's stored belief revisions and return the §9 JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_get_belief_revisions(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::core::id::EntityId;
+        use crate::experimental::temporal::belief_revision::RevisionOptions;
+
+        let req: GetBeliefRevisionsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Resolve the entity id (an out-of-range id is a caller fault →
+        // INVALID_ARGUMENT with the bare id-validation message).
+        let entity = match req.entity_kind.as_str() {
+            "node" => match NodeId::new(req.id) {
+                Ok(id) => EntityId::Node(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            "edge" => match EdgeId::new(req.id) {
+                Ok(id) => EntityId::Edge(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            other => {
+                return self.invalid_argument(&format!(
+                    "entity_kind must be 'node' or 'edge', got '{other}'"
+                ));
+            }
+        };
+
+        let mut options = RevisionOptions::new();
+        if let Some(ref key) = req.property_key {
+            options = options.with_property_key(key.clone());
+        }
+        if let Some(ref ts_str) = req.as_of_transaction_time {
+            let ts = match self.parse_timestamp(ts_str) {
+                Ok(t) => t,
+                Err(e) => return self.invalid_argument(&e),
+            };
+            options = options.with_as_of_transaction_time(ts);
+        }
+        if let Some(limit) = req.limit {
+            options = options.with_limit(limit);
+        }
+
+        match self.db.belief_revisions(entity, &options) {
+            Ok(log) => self.success_json(self.belief_revision_log_to_json(&log)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Serialize a [`BeliefRevisionLog`] into the Issue #3362 §9 JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn belief_revision_log_to_json(
+        &self,
+        log: &crate::experimental::temporal::belief_revision::BeliefRevisionLog,
+    ) -> serde_json::Value {
+        use crate::core::id::EntityId;
+
+        let (kind, id) = match log.entity {
+            EntityId::Node(nid) => ("node", nid.as_u64()),
+            EntityId::Edge(eid) => ("edge", eid.as_u64()),
+        };
+
+        let revisions: Vec<serde_json::Value> = log
+            .revisions
+            .iter()
+            .map(|r| self.revision_to_json(r))
+            .collect();
+
+        let confidence_trajectory: Vec<serde_json::Value> = log
+            .revisions
+            .iter()
+            .map(|r| match r.confidence {
+                Some(c) => json!(c),
+                None => serde_json::Value::Null,
+            })
+            .collect();
+
+        json!({
+            "entity": { "kind": kind, "id": id },
+            "property_key": log.property_key,
+            "as_of_transaction_time": log
+                .as_of_transaction_time
+                .map(Self::format_timestamp_rfc3339),
+            "revisions": revisions,
+            "confidence_trajectory": confidence_trajectory,
+            "has_more": log.has_more,
+        })
+    }
+
+    /// Serialize a single [`Revision`] entry (Issue #3362 §9).
+    #[cfg(feature = "semantic-temporal")]
+    fn revision_to_json(
+        &self,
+        rev: &crate::experimental::temporal::belief_revision::Revision,
+    ) -> serde_json::Value {
+        let changes: Vec<serde_json::Value> = rev
+            .changes
+            .iter()
+            .map(|c| {
+                json!({
+                    "key": c.key,
+                    "prior": c.prior.as_ref().map(Self::property_value_to_exported_json),
+                    "new": c.new.as_ref().map(Self::property_value_to_exported_json),
+                })
+            })
+            .collect();
+
+        let provenance = rev.provenance.as_ref().map(|p| {
+            json!({
+                "source": p.source(),
+                "confidence": p.confidence(),
+                "note": p.note(),
+                "correlation_id": p.correlation_id(),
+                "principal": p.principal(),
+            })
+        });
+
+        json!({
+            "version_number": rev.version_number,
+            "version_id": rev.version_id.as_u64(),
+            "transaction_time": Self::format_timestamp_rfc3339(rev.transaction_time),
+            "valid_from": Self::format_timestamp_rfc3339(rev.valid_from),
+            "valid_to": rev.valid_to.map(Self::format_timestamp_rfc3339),
+            "classification": rev.class.as_str(),
+            "changes": changes,
+            "provenance": provenance,
+            "confidence": rev.confidence,
+        })
+    }
+
+    /// Serialize a [`PropertyValue`] into the self-describing tagged shape used
+    /// by belief-revision `changes` (mirrors `audit::model::ExportedValue`:
+    /// `{"type": "...", "value": ...}`), independent of the `audit-export`
+    /// feature so it is available under a bare `semantic-temporal` build.
+    #[cfg(feature = "semantic-temporal")]
+    fn property_value_to_exported_json(value: &PropertyValue) -> serde_json::Value {
+        match value {
+            PropertyValue::Null => json!({ "type": "null" }),
+            PropertyValue::Bool(b) => json!({ "type": "bool", "value": b }),
+            PropertyValue::Int(i) => json!({ "type": "int", "value": i }),
+            PropertyValue::Float(f) => json!({ "type": "float", "value": f.to_string() }),
+            PropertyValue::String(s) => json!({ "type": "string", "value": s.to_string() }),
+            PropertyValue::Bytes(b) => {
+                json!({ "type": "bytes", "hex": crate::core::hex::encode(b) })
+            }
+            PropertyValue::Array(values) => json!({
+                "type": "array",
+                "values": values
+                    .iter()
+                    .map(Self::property_value_to_exported_json)
+                    .collect::<Vec<_>>(),
+            }),
+            PropertyValue::Vector(v) => json!({
+                "type": "vector",
+                "values": v.iter().map(|f| f64::from(*f).to_string()).collect::<Vec<_>>(),
+            }),
+            PropertyValue::SparseVector(sv) => json!({
+                "type": "sparse_vector",
+                "dimension": sv.dimension(),
+                "indices": sv.indices().to_vec(),
+                "values": sv.values().iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
     fn handle_audit_export(&self, args: serde_json::Value) -> CallToolResult {
         use crate::audit::{AuditScope, AuditSigningKey, ExportOptions, SIGNING_KEY_ENV};
 
@@ -9193,6 +9389,10 @@ impl AletheiaMcpServer {
             "get_edge_at_transaction_time" => self.handle_get_edge_at_transaction_time(args),
             "get_edge_history" => self.handle_get_edge_history(args),
             "diff_edge_versions" => self.handle_diff_edge_versions(args),
+            // Belief-revision audit (Issue #3362). Advertised and dispatched
+            // unconditionally (Design A); the handler body gates on the
+            // `semantic-temporal` feature.
+            "get_belief_revisions" => self.handle_get_belief_revisions(args),
             "hybrid_query" => self.handle_hybrid_query(args),
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
@@ -10063,6 +10263,16 @@ fn tool_definitions() -> Vec<Tool> {
             "diff_edge_versions",
             "Compute the difference between two versions of an edge.",
             make_input_schema::<DiffEdgeVersionsRequest>(),
+        ),
+        Tool::new(
+            "get_belief_revisions",
+            "Audit when and why the database changed its mind about a node or edge \
+             (Issue #3362): classify each stored version transition as \
+             initial_assertion / correction / world_change / retraction / reaffirmation, \
+             with the provenance and confidence trajectory. Optionally scope to one \
+             property key or a transaction-time coordinate. Requires the \
+             `semantic-temporal` feature.",
+            make_input_schema::<GetBeliefRevisionsRequest>(),
         ),
         Tool::new(
             "hybrid_query",

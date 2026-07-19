@@ -3,7 +3,7 @@
   "generated_for": "framework port parity harness",
   "totals": {
     "http_routes": 5,
-    "mcp_tools": 63,
+    "mcp_tools": 64,
     "mcp_budgetable_read_tools": 20
   },
   "http": {
@@ -177,6 +177,7 @@
       {"name": "get_edge_at_transaction_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "get_edge_history", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "diff_edge_versions", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
+      {"name": "get_belief_revisions", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
       {"name": "hybrid_query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
       {"name": "query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "tests/parity_mcp.rs::query_over_ceiling_override_is_invalid_argument", "tests/parity_mcp.rs::query_byte_cap_is_resource_exhausted", "tests/parity_mcp.rs::query_row_cap_override_truncates_successfully", "tests/parity_mcp.rs::resource_exhausted_code_is_in_vocabulary"], "resource_limits": "Issue #3368 (MCP lane 4): optional per-call `limits` {timeout_ms, max_result_rows, max_response_bytes} folded against server defaults + operator ceilings. Over-ceiling override -> INVALID_ARGUMENT (kind invalid_params, details{dimension,requested,ceiling}); wall-clock timeout -> RESOURCE_EXHAUSTED (kind runtime_error, retriable:true, details{dimension:wall_clock_timeout,limit}); result-byte cap -> RESOURCE_EXHAUSTED (retriable:false, details{dimension:result_bytes,limit,consumed}); result-row cap -> truncated:true success (#3226). Timeout enforcement bounds the caller's wait via a thread-race without engine-level cancellation (read-only guard runs first, so a discarded query never writes); the raced worker is bounded by QueryLimitsConfig.max_in_flight_queries (default 64, MCP-only; at the cap a timed query is rejected UNAVAILABLE retriable:true with details{reason:in_flight_query_cap,max_in_flight_queries} instead of spawning; a worker that panics -> INTERNAL retriable:false, never a timeout). An equivalent in-flight cap on the HTTP /query worker path (#3446) is a parity follow-up. The result-byte cap is measured incrementally as rows are appended (peak working memory ~= cap) then re-checked exactly on the full serialized response. Composes with #3353 token budget (protective byte cap runs first inside handle_query, budget shaper runs after in dispatch_tool) and the #3360 cursor unsupported_construct. In-process per-dimension termination counters via AletheiaMcpServer::limit_termination_counts(); database_stats integration is a cross-lane storage follow-up."},
       {"name": "get_schema", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},

@@ -114,6 +114,7 @@ endpoints over the shared persisted store (`{data_dir}/auth/keys.json`).
 | `get_edge_at_transaction_time` | read |
 | `get_edge_history` | read |
 | `diff_edge_versions` | read |
+| `get_belief_revisions` | read |
 | `hybrid_query` | read |
 | `query` | read |
 | `get_schema` | read |
