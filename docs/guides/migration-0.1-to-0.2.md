@@ -201,7 +201,7 @@ unaffected).
 
 | Artifact | Written by 0.1.x | 0.2.0 reader accepts | Notes |
 |---|---|---|---|
-| WAL segment | magic `GWAL`, **v1** (unencrypted) | `≤ 14` | v1 accepted; pre-v13 labels are raw interner ids resolved from the restored interner. **Verified at the format level; not exercised end-to-end.** |
+| WAL segment | magic `GWAL`, **v1** (unencrypted) | `≤ 14` | v1 accepted; pre-v13 labels are raw interner ids resolved from the restored interner. End-to-end tested (`tests/compat_0_1_1_datadir.rs`): a **drained** 0.1.x dir opens with full integrity; an **un-drained WAL tail** corrupts labels — drain first (see above). |
 | Index-persistence manifest | **v1** | `≤ 4` | Magic `GGRP`/`GDLT` unchanged; persisted graph structs byte-identical → v1 decodes correctly. **Verified.** |
 | `.albk` backup | **did not exist** in 0.1.x | writes v7, reads v1–v7 | No backup off-ramp for this upgrade; 0.2.0 can produce backups going forward. **Verified.** |
 | Temporal index / cold storage records | (as written) | backward-compatible (`principal: None` for older records) | **Maintainer-asserted; not independently re-verified here.** A 0.1.x embedded user almost certainly has no cold storage (it is manual opt-in). |
