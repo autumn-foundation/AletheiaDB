@@ -1,6 +1,10 @@
 # Knowledge Half-Life Analytics (Issue #3377)
 
-**Status:** Stage A (design + skeleton + red tests). Stage B (green implementation) pending.
+**Status:** Stage B landed (green implementation + tests). The Fix-A
+correctness/validation hardening pass has been applied (property-removal
+lifespan fix, `insufficient_data` freshness fix, as-of clock pinning,
+threshold/option validation, AC8 `CoverageScope` disclosure). Performance work
+(a wired `CohortStatsCache` and the mandated benchmark) is tracked as Fix-B.
 **Feature gate:** `semantic-temporal` (experimental, ADR-0050).
 **Module:** `src/experimental/temporal/half_life.rs`.
 **Prior art built upon:** belief-revision audit (Issue #3362,
@@ -199,8 +203,16 @@ Stage A `todo!()` bodies need no such field.
   the crate; the temporal primitives speak `i64` microseconds
   (`TimeRange::duration_micros() -> Option<i64>`), which the pure estimator
   consumes directly and the surface converts to `Duration`.
-- The censoring primitive is exactly `TimeRange::duration_micros()`: `None`
-  (open interval) → censored, `Some(d)` → completed lifespan of `d` µs.
+- The censoring discriminator is the *terminal* lifespan's open/closed state,
+  which coincides with `TimeRange::duration_micros()` at the terminus (`None`
+  = open = censored). The implementation does **not** apply a naive
+  per-version `duration_micros` rule mid-history: it derives each lifespan from
+  the `classify` oracle (a WorldChange lifespan ends at the *successor's*
+  `valid_from`; a Retraction ends at the closed interval's end; only the final
+  still-open lifespan is right-censored). This is more correct than a
+  per-version rule, because in the append-only model a superseded predecessor
+  keeps an open `[vf, ∞)` interval yet is not censored — its lifespan ends at
+  the successor's `valid_from`.
 
 ---
 
@@ -238,7 +250,7 @@ cohort/threshold, `NOT_FOUND` for an unknown entity in `fact_freshness`), all
 
 ## 10. Risks / edge-cases as tests
 
-| # | Risk / edge case | Test (RED in Stage A) |
+| # | Risk / edge case | Test (green) |
 |---|---|---|
 | 1 | Censoring bias | `km_recovers_planted_half_life_within_tolerance` (≥100 obs, 30% deterministic censoring, ±10%) |
 | 2 | All-censored ≠ insufficient | `all_censored_has_no_median` (median `None`, `insufficient_data == false`) |
@@ -272,18 +284,18 @@ in `tests/half_life_e2e.rs` (gated `all(semantic-temporal, simulation)`).
 | AC5 staleness inventory, threshold (absolute/half-lives), paginated | `StalenessThreshold`, `StalenessPage`, `staleness_inventory`, test 7 |
 | AC6 as-of past transaction time, replayable/pinnable (#3370) | `HalfLifeOptions::as_of_transaction_time`, test 8 |
 | AC7 bounded, capped, truncation flagged, no write-path impact | `max_entities`, `sampled`, tests 9; read-only module |
-| AC8 coverage caveats explicit (hot + restored; cold per #3238) | Module docs + response disclosure (§1, §6 Six-Hats White) |
+| AC8 coverage caveats explicit (hot + restored; cold per #3238) | `CoverageScope { hot_tier, cold_migrated_included }` on `VolatilityStats` and `StalenessPage` (set to hot-only, honestly disclosing cold-tier exclusion, distinct from `sampled`); module docs (§1, §6 Six-Hats White); tests `summarize_discloses_hot_only_coverage` (pure) + `coverage_scope_is_disclosed_on_results` (e2e) |
 | AC9 experimental flag + graduation checklist | `semantic-temporal` gate; graduation per ADR-0050 |
 
 ---
 
 ## 12. Coordinator flags
 
-- **`RevisionClass::classify` visibility:** the classifier is a **module-private
-  free `fn classify(...)`** in `belief_revision.rs` (not `pub`/`pub(crate)`).
-  Stage B must either promote it to `pub(crate)` (a one-line change the #3362
-  owner should sign off) or duplicate the ~5-line precedence rule with a doc
-  cross-reference. `RevisionClass` itself is already `pub`.
+- **`RevisionClass::classify` visibility (resolved):** the classifier was
+  promoted to `pub(crate) fn classify(...)` in `belief_revision.rs` and is now
+  the single source of truth for the terminating-event oracle, reused verbatim
+  by half_life. It remains transitively gated (the whole `temporal` module is
+  gated), so nothing new is exposed with the flag off.
 - **MCP tools are designed, not registered** in Stage A (no tool-registry
   changes; skeleton only). Registration lands in a later stage.
 - **`semantic-temporal` is absent from the CI clippy feature set**
@@ -295,33 +307,32 @@ in `tests/half_life_e2e.rs` (gated `all(semantic-temporal, simulation)`).
 - **#3238 cold-tier caveat:** overall statistics reflect available history (hot +
   restored); cold-migrated versions follow the #3238 coverage-caveat model, and
   the response discloses the window it saw.
-- **Stage B (green implementation) is pending:** all estimator/scan bodies are
-  `todo!()`; this stage is design + compiling skeleton + red tests only.
+- **Stage B (green implementation) landed:** the estimator, cohort scan, and
+  the three accessors are implemented; all pure and e2e tests are green. The
+  Fix-A correctness/validation hardening (property-removal lifespan, freshness
+  `insufficient_data` gating, as-of clock pinning, threshold/option validation,
+  `saturating_sub`, and the AC8 `CoverageScope` disclosure) is folded in.
 
 ---
 
-## 13. Red phase evidence
+## 13. Test evidence (green)
 
-Pure-estimator tests run against the `todo!()` skeleton — all fail, none ignored,
-none passed (asserting the tests are genuinely red, not vacuously green):
+The pure-estimator tests and the gated e2e tests are green against the Stage-B
+implementation plus the Fix-A hardening:
 
 ```
 $ cargo test --features semantic-temporal --lib half_life
+test result: ok. 10 passed; 0 failed
 
-test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 4396 filtered out
-
-failures:
-    experimental::temporal::half_life::tests::all_censored_has_no_median
-    experimental::temporal::half_life::tests::below_floor_is_insufficient_data
-    experimental::temporal::half_life::tests::empty_cohort_is_insufficient_data
-    experimental::temporal::half_life::tests::freshness_survival_probability_reads_curve
-    experimental::temporal::half_life::tests::km_recovers_planted_half_life_within_tolerance
-    experimental::temporal::half_life::tests::median_and_percentiles_over_explicit_curve
-    experimental::temporal::half_life::tests::single_event_curve_drops_to_zero
-    experimental::temporal::half_life::tests::tied_event_times_fold_into_one_step
+$ cargo test --features "semantic-temporal,simulation" --test half_life_e2e
+test result: ok. 17 passed; 0 failed
 ```
 
-Each panics with `not yet implemented: Stage B: …` from a `todo!()` body (e.g.
-`KmCurve::median`, `kaplan_meier`). The e2e tests in `tests/half_life_e2e.rs`
-(gated `all(semantic-temporal, simulation)`) likewise fail on the `todo!()`
-`AletheiaDB` accessors — Stage B turns them green.
+The pure module tests cover the Kaplan–Meier core (median/percentile/IQR ties,
+all-censored vs insufficient, ±10% recovery on synthetic observations) and the
+`summarize` seam (concrete-Duration IQR, AC8 coverage disclosure). The e2e
+tests exercise the real `observations_from_versions` DB path — concrete
+freshness values, ±10% recovery over DB-derived observations, exact HalfLives
+threshold counts, correction/retraction/property-removal lifespan
+classification, and as-of reproducibility across a wall-clock advance
+(the MAJOR-3 guard) — plus the structured error / no-panic paths.
