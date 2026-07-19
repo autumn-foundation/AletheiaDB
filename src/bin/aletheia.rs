@@ -121,7 +121,7 @@ Usage:\n\
   aletheia keys rotate (--new-key <PATH> | --new-env-var <NAME>) | --status | --resume | --cancel\n\
   aletheia encryption status [--key-file PATH | --env-var NAME]\n\
   aletheia encryption verify [--key-file PATH | --env-var NAME]\n\
-  aletheia encryption enable | disable   (in-place migration not yet implemented)"
+  aletheia encryption enable (--key-file PATH | --env-var NAME) | disable"
     );
     // The neo4j-csv import verb is gated behind the `import` feature; only advertise it
     // when it is compiled in.
@@ -229,9 +229,12 @@ Usage:\n\
   encryption status  — Per-layer (WAL/index/checkpoints/cold) encryption status.\n\
   encryption verify  — Prove the configured cipher actually decrypts the database\n\
                        (opens it, replays the WAL, loads index files). PASS/FAIL.\n\
-  encryption enable  — NOT yet supported: in-place plaintext<->encrypted migration\n\
-  encryption disable   needs a full-database migration engine that is not\n\
-                       implemented. Create the DB encrypted from the start instead.\n"
+  encryption enable  — Migrate a plaintext DB to encrypted-at-rest in place\n\
+                       (--key-file/--env-var names the master key). Migrates WAL,\n\
+                       index, checkpoints, and cold storage crash-consistently and\n\
+                       flips the durable authority; the next open comes up encrypted.\n\
+  encryption disable — Migrate an encrypted DB back to plaintext-at-rest in place\n\
+                       (inverse of enable; sources the current key from the config).\n"
     );
 }
 
@@ -786,7 +789,8 @@ fn handle_encryption(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("status") => encryption_status(&args[1..]),
         Some("verify") => encryption_verify(&args[1..]),
-        Some(cmd @ ("enable" | "disable")) => encryption_enable_disable(cmd),
+        Some("enable") => encryption_enable(&args[1..]),
+        Some("disable") => encryption_disable(&args[1..]),
         Some(sub) => Err(format!(
             "unknown encryption subcommand '{sub}'\n{}",
             encryption_usage()
@@ -802,8 +806,8 @@ fn handle_encryption(args: Vec<String>) -> Result<(), String> {
 fn encryption_usage() -> String {
     "  encryption status  [--key-file PATH | --env-var NAME]   Per-layer encryption status\n\
      \x20 encryption verify                                       Verify the configured DB's encrypted data decrypts\n\
-     \x20 encryption enable                                       (not yet supported — see below)\n\
-     \x20 encryption disable                                      (not yet supported — see below)"
+     \x20 encryption enable  (--key-file PATH | --env-var NAME)   Migrate a plaintext DB to encrypted-at-rest\n\
+     \x20 encryption disable                                      Migrate an encrypted DB back to plaintext-at-rest"
         .to_string()
 }
 
@@ -1006,25 +1010,142 @@ fn rotation_status_not_enabled(e: &aletheiadb::Error) -> bool {
     )
 }
 
-/// `encryption enable` / `encryption disable` — HONESTLY unimplemented.
+/// `encryption enable` — migrate a plaintext database to encrypted-at-rest in
+/// place (Issue #3616 PR3 / #3700), driving the shipped
+/// [`AletheiaDB::enable_encryption`](aletheiadb::AletheiaDB::enable_encryption)
+/// migration engine.
 ///
-/// Converting a database between plaintext and encrypted-at-rest in place
-/// requires a full-database migration engine (re-writing every WAL segment,
-/// checkpoint, index file, and cold-storage entry through/around the cipher,
-/// crash-consistently). No such engine exists on trunk today (the shipped
-/// rotation engine, Issue #488, only re-keys *already-encrypted* index files
-/// between generations). Rather than fake success or silently corrupt data,
-/// this returns a specific, non-zero error naming the missing engine.
-fn encryption_enable_disable(which: &str) -> Result<(), String> {
-    Err(format!(
-        "encryption {which} is not supported: switching a database between plaintext and \
-         encrypted-at-rest in place requires a full-database migration engine (re-encrypting \
-         every WAL segment, checkpoint, index file, and cold-storage entry crash-consistently), \
-         which is not yet implemented. The shipped key-rotation engine (Issue #488) only re-keys \
-         already-encrypted index files between generations.\n\
-         To use encryption at rest, create the database with encryption enabled in its config \
-         from the start (ALETHEIADB_CONFIG TOML with `[encryption] enabled = true`)."
-    ))
+/// The database to migrate is the ambient one (`ALETHEIADB_CONFIG` /
+/// `ALETHEIADB_DATA_DIR`), exactly like `encryption verify` / `keys rotate`; the
+/// operator supplies the NEW master key source via `--key-file PATH` or
+/// `--env-var NAME` (only file/env references round-trip through the durable
+/// authority — a secret-backed source is refused by the engine). The engine
+/// migrates WAL + index + checkpoint (+ cold when a cold tier is present) and
+/// flips the durable `encryption.state` authority so the NEXT open comes up
+/// encrypted; this process must therefore NOT keep writing through the returned
+/// (quiesced) handle — it exits, and the next `aletheia` invocation reopens
+/// encrypted. Never prints key bytes.
+fn encryption_enable(args: &[String]) -> Result<(), String> {
+    require_configured_db("encryption enable")?;
+
+    // The NEW master key source. Only file/env references can be persisted into
+    // the durable authority without leaking a secret, so those are the only two
+    // the CLI accepts here.
+    let key_source = if let Some(path) = arg_value(args, "--key-file") {
+        aletheiadb::encryption::config::KeyProviderConfig::File { path: path.into() }
+    } else if let Some(var) = arg_value(args, "--env-var") {
+        aletheiadb::encryption::config::KeyProviderConfig::Env { variable: var }
+    } else {
+        return Err(
+            "encryption enable requires a key source: --key-file <PATH> or --env-var <NAME> \
+             (the master key the database is migrated TO)"
+                .to_string(),
+        );
+    };
+
+    let mut db = open_db().map_err(|e| enable_disable_not_configured_hint("enable", e))?;
+    let report = db
+        .enable_encryption(key_source)
+        .map_err(|e| format!("encryption enable FAILED: {e}"))?;
+
+    println!("encryption enable: OK");
+    println!("  encryption is now ENABLED at rest (durable authority flipped)");
+    println!("  WAL:         {}", migrated_label(report.wal_migrated));
+    println!("  Index:       {}", migrated_label(report.index_migrated));
+    println!(
+        "  Checkpoints: {}",
+        migrated_label(report.checkpoint_migrated)
+    );
+    println!(
+        "  Cold:        {}",
+        if report.cold_migrated {
+            "encrypted"
+        } else {
+            "not configured"
+        }
+    );
+    println!(
+        "  Reopen the database (next `aletheia` invocation) to resume normal \
+         operation under the cipher."
+    );
+    Ok(())
+}
+
+/// `encryption disable` — migrate an encrypted database back to plaintext-at-rest
+/// in place (Issue #3616 PR4 / #3718), driving the shipped
+/// [`AletheiaDB::disable_encryption`](aletheiadb::AletheiaDB::disable_encryption)
+/// migration engine.
+///
+/// The database to migrate is the ambient one (`ALETHEIADB_CONFIG` /
+/// `ALETHEIADB_DATA_DIR`). No key source is taken: the current key is sourced
+/// from the configured database itself. The engine strips the cipher from WAL +
+/// index + checkpoint (+ cold when present) and flips the durable
+/// `encryption.state` authority to `disabled` so the NEXT open comes up
+/// plaintext; the process exits and the next `aletheia` invocation reopens
+/// plaintext.
+fn encryption_disable(_args: &[String]) -> Result<(), String> {
+    require_configured_db("encryption disable")?;
+
+    let mut db = open_db().map_err(|e| enable_disable_not_configured_hint("disable", e))?;
+    let report = db
+        .disable_encryption()
+        .map_err(|e| format!("encryption disable FAILED: {e}"))?;
+
+    println!("encryption disable: OK");
+    println!("  encryption is now DISABLED at rest (durable authority flipped)");
+    println!("  WAL:         {}", stripped_label(report.wal_migrated));
+    println!("  Index:       {}", stripped_label(report.index_migrated));
+    println!(
+        "  Checkpoints: {}",
+        stripped_label(report.checkpoint_migrated)
+    );
+    println!(
+        "  Cold:        {}",
+        if report.cold_migrated {
+            "plaintext"
+        } else {
+            "not configured"
+        }
+    );
+    println!(
+        "  Reopen the database (next `aletheia` invocation) to resume normal \
+         plaintext operation."
+    );
+    Ok(())
+}
+
+/// Per-layer status label for a completed `encryption enable` migration.
+fn migrated_label(migrated: bool) -> &'static str {
+    if migrated { "encrypted" } else { "unchanged" }
+}
+
+/// Per-layer status label for a completed `encryption disable` migration.
+fn stripped_label(migrated: bool) -> &'static str {
+    if migrated { "plaintext" } else { "unchanged" }
+}
+
+/// Both `encryption enable` and `encryption disable` operate on a durable
+/// database supplied via the ambient config env vars (`ALETHEIADB_CONFIG` /
+/// `ALETHEIADB_DATA_DIR`); refuse up front with a clear message when neither is
+/// set rather than migrating an ephemeral tempdir the engine would reject anyway.
+fn require_configured_db(verb: &str) -> Result<(), String> {
+    if env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{verb} requires a configured durable database. Set ALETHEIADB_CONFIG (or \
+             ALETHEIADB_DATA_DIR) to point at the database to migrate."
+        ))
+    }
+}
+
+/// Map a database-open failure into an enable/disable "not configured" hint.
+fn enable_disable_not_configured_hint(verb: &str, e: String) -> String {
+    format!(
+        "{e}\n\
+         hint: `encryption {verb}` requires a durable, index-persistent database. Open one via \
+         ALETHEIADB_CONFIG pointing at a TOML config with index persistence enabled."
+    )
 }
 
 /// Whether `ALETHEIADB_CONFIG` is present in the environment (a durable DB is

@@ -41,6 +41,131 @@ fn validate_interner_cap(configured: usize) -> Result<usize> {
     Ok(configured.min(u32::MAX as usize))
 }
 
+/// The outcome of reconciling a newly-opened database's requested interner cap
+/// against the process-global cap already in effect (Issue #3724).
+///
+/// The string interner is a single process-wide static, so there is exactly one
+/// effective cap shared by every `AletheiaDB` opened in the process. This enum is
+/// the pure decision of the "max-of-all-opens high-water mark" policy; see
+/// [`decide_interner_cap`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InternerCapDecision {
+    /// The first open in the process establishes the baseline cap (honoring an
+    /// intentionally low DoS bound for the common single-DB deployment, even below
+    /// the default seed).
+    Established(usize),
+    /// A later open requested MORE headroom than the current effective cap; the
+    /// shared cap is raised to it. Legitimate and silent.
+    Raised(usize),
+    /// A later open requested a LOWER cap than the current effective cap. The lower
+    /// value is NOT applied — lowering the shared cap could refuse writes on an
+    /// already-open database that may already hold more strings than `requested`.
+    /// The higher `effective` cap is kept and a loud warning is emitted.
+    KeptHigher { requested: usize, effective: usize },
+    /// A later open requested exactly the current effective cap; nothing changes.
+    Unchanged(usize),
+}
+
+/// Decide how a newly-opened database's `requested` interner cap reconciles with
+/// the process-global cap already in effect, under the "max-of-all-opens
+/// high-water mark" policy (Issue #3724).
+///
+/// Pure and side-effect-free so it can be unit-tested exhaustively without
+/// touching the process-global interner:
+///
+/// - The **first** open (`established == false`) establishes the baseline = its
+///   requested cap, so a single DB can still set a deliberately low DoS bound.
+/// - Every **subsequent** open may only ever ADD headroom: the effective cap
+///   becomes `max(current, requested)` and is never lowered. A subsequently-opened
+///   lower cap therefore can no longer refuse writes on an already-open database.
+fn decide_interner_cap(established: bool, current: usize, requested: usize) -> InternerCapDecision {
+    if !established {
+        return InternerCapDecision::Established(requested);
+    }
+    match requested.cmp(&current) {
+        std::cmp::Ordering::Greater => InternerCapDecision::Raised(requested),
+        std::cmp::Ordering::Less => InternerCapDecision::KeptHigher {
+            requested,
+            effective: current,
+        },
+        std::cmp::Ordering::Equal => InternerCapDecision::Unchanged(current),
+    }
+}
+
+/// Whether any database open in this process has already established the shared
+/// interner cap. Guards the first-open-establishes vs subsequent-raise-only arms
+/// of [`decide_interner_cap`].
+static INTERNER_CAP_ESTABLISHED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Serializes concurrent `open()`s racing to establish/raise the process-global
+/// interner cap, so the first-open-establishes / raise-only decision is atomic
+/// with respect to the read-then-write of `GLOBAL_INTERNER.max_capacity()`.
+static INTERNER_CAP_LOCK: Mutex<()> = Mutex::new(());
+
+/// Apply a validated `requested` interner cap to the process-global interner under
+/// the "max-of-all-opens high-water mark" policy (Issue #3724).
+///
+/// A later open may only ever raise the shared cap, never lower it, so a
+/// subsequently-opened lower cap cannot break writes on an already-open database.
+/// When a lower request is clamped up (not honored), a loud warning is emitted.
+///
+/// The high-water-mark invariant is enforced **only** on this open seam. The
+/// `pub(crate)` [`StringInterner::set_max_capacity`] primitive still stores
+/// exactly what it is given (a handful of in-crate/test callers rely on lowering
+/// it directly); production databases all funnel their cap through here.
+fn apply_interner_cap(requested: usize) {
+    // Poisoning only happens if a prior holder panicked; the guarded region is a
+    // couple of atomic ops with no panic path, so recover the guard either way.
+    let _guard = INTERNER_CAP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let interner = &*crate::core::GLOBAL_INTERNER;
+    let established = INTERNER_CAP_ESTABLISHED.swap(true, std::sync::atomic::Ordering::AcqRel);
+    let decision = decide_interner_cap(established, interner.max_capacity(), requested);
+    match decision {
+        InternerCapDecision::Established(cap) | InternerCapDecision::Raised(cap) => {
+            interner.set_max_capacity(cap);
+        }
+        InternerCapDecision::Unchanged(_) => {}
+        InternerCapDecision::KeptHigher {
+            requested,
+            effective,
+        } => {
+            warn_interner_cap_kept_higher(requested, effective);
+        }
+    }
+}
+
+/// Emit the loud, one-line warning for the case where a later open requested a
+/// LOWER interner cap than the process-global cap already in effect and the lower
+/// value was therefore not applied (Issue #3724).
+///
+/// Uses `tracing` when the `observability` feature is compiled and falls back to
+/// `eprintln!` (the persistence layer's best-effort-stderr convention) otherwise,
+/// so the warning is loud in every build configuration, including
+/// `--no-default-features`.
+fn warn_interner_cap_kept_higher(requested: usize, effective: usize) {
+    #[cfg(feature = "observability")]
+    tracing::warn!(
+        requested,
+        effective,
+        "persistence.max_interned_strings is lower than the process-global \
+         string-interner cap already in effect; the interner is shared across all \
+         databases opened in this process, so the lower cap is NOT applied \
+         (keeping the higher effective cap) to avoid refusing writes on an \
+         already-open database. See Issue #3724."
+    );
+    #[cfg(not(feature = "observability"))]
+    eprintln!(
+        "WARNING: persistence.max_interned_strings={requested} is lower than the \
+         process-global string-interner cap already in effect ({effective}); the \
+         interner is shared across all databases opened in this process, so the \
+         lower cap is NOT applied (keeping {effective}) to avoid refusing writes on \
+         an already-open database. See Issue #3724."
+    );
+}
+
 fn bootstrap_timestamp(
     current: &CurrentStorage,
     historical: &RwLock<HistoricalStorage>,
@@ -419,9 +544,16 @@ impl AletheiaDB {
             // open(); reject it with a clear error instead of silently bricking
             // the DB. A cap above `u32::MAX` is unreachable (ids are `AtomicU32`),
             // so it is clamped so the effective cap is honest.
+            //
+            // The interner is process-global (Issue #3724): rather than
+            // last-open-wins (which would let a later, LOWER cap refuse writes on
+            // an already-open database), `apply_interner_cap` applies a
+            // max-of-all-opens high-water mark — the first open establishes the
+            // baseline and later opens may only RAISE the shared cap, never lower
+            // it, warning loudly when a lower request is clamped up.
             let effective_interner_cap =
                 validate_interner_cap(config.persistence.max_interned_strings)?;
-            crate::core::GLOBAL_INTERNER.set_max_capacity(effective_interner_cap);
+            apply_interner_cap(effective_interner_cap);
 
             // Capture provenance-chain settings before `config.wal.wal_dir` is
             // moved into the WAL system config. The chain lives under the data
@@ -1273,6 +1405,42 @@ impl AletheiaDB {
                 db.fail_if_pending_disable_cold_without_tier()?;
             }
 
+            // Crypto-shred subject-keyring re-wrap (Slice 5): the LAST layer of a
+            // full-MEK rotation to settle. Runs AFTER the index/WAL/cold resume
+            // passes above, unconditionally (whether or not a cold tier was built),
+            // so a rotation that crashed after the ledger recorded
+            // `layer.subject_keyring=pending` finishes here — re-wrapping every
+            // per-subject DEK under the new MEK and clearing the ledger. Idempotent
+            // and a guarded no-op when the layer is not in flight; requires the OLD
+            // MEK to still be the configured key source (reopen-under-old-key
+            // contract). Gated on `audit-export` (the crypto-shred feature).
+            #[cfg(feature = "audit-export")]
+            if let Some(manager) = persistence_manager
+                .as_ref()
+                .filter(|_| config.encryption.enabled)
+            {
+                crate::db::rotation::finalize_resumed_subject_keyring_rotation(
+                    manager,
+                    &config.encryption,
+                    db.crypto_shred.as_ref(),
+                )?;
+            }
+
+            // Fail-closed counterpart (Slice 5 review 4b): when THIS binary was
+            // built WITHOUT the crypto-shred (`audit-export`) feature there is no
+            // finalizer for a subject-keyring re-wrap left `Pending` by a crash.
+            // Rather than wedge the rotation ledger `Pending` forever with no
+            // diagnostic, surface an actionable `FailedPrecondition` telling the
+            // operator to reopen with the crypto-shred feature enabled. A guarded
+            // no-op when no such pending re-wrap exists.
+            #[cfg(not(feature = "audit-export"))]
+            if let Some(manager) = persistence_manager
+                .as_ref()
+                .filter(|_| config.encryption.enabled)
+            {
+                crate::db::rotation::fail_if_pending_subject_keyring_without_crypto_shred(manager)?;
+            }
+
             seed_startup_current_timestamp(&db)?;
 
             // Wire the opt-in provenance hash chain (Issue #3351). Constructed
@@ -1938,6 +2106,256 @@ mod ephemeral_tests {
             }
             assert_eq!(db.node_count(), created + 500);
         }
+    }
+
+    /// Pure-decision coverage for the process-global interner-cap policy
+    /// (Issue #3724). Exhaustively pins every arm of `decide_interner_cap` without
+    /// touching the process-global interner, so these run in-process safely.
+    #[test]
+    fn decide_interner_cap_covers_all_arms() {
+        // First open in the process establishes the baseline, even LOWER than the
+        // (default 10M) seed — preserves the single-DB "low DoS bound" case.
+        assert_eq!(
+            decide_interner_cap(false, 10_000_000, 3_000),
+            InternerCapDecision::Established(3_000),
+        );
+        assert_eq!(
+            decide_interner_cap(false, 10_000_000, 50_000_000),
+            InternerCapDecision::Established(50_000_000),
+        );
+
+        // A later open requesting MORE headroom raises the shared cap.
+        assert_eq!(
+            decide_interner_cap(true, 5_000, 8_000),
+            InternerCapDecision::Raised(8_000),
+        );
+
+        // A later open requesting a LOWER cap keeps the higher effective cap (the
+        // footgun fix) — this is the arm that emits the loud warning.
+        assert_eq!(
+            decide_interner_cap(true, 5_000, 2_000),
+            InternerCapDecision::KeptHigher {
+                requested: 2_000,
+                effective: 5_000,
+            },
+        );
+
+        // A later open requesting exactly the effective cap changes nothing.
+        assert_eq!(
+            decide_interner_cap(true, 5_000, 5_000),
+            InternerCapDecision::Unchanged(5_000),
+        );
+    }
+
+    /// Multi-DB-in-one-process regression (Issue #3724): opening a SECOND database
+    /// with a LOWER `max_interned_strings` must NOT lower the process-global
+    /// interner cap and break writes on the already-open first database. Under the
+    /// pre-fix last-open-wins behavior the second open would drop the shared cap to
+    /// its lower value; the max-of-all-opens high-water mark keeps the higher cap.
+    ///
+    /// The string interner is a process-global singleton and this test drives its
+    /// cap through multiple opens, so it runs in a SUBPROCESS to isolate the
+    /// mutation from other tests running concurrently (mirrors the interning.rs
+    /// mutant-kill / reopen-cap subprocess pattern).
+    #[test]
+    fn interner_cap_multidb_high_water_mark_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "db::config::ephemeral_tests::interner_cap_multidb_high_water_mark_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for multi-DB interner-cap test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "multi-DB interner-cap helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("multi-DB interner-cap helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn interner_cap_multidb_high_water_mark_helper() {
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use tempfile::tempdir;
+
+        // Each database gets its own isolated tempdir WAL so the fully-default WAL
+        // dir can't collide across the four opens in this one process.
+        let make_config = |cap: usize| {
+            let scratch = tempdir().expect("scratch tempdir");
+            let dir = scratch.path().to_path_buf();
+            let config = AletheiaDBConfig::builder()
+                .wal(WalConfigBuilder::new().wal_dir(dir.join("wal")).build())
+                .persistence(PersistenceConfig {
+                    max_interned_strings: cap,
+                    ..Default::default()
+                })
+                .build();
+            // Return the tempdir guard too so it outlives the open.
+            (config, scratch)
+        };
+
+        let interner = &*crate::core::GLOBAL_INTERNER;
+
+        // DB-A: the FIRST open establishes the baseline at exactly its cap (5000),
+        // regardless of the 10M LazyLock seed.
+        let (cfg_a, _g_a) = make_config(5_000);
+        let _db_a = AletheiaDB::with_unified_config(cfg_a).expect("open A");
+        assert_eq!(
+            interner.max_capacity(),
+            5_000,
+            "the first open must establish the baseline cap exactly"
+        );
+
+        // DB-B: a SECOND open with a LOWER cap (2000) must NOT lower the shared cap.
+        // Pre-fix (last-open-wins) this assertion fails — the cap would drop to 2000
+        // and DB-A could start refusing writes.
+        let (cfg_b, _g_b) = make_config(2_000);
+        let _db_b = AletheiaDB::with_unified_config(cfg_b).expect("open B");
+        assert_eq!(
+            interner.max_capacity(),
+            5_000,
+            "a later, LOWER cap must NOT shrink the process-global interner cap \
+             (Issue #3724): DB-A's write headroom must be preserved"
+        );
+
+        // DB-C: a later open with a HIGHER cap (8000) legitimately raises the cap.
+        let (cfg_c, _g_c) = make_config(8_000);
+        let _db_c = AletheiaDB::with_unified_config(cfg_c).expect("open C");
+        assert_eq!(
+            interner.max_capacity(),
+            8_000,
+            "a later, HIGHER cap must raise the shared cap (add headroom)"
+        );
+
+        // DB-D: a later open with the SAME cap as the current effective one is a
+        // no-op and must not perturb the cap.
+        let (cfg_d, _g_d) = make_config(8_000);
+        let _db_d = AletheiaDB::with_unified_config(cfg_d).expect("open D");
+        assert_eq!(
+            interner.max_capacity(),
+            8_000,
+            "an equal later cap must leave the shared cap unchanged"
+        );
+    }
+
+    /// Concurrent-opens regression (Issue #3724): many databases opened
+    /// simultaneously, each with a different `max_interned_strings`, must
+    /// deterministically converge the process-global cap to the MAX of all
+    /// requested caps. This exercises `INTERNER_CAP_LOCK` serializing the
+    /// establish/raise read-modify-write across the two atomics; without the lock
+    /// a lost update could leave the effective cap below the true maximum.
+    ///
+    /// Process-global mutation → run in a SUBPROCESS for isolation.
+    #[test]
+    fn interner_cap_concurrent_opens_converge_to_max_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "db::config::ephemeral_tests::interner_cap_concurrent_opens_converge_to_max_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for concurrent-opens interner-cap test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(
+                        status.success(),
+                        "concurrent-opens interner-cap helper failed"
+                    );
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("concurrent-opens interner-cap helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn interner_cap_concurrent_opens_converge_to_max_helper() {
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use std::sync::{Arc, Barrier, Mutex};
+        use tempfile::tempdir;
+
+        // Mixed caps; the max (9_000) appears twice so a lost update on any raise
+        // is observable. Whichever thread wins the establish race, the high-water
+        // mark must still climb to the maximum.
+        let caps = [4_000usize, 9_000, 2_000, 7_000, 5_000, 9_000, 1_000, 6_000];
+        let expected_max = *caps.iter().max().unwrap();
+
+        // Barrier maximizes the chance of a real race on the establish/raise RMW.
+        let barrier = Arc::new(Barrier::new(caps.len()));
+        // Hold every opened DB + its tempdir alive until after the assertion, so
+        // all databases are genuinely open simultaneously.
+        let kept: Mutex<Vec<(AletheiaDB, tempfile::TempDir)>> = Mutex::new(Vec::new());
+
+        std::thread::scope(|s| {
+            for &cap in &caps {
+                let barrier = Arc::clone(&barrier);
+                let kept = &kept;
+                s.spawn(move || {
+                    let scratch = tempdir().expect("scratch tempdir");
+                    let config = AletheiaDBConfig::builder()
+                        .wal(
+                            WalConfigBuilder::new()
+                                .wal_dir(scratch.path().join("wal"))
+                                .build(),
+                        )
+                        .persistence(PersistenceConfig {
+                            max_interned_strings: cap,
+                            ..Default::default()
+                        })
+                        .build();
+                    barrier.wait();
+                    let db = AletheiaDB::with_unified_config(config).expect("concurrent open");
+                    kept.lock().expect("kept mutex").push((db, scratch));
+                });
+            }
+        });
+
+        assert_eq!(
+            crate::core::GLOBAL_INTERNER.max_capacity(),
+            expected_max,
+            "concurrent opens must converge the shared interner cap to the MAX of \
+             all requested caps ({expected_max})"
+        );
+        drop(kept);
     }
 
     /// WAL-only recovery (no index persistence) bumps edge_id_gen past the

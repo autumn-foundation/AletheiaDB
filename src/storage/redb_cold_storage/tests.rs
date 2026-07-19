@@ -3561,3 +3561,227 @@ fn cold_unwrap_empty_store_is_clean_noop() {
     assert_eq!(stats.values_skipped, 0);
     assert_eq!(storage.cold_value_format_version().unwrap(), None);
 }
+
+// ========================================================================
+// Issue #3708 — runtime-installable COLD keyring install seam.
+//
+// Mirrors the WAL `install_wal_keyring` ArcSwapOption seam (#3669): a live
+// plaintext cold store gains a keyring at runtime via a None -> Some presence
+// flip into an atomic-swap cell, serialized by a leaf install lock so a
+// double-install is fail-closed, and observed by concurrent readers without a
+// torn read.
+// ========================================================================
+
+/// None -> Some install flips the store to encrypted, and a value written AFTER
+/// the install is genuinely encrypted at rest (ACV1-wrapped at the current
+/// generation) and round-trips.
+#[test]
+fn install_cold_keyring_none_to_some_flips_encrypted_and_wraps() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("install_flip.redb");
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+
+    // A plaintext-opened store reports no encryption and no current version.
+    assert!(!storage.is_encrypted());
+    assert_eq!(storage.current_cold_key_version(), None);
+
+    // Install a keyring at runtime (the plaintext -> encrypted enable seam).
+    storage
+        .install_cold_keyring(ColdKeyring::single(test_cipher()))
+        .unwrap();
+
+    assert!(
+        storage.is_encrypted(),
+        "installing a keyring must flip the cold store to encrypted"
+    );
+    assert_eq!(
+        storage.current_cold_key_version(),
+        Some(1),
+        "a freshly installed single keyring stamps generation 1"
+    );
+
+    // A value written after the install is ACV1-wrapped at rest and round-trips.
+    let version = create_test_node_version(42);
+    storage.store_node_version(&version).unwrap();
+    let raw = raw_value(&storage, NODE_VERSIONS_TABLE, 42);
+    let (kv, _ct) =
+        parse_cold_wrapper(&raw).expect("a post-install value must be ACV1-wrapped at rest");
+    assert_eq!(kv, 1, "post-install value stamps the installed generation");
+
+    let loaded = storage
+        .get_node_version(version.version_id())
+        .unwrap()
+        .expect("post-install value round-trips");
+    assert_eq!(loaded.version_id(), version.version_id());
+    assert_eq!(loaded.node_id, version.node_id);
+}
+
+/// Fail-closed double-install: installing when a keyring is already present is
+/// rejected (never a silent replace), and no previously written data is lost.
+#[test]
+fn install_cold_keyring_twice_is_rejected() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("install_twice.redb");
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+
+    storage
+        .install_cold_keyring(ColdKeyring::single(cipher_with_byte(0x11)))
+        .unwrap();
+    let version = create_test_node_version(7);
+    storage.store_node_version(&version).unwrap();
+
+    let err = storage
+        .install_cold_keyring(ColdKeyring::single(cipher_with_byte(0x22)))
+        .expect_err("a second install must be rejected, not silently applied");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("already") || msg.contains("installed"),
+        "rejection error should explain a keyring is already present, got: {msg}"
+    );
+
+    // Still encrypted under the FIRST keyring, and no data lost.
+    assert!(storage.is_encrypted());
+    assert_eq!(storage.current_cold_key_version(), Some(1));
+    let loaded = storage
+        .get_node_version(version.version_id())
+        .unwrap()
+        .expect("a rejected double-install must not lose the existing value");
+    assert_eq!(loaded.version_id(), version.version_id());
+}
+
+/// No torn reads on the presence cell: concurrent loaders read the cell while one
+/// thread installs. A load must always yield either the old `None` or a
+/// fully-valid `Some` (a resolvable current generation), never a partial state.
+/// The cross-thread saw_none/saw_some record proves the None -> Some store is
+/// actually observed (a bare "never torn" check alone can never fail).
+#[test]
+fn install_cold_keyring_no_torn_reads_on_cell() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("install_torn.redb");
+    let storage = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+
+    let loaders = 6usize;
+    let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(loaders + 1));
+
+    let mut handles = Vec::new();
+    for _ in 0..loaders {
+        let storage = Arc::clone(&storage);
+        let stop = Arc::clone(&stop);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let mut saw_none = false;
+            let mut saw_some = false;
+            barrier.wait();
+            while !stop.load(AtOrd::Relaxed) {
+                if storage.is_encrypted() {
+                    saw_some = true;
+                    // Any observed keyring must be fully-constructed: an
+                    // encrypted store always resolves a current generation.
+                    assert!(
+                        storage.current_cold_key_version().is_some(),
+                        "an installed keyring must have a resolvable current generation"
+                    );
+                } else {
+                    saw_none = true;
+                }
+            }
+            (saw_none, saw_some)
+        }));
+    }
+
+    barrier.wait();
+    // Let loaders observe the pre-install `None` before the store flips it.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    storage
+        .install_cold_keyring(ColdKeyring::single(test_cipher()))
+        .unwrap();
+    // Keep loaders running long enough to observe the post-install `Some`.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    stop.store(true, AtOrd::Relaxed);
+
+    let mut any_saw_none = false;
+    let mut any_saw_some = false;
+    for h in handles {
+        let (saw_none, saw_some) = h.join().unwrap();
+        any_saw_none |= saw_none;
+        any_saw_some |= saw_some;
+    }
+    assert!(
+        any_saw_none,
+        "loaders must have observed the pre-install None state"
+    );
+    assert!(
+        any_saw_some,
+        "loaders must have observed the post-install Some state \
+         (proving the store is seen across threads)"
+    );
+    assert!(
+        storage.is_encrypted(),
+        "install must be visible after the store"
+    );
+}
+
+/// Concurrent double-install TOCTOU: two threads race `install_cold_keyring` on
+/// the same store. Without the install lock both could observe `None`, both pass
+/// the presence check, and both store — the second silently replacing the first
+/// keyring. With the lock, EXACTLY one returns `Ok` and one returns `Err`, the
+/// store ends encrypted, and post-install writes round-trip under the survivor.
+#[test]
+fn install_cold_keyring_concurrent_double_install_rejected() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("install_race.redb");
+    let storage = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+
+    let ok_count = Arc::new(AtomicUsize::new(0));
+    let err_count = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(2));
+
+    let mut handles = Vec::new();
+    for seed in [0x11u8, 0x22u8] {
+        let storage = Arc::clone(&storage);
+        let ok_count = Arc::clone(&ok_count);
+        let err_count = Arc::clone(&err_count);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            match storage.install_cold_keyring(ColdKeyring::single(cipher_with_byte(seed))) {
+                Ok(()) => ok_count.fetch_add(1, AtOrd::Relaxed),
+                Err(_) => err_count.fetch_add(1, AtOrd::Relaxed),
+            };
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    assert_eq!(
+        ok_count.load(AtOrd::Relaxed),
+        1,
+        "exactly one concurrent install must succeed"
+    );
+    assert_eq!(
+        err_count.load(AtOrd::Relaxed),
+        1,
+        "exactly one concurrent install must be rejected"
+    );
+    assert!(
+        storage.is_encrypted(),
+        "the survivor keyring must be installed"
+    );
+
+    // Post-install writes round-trip under the survivor keyring.
+    let version = create_test_node_version(99);
+    storage.store_node_version(&version).unwrap();
+    let loaded = storage
+        .get_node_version(version.version_id())
+        .unwrap()
+        .expect("post-install value round-trips under the survivor keyring");
+    assert_eq!(loaded.version_id(), version.version_id());
+}

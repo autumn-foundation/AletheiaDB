@@ -1475,11 +1475,12 @@ pub struct HybridQueryRequest {
     /// Optional namespace read scope (Issue #3349).
     #[schemars(
         description = "Optional namespace read scope: a single namespace name (string), an array \
-                       of names (union), or \"all\" (no filter). NOTE: hybrid_query does not yet \
-                       compose a filter-complete namespace scope with its vector ranking in v1; \
-                       supplying a scope other than \"all\" returns a structured INVALID_ARGUMENT \
-                       rather than a silently-unscoped (or incorrectly post-filtered) result. Use \
-                       find_similar / traverse with a namespace scope instead."
+                       of names (union), or \"all\" (no filter). Results are filtered to the scope \
+                       and vector ranking is filter-complete (over-fetched so the returned top-k \
+                       are genuinely in-scope; scores/order preserved, results never dropped or \
+                       reordered to meet the scope). Omitted ⇒ the \"default\" namespace only \
+                       (isolated-by-default); unknown ns ⇒ NOT_FOUND; empty array ⇒ \
+                       INVALID_ARGUMENT."
     )]
     pub namespace: Option<serde_json::Value>,
 }
@@ -1533,11 +1534,13 @@ pub struct QueryRequest {
     /// Optional namespace read scope (Issue #3349).
     #[schemars(
         description = "Optional namespace read scope: a single namespace name (string), an array \
-                       of names (union), or \"all\" (no filter). NOTE: declarative (AQL/Cypher) \
-                       namespace scoping is a follow-up; supplying a scope other than \"all\" \
-                       returns a structured INVALID_ARGUMENT rather than a silently-unscoped \
-                       result. Use USE NAMESPACE in the query language when it lands, or the \
-                       structured scoped read tools."
+                       of names (union), or \"all\" (no filter). The query executes scoped — \
+                       produced entities are filtered to the scope and traversal never crosses an \
+                       out-of-scope edge/node. Omitted ⇒ the \"default\" namespace only \
+                       (isolated-by-default). Unknown namespace ⇒ NOT_FOUND; empty array ⇒ \
+                       INVALID_ARGUMENT. A restricting scope on a multi-variable-binding or \
+                       mutating statement returns a structured unsupported_construct error \
+                       (never silently unscoped)."
     )]
     pub namespace: Option<serde_json::Value>,
 }

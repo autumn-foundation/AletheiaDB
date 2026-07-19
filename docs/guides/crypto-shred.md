@@ -203,6 +203,64 @@ Understand these boundaries before relying on it for compliance.
    assumed to be provided out-of-band by the filesystem or transport layer;
    whole-archive signing is a possible future slice.
 
+## Master-key rotation & the subject keyring (Slice 5)
+
+Each active subject's random DEK is stored **wrapped** in
+`subject_keyring.dat` under a `subject-wrap` cipher derived from the master
+encryption key (`HKDF(MEK, "subject-wrap")`). A **full-MEK rotation**
+(`keys rotate` / `rotate_index_keys`) re-derives every per-component cipher,
+so those wrapped DEKs — the only durable copies of an active subject's key —
+must be **re-wrapped** under the new MEK, or the subjects (and every value
+sealed under them) become undecryptable once the old key is dropped.
+
+The rotation driver handles this automatically as the **last** layer of a
+full-MEK rotation, after the index / WAL / cold layers:
+
+- Every **active** subject's wrapped DEK is unwrapped under the old
+  `subject-wrap` cipher and re-wrapped under the new one, advancing its
+  `key_version`. The random per-subject DEK, designation, lifecycle state,
+  attestation, and timestamps are untouched.
+- **Erased** subjects are skipped — their wrapped DEK is already physically
+  gone (`None`) and is **never** re-introduced (the erasure invariant holds
+  across rotation).
+- A keyring with no subjects, or whose subjects are all already at the target
+  generation, records the layer **skipped** — no re-wrap, no write.
+- The step is crash-resumable: it is a named layer in the rotation ledger
+  (`layer.subject_keyring`), and an interrupted re-wrap is finished
+  idempotently on the next resume (entries already at the new generation are
+  skipped). An **absent** `layer.subject_keyring` in a pre-Slice-5 ledger
+  reads as **skipped** (never a fabricated pending pass).
+
+**Operational contract — keep the OLD MEK available until rotation *fully*
+completes.** As with the WAL and **cold** layers, while a rotation is in
+flight the **old** MEK must remain the configured key source: the resume
+re-derives the old `subject-wrap` cipher from it to unwrap the still-old-
+generation per-subject DEKs. This contract now explicitly covers the
+**subject-keyring** layer too. Reopening under the **new** key alone while a
+re-wrap crashed mid-pass surfaces a **loud** AEAD authentication failure (never
+silent wrong data); recovery is lossless — reopen once under the old key so the
+resume finishes re-wrapping every entry, after which the new key alone unwraps
+everything.
+
+**Live cache is refreshed — no reopen needed for correctness.** When the
+re-wrap pass completes it **refreshes** the in-process memoized `subject-wrap`
+cipher to the **new** one (it does not merely drop it). So the *running*
+process immediately serves reads for a subject whose DEK was not already cached
+— and seals *new* values for existing subjects — under the **new** MEK, with no
+reopen required. (Before this, the memo was cleared and the next seal/unseal
+rebuilt the cipher from the still-old `encryption` config, so an uncached read
+or a post-rotation write would transiently fail closed / seal under the stale
+key until a reopen.) A reopen is still **recommended** operationally, but only
+to complete the key-provider **config swap** (point the running config at the
+new key and drop the old one per the crash contract above), not for read/write
+correctness.
+
+**v1 durability bound (save-once).** The re-wrap persists the keyring a single
+time after re-wrapping **all** entries (one atomic, durable write), not per
+entry. For very large subject counts this means a crash mid-pass redoes the
+whole pass on resume (bounded by the subject count, and always idempotent). A
+**per-entry durable cursor** that bounds the redo window is a named follow-up.
+
 ## See also
 
 - [security-quickstart.md](security-quickstart.md) — authentication, RBAC

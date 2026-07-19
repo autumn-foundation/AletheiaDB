@@ -150,9 +150,9 @@ pub struct TraverseQuery {
     /// #3349: namespace read scope — a single name, a comma-separated union
     /// (`a,b`), or `all`. Omitted = the `default` namespace only
     /// (isolated-by-default). Forwarded into dispatch so HTTP scopes identically
-    /// to the MCP twin (a narrowing scope is outgoing-only; incoming/both with a
-    /// narrowing scope is INVALID_ARGUMENT; a narrowing scope with `use_cursor`
-    /// fails closed).
+    /// to the MCP twin (a narrowing scope is boundary-enforced in every direction
+    /// — outgoing/incoming/both, PR3d; a narrowing scope with `use_cursor` fails
+    /// closed).
     pub namespace: Option<String>,
 }
 

@@ -14393,6 +14393,127 @@ mod apply_batch_tests {
         assert_eq!(db.node_count(), 0, "failed batch must leave no trace");
         assert_eq!(db.edge_count(), 0);
     }
+
+    /// Issue #3723: a property-KEY interner-cap breach inside an `apply_batch`
+    /// op must render the SAME structured `FAILED_PRECONDITION` envelope as the
+    /// single-op `create_node`/HTTP surfaces (post #3716) — actionable message
+    /// naming `persistence.max_interned_strings`, `retriable: false`, and
+    /// `details.{resource, current, limit}` — NOT the generic `INVALID_ARGUMENT`
+    /// the batch previously flattened it to. The breach lands in Phase 1 static
+    /// pre-validation (before any transaction opens), so it carries the op's
+    /// `failed_op_index` (not `null`) and leaves ZERO writes.
+    ///
+    /// Lowers the process-global interner cap, so it runs in a SUBPROCESS to
+    /// isolate the mutation from concurrent tests (mirrors the create_node
+    /// counterpart in `mcp::server`).
+    #[test]
+    fn apply_batch_interner_cap_property_key_breach_is_failed_precondition_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "mcp::tests::apply_batch_tests::apply_batch_interner_cap_property_key_breach_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for apply_batch interner-cap test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(
+                        status.success(),
+                        "apply_batch interner-cap property-key helper failed"
+                    );
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("apply_batch interner-cap property-key helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn apply_batch_interner_cap_property_key_breach_helper() {
+        use crate::core::interning::GLOBAL_INTERNER;
+
+        let server = create_test_server();
+
+        // Pin the cap exactly at the live interner size, so the NEXT new intern —
+        // the fresh property KEY on op index 1 below, interned by
+        // `json_to_property_map` during Phase 1 static pre-validation — tips it
+        // over. (No capacity rollbacks have occurred in this fresh subprocess,
+        // so next_id == len().)
+        let base = GLOBAL_INTERNER.len();
+        GLOBAL_INTERNER.set_max_capacity(base);
+
+        // Two ops; the breaching op is at index 1 so we prove the reported
+        // failed_op_index is the op's real index, not a hardcoded 0.
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "delete_node", "node_id": 999_999_999u64},
+                {"op": "create_node", "label": "TipLabel",
+                 "properties": {"uniq_batch_property_key_that_tips_the_interner_over": "v"}},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+
+        let error = &value["error"];
+        // Byte-for-byte alignment with the #3716 create_node/HTTP envelope.
+        assert_eq!(error["code"], "FAILED_PRECONDITION", "got: {value}");
+        assert_eq!(error["retriable"], false, "got: {value}");
+        assert_eq!(
+            error["details"]["resource"], "string interner",
+            "details must name the interner resource: {value}"
+        );
+        assert!(
+            error["details"]["limit"].is_number(),
+            "details must carry a numeric limit: {value}"
+        );
+        assert!(
+            error["details"]["current"].is_number(),
+            "details must carry a numeric current: {value}"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("persistence.max_interned_strings"),
+            "message must name the knob: {value}"
+        );
+        // Static-phase failure carries the breaching op's real index, not null.
+        assert_eq!(
+            error["details"]["failed_op_index"],
+            json!(1),
+            "failed_op_index must be the breaching op's index: {value}"
+        );
+
+        // All-or-nothing: the breach is in Phase 1, before any transaction
+        // opens, so ZERO writes take effect.
+        assert_eq!(
+            server.db().node_count(),
+            0,
+            "a cap-breaching batch must leave zero nodes: {value}"
+        );
+        assert_eq!(
+            server.db().edge_count(),
+            0,
+            "a cap-breaching batch must leave zero edges: {value}"
+        );
+    }
 }
 
 // ============================================================================
@@ -18336,9 +18457,13 @@ mod namespace_surface_sweep_tests {
     fn sweep_query_return_n_elides_reserved_key() {
         let (server, _a, _b) = seed_namespaced();
         // AQL is always available under `mcp-server` (no cypher feature needed).
+        // Seed data lives in agent:planner and an omitted query scope is now
+        // default-only (#3349 PR3d), so scope to "all" to still see Alice.
         let out = server.dispatch_tool_json(
             "query",
-            serde_json::json!({ "language": "aql", "query": "MATCH (n:Person) RETURN n" }),
+            serde_json::json!({
+                "language": "aql", "query": "MATCH (n:Person) RETURN n", "namespace": "all"
+            }),
         );
         assert!(out.contains("Alice"), "expected query rows: {out}");
         assert_no_reserved(&out, "query");
@@ -18783,24 +18908,20 @@ mod namespace_surface_sweep_tests {
     #[test]
     fn unsupported_scope_tools_reject_narrowing_scope() {
         let (server, _a, _b) = seed_namespaced();
-        for tool in ["list_edges", "hybrid_query", "query"] {
-            let mut args = serde_json::json!({ "namespace": "agent:planner" });
-            if tool == "query" {
-                args["language"] = serde_json::json!("aql");
-                args["query"] = serde_json::json!("MATCH (n:Person) RETURN n");
-            }
-            let out = server.dispatch_tool_json(tool, args);
-            let v = as_json(&out);
-            let code = v
+        // `list_edges` still does not support a namespace scope in v1 (it does
+        // not enumerate edges by scope); `query` and `hybrid_query` now DO scope
+        // (PR3d), so they are covered by their own dedicated tests below.
+        let out = server.dispatch_tool_json(
+            "list_edges",
+            serde_json::json!({ "namespace": "agent:planner" }),
+        );
+        assert_eq!(
+            as_json(&out)
                 .pointer("/error/code")
-                .and_then(|c| c.as_str())
-                .or_else(|| v.pointer("/error/kind").and_then(|c| c.as_str()));
-            assert_eq!(
-                v.pointer("/error/code").and_then(|c| c.as_str()),
-                Some("INVALID_ARGUMENT"),
-                "{tool} must reject a narrowing scope with INVALID_ARGUMENT (code={code:?}): {out}"
-            );
-        }
+                .and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "list_edges must reject a narrowing scope with INVALID_ARGUMENT: {out}"
+        );
         // But "all" is accepted (no-op) by these tools.
         let all_ok = server.dispatch_tool_json(
             "hybrid_query",
@@ -19134,25 +19255,416 @@ mod namespace_surface_sweep_tests {
         );
     }
 
+    /// PR3d: a scoped `incoming` traversal honors the edge ∧ far-node boundary.
+    /// Topology: bob -KNOWS(agent:planner)-> alice (both agent:planner), and a
+    /// cross-namespace edge carol(agent:researcher) -KNOWS(agent:researcher)->
+    /// alice. Scoped to agent:planner, an incoming traversal from alice reaches
+    /// bob (in-scope edge + source) but NOT carol (the edge's own namespace, and
+    /// carol, are out of scope).
     #[test]
-    fn scoped_traverse_incoming_or_both_rejected() {
-        let (server, alice, _bob, _carol) = seed_two_namespaces();
-        for direction in ["incoming", "both"] {
-            let out = server.dispatch_tool_json(
-                "traverse",
-                serde_json::json!({
-                    "start_node_id": alice, "edge_label": "KNOWS",
-                    "direction": direction, "namespace": "agent:planner"
-                }),
-            );
+    fn scoped_traverse_incoming_honors_boundary() {
+        let server = create_test_server();
+        let db = server.db();
+        let alice = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                "agent:planner",
+            )
+            .unwrap();
+        let bob = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+                "agent:planner",
+            )
+            .unwrap();
+        let carol = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+                "agent:researcher",
+            )
+            .unwrap();
+        db.create_edge_in_namespace(
+            bob,
+            alice,
+            "KNOWS",
+            PropertyMapBuilder::new().build(),
+            "agent:planner",
+        )
+        .unwrap();
+        db.create_edge_in_namespace(
+            carol,
+            alice,
+            "KNOWS",
+            PropertyMapBuilder::new().build(),
+            "agent:researcher",
+        )
+        .unwrap();
+
+        let out = server.dispatch_tool_json(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": alice.as_u64(), "edge_label": "KNOWS",
+                "direction": "incoming", "namespace": "agent:planner"
+            }),
+        );
+        assert!(
+            out.contains("Bob"),
+            "scoped incoming traverse must reach Bob via the in-scope incoming edge: {out}"
+        );
+        assert!(
+            !out.contains("Carol"),
+            "scoped incoming traverse must NOT cross the out-of-scope edge to Carol: {out}"
+        );
+        assert!(
+            as_json(&out).pointer("/error").is_none(),
+            "incoming direction must no longer be rejected under a narrowing scope: {out}"
+        );
+        assert_no_reserved(&out, "traverse(incoming scoped)");
+    }
+
+    /// PR3d: a scoped `both` traversal honors the boundary in both directions and
+    /// unions the results, never crossing an out-of-scope edge/node.
+    #[test]
+    fn scoped_traverse_both_honors_boundary() {
+        let server = create_test_server();
+        let db = server.db();
+        let alice = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                "agent:planner",
+            )
+            .unwrap();
+        // Outgoing in-scope: alice -> bob (planner).
+        let bob = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+                "agent:planner",
+            )
+            .unwrap();
+        // Incoming in-scope: dave -> alice (planner).
+        let dave = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dave").build(),
+                "agent:planner",
+            )
+            .unwrap();
+        // Out-of-scope neighbor via an out-of-scope edge: alice -> carol (researcher).
+        let carol = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+                "agent:researcher",
+            )
+            .unwrap();
+        db.create_edge_in_namespace(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().build(),
+            "agent:planner",
+        )
+        .unwrap();
+        db.create_edge_in_namespace(
+            dave,
+            alice,
+            "KNOWS",
+            PropertyMapBuilder::new().build(),
+            "agent:planner",
+        )
+        .unwrap();
+        db.create_edge_in_namespace(
+            alice,
+            carol,
+            "KNOWS",
+            PropertyMapBuilder::new().build(),
+            "agent:researcher",
+        )
+        .unwrap();
+
+        let out = server.dispatch_tool_json(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": alice.as_u64(), "edge_label": "KNOWS",
+                "direction": "both", "namespace": "agent:planner"
+            }),
+        );
+        assert!(
+            out.contains("Bob") && out.contains("Dave"),
+            "scoped both traverse must reach Bob (outgoing) and Dave (incoming): {out}"
+        );
+        assert!(
+            !out.contains("Carol"),
+            "scoped both traverse must NOT cross the out-of-scope edge to Carol: {out}"
+        );
+        assert!(
+            as_json(&out).pointer("/error").is_none(),
+            "both direction must no longer be rejected under a narrowing scope: {out}"
+        );
+    }
+
+    // ========================================================================
+    // PR3d: real query / hybrid_query namespace scoping.
+    // ========================================================================
+
+    /// PR3d: a scoped AQL `query` returns only in-scope entities, never another
+    /// namespace's; an omitted scope is default-only; `"all"` sees everything;
+    /// an unknown namespace is NOT_FOUND.
+    #[test]
+    fn scoped_query_isolates_namespaces() {
+        let (server, _alice, _bob, _carol) = seed_two_namespaces();
+        let q = "MATCH (n:Person) RETURN n";
+
+        // Scoped to agent:planner: Alice + Bob, never Carol.
+        let planner = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({ "language": "aql", "query": q, "namespace": "agent:planner" }),
+        );
+        assert!(
+            planner.contains("Alice") && planner.contains("Bob"),
+            "scoped query must return in-scope Alice + Bob: {planner}"
+        );
+        assert!(
+            !planner.contains("Carol"),
+            "scoped query must NOT leak out-of-scope Carol: {planner}"
+        );
+        assert_no_reserved(&planner, "query(scoped)");
+
+        // Scoped to agent:researcher: only Carol.
+        let research = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({ "language": "aql", "query": q, "namespace": "agent:researcher" }),
+        );
+        assert!(
+            research.contains("Carol") && !research.contains("Alice"),
+            "researcher scope must return only Carol: {research}"
+        );
+
+        // Omitted scope ⇒ default-only. All seed data is non-default, so no rows.
+        let omitted = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({ "language": "aql", "query": q }),
+        );
+        assert!(
+            !omitted.contains("Alice") && !omitted.contains("Carol"),
+            "omitted query scope is default-only; non-default data must not appear: {omitted}"
+        );
+
+        // "all" ⇒ every namespace.
+        let all = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({ "language": "aql", "query": q, "namespace": "all" }),
+        );
+        assert!(
+            all.contains("Alice") && all.contains("Bob") && all.contains("Carol"),
+            "namespace:all query must return every namespace: {all}"
+        );
+
+        // Unknown namespace ⇒ NOT_FOUND with details.namespace.
+        let unknown = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({ "language": "aql", "query": q, "namespace": "agent:ghost" }),
+        );
+        let v = as_json(&unknown);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "unknown namespace on query must be NOT_FOUND: {unknown}"
+        );
+        assert_eq!(
+            v.pointer("/error/details/namespace")
+                .and_then(|c| c.as_str()),
+            Some("agent:ghost"),
+            "NOT_FOUND must carry details.namespace: {unknown}"
+        );
+
+        // Empty array ⇒ INVALID_ARGUMENT.
+        let empty = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({ "language": "aql", "query": q, "namespace": [] }),
+        );
+        assert_eq!(
+            as_json(&empty)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "empty namespace scope array on query must be INVALID_ARGUMENT: {empty}"
+        );
+    }
+
+    /// PR3d: a scoped `query` traversal honors the boundary — an out-of-scope
+    /// edge/node is never crossed even though the far node exists.
+    #[test]
+    fn scoped_query_traversal_honors_boundary() {
+        let server = create_test_server();
+        let db = server.db();
+        let a = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Ann").build(),
+                "agent:a",
+            )
+            .unwrap();
+        let shared = db
+            .create_node_in_namespace(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Shelly").build(),
+                "shared",
+            )
+            .unwrap();
+        // Cross-namespace edge in `shared`: a -> shared. Under scope {agent:a}
+        // the edge's own namespace (shared) is out of scope ⇒ never crossed.
+        db.create_edge_in_namespace(
+            a,
+            shared,
+            "KNOWS",
+            PropertyMapBuilder::new().build(),
+            "shared",
+        )
+        .unwrap();
+
+        let scoped_a = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN m",
+                "namespace": "agent:a"
+            }),
+        );
+        assert!(
+            !scoped_a.contains("Shelly"),
+            "scope {{agent:a}} must not cross the shared-namespace edge: {scoped_a}"
+        );
+
+        // Union {agent:a, shared} crosses the edge and reaches Shelly.
+        let union = server.dispatch_tool_json(
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN m",
+                "namespace": ["agent:a", "shared"]
+            }),
+        );
+        assert!(
+            union.contains("Shelly"),
+            "union scope must cross the in-scope edge to Shelly: {union}"
+        );
+    }
+
+    /// PR3d: scoped `hybrid_query` (vector-first) is filter-complete — it
+    /// over-fetches so the returned ranked results are all genuinely in-scope,
+    /// even when NEARER out-of-scope candidates exist; scores/order preserved;
+    /// no other-namespace node appears.
+    #[test]
+    fn scoped_hybrid_vector_is_filter_complete() {
+        let server = create_test_server();
+        let db = server.db();
+        db.enable_vector_index(
+            "embedding",
+            crate::index::vector::HnswConfig::new(4, crate::index::vector::DistanceMetric::Cosine),
+        )
+        .unwrap();
+
+        let vec_props = |name: &str, e: &[f32]| {
+            PropertyMapBuilder::new()
+                .insert("name", name)
+                .insert_vector("embedding", e)
+                .build()
+        };
+
+        // b-nodes (agent:b) are NEARER the query [1,0,0,0] than a-nodes at the
+        // same index, so a naive take-k-then-filter would starve the in-scope set.
+        let mut a_names = std::collections::BTreeSet::new();
+        for i in 0..10 {
+            let spread = 0.01 + i as f32 * 0.01;
+            db.create_node_in_namespace(
+                "Doc",
+                vec_props(&format!("a{i}"), &[1.0 - spread, spread, 0.0, 0.0]),
+                "agent:a",
+            )
+            .unwrap();
+            a_names.insert(format!("a{i}"));
+            db.create_node_in_namespace(
+                "Doc",
+                vec_props(
+                    &format!("b{i}"),
+                    &[1.0 - spread * 0.5, 0.0, spread * 0.5, 0.0],
+                ),
+                "agent:b",
+            )
+            .unwrap();
+        }
+
+        let out = server.dispatch_tool_json(
+            "hybrid_query",
+            serde_json::json!({
+                "query_embedding": [1.0, 0.0, 0.0, 0.0],
+                "top_k": 5,
+                "limit": 5,
+                "namespace": "agent:a"
+            }),
+        );
+        let v = as_json(&out);
+        let results = v
+            .get("results")
+            .and_then(|r| r.as_array())
+            .unwrap_or_else(|| panic!("hybrid_query must return results array: {out}"));
+        assert_eq!(
+            results.len(),
+            5,
+            "scoped hybrid must be filter-complete (k in-scope results): {out}"
+        );
+        // Every returned node is in agent:a and none is a b-node.
+        for r in results {
+            let ns = r
+                .pointer("/node/namespace")
+                .and_then(|n| n.as_str())
+                .unwrap_or("default");
             assert_eq!(
-                as_json(&out)
-                    .pointer("/error/code")
-                    .and_then(|c| c.as_str()),
-                Some("INVALID_ARGUMENT"),
-                "scoped traverse direction:{direction} must be INVALID_ARGUMENT (v1 limitation): {out}"
+                ns, "agent:a",
+                "scoped hybrid returned an out-of-scope node: {out}"
             );
         }
+        assert!(
+            !out.contains("\"b0\"") && !out.contains("\"b1\""),
+            "scoped hybrid must not return any agent:b node: {out}"
+        );
+        // Scores present and in non-increasing order (ranking preserved).
+        let scores: Vec<f64> = results
+            .iter()
+            .filter_map(|r| r.get("similarity_score").and_then(|s| s.as_f64()))
+            .collect();
+        assert_eq!(scores.len(), 5, "each ranked result carries a score: {out}");
+        for w in scores.windows(2) {
+            assert!(
+                w[0] >= w[1] - 1e-6,
+                "scoped hybrid must preserve descending similarity order: {scores:?}"
+            );
+        }
+        assert_no_reserved(&out, "hybrid_query(scoped)");
+    }
+
+    /// PR3d: `hybrid_query` with an unknown namespace is NOT_FOUND; with `"all"`
+    /// it is unscoped; omitted is default-only.
+    #[test]
+    fn scoped_hybrid_unknown_namespace_is_not_found() {
+        let (server, _a, _b, _c) = seed_two_namespaces();
+        let out = server.dispatch_tool_json(
+            "hybrid_query",
+            serde_json::json!({ "filter_label": "Person", "namespace": "agent:ghost" }),
+        );
+        assert_eq!(
+            as_json(&out)
+                .pointer("/error/code")
+                .and_then(|c| c.as_str()),
+            Some("NOT_FOUND"),
+            "hybrid_query with an unknown namespace must be NOT_FOUND: {out}"
+        );
     }
 
     #[test]

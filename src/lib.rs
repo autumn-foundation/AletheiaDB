@@ -142,6 +142,11 @@ pub use db::{
     PitrTarget, SchemaInstant, SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats,
     TimeBounds, UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
 };
+// Issue #3349 (PR3d): re-export `TraverseDirection` at the crate root via its
+// owning `namespace_query` module path, deliberately WITHOUT adding it to the
+// `db` module's own re-export block (`src/db/mod.rs` is owned by the concurrent
+// GDPR crypto-shred lane and must not be edited here).
+pub use db::namespace_query::TraverseDirection;
 #[cfg(feature = "semantic-retrieval-fusion")]
 pub use db::{
     FusedHit, FusionBreakdown, FusionError, FusionPolicy, FusionPolicyBuilder, FusionPolicyError,
