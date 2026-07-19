@@ -95,34 +95,66 @@
 ## Firing rule (falsifiable, documented exactly)
 
 **Per-entity.** For entity `E` and monitor `M`, let `e_now = embedding(E, now)` and
-`e_past = embedding(E, now − window)` via the temporal vector history. An alarm fires
+`e_past = embedding(E, now − window)` via the point-in-time history path. An alarm fires
 **iff**:
 
-1. both `e_now` and `e_past` exist (a version actually in-window), **and**
+1. both `e_now` and `e_past` exist, **and**
 2. `distance_M(e_now, e_past) > threshold` (strict `>`), **and**
 3. no unresolved alarm for `(M, E)` exists.
 
-If `e_past` is missing (no version in-window) or `e_now` is missing, the entity does
-**not** fire.
+If `e_past` is missing or `e_now` is missing, the entity does **not** fire.
 
-**Stage B1 clarification of the two endpoints.** Operationally, `e_now` is the
-*latest* embedding version inside the lookback window `[now − window, now]` (the
-current one) and `e_past` is the *earliest* version still inside that window. This is
-the concrete reading of `embedding(E, now − window)`: reconstructing literally at the
-instant `now − window` would sit *before* an entity's very first version, so the entity
-could never fire on its first genuine drift. `e_past` is therefore MISSING exactly when
-the window holds fewer than two versions (a single point has no past to compare
-against), matching "no version in-window → no fire". The versions are read through the
-bi-temporal node history (`get_node_history`), which yields both the embedding and the
-`VersionId` for each version, supplying the `from_version` / `to_version` refs the alarm
-record carries.
+**The two endpoints are the literal reconstructions** (Fix-1, Issue #3367 correctness
+review). `e_now` is `E`'s **current** embedding — the current-state value of the vector
+property — together with its current `VersionId` (via `get_node`); an entity with no
+current embedding (never had one, or the property was removed) does not fire. `e_past`
+is the embedding **on record as of transaction-time `now − window`** (read at the current
+valid coordinate), via `get_node_at_time(E, valid = now, tx = now − window)`; the version
+current at that transaction time supplies the `from_version` ref. `e_past` is MISSING
+exactly when `E` had no embedding on record at `now − window` — it was created after that
+instant, or the property was absent then — matching "no embedding `window` ago → no fire".
+
+**Reconstruction dimension — transaction-time as-of `now − window` (design decision
+forced by the engine's bitemporal model).** The historical storage is
+*system-time-versioned*: an update supersedes the prior version by **closing its
+transaction interval** while its **valid interval stays open**. Empirically (verified
+against `get_node_history` / `get_node_at_time`), a superseded version is therefore
+invisible at `tx = now` for any past valid coordinate — a *valid-time* as-of `now − window`
+at `tx = now` returns only the current version (if `now − window ≥ its valid_from`) or
+nothing, **never** a superseded embedding. Reconstructing "what was the embedding `window`
+ago" is thus only faithful along the **transaction-time** axis, so `e_past` is read at
+`tx = now − window`. (The literal *valid-time* `embedding(E, now − window)` that the AC's
+prose names is not recoverable in this engine; the transaction-time reading is the
+correct realization of the same intent — "the embedding on record `window` ago" — and,
+critically, actually fires on genuine drift.)
+
+We deliberately do **not** substitute "the earliest version inside the window": that
+heuristic picks a data-dependent write rather than the state `window` ago, stripping
+`window` of its declared meaning and disagreeing whenever the entity's history spans the
+window. Reconstructing at the exact coordinate `now − window` keeps `window` meaning "how
+far back the past comparison anchor sits". The firing's `compared_now` is the evaluation
+instant `now`; `compared_past` is the `now − window` transaction-time anchor actually
+used; `from_version` / `to_version` name the versions that supplied `e_past` / `e_now`.
+
+Because the past anchor is on the transaction axis, a deterministic fixture must spread
+the *transaction* times of the versions (e.g. via an injected `SimulatedClock`) so that
+`now − window` lands strictly between two commits; backdating *valid* time does not create
+a readable past region under this engine's supersession model.
 
 **Label-centroid.** `centroid(t) =` the component-wise arithmetic mean over all
 entities carrying `M.label` that have the property at time `t` (iterated **sorted by
-node id**; entities missing the vector are **skipped**). For `Cosine` the mean is
-**NOT** renormalized (documented). The monitor fires iff
-`distance_M(centroid(now), centroid(now − window)) > threshold` and no unresolved label
-alarm for `M` exists.
+node id**; entities missing the vector are **skipped**). The now-centroid is taken over
+**every** label member with a current embedding; the past-centroid over **every** member
+whose embedding was on record at transaction-time `now − window` (same axis as the
+per-entity rule). The two member sets need not coincide (a
+member static over the window, or created inside it, contributes to only one) — the
+centroid is emphatically **not** restricted to members with two in-window versions
+(Fix-1 correctness review, lens1 MAJOR-2). For `Cosine` the mean is **NOT** renormalized
+(documented); a zero-magnitude centroid (normalized members cancelling) is treated as
+**no comparison → no fire** rather than a spurious max-drift artifact (lens1 MINOR-5).
+The monitor fires iff `distance_M(centroid(now), centroid(now − window)) > threshold` and
+no unresolved label alarm for `M` exists; a centroid with no contributing members does
+not fire.
 
 ## Centroid & metric decisions
 

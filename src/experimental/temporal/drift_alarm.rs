@@ -13,17 +13,29 @@
 //! # Falsifiable firing rule (documented exactly)
 //!
 //! **Per-entity.** For entity `E` and monitor `M` with metric `d_M`, threshold
-//! `θ`, and window `w`, let `e_now = embedding(E, now)` and
-//! `e_past = embedding(E, now − w)` resolved through the temporal vector
-//! history. An alarm fires **iff**:
+//! `θ`, and window `w`, let `e_now = embedding(E, now)` be `E`'s **current**
+//! embedding and `e_past = embedding(E, now − w)` the embedding **on record as
+//! of transaction-time `now − w`** (read at the current valid coordinate). An
+//! alarm fires **iff**:
 //!
-//! 1. both `e_now` and `e_past` exist (a version actually in-window), **and**
+//! 1. both `e_now` and `e_past` exist, **and**
 //! 2. `d_M(e_now, e_past) > θ` (strict `>`; exactly-at-threshold does **not**
 //!    fire), **and**
 //! 3. no unresolved alarm for `(M, E)` already exists (suppress until resolved).
 //!
-//! If `e_past` is missing (no version within the window) or `e_now` is missing,
-//! the entity does **not** fire.
+//! `e_now` is missing when `E` has no current embedding (never had one, or the
+//! property was removed) — a since-dropped embedding never fires. `e_past` is
+//! missing when `E` had no embedding on record at `now − w` (created after that
+//! instant, or the property was absent then). Either missing endpoint means the
+//! entity does **not** fire. The comparison is the literal
+//! `d_M(embedding(E, now), embedding(E, now − w))`; the anchor is reconstructed
+//! at the exact coordinate `now − w`, so `window` keeps its declared meaning
+//! (how far back the past endpoint sits) rather than degrading to an
+//! "earliest-write-within-the-window" heuristic. The past anchor is on the
+//! **transaction-time** axis (see [`evaluate_monitor`]): the engine's
+//! system-time-versioned storage cannot recall a superseded embedding along
+//! valid time at `tx = now`, so transaction-time as-of `now − w` is the
+//! faithful "what was the embedding `w` ago".
 //!
 //! **Label-centroid.** For a label-targeted monitor,
 //! `centroid(t) =` the component-wise arithmetic mean of the property vector,
@@ -308,10 +320,19 @@ pub struct DriftFiring {
 /// `arccos(cosine_similarity)` (radians). Mirrors the temporal vector index's
 /// private `compute_drift_distance` so alarm distances match drift metrics.
 ///
+/// # Zero-magnitude vectors
+///
+/// For a cosine/angular metric, [`cosine_similarity`](crate::core::vector::cosine_similarity)
+/// returns `Ok(0.0)` for a (near-)zero-magnitude vector rather than erroring, so
+/// this function returns cosine distance `1.0` (angular `π/2`) — a short-circuit
+/// artifact, not a true distance. Callers that could form a zero-magnitude
+/// operand (e.g. a label centroid whose normalized members cancel) must guard
+/// it as "no comparison" *before* calling; the drift evaluator does so via
+/// [`cosine_family_zero_guard`].
+///
 /// # Errors
 ///
-/// `INVALID_ARGUMENT` on a dimension mismatch or a zero-magnitude vector for a
-/// cosine/angular metric.
+/// `INVALID_ARGUMENT` on a dimension mismatch.
 pub fn metric_distance(a: &[f32], b: &[f32], metric: DriftMetric) -> Result<f32> {
     // Mirror the temporal vector index's private `compute_drift_distance`
     // (`src/index/vector/temporal/mod.rs`) exactly, so an alarm's measured
@@ -401,6 +422,42 @@ pub fn decide_entity_firing(
 /// Evaluate a monitor against the database as of `now`, producing the set of
 /// intended firings (pre-persistence). Deterministic given the stored history.
 ///
+/// # Firing endpoints (literal rule)
+///
+/// The two compared embeddings are reconstructed through the point-in-time
+/// history path, implementing the falsifiable rule
+/// `distance(embedding(E, now), embedding(E, now − window))`:
+///
+/// - **`e_now`** is the entity's **current** embedding (the current-state value
+///   of the vector property) together with its current [`VersionId`]. An entity
+///   with no current embedding (never had one, or the property was removed) does
+///   not fire.
+/// - **`e_past`** is the embedding **on record as of transaction-time
+///   `now − window`** — i.e. "what was the embedding, `window` ago" — read via
+///   `get_node_at_time(E, valid = now, tx = now − window)`. If the entity had no
+///   embedding on record at `now − window` (created after that instant, or the
+///   property was absent then) `e_past` is MISSING and the entity does not fire.
+///   We deliberately do **not** substitute "the earliest version within the
+///   window", so `window` keeps its declared meaning: the exact lookback
+///   coordinate of the past endpoint.
+///
+/// **Reconstruction dimension (transaction-time as-of `now − window`).** The
+/// engine's historical storage is system-time-versioned: an update supersedes
+/// the prior version by *closing its transaction interval* while its valid
+/// interval stays open. A superseded version is therefore invisible at
+/// `tx = now` for any past valid coordinate — a *valid-time* as-of `now − window`
+/// at `tx = now` can never return a superseded embedding, only the current one
+/// (or nothing). The embedding that was current `window` ago is recoverable only
+/// along the **transaction-time** axis, so `e_past` is reconstructed at
+/// `tx = now − window` (at the current valid coordinate `now`). This is the
+/// faithful reading of "the embedding as it was `window` ago" for this engine
+/// and, unlike the old earliest-in-window heuristic, keeps `window` meaning
+/// exactly how far back the comparison anchor sits.
+///
+/// `from_version` is the version supplying `e_past`; `to_version` is the current
+/// version. The firing's `compared_now` is the evaluation instant `now`;
+/// `compared_past` is the transaction-time anchor `now − window` actually used.
+///
 /// # Errors
 ///
 /// - `INVALID_ARGUMENT` for an invalid spec surfaced at evaluation.
@@ -410,36 +467,37 @@ pub fn evaluate_monitor(
     monitor: &DriftMonitor,
     now: Timestamp,
 ) -> Result<Vec<DriftFiring>> {
-    // Lookback window: [now - window, now]. We compare, per entity, the
-    // *earliest* embedding version still inside that window against the
-    // *latest* (current) one. This is the operational reading of the design's
-    // `embedding(E, now)` vs `embedding(E, now - window)`: reconstructing
-    // literally at the instant `now - window` would never fire on an entity's
-    // very first drift (that instant precedes its creation), so the "past
-    // endpoint" is the oldest fact still within the lookback window. If fewer
-    // than two versions fall in the window the past endpoint is MISSING and the
-    // entity does not fire (rule 1).
+    // The past comparison anchor is the transaction-time coordinate
+    // `now - window`; `e_past` is the embedding on record then (see the
+    // reconstruction-dimension note above), read at the current valid coord.
     let window_micros = i128::from(monitor.spec.window.as_micros() as i64);
     let now_wall = i128::from(now.wallclock());
     let past_wall = now_wall.saturating_sub(window_micros);
-    let past_bound =
-        Timestamp::new(clamp_micros(past_wall), 0).unwrap_or_else(|_| Timestamp::from(0));
+    let past_tx = Timestamp::new(clamp_micros(past_wall), 0).unwrap_or_else(|_| Timestamp::from(0));
+    let key = monitor.spec.property_key.as_str();
 
     match monitor.spec.target {
         DriftTarget::PerEntity => {
             let mut firings = Vec::new();
             for node in monitor_entities(db, &monitor.spec) {
-                let window = entity_window_embeddings(
-                    db,
-                    node,
-                    past_wall,
-                    now_wall,
-                    &monitor.spec.property_key,
-                );
-                let (e_now, e_past) = endpoints(&window);
+                let (Some(e_now), Some(e_past)) = (
+                    entity_current_embedding(db, node, key),
+                    entity_past_embedding(db, node, now, past_tx, key),
+                ) else {
+                    continue;
+                };
+                // A zero-magnitude operand under cosine/angular reads as a
+                // short-circuit artifact (distance 1.0), not a real drift.
+                if cosine_family_zero_guard(
+                    monitor.spec.metric,
+                    &e_now.embedding,
+                    &e_past.embedding,
+                ) {
+                    continue;
+                }
                 let decision = decide_entity_firing(
-                    e_now.map(|w| w.embedding.as_slice()),
-                    e_past.map(|w| w.embedding.as_slice()),
+                    Some(&e_now.embedding),
+                    Some(&e_past.embedding),
                     monitor.spec.metric,
                     monitor.spec.threshold,
                     // Purity: dedup against unresolved alarms happens at
@@ -447,48 +505,50 @@ pub fn evaluate_monitor(
                     false,
                 )?;
                 if let Some(distance) = decision {
-                    // `endpoints` guarantees both are `Some` when a distance is
-                    // produced.
-                    let now_pt = e_now.expect("firing implies a now endpoint");
-                    let past_pt = e_past.expect("firing implies a past endpoint");
                     firings.push(DriftFiring {
                         entity: Some(node),
                         label: None,
                         measured_distance: distance,
-                        compared_now: now_pt.at,
-                        compared_past: past_pt.at,
-                        from_version: Some(past_pt.version),
-                        to_version: Some(now_pt.version),
+                        compared_now: now,
+                        compared_past: past_tx,
+                        from_version: Some(e_past.version),
+                        to_version: Some(e_now.version),
                     });
                 }
             }
             Ok(firings)
         }
         DriftTarget::LabelCentroid => {
-            // Deterministic component-wise mean over entities carrying the label
-            // that have the vector, iterated in ascending node-id order.
+            // Population centroids over ALL label members that have the property
+            // at each time `t`: the now-centroid over every member with a current
+            // embedding, the past-centroid over every member whose embedding
+            // reconstructs at `now - window`. The two member sets need not
+            // coincide (a member static over the window, or created inside it,
+            // contributes to only one) — this is the documented AC3 population,
+            // NOT only members with two in-window versions. Members missing the
+            // vector at that coordinate are skipped; node-id-sorted iteration;
+            // the mean is not renormalized (see [`centroid`]).
             let mut now_vecs: Vec<Vec<f32>> = Vec::new();
             let mut past_vecs: Vec<Vec<f32>> = Vec::new();
             for node in monitor_entities(db, &monitor.spec) {
-                let window = entity_window_embeddings(
-                    db,
-                    node,
-                    past_wall,
-                    now_wall,
-                    &monitor.spec.property_key,
-                );
-                let (e_now, e_past) = endpoints(&window);
-                // Skip entities missing the vector in-window (documented).
-                if let (Some(n), Some(p)) = (e_now, e_past) {
-                    now_vecs.push(n.embedding.clone());
-                    past_vecs.push(p.embedding.clone());
+                if let Some(e_now) = entity_current_embedding(db, node, key) {
+                    now_vecs.push(e_now.embedding);
+                }
+                if let Some(e_past) = entity_past_embedding(db, node, now, past_tx, key) {
+                    past_vecs.push(e_past.embedding);
                 }
             }
             let now_refs: Vec<&[f32]> = now_vecs.iter().map(Vec::as_slice).collect();
             let past_refs: Vec<&[f32]> = past_vecs.iter().map(Vec::as_slice).collect();
             let (Some(c_now), Some(c_past)) = (centroid(&now_refs), centroid(&past_refs)) else {
+                // A centroid with no contributing members: no comparison, no fire.
                 return Ok(Vec::new());
             };
+            // A zero-magnitude centroid (normalized members cancelling) is not a
+            // real drift signal under cosine/angular: treat as no comparison.
+            if cosine_family_zero_guard(monitor.spec.metric, &c_now, &c_past) {
+                return Ok(Vec::new());
+            }
             let decision = decide_entity_firing(
                 Some(&c_now),
                 Some(&c_past),
@@ -502,7 +562,7 @@ pub fn evaluate_monitor(
                     label: monitor.spec.label.clone(),
                     measured_distance: distance,
                     compared_now: now,
-                    compared_past: past_bound,
+                    compared_past: past_tx,
                     from_version: None,
                     to_version: None,
                 }]),
@@ -512,19 +572,42 @@ pub fn evaluate_monitor(
     }
 }
 
-/// One embedding version observed inside a monitor's lookback window.
-struct WindowEmbedding {
-    /// Transaction-time coordinate of the version.
-    at: Timestamp,
-    /// The version reference.
-    version: VersionId,
-    /// The reconstructed embedding at that version.
+/// A resolved endpoint embedding for one entity at one bi-temporal coordinate,
+/// carrying the version that supplied it (for the alarm's version refs).
+struct EndpointEmbedding {
+    /// The reconstructed embedding.
     embedding: Vec<f32>,
+    /// The version that supplied the embedding.
+    version: VersionId,
 }
 
 /// Clamp a 128-bit micros value back into `i64` range for `Timestamp`.
 fn clamp_micros(v: i128) -> i64 {
     v.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+/// Squared-magnitude floor below which a vector is treated as zero for
+/// cosine/angular comparison, mirroring
+/// [`cosine_similarity`](crate::core::vector::cosine_similarity)'s own
+/// short-circuit (it returns `Ok(0.0)` — i.e. distance `1.0` — for such a
+/// vector). Used to suppress a spurious max-drift reading from a zero-magnitude
+/// embedding or centroid.
+const ZERO_MAGNITUDE_SQUARED: f32 = 1e-30;
+
+/// `true` when `metric` is cosine-family AND either operand is (near) zero
+/// magnitude, so comparing them would be a `cosine_similarity` short-circuit
+/// artifact rather than a real distance. Euclidean has no zero-norm hazard, so
+/// it never guards.
+fn cosine_family_zero_guard(metric: DriftMetric, a: &[f32], b: &[f32]) -> bool {
+    if !matches!(metric, DriftMetric::Cosine | DriftMetric::Angular) {
+        return false;
+    }
+    is_near_zero_magnitude(a) || is_near_zero_magnitude(b)
+}
+
+/// Whether `v`'s squared magnitude is at/below the zero floor.
+fn is_near_zero_magnitude(v: &[f32]) -> bool {
+    v.iter().map(|x| x * x).sum::<f32>() <= ZERO_MAGNITUDE_SQUARED
 }
 
 /// The entities a monitor watches, in ascending node-id order: the explicit
@@ -542,57 +625,50 @@ fn monitor_entities(db: &AletheiaDB, spec: &DriftMonitorSpec) -> Vec<NodeId> {
     ids
 }
 
-/// Reconstruct an entity's embedding versions that fall inside the lookback
-/// window `[past_wall, now_wall]` (transaction-time wallclock micros), oldest
-/// first. Backed by the bi-temporal node history (`get_node_history`), which
-/// carries both the version id and the embedding property for each version —
-/// the temporal reconstruction the design references, plus the version refs the
-/// alarm record needs. A node with no history (e.g. never created) yields an
-/// empty window rather than an error, so a monitor over a not-yet-existing
-/// entity simply does not fire.
-fn entity_window_embeddings(
+/// The entity's **current** embedding (current-state value of `property_key`)
+/// plus its current version id, or `None` when the entity has no current
+/// embedding (does not currently exist, or the property is absent/non-vector).
+/// This is the literal `embedding(E, now)`.
+fn entity_current_embedding(
     db: &AletheiaDB,
     node: NodeId,
-    past_wall: i128,
-    now_wall: i128,
     property_key: &str,
-) -> Vec<WindowEmbedding> {
-    let history = match db.get_node_history(node) {
-        Ok(h) => h,
-        Err(_) => return Vec::new(),
+) -> Option<EndpointEmbedding> {
+    let current = db.get_node(node).ok()?;
+    let Some(crate::core::property::PropertyValue::Vector(v)) =
+        current.properties.get(property_key)
+    else {
+        return None;
     };
-    let mut out = Vec::new();
-    for version in history.versions {
-        let tx_start = version.temporal.transaction_time().start();
-        let tx_wall = i128::from(tx_start.wallclock());
-        if tx_wall < past_wall || tx_wall > now_wall {
-            continue;
-        }
-        if let Some(crate::core::property::PropertyValue::Vector(v)) =
-            version.properties.get(property_key)
-        {
-            out.push(WindowEmbedding {
-                at: tx_start,
-                version: version.version_id,
-                embedding: v.to_vec(),
-            });
-        }
-    }
-    // Oldest first (get_node_history is already version-number ordered, but sort
-    // by transaction time defensively for a stable oldest/newest pick).
-    out.sort_by_key(|w| w.at);
-    out
+    Some(EndpointEmbedding {
+        embedding: v.to_vec(),
+        version: current.current_version,
+    })
 }
 
-/// Pick the `(now, past)` endpoints from an oldest-first window: `now` is the
-/// latest version, `past` is the earliest — but only when at least two versions
-/// are in-window (a single version has no past to compare against).
-fn endpoints(window: &[WindowEmbedding]) -> (Option<&WindowEmbedding>, Option<&WindowEmbedding>) {
-    match window.len() {
-        0 => (None, None),
-        1 => (Some(&window[0]), None),
-        n => (Some(&window[n - 1]), Some(&window[0])),
-    }
+/// The entity's embedding **on record as of transaction-time `past_tx`** (read
+/// at the current valid coordinate `valid_now`), plus the version that was
+/// current at that transaction time. `None` when the entity had no embedding on
+/// record then (created after `past_tx`, property absent, or non-vector). This
+/// is the literal `embedding(E, now − window)` for this engine — see the
+/// reconstruction-dimension note on [`evaluate_monitor`] for why the past anchor
+/// is the transaction-time, not the valid-time, axis.
+fn entity_past_embedding(
+    db: &AletheiaDB,
+    node: NodeId,
+    valid_now: Timestamp,
+    past_tx: Timestamp,
+    property_key: &str,
+) -> Option<EndpointEmbedding> {
+    let past = db.get_node_at_time(node, valid_now, past_tx).ok()?;
+    let Some(crate::core::property::PropertyValue::Vector(v)) = past.properties.get(property_key)
+    else {
+        return None;
+    };
+    Some(EndpointEmbedding {
+        embedding: v.to_vec(),
+        version: past.current_version,
+    })
 }
 
 /// Build an `INVALID_ARGUMENT`-mapped error (`QueryError::InvalidParameter`).
@@ -1579,10 +1655,12 @@ impl AletheiaDB {
     /// Query durable drift alarms by monitor / label / resolved state / time
     /// range.
     ///
-    /// When `time_range` is set, each alarm is reconstructed AS OF the range's
-    /// end coordinate (deterministic historical read), so an alarm resolved
-    /// *after* that coordinate still reads unresolved — the append-only
-    /// contract (AC5).
+    /// When `time_range` is set to `[start, end)`, results are restricted to
+    /// alarms whose `fired_at` transaction time falls within that half-open
+    /// range, and each retained alarm is reconstructed AS OF the range's `end`
+    /// coordinate (deterministic historical read), so an alarm resolved *after*
+    /// that coordinate still reads unresolved — the append-only contract (AC5).
+    /// An empty range (`start == end`) therefore returns nothing.
     ///
     /// # Errors
     ///
@@ -1608,6 +1686,14 @@ impl AletheiaDB {
             let Some(alarm) = alarm_from_node(id, &props) else {
                 continue;
             };
+            // Honor the range START: only alarms fired within `[start, end)`.
+            // (The `end` coordinate additionally governs the AS-OF reconstruction
+            // above.) An alarm fired before `start` is excluded.
+            if let Some((start, end)) = filter.time_range
+                && !(alarm.fired_at >= start && alarm.fired_at < end)
+            {
+                continue;
+            }
             if let Some(m) = filter.monitor_id
                 && alarm.monitor_id != m
             {
@@ -1868,5 +1954,595 @@ mod tests {
         };
         let firings = evaluate_monitor(&db, &monitor, ts(10_000)).expect("evaluate");
         assert!(firings.is_empty(), "no in-window history => no firings");
+    }
+
+    // -- Literal-rule firing fixtures (Fix-1, correctness review lens4) --------
+    //
+    // These drive the real reconstruction path (`get_node` for e_now,
+    // `get_node_at_time` for e_past) through the pure `evaluate_monitor(&db,
+    // &monitor, now)` seam with an EXPLICIT `now`. Because the past anchor is on
+    // the TRANSACTION-time axis (the engine cannot recall a superseded embedding
+    // along valid time at tx=now — see `evaluate_monitor`'s doc), the fixtures
+    // spread the versions' *transaction* times via an injected `SimulatedClock`
+    // so `now - window` lands strictly between two commits. Each fixture is
+    // constructed so its assertion is the literal
+    // `distance(embedding@now, embedding@(now-window))` outcome and would FAIL
+    // under the OLD "earliest-in-window vs latest-in-window" reading (noted per
+    // test).
+
+    use crate::PropertyMapBuilder;
+    use crate::core::temporal::time;
+    use crate::simulation::clock::SimulatedClock;
+
+    const HOUR_US: i64 = 3600 * 1_000_000;
+    const T0: i64 = 1_000_000_000_000;
+
+    fn make_node(db: &AletheiaDB, label: &str, embedding: &[f32]) -> NodeId {
+        db.create_node(
+            label,
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", embedding)
+                .build(),
+        )
+        .expect("create vector node")
+    }
+
+    fn update_vec(db: &AletheiaDB, node: NodeId, embedding: &[f32]) {
+        db.update_node_with_valid_time(
+            node,
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", embedding)
+                .build(),
+            None,
+        )
+        .expect("update vector node");
+    }
+
+    fn per_entity_monitor_for(label: &str, threshold: f32, window_secs: u64) -> DriftMonitor {
+        DriftMonitor {
+            id: MonitorId::new(1),
+            spec: DriftMonitorSpec {
+                property_key: "embedding".to_string(),
+                label: Some(label.to_string()),
+                entities: None,
+                metric: DriftMetric::Cosine,
+                threshold,
+                window: Duration::from_secs(window_secs),
+                target: DriftTarget::PerEntity,
+                mode: EvalMode::OnWrite,
+            },
+            created_at: ts(1000),
+        }
+    }
+
+    fn label_centroid_monitor_for(label: &str, threshold: f32, window_secs: u64) -> DriftMonitor {
+        let mut m = per_entity_monitor_for(label, threshold, window_secs);
+        m.spec.target = DriftTarget::LabelCentroid;
+        m
+    }
+
+    /// A DB with a Cosine temporal vector index on `"embedding"` (dim `dim`),
+    /// needed by `create_drift_monitor` for the persistence-path fixtures.
+    fn db_with_index(dim: usize) -> AletheiaDB {
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        let db = AletheiaDB::new().expect("db");
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 200,
+            full_snapshot_interval: 10,
+            hnsw_config: Some(HnswConfig::new(dim, DistanceMetric::Cosine)),
+        };
+        db.enable_temporal_vector_index("embedding", config)
+            .expect("enable temporal vector index");
+        db
+    }
+
+    // ---- Distinguishing window fixtures (pure evaluate_monitor) --------------
+
+    /// New literal rule FIRES where earliest-in-window would NOT.
+    ///
+    /// Versions A@t0, B@t0+2h (current == B). `now - 1.5h` (= t0+1.5h) lands in
+    /// A's transaction interval, so `e_past` (as-of tx) = A while `e_now` = B =>
+    /// distance 1.0 > θ => FIRE. The old earliest-in-window rule sees only B in
+    /// its tx-window [t0+1.5h, t0+3h] (A's commit at t0 is outside) => single
+    /// endpoint => no fire, so it would FAIL this `assert_eq!(len, 1)`.
+    #[test]
+    fn literal_asof_fires_where_earliest_in_window_would_not() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = AletheiaDB::new().expect("db");
+        let node = make_node(&db, "Doc", &a);
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let now = time::now();
+        let monitor = per_entity_monitor_for("Doc", 0.5, 5400); // 1.5h
+        let firings = evaluate_monitor(&db, &monitor, now).expect("evaluate");
+        assert_eq!(
+            firings.len(),
+            1,
+            "as-of(tx now-window)=A vs current=B must fire (old earliest-in-window would not)"
+        );
+        assert_eq!(firings[0].entity, Some(node));
+        assert!((firings[0].measured_distance - 1.0).abs() < 1e-6);
+    }
+
+    /// New literal rule does NOT fire where earliest-in-window WOULD.
+    ///
+    /// Versions A@t0, B@t0+1h, A@t0+2h (current == A). With window 2.5h,
+    /// `now - window` = t0+0.5h lands in the first A's tx interval, so `e_past`
+    /// (as-of tx) = A == current => distance 0 => no fire. The old
+    /// earliest-in-window rule (tx-window [t0+0.5h, t0+3h] holds B@t0+1h and
+    /// A@t0+2h) compares earliest B to latest A => distance 1 => it WOULD fire,
+    /// so it would FAIL this `assert!(is_empty)`.
+    #[test]
+    fn literal_asof_does_not_fire_where_earliest_in_window_would() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = AletheiaDB::new().expect("db");
+        let node = make_node(&db, "Doc", &a);
+        clock.jump_to(T0 + HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &a);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let now = time::now();
+        let monitor = per_entity_monitor_for("Doc", 0.5, 9000); // 2.5h
+        let firings = evaluate_monitor(&db, &monitor, now).expect("evaluate");
+        assert!(
+            firings.is_empty(),
+            "as-of(tx now-window)=A == current=A must NOT fire (old earliest-in-window would)"
+        );
+    }
+
+    /// A single, static version: `e_past` (as-of tx) == `e_now` => no fire.
+    #[test]
+    fn single_static_version_does_not_fire() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = AletheiaDB::new().expect("db");
+        let _node = make_node(&db, "Doc", &a);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let now = time::now();
+        let monitor = per_entity_monitor_for("Doc", 0.5, 5400);
+        let firings = evaluate_monitor(&db, &monitor, now).expect("evaluate");
+        assert!(firings.is_empty(), "a single static version has no drift");
+    }
+
+    /// Design case 5: nothing on record `window` ago (entity created after
+    /// `now - window`) => `e_past` MISSING via a real point-in-time
+    /// reconstruction => no fire, even though the current embedding differs.
+    #[test]
+    fn no_record_at_now_minus_window_does_not_fire() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = AletheiaDB::new().expect("db");
+        // Created only at t0+2h; `now - 1.5h` = t0+1.5h precedes its existence.
+        clock.jump_to(T0 + 2 * HOUR_US);
+        let node = make_node(&db, "Doc", &a);
+        clock.jump_to(T0 + 2 * HOUR_US + HOUR_US / 4);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let now = time::now();
+        let monitor = per_entity_monitor_for("Doc", 0.5, 5400);
+        let firings = evaluate_monitor(&db, &monitor, now).expect("evaluate");
+        assert!(
+            firings.is_empty(),
+            "nothing on record at now-window => missing past endpoint => no fire"
+        );
+    }
+
+    /// MAJOR-3: the current embedding was removed, though older versions carry
+    /// one. `e_now` is the CURRENT embedding (absent) => no fire. Window 3.5h so
+    /// the old "latest vector-bearing vs earliest vector-bearing" reading would
+    /// see A@t0 and B@t0+2h and FIRE, so it would FAIL this `assert!(is_empty)`.
+    #[test]
+    fn removed_current_embedding_does_not_fire() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = AletheiaDB::new().expect("db");
+        let node = make_node(&db, "Doc", &a);
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 2 * HOUR_US + HOUR_US / 2);
+        db.remove_node_property(node, "embedding")
+            .expect("remove embedding");
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let now = time::now();
+        let monitor = per_entity_monitor_for("Doc", 0.5, 12600); // 3.5h
+        let firings = evaluate_monitor(&db, &monitor, now).expect("evaluate");
+        assert!(
+            firings.is_empty(),
+            "no CURRENT embedding => no fire (old latest-vector-bearing reading would fire)"
+        );
+    }
+
+    /// BLOCKER-2: multi-entity exact fired-set. One PerEntity monitor over four
+    /// nodes: two genuine crossers, one sub-threshold jitter, one with no past
+    /// endpoint. The fired set must equal EXACTLY the two crossers.
+    #[test]
+    fn multi_entity_exact_fired_set() {
+        use std::collections::HashSet;
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let c = [0.0f32, 0.0, 1.0, 0.0];
+        let jitter = [1.0f32, 0.02, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = AletheiaDB::new().expect("db");
+        let crosser1 = make_node(&db, "Doc", &a);
+        let crosser2 = make_node(&db, "Doc", &a);
+        let jittery = make_node(&db, "Doc", &a);
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, crosser1, &b);
+        update_vec(&db, crosser2, &c);
+        update_vec(&db, jittery, &jitter);
+        // No past endpoint: created after now-window (t0+1.5h).
+        clock.jump_to(T0 + 2 * HOUR_US + HOUR_US / 2);
+        let no_past = make_node(&db, "Doc", &b);
+        let _ = no_past;
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let now = time::now();
+        let monitor = per_entity_monitor_for("Doc", 0.5, 5400);
+        let firings = evaluate_monitor(&db, &monitor, now).expect("evaluate");
+        let fired: HashSet<NodeId> = firings.iter().filter_map(|f| f.entity).collect();
+        let expected: HashSet<NodeId> = [crosser1, crosser2].into_iter().collect();
+        assert_eq!(
+            fired, expected,
+            "exactly the two crossers fire; jitter and no-past entities do not"
+        );
+    }
+
+    /// BLOCKER-3: label-centroid aggregate drift with NO single entity over θ.
+    /// e1 keeps direction but grows in magnitude (per-entity cosine distance 0);
+    /// e2 is static (distance 0). The non-renormalized component-wise mean
+    /// nonetheless rotates enough to cross θ. A co-registered PerEntity monitor
+    /// fires ZERO; the centroid fires once with the hand-computed distance. The
+    /// old centroid (only members with two in-window versions) would EXCLUDE the
+    /// single-version e2 (and the tx-windowed e1) and see no drift => it FAILS.
+    #[test]
+    fn label_centroid_aggregate_drift_no_single_entity_over_threshold() {
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = AletheiaDB::new().expect("db");
+        let e1 = make_node(&db, "Pop", &[1.0, 0.0]);
+        let _e2 = make_node(&db, "Pop", &[0.0, 1.0]);
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, e1, &[5.0, 0.0]); // same direction, larger magnitude
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let now = time::now();
+        let window = 5400u64;
+
+        let per_entity = per_entity_monitor_for("Pop", 0.1, window);
+        let per_firings = evaluate_monitor(&db, &per_entity, now).expect("evaluate");
+        assert!(
+            per_firings.is_empty(),
+            "no single entity crosses θ (each per-entity cosine distance is 0)"
+        );
+
+        // past centroid (0.5,0.5), now centroid (2.5,0.5); cosine distance ~0.1679.
+        let centroid_monitor = label_centroid_monitor_for("Pop", 0.1, window);
+        let centroid_firings = evaluate_monitor(&db, &centroid_monitor, now).expect("evaluate");
+        assert_eq!(
+            centroid_firings.len(),
+            1,
+            "the population centroid crosses θ even though no single entity does"
+        );
+        assert!(centroid_firings[0].entity.is_none());
+        assert_eq!(centroid_firings[0].label.as_deref(), Some("Pop"));
+        let expected = 0.167_949_7f32;
+        assert!(
+            (centroid_firings[0].measured_distance - expected).abs() < 2e-3,
+            "hand-computed centroid distance ~{expected}, got {}",
+            centroid_firings[0].measured_distance
+        );
+    }
+
+    /// An empty-label centroid monitor never fires and never panics.
+    #[test]
+    fn empty_label_centroid_does_not_fire() {
+        let db = AletheiaDB::new().expect("db");
+        let now = time::now();
+        let monitor = label_centroid_monitor_for("NoSuchLabel", 0.1, 3600);
+        let firings = evaluate_monitor(&db, &monitor, now).expect("evaluate");
+        assert!(firings.is_empty(), "no members => no centroid => no fire");
+    }
+
+    /// A zero-magnitude centroid (opposed unit members cancelling) must NOT
+    /// false-positive under cosine: treated as no comparison => no fire.
+    #[test]
+    fn zero_magnitude_centroid_does_not_fire() {
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = AletheiaDB::new().expect("db");
+        // now-centroid mean((1,0),(-1,0)) = (0,0); past unchanged.
+        let e1 = make_node(&db, "Zero", &[1.0, 0.0]);
+        let e2 = make_node(&db, "Zero", &[0.0, 1.0]);
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, e1, &[1.0, 0.0]);
+        update_vec(&db, e2, &[-1.0, 0.0]);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let now = time::now();
+        let monitor = label_centroid_monitor_for("Zero", 0.1, 5400);
+        let firings = evaluate_monitor(&db, &monitor, now).expect("evaluate");
+        assert!(
+            firings.is_empty(),
+            "a zero-magnitude centroid is no comparison, never a spurious max-drift fire"
+        );
+    }
+
+    // ---- Persistence-path fixtures (evaluate_drift_monitor_now + registry) ---
+
+    #[test]
+    fn above_threshold_write_produces_queryable_alarm() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(4);
+        let node = make_node(&db, "Doc", &a);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create monitor");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let fired = db
+            .evaluate_drift_monitor_now(monitor.id)
+            .expect("evaluate now");
+        assert_eq!(fired.len(), 1, "exactly one alarm expected");
+        let alarm = &fired[0];
+        assert_eq!(alarm.entity, Some(node));
+        assert_eq!(alarm.monitor_id, monitor.id);
+        assert!(!alarm.resolved);
+        assert!((alarm.threshold - 0.5).abs() < 1e-6);
+        assert!(alarm.measured_distance > 0.5);
+        assert!(alarm.to_version.is_some() && alarm.from_version.is_some());
+        assert_ne!(
+            alarm.from_version, alarm.to_version,
+            "from/to version refs name distinct versions"
+        );
+        let queried = db
+            .query_drift_alarms(&DriftAlarmFilter::for_monitor(monitor.id))
+            .expect("query alarms");
+        assert_eq!(queried.len(), 1);
+        assert_eq!(queried[0].alarm_id, alarm.alarm_id);
+    }
+
+    #[test]
+    fn sub_threshold_jitter_never_fires() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(4);
+        let node = make_node(&db, "Doc", &a);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create monitor");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &[1.0, 0.02, 0.0, 0.0]);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let fired = db.evaluate_drift_monitor_now(monitor.id).expect("evaluate");
+        assert!(fired.is_empty(), "sub-threshold jitter must not fire");
+    }
+
+    #[test]
+    fn re_crossing_fires_only_after_resolution() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let c = [0.0f32, 0.0, 1.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(4);
+        let node = make_node(&db, "Doc", &a);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create monitor");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let first = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+        assert_eq!(first.len(), 1, "first crossing fires");
+        let again = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+        assert!(again.is_empty(), "no re-fire while unresolved");
+        db.resolve_drift_alarm(first[0].alarm_id).expect("resolve");
+        clock.jump_to(T0 + 4 * HOUR_US);
+        update_vec(&db, node, &c);
+        clock.jump_to(T0 + 5 * HOUR_US);
+        let third = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+        assert_eq!(third.len(), 1, "re-arms only after resolution");
+    }
+
+    #[test]
+    fn resolve_is_recorded_and_as_of_stable() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(4);
+        let node = make_node(&db, "Doc", &a);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create monitor");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let before_fire = time::now();
+        let fired = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+        let alarm_id = fired[0].alarm_id;
+        clock.jump_to(T0 + 4 * HOUR_US);
+        let before_resolution = time::now();
+        clock.jump_to(T0 + 5 * HOUR_US);
+        let resolved = db.resolve_drift_alarm(alarm_id).expect("resolve");
+        assert!(resolved.resolved, "resolve marks resolved");
+        let unresolved = db
+            .query_drift_alarms(&DriftAlarmFilter {
+                resolved: Some(false),
+                ..DriftAlarmFilter::for_monitor(monitor.id)
+            })
+            .expect("query");
+        assert!(
+            unresolved.iter().all(|x| x.alarm_id != alarm_id),
+            "resolved alarm excluded from unresolved filter"
+        );
+        // AS OF within [before_fire, before_resolution): fired, not yet resolved.
+        let historical = db
+            .query_drift_alarms(&DriftAlarmFilter {
+                resolved: None,
+                time_range: Some((before_fire, before_resolution)),
+                ..DriftAlarmFilter::for_monitor(monitor.id)
+            })
+            .expect("query as of");
+        assert!(
+            historical
+                .iter()
+                .any(|x| x.alarm_id == alarm_id && !x.resolved),
+            "AS OF before resolution shows the alarm unresolved"
+        );
+    }
+
+    /// MAJOR-4: `query_drift_alarms` honors `time_range.start` — alarms fired
+    /// before `start` are excluded.
+    #[test]
+    fn query_drift_alarms_honors_time_range_start() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(4);
+        let node = make_node(&db, "Doc", &a);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create monitor");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let before_fire = time::now();
+        let fired = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+        let alarm_id = fired[0].alarm_id;
+        let fired_at = fired[0].fired_at;
+        let far_future = Timestamp::new(T0 + 10 * HOUR_US, 0).expect("ts");
+        // start before the fire => included.
+        let included = db
+            .query_drift_alarms(&DriftAlarmFilter {
+                resolved: None,
+                time_range: Some((before_fire, far_future)),
+                ..DriftAlarmFilter::for_monitor(monitor.id)
+            })
+            .expect("query");
+        assert!(
+            included.iter().any(|x| x.alarm_id == alarm_id),
+            "alarm fired within [before_fire, far_future) is included"
+        );
+        // start strictly after the fire => excluded.
+        let after_fire = Timestamp::new(fired_at.wallclock() + 1_000_000, 0).expect("ts");
+        let excluded = db
+            .query_drift_alarms(&DriftAlarmFilter {
+                resolved: None,
+                time_range: Some((after_fire, far_future)),
+                ..DriftAlarmFilter::for_monitor(monitor.id)
+            })
+            .expect("query");
+        assert!(
+            excluded.iter().all(|x| x.alarm_id != alarm_id),
+            "alarm fired before `start` must be excluded (time_range.start honored)"
+        );
+    }
+
+    #[test]
+    fn alarm_not_retroactively_deleted_by_later_writes() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(4);
+        let node = make_node(&db, "Doc", &a);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create monitor");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let fired = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+        let alarm_id = fired[0].alarm_id;
+        clock.jump_to(T0 + 4 * HOUR_US);
+        update_vec(&db, node, &b);
+        let still = db
+            .query_drift_alarms(&DriftAlarmFilter::for_monitor(monitor.id))
+            .expect("query");
+        assert!(
+            still.iter().any(|x| x.alarm_id == alarm_id),
+            "alarm survives later entity writes"
+        );
+    }
+
+    #[test]
+    fn changefeed_delivers_alarm_created_event() {
+        use crate::core::changefeed::ChangeType;
+        use crate::core::changefeed_subscription::ChangeFilter;
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(4);
+        let node = make_node(&db, "Doc", &a);
+        let monitor = db
+            .create_drift_monitor(per_entity_monitor_for("Doc", 0.5, 5400).spec)
+            .expect("create monitor");
+        let sub = db
+            .subscribe_changes(ChangeFilter::all().with_node_labels([DRIFT_ALARM_LABEL]))
+            .expect("subscribe");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        update_vec(&db, node, &b);
+        clock.jump_to(T0 + 3 * HOUR_US);
+        db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+        let records = sub.poll();
+        assert!(
+            records
+                .iter()
+                .any(|r| r.label == DRIFT_ALARM_LABEL && r.change_type == ChangeType::Created),
+            "changefeed delivers a Created event for the materialized alarm node"
+        );
+    }
+
+    #[test]
+    fn label_centroid_fires_on_population_shift() {
+        let a = [1.0f32, 0.0, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0, 0.0];
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(4);
+        let mut nodes = Vec::new();
+        for _ in 0..4 {
+            nodes.push(make_node(&db, "Doc", &a));
+        }
+        let monitor = db
+            .create_drift_monitor(label_centroid_monitor_for("Doc", 0.4, 5400).spec)
+            .expect("create monitor");
+        clock.jump_to(T0 + 2 * HOUR_US);
+        for &n in &nodes {
+            update_vec(&db, n, &b);
+        }
+        clock.jump_to(T0 + 3 * HOUR_US);
+        let fired = db.evaluate_drift_monitor_now(monitor.id).expect("eval");
+        assert_eq!(fired.len(), 1, "exactly one label-level alarm");
+        assert_eq!(fired[0].label.as_deref(), Some("Doc"));
+        assert!(
+            fired[0].entity.is_none(),
+            "label alarm has no single entity"
+        );
     }
 }
