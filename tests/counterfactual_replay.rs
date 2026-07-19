@@ -1,19 +1,14 @@
 #![cfg(feature = "semantic-temporal")]
-//! Red-phase behavioral test suite for counterfactual exclusion replay
+//! Behavioral test suite for counterfactual exclusion replay
 //! (Issue #3357) — *"the world without source X"*.
 //!
 //! These tests drive the real DB write path (with genuine `#3224` write-time
 //! provenance and real bi-temporal coordinates) to seed histories, then exercise
 //! [`AletheiaDB::counterfactual_replay`] and the resulting [`CounterfactualView`].
 //!
-//! # This is a RED suite
-//!
-//! The scaffold's `counterfactual_replay` returns
-//! [`CounterfactualError::Unimplemented`], so every *behavioral* test here fails
-//! at runtime (a `.expect("view")` on the materialization panics). That is the
-//! intended TDD-red state: the tests compile against the stub API and fail for
-//! the one right reason (`Unimplemented`) until the materialization wave lands.
-//! Each test encodes an acceptance-criterion contract from
+//! The materialization is implemented, so every test here asserts a real
+//! behavioral contract (the suite is green). Each test encodes an
+//! acceptance-criterion contract from
 //! `docs/plans/2026-07-19-counterfactual-replay.md`.
 
 use aletheiadb::AletheiaDB;
@@ -62,16 +57,6 @@ fn update_node_by(db: &AletheiaDB, id: NodeId, properties: PropertyMap, source: 
         WriteRequestOptions::new().with_provenance(prov(source)),
     )
     .expect("update node");
-}
-
-/// The current-state string value of a node property in the *real* DB, or `None`
-/// if the node/property is absent.
-fn real_node_str(db: &AletheiaDB, id: NodeId, key: &str) -> Option<String> {
-    db.get_node(id).ok().and_then(|n| {
-        n.get_property(key)
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    })
 }
 
 /// A canonical, order-stable digest of the *entire* observable real-DB state:
@@ -361,9 +346,18 @@ fn ac2_orphaned_update_dropped_and_counted() {
         view.get_node(fx.orphan_node).is_err(),
         "orphaned node must be absent from the view"
     );
+    // Exact count: only orphan_node's Y-update is orphaned (chain_node's Y-update
+    // has a surviving prior, all_x's writes are all excluded not orphaned).
+    assert_eq!(
+        view.report().orphaned_updates(),
+        1,
+        "exactly one orphaned update (orphan_node's Y-update)"
+    );
     assert!(
-        view.report().orphaned_updates() >= 1,
-        "the dropped Y-update must be counted as an orphaned update"
+        view.report()
+            .removed_entities()
+            .contains(&EntityId::Node(fx.orphan_node)),
+        "the orphaned node must appear in removed_entities"
     );
 }
 
@@ -531,26 +525,37 @@ fn ac5_divergence_report_counts_changed_and_removed() {
     // X wrote: orphan create, chain middle-update, all_x create + update, x_edge
     // create = 5 excluded writes.
     assert_eq!(report.excluded_writes(), 5, "all X writes excluded");
-    // Entities removed entirely: orphan_node (orphaned) and all_x_node.
-    assert!(report.entities_removed() >= 1);
-    // The chain node's current state changes (secret dropped) but it still exists.
+    // Entities removed entirely: orphan_node (orphaned Y-update), all_x_node
+    // (whole chain excluded), and x_edge (create excluded) = exactly 3.
+    assert_eq!(
+        report.entities_removed(),
+        3,
+        "orphan_node + all_x_node + x_edge removed"
+    );
+    for removed in [
+        EntityId::Node(fx.orphan_node),
+        EntityId::Node(fx.all_x_node),
+        EntityId::Edge(fx.x_edge),
+    ] {
+        assert!(
+            report.removed_entities().contains(&removed),
+            "{removed:?} must be in removed_entities"
+        );
+    }
+    // Only the chain node's current state changes (secret dropped) but it still
+    // exists — exactly one changed entity.
+    assert_eq!(report.entities_changed(), 1, "only chain_node changed");
     assert!(
         report
             .changed_entities()
             .contains(&EntityId::Node(fx.chain_node)),
         "the chain node's current state differs and must be reported as changed"
     );
-    // Untouched clean node is neither changed nor removed.
-    assert!(
-        !report
-            .changed_entities()
-            .contains(&EntityId::Node(fx.clean_node))
-    );
-    assert!(
-        !report
-            .removed_entities()
-            .contains(&EntityId::Node(fx.clean_node))
-    );
+    // Untouched clean node/edge are neither changed nor removed.
+    for clean in [EntityId::Node(fx.clean_node), EntityId::Edge(fx.clean_edge)] {
+        assert!(!report.changed_entities().contains(&clean));
+        assert!(!report.removed_entities().contains(&clean));
+    }
 }
 
 #[test]
@@ -752,19 +757,163 @@ fn noop_no_match_predicate_yields_view_equal_to_real() {
     assert_eq!(report.entities_changed(), 0, "zero blast radius");
     assert_eq!(report.entities_removed(), 0, "zero blast radius");
 
-    // Every node reads identically to the real DB.
+    // Every node's FULL current-state property map reads identically to the real
+    // DB (not just one key — m6).
     for &id in &fx.all_nodes {
-        let real = real_node_str(&fx.db, id, "title");
-        let via_view = view.get_node(id).ok().and_then(|n| {
-            n.get_property("title")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        });
-        // Not every node has a "title" key (chain_node uses "a"); this still
-        // asserts equality of the observed value (including both being None).
+        let real = fx.db.get_node(id).ok().map(|n| n.properties.clone());
+        let via_view = view.get_node(id).ok().map(|n| n.properties.clone());
         assert_eq!(
             real, via_view,
             "no-op view must equal the real DB for node {id}"
         );
     }
+    // Every edge's current state reads identically too.
+    for &id in &fx.all_edges {
+        let real = fx.db.get_edge(id).ok().map(|e| e.properties.clone());
+        let via_view = view.get_edge(id).ok().map(|e| e.properties.clone());
+        assert_eq!(
+            real, via_view,
+            "no-op view must equal the real DB for edge {id}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC3 — traversal over the view honours exclusion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ac3_traversal_over_view_excludes_removed_edges() {
+    // clean_node --(x_edge:X)--> orphan_node   (both edge and target excluded)
+    // clean_node --(clean_edge:clean-2)--> chain_node  (survives)
+    let fx = seed_fixture();
+    let view = fx
+        .db
+        .counterfactual_replay(
+            "no-x",
+            ExclusionPredicate::source("X"),
+            CounterfactualConfig::default(),
+        )
+        .expect("view materializes");
+
+    let outgoing: Vec<EdgeId> = view
+        .get_outgoing_edges(fx.clean_node)
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    assert!(
+        outgoing.contains(&fx.clean_edge),
+        "surviving clean edge must be traversable"
+    );
+    assert!(
+        !outgoing.contains(&fx.x_edge),
+        "excluded X edge must be gone from traversal"
+    );
+
+    let incoming_chain: Vec<EdgeId> = view
+        .get_incoming_edges(fx.chain_node)
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    assert!(incoming_chain.contains(&fx.clean_edge));
+
+    // orphan_node was removed entirely; the only edge into it (x_edge) is excluded.
+    assert!(
+        view.get_incoming_edges(fx.orphan_node).is_empty(),
+        "no edges may point at an entirely-removed node in the view"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// m1 — equal-value re-assertion by a surviving source (documented false-negative)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn equal_value_reassertion_by_surviving_source_is_dropped() {
+    // Y create {a:y1}; X update adds {secret:s}; Y update re-asserts {secret:s}
+    // (the SAME value X set). Excluding X, Y's re-assertion diffs EMPTY against its
+    // real predecessor (X's version, value equal), so `secret` is dropped from the
+    // view. This is the safe *no-leak* direction and a documented known limitation
+    // (full-state-diff reconstruction cannot recover PATCH intent). Pinned here so
+    // the direction can never silently regress into a *leak*.
+    let db = AletheiaDB::new().expect("db");
+    let id = create_node_by(&db, "Doc", props("a", "y1"), "Y");
+    update_node_by(&db, id, props("secret", "s"), "X");
+    update_node_by(&db, id, props("secret", "s"), "Y"); // Y re-asserts the same value
+
+    let view = db
+        .counterfactual_replay(
+            "no-x",
+            ExclusionPredicate::source("X"),
+            CounterfactualConfig::default(),
+        )
+        .expect("view materializes");
+    let node = view.get_node(id).expect("Y chain survives");
+    assert_eq!(node.get_property("a").and_then(|v| v.as_str()), Some("y1"));
+    assert!(
+        node.get_property("secret").is_none(),
+        "shared-value re-assertion is dropped (documented false-negative, never a leak)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M1 — current-state reads match the real DB even for future-dated valid times
+// ---------------------------------------------------------------------------
+
+#[test]
+fn noop_future_valid_time_view_equals_real_current_state() {
+    // A no-op (exclude nothing) view must equal the real DB's current state even
+    // when #3221 future-dated valid times are in play — the view reads through a
+    // shadow CurrentStorage with the same current-state-index semantics, not a
+    // bi-temporal AS-OF-now read.
+    let db = AletheiaDB::new().expect("db");
+    let now = time::now();
+    let future = Timestamp::new(now.wallclock() + 5_000_000_000, 0).expect("future ts");
+
+    // (A) Future valid_from create: present in the real current-state index.
+    let future_node = db
+        .create_node_with_options(
+            "Doc",
+            props("k", "future"),
+            WriteRequestOptions::new()
+                .with_provenance(prov("Y"))
+                .with_valid_from(future),
+        )
+        .expect("future create");
+    // (B) Future valid_to retraction: absent from the real current-state index.
+    let retracted = create_node_by(&db, "Doc", props("k", "present"), "Y");
+    db.retract_node(retracted, future).expect("retract");
+    // (C) Present-tense control.
+    let plain = create_node_by(&db, "Doc", props("k", "plain"), "Y");
+
+    let view = db
+        .counterfactual_replay(
+            "noop",
+            ExclusionPredicate::source("source-that-matches-nothing"),
+            CounterfactualConfig::default(),
+        )
+        .expect("view materializes");
+
+    // A no-op view has zero blast radius even with future-dated facts (report is
+    // consistent with the read surface).
+    assert_eq!(view.report().excluded_writes(), 0);
+    assert_eq!(view.report().entities_changed(), 0);
+    assert_eq!(view.report().entities_removed(), 0);
+
+    for id in [future_node, retracted, plain] {
+        let real = db.get_node(id).ok().map(|n| n.properties.clone());
+        let via = view.get_node(id).ok().map(|n| n.properties.clone());
+        assert_eq!(
+            real, via,
+            "no-op view current-state must equal the real DB for node {id}"
+        );
+    }
+    assert!(
+        view.get_node(future_node).is_ok(),
+        "future valid_from node is present (matches the real current-state index)"
+    );
+    assert!(
+        view.get_node(retracted).is_err(),
+        "future valid_to retracted node is absent (matches the real current-state index)"
+    );
 }

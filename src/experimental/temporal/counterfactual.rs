@@ -62,8 +62,9 @@ use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
 use crate::core::provenance::{Provenance, ProvenanceFilter};
-use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp, time};
+use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
 use crate::core::version::{EdgeVersion, NodeVersion, PropertyDelta};
+use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -305,10 +306,19 @@ impl CounterfactualHandle {
 pub struct CounterfactualView {
     handle: CounterfactualHandle,
     report: DivergenceReport,
-    /// Physically separate shadow storage holding only the surviving versions
-    /// (with their original bi-temporal valid intervals). Owned by the view, so
-    /// dropping the view reclaims it and the real database is never touched (AC4).
+    /// Physically separate shadow historical storage holding only the surviving
+    /// versions (with their original bi-temporal valid intervals). Owned by the
+    /// view, so dropping the view reclaims it and the real database is never
+    /// touched (AC4). Backs the `AS OF` and history read surfaces.
     shadow: HistoricalStorage,
+    /// Physically separate shadow current-state storage holding the surviving
+    /// **head** of every entity present in the view (each entity whose latest
+    /// surviving version is not a retraction/delete). Backs the current-state
+    /// reads and adjacency, matching the real DB's current-state index semantics
+    /// exactly (present iff the head interval is open, **independent of
+    /// valid-time-at-now**) so a no-op view equals the real DB even for
+    /// #3221 future-dated valid times.
+    current: CurrentStorage,
 }
 
 impl CounterfactualView {
@@ -333,29 +343,32 @@ impl CounterfactualView {
 
     /// Read a node's current state in the counterfactual view.
     ///
-    /// Resolves the node as of *now* against the shadow timeline, so a node whose
-    /// surviving chain was excluded entirely (or whose surviving head is a
-    /// retraction) reads as absent.
+    /// Reads through the shadow **current-state** store, matching the real DB's
+    /// current-state index semantics: a node is present iff its latest surviving
+    /// version is not a retraction/delete, *independent of whether its valid
+    /// interval contains now* (so a #3221 future-dated `valid_from` node is
+    /// present, exactly as in the real DB). Use [`Self::get_node_at_time`] for the
+    /// bi-temporal `AS OF` surface instead.
     ///
     /// # Errors
     ///
     /// Returns [`CounterfactualError::NotFound`] for a node absent from the view.
     pub fn get_node(&self, id: NodeId) -> Result<Node, CounterfactualError> {
-        let now = time::now();
-        self.shadow
-            .get_node_at_time(id, now, now)
+        self.current
+            .get_node(id)
             .map_err(|_| CounterfactualError::NotFound(format!("node {id}")))
     }
 
     /// Read an edge's current state in the counterfactual view.
     ///
+    /// Matches the real DB's current-state index semantics (see [`Self::get_node`]).
+    ///
     /// # Errors
     ///
     /// Returns [`CounterfactualError::NotFound`] for an edge absent from the view.
     pub fn get_edge(&self, id: EdgeId) -> Result<Edge, CounterfactualError> {
-        let now = time::now();
-        self.shadow
-            .get_edge_at_time(id, now, now)
+        self.current
+            .get_edge(id)
             .map_err(|_| CounterfactualError::NotFound(format!("edge {id}")))
     }
 
@@ -426,50 +439,34 @@ impl CounterfactualView {
             .map_err(|_| CounterfactualError::NotFound(format!("edge {id}")))
     }
 
-    /// The outgoing edges of a node in the counterfactual view, resolved as of
-    /// *now* against the shadow timeline.
+    /// The outgoing edges of a node in the counterfactual view (current state).
     ///
     /// Provided so callers can traverse the counterfactual graph; edges whose
     /// creating write was excluded (or whose surviving head is retracted) are
-    /// absent. Endpoints of a surviving edge whose node was removed entirely are
-    /// returned as-is (dangling), mirroring the engine's documented
-    /// orphaned-edge behavior. Edges are returned sorted by id for determinism.
+    /// absent. An edge whose endpoint node was removed entirely is still returned
+    /// (dangling), mirroring the engine's documented orphaned-edge behavior.
+    /// Edges are returned sorted by id for determinism. Reads through the shadow
+    /// current-state adjacency index (O(degree)), matching real-DB semantics.
     #[must_use]
     pub fn get_outgoing_edges(&self, id: NodeId) -> Vec<Edge> {
-        self.adjacent_edges(id, true)
+        self.adjacent_edges(self.current.get_outgoing_edges(id))
     }
 
-    /// The incoming edges of a node in the counterfactual view, resolved as of
-    /// *now* against the shadow timeline. Edges are returned sorted by id.
+    /// The incoming edges of a node in the counterfactual view (current state).
+    /// Edges are returned sorted by id. See [`Self::get_outgoing_edges`].
     #[must_use]
     pub fn get_incoming_edges(&self, id: NodeId) -> Vec<Edge> {
-        self.adjacent_edges(id, false)
+        self.adjacent_edges(self.current.get_incoming_edges(id))
     }
 
-    /// Collect the surviving edges adjacent to `id` (outgoing when `outgoing`,
-    /// else incoming) as of now, by scanning the shadow edge versions. The
-    /// shadow carries no adjacency index, so endpoints are read off the version
-    /// records directly and presence is verified through the point-in-time read.
-    fn adjacent_edges(&self, id: NodeId, outgoing: bool) -> Vec<Edge> {
-        let now = time::now();
-        let mut endpoints: BTreeMap<EdgeId, NodeId> = BTreeMap::new();
-        for version in self.shadow.get_edge_versions().values() {
-            let endpoint = if outgoing {
-                version.source
-            } else {
-                version.target
-            };
-            endpoints.entry(version.edge_id).or_insert(endpoint);
-        }
-        let mut edges = Vec::new();
-        for (edge_id, endpoint) in endpoints {
-            if endpoint == id
-                && let Ok(edge) = self.shadow.get_edge_at_time(edge_id, now, now)
-            {
-                edges.push(edge);
-            }
-        }
-        edges
+    /// Resolve a list of adjacent edge ids to their current-state [`Edge`]s in the
+    /// view, sorted by id for determinism.
+    fn adjacent_edges(&self, mut edge_ids: Vec<EdgeId>) -> Vec<Edge> {
+        edge_ids.sort_unstable();
+        edge_ids
+            .into_iter()
+            .filter_map(|edge_id| self.current.get_edge(edge_id).ok())
+            .collect()
     }
 }
 
@@ -539,13 +536,19 @@ impl AletheiaDB {
     ) -> Result<CounterfactualView, CounterfactualError> {
         let name = name.into();
 
-        // --- Enumerate recorded history under a single read guard. ---------
-        // Collect owned histories (and edge endpoints) so the guard is released
-        // before we build the physically-separate shadow storage.
-        let (node_histories, edge_histories) = {
+        // --- Snapshot raw version records under a brief read guard. ---------
+        // Only *shallow* clones of the version records happen under the lock
+        // (PropertyMap/PropertyDelta are Arc-backed, so this is O(versions)
+        // allocation, not reconstruction); the guard is released before any
+        // history reconstruction or folding, so writers are not stalled for the
+        // whole replay. Enumeration only ever sees hot-tier history (cold-migrated
+        // versions are omitted from the view, report, and cap — see the type docs).
+        let (raw_nodes, raw_edges) = {
             let hist = self.historical.read();
 
-            // AC8 guardrail: fail fast, before allocating any shadow storage.
+            // AC8 guardrail: fail fast, before allocating any shadow storage. The
+            // cap counts *versions*, not bytes (a byte/vector-aware guard is a
+            // follow-up).
             let total_versions = hist.get_node_versions().len() + hist.get_edge_versions().len();
             if total_versions > config.max_replay_versions {
                 return Err(CounterfactualError::HistoryTooLarge {
@@ -554,61 +557,64 @@ impl AletheiaDB {
                 });
             }
 
-            // Unique entity ids, iterated in sorted order for determinism (AC6).
-            let mut node_ids: BTreeSet<NodeId> = BTreeSet::new();
-            for version in hist.get_node_versions().values() {
-                node_ids.insert(version.node_id);
-            }
-            // Edge endpoints are fixed at creation; record them once per edge.
-            let mut edge_endpoints: BTreeMap<EdgeId, (NodeId, NodeId)> = BTreeMap::new();
-            for version in hist.get_edge_versions().values() {
-                edge_endpoints
-                    .entry(version.edge_id)
-                    .or_insert((version.source, version.target));
-            }
-
-            let mut node_histories: Vec<(NodeId, EntityHistory)> =
-                Vec::with_capacity(node_ids.len());
-            for id in node_ids {
-                let history = hist
-                    .get_node_history(id)
-                    .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
-                node_histories.push((id, history));
-            }
-            let mut edge_histories: Vec<(EdgeId, NodeId, NodeId, EntityHistory)> =
-                Vec::with_capacity(edge_endpoints.len());
-            for (id, (source, target)) in edge_endpoints {
-                let history = hist
-                    .get_edge_history(id)
-                    .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
-                edge_histories.push((id, source, target, history));
-            }
-            (node_histories, edge_histories)
+            let raw_nodes: Vec<NodeVersion> = hist.get_node_versions().values().cloned().collect();
+            let raw_edges: Vec<EdgeVersion> = hist.get_edge_versions().values().cloned().collect();
+            (raw_nodes, raw_edges)
         };
+
+        // --- Reconstruct full histories OFF-LOCK in a throwaway source store.
+        // `rebuild_version_chains` re-derives heads (insert_restored sets the head
+        // to the last-inserted version in HashMap order, which is not the tx-latest)
+        // and fills any missing chain links, so `get_*_history` walks correctly.
+        let mut source = HistoricalStorage::new();
+        // Edge endpoints are fixed at creation; record them once per edge.
+        let mut node_ids: BTreeSet<NodeId> = BTreeSet::new();
+        let mut edge_endpoints: BTreeMap<EdgeId, (NodeId, NodeId)> = BTreeMap::new();
+        for version in raw_nodes {
+            node_ids.insert(version.node_id);
+            source
+                .insert_restored_node_version(version)
+                .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
+        }
+        for version in raw_edges {
+            edge_endpoints
+                .entry(version.edge_id)
+                .or_insert((version.source, version.target));
+            source
+                .insert_restored_edge_version(version)
+                .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
+        }
+        source.rebuild_version_chains();
 
         // --- Fold each entity's history minus the excluded writes. ---------
         let mut shadow = HistoricalStorage::new();
+        let current = CurrentStorage::new();
         let mut report = DivergenceReport::default();
         let mut changed: Vec<EntityId> = Vec::new();
         let mut removed: Vec<EntityId> = Vec::new();
 
-        for (id, history) in &node_histories {
-            let outcome = replay_entity(history, &predicate);
+        // Nodes, in sorted id order for determinism (AC6).
+        for id in node_ids {
+            let history = source
+                .get_node_history(id)
+                .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
+            let outcome = replay_entity(&history, &predicate);
             outcome.accumulate(&mut report);
             classify_divergence(
-                EntityId::Node(*id),
-                real_current_map(history),
+                EntityId::Node(id),
+                real_current_map(&history),
                 outcome.shadow_current.as_ref(),
                 &mut changed,
                 &mut removed,
             );
+            // The current-state head is the last surviving version, present iff
+            // its interval is open (`shadow_current.is_some()`).
+            let head = outcome.head_present();
             for emitted in outcome.emitted {
-                let label = GLOBAL_INTERNER
-                    .intern(&emitted.label)
-                    .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
+                let label = intern_label(&emitted.label)?;
                 let version = NodeVersion::new_anchor(
                     emitted.version_id,
-                    *id,
+                    id,
                     emitted.temporal,
                     label,
                     emitted.properties,
@@ -618,34 +624,51 @@ impl AletheiaDB {
                     .insert_restored_node_version(version)
                     .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
             }
+            if let Some(head) = head {
+                let label = intern_label(&head.label)?;
+                let node = Node::new(id, label, head.properties, head.version_id);
+                current
+                    .insert_node_direct(node, head.tx_start)
+                    .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
+            }
         }
 
-        for (id, source, target, history) in &edge_histories {
-            let outcome = replay_entity(history, &predicate);
+        // Edges, in sorted id order for determinism (AC6).
+        for (id, (src, tgt)) in edge_endpoints {
+            let history = source
+                .get_edge_history(id)
+                .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
+            let outcome = replay_entity(&history, &predicate);
             outcome.accumulate(&mut report);
             classify_divergence(
-                EntityId::Edge(*id),
-                real_current_map(history),
+                EntityId::Edge(id),
+                real_current_map(&history),
                 outcome.shadow_current.as_ref(),
                 &mut changed,
                 &mut removed,
             );
+            let head = outcome.head_present();
             for emitted in outcome.emitted {
-                let label = GLOBAL_INTERNER
-                    .intern(&emitted.label)
-                    .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
+                let label = intern_label(&emitted.label)?;
                 let version = EdgeVersion::new_anchor(
                     emitted.version_id,
-                    *id,
+                    id,
                     emitted.temporal,
                     label,
-                    *source,
-                    *target,
+                    src,
+                    tgt,
                     emitted.properties,
                 )
                 .with_provenance(emitted.provenance.map(Arc::new));
                 shadow
                     .insert_restored_edge_version(version)
+                    .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
+            }
+            if let Some(head) = head {
+                let label = intern_label(&head.label)?;
+                let edge = Edge::new(id, label, src, tgt, head.properties, head.version_id);
+                current
+                    .insert_edge_direct(edge)
                     .map_err(|e| CounterfactualError::Internal(e.to_string()))?;
             }
         }
@@ -669,8 +692,19 @@ impl AletheiaDB {
             handle: CounterfactualHandle { name },
             report,
             shadow,
+            current,
         })
     }
+}
+
+/// Intern a label string for a shadow version, mapping failure to a structured
+/// internal error.
+fn intern_label(
+    label: &str,
+) -> Result<crate::core::interning::InternedString, CounterfactualError> {
+    GLOBAL_INTERNER
+        .intern(label)
+        .map_err(|e| CounterfactualError::Internal(e.to_string()))
 }
 
 /// A surviving version to materialize into the shadow store: the recomputed
@@ -696,12 +730,38 @@ struct EntityReplay {
     orphaned_updates: usize,
 }
 
+/// The surviving current-state head of an entity, to seed the shadow
+/// `CurrentStorage` — present only when the entity exists in the view (its last
+/// surviving version has an open interval).
+struct HeadInfo {
+    version_id: VersionId,
+    label: String,
+    properties: PropertyMap,
+    tx_start: Timestamp,
+}
+
 impl EntityReplay {
     /// Fold this entity's counters into the running divergence report.
     fn accumulate(&self, report: &mut DivergenceReport) {
         report.excluded_writes += self.excluded_writes;
         report.unattributed_writes_encountered += self.unattributed_writes;
         report.orphaned_updates += self.orphaned_updates;
+    }
+
+    /// The entity's current-state head to insert into the shadow current store,
+    /// or `None` when the entity is absent from the view (removed entirely or its
+    /// last surviving version is a retraction/delete). `shadow_current.is_some()`
+    /// holds iff the last emitted version has an open interval, so the head is
+    /// exactly `emitted.last()`.
+    fn head_present(&self) -> Option<HeadInfo> {
+        self.shadow_current.as_ref()?;
+        let head = self.emitted.last()?;
+        Some(HeadInfo {
+            version_id: head.version_id,
+            label: head.label.clone(),
+            properties: head.properties.clone(),
+            tx_start: head.temporal.transaction_time().start(),
+        })
     }
 }
 
@@ -740,28 +800,50 @@ fn replay_entity(history: &EntityHistory, predicate: &ExclusionPredicate) -> Ent
         if is_excluded {
             excluded_writes += 1;
         } else {
+            // `real_prev.is_none()` (the first version in the chain) is the sole
+            // create-signal. This is exact today: the public write path cannot
+            // produce a `[open, closed, open]` valid-interval chain (there is no
+            // `valid_to` write API, and update-after-retract is rejected), so a
+            // mid-chain re-open is unreachable. A future bounded-validity or
+            // re-create API would need this generalized to "surviving predecessor
+            // absent-or-closed" or it would mis-drop the re-open as an orphan.
             let is_create = real_prev.is_none();
             // Appliable iff it is the genuine create, or an update/delete whose
             // entity still has a surviving prior version.
             if is_create || shadow_current.is_some() {
                 let cf_base = shadow_current.as_ref().unwrap_or(&empty);
                 let recomputed = delta.apply(cf_base);
-                let valid_closed = version.temporal.valid_time().is_closed();
-                emitted.push(EmittedVersion {
-                    version_id: version.version_id,
-                    // Preserve the original valid interval (incl. a closed
-                    // delete/retract tombstone); open the transaction interval so
-                    // `rebuild_version_chains` re-derives supersession from the
-                    // surviving neighbours rather than the excluded ones.
-                    temporal: BiTemporalInterval::new(
-                        version.temporal.valid_time(),
-                        TimeRange::from(tx_time),
-                    ),
-                    label: version.label.clone(),
-                    provenance: version.provenance.clone(),
-                    properties: recomputed.clone(),
-                });
-                shadow_current = if valid_closed { None } else { Some(recomputed) };
+                // Preserve the original valid interval (incl. a closed
+                // delete/retract tombstone); open the transaction interval so
+                // `rebuild_version_chains` re-derives supersession from the
+                // surviving neighbours rather than the excluded ones.
+                let temporal = BiTemporalInterval::new(
+                    version.temporal.valid_time(),
+                    TimeRange::from(tx_time),
+                );
+                let label = version.label.clone();
+                let provenance = version.provenance.clone();
+                if version.temporal.valid_time().is_closed() {
+                    // Delete/retract tombstone: the value is discarded from the
+                    // current view, so move (don't clone) it into the version.
+                    emitted.push(EmittedVersion {
+                        version_id: version.version_id,
+                        temporal,
+                        label,
+                        provenance,
+                        properties: recomputed,
+                    });
+                    shadow_current = None;
+                } else {
+                    emitted.push(EmittedVersion {
+                        version_id: version.version_id,
+                        temporal,
+                        label,
+                        provenance,
+                        properties: recomputed.clone(),
+                    });
+                    shadow_current = Some(recomputed);
+                }
             } else {
                 // Update/delete targeting an entity with no surviving prior
                 // version: unappliable, dropped and counted (AC2).
