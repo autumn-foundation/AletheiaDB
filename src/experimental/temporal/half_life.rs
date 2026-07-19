@@ -67,10 +67,45 @@
 //!
 //! Cohort scans are bounded by the established
 //! [`max_schema_as_of_entities`](crate::storage::historical) cap (default
-//! 50,000, lowest ids kept); a truncated scan sets `sampled: true`. Statistics
-//! reflect **available history** — the hot tier plus restored history; versions
-//! migrated to the cold tier follow the Issue #3238 coverage-caveat model. The
-//! response discloses the window it saw.
+//! 50,000, lowest ids kept); a truncated scan sets `sampled: true`. The
+//! effective cap is `min(options.max_entities, max_schema_as_of_entities)`, read
+//! from historical-storage configuration at scan time (Issue #3377 Fix-B M3), so
+//! lowering the storage cap lowers the half-life scan cap in lockstep.
+//! Statistics reflect **available history** — the hot tier plus restored
+//! history; versions migrated to the cold tier follow the Issue #3238
+//! coverage-caveat model. The response discloses the window it saw.
+//!
+//! # Performance & complexity (v1 caveats)
+//!
+//! A cohort's `(VolatilityStats, KmCurve)` is memoized in a gated, in-memory,
+//! recomputable [`CohortStatsCache`] keyed on the full determinant
+//! `(cohort, as_of, min_events, max_entities)` and reused until a committed
+//! write advances the WAL append count (for an `as_of == None` query); an
+//! `as_of == Some(_)` past-snapshot entry is immutable and cached indefinitely.
+//! This makes a **warm** [`fact_freshness`](AletheiaDB::fact_freshness) O(1) in
+//! the cohort size (one entity-history read plus a hash lookup). The cache is
+//! **off the write path** — there is no write-time hook, so a write pays
+//! nothing; invalidation is a cheap O(1) generation comparison on read.
+//!
+//! Two known super-linear costs remain on a **cold** scan and are deliberately
+//! left as documented v1 limitations (a lean history accessor that fixes them
+//! would touch the core `historical`/`temporal` reconstruction paths broadly —
+//! out of scope for this performance pass):
+//!
+//! - **O(k²) per entity in versions-per-entity.** A cohort scan reconstructs
+//!   each member's full history via `get_node_history` / `get_edge_history`,
+//!   which for a k-version entity applies anchor+delta reconstruction O(k) per
+//!   version → O(k²) total. The `max_entities` cap bounds the *entity count*,
+//!   not the versions-per-entity, so a cohort whose versions concentrate in a
+//!   few hot entities (a `stock_price`-style fact) can dominate the scan. The
+//!   cap + cache are the v1 mitigation; a per-entity version budget and a lean
+//!   `(label, interval, one-key)` accessor are tracked follow-ups.
+//! - **Full `PropertyMap` cloned per version.** `get_*_history` clones every
+//!   reconstructed version's whole property map (including any embedding
+//!   vectors), though the estimator needs only the label, the valid interval,
+//!   and — for a property cohort — one key's value. For embedding-carrying
+//!   entities this is the dominant allocation cost. Same mitigation and same
+//!   follow-up as above.
 //!
 //! # Feature gate
 //!
@@ -89,9 +124,16 @@
 //! green. The correctness/validation hardening pass (Fix-A) folded in the
 //! property-removal lifespan fix, the `insufficient_data` freshness fix, as-of
 //! clock pinning for reproducibility, threshold/option validation, and the AC8
-//! [`CoverageScope`] disclosure. Performance work (a wired
-//! [`CohortStatsCache`] and the mandated benchmark) is tracked separately as
-//! Fix-B.
+//! [`CoverageScope`] disclosure.
+//!
+//! **Fix-B landed (performance).** The [`CohortStatsCache`] is now wired as a
+//! gated field on [`AletheiaDB`] and all three accessors route through it (a
+//! single scan + one Kaplan–Meier pass per determinant, no double-KM), the scan
+//! cap is config-driven (M3), and a benchmark (`benches/half_life.rs`) measures
+//! cohort throughput and warm freshness latency against the SM3 targets. The
+//! O(k²)/PropertyMap-clone cold-scan costs are documented above as v1
+//! limitations (mitigated by the cap + cache; a lean history accessor is a
+//! tracked follow-up).
 
 use std::time::Duration;
 
@@ -120,10 +162,16 @@ use crate::core::temporal::{Timestamp, time};
 /// "is the estimate within ±10%?").
 pub const MIN_EVENTS_FOR_ESTIMATE: usize = 20;
 
-/// The default candidate cap for a cohort scan, mirroring the established
-/// `max_schema_as_of_entities` convention (Issue #3377 AC7). The effective cap
-/// is read from historical-storage configuration at scan time; this constant is
-/// the documented default.
+/// The default value of [`HalfLifeOptions::max_entities`], matching the
+/// established `max_schema_as_of_entities` default (Issue #3377 AC7).
+///
+/// The **effective** cap a scan applies is
+/// `min(options.max_entities, historical.max_schema_as_of_entities())` — the
+/// storage-wide configuration read at scan time bounds every scan, and the
+/// per-call option can only tighten it further (Issue #3377 Fix-B M3). So a
+/// deployment that lowers `max_schema_as_of_entities` lowers the half-life scan
+/// cap in lockstep, and this constant is merely the option's standalone default
+/// (used when no database config is in play).
 pub const DEFAULT_MAX_ENTITIES: usize = 50_000;
 
 /// The default page size for a [`staleness_inventory`](AletheiaDB::staleness_inventory)
@@ -517,6 +565,21 @@ pub fn summarize(
     observations: &[Observation],
     min_events: usize,
 ) -> VolatilityStats {
+    summarize_with_curve(cohort, observations, min_events).0
+}
+
+/// [`summarize`] plus the Kaplan–Meier curve it derived the half-life/IQR from,
+/// computing the KM pass **exactly once** (Issue #3377 Fix-B: the accessors
+/// previously ran `summarize` — which computes KM internally — and then a second
+/// `kaplan_meier` on the same observations for the freshness/staleness survival
+/// estimate). The curve is empty for an `insufficient_data` cohort (no estimate
+/// is defensible below the floor), mirroring the freshness sufficiency gate.
+#[must_use]
+pub fn summarize_with_curve(
+    cohort: Cohort,
+    observations: &[Observation],
+    min_events: usize,
+) -> (VolatilityStats, KmCurve) {
     let observation_count = observations.len();
     let event_count = observations.iter().filter(|o| !o.censored).count();
     let censored_count = observation_count - event_count;
@@ -530,10 +593,16 @@ pub fn summarize(
     // deliberately-separate states into one.
     let insufficient_data = observation_count < min_events;
 
+    // Compute the KM curve at most once. Below the floor no estimate is
+    // defensible, so the curve is empty and half_life/iqr are None.
+    let curve = if insufficient_data {
+        KmCurve { steps: Vec::new() }
+    } else {
+        kaplan_meier(observations)
+    };
     let (half_life, iqr) = if insufficient_data {
         (None, None)
     } else {
-        let curve = kaplan_meier(observations);
         let half_life = curve.median().map(micros_to_duration);
         let iqr = match (curve.percentile(0.25), curve.percentile(0.75)) {
             (Some(p25), Some(p75)) => Some((micros_to_duration(p25), micros_to_duration(p75))),
@@ -542,7 +611,7 @@ pub fn summarize(
         (half_life, iqr)
     };
 
-    VolatilityStats {
+    let stats = VolatilityStats {
         cohort,
         half_life,
         iqr,
@@ -554,7 +623,23 @@ pub fn summarize(
         // The pure summary describes a hot-tier scan; the cold tier is never
         // enumerated in v1 (Issue #3377 AC8 / #3238 coverage model).
         coverage: CoverageScope::hot_only(),
-    }
+    };
+    (stats, curve)
+}
+
+/// Fold a completed cohort [`CohortScan`] into its reported [`VolatilityStats`]
+/// (with the scan's `sampled` flag applied) and the KM curve backing survival
+/// estimates, computing Kaplan–Meier exactly once via [`summarize_with_curve`]
+/// (Issue #3377 Fix-B). The single seam the cache-`compute` closure and
+/// `staleness_inventory` share.
+fn stats_and_curve_from_scan(
+    cohort: &Cohort,
+    scan: &CohortScan,
+    min_events: usize,
+) -> (VolatilityStats, KmCurve) {
+    let (mut stats, curve) = summarize_with_curve(cohort.clone(), &scan.observations, min_events);
+    stats.sampled = scan.sampled;
+    (stats, curve)
 }
 
 /// Convert a non-negative microsecond duration to [`Duration`], clamping any
@@ -598,39 +683,73 @@ pub fn survival_probability(
 // In-memory cohort-statistics cache (recomputable; no durable format).
 // ---------------------------------------------------------------------------
 
+/// The maximum number of live entries the cache retains. Because
+/// `as_of == Some(_)` entries pin immutable past snapshots and are **never**
+/// invalidated, an unbounded map could grow without limit under many distinct
+/// `as_of` coordinates; this cap bounds memory with a coarse single-entry
+/// eviction on overflow (v1). Warm-path hits are unaffected until the cap is
+/// reached.
+const MAX_CACHE_ENTRIES: usize = 256;
+
 /// An in-memory, recomputable cache of per-cohort [`VolatilityStats`] plus the
 /// KM curve backing the sub-millisecond freshness path (Issue #3377 performance
 /// metric).
 ///
 /// Half-life statistics are always recomputable from history, so this cache is
 /// **never persisted** — there is no durable sidecar and no on-disk format
-/// change. Stage B fleshes out population and lazy invalidation; the cache is
-/// off the write path (no write-time hook), so a build with the feature off
-/// pays nothing.
+/// change. It is entirely **off the write path**: there is no write-time hook
+/// (so a write pays nothing), and staleness is instead detected lazily by
+/// comparing a cheap global **write generation** — the WAL append count, an
+/// O(1) atomic read — captured at compute time against the current one on each
+/// read (see [`get_or_compute`](Self::get_or_compute)). A build with the
+/// feature off pays nothing (the whole module compiles out).
+///
+/// # Invalidation model
+///
+/// - An `as_of == None` ("now") entry is reused only while the write generation
+///   it was computed at is still current; any committed write advances the WAL
+///   append count and forces a recompute on the next read. This is
+///   **conservative** — an unrelated cohort's write also invalidates — trading a
+///   little extra recompute for zero write-path cost and never serving stale
+///   statistics.
+/// - An `as_of == Some(T)` entry pins a **fixed past transaction snapshot**
+///   (only versions recorded at or before `T` are ever considered), so it is
+///   **immutable** and reused indefinitely regardless of later writes.
+///
+/// The entry is keyed on the full result determinant
+/// `(cohort, as_of, min_events, max_entities)` so a differently-optioned call
+/// never reads a stale entry (e.g. two `knowledge_half_life` calls on one cohort
+/// with different `max_entities` must report different `sampled` flags).
 #[derive(Debug, Default)]
 pub struct CohortStatsCache {
     inner: std::sync::Mutex<CacheInner>,
 }
 
-/// Cache key: a cohort plus the transaction-time coordinate it was computed at
-/// (`None` == "as of now"). Two freshness calls at the same coordinate share
-/// one computed entry.
-type CohortCacheKey = (Cohort, Option<i64>);
+/// Cache key: the full determinant tuple of a cohort analysis. Two calls that
+/// would compute byte-identical statistics share one entry; any difference in
+/// cohort, as-of coordinate, or bounding option is a distinct entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CohortStatsKey {
+    cohort: Cohort,
+    /// The as-of transaction-time coordinate in wallclock micros (`None` ==
+    /// "now"); `Some(_)` marks an immutable past snapshot.
+    as_of: Option<i64>,
+    min_events: usize,
+    max_entities: usize,
+}
 
 #[derive(Debug, Default)]
 struct CacheInner {
-    /// Monotonic staleness stamp. Because there is no write-path hook, a cache
-    /// entry is only reused while the generation it was computed at is still
-    /// current; [`CohortStatsCache::bump_generation`] invalidates every entry
-    /// in O(1) when the caller knows the cohort data may have changed.
-    generation: u64,
-    entries: std::collections::HashMap<CohortCacheKey, CachedStats>,
+    entries: std::collections::HashMap<CohortStatsKey, CachedStats>,
 }
 
 #[derive(Debug, Clone)]
 struct CachedStats {
     stats: VolatilityStats,
     curve: KmCurve,
+    /// The write generation (WAL append count) captured when this entry was
+    /// computed. An `as_of == None` entry is valid only while this equals the
+    /// current generation; an `as_of == Some(_)` entry ignores it (immutable).
     generation: u64,
 }
 
@@ -641,50 +760,83 @@ impl CohortStatsCache {
         Self::default()
     }
 
-    /// Invalidate every cached entry (O(1)): bumps the staleness generation so
-    /// subsequent lookups miss and recompute. Call when the underlying cohort
-    /// history may have changed. The first call after this — like the very
-    /// first call ever — pays an O(scan) recompute.
-    pub fn bump_generation(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.generation = inner.generation.wrapping_add(1);
-        }
-    }
-
-    /// Fetch cached `(VolatilityStats, KmCurve)` for `cohort` at `as_of`,
+    /// Fetch cached `(VolatilityStats, KmCurve)` for the given determinant,
     /// computing and storing them via `compute` on a miss (or a stale entry).
     ///
-    /// `compute` runs the O(scan) cohort analysis; a warm hit is a hash lookup
-    /// plus two clones, backing the sub-millisecond freshness path.
+    /// `write_generation` is the cheap global staleness signal (the WAL append
+    /// count): an `as_of == None` entry is reused only while the generation it
+    /// was computed at still matches; an `as_of == Some(_)` entry is immutable
+    /// and reused regardless. `compute` runs the O(scan) cohort analysis and is
+    /// fallible (a scan can reject invalid options / miss a version); a warm hit
+    /// is a hash lookup plus two clones, backing the sub-millisecond freshness
+    /// path.
     pub fn get_or_compute<F>(
         &self,
         cohort: &Cohort,
         as_of: Option<i64>,
+        min_events: usize,
+        max_entities: usize,
+        write_generation: u64,
         compute: F,
-    ) -> (VolatilityStats, KmCurve)
+    ) -> Result<(VolatilityStats, KmCurve)>
     where
-        F: FnOnce() -> (VolatilityStats, KmCurve),
+        F: FnOnce() -> Result<(VolatilityStats, KmCurve)>,
     {
-        let key = (cohort.clone(), as_of);
+        let key = CohortStatsKey {
+            cohort: cohort.clone(),
+            as_of,
+            min_events,
+            max_entities,
+        };
+        // Warm hit: an as_of-pinned entry (immutable past snapshot) is valid
+        // regardless of generation; an as_of == None entry is valid only while
+        // the write generation it was computed at is still current.
         if let Ok(inner) = self.inner.lock()
             && let Some(cached) = inner.entries.get(&key)
-            && cached.generation == inner.generation
+            && (as_of.is_some() || cached.generation == write_generation)
         {
-            return (cached.stats.clone(), cached.curve.clone());
+            return Ok((cached.stats.clone(), cached.curve.clone()));
         }
-        let (stats, curve) = compute();
+        let (stats, curve) = compute()?;
+        self.store(key, write_generation, &stats, &curve);
+        Ok((stats, curve))
+    }
+
+    /// Insert (or refresh) a computed entry, bounding the map with a coarse
+    /// single-entry eviction on overflow. Used both by the miss path of
+    /// [`get_or_compute`](Self::get_or_compute) and to warm the cache from an
+    /// accessor that already holds a fresh scan (so a subsequent freshness call
+    /// is a warm hit).
+    fn store(
+        &self,
+        key: CohortStatsKey,
+        write_generation: u64,
+        stats: &VolatilityStats,
+        curve: &KmCurve,
+    ) {
         if let Ok(mut inner) = self.inner.lock() {
-            let generation = inner.generation;
+            if inner.entries.len() >= MAX_CACHE_ENTRIES
+                && !inner.entries.contains_key(&key)
+                && let Some(evict) = inner.entries.keys().next().cloned()
+            {
+                inner.entries.remove(&evict);
+            }
             inner.entries.insert(
                 key,
                 CachedStats {
                     stats: stats.clone(),
                     curve: curve.clone(),
-                    generation,
+                    generation: write_generation,
                 },
             );
         }
-        (stats, curve)
+    }
+
+    /// The number of live cache entries (test-only observability for the
+    /// eviction bound).
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.inner.lock().map(|i| i.entries.len()).unwrap_or(0)
     }
 }
 
@@ -711,10 +863,41 @@ impl AletheiaDB {
         cohort: Cohort,
         options: &HalfLifeOptions,
     ) -> Result<VolatilityStats> {
-        let scan = self.scan_cohort(&cohort, options)?;
-        let mut stats = summarize(cohort, &scan.observations, options.min_events);
-        stats.sampled = scan.sampled;
+        let (stats, _curve) = self.cohort_stats_cached(&cohort, options)?;
         Ok(stats)
+    }
+
+    /// Compute (or fetch from the warm cache) a cohort's
+    /// `(VolatilityStats, KmCurve)` — the single seam
+    /// [`knowledge_half_life`](Self::knowledge_half_life) and
+    /// [`fact_freshness`](Self::fact_freshness) share (Issue #3377 Fix-B).
+    ///
+    /// The O(scan) cohort analysis plus **one** Kaplan–Meier pass runs once per
+    /// `(cohort, as_of, min_events, max_entities)` determinant and is memoized in
+    /// the gated [`half_life_cache`](AletheiaDB::half_life_cache). Reuse is
+    /// governed by the WAL append count (an O(1) atomic read, no write-path
+    /// hook): an `as_of == None` ("now") entry is served warm only while that
+    /// generation is unchanged; an `as_of == Some(_)` past-snapshot entry is
+    /// immutable and served warm indefinitely. This is what makes a warm
+    /// `fact_freshness` O(1) in the cohort size.
+    fn cohort_stats_cached(
+        &self,
+        cohort: &Cohort,
+        options: &HalfLifeOptions,
+    ) -> Result<(VolatilityStats, KmCurve)> {
+        let as_of = options.as_of_transaction_time.map(|t| t.wallclock());
+        let generation = self.wal.total_appends();
+        self.half_life_cache.get_or_compute(
+            cohort,
+            as_of,
+            options.min_events,
+            options.max_entities,
+            generation,
+            || {
+                let scan = self.scan_cohort(cohort, options)?;
+                Ok(stats_and_curve_from_scan(cohort, &scan, options.min_events))
+            },
+        )
     }
 
     /// Compute the freshness score of a single fact relative to its cohort's
@@ -772,22 +955,21 @@ impl AletheiaDB {
             .max(0);
         let age = micros_to_duration(age_us);
 
-        // Cohort statistics + KM curve (recomputed here; the CohortStatsCache
-        // backs the sub-millisecond warm path when wired to a persistent
-        // registry — see the type's docs).
-        let scan = self.scan_cohort(&cohort, options)?;
-        let stats = summarize(cohort.clone(), &scan.observations, options.min_events);
-        // Gate the curve on sufficiency so a below-floor cohort degrades to
+        // Cohort statistics + KM curve via the shared warm cache (Issue #3377
+        // Fix-B): O(1) on a warm hit, so the freshness path no longer re-scans
+        // the whole cohort on every call. The curve is empty for a below-floor
+        // cohort, so gating on sufficiency degrades to
         // `(age_in_half_lives: None, survival_probability: None)` in lockstep —
         // never a spurious survival number from an under-powered sample
         // (Fix-A MAJOR-2, AC3).
-        let curve = (!stats.insufficient_data).then(|| kaplan_meier(&scan.observations));
+        let (stats, km_curve) = self.cohort_stats_cached(&cohort, options)?;
+        let curve = (!stats.insufficient_data).then_some(&km_curve);
 
         let age_in_half_lives = stats.half_life.and_then(|hl| {
             let hl_us = hl.as_micros() as f64;
             (hl_us > 0.0).then_some(age_us as f64 / hl_us)
         });
-        let survival_probability = survival_probability(age, stats.half_life, curve.as_ref());
+        let survival_probability = survival_probability(age, stats.half_life, curve);
 
         Ok(FreshnessScore {
             entity,
@@ -830,18 +1012,42 @@ impl AletheiaDB {
             ));
         }
 
+        // The staleness inventory needs the per-member ages the cache does not
+        // hold, so it runs its own bounded scan. It derives the cohort stats +
+        // KM curve from that scan **once** (Issue #3377 Fix-B M4: no more double
+        // Kaplan–Meier) and routes them through the shared cache so a subsequent
+        // `knowledge_half_life` / `fact_freshness` on the same determinant is a
+        // warm hit — and, symmetrically, a *prior* warm entry is reused here
+        // (Fix-B M2 scan-sharing). Either way the pair is byte-identical to what
+        // this scan produced.
         let scan = self.scan_cohort(&cohort, options)?;
+        let as_of = options.as_of_transaction_time.map(|t| t.wallclock());
+        let generation = self.wal.total_appends();
+        let (stats, km_curve) = self.half_life_cache.get_or_compute(
+            &cohort,
+            as_of,
+            options.min_events,
+            options.max_entities,
+            generation,
+            || {
+                Ok(stats_and_curve_from_scan(
+                    &cohort,
+                    &scan,
+                    options.min_events,
+                ))
+            },
+        )?;
 
-        // A `HalfLives` threshold needs the cohort half-life (and curve for the
-        // per-entry survival estimate); an `AbsoluteAge` threshold needs
-        // neither, so compute lazily.
+        // A `HalfLives` threshold uses the cohort half-life (and curve for the
+        // per-entry survival estimate); an `AbsoluteAge` threshold uses neither,
+        // matching the prior per-entry output exactly.
         let needs_half_life = matches!(threshold, StalenessThreshold::HalfLives(_));
-        let (cohort_half_life, curve) = if needs_half_life {
-            let stats = summarize(cohort.clone(), &scan.observations, options.min_events);
-            (stats.half_life, Some(kaplan_meier(&scan.observations)))
+        let cohort_half_life = if needs_half_life {
+            stats.half_life
         } else {
-            (None, None)
+            None
         };
+        let curve = needs_half_life.then_some(&km_curve);
 
         let mut matches: Vec<StalenessEntry> = Vec::new();
         for (entity, age_us) in &scan.members {
@@ -862,7 +1068,7 @@ impl AletheiaDB {
                 let hl_us = hl.as_micros() as f64;
                 (hl_us > 0.0).then_some(*age_us as f64 / hl_us)
             });
-            let survival_probability = survival_probability(age, cohort_half_life, curve.as_ref());
+            let survival_probability = survival_probability(age, cohort_half_life, curve);
             matches.push(StalenessEntry {
                 entity: *entity,
                 age,
@@ -958,7 +1164,6 @@ impl AletheiaDB {
         // censored durations / member ages are reproducible across re-runs on
         // frozen history (Fix-A MAJOR-3, AC2/AC6); else the live wall clock.
         let now_us = analysis_now_us(as_of);
-        let cap = options.max_entities;
         let is_edge = matches!(cohort, Cohort::EdgeType(_));
         let label = cohort_label(cohort);
         let key = match cohort {
@@ -972,6 +1177,18 @@ impl AletheiaDB {
         // candidate truncation.
         let (node_ids, edge_ids, sampled) = {
             let historical = self.historical.read();
+            // Effective candidate cap (Issue #3377 Fix-B M3): honor the
+            // storage-wide `max_schema_as_of_entities` configuration read at scan
+            // time, with the per-call `options.max_entities` as a further
+            // (only-tightening) override — a smaller per-call value wins, and
+            // neither exceeds the configured storage ceiling. (A degenerate
+            // configured cap of 0 is ignored so it cannot truncate every scan.)
+            let configured_cap = historical.max_schema_as_of_entities();
+            let cap = if configured_cap == 0 {
+                options.max_entities
+            } else {
+                options.max_entities.min(configured_cap)
+            };
             if is_edge {
                 let mut ids = historical.versioned_edge_ids();
                 ids.sort_unstable();
@@ -1479,6 +1696,72 @@ mod tests {
         assert!(
             !stats.coverage.cold_migrated_included,
             "v1 excludes cold-migrated history (Issue #3238 coverage model)"
+        );
+    }
+
+    // ---- Fix-B: cache generation invalidation + immutable as-of + bound ------
+
+    #[test]
+    fn cache_reuses_and_invalidates_on_write_generation() {
+        use std::cell::Cell;
+        let cache = CohortStatsCache::new();
+        let cohort = Cohort::NodeLabel("Person".into());
+        let obs = vec![Observation::event(DAY_US), Observation::event(2 * DAY_US)];
+        let calls = Cell::new(0usize);
+        let run = |as_of: Option<i64>, generation: u64| {
+            cache
+                .get_or_compute(&cohort, as_of, 1, 100, generation, || {
+                    calls.set(calls.get() + 1);
+                    Ok(summarize_with_curve(cohort.clone(), &obs, 1))
+                })
+                .expect("compute ok")
+        };
+
+        // First call at generation 0: a miss (compute runs).
+        run(None, 0);
+        assert_eq!(calls.get(), 1, "first call computes");
+
+        // Same (cohort, as_of=None, opts) at the SAME generation: a warm hit —
+        // compute must NOT run again.
+        run(None, 0);
+        assert_eq!(calls.get(), 1, "same generation => warm hit, no recompute");
+
+        // Advance the write generation: an as_of=None entry must recompute.
+        run(None, 1);
+        assert_eq!(
+            calls.get(),
+            2,
+            "advanced generation => recompute for as_of=None"
+        );
+
+        // An as_of=Some(T) entry is immutable: computed once, then served warm
+        // even as the generation advances.
+        run(Some(12_345), 5);
+        assert_eq!(calls.get(), 3, "first as_of=Some call computes");
+        run(Some(12_345), 999);
+        assert_eq!(
+            calls.get(),
+            3,
+            "as_of=Some entry is immutable => warm hit regardless of generation"
+        );
+    }
+
+    #[test]
+    fn cache_is_bounded_under_many_as_of_entries() {
+        let cache = CohortStatsCache::new();
+        let cohort = Cohort::NodeLabel("Person".into());
+        let obs = vec![Observation::event(DAY_US)];
+        // Insert far more distinct (immutable) as_of-keyed entries than the cap;
+        // eviction must keep the map bounded rather than growing without limit.
+        for t in 0..(MAX_CACHE_ENTRIES as i64 + 64) {
+            let _ = cache.get_or_compute(&cohort, Some(t), 1, 100, 0, || {
+                Ok(summarize_with_curve(cohort.clone(), &obs, 1))
+            });
+        }
+        assert!(
+            cache.entry_count() <= MAX_CACHE_ENTRIES,
+            "cache must stay bounded at {MAX_CACHE_ENTRIES}, got {}",
+            cache.entry_count()
         );
     }
 

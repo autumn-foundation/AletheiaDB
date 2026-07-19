@@ -968,3 +968,126 @@ fn coverage_scope_is_disclosed_on_results() {
     assert!(page.coverage.hot_tier);
     assert!(!page.coverage.cold_migrated_included);
 }
+
+// ===========================================================================
+// Fix-B: cohort-stats cache — warm reuse, write-generation invalidation, and
+// as-of immutability (the cache must never change results).
+// ===========================================================================
+
+// ---- (a) two back-to-back freshness calls hit the warm cache (same result) --
+
+#[test]
+fn back_to_back_freshness_calls_return_identical_results() {
+    let mut clock = SimulatedClock::new(T0);
+    let _g = clock.inject();
+    let db = AletheiaDB::new().expect("db");
+
+    // A cohort with a computable half-life (a sibling with several world-changes)
+    // so the freshness score carries concrete age_in_half_lives / survival.
+    let id = make_person(&db, "Oslo", T0);
+    let sibling = make_person(&db, "c0", T0);
+    for k in 1..=5i64 {
+        clock.jump_to(T0 + k * DAY_US);
+        set_city(&db, sibling, &format!("c{k}"), T0 + k * DAY_US);
+    }
+    clock.jump_to(T0 + 60 * DAY_US);
+    let _ = time::now();
+
+    let opts = HalfLifeOptions::new().with_min_events(1);
+    let s1 = db.fact_freshness(EntityId::Node(id), &opts).expect("s1");
+    // Second call with no intervening write: served from the warm cache.
+    let s2 = db.fact_freshness(EntityId::Node(id), &opts).expect("s2");
+    assert_eq!(
+        s1, s2,
+        "two back-to-back freshness calls (warm cache) must return identical results"
+    );
+    assert!(
+        s1.age_in_half_lives.is_some(),
+        "the cohort has a computable half-life"
+    );
+}
+
+// ---- (b) a new committed write invalidates the as_of=None cache (recompute) --
+
+#[test]
+fn as_of_none_cache_recomputes_after_new_committed_write() {
+    let mut clock = SimulatedClock::new(T0);
+    let _g = clock.inject();
+    let db = AletheiaDB::new().expect("db");
+
+    // One Person with a single world-change => one completed event.
+    let a = make_person(&db, "A0", T0);
+    clock.jump_to(T0 + DAY_US);
+    set_city(&db, a, "A1", T0 + DAY_US); // world-change (event #1)
+    clock.jump_to(T0 + 2 * DAY_US);
+    let _ = time::now();
+
+    let opts = HalfLifeOptions::new().with_min_events(1);
+    let first = db
+        .knowledge_half_life(Cohort::NodeLabel("Person".into()), &opts)
+        .expect("first");
+    assert_eq!(first.event_count, 1, "one world-change so far");
+
+    // A brand-new committed write to the cohort (a second Person + its own
+    // world-change) advances the WAL append generation, so a repeat as_of=None
+    // query must recompute rather than serve the cached stats.
+    let b = make_person(&db, "B0", T0);
+    clock.jump_to(T0 + 3 * DAY_US);
+    set_city(&db, b, "B1", T0 + 3 * DAY_US); // world-change (event #2)
+    clock.jump_to(T0 + 4 * DAY_US);
+    let _ = time::now();
+
+    let second = db
+        .knowledge_half_life(Cohort::NodeLabel("Person".into()), &opts)
+        .expect("second");
+    assert_eq!(
+        second.event_count, 2,
+        "the new write must invalidate the as_of=None cache => recompute sees 2 events"
+    );
+}
+
+// ---- (c) an as_of=Some(T) query is stable across later writes (immutable) ----
+
+#[test]
+fn as_of_pinned_cache_is_stable_across_later_writes() {
+    let mut clock = SimulatedClock::new(T0);
+    let _g = clock.inject();
+    let db = AletheiaDB::new().expect("db");
+
+    // Initial cohort state, fully recorded by the cutoff tx-time.
+    let a = make_person(&db, "A0", T0);
+    clock.jump_to(T0 + DAY_US);
+    set_city(&db, a, "A1", T0 + DAY_US); // world-change (event #1)
+    clock.jump_to(T0 + 2 * DAY_US);
+    let _ = time::now();
+
+    // Pin as-of just after the initial writes are recorded.
+    let cutoff = ts(T0 + 2 * DAY_US);
+    let opts = HalfLifeOptions::new()
+        .with_as_of_transaction_time(cutoff)
+        .with_min_events(1);
+    let first = db
+        .knowledge_half_life(Cohort::NodeLabel("Person".into()), &opts)
+        .expect("first");
+    assert_eq!(
+        first.event_count, 1,
+        "only the pre-cutoff world-change is visible at the pinned tx-time"
+    );
+
+    // Later writes, recorded strictly AFTER the pinned cutoff.
+    clock.jump_to(T0 + 10 * DAY_US);
+    let _ = time::now();
+    let b = make_person(&db, "B0", T0);
+    clock.jump_to(T0 + 11 * DAY_US);
+    set_city(&db, b, "B1", T0 + 11 * DAY_US); // world-change (after cutoff)
+    clock.jump_to(T0 + 12 * DAY_US);
+    let _ = time::now();
+
+    let second = db
+        .knowledge_half_life(Cohort::NodeLabel("Person".into()), &opts)
+        .expect("second");
+    assert_eq!(
+        first, second,
+        "an as_of-pinned report is immutable: later writes must not change it (cached or not)"
+    );
+}

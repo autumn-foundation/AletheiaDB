@@ -834,6 +834,13 @@ impl AletheiaDB {
                 ),
                 snapshots,
                 namespaces,
+                // Knowledge half-life cohort-stats cache (Issue #3377, Fix-B):
+                // in-memory, recomputable, off the write path. Gated to
+                // `semantic-temporal`.
+                #[cfg(feature = "semantic-temporal")]
+                half_life_cache: Arc::new(
+                    crate::experimental::temporal::half_life::CohortStatsCache::new(),
+                ),
                 chain: None,
                 _tempdir: None,
             };
@@ -1404,6 +1411,13 @@ impl AletheiaDB {
                 snapshots: Arc::new(crate::db::snapshot::SnapshotRegistry::in_memory()),
                 // Ephemeral namespace registry (Issue #3349): in-memory only.
                 namespaces: Arc::new(crate::db::namespace::NamespaceRegistry::in_memory()),
+                // Knowledge half-life cohort-stats cache (Issue #3377, Fix-B):
+                // in-memory, recomputable, off the write path. Gated to
+                // `semantic-temporal`.
+                #[cfg(feature = "semantic-temporal")]
+                half_life_cache: Arc::new(
+                    crate::experimental::temporal::half_life::CohortStatsCache::new(),
+                ),
                 chain: None,
                 _tempdir: None,
             };
