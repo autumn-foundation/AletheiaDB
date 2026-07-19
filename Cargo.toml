@@ -1,6 +1,6 @@
 [package]
 name = "aletheiadb"
-version = "0.3.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["AletheiaDB Contributors"]
@@ -12,6 +12,23 @@ documentation = "https://docs.rs/aletheiadb"
 readme = "README.md"
 keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations", "data-structures"]
+# Trim non-crate trees from the published crates.io tarball. src/, tests/,
+# benches/, examples/, docs/, README.md, CHANGELOG.md, LICENSE-*, and Cargo.toml
+# are all retained.
+exclude = [
+    "clients/",
+    ".jules/",
+    ".github/",
+    "scripts/",
+    "benchmarks/",
+    "test_vis/",
+    ".cargo/",
+    "proptest-regressions/",
+    "Dockerfile",
+    ".dockerignore",
+    ".pre-commit-config.yaml",
+    ".mirirc",
+]
 
 # Workspace root (added for the autumn-web 0.5.0 migration spike, Issue #3524).
 # `aletheia-autumn-spike` is an isolated member crate that depends on

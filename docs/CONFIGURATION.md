@@ -494,7 +494,7 @@ Enable TOML configuration file support:
 
 ```toml
 [dependencies]
-aletheiadb = "0.1.0"  # config-toml enabled by default
+aletheiadb = "0.2"  # config-toml enabled by default
 ```
 
 **Adds:**
