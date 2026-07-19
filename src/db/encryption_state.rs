@@ -42,12 +42,12 @@
 //!
 //! # Security
 //!
-//! Only a key-source **reference** is ever written — a File path or an Env var
-//! NAME — exactly like the rotation ledger. Key bytes, passphrases, and tokens
-//! are never persisted here; passphrase/KMS/Vault sources (which carry secrets
-//! or multi-field config the line format cannot round-trip) are refused
-//! fail-closed by [`write_encryption_state_durable`], mirroring the rotation
-//! ledger's File/Env-only constraint.
+//! Only a key-source **reference** is ever written — a File path, an Env var
+//! NAME, or (since Issue #3620, `version=3`) the full non-secret
+//! [`KeyProviderConfig`] as JSON (a KMS key id + wrapped blob, a Vault address, a
+//! passphrase-file path + env NAME). Key bytes, passphrases, and tokens are never
+//! persisted here, exactly like the rotation ledger. A build without `serde`
+//! emits `version=2` and still refuses secret-backed sources fail-closed.
 
 use std::path::{Path, PathBuf};
 
@@ -57,12 +57,20 @@ use crate::encryption::factory::Algorithm;
 
 /// Current on-disk format version of the authority file.
 ///
-/// `version=2` (Issue #3616 PR3) additively records the pinned concrete AEAD
-/// `algorithm` an enable migration wrote under. The reader still accepts a legacy
-/// `version=1` file (no `algorithm` line → `algorithm: None`, reopen falls back to
-/// the config algorithm, exactly the prior behavior). An unknown version fails
-/// closed (never guessed).
-const ENCRYPTION_STATE_VERSION: u32 = 2;
+/// * `version=1` — the original enabled/disabled + two-string File/Env source.
+/// * `version=2` (Issue #3616 PR3) additively records the pinned concrete AEAD
+///   `algorithm` an enable migration wrote under.
+/// * `version=3` (Issue #3620) serializes the FULL, non-secret
+///   [`KeyProviderConfig`] via serde_json on a single `key_source_json=` line, so
+///   an `encryption enable` to a passphrase/KMS/Vault source round-trips (the
+///   two-string form could not). The `algorithm` line is retained.
+///
+/// The reader still accepts legacy `version=1`/`version=2` files (two-string
+/// File/Env source; a v1 file has no `algorithm` line → `algorithm: None`, reopen
+/// falls back to the config algorithm). An unknown version fails closed (never
+/// guessed). A build compiled WITHOUT `serde` emits `version=2` and still refuses
+/// secret-backed sources, preserving prior behavior.
+const ENCRYPTION_STATE_VERSION: u32 = if cfg!(feature = "serde") { 3 } else { 2 };
 
 /// Serialize a concrete AEAD [`Algorithm`] to its stable on-disk token. `Auto` is
 /// resolved to its concrete form first so the pinned value is never ambiguous
@@ -89,13 +97,15 @@ fn algorithm_from_token(token: &str) -> Option<Algorithm> {
 /// The durable encryption-state authority parsed from `{data_dir}/encryption.state`.
 ///
 /// `enabled` is the authoritative on/off decision. `key_source` is present iff
-/// `enabled` and is restricted to File/Env references (never key bytes).
+/// `enabled` and is a non-secret source reference (File/Env, or — since #3620,
+/// via the v3 JSON authority — any passphrase/KMS/Vault config; never key bytes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EncryptionState {
     /// Whether encryption at rest is authoritatively ON for this database.
     pub enabled: bool,
-    /// The non-secret key-source reference (File path / Env var name). `Some`
-    /// iff `enabled`; `None` when the authority records "disabled".
+    /// The non-secret key-source reference (File path / Env NAME / full
+    /// passphrase/KMS/Vault config via the #3620 v3 JSON authority — never a
+    /// secret). `Some` iff `enabled`; `None` when the authority records "disabled".
     pub key_source: Option<KeyProviderConfig>,
     /// The pinned concrete AEAD algorithm the enable migration wrote under
     /// (Issue #3616 PR3). `Some` for a `version=2` enabled authority; `None` for a
@@ -111,8 +121,8 @@ impl EncryptionState {
     /// pinned algorithm (legacy shape). Prefer [`Self::enabled_with_algorithm`] on
     /// the production enable path so the concrete cipher is pinned durably.
     ///
-    /// `key_source` must be a File or Env reference; other backends are refused
-    /// at write time (they carry secrets the line format cannot persist).
+    /// Since #3620 any source round-trips through the v3 JSON authority; a
+    /// non-serde build still refuses secret-backed sources at write time.
     #[cfg(test)]
     pub(crate) fn enabled(key_source: KeyProviderConfig) -> Self {
         Self {
@@ -156,6 +166,23 @@ fn corrupt(detail: &str) -> crate::core::error::Error {
     .into()
 }
 
+/// Deserialize a v3 `key_source_json` value back into a [`KeyProviderConfig`]
+/// (Issue #3620). Present-but-unparseable JSON fails closed as `corrupt`.
+#[cfg(feature = "serde")]
+fn reconstruct_key_source_json(json: &str) -> Result<KeyProviderConfig> {
+    serde_json::from_str::<KeyProviderConfig>(json)
+        .map_err(|e| corrupt(&format!("unparseable key_source_json ({e})")))
+}
+
+/// Non-serde builds cannot deserialize a v3 authority; fail closed rather than
+/// mis-open. (A v3 authority can only have been written by a serde build.)
+#[cfg(not(feature = "serde"))]
+fn reconstruct_key_source_json(_json: &str) -> Result<KeyProviderConfig> {
+    Err(corrupt(
+        "version=3 encryption.state requires the serde feature to reconstruct key_source",
+    ))
+}
+
 /// Read + parse the durable encryption-state authority for `data_dir`.
 ///
 /// Fail-closed: absent → `Ok(None)`, well-formed → `Ok(Some(_))`, present but
@@ -186,6 +213,8 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
     let mut enabled = None;
     let mut kind = None;
     let mut value = None;
+    // v3 (#3620): full serde_json key source.
+    let mut key_source_json = None;
     let mut algorithm_line = None;
     for line in body.lines() {
         if line.trim().is_empty() {
@@ -205,7 +234,10 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
             }
             "key_source_kind" => kind = Some(v.to_string()),
             "key_source_value" => value = Some(v.to_string()),
-            // Pinned concrete AEAD algorithm (Issue #3616 PR3, `version=2`).
+            // v3 (#3620): the value is the remainder after the first `=`, i.e. the
+            // full compact JSON (internal `=` preserved).
+            "key_source_json" => key_source_json = Some(v.to_string()),
+            // Pinned concrete AEAD algorithm (Issue #3616 PR3, `version>=2`).
             "algorithm" => algorithm_line = Some(v.to_string()),
             // Unknown keys are ignored for forward-compatibility, mirroring the
             // rotation ledger reader.
@@ -216,10 +248,10 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
     // `version=` is MANDATORY — a well-formed writer always emits it, so its
     // absence means a truncated/garbled file, not a legacy artifact.
     let version = version.ok_or_else(|| corrupt("missing version"))?;
-    // Accept every version this build understands. A `version=1` file predates the
-    // pinned `algorithm` line (Issue #3616 PR3) and loads with `algorithm: None` —
-    // reopen then falls back to the config algorithm, exactly the prior behavior.
-    if version != 1 && version != ENCRYPTION_STATE_VERSION {
+    // Accept every version this build understands. v1 predates the pinned
+    // `algorithm` line (loads `algorithm: None`); v2 is the two-string source;
+    // v3 (#3620) is the full-JSON source. An unknown version fails closed.
+    if version != 1 && version != 2 && version != 3 {
         return Err(corrupt(&format!("unsupported version {version}")));
     }
     let enabled = enabled.ok_or_else(|| corrupt("missing enabled"))?;
@@ -232,15 +264,20 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
         }));
     }
 
-    // enabled → a File/Env key-source reference is required (fail-closed: an
-    // enabled authority with no resolvable key source is corrupt, never a
-    // silent plaintext fallback).
-    let value = value.ok_or_else(|| corrupt("missing key_source_value"))?;
-    let key_source = match kind.as_deref() {
-        Some("file") => KeyProviderConfig::File { path: value.into() },
-        Some("env") => KeyProviderConfig::Env { variable: value },
-        Some(other) => return Err(corrupt(&format!("unsupported key_source_kind {other:?}"))),
-        None => return Err(corrupt("missing key_source_kind")),
+    // enabled → a key-source reference is required (fail-closed: an enabled
+    // authority with no resolvable key source is corrupt, never a silent
+    // plaintext fallback). Prefer the v3 full-JSON source; fall back to the
+    // v1/v2 two-string File/Env reference.
+    let key_source = if let Some(json) = key_source_json {
+        reconstruct_key_source_json(&json)?
+    } else {
+        let value = value.ok_or_else(|| corrupt("missing key_source_value"))?;
+        match kind.as_deref() {
+            Some("file") => KeyProviderConfig::File { path: value.into() },
+            Some("env") => KeyProviderConfig::Env { variable: value },
+            Some(other) => return Err(corrupt(&format!("unsupported key_source_kind {other:?}"))),
+            None => return Err(corrupt("missing key_source_kind")),
+        }
     };
     // A present `algorithm` line must parse to a known concrete algorithm; an
     // unrecognized token is corrupt (fail-closed, never a silent wrong cipher).
@@ -265,13 +302,14 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
 /// `sync_all` → atomic rename → parent-directory fsync
 /// ([`write_durable`](crate::db::rotation::write_durable)) — so a power loss can
 /// never leave a torn authority file. No key material is written: only a
-/// non-secret File/Env reference.
+/// non-secret source reference (File path / Env NAME / — since #3620 — the full
+/// non-secret [`KeyProviderConfig`] as JSON).
 ///
 /// # Errors
 ///
-/// * The key source is a passphrase/KMS/Vault backend (refused fail-closed —
-///   those carry secrets or multi-field config the line format cannot persist,
-///   mirroring the rotation ledger).
+/// * The key source is a passphrase/KMS/Vault backend AND `serde` is not compiled
+///   in (refused fail-closed — the two-string line format cannot round-trip it).
+///   With `serde` (the default) such sources round-trip via `version=3`.
 /// * An enabled state carries no key source, or a disabled state carries one
 ///   (a caller bug — the authority must be internally consistent).
 /// * The directory cannot be created or the file cannot be written durably.
@@ -287,30 +325,16 @@ pub(crate) fn write_encryption_state_durable(
 ) -> Result<()> {
     let body = match (state.enabled, &state.key_source) {
         (true, Some(source)) => {
-            let (kind, value) = match source {
-                KeyProviderConfig::File { path } => ("file", path.to_string_lossy().into_owned()),
-                KeyProviderConfig::Env { variable } => ("env", variable.clone()),
-                KeyProviderConfig::PassphraseFile { .. }
-                | KeyProviderConfig::Kms { .. }
-                | KeyProviderConfig::Vault { .. } => {
-                    let (provider_type, _) = source.describe();
-                    return Err(StorageError::PersistenceError(format!(
-                        "recording a {provider_type} key source in the encryption-state authority \
-                         is not supported (only file/env references can be persisted without \
-                         leaking a secret)"
-                    ))
-                    .into());
-                }
-            };
-            // The pinned concrete algorithm line is additive (`version=2`); a state
+            // The pinned concrete algorithm line is additive (`version>=2`); a state
             // constructed without one (legacy `enabled`) omits it and reads back as
             // `algorithm: None`.
             let algorithm_line = match state.algorithm {
                 Some(algorithm) => format!("algorithm={}\n", algorithm_token(algorithm)),
                 None => String::new(),
             };
+            let source_line = serialize_key_source(source)?;
             format!(
-                "version={ENCRYPTION_STATE_VERSION}\nenabled=true\nkey_source_kind={kind}\nkey_source_value={value}\n{algorithm_line}"
+                "version={ENCRYPTION_STATE_VERSION}\nenabled=true\n{source_line}{algorithm_line}"
             )
         }
         (true, None) => {
@@ -332,6 +356,46 @@ pub(crate) fn write_encryption_state_durable(
     std::fs::create_dir_all(data_dir)
         .map_err(|e| StorageError::io_error(format!("Failed to create data dir: {e}")))?;
     crate::db::rotation::write_durable(&encryption_state_path(data_dir), body.as_bytes())
+}
+
+/// Serialize the enabled authority's key SOURCE line(s).
+///
+/// Under serde (`version=3`, Issue #3620): the full, non-secret
+/// [`KeyProviderConfig`] as compact single-line JSON on a `key_source_json=`
+/// line, so passphrase/KMS/Vault sources round-trip. No secret is written — the
+/// config carries file paths, env-var NAMES, a KMS-wrapped blob, or a Vault
+/// address (mirroring the rotation ledger; the reader's `split_once('=')` keeps
+/// any internal `=` in the JSON).
+#[cfg(feature = "serde")]
+fn serialize_key_source(source: &KeyProviderConfig) -> Result<String> {
+    let json = serde_json::to_string(source).map_err(|e| {
+        StorageError::PersistenceError(format!("failed to serialize encryption key source: {e}"))
+    })?;
+    Ok(format!("key_source_json={json}\n"))
+}
+
+/// Non-serde fallback (`version=2`): the two-string File/Env form. Secret-backed
+/// sources are refused (they cannot round-trip without serde), preserving the
+/// prior behavior exactly.
+#[cfg(not(feature = "serde"))]
+fn serialize_key_source(source: &KeyProviderConfig) -> Result<String> {
+    let (kind, value) = match source {
+        KeyProviderConfig::File { path } => ("file", path.to_string_lossy().into_owned()),
+        KeyProviderConfig::Env { variable } => ("env", variable.clone()),
+        KeyProviderConfig::PassphraseFile { .. }
+        | KeyProviderConfig::Kms { .. }
+        | KeyProviderConfig::Vault { .. } => {
+            let (provider_type, _) = source.describe();
+            return Err(StorageError::PersistenceError(format!(
+                "recording a {provider_type} key source in the encryption-state authority \
+                 requires the serde feature (the line format cannot round-trip it otherwise)"
+            ))
+            .into());
+        }
+    };
+    Ok(format!(
+        "key_source_kind={kind}\nkey_source_value={value}\n"
+    ))
 }
 
 /// Emit a LOUD warning under either logging configuration, matching the crate's
@@ -392,7 +456,7 @@ mod tests {
 
     #[test]
     fn round_trips_pinned_algorithm() {
-        // A version=2 authority pins the concrete algorithm; it round-trips.
+        // A v3 (serde) authority pins the concrete algorithm; it round-trips.
         for algo in [Algorithm::Aes256Gcm, Algorithm::ChaCha20Poly1305] {
             let dir = tmp();
             let state = EncryptionState::enabled_with_algorithm(
@@ -407,7 +471,7 @@ mod tests {
             assert_eq!(read, state);
             // The pinned token is on disk under the additive `algorithm=` key.
             let text = std::fs::read_to_string(encryption_state_path(dir.path())).unwrap();
-            assert!(text.contains("version=2"));
+            assert!(text.contains("version=3"));
             assert!(text.contains("algorithm="));
         }
     }
@@ -494,15 +558,13 @@ mod tests {
         let bytes = std::fs::read(encryption_state_path(dir.path())).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("/keys/unique-ref-path.key"));
-        assert!(text.contains("key_source_kind=file"));
-        // Only the four documented keys appear.
+        // Since #3620 the source is the full non-secret config as JSON.
+        assert!(text.contains("key_source_json="));
+        // Only the documented keys appear.
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let key = line.split_once('=').unwrap().0;
             assert!(
-                matches!(
-                    key,
-                    "version" | "enabled" | "key_source_kind" | "key_source_value" | "algorithm"
-                ),
+                matches!(key, "version" | "enabled" | "key_source_json" | "algorithm"),
                 "unexpected key on disk: {key}"
             );
         }
@@ -566,21 +628,52 @@ mod tests {
     }
 
     #[test]
-    fn writing_secret_backed_source_is_refused() {
-        // Passphrase/KMS/Vault sources are refused fail-closed — they carry
-        // secrets or multi-field config the line format cannot round-trip.
+    fn secret_backed_source_round_trips_in_v3_authority() {
+        // Issue #3620: a passphrase/KMS/Vault source now round-trips through the
+        // v3 (serde) authority — the config carries a path + env NAME, never a
+        // secret. (A non-serde build still refuses it; this crate's default and
+        // --all-features configs both compile serde.)
         let dir = tmp();
+        let source = KeyProviderConfig::PassphraseFile {
+            path: "/k.aekf".into(),
+            passphrase_env: "PASS_ENV_NAME".to_string(),
+        };
         let state = EncryptionState {
             enabled: true,
-            key_source: Some(KeyProviderConfig::PassphraseFile {
-                path: "/k.aekf".into(),
-                passphrase_env: "PASS".to_string(),
-            }),
+            key_source: Some(source.clone()),
             algorithm: None,
         };
-        assert!(write_encryption_state_durable(dir.path(), &state).is_err());
-        // And nothing partial was left on disk.
-        assert_eq!(read_encryption_state(dir.path()).unwrap(), None);
+        write_encryption_state_durable(dir.path(), &state).unwrap();
+        assert_eq!(read_encryption_state(dir.path()).unwrap(), Some(state));
+        // Only the env-var NAME lands on disk, never a secret value.
+        let text = std::fs::read_to_string(encryption_state_path(dir.path())).unwrap();
+        assert!(text.contains("PASS_ENV_NAME") && text.contains("key_source_json="));
+    }
+
+    #[test]
+    fn v2_enabled_two_string_source_reconstructs() {
+        // Issue #3620 (FIX 4): a legacy `version=2` ENABLED authority (the
+        // two-string File/Env source plus the pinned `algorithm` line) must still
+        // reconstruct its `key_source` and `algorithm`. Only v1 (no algorithm
+        // line) was covered before; this pins the v2 two-string read path.
+        let dir = tmp();
+        std::fs::write(
+            encryption_state_path(dir.path()),
+            b"version=2\nenabled=true\nkey_source_kind=file\nkey_source_value=/etc/aletheia/mek.key\nalgorithm=aes256gcm\n",
+        )
+        .unwrap();
+        let got = read_encryption_state(dir.path()).unwrap().unwrap();
+        assert!(got.enabled);
+        assert_eq!(
+            got.key_source,
+            Some(KeyProviderConfig::File {
+                path: "/etc/aletheia/mek.key".into()
+            })
+        );
+        assert_eq!(
+            got.algorithm,
+            Some(crate::encryption::factory::Algorithm::Aes256Gcm)
+        );
     }
 
     #[test]
