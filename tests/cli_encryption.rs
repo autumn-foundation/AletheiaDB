@@ -334,6 +334,31 @@ fn encryption_unknown_subcommand_fails() {
 }
 
 #[test]
+fn encryption_unknown_subcommand_lists_real_subcommands() {
+    // The unknown-subcommand error appends `encryption_usage()`, which must
+    // enumerate the real subcommands so an operator can self-correct. This pins
+    // `encryption_usage` returning the actual listing (not an empty/placeholder
+    // string).
+    let r = run(&["encryption", "bogus"]);
+    assert_ne!(r.code, 0, "unknown encryption subcommand must fail");
+    let c = r.combined_lower();
+    for sub in [
+        "encryption status",
+        "encryption verify",
+        "encryption enable",
+        "encryption disable",
+    ] {
+        assert!(
+            c.contains(sub),
+            "usage must list `{sub}`; stdout={:?} stderr={:?}",
+            r.stdout,
+            r.stderr
+        );
+    }
+    assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+}
+
+#[test]
 fn encryption_no_subcommand_shows_usage() {
     let r = run(&["encryption"]);
     assert_ne!(
@@ -1082,6 +1107,17 @@ mod encrypted {
             c.contains("enabled") || c.contains("encrypted"),
             "enable must report success; got={c:?}"
         );
+        // Per-layer report: a layer line (e.g. WAL) must be labeled `encrypted`,
+        // distinct from the "ENABLED" header (which never contains "encrypted").
+        // This pins `migrated_label` returning "encrypted" for a migrated layer.
+        assert!(
+            r.stdout.lines().any(|line| {
+                let ll = line.to_lowercase();
+                ll.contains("wal:") && ll.contains("encrypted")
+            }),
+            "enable per-layer report must label the WAL layer `encrypted`; stdout={:?}",
+            r.stdout
+        );
         assert!(!c.contains("panicked"), "must not panic; got={c:?}");
         assert_no_key_leak(&r, &[f.key_path.as_path()]);
 
@@ -1108,6 +1144,17 @@ mod encrypted {
         assert!(
             c.contains("disabled") || c.contains("plaintext"),
             "disable must report success; got={c:?}"
+        );
+        // Per-layer report: a layer line (e.g. WAL) must be labeled `plaintext`,
+        // distinct from the "DISABLED" header (which never contains "plaintext").
+        // This pins `stripped_label` returning "plaintext" for a stripped layer.
+        assert!(
+            r.stdout.lines().any(|line| {
+                let ll = line.to_lowercase();
+                ll.contains("wal:") && ll.contains("plaintext")
+            }),
+            "disable per-layer report must label the WAL layer `plaintext`; stdout={:?}",
+            r.stdout
         );
         assert!(!c.contains("panicked"), "must not panic; got={c:?}");
         assert_no_key_leak(&r, &[f.key_path.as_path()]);
