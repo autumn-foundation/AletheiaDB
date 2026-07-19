@@ -386,6 +386,33 @@ fn build_log(
     }
 }
 
+/// Classify every version in `history` (oldest-first) into its
+/// [`RevisionClass`], returning one class per version in input order.
+///
+/// Shared with contradiction genealogy (Issue #3352) so that a competing
+/// claim's per-version `origin` is computed by the *same* classifier the
+/// belief-revision audit uses (AC3) — the two analyses never disagree about
+/// whether a given version was a correction, world-change, retraction, etc.
+/// Pure over `history` (no I/O, no map-iteration-order leakage).
+pub(crate) fn classify_history(history: &EntityHistory) -> Vec<RevisionClass> {
+    let mut out = Vec::with_capacity(history.versions.len());
+    let mut max_prior_valid_from: Option<Timestamp> = None;
+    for (i, v) in history.versions.iter().enumerate() {
+        let predecessor = if i == 0 {
+            None
+        } else {
+            Some(&history.versions[i - 1])
+        };
+        out.push(classify(v, predecessor, max_prior_valid_from));
+        let vf = v.temporal.valid_time().start();
+        max_prior_valid_from = Some(match max_prior_valid_from {
+            Some(m) if m >= vf => m,
+            _ => vf,
+        });
+    }
+    out
+}
+
 /// Classify a single version. Pure function of the version, its predecessor, and
 /// the max `valid_from` recorded before it — unit-testable in isolation.
 ///
