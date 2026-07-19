@@ -2849,6 +2849,94 @@ mod tests {
     }
 
     #[test]
+    fn convert_namespace_scope_carried_on_vector_source() {
+        // Regression pin (Issue #3349, PR2b): a non-MATCH source (vector
+        // SIMILAR search) must still lower the `USE NAMESPACE` prefix onto
+        // `Query.scope`. Flipping the general-path `Ok(Query { .., scope })`
+        // site to `scope: None` would silently drop the namespace filter on
+        // every vector query -- the lane's worst outcome -- and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query =
+            super::parse_query("USE NAMESPACE 'agent:a' SIMILAR TO [0.1, 0.2, 0.3] LIMIT 10")
+                .unwrap();
+        // Sanity: this really is the vector-source path, not a MATCH.
+        assert!(matches!(&query.ops[0], QueryOp::VectorSearch { k: 10, .. }));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_scope_carried_on_window() {
+        // Regression pin (Issue #3349, PR2b): the self-contained WINDOW
+        // terminal op has its own early `return Ok(Query { .., scope })`;
+        // flipping it to `scope: None` would silently drop the namespace
+        // filter on temporal-window aggregates and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' MATCH (p:Product) \
+             WINDOW 1 month OVER VALID_TIME \
+             FROM '2024-01-01T00:00:00Z' TO '2024-03-01T00:00:00Z' \
+             RETURN AVG(p.price) AS avg_price",
+        )
+        .unwrap();
+        assert!(matches!(
+            &query.ops[..],
+            [.., QueryOp::TemporalWindowAggregate(_)]
+        ));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_scope_carried_on_align() {
+        // Regression pin (Issue #3349, PR2b): the self-contained ALIGN
+        // terminal op has its own early `return Ok(Query { .., scope })`;
+        // flipping it to `scope: None` would silently drop the namespace
+        // filter on temporal-align queries and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' MATCH (p:Product) ALIGN OVERLAP \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' \
+             RETURN p.price",
+        )
+        .unwrap();
+        assert!(matches!(&query.ops[..], [.., QueryOp::TemporalAlign(_)]));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_and_temporal_both_lower_onto_one_query() {
+        // NIT (Issue #3349, PR2b): a namespace clause and an `AS OF` temporal
+        // clause on the same query lower independently -- both must land on the
+        // single resulting `Query` (scope AND temporal_context), neither
+        // clobbering the other.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        // `AS OF` via the bare `parse_query` path takes microseconds since epoch
+        // (1704067200000000 == 2024-01-01T00:00:00Z), mirroring the existing
+        // `parse_query` temporal doc example.
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' AS OF 1704067200000000 MATCH (n:Person) RETURN n",
+        )
+        .unwrap();
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+        // The temporal clause lowered too (valid-time set), not dropped.
+        assert!(
+            query.temporal_context.is_some(),
+            "AS OF should lower onto temporal_context alongside the namespace scope"
+        );
+    }
+
+    #[test]
     fn test_parse_query_with_params() {
         use std::collections::HashMap;
 
