@@ -62,11 +62,12 @@ use crate::core::namespace::{
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData};
 use crate::storage::wal::LSN;
+use arc_swap::ArcSwapOption;
 use rayon::prelude::*;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -936,14 +937,34 @@ pub struct RedbColdStorage {
     config: RedbConfig,
     /// Statistics tracker.
     stats: AtomicColdStorageStats,
-    /// Optional cold key ring for encrypting data at rest (Issue #3617 PR3).
+    /// Optional cold key ring for encrypting data at rest (Issue #3617 PR3),
+    /// held in a runtime-swappable presence cell (Issue #3708).
     ///
-    /// `None` when encryption is disabled (values stored as bare
+    /// Empty (`None`) when encryption is disabled (values stored as bare
     /// compressed bytes, unchanged from the unencrypted path). When present it
     /// holds one generation in the steady state and two during a full-MEK key
     /// rotation, so a half-rotated store reads every value under its own
     /// generation via the `ACV1` wrapper dispatch.
-    keyring: Option<ColdKeyring>,
+    ///
+    /// The cell is an [`ArcSwapOption`] so a keyring can be **installed at
+    /// runtime** (`None` -> `Some`, Issue #3708) into a live plaintext store —
+    /// the cold-tier mirror of the WAL's
+    /// [`install_wal_keyring`](crate::storage::wal::concurrent_system::ConcurrentWalSystem::install_wal_keyring)
+    /// seam (#3669) — without reopening the store. Every read path
+    /// (`is_encrypted`, `encrypt_if_needed`, `decrypt_if_needed`,
+    /// `prepare_batch`, ...) `load()`s it lock-free, so an install is observed
+    /// atomically and never as a torn read; the install itself is serialized by
+    /// [`install_lock`](Self::install_lock).
+    keyring: ArcSwapOption<ColdKeyring>,
+    /// Serializes runtime keyring installs (Issue #3708) so two concurrent
+    /// installers cannot both observe the cell as `None`, both pass the presence
+    /// check, and both store -- the second silently replacing the first keyring.
+    /// Held for the entire [`install_cold_keyring`](Self::install_cold_keyring)
+    /// body (presence check + store) so a second concurrent installer blocks,
+    /// then observes `Some`, and returns the existing rejection `Err`. A private
+    /// leaf taken only at the top of install; the hot read/write paths never
+    /// touch it.
+    install_lock: Mutex<()>,
     /// Fault injection flag for testing.
     #[cfg(test)]
     fail_writes: AtomicBool,
@@ -1054,7 +1075,8 @@ impl RedbColdStorage {
             db,
             config,
             stats,
-            keyring: None,
+            keyring: ArcSwapOption::empty(),
+            install_lock: Mutex::new(()),
             #[cfg(test)]
             fail_writes: AtomicBool::new(false),
             #[cfg(test)]
@@ -1145,19 +1167,90 @@ impl RedbColdStorage {
     /// use [`with_cipher`](Self::with_cipher).
     #[must_use]
     pub fn with_cold_keyring(mut self, keyring: ColdKeyring) -> Self {
-        self.keyring = Some(keyring);
+        self.keyring = ArcSwapOption::from(Some(Arc::new(keyring)));
         self
     }
 
     /// Whether the cold store encrypts values at rest.
     pub fn is_encrypted(&self) -> bool {
-        self.keyring.is_some()
+        self.keyring.load().is_some()
     }
 
     /// The `key_version` freshly written cold values are stamped with, or `None`
     /// when encryption is disabled (Issue #3617 PR3).
     pub fn current_cold_key_version(&self) -> Option<u32> {
-        self.keyring.as_ref().map(ColdKeyring::current_version)
+        self.keyring
+            .load()
+            .as_deref()
+            .map(ColdKeyring::current_version)
+    }
+
+    /// Install a cold DEK keyring at runtime, flipping a live **plaintext** cold
+    /// store to **encrypted** (`None` -> `Some`, Issue #3708). This is the
+    /// cold-tier mirror of the WAL's
+    /// [`install_wal_keyring`](crate::storage::wal::concurrent_system::ConcurrentWalSystem::install_wal_keyring)
+    /// seam (#3669): the structural primitive a hot-live `encryption enable`
+    /// driver installs so the cold tier is re-keyed without reopening the store.
+    ///
+    /// # Transition
+    ///
+    /// Only the `None` -> `Some` transition is supported. Installing when a
+    /// keyring is already present is **rejected** with a structured error (never
+    /// a silent replace, so no generation is lost): rotation (`Some` -> `Some'`)
+    /// is the job of [`install_cold_generation`](Self::install_cold_generation),
+    /// not this seam.
+    ///
+    /// # Concurrency
+    ///
+    /// The whole body -- presence check and store -- runs under a dedicated leaf
+    /// [`install_lock`](Self::install_lock), so two concurrent installers cannot
+    /// both observe the cell as `None` and both store (the second silently
+    /// replacing the first): the loser blocks, then observes `Some`, and takes
+    /// the rejection path. Readers `load()` the cell lock-free, so an install is
+    /// observed atomically and never as a torn read.
+    ///
+    /// # Data at rest
+    ///
+    /// Unlike the WAL, no segment seal/reopen is required: cold values are
+    /// individually self-describing (`ACV1`), so values written **after** the
+    /// install are wrapped under the new keyring while values written before it
+    /// stay bare. Wrapping the pre-install plaintext corpus (via
+    /// [`wrap_plaintext_cold_values`](Self::wrap_plaintext_cold_values)) is the
+    /// enable **driver's** responsibility, exactly as the WAL seam leaves its
+    /// downstream migration to its driver -- installing the keyring alone does
+    /// NOT retroactively encrypt already-stored values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a keyring is already installed (a double-install).
+    // The production consumer is the hot-live plaintext -> encrypted enable
+    // engine (Issue #3708 follow-up), which drives this from `enable_encryption`
+    // after the WAL's `install_wal_keyring` and a bare -> `ACV1` wrap pass. A
+    // dedicated `StorageError` variant for the double-install rejection (so the
+    // enable engine can map ONLY it to `FAILED_PRECONDITION`, as the WAL seam's
+    // `WalKeyringAlreadyInstalled` allows) is a trivial follow-up for the
+    // enable lane; reusing `InconsistentState` here keeps the change within the
+    // cold-storage module.
+    pub fn install_cold_keyring(&self, keyring: ColdKeyring) -> Result<()> {
+        // Serialize the ENTIRE install -- presence check + store -- under a
+        // dedicated leaf mutex. Without it two concurrent installers could both
+        // observe `None`, both pass the check, and both store, the second
+        // silently replacing the first keyring.
+        let _install_guard = self.install_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Reject a double-install: presence is a one-way None -> Some transition.
+        if self.keyring.load().is_some() {
+            return Err(StorageError::InconsistentState {
+                reason: "a cold keyring is already installed; runtime install only \
+                         supports the plaintext -> encrypted (None -> Some) transition \
+                         (key rotation is install_cold_generation)"
+                    .to_string(),
+            }
+            .into());
+        }
+
+        self.keyring.store(Some(Arc::new(keyring)));
+        Ok(())
     }
 
     /// Install a new cold DEK generation for a key rotation (Issue #3617 PR3),
@@ -1173,7 +1266,8 @@ impl RedbColdStorage {
         key_version: u32,
         cipher: Arc<dyn crate::encryption::cipher::Cipher>,
     ) -> Result<()> {
-        let ring = self.keyring.as_ref().ok_or_else(|| {
+        let guard = self.keyring.load();
+        let ring = guard.as_deref().ok_or_else(|| {
             Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
                 reason: "cold storage is not encrypted; cannot install a key generation"
                     .to_string(),
@@ -1191,7 +1285,8 @@ impl RedbColdStorage {
     ///
     /// Returns an error if the store is not encrypted.
     pub fn retire_cold_generations(&self, key_version: u32) -> Result<()> {
-        let ring = self.keyring.as_ref().ok_or_else(|| {
+        let guard = self.keyring.load();
+        let ring = guard.as_deref().ok_or_else(|| {
             Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
                 reason: "cold storage is not encrypted; cannot retire key generations".to_string(),
             })
@@ -1207,8 +1302,9 @@ impl RedbColdStorage {
     /// half-rotated store distinguishes old- from new-generation values on read.
     /// A no-op (returns the input) when encryption is disabled.
     fn encrypt_if_needed(&self, data: Vec<u8>) -> Result<Vec<u8>> {
-        match self.keyring {
-            Some(ref ring) => {
+        let guard = self.keyring.load();
+        match guard.as_deref() {
+            Some(ring) => {
                 let (cipher, key_version) = ring.current().ok_or_else(|| {
                     Into::<crate::core::error::Error>::into(StorageError::Encryption(
                         "Cold storage keyring holds no generation".to_string(),
@@ -1236,7 +1332,8 @@ impl RedbColdStorage {
     /// [`keyring`](crate::storage::redb_cold_storage::keyring) for the collision
     /// argument. A no-op (returns a copy) when encryption is disabled.
     fn decrypt_if_needed(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let Some(ref ring) = self.keyring else {
+        let guard = self.keyring.load();
+        let Some(ring) = guard.as_deref() else {
             return Ok(data.to_vec());
         };
         // Wrapped iff ACV1 magic AND the stamped version names a held generation.
@@ -1314,9 +1411,10 @@ impl RedbColdStorage {
         // Resolve the current cold generation ONCE up front so the parallel
         // compression closure is `Sync` (no borrow of `self.keyring`'s lock) and
         // every value in the batch is wrapped under the same `key_version`.
+        let keyring_guard = self.keyring.load();
         let cold_generation: Option<(Arc<dyn crate::encryption::cipher::Cipher>, u32)> =
-            match self.keyring {
-                Some(ref ring) => Some(ring.current().ok_or_else(|| {
+            match keyring_guard.as_deref() {
+                Some(ring) => Some(ring.current().ok_or_else(|| {
                     Into::<crate::core::error::Error>::into(StorageError::Encryption(
                         "Cold storage keyring holds no generation".to_string(),
                     ))
@@ -1709,7 +1807,8 @@ impl RedbColdStorage {
     /// * a value fails to decrypt (a genuine wrong/absent key — surfaced loudly,
     ///   never silent wrong data) or a redb transaction fails.
     pub fn reencrypt_cold_values(&self, target_version: u32) -> Result<ColdReencryptStats> {
-        let ring = self.keyring.as_ref().ok_or_else(|| {
+        let guard = self.keyring.load();
+        let ring = guard.as_deref().ok_or_else(|| {
             Into::<crate::core::error::Error>::into(StorageError::InconsistentState {
                 reason: "cold storage is not encrypted; cannot rotate cold keys".to_string(),
             })
@@ -1799,7 +1898,7 @@ impl RedbColdStorage {
     /// * a value fails to decrypt (a genuine wrong/absent key — surfaced loudly,
     ///   never silently left encrypted) or a redb transaction fails.
     pub fn unwrap_encrypted_cold_values(&self) -> Result<ColdUnwrapStats> {
-        if self.keyring.is_none() {
+        if self.keyring.load().is_none() {
             return Err(StorageError::InconsistentState {
                 reason: "cold storage is not encrypted; nothing to unwrap".to_string(),
             }
