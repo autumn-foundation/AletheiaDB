@@ -512,14 +512,14 @@ impl CheckpointManager {
                 &graph_data,
                 &graph_path,
                 self.config.compression_level,
-                keyring,
+                keyring.as_ref(),
             )
             .map_err(persistence_err)?;
         } else {
             crate::storage::index_persistence::graph::save_graph_index_with_keyring(
                 &graph_data,
                 &graph_path,
-                keyring,
+                keyring.as_ref(),
             )
             .map_err(persistence_err)?;
         }
@@ -533,7 +533,7 @@ impl CheckpointManager {
         crate::storage::index_persistence::temporal::save_temporal_index_with_keyring(
             &temporal_data,
             &temporal_path,
-            self.persistence_manager.keyring(),
+            self.persistence_manager.keyring().as_ref(),
         )
         .map_err(persistence_err)?;
         bytes_written += std::fs::metadata(&temporal_path)
@@ -1041,7 +1041,7 @@ impl CheckpointManager {
             let mut graph_data =
                 crate::storage::index_persistence::graph::load_graph_index_with_keyring(
                     &graph_path,
-                    self.persistence_manager.keyring(),
+                    self.persistence_manager.keyring().as_ref(),
                 )
                 .map_err(persistence_err)?;
             remap.remap_graph_index_data(&mut graph_data);
@@ -1118,7 +1118,7 @@ impl CheckpointManager {
             let mut temporal_data =
                 crate::storage::index_persistence::temporal::load_temporal_index_with_keyring(
                     &temporal_path,
-                    self.persistence_manager.keyring(),
+                    self.persistence_manager.keyring().as_ref(),
                 )
                 .map_err(persistence_err)?;
             remap.remap_temporal_index_data(&mut temporal_data);

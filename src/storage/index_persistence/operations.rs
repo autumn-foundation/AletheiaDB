@@ -109,7 +109,7 @@ pub(crate) fn persist_vector_indexes(
         crate::storage::index_persistence::vector::save_hnsw_index_with_keyring(
             index.as_ref(),
             &usearch_path,
-            keyring,
+            keyring.as_ref(),
         )
         .map_err(|e| {
             StorageError::PersistenceError(format!("Failed to save usearch index: {}", e))
@@ -132,14 +132,13 @@ pub(crate) fn persist_vector_indexes(
         // Set the actual vector count
         vector_meta.vector_count = vector_count as u64;
 
-        save_vector_meta_with_keyring(&vector_meta, &vec_path.join("meta.idx"), keyring).map_err(
-            |e| {
-                StorageError::PersistenceError(format!(
-                    "Failed to save vector metadata for {}: {}",
-                    property_name, e
-                ))
-            },
-        )?;
+        save_vector_meta_with_keyring(&vector_meta, &vec_path.join("meta.idx"), keyring.as_ref())
+            .map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to save vector metadata for {}: {}",
+                property_name, e
+            ))
+        })?;
 
         // Create and save mappings
         use crate::storage::index_persistence::formats::VectorMapping;
@@ -156,7 +155,7 @@ pub(crate) fn persist_vector_indexes(
         save_vector_mappings_with_keyring(
             &vector_mappings,
             &vec_path.join("mappings.idx"),
-            keyring,
+            keyring.as_ref(),
         )
         .map_err(|e| {
             StorageError::PersistenceError(format!(
@@ -424,7 +423,7 @@ pub(crate) fn load_vector_indexes(
     // otherwise propagate the panic through `collect`).
     // Clone the index cipher (cheap Arc clone) so each parallel task can decrypt
     // encrypted vector meta/mappings files (Issue #481).
-    let keyring = manager.keyring().cloned();
+    let keyring = manager.keyring();
     let staged: Vec<std::result::Result<LoadedVectorIndex, SkippedVectorIndex>> = index_dirs
         .par_iter()
         .map(|path| {
@@ -590,9 +589,9 @@ pub(crate) fn persist_graph_index(
         StorageError::PersistenceError(format!("Failed to create graph directory: {}", e))
     })?;
 
-    save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring()).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save graph index: {}", e))
-    })?;
+    save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring().as_ref()).map_err(
+        |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+    )?;
 
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
@@ -646,9 +645,9 @@ pub(crate) fn persist_graph_index_from_snapshot(
     // (Issue #3564): when a cipher is configured the snapshot-persisted file MUST be
     // encrypted, not plaintext, or the coherent-snapshot path would be a security
     // regression vs the live path.
-    save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring()).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save graph index: {}", e))
-    })?;
+    save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring().as_ref()).map_err(
+        |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+    )?;
 
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
@@ -798,9 +797,10 @@ pub(crate) fn persist_temporal_index(
 
     // Save to disk
     let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
-    save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring()).map_err(
-        |e| StorageError::PersistenceError(format!("Failed to save temporal index: {}", e)),
-    )?;
+    save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring().as_ref())
+        .map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
+        })?;
 
     tracker.reset_temporal_mutations();
     tracker.update_temporal_lsn(current_lsn);
@@ -1037,9 +1037,10 @@ pub(crate) fn persist_temporal_index_from_snapshot(
     // Route through the same at-rest encryption path as the live `persist_temporal_index`
     // (Issue #3564): when a cipher is configured the snapshot-persisted file MUST be
     // encrypted, not plaintext.
-    save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring()).map_err(
-        |e| StorageError::PersistenceError(format!("Failed to save temporal index: {}", e)),
-    )?;
+    save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring().as_ref())
+        .map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
+        })?;
 
     tracker.reset_temporal_mutations();
     tracker.update_temporal_lsn(current_lsn);
@@ -1085,7 +1086,7 @@ pub(crate) fn persist_temporal_adjacency_index(
         save_temporal_adjacency_index_with_keyring(
             adj_index,
             manager.base_path(),
-            manager.keyring(),
+            manager.keyring().as_ref(),
         )
         .map_err(|e| {
             StorageError::PersistenceError(format!(
@@ -1264,7 +1265,7 @@ pub(crate) fn load_indexes_startup(
             load_graph_index_with_keyring, restore_property_map,
         };
 
-        match load_graph_index_with_keyring(&graph_path, manager.keyring()) {
+        match load_graph_index_with_keyring(&graph_path, manager.keyring().as_ref()) {
             Ok(mut graph_data) => {
                 // Issue #3490: translate persisted (file-space) interner ids
                 // (node/edge labels, property keys, and string property values)
@@ -1499,7 +1500,7 @@ pub(crate) fn load_indexes_startup(
             load_temporal_index_with_keyring, restore_into_historical_storage,
         };
 
-        match load_temporal_index_with_keyring(&temporal_path, manager.keyring()) {
+        match load_temporal_index_with_keyring(&temporal_path, manager.keyring().as_ref()) {
             Ok(mut temporal_data) => {
                 // Issue #3490: translate persisted (file-space) interner ids in
                 // the historical versions/anchors (labels, property keys, string
@@ -1626,7 +1627,7 @@ pub(crate) fn load_indexes_startup(
     if adjacency_file.exists() {
         match load_temporal_adjacency_index_with_keyring_and_remap(
             manager.base_path(),
-            manager.keyring(),
+            manager.keyring().as_ref(),
             &interner_remap,
         ) {
             Ok(adj_index) => {
