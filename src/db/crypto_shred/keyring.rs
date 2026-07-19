@@ -189,6 +189,33 @@ impl SubjectKeyring {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// Iterate all subject entries (read-only), in subject-id order.
+    ///
+    /// Used by the subject-keyring re-wrap pass (Slice 5) to plan which entries
+    /// hold a stale-generation wrapped DEK; never exposes key material (the
+    /// wrapped blob is AEAD ciphertext, and `SubjectEntry`'s `Debug` is redacted).
+    pub fn iter_entries(&self) -> impl Iterator<Item = &SubjectEntry> {
+        self.entries.values()
+    }
+
+    /// Replace an existing **active** subject's wrapped DEK blob (subject-keyring
+    /// re-wrap on full-MEK rotation, Slice 5).
+    ///
+    /// A no-op when the subject is absent. Fail-closed on the erased invariant:
+    /// an `Erased` subject (or one whose `wrapped_key` is already `None`) is
+    /// **never** given a wrapped key back — a re-wrap must never resurrect a
+    /// destroyed key. The caller (`CryptoShredState::rewrap_keyring`) already
+    /// skips such entries; this guard is defense in depth.
+    pub fn set_wrapped_key(&mut self, subject_id: &str, wrapped: WrappedKey) {
+        if let Some(entry) = self
+            .entries
+            .get_mut(subject_id)
+            .filter(|e| e.state == SubjectState::Active && e.wrapped_key.is_some())
+        {
+            entry.wrapped_key = Some(wrapped);
+        }
+    }
+
     /// Whether any subject is currently `Active`.
     #[must_use]
     pub fn any_active(&self) -> bool {
