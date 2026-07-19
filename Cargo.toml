@@ -598,6 +598,12 @@ harness = false
 path = "benches/belief_revision.rs"
 required-features = ["semantic-temporal"]
 
+[[bench]]
+name = "counterfactual_replay"
+harness = false
+path = "benches/counterfactual_replay.rs"
+required-features = ["semantic-temporal"]
+
 # Drift-alarm write-path overhead (Issue #3367): GroupCommit commit throughput
 # baseline vs 10 active on-write monitors + engine (target: <10% reduction).
 [[bench]]
