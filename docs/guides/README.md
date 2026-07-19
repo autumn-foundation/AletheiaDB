@@ -29,6 +29,7 @@ After those four, pick the guides relevant to what you're building.
 - [Hybrid Query Guide](hybrid-query-guide.md) — Combine graph traversal + vector similarity + temporal in one query
 - [Query Pipeline Guide](query-pipeline-guide.md) — How queries are planned and executed internally
 - [Cypher Compatibility Matrix](cypher-compatibility.md) — The supported read-only openCypher subset and how unsupported constructs are rejected
+- [Namespaces Guide](namespaces-guide.md) — Multi-agent data scoping: a shared knowledge base with private per-agent scratch (isolated-by-default, shared-by-explicit-query)
 
 ### Vector Search
 - [Vector Search Integration](vector-search-integration.md) — HNSW indexing, k-NN search, embedding properties
