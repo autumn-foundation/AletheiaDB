@@ -81,9 +81,17 @@
 //!
 //! # Status
 //!
-//! **Stage A skeleton (Issue #3377).** The public API surface and a red
-//! (failing) test suite are in place; the estimator and scan bodies are
-//! `todo!()` pending the Stage B green implementation.
+//! **Stage B landed (Issue #3377).** The pure Kaplan–Meier estimator, the
+//! bounded cohort scan, and the three [`AletheiaDB`] accessors
+//! ([`knowledge_half_life`](AletheiaDB::knowledge_half_life),
+//! [`fact_freshness`](AletheiaDB::fact_freshness),
+//! [`staleness_inventory`](AletheiaDB::staleness_inventory)) are implemented and
+//! green. The correctness/validation hardening pass (Fix-A) folded in the
+//! property-removal lifespan fix, the `insufficient_data` freshness fix, as-of
+//! clock pinning for reproducibility, threshold/option validation, and the AC8
+//! [`CoverageScope`] disclosure. Performance work (a wired
+//! [`CohortStatsCache`] and the mandated benchmark) is tracked separately as
+//! Fix-B.
 
 use std::time::Duration;
 
@@ -94,10 +102,17 @@ use crate::core::history::{EntityHistory, VersionInfo};
 use crate::core::id::EntityId;
 use crate::core::temporal::{Timestamp, time};
 
-/// The minimum number of **event** observations a cohort must have before a
-/// half-life is estimated at all. Below this floor the analysis returns
-/// [`VolatilityStats`] with `insufficient_data == true` and no half-life —
-/// never a spurious number (Issue #3377 AC3).
+/// The minimum number of **observations** (events *plus* right-censored) a
+/// cohort must have before a half-life is estimated at all. Below this floor the
+/// analysis returns [`VolatilityStats`] with `insufficient_data == true` and no
+/// half-life — never a spurious number (Issue #3377 AC3).
+///
+/// Despite the historical `EVENTS` in the name (kept for API stability while the
+/// feature is experimental), the floor is measured against the total
+/// *observation* count, matching the issue's "insufficient **observations**"
+/// wording — see [`summarize`] for why gating on the event count alone would
+/// collapse the distinct "plenty of data, all right-censored" state into
+/// `insufficient_data`.
 ///
 /// This is the *refusal* floor and is deliberately smaller than the ≥100
 /// observations the success metric names for its ±10% *accuracy* guarantee: the
@@ -204,11 +219,45 @@ impl HalfLifeOptions {
     }
 }
 
+/// Which storage tiers a cohort scan actually covered (Issue #3377 AC8).
+///
+/// Half-life statistics reflect **available history**. The v1 cohort scan
+/// enumerates hot-tier version heads
+/// ([`versioned_node_ids`](crate::storage::historical)/`versioned_edge_ids`)
+/// plus any history restored into the hot tier; versions migrated to the cold
+/// tier are **excluded** (the Issue #3238 coverage-caveat model). This struct
+/// makes that window explicit on every result so a caller never mistakes a
+/// partial scan for a complete one — it is **distinct from `sampled`**, which
+/// flags only candidate-cap truncation, not tier coverage. A lifespan whose
+/// terminating event lives only in the cold tier can therefore be under-observed
+/// (counted as still-open/censored); `cold_migrated_included == false` discloses
+/// that boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoverageScope {
+    /// The hot tier (in-RAM version heads plus restored history) was scanned.
+    /// Always `true` in v1.
+    pub hot_tier: bool,
+    /// Whether cold-tier-migrated history was included in the scan. Always
+    /// `false` in v1 — the scan sees hot-tier heads only (Issue #3238 model).
+    pub cold_migrated_included: bool,
+}
+
+impl CoverageScope {
+    /// The v1 coverage scope: hot tier scanned, cold-migrated history excluded.
+    #[must_use]
+    pub const fn hot_only() -> Self {
+        Self {
+            hot_tier: true,
+            cold_migrated_included: false,
+        }
+    }
+}
+
 /// The survival statistics of a cohort (Issue #3377 AC1).
 ///
 /// When `insufficient_data` is `true` the cohort had fewer than
-/// [`HalfLifeOptions::min_events`] events and `half_life` / `iqr` are `None`
-/// (AC3). A `half_life` of `None` with `insufficient_data == false` is the
+/// [`HalfLifeOptions::min_events`] observations and `half_life` / `iqr` are
+/// `None` (AC3). A `half_life` of `None` with `insufficient_data == false` is the
 /// *distinct* "heavily censored — the survival curve never reached 0.5" case,
 /// which still reports its counts and an accompanying survival floor rather than
 /// a fabricated median.
@@ -220,7 +269,10 @@ pub struct VolatilityStats {
     /// is `insufficient_data`, or when the survival curve never crossed 0.5.
     pub half_life: Option<Duration>,
     /// The dispersion measure: the (25th, 75th) percentile survival times of the
-    /// KM curve. `None` under the same conditions as `half_life`.
+    /// KM curve. `None` when `half_life` is `None`, and *additionally* whenever
+    /// the curve never descends to the 25th survival quantile (`S ≤ 0.25`): a
+    /// curve whose floor sits in `(0.25, 0.5]` yields `half_life == Some` but
+    /// `iqr == None`.
     pub iqr: Option<(Duration, Duration)>,
     /// Total observations considered (events + censored).
     pub observation_count: usize,
@@ -229,11 +281,15 @@ pub struct VolatilityStats {
     /// Right-censored (still-current) observations.
     pub censored_count: usize,
     /// `true` when the cohort scan hit the candidate cap and did not see every
-    /// member (Issue #3377 AC7).
+    /// member (Issue #3377 AC7). This flags **candidate-cap truncation only**;
+    /// see [`coverage`](Self::coverage) for tier coverage.
     pub sampled: bool,
-    /// `true` when the cohort had fewer than the event floor and no half-life was
-    /// estimated (Issue #3377 AC3).
+    /// `true` when the cohort had fewer than the observation floor and no
+    /// half-life was estimated (Issue #3377 AC3).
     pub insufficient_data: bool,
+    /// Which storage tiers the scan covered (Issue #3377 AC8) — the window these
+    /// statistics actually saw.
+    pub coverage: CoverageScope,
 }
 
 /// The freshness of a single fact relative to its cohort's survival statistics
@@ -289,11 +345,15 @@ pub struct StalenessPage {
     pub entries: Vec<StalenessEntry>,
     /// The total number of matching facts within the sampled candidate set.
     pub total_matching: usize,
-    /// `true` when the cohort scan hit the candidate cap (Issue #3377 AC7).
+    /// `true` when the cohort scan hit the candidate cap (Issue #3377 AC7) —
+    /// candidate-cap truncation only; see [`coverage`](Self::coverage) for tier
+    /// coverage.
     pub sampled: bool,
     /// The offset to pass on the next call to continue paging, or `None` when the
     /// page is the last.
     pub next_offset: Option<usize>,
+    /// Which storage tiers the underlying cohort scan covered (Issue #3377 AC8).
+    pub coverage: CoverageScope,
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +426,16 @@ impl KmCurve {
 
     /// The estimated survival probability at time `t` (microseconds): the value
     /// of the step function at `t`. `1.0` before the first event time.
+    ///
+    /// Beyond the largest event time this returns the KM **plateau** — the
+    /// survival of the last step — because the curve does not descend through a
+    /// censored tail. A fact aged far past the last observed event therefore
+    /// reads that plateau (a survival *floor*), which can be materially higher
+    /// than the exponential fallback `0.5^(age/half_life)` would give for the
+    /// same age; [`survival_probability`] prefers the curve when one exists, so
+    /// the two estimators can disagree for `t` past `max_event_time`. This is
+    /// standard Kaplan–Meier behavior (the estimator makes no assumption about
+    /// the unobserved tail).
     #[must_use]
     pub fn survival_at(&self, t: i64) -> f64 {
         // Right-continuous step: S(t) is the survival of the last step whose
@@ -481,6 +551,9 @@ pub fn summarize(
         censored_count,
         sampled: false,
         insufficient_data,
+        // The pure summary describes a hot-tier scan; the cold tier is never
+        // enumerated in v1 (Issue #3377 AC8 / #3238 coverage model).
+        coverage: CoverageScope::hot_only(),
     }
 }
 
@@ -651,6 +724,12 @@ impl AletheiaDB {
     /// the age in half-lives and an estimated survival probability. Exposed on
     /// demand; it never silently alters any existing read response.
     ///
+    /// The fact's `age` and the cohort's censored durations are measured against
+    /// the analysis clock: the live wall clock by default, or — when
+    /// [`HalfLifeOptions::as_of_transaction_time`] is set — that pinned
+    /// coordinate, so a past-as-of report is reproducible (re-running it on
+    /// frozen history yields the same age / survival, Issue #3377 AC6).
+    ///
     /// # Errors
     ///
     /// `NOT_FOUND` for an unknown entity; a structured error for an invalid
@@ -660,8 +739,10 @@ impl AletheiaDB {
         entity: EntityId,
         options: &HalfLifeOptions,
     ) -> Result<FreshnessScore> {
-        let now_us = time::now().wallclock();
         let as_of = options.as_of_transaction_time;
+        // Pin the analysis clock to `as_of` when scoped to a past tx-time so the
+        // age / censored durations are reproducible (AC6); else the live clock.
+        let now_us = analysis_now_us(as_of);
 
         // Fetch the entity's history (NOT_FOUND for an unknown entity).
         let history = match entity {
@@ -684,8 +765,11 @@ impl AletheiaDB {
             EntityId::Edge(_) => Cohort::EdgeType(current.label.clone()),
         };
 
-        // Current valid age of the entity's current version.
-        let age_us = (now_us - current.temporal.valid_time().start().wallclock()).max(0);
+        // Current valid age of the entity's current version (saturating so an
+        // extreme backdated valid_from cannot overflow, Fix-A L1).
+        let age_us = now_us
+            .saturating_sub(current.temporal.valid_time().start().wallclock())
+            .max(0);
         let age = micros_to_duration(age_us);
 
         // Cohort statistics + KM curve (recomputed here; the CohortStatsCache
@@ -693,13 +777,17 @@ impl AletheiaDB {
         // registry — see the type's docs).
         let scan = self.scan_cohort(&cohort, options)?;
         let stats = summarize(cohort.clone(), &scan.observations, options.min_events);
-        let curve = kaplan_meier(&scan.observations);
+        // Gate the curve on sufficiency so a below-floor cohort degrades to
+        // `(age_in_half_lives: None, survival_probability: None)` in lockstep —
+        // never a spurious survival number from an under-powered sample
+        // (Fix-A MAJOR-2, AC3).
+        let curve = (!stats.insufficient_data).then(|| kaplan_meier(&scan.observations));
 
         let age_in_half_lives = stats.half_life.and_then(|hl| {
             let hl_us = hl.as_micros() as f64;
             (hl_us > 0.0).then_some(age_us as f64 / hl_us)
         });
-        let survival_probability = survival_probability(age, stats.half_life, Some(&curve));
+        let survival_probability = survival_probability(age, stats.half_life, curve.as_ref());
 
         Ok(FreshnessScore {
             entity,
@@ -729,6 +817,17 @@ impl AletheiaDB {
     ) -> Result<StalenessPage> {
         if limit == 0 {
             return Err(invalid_argument("limit", "limit must be greater than 0"));
+        }
+        // Reject a non-finite or negative half-lives threshold: NaN would
+        // silently match nothing and a negative value would match the whole
+        // cohort — either produces a misleading worklist (Fix-A M1, AC5).
+        if let StalenessThreshold::HalfLives(n) = threshold
+            && (!n.is_finite() || n < 0.0)
+        {
+            return Err(invalid_argument(
+                "threshold",
+                "half-lives threshold must be finite and >= 0",
+            ));
         }
 
         let scan = self.scan_cohort(&cohort, options)?;
@@ -788,6 +887,7 @@ impl AletheiaDB {
             total_matching,
             sampled: scan.sampled,
             next_offset,
+            coverage: CoverageScope::hot_only(),
         })
     }
 }
@@ -811,6 +911,16 @@ impl AletheiaDB {
     /// Enumerate a cohort's members (bounded by `options.max_entities`), read
     /// each one's recorded history, and derive its survival observations +
     /// current age. Read-only; takes only short historical read locks.
+    ///
+    /// An **unknown but structurally-valid** cohort label/edge-type/property key
+    /// is not an error: it simply matches no members and yields an empty scan,
+    /// which the accessors surface as an `insufficient_data`
+    /// [`VolatilityStats`] (consistent across `knowledge_half_life` /
+    /// `staleness_inventory` / the cohort scan inside `fact_freshness`). This is
+    /// deliberately asymmetric with `fact_freshness`'s *entity* lookup, where an
+    /// unknown entity id is a `NOT_FOUND` storage error — a missing entity is a
+    /// caller mistake, whereas a cohort with no members is a legitimate empty
+    /// result.
     fn scan_cohort(&self, cohort: &Cohort, options: &HalfLifeOptions) -> Result<CohortScan> {
         // Reject a structurally-invalid cohort (an empty label/type/key).
         match cohort {
@@ -826,8 +936,28 @@ impl AletheiaDB {
             _ => {}
         }
 
-        let now_us = time::now().wallclock();
+        // Reject degenerate options: `min_events == 0` would defeat the AC3
+        // insufficiency floor (an empty cohort would read as "heavy censoring"
+        // rather than insufficient), and `max_entities == 0` would truncate the
+        // entire scan away (Fix-A L2).
+        if options.min_events == 0 {
+            return Err(invalid_argument(
+                "min_events",
+                "min_events must be greater than 0",
+            ));
+        }
+        if options.max_entities == 0 {
+            return Err(invalid_argument(
+                "max_entities",
+                "max_entities must be greater than 0",
+            ));
+        }
+
         let as_of = options.as_of_transaction_time;
+        // Pin the analysis clock to `as_of` when scoped to a past tx-time so the
+        // censored durations / member ages are reproducible across re-runs on
+        // frozen history (Fix-A MAJOR-3, AC2/AC6); else the live wall clock.
+        let now_us = analysis_now_us(as_of);
         let cap = options.max_entities;
         let is_edge = matches!(cohort, Cohort::EdgeType(_));
         let label = cohort_label(cohort);
@@ -905,6 +1035,23 @@ fn visible_versions(history: &EntityHistory, as_of: Option<Timestamp>) -> Vec<&V
         .collect()
 }
 
+/// The wall-clock reference ("now") an analysis measures censored durations and
+/// current ages against.
+///
+/// When the caller pins an `as_of` transaction-time coordinate, the analysis
+/// clock is pinned to it too — so re-running the same past-as-of report on
+/// frozen history yields identical censored durations and ages (Issue #3377
+/// AC2/AC6 reproducibility). Otherwise it is the live wall clock (which honors a
+/// [`SimulatedClock`](crate::simulation) injection under the `simulation`
+/// feature). An `as_of` transaction-time coordinate is, by construction,
+/// approximately the wall clock at which the measurement "would have been" taken.
+fn analysis_now_us(as_of: Option<Timestamp>) -> i64 {
+    match as_of {
+        Some(t) => t.wallclock(),
+        None => time::now().wallclock(),
+    }
+}
+
 /// The label/type/property-label string a cohort scopes to.
 fn cohort_label(cohort: &Cohort) -> &str {
     match cohort {
@@ -930,7 +1077,9 @@ fn process_entity_history(
         return None;
     }
     let observations = observations_from_versions(&visible, key, now_us);
-    let current_age = (now_us - current.temporal.valid_time().start().wallclock()).max(0);
+    let current_age = now_us
+        .saturating_sub(current.temporal.valid_time().start().wallclock())
+        .max(0);
     Some((observations, current_age))
 }
 
@@ -947,7 +1096,10 @@ fn process_entity_history(
 /// For a property cohort (`key` = `Some`), a terminating transition only ends
 /// *that property's* lifespan when the property's value actually changes across
 /// it (a per-property refinement: a WorldChange to a different property, or a
-/// correction, leaves this property's lifespan running).
+/// correction, leaves this property's lifespan running). A WorldChange that
+/// *removes* the measured key ends the lifespan (one completed event) and does
+/// **not** begin a new one — the property no longer exists, so no phantom
+/// censored/event observation is emitted (Fix-A MAJOR-1).
 fn observations_from_versions(
     visible: &[&VersionInfo],
     key: Option<&str>,
@@ -980,9 +1132,19 @@ fn observations_from_versions(
                     };
                     if terminates {
                         if let Some(start) = life_start {
-                            observations.push(Observation::event((valid_from_us - start).max(0)));
+                            observations.push(Observation::event(
+                                valid_from_us.saturating_sub(start).max(0),
+                            ));
                         }
-                        life_start = Some(valid_from_us);
+                        // Only restart the lifespan if the fact still exists in
+                        // this version. A WorldChange that REMOVES the measured
+                        // property terminates the lifespan but does NOT begin a
+                        // new one — restarting unconditionally would emit a
+                        // phantom censored/event observation for a property that
+                        // is no longer present (Fix-A MAJOR-1). For an entity
+                        // cohort (`key == None`) `key_present` is always true, so
+                        // this preserves the prior behavior exactly.
+                        life_start = key_present(version, key).then_some(valid_from_us);
                     }
                 }
                 RevisionClass::Retraction => {
@@ -993,7 +1155,7 @@ fn observations_from_versions(
                     if terminates {
                         if let Some(start) = life_start {
                             let end = version.temporal.valid_time().end().wallclock();
-                            observations.push(Observation::event((end - start).max(0)));
+                            observations.push(Observation::event(end.saturating_sub(start).max(0)));
                         }
                         life_start = None;
                     }
@@ -1016,7 +1178,7 @@ fn observations_from_versions(
 
     // A still-open final lifespan is a right-censored observation.
     if let Some(start) = life_start {
-        observations.push(Observation::censored((now_us - start).max(0)));
+        observations.push(Observation::censored(now_us.saturating_sub(start).max(0)));
     }
 
     observations
@@ -1055,10 +1217,11 @@ fn invalid_argument(parameter: &str, reason: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
-    //! RED phase (Issue #3377 Stage A): every test asserts a real expected value
-    //! and therefore **fails** against the `todo!()` skeleton. These are the
-    //! pure-estimator tests (no database); the cohort/freshness/staleness/as-of
+    //! Pure-estimator unit tests (no database) for the Kaplan–Meier core and the
+    //! `summarize` seam (Issue #3377); the cohort/freshness/staleness/as-of
     //! coverage lives in the gated `tests/half_life_e2e.rs` integration file.
+    //! These assert concrete expected values against the (green) Stage-B
+    //! implementation plus the Fix-A correctness/validation hardening.
 
     use super::*;
 
@@ -1278,6 +1441,45 @@ mod tests {
         );
         let pf = p_fallback.expect("exponential fallback available with a half-life");
         assert!((pf - 0.5).abs() < 1e-9, "age==half_life => 0.5, got {pf}");
+    }
+
+    // ---- AC1: IQR percentiles surface as concrete Durations -------------------
+
+    #[test]
+    fn iqr_percentiles_are_concrete_durations() {
+        // Four uncensored events at distinct times => the KM survival curve steps
+        // down by 1/4 each: S = 3/4 @100, 2/4 @200, 1/4 @300, 0 @400. Hence:
+        //   median             (smallest t, S <= 0.50) => 200
+        //   25th-pctile surv.  (smallest t, S <= 0.75) => 100
+        //   75th-pctile surv.  (smallest t, S <= 0.25) => 300
+        let obs: Vec<Observation> = [100_i64, 200, 300, 400]
+            .into_iter()
+            .map(Observation::event)
+            .collect();
+        let stats = summarize(Cohort::NodeLabel("Person".into()), &obs, 4);
+        assert!(
+            !stats.insufficient_data,
+            "4 observations meet the floor of 4"
+        );
+        assert_eq!(stats.half_life, Some(Duration::from_micros(200)));
+        assert_eq!(
+            stats.iqr,
+            Some((Duration::from_micros(100), Duration::from_micros(300))),
+            "IQR = (25th, 75th) survival-time percentiles as concrete Durations"
+        );
+    }
+
+    // ---- AC8: the summary discloses the coverage window it saw ----------------
+
+    #[test]
+    fn summarize_discloses_hot_only_coverage() {
+        let obs = vec![Observation::event(DAY_US)];
+        let stats = summarize(Cohort::NodeLabel("Person".into()), &obs, 1);
+        assert!(stats.coverage.hot_tier, "the hot tier is scanned");
+        assert!(
+            !stats.coverage.cold_migrated_included,
+            "v1 excludes cold-migrated history (Issue #3238 coverage model)"
+        );
     }
 
     // ---- Test 15 note: zero-cost-when-off ------------------------------------
