@@ -19,8 +19,9 @@ use aletheiadb::core::property::PropertyMap;
 use aletheiadb::core::provenance::Provenance;
 use aletheiadb::core::temporal::{Timestamp, time};
 use aletheiadb::experimental::temporal::counterfactual::{
-    CounterfactualConfig, CounterfactualError, DivergenceReport, ExclusionPredicate,
+    CounterfactualConfig, CounterfactualError, CounterfactualView, ExclusionPredicate,
 };
+use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -82,28 +83,6 @@ fn structural_digest(db: &AletheiaDB, node_ids: &[NodeId], edge_ids: &[EdgeId]) 
         }
     }
     out
-}
-
-/// Compare two divergence reports on their reported quantities (order-normalized
-/// entity id sets). Used by the determinism test, which runs against two
-/// *separate* DBs whose internal version ids differ — so only the counts and the
-/// entity-id membership are comparable, never raw version ids.
-fn reports_equivalent(a: &DivergenceReport, b: &DivergenceReport) -> bool {
-    let mut a_changed = a.changed_entities().to_vec();
-    let mut b_changed = b.changed_entities().to_vec();
-    let mut a_removed = a.removed_entities().to_vec();
-    let mut b_removed = b.removed_entities().to_vec();
-    a_changed.sort();
-    b_changed.sort();
-    a_removed.sort();
-    b_removed.sort();
-    a.excluded_writes() == b.excluded_writes()
-        && a.unattributed_writes_encountered() == b.unattributed_writes_encountered()
-        && a.orphaned_updates() == b.orphaned_updates()
-        && a.entities_changed() == b.entities_changed()
-        && a.entities_removed() == b.entities_removed()
-        && a_changed == b_changed
-        && a_removed == b_removed
 }
 
 // ---------------------------------------------------------------------------
@@ -600,50 +579,78 @@ fn ac5_poisoned_feed_blast_radius_is_exactly_contaminated_set() {
 }
 
 // ---------------------------------------------------------------------------
-// AC6 — determinism
+// AC6 — determinism (randomized property test)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn ac6_replay_is_deterministic_across_runs() {
-    // Determinism property: the same deterministically-built history with the
-    // same exclusion predicate yields identical reports and identical query
-    // answers. Built by hand (no rng) so the history is fixed across the two
-    // independent DBs; version ids differ between DBs, so we compare reported
-    // quantities and property answers, never raw version ids.
-    let make_view = || {
-        let fx = seed_fixture();
-        let view = fx
-            .db
-            .counterfactual_replay(
+/// A canonical, order-stable digest of everything observable through a view: for
+/// each known node, its current-state property map plus its full reconstructed
+/// history (bi-temporal coordinates, properties, provenance). Two replays that
+/// agree on this digest are indistinguishable through every read surface.
+fn view_digest(view: &CounterfactualView, nodes: &[NodeId]) -> String {
+    let mut out = String::new();
+    for &id in nodes {
+        out.push_str(&format!(
+            "N{id} cur={:?}\n",
+            view.get_node(id).ok().map(|n| n.properties.clone())
+        ));
+        match view.get_node_history(id) {
+            Ok(h) => out.push_str(&format!("{h:#?}\n")),
+            Err(e) => out.push_str(&format!("ABSENT {e}\n")),
+        }
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// Property: replaying the *same* database with the *same* predicate twice
+    /// yields byte-identical reports AND byte-identical query answers over a
+    /// randomized attributed history and a randomly chosen excluded source. Both
+    /// replays run against the SAME db instance, so any HashMap-iteration-order
+    /// nondeterminism in the fold or chain rebuild would surface here.
+    #[test]
+    fn ac6_replay_is_deterministic(
+        // Each op: (is_create, selector, value, source) — u8s mapped into range.
+        ops in prop::collection::vec((any::<bool>(), 0u8..8, 0u8..6, 0u8..4), 1..40),
+        excl in 0u8..5,
+    ) {
+        let sources = ["s0", "s1", "s2", "s3"];
+        let db = AletheiaDB::new().expect("db");
+        let mut nodes: Vec<NodeId> = Vec::new();
+        for (is_create, selector, value, source_idx) in &ops {
+            let src = sources[*source_idx as usize % sources.len()];
+            let val = format!("v{value}");
+            if *is_create || nodes.is_empty() {
+                nodes.push(create_node_by(&db, "N", props("v", &val), src));
+            } else {
+                let idx = *selector as usize % nodes.len();
+                update_node_by(&db, nodes[idx], props("v", &val), src);
+            }
+        }
+        // excl == 4 selects a source that wrote nothing (a no-op predicate).
+        let excl_src = if excl as usize >= sources.len() {
+            "s-none"
+        } else {
+            sources[excl as usize]
+        };
+
+        let make = || {
+            db.counterfactual_replay(
                 "det",
-                ExclusionPredicate::source("X"),
+                ExclusionPredicate::source(excl_src),
                 CounterfactualConfig::default(),
             )
-            .expect("view materializes");
-        // Capture query answers for the surviving nodes (by construction the ids
-        // are assigned in the same order across the two identical builds).
-        let chain_a = view.get_node(fx.chain_node).ok().and_then(|n| {
-            n.get_property("a")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        });
-        let clean_title = view.get_node(fx.clean_node).ok().and_then(|n| {
-            n.get_property("title")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        });
-        (view.report().clone(), chain_a, clean_title)
-    };
+            .expect("view materializes")
+        };
+        let v1 = make();
+        let v2 = make();
 
-    let (report_a, chain_a1, clean_a1) = make_view();
-    let (report_b, chain_a2, clean_a2) = make_view();
-
-    assert!(
-        reports_equivalent(&report_a, &report_b),
-        "two replays of the same history must produce equivalent divergence reports"
-    );
-    assert_eq!(chain_a1, chain_a2, "query answers must be deterministic");
-    assert_eq!(clean_a1, clean_a2, "query answers must be deterministic");
+        // Reports are byte-identical (same db => same ids, deterministic order).
+        prop_assert_eq!(format!("{:?}", v1.report()), format!("{:?}", v2.report()));
+        // Every read surface answer is byte-identical.
+        prop_assert_eq!(view_digest(&v1, &nodes), view_digest(&v2, &nodes));
+    }
 }
 
 // ---------------------------------------------------------------------------
