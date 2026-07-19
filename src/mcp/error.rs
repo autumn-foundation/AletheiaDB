@@ -928,6 +928,31 @@ mod tests {
     }
 
     #[test]
+    fn keyring_already_installed_errors_classify_as_failed_precondition() {
+        // Issue #3708: the index and cold runtime keyring-install seams reject a
+        // double-install with a distinguishable `*AlreadyInstalled` variant, each
+        // of which must classify to FAILED_PRECONDITION (non-retriable): a second
+        // install is a caller-fault precondition breach, never a transient retry.
+        let index_err = StorageError::IndexKeyringAlreadyInstalled {
+            reason: "None -> Some transition only".to_string(),
+        };
+        assert_eq!(
+            classify_storage_error(&index_err),
+            (McpErrorCode::FailedPrecondition, false),
+            "IndexKeyringAlreadyInstalled must be FAILED_PRECONDITION, non-retriable"
+        );
+
+        let cold_err = StorageError::ColdKeyringAlreadyInstalled {
+            reason: "None -> Some transition only".to_string(),
+        };
+        assert_eq!(
+            classify_storage_error(&cold_err),
+            (McpErrorCode::FailedPrecondition, false),
+            "ColdKeyringAlreadyInstalled must be FAILED_PRECONDITION, non-retriable"
+        );
+    }
+
+    #[test]
     fn type_violation_carries_expected_and_actual_type_details() {
         // Issue #3378: a TypeViolation surfaces `expected_type`/`actual_type`
         // under `error.details` (CONSTRAINT_VIOLATION, non-retriable), so a

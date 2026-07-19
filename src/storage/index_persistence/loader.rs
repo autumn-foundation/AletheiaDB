@@ -486,8 +486,20 @@ mod tests {
             "post-install manifest must be AEIX-encrypted at rest (found plaintext)"
         );
 
-        // The pre-install plaintext interner still reads (header sniffing) and
-        // the encrypted manifest round-trips through the installed keyring.
+        // A runtime install must encrypt MORE than just the manifest: re-saving
+        // the string interner after the install (the same re-save the manifest
+        // gets) must also carry the AEIX header, proving the keyring is threaded
+        // through every persist path — not just the manifest write.
+        manager.save_string_interner().unwrap();
+        let interner_raw_post = std::fs::read(manager.interner_path()).unwrap();
+        assert!(
+            is_encrypted_index(&interner_raw_post),
+            "post-install string interner must be AEIX-encrypted at rest (found plaintext)"
+        );
+
+        // The now-encrypted manifest and re-saved interner both round-trip
+        // through the installed keyring (header sniffing selects the encrypted
+        // read path for each).
         let manifest = manager.load_manifest_and_strings().unwrap();
         assert_eq!(
             manifest.lsn, 22,
@@ -534,11 +546,15 @@ mod tests {
         );
     }
 
-    /// No torn reads on the presence cell: concurrent loaders read `keyring()`
-    /// while one thread installs. A load must always yield either the old `None`
-    /// or a fully-valid `Some` (a resolvable current generation), never a partial
-    /// state. The saw_none/saw_some records prove the `None -> Some` store is
-    /// actually observed across threads.
+    /// Torn-read-free atomic visibility of the install across concurrent readers.
+    /// The `ArcSwapOption` presence cell makes a *literal* torn read structurally
+    /// impossible (a load atomically observes the whole pointer), so what this
+    /// test actually validates is cross-thread STORE VISIBILITY: while one thread
+    /// installs, concurrent loaders read `keyring()` and must always see either
+    /// the old `None` or a fully-valid `Some` (a resolvable current generation),
+    /// never a partial/half-published state. The saw_none/saw_some records prove
+    /// the `None -> Some` store is actually made visible across threads.
+    /// (Name kept aligned with the WAL/cold sibling tests.)
     #[test]
     fn install_index_keyring_no_torn_reads_on_cell() {
         use std::sync::Barrier;

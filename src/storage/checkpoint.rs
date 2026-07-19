@@ -533,7 +533,7 @@ impl CheckpointManager {
         crate::storage::index_persistence::temporal::save_temporal_index_with_keyring(
             &temporal_data,
             &temporal_path,
-            self.persistence_manager.keyring().as_ref(),
+            keyring.as_ref(),
         )
         .map_err(persistence_err)?;
         bytes_written += std::fs::metadata(&temporal_path)
