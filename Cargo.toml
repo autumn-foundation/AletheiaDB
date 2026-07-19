@@ -581,6 +581,14 @@ harness = false
 path = "benches/belief_revision.rs"
 required-features = ["semantic-temporal"]
 
+# Drift-alarm write-path overhead (Issue #3367): GroupCommit commit throughput
+# baseline vs 10 active on-write monitors + engine (target: <10% reduction).
+[[bench]]
+name = "drift_alarm_overhead"
+harness = false
+path = "benches/drift_alarm_overhead.rs"
+required-features = ["semantic-temporal"]
+
 # High-level API - includes transaction overhead and API layer
 [[bench]]
 name = "aletheiadb"
