@@ -5501,6 +5501,141 @@ mod explain_profile {
             "EXPLAIN of a single-variable MATCH should still produce a plan: {text}"
         );
     }
+
+    // ------------------------------------------------------------------------
+    // Namespace-scoped EXPLAIN / PROFILE (Issue #3349, PR3d — adversarial
+    // review BLOCKER: a scoped PROFILE must profile the SCOPED query, never
+    // execute across ALL namespaces; a scoped EXPLAIN must honor the
+    // NOT_FOUND error contract).
+    // ------------------------------------------------------------------------
+
+    use crate::core::namespace::{Namespace, NamespaceScope};
+
+    /// Run a scoped Cypher `EXPLAIN`/`PROFILE` expected to return exactly one
+    /// `plan` string row, and return the plan text.
+    fn plan_text_scoped(db: &AletheiaDB, query: &str, scope: NamespaceScope) -> String {
+        let results = db
+            .execute_cypher_scoped(query, scope)
+            .unwrap_or_else(|e| panic!("`{query}` should execute scoped, got error: {e:?}"));
+        let rows: Vec<_> = results.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 1, "EXPLAIN/PROFILE must return exactly one row");
+        let cols = rows[0]
+            .columns
+            .as_ref()
+            .expect("plan row must carry computed columns");
+        match &cols[0].1 {
+            PropertyValue::String(s) => s.to_string(),
+            other => panic!("plan column must be a string, got {other:?}"),
+        }
+    }
+
+    /// The largest `actual rows: N` count reported anywhere in a PROFILE plan.
+    fn max_actual_rows(plan: &str) -> u64 {
+        plan.split("actual rows: ")
+            .skip(1)
+            .filter_map(|tail| {
+                let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse::<u64>().ok()
+            })
+            .max()
+            .unwrap_or_else(|| panic!("PROFILE plan carried no `actual rows:` stats: {plan}"))
+    }
+
+    /// BLOCKER (Finding 1): a scoped `PROFILE` must profile the SCOPED query.
+    /// With 3 nodes in `agent:a` and 2 in `agent:b` (same label), profiling
+    /// `PROFILE MATCH (n:Widget) RETURN n` under `{agent:a}` must report the
+    /// in-scope row count (3), never the global total (5). Pre-fix the PROFILE
+    /// helper never applied the scope, so the scan ran unscoped and reported 5.
+    #[test]
+    fn profile_scoped_row_count_reflects_scope_not_global() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..3 {
+            let props = PropertyMapBuilder::new()
+                .insert("name", format!("a{i}"))
+                .build();
+            db.create_node_in_namespace("Widget", props, "agent:a")
+                .unwrap();
+        }
+        for i in 0..2 {
+            let props = PropertyMapBuilder::new()
+                .insert("name", format!("b{i}"))
+                .build();
+            db.create_node_in_namespace("Widget", props, "agent:b")
+                .unwrap();
+        }
+
+        let scope_a = NamespaceScope::single(Namespace::new("agent:a").unwrap());
+        let plan = plan_text_scoped(&db, "PROFILE MATCH (n:Widget) RETURN n", scope_a);
+
+        assert_eq!(
+            max_actual_rows(&plan),
+            3,
+            "scoped PROFILE must count ONLY agent:a's 3 nodes, not the 5 global: {plan}"
+        );
+        assert!(
+            !plan.contains("actual rows: 5"),
+            "scoped PROFILE must never expose the global (unscoped) count of 5: {plan}"
+        );
+    }
+
+    /// Sanity companion: an unscoped (`All`) PROFILE still sees every namespace.
+    #[test]
+    fn profile_all_scope_sees_every_namespace() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Widget", CorePropertyMap::new(), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Widget", CorePropertyMap::new(), "agent:b")
+            .unwrap();
+        let plan = plan_text_scoped(
+            &db,
+            "PROFILE MATCH (n:Widget) RETURN n",
+            NamespaceScope::All,
+        );
+        assert_eq!(
+            max_actual_rows(&plan),
+            2,
+            "an `All` scope profiles across both namespaces: {plan}"
+        );
+    }
+
+    /// MINOR (Finding 2): a scoped `EXPLAIN` against an UNKNOWN namespace must
+    /// return the `NOT_FOUND` error contract (with the offending namespace),
+    /// not a silently-accepted plan. Pre-fix EXPLAIN skipped `validate_scope`.
+    #[test]
+    fn explain_unknown_namespace_is_not_found() {
+        use crate::core::error::Error;
+        use crate::core::namespace::NamespaceError;
+
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", CorePropertyMap::new(), "agent:a")
+            .unwrap();
+
+        let bad = NamespaceScope::single(Namespace::new("agent:nope").unwrap());
+        match db.execute_cypher_scoped("EXPLAIN MATCH (n:Person) RETURN n", bad) {
+            Err(Error::Namespace(NamespaceError::NotFound { namespace })) => {
+                assert_eq!(namespace, "agent:nope");
+            }
+            Err(other) => panic!("unknown-namespace EXPLAIN must be NOT_FOUND, got {other:?}"),
+            Ok(_) => {
+                panic!("unknown-namespace EXPLAIN must be NOT_FOUND, not a silently-accepted plan")
+            }
+        }
+    }
+
+    /// Companion: a VALID scoped EXPLAIN still returns a plan (validation does
+    /// not break the happy path).
+    #[test]
+    fn explain_known_namespace_still_returns_plan() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", CorePropertyMap::new(), "agent:a")
+            .unwrap();
+        let scope_a = NamespaceScope::single(Namespace::new("agent:a").unwrap());
+        let plan = plan_text_scoped(&db, "EXPLAIN MATCH (n:Person) RETURN n", scope_a);
+        assert!(
+            plan.contains("NodeScan"),
+            "a valid scoped EXPLAIN still produces a plan: {plan}"
+        );
+    }
 }
 
 // ============================================================================
