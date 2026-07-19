@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AletheiaDB Benchmark Results</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            color: #7f8c8d;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+
+        .benchmark-suite {
+            margin-bottom: 50px;
+        }
+
+        h2 {
+            color: #34495e;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #3498db;
+            font-size: 1.8em;
+        }
+
+        .benchmark-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+            background: white;
+        }
+
+        .benchmark-table th {
+            background: #3498db;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        .benchmark-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #ecf0f1;
+        }
+
+        .benchmark-table tbody tr:hover {
+            background: #f8f9fa;
+        }
+
+        .benchmark-table code {
+            background: #ecf0f1;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 0.9em;
+        }
+
+        .footer {
+            margin-top: 60px;
+            padding-top: 20px;
+            border-top: 1px solid #ecf0f1;
+            color: #7f8c8d;
+            text-align: center;
+            font-size: 0.9em;
+        }
+
+        .performance-target {
+            background: #e8f5e9;
+            border-left: 4px solid #4caf50;
+            padding: 15px;
+            margin-bottom: 30px;
+            border-radius: 4px;
+        }
+
+        .performance-target h3 {
+            color: #2e7d32;
+            margin-bottom: 10px;
+        }
+
+        .performance-target ul {
+            margin-left: 20px;
+        }
+
+        .performance-target li {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AletheiaDB Benchmark Results</h1>
+        <p class="subtitle">Performance metrics for bi-temporal graph database operations</p>
+
+        <div class="performance-target">
+            <h3>Performance Targets</h3>
+            <table class='benchmark-table'>
+<thead><tr><th>Metric</th><th>Target</th><th>Actual</th><th>Status</th></tr></thead>
+<tbody>
+<tr>
+                <td>Current-state 3-hop traversal</td>
+                <td><100µs</td>
+                <td>160.72 ns <em>(99.8% faster than target)</em></td>
+                <td>✅ PASS</td>
+            </tr>
+<tr>
+                <td>Current-state single-hop traversal</td>
+                <td><1µs</td>
+                <td>19.13 ns <em>(98.1% faster than target)</em></td>
+                <td>✅ PASS</td>
+            </tr>
+</tbody></table>
+        </div>
+
+<div class="benchmark-suite">
+    <h2>target_3_hop</h2>
+    <table class="benchmark-table">
+        <thead>
+            <tr>
+                <th>Benchmark</th>
+                <th>Mean</th>
+                <th>Std Dev</th>
+                <th>Median</th>
+            </tr>
+        </thead>
+        <tbody>
+
+            <tr>
+                <td><code>target_3_hop/traverse_three_hops</code></td>
+                <td>160.72 ns</td>
+                <td>± 1.55 ns</td>
+                <td>160.88 ns</td>
+            </tr>
+
+        </tbody>
+    </table>
+</div>
+
+<div class="benchmark-suite">
+    <h2>target_batch_insertion</h2>
+    <table class="benchmark-table">
+        <thead>
+            <tr>
+                <th>Benchmark</th>
+                <th>Mean</th>
+                <th>Std Dev</th>
+                <th>Median</th>
+            </tr>
+        </thead>
+        <tbody>
+
+            <tr>
+                <td><code>target_batch_insertion/insert_1000_edges</code></td>
+                <td>479.80 µs</td>
+                <td>± 996.84 µs</td>
+                <td>479.76 µs</td>
+            </tr>
+
+        </tbody>
+    </table>
+</div>
+
+<div class="benchmark-suite">
+    <h2>target_single_hop</h2>
+    <table class="benchmark-table">
+        <thead>
+            <tr>
+                <th>Benchmark</th>
+                <th>Mean</th>
+                <th>Std Dev</th>
+                <th>Median</th>
+            </tr>
+        </thead>
+        <tbody>
+
+            <tr>
+                <td><code>target_single_hop/traverse_one_hop</code></td>
+                <td>19.13 ns</td>
+                <td>± 0.41 ns</td>
+                <td>19.04 ns</td>
+            </tr>
+
+        </tbody>
+    </table>
+</div>
+
+<div class="benchmark-suite">
+    <h2>target_time_travel</h2>
+    <table class="benchmark-table">
+        <thead>
+            <tr>
+                <th>Benchmark</th>
+                <th>Mean</th>
+                <th>Std Dev</th>
+                <th>Median</th>
+            </tr>
+        </thead>
+        <tbody>
+
+            <tr>
+                <td><code>target_time_travel/at_anchor</code></td>
+                <td>176.77 ns</td>
+                <td>± 3.91 ns</td>
+                <td>175.56 ns</td>
+            </tr>
+
+            <tr>
+                <td><code>target_time_travel/with_5_deltas</code></td>
+                <td>173.24 ns</td>
+                <td>± 1.82 ns</td>
+                <td>173.23 ns</td>
+            </tr>
+
+            <tr>
+                <td><code>target_time_travel/worst_case_9_deltas</code></td>
+                <td>181.15 ns</td>
+                <td>± 1.31 ns</td>
+                <td>181.14 ns</td>
+            </tr>
+
+        </tbody>
+    </table>
+</div>
+
+        <div class="footer">
+            <p>Generated by AletheiaDB benchmark suite using Criterion.rs</p>
+            <p>View detailed reports in the <a href="report/index.html">Criterion report</a></p>
+        </div>
+    </div>
+</body>
+</html>
