@@ -113,7 +113,7 @@ async fn live_mcp_catalog(client: &TestClient) -> BTreeSet<String> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (1) MCP catalog == inventory — EXACT set equality across all 63 tools.
+// (1) MCP catalog == inventory — EXACT set equality across all 64 tools.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -133,8 +133,8 @@ async fn mcp_catalog_equals_inventory_exactly() {
 
     assert_eq!(
         inv.len(),
-        63,
-        "inventory must advertise exactly 63 MCP tools"
+        64,
+        "inventory must advertise exactly 64 MCP tools"
     );
 
     // Symmetric difference, reported precisely so a drift names the culprits.
@@ -148,20 +148,20 @@ async fn mcp_catalog_equals_inventory_exactly() {
     );
     assert_eq!(
         live.len(),
-        63,
-        "the live catalog must be exactly 63 tools (got {})",
+        64,
+        "the live catalog must be exactly 64 tools (got {})",
         live.len()
     );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (2) Access-class conformance for all 63 (belt-and-suspenders full-set check;
+// (2) Access-class conformance for all 64 (belt-and-suspenders full-set check;
 //     `tests/security_rbac.rs::registry_matches_inventory_exactly` pins the
 //     static registry, this pins the *live-catalog-anchored* class per tool).
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn access_class_conformance_for_all_63() {
+async fn access_class_conformance_for_all_64() {
     let (db, store) = fixture();
     let client = build_server_client(db, store, AuthMode::Required);
     let live = live_mcp_catalog(&client).await;
@@ -277,7 +277,7 @@ async fn metrics_route_is_served_and_is_not_an_mcp_tool() {
     //     (→ class == Metrics), and serves the Prometheus text content type.
     let resp = client
         .get("/metrics")
-        .header("authorization", &format!("Bearer {}", &*metrics_key))
+        .header("authorization", &format!("Bearer {}", *metrics_key))
         .send()
         .await;
     assert_ne!(

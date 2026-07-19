@@ -33,7 +33,7 @@
 //! (via the public `McpErrorCode` enum — the single source of truth for the
 //! wire codes), the success + structured-error envelope shapes, the temporal
 //! block on read responses, and the vector-elision default. It also pins the
-//! full 63-tool inventory + access-class table as a golden constant that a
+//! full 64-tool inventory + access-class table as a golden constant that a
 //! porter must keep in lockstep with the server.
 //!
 //! Run with:
@@ -354,7 +354,7 @@ fn representative_tool_roundtrip_is_wellformed() {
 }
 
 // ===========================================================================
-// Golden tool inventory — the 63-tool advertised set + access classes.
+// Golden tool inventory — the 64-tool advertised set + access classes.
 //
 // This is the one place the FULL registry is pinned from an external test:
 // because the advertised list (`tool_definitions`) is not reachable through the
@@ -368,7 +368,7 @@ fn representative_tool_roundtrip_is_wellformed() {
 /// {read, write, metrics, admin} — the GDPR crypto-shred tools
 /// (`designate_subject`/`erase_subject`, Issue #3359) are the first
 /// admin-class MCP tools.
-const TOOL_INVENTORY: [(&str, &str); 63] = [
+const TOOL_INVENTORY: [(&str, &str); 64] = [
     ("get_node", "read"),
     ("create_node", "write"),
     ("update_node", "write"),
@@ -417,6 +417,7 @@ const TOOL_INVENTORY: [(&str, &str); 63] = [
     ("get_edge_at_transaction_time", "read"),
     ("get_edge_history", "read"),
     ("diff_edge_versions", "read"),
+    ("get_belief_revisions", "read"),
     ("hybrid_query", "read"),
     ("query", "read"),
     ("get_schema", "read"),
@@ -436,10 +437,10 @@ const TOOL_INVENTORY: [(&str, &str); 63] = [
 ];
 
 /// PARITY (external mirror, NOT a live drift detector): this constant is a
-/// cross-crate reference copy of the 63-tool inventory. Because the live
+/// cross-crate reference copy of the 64-tool inventory. Because the live
 /// registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)`
 /// and unreachable from this external test crate, this test only validates the
-/// mirror's internal consistency (63 tools, unique names, MCP-legal classes,
+/// mirror's internal consistency (64 tools, unique names, MCP-legal classes,
 /// exactly one metrics tool) — it does NOT read the server, so it cannot by
 /// itself catch a tool added/removed/renamed/reclassified in the registry.
 ///
@@ -450,7 +451,7 @@ const TOOL_INVENTORY: [(&str, &str); 63] = [
 /// `tests/parity/inventory.json` in lockstep when the inventory changes.
 #[test]
 fn tool_inventory_golden_is_stable() {
-    assert_eq!(TOOL_INVENTORY.len(), 63, "MCP advertises exactly 63 tools");
+    assert_eq!(TOOL_INVENTORY.len(), 64, "MCP advertises exactly 64 tools");
 
     // Names unique.
     let mut names: Vec<&str> = TOOL_INVENTORY.iter().map(|(n, _)| *n).collect();

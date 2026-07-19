@@ -156,6 +156,11 @@ pub struct FindSimilarBody {
     /// (isolated-by-default). Forwarded into dispatch so HTTP scopes identically
     /// to the MCP twin (filter-complete scoped k-NN).
     pub namespace: Option<Value>,
+    /// #3372: optional provenance-weighted fusion policy. When present, results
+    /// are re-ranked by the fused score and each carries a `score_breakdown`.
+    /// Forwarded raw into dispatch so HTTP fuses identically to the MCP twin
+    /// (this body whitelists fields, so it must be plumbed explicitly).
+    pub fusion_policy: Option<Value>,
 }
 
 /// `find_similar` — k-nearest-neighbor search for nodes whose `property_name`
@@ -199,6 +204,7 @@ pub async fn find_similar(
         opts.priority_properties,
     );
     insert_opt(&mut args, "namespace", opts.namespace);
+    insert_opt(&mut args, "fusion_policy", opts.fusion_policy);
     dispatch_slow_read(&security, &state, "find_similar", Value::Object(args)).await
 }
 
@@ -249,6 +255,11 @@ pub struct HybridQueryBody {
     /// namespace only (isolated-by-default); unknown ns ⇒ NOT_FOUND; empty array
     /// ⇒ INVALID_ARGUMENT — identical to the MCP twin.
     pub namespace: Option<Value>,
+    /// #3372: optional provenance-weighted fusion policy. When present, results
+    /// are re-ranked by the fused score (with `AS OF` confidence/recency when a
+    /// temporal coordinate is set) and each carries a `score_breakdown`.
+    /// Forwarded raw so HTTP fuses identically to the MCP twin.
+    pub fusion_policy: Option<Value>,
 }
 
 /// `hybrid_query` — combined graph traversal + vector similarity + temporal
@@ -321,6 +332,7 @@ pub async fn hybrid_query(
         opts.priority_properties,
     );
     insert_opt(&mut args, "namespace", opts.namespace);
+    insert_opt(&mut args, "fusion_policy", opts.fusion_policy);
     dispatch_slow_read(&security, &state, "hybrid_query", Value::Object(args)).await
 }
 

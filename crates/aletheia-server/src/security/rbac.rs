@@ -31,7 +31,7 @@
 //!
 //! This registry is anchored on `tests/parity/inventory.json` — the inventory's
 //! `mcp.tools[].access_class` is the shared source of truth. It enumerates all
-//! 63 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
+//! 64 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
 //! checks it bidirectionally against the inventory, and
 //! `mcp_routable_tools_are_all_classified` checks the live routable set is a
 //! subset (every routable tool classified). Handlers become routable one slice
@@ -44,7 +44,7 @@ use aletheiadb::auth::{AccessClass, Role};
 /// tests derive from THIS list, so the routable-name set and the class-table
 /// set cannot silently drift into two independently-maintained lists.
 ///
-/// This registry is **inventory-anchored**: it enumerates all 63 tools from
+/// This registry is **inventory-anchored**: it enumerates all 64 tools from
 /// `tests/parity/inventory.json` (`mcp.tools[].access_class`) upfront, mirroring
 /// the legacy `src/mcp/auth.rs::TOOL_ACCESS_CLASSES` verbatim. The conformance
 /// test `registry_matches_inventory_exactly` (`tests/security_rbac.rs`) proves
@@ -93,6 +93,8 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     ("get_edge_at_transaction_time", AccessClass::Read),
     ("get_edge_history", AccessClass::Read),
     ("diff_edge_versions", AccessClass::Read),
+    // Belief-revision audit (Issue #3362) — read-only.
+    ("get_belief_revisions", AccessClass::Read),
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
