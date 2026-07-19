@@ -243,9 +243,11 @@ pub struct HybridQueryBody {
     /// #3353: property keys to protect first as the response degrades.
     pub priority_properties: Option<Vec<String>>,
     /// #3349: namespace read scope — a JSON string (single name or `all`) or an
-    /// array of names (union). `hybrid_query` does not support namespace scoping
-    /// in v1: a narrowing scope is rejected with INVALID_ARGUMENT at dispatch
-    /// (never a silently-unscoped result), identical to the MCP twin.
+    /// array of names (union). Results are filtered to the scope and vector
+    /// ranking is filter-complete (over-fetched so the returned top-k are
+    /// genuinely in-scope; scores/order preserved). Omitted ⇒ the `default`
+    /// namespace only (isolated-by-default); unknown ns ⇒ NOT_FOUND; empty array
+    /// ⇒ INVALID_ARGUMENT — identical to the MCP twin.
     pub namespace: Option<Value>,
 }
 
@@ -371,9 +373,10 @@ pub struct QueryBody {
     /// #3360: not supported by the `query` tool in v1 (see `use_cursor`).
     pub cursor: Option<String>,
     /// #3349: namespace read scope — a JSON string (single name or `all`) or an
-    /// array of names (union). Declarative (AQL/Cypher) namespace scoping is a
-    /// follow-up: a narrowing scope is rejected with INVALID_ARGUMENT at dispatch
-    /// (never a silently-unscoped result), identical to the MCP twin.
+    /// array of names (union). The query executes scoped (entities filtered to
+    /// the scope; traversal never crosses an out-of-scope edge/node). Omitted ⇒
+    /// the `default` namespace only (isolated-by-default); unknown ns ⇒
+    /// NOT_FOUND; empty array ⇒ INVALID_ARGUMENT — identical to the MCP twin.
     pub namespace: Option<Value>,
 }
 

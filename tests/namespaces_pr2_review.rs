@@ -304,16 +304,30 @@ fn c5_edge_membership_after_delete_and_restart() {
 
 /// C6: scoped k-NN returns the NEAREST in-scope neighbors in similarity order
 /// with scores identical to the unscoped ranking filtered to the scope.
+///
+/// Hermeticity note (Issue #3349, PR3d): this queries by a **raw embedding**
+/// ([`AletheiaDB::find_similar_by_embedding_scoped`]) rather than by a stored
+/// query node. Querying by node reads the query node's `embedding` property back
+/// out of storage, which under concurrent interner load in this multi-test
+/// binary intermittently surfaced as `PropertyNotFound("embedding")` on
+/// Windows-nightly (a pre-existing global-interner race, unrelated to
+/// namespaces). The by-embedding path performs no node-property read, so the
+/// fixture is deterministic and order-independent while still proving exactly the
+/// filter-completeness contract (over-fetch so top-k are genuinely in-scope,
+/// scores/order preserved).
 #[test]
 fn c6_scoped_knn_order_and_scores_match_filtered_unscoped() {
     let db = AletheiaDB::new().unwrap();
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
-    let q = db
-        .create_node_in_namespace("Doc", vec_props("q", &[1.0, 0.0, 0.0, 0.0]), "agent:a")
-        .unwrap();
-    // Interleave a and b nodes at varying distances.
+    // Raw query point (no stored query node ⇒ no property read at search time).
+    let query_vec = [1.0f32, 0.0, 0.0, 0.0];
+
+    // Interleave a and b nodes at varying distances. The b-nodes are NEARER to
+    // the query than the a-nodes at the same index, so a naive "take k, then drop
+    // out-of-scope" would return fewer than k in-scope results — only an
+    // over-fetching (filter-complete) scoped search yields k.
     let mut a_nodes = BTreeSet::new();
     for i in 0..12 {
         let spread = 0.01 + i as f32 * 0.01;
@@ -338,11 +352,13 @@ fn c6_scoped_knn_order_and_scores_match_filtered_unscoped() {
 
     let k = 5;
     let scope_a = NamespaceScope::single(ns("agent:a"));
-    let scoped = db.find_similar_scoped(q, k, &scope_a).unwrap();
+    let scoped = db
+        .find_similar_by_embedding_scoped(&query_vec, k, &scope_a)
+        .unwrap();
 
     // Expected: the full unscoped ranking, filtered to agent:a, top-k.
     let expected: Vec<(u64, f32)> = db
-        .find_similar_scoped(q, 1_000, &NamespaceScope::all())
+        .find_similar_by_embedding_scoped(&query_vec, 1_000, &NamespaceScope::all())
         .unwrap()
         .into_iter()
         .filter(|(id, _)| a_nodes.contains(id))
@@ -399,6 +415,144 @@ fn c7_union_scope_follows_within_and_between() {
     assert!(reachable.contains(&a2), "within-A edge followed");
     assert!(reachable.contains(&s1), "between-namespace edge followed");
     assert!(reachable.contains(&s2), "within-shared edge followed");
+}
+
+/// PR3d: `traverse_scoped_directed` honors the symmetric boundary for
+/// `incoming` and `both`, current-state and as-of; a union scope crosses in-
+/// and between-namespace edges in every direction.
+#[test]
+fn pr3d_directed_scoped_traverse_boundary() {
+    use aletheiadb::TraverseDirection;
+    let db = AletheiaDB::new().unwrap();
+    // a1, a2 in agent:a; carol in agent:b. Edges:
+    //   a2 -KNOWS(agent:a)-> a1     (incoming into a1, in scope)
+    //   carol -KNOWS(agent:b)-> a1  (incoming into a1, OUT of scope)
+    //   a1 -KNOWS(agent:a)-> a2     (outgoing from a1, in scope)
+    let a1 = db
+        .create_node_in_namespace("Person", props("a1"), "agent:a")
+        .unwrap();
+    let a2 = db
+        .create_node_in_namespace("Person", props("a2"), "agent:a")
+        .unwrap();
+    let carol = db
+        .create_node_in_namespace("Person", props("carol"), "agent:b")
+        .unwrap();
+    db.create_edge_in_namespace(a2, a1, "KNOWS", props(""), "agent:a")
+        .unwrap();
+    db.create_edge_in_namespace(carol, a1, "KNOWS", props(""), "agent:b")
+        .unwrap();
+    db.create_edge_in_namespace(a1, a2, "KNOWS", props(""), "agent:a")
+        .unwrap();
+
+    let scope_a = NamespaceScope::single(ns("agent:a"));
+
+    // Incoming from a1 under {agent:a}: reaches a2 (in-scope edge+source), never
+    // carol (out-of-scope edge+source).
+    let incoming: BTreeSet<_> = db
+        .traverse_scoped_directed(a1, Some("KNOWS"), TraverseDirection::Incoming, 5, &scope_a)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(
+        incoming.contains(&a2),
+        "incoming crosses the in-scope edge to a2"
+    );
+    assert!(
+        !incoming.contains(&carol),
+        "incoming must NOT cross the out-of-scope edge to carol"
+    );
+
+    // Both from a1 under {agent:a}: a2 (via either direction), never carol.
+    let both: BTreeSet<_> = db
+        .traverse_scoped_directed(a1, Some("KNOWS"), TraverseDirection::Both, 5, &scope_a)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(both.contains(&a2), "both reaches a2");
+    assert!(
+        !both.contains(&carol),
+        "both must NOT reach out-of-scope carol"
+    );
+
+    // As-of directed incoming honors the same boundary at a coordinate.
+    let t = time::now();
+    let incoming_asof: BTreeSet<_> = db
+        .traverse_scoped_as_of_directed(
+            a1,
+            Some("KNOWS"),
+            TraverseDirection::Incoming,
+            5,
+            t,
+            t,
+            &scope_a,
+        )
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(incoming_asof.contains(&a2), "as-of incoming crosses to a2");
+    assert!(
+        !incoming_asof.contains(&carol),
+        "as-of incoming must NOT cross to out-of-scope carol"
+    );
+}
+
+/// PR3d (Finding 3): the traversal boundary is enforced on the EDGE namespace,
+/// not merely the target-node namespace. An in-scope far node reachable ONLY via
+/// an OUT-OF-SCOPE edge (edge.ns ∉ scope, node.ns ∈ scope) must NOT be crossed
+/// under `incoming` or `both` — the out-of-scope edge is the boundary, even
+/// though its endpoint is in scope.
+#[test]
+fn pr3d_in_scope_node_via_out_of_scope_edge_is_not_crossed() {
+    use aletheiadb::TraverseDirection;
+    let db = AletheiaDB::new().unwrap();
+    // a1 and a3 are BOTH in agent:a (in scope), but the edge connecting them
+    // lives in agent:b (out of scope):
+    //   a3 -KNOWS(agent:b)-> a1    (incoming into a1; edge OUT of scope)
+    //   a1 -KNOWS(agent:a)-> a2    (a control in-scope outgoing edge)
+    let a1 = db
+        .create_node_in_namespace("Person", props("a1"), "agent:a")
+        .unwrap();
+    let a2 = db
+        .create_node_in_namespace("Person", props("a2"), "agent:a")
+        .unwrap();
+    let a3 = db
+        .create_node_in_namespace("Person", props("a3"), "agent:a")
+        .unwrap();
+    // The endpoints are agent:a, but the edge itself is stamped agent:b.
+    db.create_edge_in_namespace(a3, a1, "KNOWS", props(""), "agent:b")
+        .unwrap();
+    db.create_edge_in_namespace(a1, a2, "KNOWS", props(""), "agent:a")
+        .unwrap();
+
+    let scope_a = NamespaceScope::single(ns("agent:a"));
+
+    // Incoming from a1 under {agent:a}: the a3->a1 edge is out of scope, so a3 is
+    // NOT reachable even though a3 itself is an agent:a node.
+    let incoming: BTreeSet<_> = db
+        .traverse_scoped_directed(a1, Some("KNOWS"), TraverseDirection::Incoming, 5, &scope_a)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(
+        !incoming.contains(&a3),
+        "incoming must NOT cross the out-of-scope edge to a3 (edge.ns ∉ scope)"
+    );
+
+    // Both from a1 under {agent:a}: a2 via the in-scope edge, never a3 via the
+    // out-of-scope edge.
+    let both: BTreeSet<_> = db
+        .traverse_scoped_directed(a1, Some("KNOWS"), TraverseDirection::Both, 5, &scope_a)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(
+        both.contains(&a2),
+        "both reaches a2 over the in-scope agent:a edge"
+    );
+    assert!(
+        !both.contains(&a3),
+        "both must NOT reach a3 over the out-of-scope agent:b edge"
+    );
 }
 
 /// C8: `find_nodes_by_property_at_scoped` reconstructs point-in-time nodes then

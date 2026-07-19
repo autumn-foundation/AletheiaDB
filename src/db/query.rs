@@ -37,6 +37,33 @@ impl AletheiaDB {
         self.execute_query(query)
     }
 
+    /// Execute an AQL string scoped to a namespace read scope (Issue #3349, PR3d).
+    ///
+    /// The parsed query is stamped with `scope` before planning/execution, so it
+    /// runs through exactly the same executor scope machinery as
+    /// [`QueryBuilder::in_namespace`](crate::query::QueryBuilder::in_namespace):
+    /// produced entities are filtered to those whose (immutable) namespace ∈
+    /// `scope`, and graph traversal never crosses an out-of-scope edge nor
+    /// bridges through an out-of-scope node.
+    ///
+    /// # Errors
+    ///
+    /// - `NOT_FOUND` if `scope` names an unregistered namespace,
+    ///   `INVALID_ARGUMENT` for an empty `List` scope (both via
+    ///   [`validate_scope`](Self::validate_scope), invoked by
+    ///   [`execute_query`](Self::execute_query)).
+    /// - The parse / execution errors of [`execute_aql`](Self::execute_aql).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn execute_aql_scoped(
+        &self,
+        query_string: &str,
+        scope: crate::core::namespace::NamespaceScope,
+    ) -> Result<QueryResults> {
+        let mut query = crate::query::parse_query(query_string)?;
+        query.scope = Some(scope);
+        self.execute_query(query)
+    }
+
     /// Create a new query builder for constructing hybrid queries.
     ///
     /// This is the entry point for the fluent query API that enables
@@ -360,8 +387,12 @@ impl AletheiaDB {
             crate::cypher::CypherExecution::MultiPattern { statement, params } => {
                 self.execute_multi_pattern(&statement, &params)
             }
-            crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
-            crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
+            crate::cypher::CypherExecution::Explain(query) => {
+                self.explain_cypher_query(query, crate::core::namespace::NamespaceScope::All)
+            }
+            crate::cypher::CypherExecution::Profile(query) => {
+                self.profile_cypher_query(query, crate::core::namespace::NamespaceScope::All)
+            }
             crate::cypher::CypherExecution::Mutation { statement, params } => {
                 self.execute_mutation(&statement, &params)
             }
@@ -412,9 +443,120 @@ impl AletheiaDB {
             crate::cypher::CypherExecution::MultiPattern { statement, params } => {
                 self.execute_multi_pattern(&statement, &params)
             }
-            crate::cypher::CypherExecution::Explain(query) => self.explain_cypher_query(query),
-            crate::cypher::CypherExecution::Profile(query) => self.profile_cypher_query(query),
+            crate::cypher::CypherExecution::Explain(query) => {
+                self.explain_cypher_query(query, crate::core::namespace::NamespaceScope::All)
+            }
+            crate::cypher::CypherExecution::Profile(query) => {
+                self.profile_cypher_query(query, crate::core::namespace::NamespaceScope::All)
+            }
             crate::cypher::CypherExecution::Mutation { statement, params } => {
+                self.execute_mutation(&statement, &params)
+            }
+        }
+    }
+
+    /// Execute a Cypher string scoped to a namespace read scope (Issue #3349,
+    /// PR3d). See [`execute_aql_scoped`](Self::execute_aql_scoped) for the
+    /// filtering/boundary semantics.
+    ///
+    /// # Errors
+    ///
+    /// - `NOT_FOUND` / `INVALID_ARGUMENT` for an invalid `scope`.
+    /// - `UnsupportedFeature` when a **restricting** (non-`All`) scope is
+    ///   combined with an execution shape the v1 scope machinery does not thread
+    ///   through (the multi-variable-binding evaluator, or a mutation) — a
+    ///   structured error, never a silently-unscoped result (design §6).
+    /// - The parse / execution errors of [`execute_cypher`](Self::execute_cypher).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn execute_cypher_scoped(
+        &self,
+        query_string: &str,
+        scope: crate::core::namespace::NamespaceScope,
+    ) -> Result<QueryResults> {
+        self.execute_cypher_execution_scoped(crate::cypher::plan_cypher(query_string)?, scope)
+    }
+
+    /// Execute a parameterized Cypher string scoped to a namespace read scope
+    /// (Issue #3349, PR3d). See [`execute_cypher_scoped`](Self::execute_cypher_scoped).
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_cypher_scoped`](Self::execute_cypher_scoped).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn execute_cypher_with_params_scoped(
+        &self,
+        query_string: &str,
+        params: std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
+        scope: crate::core::namespace::NamespaceScope,
+    ) -> Result<QueryResults> {
+        self.execute_cypher_execution_scoped(
+            crate::cypher::plan_cypher_with_params(query_string, params)?,
+            scope,
+        )
+    }
+
+    /// Apply a namespace read scope to a planned [`CypherExecution`] and run it
+    /// (Issue #3349, PR3d).
+    ///
+    /// The single-entity `Query` pipeline runs through [`Self::execute_query`],
+    /// which validates the scope and applies the source-leaf filter + traversal
+    /// boundary via the standard executor. `EXPLAIN` and `PROFILE` over that same
+    /// pipeline thread the scope explicitly (they build their own planner /
+    /// executor rather than going through `execute_query`): both first
+    /// [`validate_scope`](Self::validate_scope) it (unknown ns ⇒ `NOT_FOUND`,
+    /// empty list ⇒ `INVALID_ARGUMENT`), and `PROFILE` additionally executes the
+    /// plan under [`with_namespace_scope`](crate::query::executor::QueryExecutor::with_namespace_scope)
+    /// so its per-operator row counts / timing reflect the **scoped** query, not
+    /// unscoped data. `EXPLAIN` only plans (no execution) so validation is
+    /// sufficient — no execution means no cross-namespace leak. A standalone
+    /// `UNWIND` (`Rows`) yields scalar rows with no graph entities, so the scope
+    /// only needs validating — there is nothing to filter. The
+    /// multi-variable-binding evaluator and mutation paths do not thread scope in
+    /// v1: under a **restricting** scope they return a structured
+    /// `UnsupportedFeature` (never silently unscoped); under `All` (the no-op
+    /// selector) they run unchanged.
+    fn execute_cypher_execution_scoped(
+        &self,
+        execution: crate::cypher::CypherExecution,
+        scope: crate::core::namespace::NamespaceScope,
+    ) -> Result<QueryResults> {
+        use crate::core::namespace::NamespaceScope;
+        use crate::cypher::CypherExecution;
+        let restricting = !matches!(scope, NamespaceScope::All);
+        match execution {
+            CypherExecution::Query(mut query) => {
+                query.scope = Some(scope);
+                self.execute_query(query)
+            }
+            CypherExecution::Explain(query) => self.explain_cypher_query(query, scope),
+            CypherExecution::Profile(query) => self.profile_cypher_query(query, scope),
+            CypherExecution::Rows(results) => {
+                // Scalar UNWIND rows carry no graph entities; validate the scope
+                // (an unknown ns is still `NOT_FOUND`, never silently ignored)
+                // then return the rows unchanged.
+                self.validate_scope(&scope)?;
+                Ok(results)
+            }
+            CypherExecution::MultiPattern { statement, params } => {
+                if restricting {
+                    return Err(crate::cypher::CypherError::UnsupportedFeature(
+                        "namespace scoping is not supported by the multi-variable pattern \
+                         evaluator in v1; scope a single-variable MATCH, or pass \"all\" to run \
+                         unscoped"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                self.execute_multi_pattern(&statement, &params)
+            }
+            CypherExecution::Mutation { statement, params } => {
+                if restricting {
+                    return Err(crate::cypher::CypherError::UnsupportedFeature(
+                        "a namespace read scope cannot be applied to a mutating Cypher statement"
+                            .to_string(),
+                    )
+                    .into());
+                }
                 self.execute_mutation(&statement, &params)
             }
         }
@@ -462,7 +604,19 @@ impl AletheiaDB {
     /// This mirrors [`Self::execute_query`]'s planner construction but stops
     /// after planning -- no executor is run, so there are no side effects and
     /// the plan is returned even against an empty database.
-    fn explain_cypher_query(&self, query: Query) -> Result<QueryResults> {
+    ///
+    /// Under a namespace read scope (Issue #3349, PR3d) the scope is
+    /// [`validate_scope`](Self::validate_scope)d up front so an unknown namespace
+    /// is a `NOT_FOUND` (and an empty list an `INVALID_ARGUMENT`) rather than a
+    /// silently-accepted plan. Because `EXPLAIN` never executes and the planner
+    /// ignores the scope, validation is the complete obligation here — there is
+    /// no execution and therefore no cross-namespace leak.
+    fn explain_cypher_query(
+        &self,
+        query: Query,
+        scope: crate::core::namespace::NamespaceScope,
+    ) -> Result<QueryResults> {
+        self.validate_scope(&scope)?;
         let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
         let physical_plan = planner.plan(query)?;
         Ok(Self::plan_text_result("plan", physical_plan.explain()))
@@ -475,11 +629,25 @@ impl AletheiaDB {
     /// The instrumented stream is drained (its data rows discarded -- `PROFILE`
     /// reports statistics, not the query's data, in v1) so the per-operator
     /// counters are fully populated before the annotated plan is rendered.
-    fn profile_cypher_query(&self, query: Query) -> Result<QueryResults> {
+    ///
+    /// Under a namespace read scope (Issue #3349, PR3d) the scope is
+    /// [`validate_scope`](Self::validate_scope)d and then applied to the executor
+    /// via [`with_namespace_scope`](crate::query::executor::QueryExecutor::with_namespace_scope),
+    /// exactly as [`Self::execute_query`] does. `PROFILE` executes the plan to
+    /// populate its counters, so it MUST run scoped — otherwise the reported
+    /// per-operator row counts / timing would reflect unscoped data across ALL
+    /// namespaces (a silent cardinality/timing side channel).
+    fn profile_cypher_query(
+        &self,
+        query: Query,
+        scope: crate::core::namespace::NamespaceScope,
+    ) -> Result<QueryResults> {
+        self.validate_scope(&scope)?;
         let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
         let physical_plan = planner.plan(query)?;
 
-        let executor = QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
+        let executor = QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical))
+            .with_namespace_scope(scope);
         let (results, registry) = executor.execute_profiled(&physical_plan)?;
 
         // Fully drain so every operator's counters are populated before render.
