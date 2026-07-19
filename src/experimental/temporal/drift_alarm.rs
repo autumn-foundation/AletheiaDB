@@ -3110,4 +3110,206 @@ mod tests {
         engine.start().expect("restart engine");
         engine.stop();
     }
+
+    // ---- SM4: 12-week demo scenario (docs/guides/drift-alarms-demo.md) -------
+
+    /// Success Metric SM4 (#3367): a concept whose embedding is rewritten over 12
+    /// simulated weeks triggers EXACTLY one entity-level alarm and EXACTLY one
+    /// label-level alarm, each at the documented crossing week. This is the
+    /// deterministic backing test for `docs/guides/drift-alarms-demo.md`; keep the
+    /// vectors, thresholds, and crossing weeks in that guide in lock-step with the
+    /// constants here.
+    ///
+    /// Cohort: a `Concept` node `concept` plus three sibling `Concept` nodes that
+    /// drift mildly in the same direction (a genuine population shift, not a static
+    /// backdrop). Both monitors use `Cosine` distance and a **4-week trailing
+    /// window**: each weekly evaluation compares the current embedding to the one
+    /// on record as of transaction-time `now - 4 weeks` (the tx-time reconstruction
+    /// rule documented on `evaluate_monitor`), so a full window of history must
+    /// exist before any fire is possible (weeks 1-3 have no past endpoint).
+    ///
+    /// Documented crossing points (unit 2-D embeddings; distances are the literal
+    /// `metric_distance` outputs):
+    ///
+    /// - **LabelCentroid** monitor on label `Concept`, threshold **0.03** (the
+    ///   smaller, early-warning threshold): the cohort centroid's 4-week drift is
+    ///   0.0248 at week 5 (below) and 0.0366 at week 6 (above), so it first crosses
+    ///   at **week 6** -> one label alarm.
+    /// - **PerEntity** monitor on `concept` only, threshold **0.40**: the concept's
+    ///   own 4-week drift is 0.331 at week 8 (below) and 0.441 at week 9 (above), so
+    ///   it first crosses at **week 9** -> one entity alarm.
+    ///
+    /// Because an unresolved alarm suppresses re-firing (and this scenario never
+    /// resolves), each monitor fires at most once even though both distances keep
+    /// growing through week 11 -- hence exactly one of each.
+    #[test]
+    fn twelve_week_demo_fires_one_entity_and_one_label_alarm() {
+        // One simulated week in microseconds (HOUR_US = 3600 * 1_000_000).
+        const WEEK_US: i64 = 7 * 24 * HOUR_US;
+        // 12 weekly concept embeddings: unit vectors at accelerating rotation
+        // (angles 0,4,9,15,22,31,42,55,70,87,106,127 degrees).
+        let concept: [[f32; 2]; 12] = [
+            [1.000000, 0.000000],
+            [0.997564, 0.069756],
+            [0.987688, 0.156434],
+            [0.965926, 0.258819],
+            [0.927184, 0.374607],
+            [0.857167, 0.515038],
+            [0.743145, 0.669131],
+            [0.573576, 0.819152],
+            [0.342020, 0.939693],
+            [0.052336, 0.998630],
+            [-0.275637, 0.961262],
+            [-0.601815, 0.798635],
+        ];
+        // 12 weekly sibling embeddings: the same schedule scaled to 30% of the
+        // concept's angle -- the cohort drifts, but far less than the concept.
+        let sib: [[f32; 2]; 12] = [
+            [1.000000, 0.000000],
+            [0.999781, 0.020942],
+            [0.998890, 0.047106],
+            [0.996917, 0.078459],
+            [0.993373, 0.114937],
+            [0.986856, 0.161604],
+            [0.975917, 0.218143],
+            [0.958820, 0.284015],
+            [0.933580, 0.358368],
+            [0.898028, 0.439939],
+            [0.849893, 0.526956],
+            [0.786935, 0.617036],
+        ];
+
+        let mut clock = SimulatedClock::new(T0);
+        let _g = clock.inject();
+        let db = db_with_index(2);
+
+        // Week 0: create the concept and three sibling concepts.
+        let concept_id = make_node(&db, "Concept", &concept[0]);
+        let siblings: Vec<NodeId> = (0..3).map(|_| make_node(&db, "Concept", &sib[0])).collect();
+
+        // Per-entity monitor watches the concept ONLY (so a sibling's drift can
+        // never produce an entity alarm); label-centroid monitor watches the whole
+        // `Concept` cohort. Same metric + window; deliberately different thresholds.
+        let window = Duration::from_micros(4 * WEEK_US as u64);
+        let entity_monitor = db
+            .create_drift_monitor(DriftMonitorSpec {
+                property_key: "embedding".to_string(),
+                label: None,
+                entities: Some(vec![concept_id]),
+                metric: DriftMetric::Cosine,
+                threshold: 0.40,
+                window,
+                target: DriftTarget::PerEntity,
+                mode: EvalMode::OnWrite,
+            })
+            .expect("create per-entity monitor");
+        let centroid_monitor = db
+            .create_drift_monitor(DriftMonitorSpec {
+                property_key: "embedding".to_string(),
+                label: Some("Concept".to_string()),
+                entities: None,
+                metric: DriftMetric::Cosine,
+                threshold: 0.03,
+                window,
+                target: DriftTarget::LabelCentroid,
+                mode: EvalMode::OnWrite,
+            })
+            .expect("create label-centroid monitor");
+
+        let mut entity_weeks: Vec<usize> = Vec::new();
+        let mut label_weeks: Vec<usize> = Vec::new();
+        let mut entity_alarm: Option<DriftAlarm> = None;
+        let mut label_alarm: Option<DriftAlarm> = None;
+
+        for week in 1..12usize {
+            // Rewrite the concept and its cohort at the start of the week.
+            clock.jump_to(T0 + week as i64 * WEEK_US);
+            update_vec(&db, concept_id, &concept[week]);
+            for &s in &siblings {
+                update_vec(&db, s, &sib[week]);
+            }
+            // Evaluate MID-week so `now - 4 weeks` lands strictly inside the
+            // week-(week-4) transaction interval -- an unambiguous as-of endpoint.
+            clock.jump_to(T0 + week as i64 * WEEK_US + WEEK_US / 2);
+            for alarm in db
+                .evaluate_drift_monitor_now(entity_monitor.id)
+                .expect("evaluate entity monitor")
+            {
+                entity_weeks.push(week);
+                entity_alarm = Some(alarm);
+            }
+            for alarm in db
+                .evaluate_drift_monitor_now(centroid_monitor.id)
+                .expect("evaluate centroid monitor")
+            {
+                label_weeks.push(week);
+                label_alarm = Some(alarm);
+            }
+        }
+
+        // Exactly one entity alarm, at the documented crossing week 9.
+        assert_eq!(
+            entity_weeks,
+            vec![9],
+            "entity alarm fires exactly once, at the documented crossing week 9"
+        );
+        // Exactly one label alarm, at the documented crossing week 6.
+        assert_eq!(
+            label_weeks,
+            vec![6],
+            "label alarm fires exactly once, at the documented crossing week 6"
+        );
+
+        let entity_alarm = entity_alarm.expect("entity alarm present");
+        assert_eq!(entity_alarm.entity, Some(concept_id));
+        assert!(
+            entity_alarm.label.is_none(),
+            "a per-entity alarm carries no label"
+        );
+        assert!((entity_alarm.threshold - 0.40).abs() < 1e-6);
+        assert!(
+            entity_alarm.measured_distance > 0.40,
+            "entity distance must exceed its threshold, got {}",
+            entity_alarm.measured_distance
+        );
+        assert!(
+            (entity_alarm.measured_distance - 0.4408).abs() < 1e-2,
+            "entity distance ~0.441 at week 9, got {}",
+            entity_alarm.measured_distance
+        );
+        assert!(
+            entity_alarm.from_version.is_some() && entity_alarm.to_version.is_some(),
+            "entity alarm carries both compared version refs"
+        );
+
+        let label_alarm = label_alarm.expect("label alarm present");
+        assert!(
+            label_alarm.entity.is_none(),
+            "a label-centroid alarm names no single entity"
+        );
+        assert_eq!(label_alarm.label.as_deref(), Some("Concept"));
+        assert!((label_alarm.threshold - 0.03).abs() < 1e-6);
+        assert!(
+            label_alarm.measured_distance > 0.03,
+            "centroid distance must exceed its threshold, got {}",
+            label_alarm.measured_distance
+        );
+        assert!(
+            (label_alarm.measured_distance - 0.0366).abs() < 1e-2,
+            "centroid distance ~0.037 at week 6, got {}",
+            label_alarm.measured_distance
+        );
+
+        // Exactly one durable alarm node per monitor across the whole run.
+        let entity_alarms = db
+            .query_drift_alarms(&DriftAlarmFilter::for_monitor(entity_monitor.id))
+            .expect("query entity alarms");
+        let label_alarms = db
+            .query_drift_alarms(&DriftAlarmFilter::for_monitor(centroid_monitor.id))
+            .expect("query label alarms");
+        assert_eq!(entity_alarms.len(), 1, "one durable entity alarm node");
+        assert_eq!(label_alarms.len(), 1, "one durable label alarm node");
+        assert_eq!(entity_alarms[0].alarm_id, entity_alarm.alarm_id);
+        assert_eq!(label_alarms[0].alarm_id, label_alarm.alarm_id);
+    }
 }
