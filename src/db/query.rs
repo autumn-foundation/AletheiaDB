@@ -695,4 +695,127 @@ mod tests_aql {
         let err = db.execute_aql("INVALID SYNTAX");
         assert!(err.is_err());
     }
+
+    // ========================================================================
+    // AQL `USE / IN NAMESPACE` grammar (Issue #3349, PR2b)
+    //
+    // These prove the parsed clause is threaded into the executor scope PR2/PR3d
+    // already built: a `USE NAMESPACE` clause on a raw `execute_aql` string
+    // isolates results exactly as `execute_aql_scoped` / the MCP `namespace`
+    // param do — with no other change to the AQL surface.
+    // ========================================================================
+
+    fn person(name: &str) -> PropertyMap {
+        crate::core::property::PropertyMapBuilder::new()
+            .insert("name", name)
+            .build()
+    }
+
+    fn returned_names(results: crate::query::QueryResults) -> Vec<String> {
+        use crate::core::property::PropertyValue;
+        let mut names: Vec<String> = results
+            .collect_all()
+            .expect("collect rows")
+            .iter()
+            .filter_map(|r| r.entity.as_node())
+            .filter_map(|n| match n.get_property("name") {
+                Some(PropertyValue::String(s)) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn aql_use_namespace_single_isolates() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+
+        // Scoped to agent:a → only Alice, never Bob.
+        let names = returned_names(
+            db.execute_aql("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string()]);
+    }
+
+    #[test]
+    fn aql_use_namespace_union_spans_listed() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Carol"), "agent:c")
+            .unwrap();
+
+        // Union of exactly the two listed namespaces (not agent:c).
+        let names = returned_names(
+            db.execute_aql("USE NAMESPACE 'agent:a', 'agent:b' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string(), "Bob".to_string()]);
+    }
+
+    #[test]
+    fn aql_use_all_namespaces_sees_everything() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+
+        let names = returned_names(
+            db.execute_aql("USE ALL NAMESPACES MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string(), "Bob".to_string()]);
+    }
+
+    #[test]
+    fn aql_no_clause_is_unchanged_default_only() {
+        let db = AletheiaDB::new().unwrap();
+        // A default (non-namespaced) node and an agent:a node.
+        db.create_node("Person", person("Legacy")).unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+
+        // No clause ⇒ scope None ⇒ prior behavior exactly: every current node is
+        // returned (namespace-agnostic), not filtered to `default`.
+        let names = returned_names(db.execute_aql("MATCH (n:Person) RETURN n").unwrap());
+        assert_eq!(names, vec!["Alice".to_string(), "Legacy".to_string()]);
+    }
+
+    #[test]
+    fn aql_use_namespace_unknown_is_not_found() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        match db.execute_aql("USE NAMESPACE 'agent:missing' MATCH (n:Person) RETURN n") {
+            Err(crate::core::error::Error::Namespace(
+                crate::core::namespace::NamespaceError::NotFound { .. },
+            )) => {}
+            Err(other) => panic!("unknown namespace must be NOT_FOUND, got {other:?}"),
+            Ok(_) => panic!("unknown namespace must error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn aql_malformed_namespace_clause_is_parse_error() {
+        let db = AletheiaDB::new().unwrap();
+        // Missing name after NAMESPACE.
+        assert!(
+            db.execute_aql("USE NAMESPACE MATCH (n:Person) RETURN n")
+                .is_err()
+        );
+        // Missing NAMESPACE keyword after USE.
+        assert!(
+            db.execute_aql("USE 'agent:a' MATCH (n:Person) RETURN n")
+                .is_err()
+        );
+    }
 }

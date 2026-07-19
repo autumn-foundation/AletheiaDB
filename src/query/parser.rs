@@ -183,8 +183,36 @@ impl Parser {
     ///           limit_clause?
     /// ```
     fn parse_query(&mut self) -> Result<QueryAst, ParseError> {
-        // Parse optional temporal clause
-        let temporal = self.parse_temporal_clause()?;
+        // Parse optional prefix modifiers (Issue #3349, PR2b). The temporal
+        // (`AS OF` / `BETWEEN`) and namespace (`USE / IN NAMESPACE`) clauses are
+        // both cross-cutting prefixes and may appear in either order; at most one
+        // of each is allowed (a duplicate is a structured parse error rather than
+        // a silent last-wins).
+        let mut temporal = None;
+        let mut namespace = None;
+        loop {
+            if self.check(&Token::As) || self.check(&Token::Between) {
+                if temporal.is_some() {
+                    return Err(self.error(
+                        "Duplicate temporal clause (only one AS OF / BETWEEN is allowed)"
+                            .to_string(),
+                        Some("MATCH / SIMILAR / FIND".to_string()),
+                    ));
+                }
+                temporal = self.parse_temporal_clause()?;
+            } else if self.check_kw("USE") || self.check(&Token::In) {
+                if namespace.is_some() {
+                    return Err(self.error(
+                        "Duplicate namespace clause (only one USE / IN NAMESPACE is allowed)"
+                            .to_string(),
+                        Some("MATCH / SIMILAR / FIND".to_string()),
+                    ));
+                }
+                namespace = Some(self.parse_namespace_clause()?);
+            } else {
+                break;
+            }
+        }
 
         // Parse main source clause (MATCH or vector search)
         let source = self.parse_source_clause()?;
@@ -193,6 +221,9 @@ impl Parser {
         let mut query = QueryAst::new(source);
         if let Some(t) = temporal {
             query = query.with_temporal(t);
+        }
+        if let Some(ns) = namespace {
+            query = query.with_namespace(ns);
         }
 
         // Parse an optional temporal aggregation window clause (Issue #3363).
@@ -326,6 +357,87 @@ impl Parser {
         let end = self.parse_timestamp()?;
 
         Ok(TemporalClause::Between { start, end })
+    }
+
+    // =========================================================
+    // Namespace Scope Clause (Issue #3349, PR2b)
+    // =========================================================
+
+    /// Parse a namespace scope clause (`USE / IN NAMESPACE ...`).
+    ///
+    /// The leading `USE` / `IN` keyword has already been detected by the caller
+    /// (the prefix loop in [`parse_query`](Self::parse_query)); it is consumed
+    /// here.
+    ///
+    /// # Grammar
+    /// ```text
+    /// namespace_clause ::= ("USE" | "IN") "ALL" "NAMESPACES"
+    ///                    | ("USE" | "IN") "NAMESPACE" ns_name ("," ns_name)*
+    /// ns_name          ::= string_literal | identifier
+    /// ```
+    ///
+    /// `USE`, `NAMESPACE`, `ALL`, and `NAMESPACES` are **contextual** keywords
+    /// (matched against `Token::Identifier`, like the `WINDOW` / `ALIGN` clauses),
+    /// so they are not reserved and existing queries using those words as
+    /// labels/variables keep parsing unchanged. `IN` is the reserved `Token::In`
+    /// (also used by the `WHERE ... IN [...]` predicate), unambiguous in this
+    /// prefix position. Namespace names carry `:` / `/` / `.` / `-`, none of which
+    /// lex as identifiers, so a name is normally a string literal; a bare
+    /// identifier is also accepted for simple names.
+    ///
+    /// # Examples
+    /// - `USE NAMESPACE 'agent:planner'` (single)
+    /// - `USE NAMESPACE 'agent:planner', 'shared'` (union)
+    /// - `USE ALL NAMESPACES` (no filter)
+    /// - `IN NAMESPACE 'agent:planner'` (`IN` synonym)
+    fn parse_namespace_clause(&mut self) -> Result<NamespaceClause, ParseError> {
+        // Consume the leading keyword (USE contextual, or reserved IN).
+        if self.check(&Token::In) {
+            self.advance();
+        } else {
+            self.expect_kw("USE")?;
+        }
+
+        // `ALL NAMESPACES` — the no-filter selector.
+        if self.check_kw("ALL") {
+            self.advance();
+            self.expect_kw("NAMESPACES")?;
+            return Ok(NamespaceClause::All);
+        }
+
+        self.expect_kw("NAMESPACE")?;
+
+        let mut names = vec![self.parse_namespace_name()?];
+        while self.check(&Token::Comma) {
+            self.advance();
+            names.push(self.parse_namespace_name()?);
+        }
+
+        Ok(NamespaceClause::Names(names))
+    }
+
+    /// Parse a single namespace name: a string literal (the usual form, since
+    /// names carry `:` / `/` / `.` / `-`) or a bare identifier (for simple
+    /// names). Charset / length / reserved validation happens in the converter
+    /// via [`Namespace::new`](crate::core::namespace::Namespace::new).
+    fn parse_namespace_name(&mut self) -> Result<String, ParseError> {
+        match self.current() {
+            Some(Token::StringLiteral(s)) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            Some(Token::Identifier(s)) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            _ => Err(self.error(
+                "Expected a namespace name (a quoted string or identifier) after NAMESPACE"
+                    .to_string(),
+                Some("'namespace-name'".to_string()),
+            )),
+        }
     }
 
     // =========================================================
@@ -1764,6 +1876,109 @@ mod tests {
 
         assert!(matches!(query.source, SourceClause::Match(_)));
         assert!(query.return_clause.is_some());
+    }
+
+    // =====================================================
+    // Namespace Scope Clause (Issue #3349, PR2b)
+    // =====================================================
+
+    #[test]
+    fn parse_use_namespace_single() {
+        let query = Parser::parse("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["agent:a".to_string()]))
+        );
+        assert!(matches!(query.source, SourceClause::Match(_)));
+    }
+
+    #[test]
+    fn parse_use_namespace_union() {
+        let query =
+            Parser::parse("USE NAMESPACE 'agent:a', 'shared' MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec![
+                "agent:a".to_string(),
+                "shared".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn parse_use_all_namespaces() {
+        let query = Parser::parse("USE ALL NAMESPACES MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.namespace, Some(NamespaceClause::All));
+    }
+
+    #[test]
+    fn parse_in_namespace_synonym() {
+        let query = Parser::parse("IN NAMESPACE 'agent:a' MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["agent:a".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parse_namespace_bare_identifier_name() {
+        // A simple name (no `:` / `/`) may be a bare identifier.
+        let query = Parser::parse("USE NAMESPACE shared MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["shared".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parse_namespace_after_temporal() {
+        // Both prefixes, temporal first.
+        let query =
+            Parser::parse("AS OF 1000000 USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap();
+        assert!(query.temporal.is_some());
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["agent:a".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parse_namespace_before_temporal() {
+        // Both prefixes, namespace first (order-independent).
+        let query =
+            Parser::parse("USE NAMESPACE 'agent:a' AS OF 1000000 MATCH (n:Person) RETURN n")
+                .unwrap();
+        assert!(query.temporal.is_some());
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["agent:a".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parse_no_namespace_clause_is_none() {
+        let query = Parser::parse("MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.namespace, None);
+    }
+
+    #[test]
+    fn parse_namespace_missing_name_is_error() {
+        assert!(Parser::parse("USE NAMESPACE MATCH (n:Person) RETURN n").is_err());
+    }
+
+    #[test]
+    fn parse_namespace_missing_keyword_is_error() {
+        // `USE` not followed by NAMESPACE / ALL.
+        assert!(Parser::parse("USE 'agent:a' MATCH (n:Person) RETURN n").is_err());
+    }
+
+    #[test]
+    fn parse_duplicate_namespace_clause_is_error() {
+        assert!(
+            Parser::parse("USE NAMESPACE 'agent:a' USE NAMESPACE 'agent:b' MATCH (n) RETURN n")
+                .is_err()
+        );
     }
 
     #[test]

@@ -741,6 +741,11 @@ impl AstConverter {
         // 1. Convert temporal clause to context
         let temporal_context = self.convert_temporal(&ast.temporal)?;
 
+        // 1b. Convert the namespace scope clause (Issue #3349, PR2b). `None`
+        //     (no clause) stays `None` — namespace-agnostic, exactly as before;
+        //     a present clause lowers to a `NamespaceScope` the executor applies.
+        let scope = self.convert_namespace_clause(&ast.namespace)?;
+
         // 2. Convert source clause (MATCH or vector search)
         self.convert_source(&ast.source, &mut ops)?;
 
@@ -756,9 +761,9 @@ impl AstConverter {
                 ops,
                 temporal_context,
                 hints,
-                // AQL/Cypher namespace scoping is a follow-up (PR2b); the
-                // converter never scopes today (Issue #3349).
-                scope: None,
+                // Namespace scope (Issue #3349, PR2b): a self-contained
+                // terminal op still honors a `USE / IN NAMESPACE` prefix.
+                scope: scope.clone(),
             });
         }
 
@@ -773,9 +778,9 @@ impl AstConverter {
                 ops,
                 temporal_context,
                 hints,
-                // AQL/Cypher namespace scoping is a follow-up (PR2b); the
-                // converter never scopes today (Issue #3349).
-                scope: None,
+                // Namespace scope (Issue #3349, PR2b): a self-contained
+                // terminal op still honors a `USE / IN NAMESPACE` prefix.
+                scope: scope.clone(),
             });
         }
 
@@ -821,8 +826,9 @@ impl AstConverter {
             ops,
             temporal_context,
             hints,
-            // AQL/Cypher namespace scoping is a follow-up (PR2b).
-            scope: None,
+            // Namespace scope (Issue #3349, PR2b): lowered from the optional
+            // `USE / IN NAMESPACE` prefix clause; `None` when omitted.
+            scope,
         })
     }
 
@@ -1439,6 +1445,62 @@ impl AstConverter {
                 Ok(Some(TemporalContext::valid_time_between(range)))
             }
         }
+    }
+
+    /// Lower an optional AQL namespace scope clause (`USE / IN NAMESPACE ...`)
+    /// to a [`NamespaceScope`] on the query IR (Issue #3349, PR2b).
+    ///
+    /// `None` (no clause) stays `None` — namespace-agnostic, byte-identical to
+    /// prior behavior; `execute_query` treats it exactly as today. When the
+    /// clause is present it maps to the same [`NamespaceScope`] the MCP tools /
+    /// the Rust `QueryBuilder` produce, so it flows through the executor scope
+    /// PR2/PR3d already built (source-leaf filter + traversal boundary + ranked
+    /// filter).
+    ///
+    /// Namespace **name** validation (charset / length / reserved-prefix /
+    /// the reserved `all` selector) is delegated to
+    /// [`Namespace::new`](crate::core::namespace::Namespace::new), so a malformed
+    /// name surfaces as a structured `INVALID_ARGUMENT` — identical to the MCP
+    /// `namespace` param — never a silent unscoped result. A single bare `all`
+    /// name is treated as the no-filter selector (mirroring the MCP `"all"`
+    /// string), the same meaning as `USE ALL NAMESPACES`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Namespace`] with `InvalidName` for a malformed name (or an
+    ///   empty union — already rejected by the parser, guarded here too).
+    fn convert_namespace_clause(
+        &self,
+        clause: &Option<crate::query::ast::NamespaceClause>,
+    ) -> Result<Option<crate::core::namespace::NamespaceScope>> {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        use crate::query::ast::NamespaceClause;
+
+        let Some(clause) = clause else {
+            return Ok(None);
+        };
+        let scope = match clause {
+            NamespaceClause::All => NamespaceScope::All,
+            // A lone `all` name is the no-filter selector, mirroring the MCP
+            // `namespace: "all"` string (exact match, like `parse_opt_scope`).
+            NamespaceClause::Names(names) if names.len() == 1 && names[0] == "all" => {
+                NamespaceScope::All
+            }
+            NamespaceClause::Names(names) => {
+                let mut namespaces = Vec::with_capacity(names.len());
+                for name in names {
+                    namespaces.push(Namespace::new(name.as_str()).map_err(Error::Namespace)?);
+                }
+                if namespaces.len() == 1 {
+                    NamespaceScope::Single(namespaces.into_iter().next().expect("len == 1"))
+                } else {
+                    // Empty is unreachable (the parser requires >= 1 name), but
+                    // `list` still guards it as `INVALID_ARGUMENT`.
+                    NamespaceScope::list(namespaces).map_err(Error::Namespace)?
+                }
+            }
+        };
+        Ok(Some(scope))
     }
 
     /// Convert a timestamp literal to a Timestamp.
@@ -2720,6 +2782,158 @@ mod tests {
     fn test_parse_query() {
         let query = super::parse_query("MATCH (n:Person) RETURN n").unwrap();
         assert!(!query.ops.is_empty());
+    }
+
+    // ========================================================================
+    // Namespace scope lowering (Issue #3349, PR2b): AQL clause -> Query.scope
+    // ========================================================================
+
+    #[test]
+    fn convert_namespace_single_sets_single_scope() {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query =
+            super::parse_query("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_union_sets_list_scope() {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query =
+            super::parse_query("USE NAMESPACE 'agent:a', 'shared' MATCH (n:Person) RETURN n")
+                .unwrap();
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::List(vec![
+                Namespace::new("agent:a").unwrap(),
+                Namespace::new("shared").unwrap(),
+            ]))
+        );
+    }
+
+    #[test]
+    fn convert_all_namespaces_sets_all_scope() {
+        use crate::core::namespace::NamespaceScope;
+        let query = super::parse_query("USE ALL NAMESPACES MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.scope, Some(NamespaceScope::All));
+    }
+
+    #[test]
+    fn convert_bare_all_name_sets_all_scope() {
+        use crate::core::namespace::NamespaceScope;
+        // A lone `all` name is the no-filter selector (mirrors MCP `"all"`).
+        let query = super::parse_query("USE NAMESPACE all MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.scope, Some(NamespaceScope::All));
+    }
+
+    #[test]
+    fn convert_no_namespace_clause_leaves_scope_none() {
+        let query = super::parse_query("MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.scope, None);
+    }
+
+    #[test]
+    fn convert_malformed_namespace_name_is_error() {
+        // A name outside the `[A-Za-z0-9._:/-]` charset is rejected at conversion
+        // (structured INVALID_ARGUMENT), never silently accepted.
+        let result = super::parse_query("USE NAMESPACE 'has space' MATCH (n:Person) RETURN n");
+        assert!(matches!(
+            result,
+            Err(crate::core::error::Error::Namespace(
+                crate::core::namespace::NamespaceError::InvalidName { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn convert_namespace_scope_carried_on_vector_source() {
+        // Regression pin (Issue #3349, PR2b): a non-MATCH source (vector
+        // SIMILAR search) must still lower the `USE NAMESPACE` prefix onto
+        // `Query.scope`. Flipping the general-path `Ok(Query { .., scope })`
+        // site to `scope: None` would silently drop the namespace filter on
+        // every vector query -- the lane's worst outcome -- and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query =
+            super::parse_query("USE NAMESPACE 'agent:a' SIMILAR TO [0.1, 0.2, 0.3] LIMIT 10")
+                .unwrap();
+        // Sanity: this really is the vector-source path, not a MATCH.
+        assert!(matches!(&query.ops[0], QueryOp::VectorSearch { k: 10, .. }));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_scope_carried_on_window() {
+        // Regression pin (Issue #3349, PR2b): the self-contained WINDOW
+        // terminal op has its own early `return Ok(Query { .., scope })`;
+        // flipping it to `scope: None` would silently drop the namespace
+        // filter on temporal-window aggregates and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' MATCH (p:Product) \
+             WINDOW 1 month OVER VALID_TIME \
+             FROM '2024-01-01T00:00:00Z' TO '2024-03-01T00:00:00Z' \
+             RETURN AVG(p.price) AS avg_price",
+        )
+        .unwrap();
+        assert!(matches!(
+            &query.ops[..],
+            [.., QueryOp::TemporalWindowAggregate(_)]
+        ));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_scope_carried_on_align() {
+        // Regression pin (Issue #3349, PR2b): the self-contained ALIGN
+        // terminal op has its own early `return Ok(Query { .., scope })`;
+        // flipping it to `scope: None` would silently drop the namespace
+        // filter on temporal-align queries and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' MATCH (p:Product) ALIGN OVERLAP \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' \
+             RETURN p.price",
+        )
+        .unwrap();
+        assert!(matches!(&query.ops[..], [.., QueryOp::TemporalAlign(_)]));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_and_temporal_both_lower_onto_one_query() {
+        // NIT (Issue #3349, PR2b): a namespace clause and an `AS OF` temporal
+        // clause on the same query lower independently -- both must land on the
+        // single resulting `Query` (scope AND temporal_context), neither
+        // clobbering the other.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        // `AS OF` via the bare `parse_query` path takes microseconds since epoch
+        // (1704067200000000 == 2024-01-01T00:00:00Z), mirroring the existing
+        // `parse_query` temporal doc example.
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' AS OF 1704067200000000 MATCH (n:Person) RETURN n",
+        )
+        .unwrap();
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+        // The temporal clause lowered too (valid-time set), not dropped.
+        assert!(
+            query.temporal_context.is_some(),
+            "AS OF should lower onto temporal_context alongside the namespace scope"
+        );
     }
 
     #[test]
