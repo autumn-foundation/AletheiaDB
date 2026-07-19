@@ -179,6 +179,20 @@ fn refuse_unsupported_new_source(new_source: &KeyProviderConfig) -> Result<()> {
 /// nothing about the MEK, yet two identical MEKs always yield the same value.
 /// It uses only the codebase's existing [`KeyDerivation`] primitive — no new
 /// crypto. The MEK never leaves `Zeroizing`.
+///
+/// # Threat model: operational, NOT tamper-evidence
+///
+/// The KCV is an **operational accidental-change detector**, not a security
+/// control. The plaintext `rotation.state` ledger is **unauthenticated**: an
+/// attacker who can write the file can also delete the `mek_kcv=` line, which
+/// makes verification a no-op (fail-open **by design**, for back-compat with
+/// legacy ledgers that carry no KCV). What actually backstops ledger integrity
+/// is the layer ciphertext itself — a wrong key always fails the AEAD auth tag
+/// on the WAL/index/cold data — so a tampered or deleted KCV can never cause a
+/// wrong key to be *accepted*, only downgrade a precise KCV error to the same
+/// loud AEAD failure that existed before this feature. The KCV's sole value is
+/// turning that cryptic downstream AEAD failure into an actionable, up-front
+/// "the source secret changed" message for the honest-operator case.
 fn compute_mek_kcv(mek: &Zeroizing<[u8; 32]>) -> Result<String> {
     let subkey = KeyDerivation::new(mek.clone())
         .derive_dek("rotation-kcv")
@@ -199,7 +213,15 @@ fn compute_mek_kcv(mek: &Zeroizing<[u8; 32]>) -> Result<String> {
 /// the ledger is retained: a later `open()` with the correct/restored secret
 /// resumes losslessly.
 fn verify_mek_kcv(ledger: &RotationLedger, mek: &Zeroizing<[u8; 32]>) -> Result<()> {
-    let Some(expected) = ledger.mek_kcv.as_deref() else {
+    verify_mek_kcv_value(ledger.mek_kcv.as_deref(), mek)
+}
+
+/// Constant-time compare an already-loaded MEK against an `expected` KCV string.
+/// A no-op (`Ok(())`) when `expected` is `None`, so callers holding a view that
+/// dropped its ledger (enable/disable resume) share the exact same fail-closed
+/// semantics as [`verify_mek_kcv`] without reconstructing a `RotationLedger`.
+fn verify_mek_kcv_value(expected: Option<&str>, mek: &Zeroizing<[u8; 32]>) -> Result<()> {
+    let Some(expected) = expected else {
         return Ok(());
     };
     let actual = compute_mek_kcv(mek)?;
@@ -217,6 +239,30 @@ fn verify_mek_kcv(ledger: &RotationLedger, mek: &Zeroizing<[u8; 32]>) -> Result<
         .into());
     }
     Ok(())
+}
+
+/// Re-derive the MEK from a resumed enable/disable ledger's recorded key
+/// `source` and verify it against the ledger's stamped `mek_kcv` (Issue #3620),
+/// BEFORE any wrap/unwrap pass runs. This closes a silent split-key corruption:
+/// without it a source secret that changed out-of-band between the migration's
+/// start and a crash-resume would re-key the still-pending files under the
+/// *new* key while the already-processed files stay under the *old* key, with
+/// NO error. Mirrors the forward-rotation [`load_mek_checked`] seam.
+///
+/// A no-op when `mek_kcv` is `None` (legacy/absent KCV) — it does NOT even load
+/// the MEK in that case — so back-compat is exact. On mismatch it returns the
+/// same structured, fail-closed [`StorageError::InconsistentState`] the forward
+/// path uses; the caller leaves the ledger untouched (no clear, no wrap) so a
+/// later `open()` with the correct secret resumes losslessly.
+pub(crate) fn verify_resumed_source_kcv(
+    source: &KeyProviderConfig,
+    mek_kcv: Option<&str>,
+) -> Result<()> {
+    if mek_kcv.is_none() {
+        return Ok(());
+    }
+    let mek = load_mek(source).map_err(rotation_err)?;
+    verify_mek_kcv_value(mek_kcv, &mek)
 }
 
 /// Re-derive the MEK recorded in a ledger's `new_source` AND verify it against
@@ -1367,7 +1413,8 @@ fn rotation_state_present(manager: &IndexPersistenceManager) -> Result<bool> {
 
 /// Write the default PR1 index-scope ledger (index + checkpoint pending, WAL +
 /// cold skipped). Signature-compatible with the #488 breadcrumb writer so every
-/// existing caller keeps working; the on-disk format is now `version=2`.
+/// existing caller keeps working; the on-disk format is now `version=3` (the
+/// serde full-config writer; `version=2` only on a non-serde build).
 fn write_rotation_state(
     manager: &IndexPersistenceManager,
     new_version: u32,
@@ -1404,6 +1451,12 @@ fn write_ledger(manager: &IndexPersistenceManager, ledger: &RotationLedger) -> R
 
 /// Serialize a ledger's on-disk body. `version=3` under serde (full config +
 /// optional KCV); `version=2` two-string form otherwise.
+///
+/// Note: a non-UTF-8 key-source path (e.g. a `File { path }` with invalid UTF-8)
+/// now fails **closed** here — `serde_json` refuses to serialize it and the
+/// write errors — rather than being silently mangled through the old v2
+/// writer's `to_string_lossy()`. Failing the rotation write is strictly safer:
+/// a lossily-rewritten path would round-trip to the WRONG file on resume.
 #[cfg(feature = "serde")]
 fn serialize_ledger(ledger: &RotationLedger) -> Result<String> {
     // Compact serde_json is single-line (string values escape newlines as `\n`
@@ -1478,8 +1531,23 @@ pub(crate) fn write_durable(path: &std::path::Path, bytes: &[u8]) -> Result<()> 
         StorageError::io_error("rotation.state path has no parent directory".to_string())
     })?;
     let tmp = path.with_extension("state.tmp");
+    // Remove any stale temp file first: the `mode(0o600)` below only applies when
+    // the file is *created*, so a pre-existing temp (e.g. from a crashed write)
+    // could otherwise retain looser permissions.
+    let _ = std::fs::remove_file(&tmp);
     {
-        let mut f = std::fs::File::create(&tmp)
+        // Owner-only (0600): the rotation.state / encryption.state bodies carry a
+        // CMK-useless KMS blob + the (non-secret) KCV, but there is no reason to
+        // leave them world-readable. Matches the auth `keys.json` 0600 precedent.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut f = options
+            .open(&tmp)
             .map_err(|e| StorageError::io_error(format!("Failed to write rotation.state: {e}")))?;
         f.write_all(bytes)
             .map_err(|e| StorageError::io_error(format!("Failed to write rotation.state: {e}")))?;
@@ -1872,6 +1940,12 @@ pub(crate) struct EnableLedgerView {
     /// (Issue #3616 PR3). Only ever set for an enable ledger whose index layer is
     /// in scope (there is a durable snapshot to hold the pre-enable state first).
     pub(crate) wal_retire_pending: bool,
+    /// The KCV of the new MEK stamped when the enable was started (Issue #3620),
+    /// or `None` on a legacy/non-serde ledger. A crash-resume verifies the MEK
+    /// re-derived from `new_source` against this BEFORE any wrap pass, so a
+    /// changed source secret is refused precisely instead of silently wrapping
+    /// the still-plaintext files under a different key.
+    pub(crate) mek_kcv: Option<String>,
 }
 
 impl EnableLedgerView {
@@ -1885,6 +1959,7 @@ impl EnableLedgerView {
             cold_pending: matches!(ledger.cold, LayerStatus::Pending),
             wal_retire_pending: matches!(ledger.wal_retire, LayerStatus::Pending),
             new_source: ledger.new_source,
+            mek_kcv: ledger.mek_kcv,
         }
     }
 
@@ -2169,6 +2244,12 @@ pub(crate) struct DisableLedgerView {
     /// `true` once the encrypted WAL segments have been retired — the signal that
     /// the WAL is fully plaintext at rest and needs no decrypt keyring to replay.
     pub(crate) wal_retire_complete: bool,
+    /// The KCV of the CURRENT (to-be-retired) MEK stamped when the disable was
+    /// started (Issue #3620), or `None` on a legacy/non-serde ledger. A
+    /// crash-resume verifies the MEK re-derived from `current_source` against
+    /// this BEFORE any unwrap pass, turning a changed source secret into a
+    /// precise error rather than a cryptic downstream AEAD decrypt failure.
+    pub(crate) mek_kcv: Option<String>,
 }
 
 impl DisableLedgerView {
@@ -2181,6 +2262,7 @@ impl DisableLedgerView {
             wal_retire_pending: matches!(ledger.wal_retire, LayerStatus::Pending),
             wal_retire_complete: matches!(ledger.wal_retire, LayerStatus::Complete),
             current_source: ledger.new_source,
+            mek_kcv: ledger.mek_kcv,
         }
     }
 
@@ -5597,6 +5679,44 @@ mod tests {
         )
         .unwrap();
         assert!(super::read_rotation_state_at(&path).is_err());
+    }
+
+    #[test]
+    fn ledger_v3_prefers_json_over_leftover_v2_two_string() {
+        // Issue #3620 (FIX 4): a v3 ledger carrying BOTH the `new_source_json` line
+        // AND leftover v2 `new_source_kind`/`new_source_value` lines must prefer the
+        // JSON source (the reader's documented precedence), never the stale
+        // two-string reference.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rotation.state");
+        std::fs::write(
+            &path,
+            "version=3\ndirection=forward\ntarget_version=2\nnew_source_json={\"type\":\"file\",\"path\":\"/from/json.key\"}\nnew_source_kind=env\nnew_source_value=STALE_V2_VAR\nlayer.index=pending\n",
+        )
+        .unwrap();
+        let got = super::read_rotation_state_at(&path).unwrap().unwrap();
+        assert_eq!(
+            got.new_source,
+            KeyProviderConfig::File {
+                path: "/from/json.key".into()
+            },
+            "the v3 JSON source must win over leftover v2 two-string lines"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_durable_creates_owner_only_0600_file() {
+        // Issue #3620 (FIX 2): rotation.state / encryption.state both funnel through
+        // `write_durable`; the file must be owner-only (0600), never world-readable
+        // (it carries a CMK-useless KMS blob + the KCV). Matches the auth keys.json
+        // 0600 precedent.
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rotation.state");
+        super::write_durable(&path, b"version=3\ndirection=forward\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {mode:o}");
     }
 
     #[test]

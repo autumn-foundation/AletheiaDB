@@ -87,7 +87,8 @@ use crate::db::encryption_state::{
 use crate::db::rotation::{
     ENABLE_KEY_VERSION, build_enable_cold_cipher, build_enable_wal_keyring, clear_rotation_state,
     mark_cold_complete, mark_index_complete, mark_wal_complete, mark_wal_retire_complete,
-    read_enable_ledger, retire_enable_plaintext_wal, wrap_enable_index_files, write_enable_ledger,
+    read_enable_ledger, retire_enable_plaintext_wal, verify_resumed_source_kcv,
+    wrap_enable_index_files, write_enable_ledger,
 };
 use crate::encryption::config::KeyProviderConfig;
 use crate::encryption::factory::Algorithm;
@@ -394,6 +395,17 @@ impl AletheiaDB {
         let Some(view) = read_enable_ledger(manager)? else {
             return Ok(());
         };
+
+        // Fail-closed KCV check (Issue #3620): BEFORE any wrap pass, verify the MEK
+        // re-derived from the recorded source matches the KCV the enable stamped.
+        // Without this, a source secret changed out-of-band between the enable's
+        // start and this resume would leave the already-wrapped (key-A) index/cold
+        // files untouched while wrapping the still-plaintext ones under the new
+        // key-B and flipping key-B in as authority — permanently orphaning the
+        // key-A files with NO error. On mismatch the ledger is RETAINED (no clear,
+        // no wrap), so a later open() with the correct secret resumes losslessly.
+        // A no-op for a legacy ledger without a KCV (preserves prior behavior).
+        verify_resumed_source_kcv(&view.new_source, view.mek_kcv.as_deref())?;
 
         // WAL: ensure the keyring is installed + rolled, then record completion.
         // At startup the pre-read hook installs it when the WAL is already
@@ -868,6 +880,91 @@ mod tests {
         assert!(
             !msg.contains("only file/env references"),
             "the old File/Env-only refusal must be gone, got: {msg}"
+        );
+    }
+
+    /// Issue #3620 (FIX 1): an interrupted ENABLE resume whose passphrase source
+    /// secret CHANGED out-of-band between start and resume must be REFUSED by the
+    /// KCV check — never silently wrapping the still-plaintext index files under
+    /// the new (key-B) key and flipping key-B in as authority. The ledger must be
+    /// RETAINED so a later open() with the ORIGINAL secret resumes losslessly.
+    ///
+    /// Construction: a plaintext DB with a persisted (plaintext) index snapshot;
+    /// an enable ledger stamped with the KCV of MEK-A (index=Pending); then the
+    /// AEKF is swapped out-of-band to wrap a DIFFERENT MEK-B under the same
+    /// passphrase. Pre-fix the reopen SUCCEEDS (it wraps the plaintext index under
+    /// MEK-B and reads it back consistently — silent split-key corruption); the
+    /// fix makes the reopen fail with a precise KCV error. (We keep the index
+    /// fully plaintext rather than a real mid-wrap mix so that the pre-fix reopen
+    /// *succeeds* — the property being proven — instead of erroring later on an
+    /// undecryptable key-A file.)
+    #[test]
+    fn enable_resume_passphrase_secret_changed_refused_by_kcv() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexes = dir.path().join("indexes");
+        let idx_dir = index_files_dir(dir.path());
+
+        // Plaintext DB with a persisted plaintext index snapshot.
+        {
+            let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+            db.create_node("N", PropertyMapBuilder::new().insert("k", "v").build())
+                .unwrap();
+            db.persist_indexes().unwrap();
+        }
+        let (total0, plain0, aeix0) = classify_index_files(&idx_dir);
+        assert!(
+            total0 > 0 && aeix0 == 0 && plain0 == total0,
+            "index starts plaintext"
+        );
+
+        // Passphrase source wrapping MEK-A; its passphrase in a unique env var.
+        let pp_path = dir.path().join("mek.aekf");
+        crate::encryption::generate_passphrase_key_file(&pp_path, "pass-A", true).unwrap();
+        let var = format!("ALETHEIADB_TEST_ENABLE_KCV_{}", std::process::id());
+        // SAFETY: test-only, unique var.
+        unsafe { std::env::set_var(&var, "pass-A") };
+        let pp_source = KeyProviderConfig::PassphraseFile {
+            path: pp_path.clone(),
+            passphrase_env: var.clone(),
+        };
+
+        // Lay a pending-enable ledger (index=Pending). Its KCV is stamped from
+        // MEK-A (the AEKF currently on disk).
+        write_enable_ledger(&manager_for(dir.path()), &pp_source, true, false).unwrap();
+        assert!(indexes.join("rotation.state").exists());
+
+        // Out-of-band: replace the AEKF with one wrapping a DIFFERENT MEK-B under
+        // the same passphrase. The source now yields MEK-B (KCV mismatch).
+        crate::encryption::generate_passphrase_key_file(&pp_path, "pass-A", true).unwrap();
+
+        // Reopen: resume_pending_enable must REFUSE at the KCV check.
+        let result = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path()));
+        // SAFETY: test-only cleanup.
+        unsafe { std::env::remove_var(&var) };
+
+        let Err(err) = result else {
+            panic!("resume must refuse a changed source secret (returned Ok)");
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("KCV") && msg.to_lowercase().contains("does not match"),
+            "expected a precise KCV-mismatch error, got: {msg}"
+        );
+        assert!(
+            indexes.join("rotation.state").exists(),
+            "ledger must be RETAINED after a KCV mismatch (resumable with the original secret)"
+        );
+        // No key-B wrap applied: the index dir is still fully plaintext, and the
+        // authority was NOT flipped to the wrong key.
+        let (total1, plain1, aeix1) = classify_index_files(&idx_dir);
+        assert_eq!(
+            (total1, plain1, aeix1),
+            (total0, plain0, aeix0),
+            "no index file may be wrapped under the wrong (key-B) key"
+        );
+        assert!(
+            read_encryption_state(&indexes).unwrap().is_none(),
+            "authority must NOT be flipped on a refused resume"
         );
     }
 

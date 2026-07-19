@@ -651,6 +651,32 @@ mod tests {
     }
 
     #[test]
+    fn v2_enabled_two_string_source_reconstructs() {
+        // Issue #3620 (FIX 4): a legacy `version=2` ENABLED authority (the
+        // two-string File/Env source plus the pinned `algorithm` line) must still
+        // reconstruct its `key_source` and `algorithm`. Only v1 (no algorithm
+        // line) was covered before; this pins the v2 two-string read path.
+        let dir = tmp();
+        std::fs::write(
+            encryption_state_path(dir.path()),
+            b"version=2\nenabled=true\nkey_source_kind=file\nkey_source_value=/etc/aletheia/mek.key\nalgorithm=aes256gcm\n",
+        )
+        .unwrap();
+        let got = read_encryption_state(dir.path()).unwrap().unwrap();
+        assert!(got.enabled);
+        assert_eq!(
+            got.key_source,
+            Some(KeyProviderConfig::File {
+                path: "/etc/aletheia/mek.key".into()
+            })
+        );
+        assert_eq!(
+            got.algorithm,
+            Some(crate::encryption::factory::Algorithm::Aes256Gcm)
+        );
+    }
+
+    #[test]
     fn overwrite_replaces_prior_state() {
         let dir = tmp();
         write_encryption_state_durable(
