@@ -966,6 +966,17 @@ impl AletheiaDB {
                 ),
                 snapshots,
                 namespaces,
+                // Drift-monitor registry (Issue #3367): durable sidecar at
+                // `{data_dir}/drift_monitors.json` when index persistence is
+                // enabled, in-memory-only otherwise. Gated to `semantic-temporal`.
+                #[cfg(feature = "semantic-temporal")]
+                drift_monitors: Arc::new(
+                    crate::experimental::temporal::drift_alarm::DriftMonitorRegistry::open(
+                        crate::experimental::temporal::drift_alarm::registry_path_for(
+                            &config.persistence,
+                        ),
+                    )?,
+                ),
                 chain: None,
                 _tempdir: None,
             };
@@ -1486,6 +1497,13 @@ impl AletheiaDB {
                 crate::db::schema_constraint::load_sidecar(path, &db.constraint_registry);
             }
 
+            // Drift monitors (Issue #3367): if the sidecar was quarantined at
+            // open, reseed `next_id` above any orphaned `__drift_alarm` node's
+            // `monitor_id` now that index/WAL load has made alarm nodes
+            // queryable, so reused ids cannot collide (robustness MINOR-4).
+            #[cfg(feature = "semantic-temporal")]
+            db.reseed_drift_registry_after_quarantine();
+
             Ok(db)
         })();
         result.record_error_metric()
@@ -1572,6 +1590,11 @@ impl AletheiaDB {
                 snapshots: Arc::new(crate::db::snapshot::SnapshotRegistry::in_memory()),
                 // Ephemeral namespace registry (Issue #3349): in-memory only.
                 namespaces: Arc::new(crate::db::namespace::NamespaceRegistry::in_memory()),
+                // Ephemeral drift-monitor registry (Issue #3367): in-memory only.
+                #[cfg(feature = "semantic-temporal")]
+                drift_monitors: Arc::new(
+                    crate::experimental::temporal::drift_alarm::DriftMonitorRegistry::in_memory(),
+                ),
                 chain: None,
                 _tempdir: None,
             };
