@@ -672,7 +672,9 @@ impl AletheiaDB {
         let Some(current) = visible.last().copied() else {
             return Err(invalid_argument(
                 "as_of_transaction_time",
-                format!("entity {entity} has no version recorded at or before the given transaction time"),
+                format!(
+                    "entity {entity} has no version recorded at or before the given transaction time"
+                ),
             ));
         };
 
@@ -761,8 +763,7 @@ impl AletheiaDB {
                 let hl_us = hl.as_micros() as f64;
                 (hl_us > 0.0).then_some(*age_us as f64 / hl_us)
             });
-            let survival_probability =
-                survival_probability(age, cohort_half_life, curve.as_ref());
+            let survival_probability = survival_probability(age, cohort_half_life, curve.as_ref());
             matches.push(StalenessEntry {
                 entity: *entity,
                 age,
@@ -776,8 +777,7 @@ impl AletheiaDB {
         matches.sort_by(|a, b| b.age.cmp(&a.age).then_with(|| a.entity.cmp(&b.entity)));
 
         let total_matching = matches.len();
-        let entries: Vec<StalenessEntry> =
-            matches.into_iter().skip(offset).take(limit).collect();
+        let entries: Vec<StalenessEntry> = matches.into_iter().skip(offset).take(limit).collect();
         let next_offset = {
             let consumed = offset + entries.len();
             (consumed < total_matching).then_some(consumed)
@@ -908,9 +908,9 @@ fn visible_versions(history: &EntityHistory, as_of: Option<Timestamp>) -> Vec<&V
 /// The label/type/property-label string a cohort scopes to.
 fn cohort_label(cohort: &Cohort) -> &str {
     match cohort {
-        Cohort::NodeLabel(label)
-        | Cohort::EdgeType(label)
-        | Cohort::NodeProperty { label, .. } => label,
+        Cohort::NodeLabel(label) | Cohort::EdgeType(label) | Cohort::NodeProperty { label, .. } => {
+            label
+        }
     }
 }
 
@@ -988,8 +988,7 @@ fn observations_from_versions(
                 RevisionClass::Retraction => {
                     let terminates = match key {
                         None => true,
-                        Some(k) => predecessor
-                            .is_some_and(|p| p.properties.get(k).is_some()),
+                        Some(k) => predecessor.is_some_and(|p| p.properties.get(k).is_some()),
                     };
                     if terminates {
                         if let Some(start) = life_start {
