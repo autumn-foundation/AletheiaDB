@@ -273,34 +273,53 @@ fn encryption_status_disabled_is_informational() {
 }
 
 #[test]
-fn encryption_enable_reports_missing_migration_engine() {
+fn encryption_enable_without_config_reports_not_configured() {
+    // The migration engine (Issue #3700) is now wired in, so `encryption enable`
+    // is NO LONGER the old "missing migration engine" stub. With no ambient
+    // database configured it fails honestly asking for a configured durable DB
+    // (and, on the key-source axis, a key file/env var), non-zero, no panic.
     let r = run(&["encryption", "enable"]);
     assert_ne!(
         r.code, 0,
-        "encryption enable must exit non-zero (no engine)"
+        "encryption enable with no configured DB must exit non-zero"
     );
     let c = r.combined_lower();
     assert!(
-        c.contains("migration")
-            && (c.contains("not") && c.contains("implement") || c.contains("not supported")),
-        "enable must honestly name the missing migration engine; got={c:?}"
+        c.contains("configured")
+            || c.contains("durable")
+            || c.contains("aletheiadb_config")
+            || c.contains("key"),
+        "enable must ask for a configured durable DB / key source; got={c:?}"
+    );
+    // It must NOT be the old honest-stub "not yet implemented / not supported"
+    // migration-engine message — the engine exists now.
+    assert!(
+        !(c.contains("full-database migration engine") || c.contains("not yet implemented")),
+        "enable must no longer report the missing migration engine stub; got={c:?}"
     );
     assert!(!c.contains("panicked"), "must not panic; got={c:?}");
 }
 
 #[test]
-fn encryption_disable_reports_missing_migration_engine() {
+fn encryption_disable_without_config_reports_not_configured() {
+    // The disable engine (Issue #3718) is wired in, so `encryption disable` is
+    // no longer the "missing migration engine" stub. With no ambient database it
+    // fails honestly asking for a configured durable DB, non-zero, no panic.
     let r = run(&["encryption", "disable"]);
     assert_ne!(
         r.code, 0,
-        "encryption disable must exit non-zero (no engine)"
+        "encryption disable with no configured DB must exit non-zero"
     );
     let c = r.combined_lower();
     assert!(
-        c.contains("migration")
-            && (c.contains("not") && c.contains("implement") || c.contains("not supported")),
-        "disable must honestly name the missing migration engine; got={c:?}"
+        c.contains("configured") || c.contains("durable") || c.contains("aletheiadb_config"),
+        "disable must ask for a configured durable DB; got={c:?}"
     );
+    assert!(
+        !(c.contains("full-database migration engine") || c.contains("not yet implemented")),
+        "disable must no longer report the missing migration engine stub; got={c:?}"
+    );
+    assert!(!c.contains("panicked"), "must not panic; got={c:?}");
 }
 
 #[test]
@@ -312,6 +331,31 @@ fn encryption_unknown_subcommand_fails() {
         "must not panic; stderr={:?}",
         r.stderr
     );
+}
+
+#[test]
+fn encryption_unknown_subcommand_lists_real_subcommands() {
+    // The unknown-subcommand error appends `encryption_usage()`, which must
+    // enumerate the real subcommands so an operator can self-correct. This pins
+    // `encryption_usage` returning the actual listing (not an empty/placeholder
+    // string).
+    let r = run(&["encryption", "bogus"]);
+    assert_ne!(r.code, 0, "unknown encryption subcommand must fail");
+    let c = r.combined_lower();
+    for sub in [
+        "encryption status",
+        "encryption verify",
+        "encryption enable",
+        "encryption disable",
+    ] {
+        assert!(
+            c.contains(sub),
+            "usage must list `{sub}`; stdout={:?} stderr={:?}",
+            r.stdout,
+            r.stderr
+        );
+    }
+    assert!(!c.contains("panicked"), "must not panic; got={c:?}");
 }
 
 #[test]
@@ -918,6 +962,278 @@ mod encrypted {
             "verify must report success; got={c:?}"
         );
         assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    /// Build a PLAINTEXT (encryption-disabled) durable config rooted at `root`:
+    /// WAL + index persistence, no `[encryption]` block. This is what
+    /// `encryption enable` migrates.
+    fn plaintext_config(root: &Path) -> AletheiaDBConfig {
+        AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(root.join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_delay_ms: 5,
+                        max_batch_size: 64,
+                    })
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: root.join("data"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .build()
+    }
+
+    /// Create a PLAINTEXT database on disk with persisted index files, then drop
+    /// it, leaving the plaintext TOML the CLI reopens via `ALETHEIADB_CONFIG` and
+    /// a generated master key file the CLI's `encryption enable --key-file`
+    /// migrates the database TO. Mirrors [`make_encrypted_db`] but starts plaintext.
+    fn make_plaintext_db() -> EncryptedFixture {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        // A master key file for the operator to `encryption enable` toward.
+        let key_path = root.join("master.key");
+        FileKeyProvider::generate_key_file(&key_path).unwrap();
+
+        let toml_path = root.join("aletheia.toml");
+        let config = plaintext_config(root);
+        config.to_toml_file(&toml_path).unwrap();
+
+        // Seed from the SAME TOML the CLI will open, so paths match exactly.
+        {
+            let cfg = AletheiaDBConfig::from_toml_file(&toml_path).unwrap();
+            let db = AletheiaDB::with_unified_config(cfg).unwrap();
+            let a = db
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )
+                .unwrap();
+            let b = db
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
+                )
+                .unwrap();
+            db.create_edge(a, b, "KNOWS", PropertyMap::new()).unwrap();
+            db.persist_indexes().unwrap();
+        }
+
+        EncryptedFixture {
+            _dir: dir,
+            toml_path,
+            key_path,
+        }
+    }
+
+    /// Recursively count files under `dir` whose first four bytes are the `AEIX`
+    /// encrypted-index magic, skipping atomic-write scratch files. Zero means no
+    /// encrypted index file exists anywhere under `dir`.
+    fn count_aeix_files(dir: &Path) -> usize {
+        fn walk(dir: &Path, count: &mut usize) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, count);
+                    continue;
+                }
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if name.ends_with(".tmp") || name.contains(".tmp.") || name.contains("-tmp-") {
+                    continue;
+                }
+                if let Ok(bytes) = std::fs::read(&p)
+                    && bytes.len() >= 4
+                    && &bytes[..4] == b"AEIX"
+                {
+                    *count += 1;
+                }
+            }
+        }
+        let mut count = 0;
+        walk(dir, &mut count);
+        count
+    }
+
+    /// Reopen the fixture's database via its plaintext TOML (the durable
+    /// encryption-state authority written by enable/disable wins over it) and
+    /// return `(node_count, is_encryption_enabled)`.
+    fn reopen_state(f: &EncryptedFixture) -> (usize, bool) {
+        let cfg = AletheiaDBConfig::from_toml_file(&f.toml_path).unwrap();
+        let db = AletheiaDB::with_unified_config(cfg).unwrap();
+        (db.node_count(), db.is_encryption_enabled())
+    }
+
+    #[test]
+    fn encryption_enable_then_disable_round_trips() {
+        // Full fast-follow contract (Issues #3700 enable, #3718 disable): the CLI
+        // `encryption enable` runs the real plaintext -> encrypted migration and
+        // `encryption disable` runs the inverse, and the data survives both.
+        let f = make_plaintext_db();
+        let data_dir = f.toml_path.parent().unwrap().join("data");
+
+        // Sanity: fixture starts plaintext with 2 nodes and no AEIX files.
+        let (n0, enc0) = reopen_state(&f);
+        assert_eq!(n0, 2, "fixture seeds two nodes");
+        assert!(!enc0, "fixture starts plaintext");
+        assert_eq!(
+            count_aeix_files(&data_dir),
+            0,
+            "no encrypted index file before enable"
+        );
+
+        // === ENABLE via the CLI =================================================
+        let r = run_with(
+            &[
+                "encryption",
+                "enable",
+                "--key-file",
+                f.key_path.to_str().unwrap(),
+            ],
+            &cfg_env(&f),
+        );
+        assert_eq!(
+            r.code, 0,
+            "encryption enable must succeed; stdout={:?} stderr={:?}",
+            r.stdout, r.stderr
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("enabled") || c.contains("encrypted"),
+            "enable must report success; got={c:?}"
+        );
+        // Per-layer report: a layer line (e.g. WAL) must be labeled `encrypted`,
+        // distinct from the "ENABLED" header (which never contains "encrypted").
+        // This pins `migrated_label` returning "encrypted" for a migrated layer.
+        assert!(
+            r.stdout.lines().any(|line| {
+                let ll = line.to_lowercase();
+                ll.contains("wal:") && ll.contains("encrypted")
+            }),
+            "enable per-layer report must label the WAL layer `encrypted`; stdout={:?}",
+            r.stdout
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+
+        // Data readable AND at-rest encrypted after enable.
+        let (n1, enc1) = reopen_state(&f);
+        assert_eq!(n1, 2, "both nodes survive the enable migration");
+        assert!(
+            enc1,
+            "reopen honors the flipped authority: encrypted at rest"
+        );
+        assert!(
+            count_aeix_files(&data_dir) > 0,
+            "at least one AEIX-encrypted index file exists after enable"
+        );
+
+        // === DISABLE via the CLI ================================================
+        let r = run_with(&["encryption", "disable"], &cfg_env(&f));
+        assert_eq!(
+            r.code, 0,
+            "encryption disable must succeed; stdout={:?} stderr={:?}",
+            r.stdout, r.stderr
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("disabled") || c.contains("plaintext"),
+            "disable must report success; got={c:?}"
+        );
+        // Per-layer report: a layer line (e.g. WAL) must be labeled `plaintext`,
+        // distinct from the "DISABLED" header (which never contains "plaintext").
+        // This pins `stripped_label` returning "plaintext" for a stripped layer.
+        assert!(
+            r.stdout.lines().any(|line| {
+                let ll = line.to_lowercase();
+                ll.contains("wal:") && ll.contains("plaintext")
+            }),
+            "disable per-layer report must label the WAL layer `plaintext`; stdout={:?}",
+            r.stdout
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+
+        // Data readable AND at-rest plaintext after disable.
+        let (n2, enc2) = reopen_state(&f);
+        assert_eq!(n2, 2, "both nodes survive the disable migration");
+        assert!(
+            !enc2,
+            "reopen honors the flipped authority: plaintext at rest"
+        );
+        assert_eq!(
+            count_aeix_files(&data_dir),
+            0,
+            "no AEIX-encrypted index file survives disable (plaintext at rest)"
+        );
+    }
+
+    #[test]
+    fn encryption_enable_on_already_encrypted_is_refused() {
+        // Enabling an already-encrypted DB is a precondition failure the engine
+        // rejects; the CLI surfaces it as a clean non-zero error, not a panic.
+        let f = make_encrypted_db();
+        let r = run_with(
+            &[
+                "encryption",
+                "enable",
+                "--key-file",
+                f.key_path.to_str().unwrap(),
+            ],
+            &cfg_env(&f),
+        );
+        assert_ne!(
+            r.code, 0,
+            "enable on an already-encrypted DB must fail; stdout={:?}",
+            r.stdout
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("already") || c.contains("encrypted") || c.contains("rotation"),
+            "must explain the DB is already encrypted; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+        assert_no_key_leak(&r, &[f.key_path.as_path()]);
+    }
+
+    #[test]
+    fn encryption_disable_on_plaintext_is_refused() {
+        // Disabling a plaintext DB is a precondition failure (nothing to disable).
+        let f = make_plaintext_db();
+        let r = run_with(&["encryption", "disable"], &cfg_env(&f));
+        assert_ne!(
+            r.code, 0,
+            "disable on a plaintext DB must fail; stdout={:?}",
+            r.stdout
+        );
+        let c = r.combined_lower();
+        assert!(
+            c.contains("not encrypted")
+                || c.contains("nothing to disable")
+                || c.contains("disable"),
+            "must explain there is nothing to disable; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
+    }
+
+    #[test]
+    fn encryption_enable_without_key_source_is_usage_error() {
+        // A configured plaintext DB but no --key-file/--env-var: the CLI must ask
+        // for a key source rather than migrate toward an unspecified key.
+        let f = make_plaintext_db();
+        let r = run_with(&["encryption", "enable"], &cfg_env(&f));
+        assert_ne!(r.code, 0, "enable with no key source must fail");
+        let c = r.combined_lower();
+        assert!(
+            c.contains("key") && (c.contains("--key-file") || c.contains("--env-var")),
+            "must name the key-source flags; got={c:?}"
+        );
+        assert!(!c.contains("panicked"), "must not panic; got={c:?}");
     }
 
     #[test]
