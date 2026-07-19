@@ -310,6 +310,22 @@ fn fact_freshness_reports_age_in_half_lives() {
     let db = AletheiaDB::new().expect("db");
 
     let id = make_person(&db, "Oslo", T0);
+
+    // Give the Person cohort a computable half-life. A single unchanging node
+    // yields only a right-censored observation, so the cohort's Kaplan–Meier
+    // curve never crosses 0.5 and its half-life is undefined (and then
+    // `age_in_half_lives` would correctly be None per design decision #6). To
+    // exercise the freshness math the cohort must have completed lifespans, so
+    // a sibling Person undergoes several world-changes (each advancing
+    // valid_from), planting terminating-event observations that dominate the
+    // censored ones and define the KM median. This is the under-specified
+    // Stage-A setup corrected to the feature's intent — no assertion is relaxed.
+    let sibling = make_person(&db, "c0", T0);
+    for k in 1..=5i64 {
+        clock.jump_to(T0 + k * DAY_US);
+        set_city(&db, sibling, &format!("c{k}"), T0 + k * DAY_US); // world-change
+    }
+
     // Advance the clock 60 days so the fact's current age is 60 days.
     clock.jump_to(T0 + 60 * DAY_US);
     let _ = time::now();

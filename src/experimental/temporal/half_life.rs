@@ -90,7 +90,7 @@ use std::time::Duration;
 use super::belief_revision::{RevisionClass, classify};
 use crate::AletheiaDB;
 use crate::core::error::{Error, QueryError, Result};
-use crate::core::history::VersionInfo;
+use crate::core::history::{EntityHistory, VersionInfo};
 use crate::core::id::EntityId;
 use crate::core::temporal::{Timestamp, time};
 
@@ -536,10 +536,29 @@ pub fn survival_probability(
 /// pays nothing.
 #[derive(Debug, Default)]
 pub struct CohortStatsCache {
-    // Stage B: keyed cache of (VolatilityStats, KmCurve) per Cohort, computed
-    // lazily and recomputed on demand. Held here as a stub so the public type
-    // and its zero-cost-when-off gating land in Stage A.
-    _private: (),
+    inner: std::sync::Mutex<CacheInner>,
+}
+
+/// Cache key: a cohort plus the transaction-time coordinate it was computed at
+/// (`None` == "as of now"). Two freshness calls at the same coordinate share
+/// one computed entry.
+type CohortCacheKey = (Cohort, Option<i64>);
+
+#[derive(Debug, Default)]
+struct CacheInner {
+    /// Monotonic staleness stamp. Because there is no write-path hook, a cache
+    /// entry is only reused while the generation it was computed at is still
+    /// current; [`CohortStatsCache::bump_generation`] invalidates every entry
+    /// in O(1) when the caller knows the cohort data may have changed.
+    generation: u64,
+    entries: std::collections::HashMap<CohortCacheKey, CachedStats>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedStats {
+    stats: VolatilityStats,
+    curve: KmCurve,
+    generation: u64,
 }
 
 impl CohortStatsCache {
@@ -547,6 +566,52 @@ impl CohortStatsCache {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Invalidate every cached entry (O(1)): bumps the staleness generation so
+    /// subsequent lookups miss and recompute. Call when the underlying cohort
+    /// history may have changed. The first call after this — like the very
+    /// first call ever — pays an O(scan) recompute.
+    pub fn bump_generation(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.generation = inner.generation.wrapping_add(1);
+        }
+    }
+
+    /// Fetch cached `(VolatilityStats, KmCurve)` for `cohort` at `as_of`,
+    /// computing and storing them via `compute` on a miss (or a stale entry).
+    ///
+    /// `compute` runs the O(scan) cohort analysis; a warm hit is a hash lookup
+    /// plus two clones, backing the sub-millisecond freshness path.
+    pub fn get_or_compute<F>(
+        &self,
+        cohort: &Cohort,
+        as_of: Option<i64>,
+        compute: F,
+    ) -> (VolatilityStats, KmCurve)
+    where
+        F: FnOnce() -> (VolatilityStats, KmCurve),
+    {
+        let key = (cohort.clone(), as_of);
+        if let Ok(inner) = self.inner.lock()
+            && let Some(cached) = inner.entries.get(&key)
+            && cached.generation == inner.generation
+        {
+            return (cached.stats.clone(), cached.curve.clone());
+        }
+        let (stats, curve) = compute();
+        if let Ok(mut inner) = self.inner.lock() {
+            let generation = inner.generation;
+            inner.entries.insert(
+                key,
+                CachedStats {
+                    stats: stats.clone(),
+                    curve: curve.clone(),
+                    generation,
+                },
+            );
+        }
+        (stats, curve)
     }
 }
 
@@ -573,8 +638,10 @@ impl AletheiaDB {
         cohort: Cohort,
         options: &HalfLifeOptions,
     ) -> Result<VolatilityStats> {
-        let _ = (self, &cohort, options);
-        todo!("Stage B: bounded cohort scan -> observations -> summarize")
+        let scan = self.scan_cohort(&cohort, options)?;
+        let mut stats = summarize(cohort, &scan.observations, options.min_events);
+        stats.sampled = scan.sampled;
+        Ok(stats)
     }
 
     /// Compute the freshness score of a single fact relative to its cohort's
@@ -593,8 +660,52 @@ impl AletheiaDB {
         entity: EntityId,
         options: &HalfLifeOptions,
     ) -> Result<FreshnessScore> {
-        let _ = (self, entity, options);
-        todo!("Stage B: entity current age + cached cohort stats -> FreshnessScore")
+        let now_us = time::now().wallclock();
+        let as_of = options.as_of_transaction_time;
+
+        // Fetch the entity's history (NOT_FOUND for an unknown entity).
+        let history = match entity {
+            EntityId::Node(id) => self.get_node_history(id)?,
+            EntityId::Edge(id) => self.get_edge_history(id)?,
+        };
+        let visible = visible_versions(&history, as_of);
+        let Some(current) = visible.last().copied() else {
+            return Err(invalid_argument(
+                "as_of_transaction_time",
+                format!("entity {entity} has no version recorded at or before the given transaction time"),
+            ));
+        };
+
+        // The entity's cohort is its own label / edge type.
+        let cohort = match entity {
+            EntityId::Node(_) => Cohort::NodeLabel(current.label.clone()),
+            EntityId::Edge(_) => Cohort::EdgeType(current.label.clone()),
+        };
+
+        // Current valid age of the entity's current version.
+        let age_us = (now_us - current.temporal.valid_time().start().wallclock()).max(0);
+        let age = micros_to_duration(age_us);
+
+        // Cohort statistics + KM curve (recomputed here; the CohortStatsCache
+        // backs the sub-millisecond warm path when wired to a persistent
+        // registry — see the type's docs).
+        let scan = self.scan_cohort(&cohort, options)?;
+        let stats = summarize(cohort.clone(), &scan.observations, options.min_events);
+        let curve = kaplan_meier(&scan.observations);
+
+        let age_in_half_lives = stats.half_life.and_then(|hl| {
+            let hl_us = hl.as_micros() as f64;
+            (hl_us > 0.0).then_some(age_us as f64 / hl_us)
+        });
+        let survival_probability = survival_probability(age, stats.half_life, Some(&curve));
+
+        Ok(FreshnessScore {
+            entity,
+            cohort,
+            age,
+            age_in_half_lives,
+            survival_probability,
+        })
     }
 
     /// List the facts in a cohort whose age exceeds `threshold` — the operator's
@@ -614,9 +725,333 @@ impl AletheiaDB {
         limit: usize,
         options: &HalfLifeOptions,
     ) -> Result<StalenessPage> {
-        let _ = (self, &cohort, threshold, offset, limit, options);
-        todo!("Stage B: bounded cohort scan -> age filter -> paginated StalenessPage")
+        if limit == 0 {
+            return Err(invalid_argument("limit", "limit must be greater than 0"));
+        }
+
+        let scan = self.scan_cohort(&cohort, options)?;
+
+        // A `HalfLives` threshold needs the cohort half-life (and curve for the
+        // per-entry survival estimate); an `AbsoluteAge` threshold needs
+        // neither, so compute lazily.
+        let needs_half_life = matches!(threshold, StalenessThreshold::HalfLives(_));
+        let (cohort_half_life, curve) = if needs_half_life {
+            let stats = summarize(cohort.clone(), &scan.observations, options.min_events);
+            (stats.half_life, Some(kaplan_meier(&scan.observations)))
+        } else {
+            (None, None)
+        };
+
+        let mut matches: Vec<StalenessEntry> = Vec::new();
+        for (entity, age_us) in &scan.members {
+            let qualifies = match threshold {
+                StalenessThreshold::AbsoluteAge(d) => (*age_us as u128) >= d.as_micros(),
+                StalenessThreshold::HalfLives(n) => match cohort_half_life {
+                    // A cohort with no half-life matches nothing under a
+                    // half-lives threshold (documented AC5 behavior).
+                    Some(hl) => (*age_us as f64) >= hl.as_micros() as f64 * n,
+                    None => false,
+                },
+            };
+            if !qualifies {
+                continue;
+            }
+            let age = micros_to_duration(*age_us);
+            let age_in_half_lives = cohort_half_life.and_then(|hl| {
+                let hl_us = hl.as_micros() as f64;
+                (hl_us > 0.0).then_some(*age_us as f64 / hl_us)
+            });
+            let survival_probability =
+                survival_probability(age, cohort_half_life, curve.as_ref());
+            matches.push(StalenessEntry {
+                entity: *entity,
+                age,
+                age_in_half_lives,
+                survival_probability,
+            });
+        }
+
+        // Stable order: oldest first, then by entity id for deterministic
+        // pagination under equal ages.
+        matches.sort_by(|a, b| b.age.cmp(&a.age).then_with(|| a.entity.cmp(&b.entity)));
+
+        let total_matching = matches.len();
+        let entries: Vec<StalenessEntry> =
+            matches.into_iter().skip(offset).take(limit).collect();
+        let next_offset = {
+            let consumed = offset + entries.len();
+            (consumed < total_matching).then_some(consumed)
+        };
+
+        Ok(StalenessPage {
+            entries,
+            total_matching,
+            sampled: scan.sampled,
+            next_offset,
+        })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cohort scan (bounded, capped, engine-leaf read over already-stored history).
+// ---------------------------------------------------------------------------
+
+/// The result of scanning a cohort's recorded history: the survival
+/// observations feeding the estimator, the current members (with their current
+/// valid ages) feeding the staleness inventory, and whether the candidate scan
+/// hit the cap.
+struct CohortScan {
+    observations: Vec<Observation>,
+    /// `(entity, current_valid_age_micros)` for each current cohort member.
+    members: Vec<(EntityId, i64)>,
+    sampled: bool,
+}
+
+impl AletheiaDB {
+    /// Enumerate a cohort's members (bounded by `options.max_entities`), read
+    /// each one's recorded history, and derive its survival observations +
+    /// current age. Read-only; takes only short historical read locks.
+    fn scan_cohort(&self, cohort: &Cohort, options: &HalfLifeOptions) -> Result<CohortScan> {
+        // Reject a structurally-invalid cohort (an empty label/type/key).
+        match cohort {
+            Cohort::NodeLabel(label) | Cohort::EdgeType(label) if label.is_empty() => {
+                return Err(invalid_argument("cohort", "cohort label must not be empty"));
+            }
+            Cohort::NodeProperty { label, key } if label.is_empty() || key.is_empty() => {
+                return Err(invalid_argument(
+                    "cohort",
+                    "node-property cohort label and key must not be empty",
+                ));
+            }
+            _ => {}
+        }
+
+        let now_us = time::now().wallclock();
+        let as_of = options.as_of_transaction_time;
+        let cap = options.max_entities;
+        let is_edge = matches!(cohort, Cohort::EdgeType(_));
+        let label = cohort_label(cohort);
+        let key = match cohort {
+            Cohort::NodeProperty { key, .. } => Some(key.as_str()),
+            _ => None,
+        };
+
+        // Enumerate candidate ids under a single short read lock, sorted
+        // ascending so the cap keeps the lowest ids (mirroring the
+        // `max_schema_as_of_entities` scan discipline). `sampled` reflects
+        // candidate truncation.
+        let (node_ids, edge_ids, sampled) = {
+            let historical = self.historical.read();
+            if is_edge {
+                let mut ids = historical.versioned_edge_ids();
+                ids.sort_unstable();
+                let sampled = ids.len() > cap;
+                ids.truncate(cap);
+                (Vec::new(), ids, sampled)
+            } else {
+                let mut ids = historical.versioned_node_ids();
+                ids.sort_unstable();
+                let sampled = ids.len() > cap;
+                ids.truncate(cap);
+                (ids, Vec::new(), sampled)
+            }
+        };
+
+        let mut observations = Vec::new();
+        let mut members = Vec::new();
+
+        if is_edge {
+            for id in edge_ids {
+                let history = self.get_edge_history(id)?;
+                if let Some((obs, member_age)) =
+                    process_entity_history(&history, label, key, as_of, now_us)
+                {
+                    observations.extend(obs);
+                    members.push((EntityId::Edge(id), member_age));
+                }
+            }
+        } else {
+            for id in node_ids {
+                let history = self.get_node_history(id)?;
+                if let Some((obs, member_age)) =
+                    process_entity_history(&history, label, key, as_of, now_us)
+                {
+                    observations.extend(obs);
+                    members.push((EntityId::Node(id), member_age));
+                }
+            }
+        }
+
+        Ok(CohortScan {
+            observations,
+            members,
+            sampled,
+        })
+    }
+}
+
+/// The versions of `history` visible at `as_of` transaction time (all versions
+/// when `as_of` is `None`), oldest-first, mirroring the belief-revision audit's
+/// visibility filter (Issue #3362) so a half-life run at a past coordinate is
+/// replayable.
+fn visible_versions(history: &EntityHistory, as_of: Option<Timestamp>) -> Vec<&VersionInfo> {
+    history
+        .versions
+        .iter()
+        .filter(|v| match as_of {
+            Some(a) => v.temporal.transaction_time().start() <= a,
+            None => true,
+        })
+        .collect()
+}
+
+/// The label/type/property-label string a cohort scopes to.
+fn cohort_label(cohort: &Cohort) -> &str {
+    match cohort {
+        Cohort::NodeLabel(label)
+        | Cohort::EdgeType(label)
+        | Cohort::NodeProperty { label, .. } => label,
+    }
+}
+
+/// Derive one entity's survival observations and current valid age for the
+/// cohort, or `None` when the entity is not in the cohort (wrong label, or no
+/// version visible at the as-of coordinate).
+fn process_entity_history(
+    history: &EntityHistory,
+    label: &str,
+    key: Option<&str>,
+    as_of: Option<Timestamp>,
+    now_us: i64,
+) -> Option<(Vec<Observation>, i64)> {
+    let visible = visible_versions(history, as_of);
+    let current = visible.last().copied()?;
+    if current.label != label {
+        return None;
+    }
+    let observations = observations_from_versions(&visible, key, now_us);
+    let current_age = (now_us - current.temporal.valid_time().start().wallclock()).max(0);
+    Some((observations, current_age))
+}
+
+/// Derive the survival observations for one entity's visible version history.
+///
+/// A fact's valid-time lifespan runs from the `valid_from` that established it
+/// (the initial assertion, or a later WorldChange) until the next terminating
+/// transition — a WorldChange (the fact changed: ends at the successor's
+/// `valid_from`) or a Retraction (ends at the closed valid interval's end). A
+/// Correction/Reaffirmation rewrites the record of the same validity period and
+/// does NOT terminate the lifespan (Issue #3362 event oracle). A still-open
+/// final lifespan yields a right-censored observation.
+///
+/// For a property cohort (`key` = `Some`), a terminating transition only ends
+/// *that property's* lifespan when the property's value actually changes across
+/// it (a per-property refinement: a WorldChange to a different property, or a
+/// correction, leaves this property's lifespan running).
+fn observations_from_versions(
+    visible: &[&VersionInfo],
+    key: Option<&str>,
+    now_us: i64,
+) -> Vec<Observation> {
+    let mut observations = Vec::new();
+    // Wallclock micros at which the currently-live fact's valid interval began,
+    // or `None` when no fact is currently live (before the property appears, or
+    // after a retraction).
+    let mut life_start: Option<i64> = None;
+    let mut max_prior_valid_from: Option<Timestamp> = None;
+
+    for i in 0..visible.len() {
+        let version = visible[i];
+        let predecessor = (i > 0).then(|| visible[i - 1]);
+        let class = classify(version, predecessor, max_prior_valid_from);
+        let valid_from = version.temporal.valid_time().start();
+        let valid_from_us = valid_from.wallclock();
+
+        if predecessor.is_none() {
+            // Initial assertion: a lifespan begins iff the property is present
+            // (always, for an entity cohort).
+            life_start = key_present(version, key).then_some(valid_from_us);
+        } else {
+            match class {
+                RevisionClass::WorldChange => {
+                    let terminates = match key {
+                        None => true,
+                        Some(k) => value_changed(predecessor, version, k),
+                    };
+                    if terminates {
+                        if let Some(start) = life_start {
+                            observations.push(Observation::event((valid_from_us - start).max(0)));
+                        }
+                        life_start = Some(valid_from_us);
+                    }
+                }
+                RevisionClass::Retraction => {
+                    let terminates = match key {
+                        None => true,
+                        Some(k) => predecessor
+                            .is_some_and(|p| p.properties.get(k).is_some()),
+                    };
+                    if terminates {
+                        if let Some(start) = life_start {
+                            let end = version.temporal.valid_time().end().wallclock();
+                            observations.push(Observation::event((end - start).max(0)));
+                        }
+                        life_start = None;
+                    }
+                }
+                // Correction / Reaffirmation continue the current lifespan; if
+                // the (property) fact had not yet begun, it may begin here.
+                _ => {
+                    if life_start.is_none() && key_present(version, key) {
+                        life_start = Some(valid_from_us);
+                    }
+                }
+            }
+        }
+
+        max_prior_valid_from = Some(match max_prior_valid_from {
+            Some(m) if m >= valid_from => m,
+            _ => valid_from,
+        });
+    }
+
+    // A still-open final lifespan is a right-censored observation.
+    if let Some(start) = life_start {
+        observations.push(Observation::censored((now_us - start).max(0)));
+    }
+
+    observations
+}
+
+/// Whether `version` carries the cohort's property key (always `true` for an
+/// entity cohort, where `key` is `None`).
+fn key_present(version: &VersionInfo, key: Option<&str>) -> bool {
+    match key {
+        None => true,
+        Some(k) => version.properties.get(k).is_some(),
+    }
+}
+
+/// Whether the value of property `key` differs between `predecessor` and
+/// `version` (an added or removed key counts as a change; NaN-aware via
+/// `semantically_equal`).
+fn value_changed(predecessor: Option<&VersionInfo>, version: &VersionInfo, key: &str) -> bool {
+    let before = predecessor.and_then(|p| p.properties.get(key));
+    let after = version.properties.get(key);
+    match (before, after) {
+        (Some(a), Some(b)) => !a.semantically_equal(b),
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+/// Build an `INVALID_ARGUMENT`-mapped error (`QueryError::InvalidParameter`),
+/// mirroring the belief-revision helper (Issue #3234 structured codes).
+fn invalid_argument(parameter: &str, reason: impl Into<String>) -> Error {
+    Error::Query(QueryError::InvalidParameter {
+        parameter: parameter.to_string(),
+        reason: reason.into(),
+    })
 }
 
 #[cfg(test)]
