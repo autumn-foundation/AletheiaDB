@@ -243,3 +243,28 @@ future-dated `valid_from` clamp.
 Trust propagation through lineage (#3371); learned ranking; hard provenance filtering
 (#3348, shipped, composes); query-language fusion surface (#3354); cross-encoder
 re-ranking; per-source trust registries; the #3366 eval harness (graduation dependency).
+
+## 11. Follow-up residue (MCP-registry follow-up PR #3735)
+
+The following two items are **intentionally deferred** and are documented here so the
+gap is explicit rather than silent:
+
+- **`get_belief_revisions` is NOT enrolled in the #3353 token-budget set.** Its
+  array-returning sibling `get_node_history` *is* in `BUDGETABLE_READ_TOOLS`, but
+  `get_belief_revisions` (Issue #3362) is deliberately excluded in v1 (per §9): a large
+  belief-revision audit cannot yet be byte-bounded along the #3353 degradation ladder
+  without dropping the classified-revision sequence / confidence trajectory that is the
+  tool's whole value. Enrolling it (a budget-shaped audit with fetch handles) is a
+  tracked follow-up.
+
+- **`hybrid_query` fusion AS-OF resolves coordinate metadata only when BOTH `valid_time`
+  and `transaction_time` are set.** `hybrid_fusion_inputs` reads the version at the
+  `(valid, tx)` coordinate via `get_node_at_time` **only** when both dimensions are
+  supplied (AC6); a tx-only or valid-only AS OF falls back to **current-version**
+  confidence/recency metadata (via `get_node`). This matches §8's "the AS OF path
+  resolves confidence/recency at the coordinate … when `valid_time`/`transaction_time`
+  set" phrasing. Full single-dimension AS-OF metadata resolution (defaulting the other
+  dimension to now the way #3225 traversal does) is a tracked follow-up; until then a
+  partial-coordinate fused `hybrid_query` scores against current metadata rather than
+  erroring, since the fused ranking is still monotone and the `score_breakdown` discloses
+  the recency term used.

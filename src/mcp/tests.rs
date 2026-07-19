@@ -20388,4 +20388,124 @@ mod belief_revision_and_fusion_tests {
             );
         }
     }
+
+    /// HIGH-1: the vector-first hybrid fusion path must over-fetch the fused
+    /// horizon (not the similarity top-k) so a high-trust candidate ranked
+    /// *below* the similarity top-k still surfaces in the fused top-k. With
+    /// `top_k = 1` the similarity top-1 is "near"; "trusted" is rank-2 by
+    /// similarity but high-trust, so a correct over-fetch promotes it. The
+    /// buggy `(k, limit)` path fetches only the similarity top-1 ("near") and
+    /// can never surface "trusted" — a k-independent post-hoc re-sort.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[test]
+    fn hybrid_query_fusion_surfaces_high_trust_below_similarity_topk() {
+        let server = create_test_server();
+        setup_fusion_corpus(&server);
+        let out = server.dispatch_tool_json(
+            "hybrid_query",
+            serde_json::json!({
+                "query_embedding": [1.0, 0.0, 0.0, 0.0],
+                "vector_property": "embedding",
+                "namespace": "all",
+                "top_k": 1, "limit": 1,
+                "fusion_policy": { "w_similarity": 1.0, "w_confidence": 5.0, "w_recency": 0.0 }
+            }),
+        );
+        let v = parse(&out);
+        assert!(
+            v.get("error").is_none(),
+            "hybrid fusion should succeed: {out}"
+        );
+        assert_eq!(
+            result_names(&v).first().map(String::as_str),
+            Some("trusted"),
+            "fusion must over-fetch the fused horizon and surface the high-trust \
+             candidate ranked below the similarity top-k: {out}"
+        );
+    }
+
+    /// MED-2: the hybrid fusion path must reject a non-Cosine index with the
+    /// same structured `FAILED_PRECONDITION` the `find_similar` fused path uses,
+    /// rather than feeding a distance whose scores are not in `[0,1]` straight
+    /// into the fused score.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[test]
+    fn hybrid_query_fusion_on_non_cosine_index_is_failed_precondition() {
+        let server = create_test_server();
+        server.dispatch_tool_json(
+            "enable_vector_index",
+            serde_json::json!({
+                "property_name": "embedding", "dimensions": 4,
+                "distance_metric": "euclidean"
+            }),
+        );
+        server.dispatch_tool_json(
+            "create_node",
+            serde_json::json!({
+                "label": "Doc",
+                "properties": { "name": "a", "embedding": [1.0, 0.0, 0.0, 0.0] }
+            }),
+        );
+        let out = server.dispatch_tool_json(
+            "hybrid_query",
+            serde_json::json!({
+                "query_embedding": [1.0, 0.0, 0.0, 0.0],
+                "vector_property": "embedding",
+                "top_k": 2, "limit": 2,
+                "fusion_policy": { "w_similarity": 1.0, "w_confidence": 5.0, "w_recency": 0.0 }
+            }),
+        );
+        let v = parse(&out);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("FAILED_PRECONDITION"),
+            "hybrid fusion on a non-Cosine index must be FAILED_PRECONDITION: {out}"
+        );
+        assert_eq!(
+            v.pointer("/error/retriable"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    /// MED-3: the `start_node_id` single-node fast path (no `traverse_edge`)
+    /// must still run fusion scoring when a `fusion_policy` is supplied, so the
+    /// contract's per-result `score_breakdown` is present on these paths too.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[test]
+    fn hybrid_query_single_node_with_fusion_attaches_breakdown() {
+        let server = create_test_server();
+        setup_fusion_corpus(&server);
+        // Resolve a concrete node id via find_similar.
+        let fs = parse(&server.dispatch_tool_json(
+            "find_similar",
+            serde_json::json!({
+                "property_name": "embedding", "embedding": [1.0, 0.0, 0.0, 0.0], "k": 1
+            }),
+        ));
+        let node_id = fs["results"][0]["node"]["id"]
+            .as_u64()
+            .expect("node id from find_similar");
+        let out = server.dispatch_tool_json(
+            "hybrid_query",
+            serde_json::json!({
+                "start_node_id": node_id,
+                "fusion_policy": { "w_similarity": 1.0, "w_confidence": 5.0, "w_recency": 0.0 }
+            }),
+        );
+        let v = parse(&out);
+        assert!(
+            v.get("error").is_none(),
+            "single-node hybrid fusion should succeed: {out}"
+        );
+        let results = v["results"].as_array().expect("results");
+        assert_eq!(
+            results.len(),
+            1,
+            "single-node path returns exactly one result: {out}"
+        );
+        assert!(
+            results[0].get("score_breakdown").is_some(),
+            "single-node hybrid fusion must attach score_breakdown: {out}"
+        );
+    }
 }

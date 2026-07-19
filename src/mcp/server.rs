@@ -5704,18 +5704,8 @@ impl AletheiaMcpServer {
         // Fusion's similarity term assumes an already-`[0,1]` score, true only
         // for Cosine; reject other metrics rather than distorting the term
         // (mirrors `FusionError::UnsupportedMetric`).
-        if let Some(info) = self
-            .db
-            .list_vector_indexes()
-            .into_iter()
-            .find(|i| i.property_name == req.property_name)
-            && info.distance_metric != DistanceMetric::Cosine
-        {
-            return self.failed_precondition(&format!(
-                "provenance-weighted fusion requires a Cosine vector index; the index for '{}' \
-                 uses {:?}, whose scores are not in [0,1] (v1 supports Cosine only)",
-                req.property_name, info.distance_metric
-            ));
+        if let Some(err) = self.fusion_metric_precondition(&req.property_name) {
+            return err;
         }
 
         let scope = match self.parse_opt_scope(&req.namespace) {
@@ -8503,7 +8493,8 @@ impl AletheiaMcpServer {
                         // the version resolved at this coordinate) to the single
                         // result; a fail yields an empty result set, never a
                         // fabricated row.
-                        let results: Vec<HybridQueryResult> = if in_scope
+                        #[allow(unused_mut)]
+                        let mut results: Vec<HybridQueryResult> = if in_scope
                             && prov_filter_ref
                                 .is_none_or(|f| f.matches(response.provenance.as_ref()))
                         {
@@ -8517,6 +8508,14 @@ impl AletheiaMcpServer {
                         } else {
                             Vec::new()
                         };
+                        // Issue #3372 (MED-3): attach the fused `score_breakdown`
+                        // on the single-node AS-OF path too. Ranking is a no-op
+                        // for one result; AC6 confidence/recency are resolved at
+                        // the (valid, tx) coordinate here.
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(&mut results, policy, valid_time, tx_time);
+                        }
                         self.success_json(json!({
                             "results": results,
                             "count": results.len(),
@@ -8547,7 +8546,8 @@ impl AletheiaMcpServer {
                         let in_scope = !scope_is_restricting || scope.contains(&node.namespace());
                         let response = self.node_to_response(&node, include_vectors, now);
                         // Issue #3348: filter the single start node.
-                        let results: Vec<HybridQueryResult> = if in_scope
+                        #[allow(unused_mut)]
+                        let mut results: Vec<HybridQueryResult> = if in_scope
                             && prov_filter_ref
                                 .is_none_or(|f| f.matches(response.provenance.as_ref()))
                         {
@@ -8561,6 +8561,15 @@ impl AletheiaMcpServer {
                         } else {
                             Vec::new()
                         };
+                        // Issue #3372 (MED-3): attach the fused `score_breakdown`
+                        // on the single-node (no-traverse) path too. Ranking is a
+                        // no-op for one result; with no full (valid, tx) AS-OF
+                        // set here, confidence/recency resolve from the current
+                        // version (documented partial-coordinate limitation).
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(&mut results, policy, valid_time, tx_time);
+                        }
                         self.success_json(json!({
                             "results": results,
                             "count": results.len(),
@@ -8616,6 +8625,30 @@ impl AletheiaMcpServer {
                 return self.invalid_argument(&e);
             }
 
+            // Issue #3372 (MED-2): with a fusion policy, reject a non-Cosine
+            // index up front — mirroring `handle_find_similar_fused` — rather
+            // than feeding a distance whose scores are not in [0,1] into the
+            // fused score.
+            #[cfg(feature = "semantic-retrieval-fusion")]
+            if fusion_policy.is_some()
+                && let Some(err) = self.fusion_metric_precondition(property_name)
+            {
+                return err;
+            }
+
+            // Issue #3372 (HIGH-1): when a fusion policy is present, over-fetch
+            // the `k`-scaled fused horizon (never the similarity top-k) so a
+            // geometrically-far but high-trust candidate can still enter the
+            // fused ranking, rather than degenerating into a post-hoc re-sort of
+            // the similarity top-k. Mirrors `handle_find_similar_fused`'s
+            // `fused_horizon(k)` over-fetch.
+            #[cfg(feature = "semantic-retrieval-fusion")]
+            let fusion_fetch = fusion_policy
+                .as_ref()
+                .map(|_| crate::db::fusion::fused_horizon(k).min(MAX_VECTOR_K));
+            #[cfg(not(feature = "semantic-retrieval-fusion"))]
+            let fusion_fetch: Option<usize> = None;
+
             // Issue #3348 (AC6) / #3349 (PR3d): with a provenance filter OR a
             // restricting namespace scope, over-fetch the candidate horizon so
             // the returned top rows are all filter-passing (filter-complete)
@@ -8628,6 +8661,8 @@ impl AletheiaMcpServer {
             // exclusion.
             let (fetch_k, fetch_limit) = if prov_filter.is_some() || scope_is_restricting {
                 (MAX_VECTOR_K, MAX_VECTOR_K)
+            } else if let Some(horizon) = fusion_fetch {
+                (horizon, horizon)
             } else {
                 (k, limit)
             };
@@ -8694,6 +8729,31 @@ impl AletheiaMcpServer {
                 "Must specify either start_node_id, query_embedding, or filter_label",
             )
         }
+    }
+
+    /// Reject a non-Cosine vector index for a provenance-weighted fused search
+    /// (Issue #3372). Fusion's similarity term assumes an already-`[0,1]` score,
+    /// true only for Cosine; a Euclidean/dot index would silently distort the
+    /// fused score. Returns the structured `FAILED_PRECONDITION`
+    /// (`FusionError::UnsupportedMetric`) when the queried property's index uses
+    /// another metric, else `None`. Shared by the `find_similar` and
+    /// `hybrid_query` fused paths.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn fusion_metric_precondition(&self, property_name: &str) -> Option<CallToolResult> {
+        if let Some(info) = self
+            .db
+            .list_vector_indexes()
+            .into_iter()
+            .find(|i| i.property_name == property_name)
+            && info.distance_metric != DistanceMetric::Cosine
+        {
+            return Some(self.failed_precondition(&format!(
+                "provenance-weighted fusion requires a Cosine vector index; the index for '{}' \
+                 uses {:?}, whose scores are not in [0,1] (v1 supports Cosine only)",
+                property_name, info.distance_metric
+            )));
+        }
+        None
     }
 
     /// Re-rank `results` by the provenance-weighted fused score (Issue #3372)

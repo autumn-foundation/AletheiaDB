@@ -277,7 +277,7 @@ async fn metrics_route_is_served_and_is_not_an_mcp_tool() {
     //     (→ class == Metrics), and serves the Prometheus text content type.
     let resp = client
         .get("/metrics")
-        .header("authorization", &format!("Bearer {}", &*metrics_key))
+        .header("authorization", &format!("Bearer {}", *metrics_key))
         .send()
         .await;
     assert_ne!(

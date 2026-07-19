@@ -1084,8 +1084,8 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
     // Everything else must be Read (no fifth class sneaking in).
     assert_eq!(
         TOOL_ACCESS_CLASSES.len(),
-        actual_write.len() + actual_metrics.len() + actual_admin.len() + 45,
-        "Read tool count changed (expected 45); if a tool was added or \
+        actual_write.len() + actual_metrics.len() + actual_admin.len() + 46,
+        "Read tool count changed (expected 46); if a tool was added or \
          removed, re-verify its classification and update this count"
     );
 }
@@ -1129,7 +1129,7 @@ fn live_tool_inventory_matches_golden() {
     /// The 64 `(tool_name, access_class)` pairs the server is expected to
     /// advertise, derived from the current live `TOOL_ACCESS_CLASSES`.
     const GOLDEN: [(&str, AccessClass); 64] = [
-        // Read (45)
+        // Read (46)
         ("get_node", AccessClass::Read),
         ("list_nodes", AccessClass::Read),
         ("count_nodes", AccessClass::Read),
