@@ -462,20 +462,24 @@ impl<'a> ContradictionGenealogyEngine<'a> {
     ///   never had.
     pub fn genealogy(
         &self,
-        _target: ContradictionTarget,
-        _options: &GenealogyOptions,
+        target: ContradictionTarget,
+        options: &GenealogyOptions,
     ) -> Result<ContradictionGenealogy> {
-        // RED stub — implementation lands in GREEN.
-        Ok(ContradictionGenealogy {
-            entity: None,
-            property: None,
-            claims: Vec::new(),
-            pairs: Vec::new(),
-            divergence_point: None,
-            sources: Vec::new(),
-            narrative: String::new(),
-            truncated: false,
-        })
+        match target {
+            ContradictionTarget::EntityProperty { entity, property } => {
+                let history = self.fetch_history(entity)?;
+                if !history_contains_key(&history, &property) {
+                    return Err(invalid_argument(
+                        "property",
+                        format!("entity {entity} never had property '{property}'"),
+                    ));
+                }
+                Ok(genealogy_entity_property(
+                    entity, &history, &property, options,
+                ))
+            }
+            ContradictionTarget::Claims(refs) => self.genealogy_from_claims(refs, options),
+        }
     }
 
     fn genealogy_from_claims(
@@ -524,16 +528,7 @@ impl<'a> ContradictionGenealogyEngine<'a> {
     }
 
     /// Scan the database for contradictions under `scope`.
-    #[allow(unreachable_code, unused_variables, clippy::needless_return)]
     pub fn scan(&self, scope: &ContradictionScope) -> Result<ContradictionScan> {
-        // RED stub — implementation lands in GREEN.
-        return Ok(ContradictionScan {
-            contradictions: Vec::new(),
-            scanned_entities: 0,
-            sampled: false,
-            has_more: false,
-            next_offset: None,
-        });
         let (candidates, sampled) = self.candidates(scope);
         let scanned_entities = candidates.len();
 
@@ -723,24 +718,26 @@ fn history_contains_key(history: &EntityHistory, key: &str) -> bool {
 ///
 /// Pure over `(history, options)`. Callers must have already validated that the
 /// property exists somewhere in `history`.
-#[allow(unused_variables)]
 fn genealogy_entity_property(
     entity: EntityId,
     history: &EntityHistory,
     property: &str,
     options: &GenealogyOptions,
 ) -> ContradictionGenealogy {
-    // RED stub — implementation lands in GREEN.
-    ContradictionGenealogy {
-        entity: Some(entity),
-        property: Some(property.to_string()),
-        claims: Vec::new(),
-        pairs: Vec::new(),
-        divergence_point: None,
-        sources: Vec::new(),
-        narrative: String::new(),
-        truncated: false,
-    }
+    let classes = belief_revision::classify_history(history);
+    let as_of = options.as_of_transaction_time;
+    let claims: Vec<ClaimCtx> = history
+        .versions
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| as_of.is_none_or(|t| v.temporal.transaction_time().start() <= t))
+        .filter_map(|(i, v)| {
+            v.properties
+                .get(property)
+                .map(|val| ClaimCtx::new(entity, v, val.clone(), classes[i]))
+        })
+        .collect();
+    build_genealogy(Some(entity), Some(property.to_string()), claims, options)
 }
 
 /// The overlapping valid window of two claims, if any (`[max(vf), min(vt))`).

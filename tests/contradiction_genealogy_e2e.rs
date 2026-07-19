@@ -22,21 +22,23 @@ fn backdated(secs: i64) -> Timestamp {
 #[test]
 fn e2e_backdated_correction_is_retroactive() {
     let db = AletheiaDB::new().unwrap();
-    let vt_recent = backdated(500);
-    let vt_old = backdated(1000);
-    // Create asserting a recent valid_from, then backdate a different value to
-    // an earlier valid_from that overlaps => retroactive correction.
+    // A node's update valid_from cannot precede its creation valid_from, so a
+    // retroactive correction (B.valid_from <= A.valid_from) is realized by
+    // re-asserting a *different* value over the *same* valid period the first
+    // claim already covered from its start — the superseded claim is never
+    // retracted, so both remain asserted over the overlap.
+    let vt = backdated(1000);
     let id = db
         .create_node_with_options(
             "Company",
             PropertyMapBuilder::new().insert("ceo", "Alice").build(),
-            WriteRequestOptions::new().with_valid_from(vt_recent),
+            WriteRequestOptions::new().with_valid_from(vt),
         )
         .unwrap();
     db.update_node_with_options(
         id,
         PropertyMapBuilder::new().insert("ceo", "Bob").build(),
-        WriteRequestOptions::new().with_valid_from(vt_old),
+        WriteRequestOptions::new().with_valid_from(vt),
     )
     .unwrap();
 
