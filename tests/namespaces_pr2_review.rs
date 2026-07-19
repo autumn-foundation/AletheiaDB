@@ -496,6 +496,65 @@ fn pr3d_directed_scoped_traverse_boundary() {
     );
 }
 
+/// PR3d (Finding 3): the traversal boundary is enforced on the EDGE namespace,
+/// not merely the target-node namespace. An in-scope far node reachable ONLY via
+/// an OUT-OF-SCOPE edge (edge.ns ∉ scope, node.ns ∈ scope) must NOT be crossed
+/// under `incoming` or `both` — the out-of-scope edge is the boundary, even
+/// though its endpoint is in scope.
+#[test]
+fn pr3d_in_scope_node_via_out_of_scope_edge_is_not_crossed() {
+    use aletheiadb::TraverseDirection;
+    let db = AletheiaDB::new().unwrap();
+    // a1 and a3 are BOTH in agent:a (in scope), but the edge connecting them
+    // lives in agent:b (out of scope):
+    //   a3 -KNOWS(agent:b)-> a1    (incoming into a1; edge OUT of scope)
+    //   a1 -KNOWS(agent:a)-> a2    (a control in-scope outgoing edge)
+    let a1 = db
+        .create_node_in_namespace("Person", props("a1"), "agent:a")
+        .unwrap();
+    let a2 = db
+        .create_node_in_namespace("Person", props("a2"), "agent:a")
+        .unwrap();
+    let a3 = db
+        .create_node_in_namespace("Person", props("a3"), "agent:a")
+        .unwrap();
+    // The endpoints are agent:a, but the edge itself is stamped agent:b.
+    db.create_edge_in_namespace(a3, a1, "KNOWS", props(""), "agent:b")
+        .unwrap();
+    db.create_edge_in_namespace(a1, a2, "KNOWS", props(""), "agent:a")
+        .unwrap();
+
+    let scope_a = NamespaceScope::single(ns("agent:a"));
+
+    // Incoming from a1 under {agent:a}: the a3->a1 edge is out of scope, so a3 is
+    // NOT reachable even though a3 itself is an agent:a node.
+    let incoming: BTreeSet<_> = db
+        .traverse_scoped_directed(a1, Some("KNOWS"), TraverseDirection::Incoming, 5, &scope_a)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(
+        !incoming.contains(&a3),
+        "incoming must NOT cross the out-of-scope edge to a3 (edge.ns ∉ scope)"
+    );
+
+    // Both from a1 under {agent:a}: a2 via the in-scope edge, never a3 via the
+    // out-of-scope edge.
+    let both: BTreeSet<_> = db
+        .traverse_scoped_directed(a1, Some("KNOWS"), TraverseDirection::Both, 5, &scope_a)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(
+        both.contains(&a2),
+        "both reaches a2 over the in-scope agent:a edge"
+    );
+    assert!(
+        !both.contains(&a3),
+        "both must NOT reach a3 over the out-of-scope agent:b edge"
+    );
+}
+
 /// C8: `find_nodes_by_property_at_scoped` reconstructs point-in-time nodes then
 /// filters by (immutable) namespace.
 #[test]
