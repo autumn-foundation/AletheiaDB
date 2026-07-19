@@ -13,6 +13,12 @@ use crate::index::vector::DistanceMetric;
 pub struct QueryAst {
     /// Optional temporal clause (AS OF or BETWEEN)
     pub temporal: Option<TemporalClause>,
+    /// Optional namespace scope clause (`USE / IN NAMESPACE ...`, Issue #3349,
+    /// PR2b). When present, the converter lowers it to a
+    /// [`NamespaceScope`](crate::core::namespace::NamespaceScope) on the produced
+    /// query IR; when absent, the query stays namespace-agnostic exactly as
+    /// before.
+    pub namespace: Option<NamespaceClause>,
     /// Main query source (MATCH or vector search)
     pub source: SourceClause,
     /// Optional ranking clause (RANK BY SIMILARITY)
@@ -44,6 +50,7 @@ impl QueryAst {
     pub fn new(source: SourceClause) -> Self {
         QueryAst {
             temporal: None,
+            namespace: None,
             source,
             rank: None,
             where_clause: None,
@@ -60,6 +67,13 @@ impl QueryAst {
     #[must_use]
     pub fn with_temporal(mut self, temporal: TemporalClause) -> Self {
         self.temporal = Some(temporal);
+        self
+    }
+
+    /// Add a namespace scope clause to the query.
+    #[must_use]
+    pub fn with_namespace(mut self, namespace: NamespaceClause) -> Self {
+        self.namespace = Some(namespace);
         self
     }
 
@@ -131,6 +145,25 @@ impl QueryAst {
             SourceClause::VectorSearch { .. } | SourceClause::FindSimilar { .. }
         ) || self.rank.is_some()
     }
+}
+
+/// A namespace scope clause (`USE / IN NAMESPACE ...`, Issue #3349, PR2b).
+///
+/// The canonical surface is `USE NAMESPACE <name>` (single),
+/// `USE NAMESPACE <a>, <b>` (union), and `USE ALL NAMESPACES` (no filter);
+/// `IN` is an accepted synonym for `USE`. Namespace **names** are carried as
+/// raw strings and validated in the converter (charset / length / reserved
+/// rules via [`Namespace::new`](crate::core::namespace::Namespace::new)), so a
+/// malformed *name* surfaces as a structured `INVALID_ARGUMENT`, exactly as the
+/// MCP `namespace` param does — while a malformed *clause structure* is a parse
+/// error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceClause {
+    /// `USE ALL NAMESPACES` (or the single selector name `all`) — no filter.
+    All,
+    /// `USE NAMESPACE <name> [, <name>]*` — a non-empty list of raw namespace
+    /// names (one ⇒ single scope, more ⇒ union).
+    Names(Vec<String>),
 }
 
 /// Temporal clause for time-travel queries.
