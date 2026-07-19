@@ -598,6 +598,15 @@ harness = false
 path = "benches/belief_revision.rs"
 required-features = ["semantic-temporal"]
 
+# Contradiction-genealogy reconstruction (Issue #3352): building a genealogy over
+# a ≤1K-version entity, targeting p99 < 50ms (temporal-reconstruction budget).
+# Gated on semantic-temporal.
+[[bench]]
+name = "contradiction_genealogy"
+harness = false
+path = "benches/contradiction_genealogy.rs"
+required-features = ["semantic-temporal"]
+
 # Drift-alarm write-path overhead (Issue #3367): GroupCommit commit throughput
 # baseline vs 10 active on-write monitors + engine (target: <10% reduction).
 [[bench]]

@@ -492,7 +492,8 @@ impl<'a> ContradictionGenealogyEngine<'a> {
         }
 
         // Resolve every referenced version, carrying its origin class.
-        let mut resolved: Vec<(ClaimRef, VersionInfo, RevisionClass)> = Vec::with_capacity(refs.len());
+        let mut resolved: Vec<(ClaimRef, VersionInfo, RevisionClass)> =
+            Vec::with_capacity(refs.len());
         for r in &refs {
             let history = self.fetch_history(r.entity)?;
             let classes = belief_revision::classify_history(&history);
@@ -601,13 +602,19 @@ impl<'a> ContradictionGenealogyEngine<'a> {
         let mut sampled = false;
         let mut out: Vec<EntityId> = Vec::new();
 
-        if matches!(scope.entity_kind, EntityKindScope::Nodes | EntityKindScope::Both) {
+        if matches!(
+            scope.entity_kind,
+            EntityKindScope::Nodes | EntityKindScope::Both
+        ) {
             let mut ids = historical.versioned_node_ids();
             sampled |= crate::db::schema::cap_ids(&mut ids, cap);
             ids.sort_unstable();
             out.extend(ids.into_iter().map(EntityId::Node));
         }
-        if matches!(scope.entity_kind, EntityKindScope::Edges | EntityKindScope::Both) {
+        if matches!(
+            scope.entity_kind,
+            EntityKindScope::Edges | EntityKindScope::Both
+        ) {
             let mut ids = historical.versioned_edge_ids();
             sampled |= crate::db::schema::cap_ids(&mut ids, cap);
             ids.sort_unstable();
@@ -670,7 +677,12 @@ struct ClaimCtx {
 }
 
 impl ClaimCtx {
-    fn new(entity: EntityId, version: &VersionInfo, value: PropertyValue, origin: RevisionClass) -> Self {
+    fn new(
+        entity: EntityId,
+        version: &VersionInfo,
+        value: PropertyValue,
+        origin: RevisionClass,
+    ) -> Self {
         let valid = version.temporal.valid_time();
         let tx = version.temporal.transaction_time();
         let value_display = value.to_string();
@@ -711,7 +723,10 @@ impl ClaimCtx {
 
 /// Whether `key` appears in the properties of any version in `history`.
 fn history_contains_key(history: &EntityHistory, key: &str) -> bool {
-    history.versions.iter().any(|v| v.properties.get(key).is_some())
+    history
+        .versions
+        .iter()
+        .any(|v| v.properties.get(key).is_some())
 }
 
 /// Build a genealogy for a single entity+property from its full history.
@@ -745,7 +760,11 @@ fn valid_overlap(a: &ClaimCtx, b: &ClaimCtx) -> Option<(Timestamp, Option<Timest
     let start = a.valid_from.max(b.valid_from);
     let end = a.valid_end().min(b.valid_end());
     if start < end {
-        let end_opt = if end == TIMESTAMP_MAX { None } else { Some(end) };
+        let end_opt = if end == TIMESTAMP_MAX {
+            None
+        } else {
+            Some(end)
+        };
         Some((start, end_opt))
     } else {
         None
@@ -835,14 +854,11 @@ fn build_genealogy(
         })
         .collect();
 
-    let divergence_point = pairs
-        .iter()
-        .map(|p| p.coordinate)
-        .min_by(|a, b| {
-            a.transaction_time
-                .cmp(&b.transaction_time)
-                .then_with(|| a.valid_time.cmp(&b.valid_time))
-        });
+    let divergence_point = pairs.iter().map(|p| p.coordinate).min_by(|a, b| {
+        a.transaction_time
+            .cmp(&b.transaction_time)
+            .then_with(|| a.valid_time.cmp(&b.valid_time))
+    });
 
     let participating_ctx: Vec<&ClaimCtx> = participating.iter().map(|&idx| &claims[idx]).collect();
     let sources = aggregate_sources(&participating_ctx);
@@ -889,7 +905,10 @@ fn aggregate_sources(claims: &[&ClaimCtx]) -> Vec<SourceSummary> {
     // Distinct source keys, ordered: Some(name) ascending, None last.
     let mut keys: Vec<Option<String>> = Vec::new();
     for c in claims {
-        let src = c.provenance.as_ref().and_then(|p| p.source().map(str::to_string));
+        let src = c
+            .provenance
+            .as_ref()
+            .and_then(|p| p.source().map(str::to_string));
         if !keys.contains(&src) {
             keys.push(src);
         }
@@ -902,9 +921,13 @@ fn aggregate_sources(claims: &[&ClaimCtx]) -> Vec<SourceSummary> {
     });
 
     keys.into_iter()
-        .map(|key| {
-            let members: Vec<&&ClaimCtx> = claims
+        // `filter_map` (rather than `map`) keeps the aggregation total: each key
+        // was derived from `claims`, so its bucket is always non-empty, but the
+        // `?`s below let us fold min/max/latest with no `unwrap`/`expect`.
+        .filter_map(|key| {
+            let members: Vec<&ClaimCtx> = claims
                 .iter()
+                .copied()
                 .filter(|c| {
                     c.provenance
                         .as_ref()
@@ -931,26 +954,19 @@ fn aggregate_sources(claims: &[&ClaimCtx]) -> Vec<SourceSummary> {
                 .copied()
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Latest = highest transaction_from member's own confidence.
-            let latest_member = members
-                .iter()
-                .max_by(|a, b| {
-                    a.transaction_from
-                        .cmp(&b.transaction_from)
-                        .then_with(|| a.version_id.cmp(&b.version_id))
-                })
-                .expect("source bucket is non-empty");
+            // Latest = highest-transaction_from member's own confidence.
+            let latest_member = members.iter().copied().max_by(|a, b| {
+                a.transaction_from
+                    .cmp(&b.transaction_from)
+                    .then_with(|| a.version_id.cmp(&b.version_id))
+            })?;
             let latest_confidence = latest_member
                 .provenance
                 .as_ref()
                 .and_then(Provenance::confidence);
-            let most_recent_assertion = members
-                .iter()
-                .map(|c| c.transaction_from)
-                .max()
-                .expect("source bucket is non-empty");
+            let most_recent_assertion = members.iter().map(|c| c.transaction_from).max()?;
 
-            SourceSummary {
+            Some(SourceSummary {
                 source: key,
                 backs_values,
                 claim_count: members.len(),
@@ -958,7 +974,7 @@ fn aggregate_sources(claims: &[&ClaimCtx]) -> Vec<SourceSummary> {
                 max_confidence,
                 latest_confidence,
                 most_recent_assertion,
-            }
+            })
         })
         .collect()
 }
@@ -1036,9 +1052,7 @@ fn build_narrative(
 fn label_matches(history: &EntityHistory, label: Option<&str>) -> bool {
     match label {
         None => true,
-        Some(want) => history
-            .current_version()
-            .is_some_and(|v| v.label == want),
+        Some(want) => history.current_version().is_some_and(|v| v.label == want),
     }
 }
 
@@ -1227,7 +1241,10 @@ mod tests {
             open_version(2, 2000, 200, one_prop("ceo", "Bob"), None),
         ]);
         let g = analyze(&h, "ceo");
-        assert!(!g.has_contradiction(), "clean succession is not a contradiction");
+        assert!(
+            !g.has_contradiction(),
+            "clean succession is not a contradiction"
+        );
     }
 
     // ---- case 2: backdated correction => retroactive -----------------------
@@ -1295,8 +1312,20 @@ mod tests {
     #[test]
     fn equal_value_reassertion_not_flagged() {
         let h = history(vec![
-            open_version(1, 1000, 100, one_prop("ceo", "Alice"), Some(prov(Some("a"), None))),
-            open_version(2, 1000, 200, one_prop("ceo", "Alice"), Some(prov(Some("b"), None))),
+            open_version(
+                1,
+                1000,
+                100,
+                one_prop("ceo", "Alice"),
+                Some(prov(Some("a"), None)),
+            ),
+            open_version(
+                2,
+                1000,
+                200,
+                one_prop("ceo", "Alice"),
+                Some(prov(Some("b"), None)),
+            ),
         ]);
         let g = analyze(&h, "ceo");
         assert!(!g.has_contradiction(), "same value is not a contradiction");
@@ -1338,7 +1367,13 @@ mod tests {
     #[test]
     fn missing_provenance_unattributed_bucket() {
         let h = history(vec![
-            open_version(1, 1000, 100, one_prop("ceo", "Alice"), Some(prov(Some("sec"), Some(0.9)))),
+            open_version(
+                1,
+                1000,
+                100,
+                one_prop("ceo", "Alice"),
+                Some(prov(Some("sec"), Some(0.9))),
+            ),
             open_version(2, 1000, 200, one_prop("ceo", "Bob"), None),
         ]);
         let g = analyze(&h, "ceo");
@@ -1346,7 +1381,10 @@ mod tests {
         // Two buckets: "sec" and the unattributed (None) bucket, None last.
         assert_eq!(g.sources.len(), 2);
         assert_eq!(g.sources[0].source.as_deref(), Some("sec"));
-        assert_eq!(g.sources[1].source, None, "unattributed bucket is present and last");
+        assert_eq!(
+            g.sources[1].source, None,
+            "unattributed bucket is present and last"
+        );
     }
 
     // ---- case 9: multi-source summary --------------------------------------
@@ -1354,18 +1392,48 @@ mod tests {
     #[test]
     fn multi_source_summary() {
         let h = history(vec![
-            open_version(1, 1000, 100, one_prop("ceo", "Alice"), Some(prov(Some("sec"), Some(0.9)))),
-            open_version(2, 1000, 200, one_prop("ceo", "Bob"), Some(prov(Some("press"), Some(0.5)))),
-            open_version(3, 1000, 300, one_prop("ceo", "Bob"), Some(prov(Some("press"), Some(0.7)))),
+            open_version(
+                1,
+                1000,
+                100,
+                one_prop("ceo", "Alice"),
+                Some(prov(Some("sec"), Some(0.9))),
+            ),
+            open_version(
+                2,
+                1000,
+                200,
+                one_prop("ceo", "Bob"),
+                Some(prov(Some("press"), Some(0.5))),
+            ),
+            open_version(
+                3,
+                1000,
+                300,
+                one_prop("ceo", "Bob"),
+                Some(prov(Some("press"), Some(0.7))),
+            ),
         ]);
         let g = analyze(&h, "ceo");
-        let press = g.sources.iter().find(|s| s.source.as_deref() == Some("press")).unwrap();
+        let press = g
+            .sources
+            .iter()
+            .find(|s| s.source.as_deref() == Some("press"))
+            .unwrap();
         assert_eq!(press.claim_count, 2);
         assert_eq!(press.min_confidence, Some(0.5));
         assert_eq!(press.max_confidence, Some(0.7));
-        assert_eq!(press.latest_confidence, Some(0.7), "latest = highest-tx member");
+        assert_eq!(
+            press.latest_confidence,
+            Some(0.7),
+            "latest = highest-tx member"
+        );
         assert_eq!(press.most_recent_assertion, ts(300));
-        assert_eq!(press.backs_values.len(), 1, "press backs a single distinct value");
+        assert_eq!(
+            press.backs_values.len(),
+            1,
+            "press backs a single distinct value"
+        );
         assert!(press.backs_values[0].contains("Bob"));
     }
 
@@ -1374,8 +1442,20 @@ mod tests {
     #[test]
     fn genealogy_is_byte_identical() {
         let h = history(vec![
-            open_version(1, 1000, 100, one_prop("ceo", "Alice"), Some(prov(Some("sec"), Some(0.9)))),
-            open_version(2, 1000, 200, one_prop("ceo", "Bob"), Some(prov(Some("press"), Some(0.7)))),
+            open_version(
+                1,
+                1000,
+                100,
+                one_prop("ceo", "Alice"),
+                Some(prov(Some("sec"), Some(0.9))),
+            ),
+            open_version(
+                2,
+                1000,
+                200,
+                one_prop("ceo", "Bob"),
+                Some(prov(Some("press"), Some(0.7))),
+            ),
         ]);
         let a = analyze(&h, "ceo");
         let b = analyze(&h, "ceo");
@@ -1409,7 +1489,10 @@ mod tests {
             open_version(1, 1000, 100, props_a_shuffled, None),
             open_version(2, 1000, 200, props_b_shuffled, None),
         ]);
-        assert_eq!(format!("{:?}", analyze(&h1, "ceo")), format!("{:?}", analyze(&h2, "ceo")));
+        assert_eq!(
+            format!("{:?}", analyze(&h1, "ceo")),
+            format!("{:?}", analyze(&h2, "ceo"))
+        );
     }
 
     // ---- case 13: elision --------------------------------------------------
@@ -1492,8 +1575,20 @@ mod tests {
     #[test]
     fn narrative_names_divergence_and_sources() {
         let h = history(vec![
-            open_version(1, 1000, 100, one_prop("ceo", "Alice"), Some(prov(Some("sec"), Some(0.9)))),
-            open_version(2, 1000, 200, one_prop("ceo", "Bob"), Some(prov(Some("press"), Some(0.5)))),
+            open_version(
+                1,
+                1000,
+                100,
+                one_prop("ceo", "Alice"),
+                Some(prov(Some("sec"), Some(0.9))),
+            ),
+            open_version(
+                2,
+                1000,
+                200,
+                one_prop("ceo", "Bob"),
+                Some(prov(Some("press"), Some(0.5))),
+            ),
         ]);
         let g = analyze(&h, "ceo");
         assert!(g.narrative.contains("ceo"));
@@ -1509,7 +1604,10 @@ mod tests {
     fn resolve_scan_limit_clamps() {
         assert_eq!(resolve_scan_limit(0), DEFAULT_CONTRADICTION_LIMIT);
         assert_eq!(resolve_scan_limit(50), 50);
-        assert_eq!(resolve_scan_limit(MAX_CONTRADICTION_LIMIT + 10), MAX_CONTRADICTION_LIMIT);
+        assert_eq!(
+            resolve_scan_limit(MAX_CONTRADICTION_LIMIT + 10),
+            MAX_CONTRADICTION_LIMIT
+        );
     }
 
     #[test]
@@ -1584,7 +1682,10 @@ mod db_tests {
     fn unknown_property_invalid_argument() {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node("Company", PropertyMapBuilder::new().insert("ceo", "Alice").build())
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("ceo", "Alice").build(),
+            )
             .unwrap();
         let err = db
             .contradiction_genealogy(
@@ -1619,8 +1720,12 @@ mod db_tests {
     #[test]
     fn edge_property_contradiction_parity() {
         let db = AletheiaDB::new().unwrap();
-        let a = db.create_node("P", PropertyMapBuilder::new().insert("n", "a").build()).unwrap();
-        let b = db.create_node("P", PropertyMapBuilder::new().insert("n", "b").build()).unwrap();
+        let a = db
+            .create_node("P", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        let b = db
+            .create_node("P", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
         let vt_early = backdated(1000);
         let e = db
             .create_edge_with_options(
@@ -1646,7 +1751,10 @@ mod db_tests {
                 &GenealogyOptions::default(),
             )
             .unwrap();
-        assert!(g.has_contradiction(), "edge-property contradictions detected");
+        assert!(
+            g.has_contradiction(),
+            "edge-property contradictions detected"
+        );
     }
 
     #[test]
@@ -1659,7 +1767,9 @@ mod db_tests {
             let id = db
                 .create_node_with_options(
                     "Company",
-                    PropertyMapBuilder::new().insert("ceo", format!("Person{i}")).build(),
+                    PropertyMapBuilder::new()
+                        .insert("ceo", format!("Person{i}"))
+                        .build(),
                     WriteRequestOptions::new().with_valid_from(vt_early),
                 )
                 .unwrap();
@@ -1667,7 +1777,9 @@ mod db_tests {
                 // Unretracted overlapping change => contradiction.
                 db.update_node_with_options(
                     id,
-                    PropertyMapBuilder::new().insert("ceo", format!("Other{i}")).build(),
+                    PropertyMapBuilder::new()
+                        .insert("ceo", format!("Other{i}"))
+                        .build(),
                     WriteRequestOptions::new().with_valid_from(vt_early),
                 )
                 .unwrap();
@@ -1677,7 +1789,11 @@ mod db_tests {
         let scan = db
             .find_contradictions(&ContradictionScope::new().with_label("Company"))
             .unwrap();
-        assert_eq!(scan.contradictions.len(), 2, "exactly the 2 seeded conflicts");
+        assert_eq!(
+            scan.contradictions.len(),
+            2,
+            "exactly the 2 seeded conflicts"
+        );
         let found: std::collections::HashSet<EntityId> =
             scan.contradictions.iter().map(|c| c.entity).collect();
         for s in seeded {
@@ -1693,25 +1809,37 @@ mod db_tests {
             let id = db
                 .create_node_with_options(
                     "Company",
-                    PropertyMapBuilder::new().insert("ceo", format!("P{i}")).build(),
+                    PropertyMapBuilder::new()
+                        .insert("ceo", format!("P{i}"))
+                        .build(),
                     WriteRequestOptions::new().with_valid_from(vt_early),
                 )
                 .unwrap();
             db.update_node_with_options(
                 id,
-                PropertyMapBuilder::new().insert("ceo", format!("Q{i}")).build(),
+                PropertyMapBuilder::new()
+                    .insert("ceo", format!("Q{i}"))
+                    .build(),
                 WriteRequestOptions::new().with_valid_from(vt_early),
             )
             .unwrap();
         }
         let page1 = db
-            .find_contradictions(&ContradictionScope::new().with_label("Company").with_page(2, 0))
+            .find_contradictions(
+                &ContradictionScope::new()
+                    .with_label("Company")
+                    .with_page(2, 0),
+            )
             .unwrap();
         assert_eq!(page1.contradictions.len(), 2);
         assert!(page1.has_more);
         assert_eq!(page1.next_offset, Some(2));
         let page3 = db
-            .find_contradictions(&ContradictionScope::new().with_label("Company").with_page(2, 4))
+            .find_contradictions(
+                &ContradictionScope::new()
+                    .with_label("Company")
+                    .with_page(2, 4),
+            )
             .unwrap();
         assert_eq!(page3.contradictions.len(), 1, "5 total => last page has 1");
         assert!(!page3.has_more);
@@ -1720,20 +1848,39 @@ mod db_tests {
     #[test]
     fn claims_target_spanning_two_entities() {
         let db = AletheiaDB::new().unwrap();
-        let a = db.create_node("Company", PropertyMapBuilder::new().insert("ceo", "Alice").build()).unwrap();
-        let b = db.create_node("Company", PropertyMapBuilder::new().insert("ceo", "Bob").build()).unwrap();
+        let a = db
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("ceo", "Alice").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("ceo", "Bob").build(),
+            )
+            .unwrap();
         let va = db.get_node_history(a).unwrap().versions[0].version_id;
         let vb = db.get_node_history(b).unwrap().versions[0].version_id;
         let g = db
             .contradiction_genealogy(
                 ContradictionTarget::Claims(vec![
-                    ClaimRef { entity: EntityId::Node(a), version: va },
-                    ClaimRef { entity: EntityId::Node(b), version: vb },
+                    ClaimRef {
+                        entity: EntityId::Node(a),
+                        version: va,
+                    },
+                    ClaimRef {
+                        entity: EntityId::Node(b),
+                        version: vb,
+                    },
                 ]),
                 &GenealogyOptions::default(),
             )
             .unwrap();
-        assert!(g.has_contradiction(), "two entities' competing ceo claims conflict");
+        assert!(
+            g.has_contradiction(),
+            "two entities' competing ceo claims conflict"
+        );
         assert_eq!(g.entity, None, "multi-entity target has no single entity");
         assert_eq!(g.property.as_deref(), Some("ceo"));
     }
