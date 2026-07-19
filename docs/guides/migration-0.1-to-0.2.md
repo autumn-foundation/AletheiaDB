@@ -14,48 +14,78 @@ maintainers and not independently re-checked.
 
 ## ⚠️ Before you upgrade (data safety)
 
-**Copy your data directory before the first 0.2.0 open.**
+**Drain the WAL before upgrading.** A cleanly-checkpointed 0.1.x data
+directory opens under 0.2.0 with full integrity — this is verified by a
+cross-version test that opens a real 0.1.1-written fixture (see
+`tests/compat_0_1_1_datadir.rs`). Correct labels, all nodes/edges/properties,
+and temporal history come back intact. The safe upgrade procedure:
 
-Here is the honest reasoning:
+1. On **0.1.x**, after your last write, call `db.persist_indexes()` to snapshot
+   all state, then shut the database down **gracefully** (drop the `AletheiaDB`
+   value; do not hard-kill the process). This leaves the WAL with no unreplayed
+   tail.
+2. **Verify the WAL is drained** (see the check below).
+3. Copy the data directory.
+4. Open the copy with 0.2.0 (`AletheiaDB::open(path)`), and validate known
+   entities before decommissioning the original.
 
-- **The formats line up.** 0.2.0's readers accept the on-disk formats that
-  0.1.x wrote. The WAL segment magic is unchanged (`GWAL`) and 0.1.x wrote
-  format **v1**, which is within 0.2.0's accepted range (`≤ 14`). The
-  index-persistence manifest 0.1.x wrote is **v1**, within 0.2.0's accepted
-  range (`≤ 4`). And the persisted graph structs (`GraphIndexData`,
-  `PersistedNode`, `PersistedEdge`) are **byte-for-byte identical** between
-  0.1.1 and 0.2.0, so a v1 graph index decodes correctly under the newer code.
-  So an in-place open is expected to work **at the format level**.
-- **But there is no end-to-end cross-version test.** No test in the repo opens
-  a data directory (or WAL, or backup) actually written by a released 0.1.x
-  binary. The compatibility tests that exist **synthesize old byte layouts
-  in-process** with the current code — they exercise the format branches, not
-  "the 0.1.1 release binary wrote this directory; 0.2.0 opens it." So treat
-  in-place opening as **expected-to-work but not test-proven**.
-- **There is no backup/restore off-ramp.** The `.albk` backup format did
-  **not** exist in 0.1.x — 0.1.1 has no `backup()` at all — so the usual
-  "back up on the old version, restore on the new version" migration path is
-  impossible for this upgrade. **In-place open is the only path.** (Once you
-  are on 0.2.0, you *can* create `.albk` backups going forward.)
+```rust
+// On 0.1.x, before upgrading: snapshot state, then drop gracefully.
+db.persist_indexes()?;
+drop(db); // graceful shutdown — do NOT hard-kill the process
+```
 
-**Therefore:**
+**Checking the WAL is drained (0.1.x):** re-open the directory once with your
+0.1.x binary and watch its startup logs. If there is **no**
+`Replaying N WAL entries` line, the WAL has no unreplayed tail and the
+directory is safe to upgrade. (The `wal/` segment file is retained and
+non-empty even when drained — it is the *replay log line*, not the file size,
+that tells you. The entries it holds are all at or below the last
+index-snapshot watermark.)
 
-1. Make a filesystem copy of your data directory.
-2. Open the **copy** with 0.2.0.
-3. Validate a few known nodes/edges after startup.
-4. Only then decommission the original. Keep the 0.1.1 binary available so you
-   can re-read the original copy if anything looks wrong.
+```text
+# Drained (safe to upgrade) — no replay line at startup:
+INFO aletheiadb: opened data directory, 0 WAL entries to replay
 
-**WAL caveat — keep `indexes/` next to `wal/`.** For WAL segments written
-before v13, edge/node labels are stored as raw string-interner ids, which
-resolve to the correct strings **only** once the persisted interner has been
-restored. `AletheiaDB::open()` enables index persistence with
-`load_on_startup`, so the interner is restored before WAL replay and ids
-resolve correctly. If you replay a 0.1.x WAL **without** the matching
-persisted interner (e.g. a WAL-only setup, or with persistence disabled —
-which is now the *default*, see below), pre-v13 labels can silently resolve to
-the wrong string. Keep the `indexes/` directory alongside `wal/`, and use
-`open()`.
+# NOT drained (do NOT upgrade this directory):
+INFO aletheiadb: Replaying 42 WAL entries
+```
+
+**⚠️ Do NOT upgrade a directory with an unreplayed WAL tail.** If a 0.1.x
+directory is opened by 0.2.0 while it still has un-checkpointed WAL entries
+(e.g. the process was killed, or you skipped `persist_indexes()`), the
+tail-replayed entities come back with **silently corrupted labels** — this is a
+verified failure, reproduced in `tests/compat_0_1_1_datadir.rs` (the
+`#[ignore]`d blocker test): tail nodes were mislabeled to unrelated interned
+strings (for example, nodes coming back labeled with property-key strings such
+as `founded`/`since`), and the recovered node count also diverged. The cause is
+that 0.1.x's pre-v13 WAL stores labels as process-local interner ids that
+0.2.0's rebuilt interner resolves to different strings. There is no in-place
+fix; drain the WAL first (above).
+
+**There is no backup/restore off-ramp.** The `.albk` backup format did **not**
+exist in 0.1.x — 0.1.1 has no `backup()` at all — so the usual "back up on the
+old version, restore on the new version" migration path is impossible for this
+upgrade. **In-place open (of a drained, copied directory) is the only path.**
+(Once you are on 0.2.0, you *can* create `.albk` backups going forward.)
+
+Keep the 0.1.1 binary available so you can re-read the original copy if
+anything looks wrong.
+
+### Known post-upgrade caveats
+
+- **`get_node_at_time` on restored nodes may return `NotFound`.** After
+  upgrading, point-in-time reads via `get_node_at_time` on nodes restored from
+  a 0.1.x directory may return `NotFound` even at valid coordinates (a
+  restore-path limitation carried from 0.1.x, not fixed in 0.2.0). Use
+  `get_node_history`, which returns the correct versioned history. This applies
+  to both the cleanly-checkpointed and WAL-tail cases and is tracked
+  separately.
+- **A distinct, still-unverified discrepancy is under investigation.** 0.2.0
+  has been observed recovering a *different* node count than 0.1.x from the
+  same WAL tail (a possible replay-watermark off-by-one). This is not yet
+  fully characterized — it is a further reason to drain the WAL before
+  upgrading rather than rely on tail replay.
 
 ---
 
