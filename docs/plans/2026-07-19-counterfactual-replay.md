@@ -91,7 +91,7 @@ Each failure is mapped to the AC that must guard against it.
 | # | Catastrophic failure | Guarded by |
 |---|---|---|
 | R1 | **Mutate the real DB** while building/dropping the view (share storage, write through a handle). | AC4 — separate shadow storage; checksum test before/after. |
-| R2 | **Non-deterministic replay** (iterate a `HashMap`, tie-break on wallclock only, thread races) → two runs disagree. | AC6 — replay over the `ChangeCursor` *total* order, pure fold, no map-order leakage; property test. |
+| R2 | **Non-deterministic replay** (iterate a `HashMap`, tie-break on wallclock only, thread races) → two runs disagree. | AC6 — pure per-entity fold in sorted-id order (no map-order leakage), and `rebuild_version_chains` tie-breaks on `version_id` so same-`tx` versions get a stable chain order; randomized property test. |
 | R3 | **Exclude unattributed writes** (treat `None` provenance as "not source S" *inclusively*, or as a wildcard). | AC7 — predicate `matches(None) == false` always; count them separately. |
 | R4 | **Unbounded memory** — materialize a billion-version history into RAM and OOM. | AC8 — `max_replay_versions` cap + structured `HistoryTooLarge` error *before* allocation. |
 | R5 | **Orphaned-update ambiguity** — silently drop, silently promote-to-create, or panic when source Y's update targets an entity whose creating write was excluded. | AC2 — explicit deterministic drop-and-count contract (§5); reported. |
@@ -146,22 +146,41 @@ Each failure is mapped to the AC that must guard against it.
 
 ### Approach A — Materialized shadow storage (CHOSEN)
 
-On view creation:
+On view creation (as implemented):
 
-1. **Enumerate** every recorded version from the real `HistoricalStorage` (node
-   and edge version records).
-2. **Order** them by the `ChangeCursor` total order
-   `(tx_wallclock, tx_logical, kind_ord, entity_id, version_id)` — the
-   transaction-time replay order AC2 requires.
-3. **Filter**: skip any version whose recorded `provenance` matches the exclusion
-   predicate (source ∈ set) *and* falls inside the optional tx-time bound. Count
-   excluded and unattributed-encountered as we go.
-4. **Apply survivors** into a **fresh in-memory** shadow `HistoricalStorage`
-   (+ derived `CurrentStorage` heads) via the trusted-restore bypass so each
-   surviving version keeps its **exact** `BiTemporalInterval`.
-5. **Reads delegate** to the existing historical read implementations bound to the
-   shadow storage (`get_node_at_time`, `get_node_history`, reconstruction,
-   traversal), giving AC3 fidelity by reuse.
+1. **Snapshot** the raw version records from the real `HistoricalStorage` under a
+   brief read guard (shallow, Arc-backed clones only), then release the guard —
+   history reconstruction happens **off-lock** in a throwaway source store, so
+   writers are not stalled for the whole replay. Enumeration is **hot-tier only**
+   (cold-migrated history is out of scope — see §8).
+2. **Fold per entity, in sorted id order.** Rather than materialising the global
+   `ChangeCursor` stream, the implementation reconstructs each entity's history
+   (`get_*_history`, oldest-first) and folds it independently. The per-entity
+   result is invariant to cross-entity interleaving (exclusion is per-version;
+   orphan detection is per-entity), so a per-entity fold in sorted-id order is
+   equivalent to the total-order replay AC2 describes, and deterministic (AC6).
+   Within an entity, versions are already in transaction-time order; the shadow
+   chain's tx-supersession is re-derived by `rebuild_version_chains`, whose sort
+   now tie-breaks on the unique `version_id` (closing the last same-`tx` ordering
+   hole).
+3. **Re-evaluate each surviving version against the surviving timeline.** For each
+   version compute its delta vs its immediate **real** predecessor
+   (`PropertyDelta::from_diff`) and apply it onto the surviving current map — so an
+   excluded source's carried-forward untouched fields never leak back (§6). Skip
+   versions whose provenance matches the predicate (within the optional tx-time
+   bound), counting excluded / unattributed as we go. Preserve each survivor's
+   **exact valid interval** (incl. closed delete/retract tombstones).
+4. **Materialise survivors** as anchors into a **fresh in-memory** shadow
+   `HistoricalStorage` (via the trusted-restore bypass) **and** seed a **fresh
+   shadow `CurrentStorage`** with each entity's surviving open-interval head. The
+   current store gives current-state reads the real DB's current-state-index
+   semantics (present iff the head interval is open, independent of
+   valid-time-at-now), so a no-op view equals the real DB even for #3221
+   future-dated valid times.
+5. **Reads delegate** to the shadow stores: current-state (`get_node`/`get_edge`)
+   and adjacency through the shadow `CurrentStorage`; `AS OF` and history reads
+   (`get_node_at_time`, `get_node_history`, reconstruction) through the shadow
+   `HistoricalStorage` — giving AC3 fidelity by reuse.
 
 - **Pros:** read fidelity by reuse (AC3); real DB trivially untouched via
   separate storage (AC4); strong determinism — a pure fold over a totally-ordered
@@ -318,16 +337,21 @@ impl CounterfactualView {
     pub fn report(&self) -> &DivergenceReport;
     pub fn handle(&self) -> &CounterfactualHandle;
     pub fn is_counterfactual(&self) -> bool; // always true (AC8)
-    // read surface (shapes mirror the real API), bound to shadow storage:
+    // current-state reads + adjacency, bound to the shadow CurrentStorage:
     pub fn get_node(&self, id: NodeId) -> Result<Node, CounterfactualError>;
     pub fn get_edge(&self, id: EdgeId) -> Result<Edge, CounterfactualError>;
+    pub fn get_outgoing_edges(&self, id: NodeId) -> Vec<Edge>;
+    pub fn get_incoming_edges(&self, id: NodeId) -> Vec<Edge>;
+    // AS OF + history reads, bound to the shadow HistoricalStorage:
     pub fn get_node_at_time(&self, id: NodeId, valid: Timestamp, tx: Timestamp)
         -> Result<Node, CounterfactualError>;
+    pub fn get_edge_at_time(&self, id: EdgeId, valid: Timestamp, tx: Timestamp)
+        -> Result<Edge, CounterfactualError>;
     pub fn get_node_history(&self, id: NodeId) -> Result<EntityHistory, CounterfactualError>;
+    pub fn get_edge_history(&self, id: EdgeId) -> Result<EntityHistory, CounterfactualError>;
 }
 
 pub enum CounterfactualError {
-    Unimplemented,
     HistoryTooLarge { versions: usize, cap: usize },
     NotFound(String),
     Internal(String),
@@ -361,11 +385,33 @@ Names may be refined during implementation to match repo conventions observed in
 - **Structured over-limit error.** When the enumerated version count exceeds the
   cap, return `CounterfactualError::HistoryTooLarge { versions, cap }` **before**
   allocating the shadow store (fail fast, R4). This maps to MCP
-  `FAILED_PRECONDITION` (non-retriable) when the MCP surface lands.
-- **Labeling.** `CounterfactualView::is_counterfactual()` is *always* `true`, the
-  view's `name` surfaces in the handle and in every divergence report, and (when
-  MCP lands) every response envelope carries a `counterfactual: true` + view-name
-  marker so no caller can mistake a counterfactual answer for real state (R6).
+  `FAILED_PRECONDITION` (non-retriable) when the MCP surface lands. The cap counts
+  **versions, not bytes** — a wide-vector or large-property history can exceed a
+  byte budget while under the version cap; a byte/vector-aware guard is a
+  follow-up.
+- **Labeling (honest scope).** `CounterfactualView::is_counterfactual()` is
+  *always* `true` and the view's `name` surfaces in the handle and the divergence
+  report. At the Rust-API level the guarantee is **type-level**: reads are only
+  reachable through a `CounterfactualView`, never a real-DB handle, so a caller
+  cannot confuse the two by construction. The AC8 *per-response-envelope*
+  `counterfactual: true` marker lands **with the deferred MCP surface** (§9) — it
+  is not claimed to be met at the individual field level in this Rust-only wave.
+
+### Coverage caveats (documented)
+
+- **Hot-tier only.** Enumeration reads the hot-tier `HistoricalStorage`
+  version maps; history migrated to the cold tier is **omitted** from the view,
+  the divergence report, and the cap count (mirroring how `temporal_extent`'s
+  per-label breakdown and the snapshot registry document their hot-tier scope).
+  A view over a dataset with cold-migrated history therefore reflects only the
+  retained hot history — the same "views are limited to available recorded
+  history" caveat the issue's Out-of-Scope states.
+- **Shared-value re-assertion is a false negative, never a leak.** Because a
+  surviving version is reconstructed by diffing full-state maps against its real
+  predecessor, a surviving source re-asserting *the same value* an excluded
+  source also wrote produces an empty delta and is dropped (§6). This
+  under-represents the surviving source's contribution but can never re-introduce
+  excluded data (the safe direction); pinned by a test.
 
 ---
 

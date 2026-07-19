@@ -16,13 +16,28 @@
 //!
 //! # Status
 //!
-//! Implemented (cohort `semantic-temporal`, Rust API). Materialization enumerates
-//! recorded history, folds out the excluded writes, and restores the survivors as
-//! anchors into a fresh, physically separate shadow [`HistoricalStorage`] whose
-//! reads reuse the engine's point-in-time / history reconstruction. See
-//! `docs/plans/2026-07-19-counterfactual-replay.md` for the full design,
-//! including the AC2 orphaned-update contract and the reconstruction mechanism.
-//! The MCP surface is a deferred follow-up (design §9).
+//! Implemented (cohort `semantic-temporal`, Rust API). Materialization
+//! shallow-clones the raw version records under a brief `historical` read guard,
+//! then **off-lock** folds out the excluded writes and restores the survivors —
+//! as anchors into a fresh shadow [`HistoricalStorage`] (backing `AS OF` and
+//! history reads) and, for each surviving open-interval head, into a fresh shadow
+//! [`CurrentStorage`] (backing current-state reads and adjacency). The shadow
+//! current store gives current-state reads the real DB's current-state-index
+//! semantics — present iff the head interval is open, **independent of
+//! valid-time-at-now** — so a no-op view equals the real DB even for #3221
+//! future-dated valid times; use the `get_*_at_time` surface for bi-temporal
+//! `AS OF` reads. See `docs/plans/2026-07-19-counterfactual-replay.md` for the
+//! full design, including the AC2 orphaned-update contract, the reconstruction
+//! mechanism, and the hot-tier-only / version-cap / shared-value-reassertion
+//! caveats. The MCP surface is a deferred follow-up (design §9).
+//!
+//! # Labeling scope (AC8)
+//!
+//! Every view is labeled via [`CounterfactualView::is_counterfactual`] (always
+//! `true`) and its `name` surfaces in the handle. At this Rust-API level the
+//! stronger guarantee is **type-level**: reads are only reachable through a
+//! [`CounterfactualView`], never a real-DB handle. The AC8 per-response-envelope
+//! `counterfactual: true` marker lands with the deferred MCP surface.
 //!
 //! # Exclusion-replay semantics (AC2, summary)
 //!
