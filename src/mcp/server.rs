@@ -11429,9 +11429,15 @@ mod server_unit_tests {
                 PropertyMapBuilder::new().insert("name", "Acme").build(),
             )
             .unwrap();
+        // A multi-variable-pattern MATCH rejects any *restricting* namespace
+        // scope (v1, src/db/query.rs), and the MCP `query` tool defaults an
+        // omitted `namespace` to `default`-only (fail-closed / isolated-by-
+        // default, #3349 / PR3d #3731). This test must therefore pass
+        // `"namespace": "all"` to run the cartesian product unscoped.
         let result = server.handle_query(serde_json::json!({
             "language": "cypher",
-            "query": "MATCH (a:Person),(b:Company) RETURN a,b"
+            "query": "MATCH (a:Person),(b:Company) RETURN a,b",
+            "namespace": "all"
         }));
         let text = AletheiaMcpServer::extract_text(result);
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -11449,6 +11455,52 @@ mod server_unit_tests {
         assert!(
             cols.contains(&"a".to_string()) && cols.contains(&"b".to_string()),
             "columns must name the bound variables: {val}"
+        );
+    }
+
+    /// Fail-closed guard (companion to
+    /// `handle_query_multi_pattern_returns_non_null_bindings`): the SAME
+    /// multi-variable-pattern MATCH with NO `namespace` arg must be rejected,
+    /// not silently unscoped. An omitted `namespace` defaults to `default`-only
+    /// (#3349 / PR3d #3731), and a multi-variable-pattern MATCH rejects any
+    /// restricting scope (v1, src/db/query.rs), so the tool returns a
+    /// structured `unsupported_construct` / `INVALID_ARGUMENT` error. This pins
+    /// the fail-closed semantics so a future change can't silently unscope it.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_multi_pattern_omitted_scope_is_rejected() {
+        use crate::core::PropertyMapBuilder;
+        let server = make_server();
+        server
+            .db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        server
+            .db
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
+        // No `namespace` arg -> defaults to `default`-only (fail-closed).
+        let result = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (a:Person),(b:Company) RETURN a,b"
+        }));
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["error"]["code"].as_str(),
+            Some("INVALID_ARGUMENT"),
+            "got: {val}"
+        );
+        assert_eq!(
+            val["error"]["kind"].as_str(),
+            Some("unsupported_construct"),
+            "got: {val}"
         );
     }
 

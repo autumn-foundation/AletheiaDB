@@ -95,6 +95,17 @@ extend them. Advertised, supported constructs:
 Mutating clauses (`CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`, `DETACH`,
 `DROP`, `CALL`, `FOREACH`, `LOAD`) are rejected **before execution**.
 
+### Multi-variable-pattern MATCH under a namespace scope (v1)
+
+A multi-variable-pattern `MATCH` — comma-separated patterns binding more than
+one variable, e.g. `MATCH (a:Person),(b:Company) RETURN a,b` (a cartesian
+product) — is **not** supported under a *restricting* namespace scope in v1.
+Because an omitted `namespace` argument defaults to `default`-only (fail-closed
+/ isolated-by-default, #3349 / PR3d #3731), such a query must pass
+`"namespace": "all"` to run unscoped (or be rewritten as a single-variable
+`MATCH`); otherwise the server returns a structured `unsupported_construct` /
+`INVALID_ARGUMENT` error rather than silently running it unscoped.
+
 ## Querying provenance (Issue #3354a)
 
 Write-time provenance (source / confidence / reason, Issue #3224 — the same
