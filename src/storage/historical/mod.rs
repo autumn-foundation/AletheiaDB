@@ -2485,6 +2485,20 @@ impl HistoricalStorage {
             let migrated = migration_service.migrate_node_versions(&node_versions_to_migrate)?;
             total_migrated += migrated;
 
+            // Issue #3677: record each migrated version's ChangeCursor in the cold-change
+            // directory AFTER it is durably in cold and BEFORE it is removed from the hot maps, so
+            // it is never absent from both hot and directory during the migration window.
+            if let Some(tiered) = self.tiered_storage.as_ref() {
+                tiered.record_cold_cursors(node_versions_to_migrate[..migrated].iter().map(|v| {
+                    ChangeCursor::for_version(
+                        v.temporal.transaction_time().start(),
+                        EntityKind::Node,
+                        v.node_id.as_u64(),
+                        v.id.as_u64(),
+                    )
+                }));
+            }
+
             // Remove migrated versions from hot storage
             for candidate in &node_candidates[..migrated] {
                 if let Some(version) = self.node_versions.remove(&candidate.version_id) {
@@ -2522,6 +2536,19 @@ impl HistoricalStorage {
         if !edge_versions_to_migrate.is_empty() {
             let migrated = migration_service.migrate_edge_versions(&edge_versions_to_migrate)?;
             total_migrated += migrated;
+
+            // Issue #3677: record migrated edge cursors before removing them from the hot maps
+            // (see the node path above for the ordering invariant).
+            if let Some(tiered) = self.tiered_storage.as_ref() {
+                tiered.record_cold_cursors(edge_versions_to_migrate[..migrated].iter().map(|v| {
+                    ChangeCursor::for_version(
+                        v.temporal.transaction_time().start(),
+                        EntityKind::Edge,
+                        v.edge_id.as_u64(),
+                        v.id.as_u64(),
+                    )
+                }));
+            }
 
             // Remove migrated versions from hot storage
             for candidate in &edge_candidates[..migrated] {

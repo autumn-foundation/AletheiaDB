@@ -12,6 +12,7 @@
 
 pub mod backup;
 pub mod checkpoint;
+pub(crate) mod cold_change_directory;
 pub mod compression;
 pub mod current;
 pub mod historical;

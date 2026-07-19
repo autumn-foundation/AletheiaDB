@@ -107,6 +107,12 @@ pub struct TieredStorageConfig {
     /// Maximum versions to prefetch in a chain
     /// Default: 5
     pub prefetch_depth: usize,
+
+    /// Memory budget (entry count) for the in-memory cold changefeed directory used by the
+    /// `list_changes` cold-tier pushdown (Issue #3677). Each entry is one `ChangeCursor`
+    /// (~5 machine words). Default: 1,000,000 (~40-50 MB). `0` disables the directory, so every
+    /// cold `list_changes` scan degrades to the (correct) full scan.
+    pub cold_change_directory_max_entries: usize,
 }
 ```
 
@@ -114,6 +120,8 @@ pub struct TieredStorageConfig {
 - Increase `warm_cache_size` if you have frequent time-travel queries
 - Disable `enable_prefetch` if your queries are random access (not following chains)
 - Reduce `prefetch_depth` to save memory if chains are short
+- Lower `cold_change_directory_max_entries` (or set `0`) to cap/disable the cold changefeed
+  directory's memory; queries over windows beyond the retained newest region degrade to a full scan
 
 ### RedbConfig (Cold Storage)
 
