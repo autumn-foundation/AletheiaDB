@@ -401,12 +401,22 @@ fn saturated_queue_sheds_without_blocking_commits() {
     let _monitor = db
         .create_drift_monitor(per_entity_monitor(DriftMetric::Cosine, 0.5))
         .expect("create");
-    let engine = DriftAlarmEngine::new(Arc::clone(&db));
+    // Capacity-1 evaluation queue: the shock absorber holds a single pending
+    // task. To prove shed-not-block *deterministically* (rather than racing the
+    // evaluator against the commit rate), freeze evaluation: a stalled evaluator
+    // is exactly the saturation scenario AC6 governs. With the worker parked, the
+    // queue can hold at most one pending task and every further enqueue sheds —
+    // while commits, which are entirely off the engine's path, keep succeeding.
+    let engine = DriftAlarmEngine::with_capacity(Arc::clone(&db), 1);
     engine.start().expect("start engine");
+    engine.set_evaluation_paused(true);
 
-    // Flood writes faster than evaluation drains; commits must all succeed.
+    // Flood updates faster than the (frozen) evaluator drains; commits must all
+    // succeed and never block. 200 updates on one node stays under the per-entity
+    // version cap. Each is its own committed transaction emitting a Doc change →
+    // one enqueued evaluation the dispatcher tries to hand to the parked worker.
     let node = create_doc(&db, "Doc", &[1.0, 0.0, 0.0, 0.0]);
-    for i in 0..5_000u32 {
+    for i in 0..200u32 {
         let x = (i % 7) as f32;
         db.update_node_with_valid_time(
             node,
@@ -418,10 +428,19 @@ fn saturated_queue_sheds_without_blocking_commits() {
         .expect("commit must never block or fail");
     }
 
+    // The dispatcher delivers changes asynchronously; wait (bounded) for it to
+    // drain the subscription into the saturated queue and record shed work.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while engine.shed_count() == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
     // Some evaluation work was shed rather than back-pressuring writers.
     assert!(
         engine.shed_count() > 0,
         "a saturated evaluation queue sheds work (observable)"
     );
+    // Resume + stop cleanly (no panics on shutdown, even from a paused worker).
+    engine.set_evaluation_paused(false);
     engine.stop();
 }

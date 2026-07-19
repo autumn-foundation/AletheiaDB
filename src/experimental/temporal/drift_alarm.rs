@@ -94,7 +94,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::AletheiaDB;
@@ -907,41 +907,281 @@ pub(crate) fn registry_path_for(
 // Background driver (Stage B fleshes out subscription + queue + shedding).
 // ---------------------------------------------------------------------------
 
+/// Default capacity of the bounded evaluation queue that the engine sheds from
+/// on saturation. Deliberately small: the queue is a shock absorber for bursts,
+/// not a work backlog — a saturated queue **sheds** (increments
+/// [`DriftAlarmEngine::shed_count`]) rather than back-pressuring the changefeed
+/// producer / commit path (AC6). Evaluation is idempotent and re-driven by the
+/// next matching change or scheduled tick, so a shed task loses no correctness.
+pub const DEFAULT_EVAL_QUEUE_CAPACITY: usize = 64;
+
+/// How long a dispatcher/ticker thread parks between shutdown-flag checks. Bounds
+/// `stop()` latency to roughly this interval.
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Background evaluator: subscribes to the changefeed for on-write monitors,
 /// ticks scheduled monitors, and persists fired alarms — all off the write
 /// path, shedding on queue saturation.
+///
+/// # Threads
+///
+/// [`start`](Self::start) spawns up to three background threads:
+/// - a **dispatcher** that drains the changefeed [`Subscription`] and, for each
+///   matching committed change, enqueues an evaluation of the affected
+///   monitor(s) onto the bounded queue (never blocking — a full queue sheds);
+/// - a **worker** that pops queued monitor ids and runs
+///   [`AletheiaDB::evaluate_drift_monitor_now`] (the sole path that materializes
+///   alarm nodes and dedups against unresolved alarms);
+/// - a **ticker** (only when scheduled monitors exist) that enqueues an
+///   evaluation for each scheduled monitor on its own interval.
+///
+/// Changes to the reserved [`DRIFT_ALARM_LABEL`] are ignored by the dispatcher,
+/// so materializing an alarm never re-triggers evaluation (no feedback loop).
+///
+/// # Lock discipline
+///
+/// The engine's own synchronization primitives (the bounded `mpsc` queue, the
+/// `shed_count` atomic, and the `state` mutex guarding the join handles) are
+/// **leaves**: a worker never holds the `state` mutex while calling into the
+/// database, and the database write-path locks are only ever taken *inside*
+/// the public `AletheiaDB` API the worker calls, never around it. The engine
+/// therefore introduces no new edge into the documented lock-acquisition order.
+///
+/// # v1 scope
+///
+/// The monitor set is snapshotted at [`start`](Self::start): monitors created
+/// after start are not watched until the engine is restarted (a documented
+/// follow-up). Evaluation is best-effort — errors from a since-deleted monitor
+/// or a transient read are dropped, since the next change/tick re-drives it.
 pub struct DriftAlarmEngine {
     db: Arc<AletheiaDB>,
     shed_count: Arc<AtomicU64>,
+    capacity: usize,
+    /// Gate the worker checks before draining each evaluation task, so a test can
+    /// deterministically stall evaluation and force the bounded queue to saturate
+    /// (see [`set_evaluation_paused`](Self::set_evaluation_paused)).
+    eval_pause: Arc<EvalPause>,
+    state: parking_lot::Mutex<EngineState>,
+}
+
+/// Mutable run state, guarded by the engine's leaf `state` mutex.
+struct EngineState {
+    /// Shutdown flag shared with the dispatcher/ticker; `Some` iff running.
+    running: Option<Arc<AtomicBool>>,
+    /// Join handles for the spawned background threads.
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// A pause gate the evaluation worker parks on. Normally unpaused (a single
+/// cheap lock+bool check per task); a diagnostic/test hook can pause it to stall
+/// evaluation deterministically without touching the write path.
+struct EvalPause {
+    paused: parking_lot::Mutex<bool>,
+    resumed: parking_lot::Condvar,
+}
+
+impl EvalPause {
+    fn new() -> Self {
+        Self {
+            paused: parking_lot::Mutex::new(false),
+            resumed: parking_lot::Condvar::new(),
+        }
+    }
+
+    /// Block while paused (used by the worker before it drains the next task).
+    fn wait_while_paused(&self) {
+        let mut guard = self.paused.lock();
+        while *guard {
+            self.resumed.wait(&mut guard);
+        }
+    }
+
+    /// Set the paused flag and wake any parked worker on resume.
+    fn set(&self, paused: bool) {
+        *self.paused.lock() = paused;
+        if !paused {
+            self.resumed.notify_all();
+        }
+    }
 }
 
 impl DriftAlarmEngine {
     /// Create an engine bound to `db` (not yet running; call [`start`]).
     ///
+    /// Uses [`DEFAULT_EVAL_QUEUE_CAPACITY`] for the bounded evaluation queue.
+    ///
     /// [`start`]: DriftAlarmEngine::start
     #[must_use]
     pub fn new(db: Arc<AletheiaDB>) -> Self {
+        Self::with_capacity(db, DEFAULT_EVAL_QUEUE_CAPACITY)
+    }
+
+    /// Create an engine with an explicit bounded-queue capacity (min 1).
+    ///
+    /// A smaller capacity sheds sooner under load — useful for deterministically
+    /// exercising the shed path. The capacity bounds only the *pending* backlog;
+    /// it never bounds the number of evaluations performed over time.
+    #[must_use]
+    pub fn with_capacity(db: Arc<AletheiaDB>, capacity: usize) -> Self {
         Self {
             db,
             shed_count: Arc::new(AtomicU64::new(0)),
+            capacity: capacity.max(1),
+            eval_pause: Arc::new(EvalPause::new()),
+            state: parking_lot::Mutex::new(EngineState {
+                running: None,
+                handles: Vec::new(),
+            }),
         }
     }
 
+    /// Pause or resume background evaluation (diagnostic / test hook).
+    ///
+    /// When paused, the worker stops draining the bounded evaluation queue, so a
+    /// sustained burst of changes deterministically saturates the queue and
+    /// sheds — the observable proof that a saturated evaluator sheds rather than
+    /// back-pressuring commits (AC6). Commits continue unaffected while paused
+    /// (the engine is off the write path). Resuming wakes the worker to drain
+    /// whatever remains. This does not affect [`shed_count`](Self::shed_count)
+    /// semantics. Not part of the stable API.
+    #[doc(hidden)]
+    pub fn set_evaluation_paused(&self, paused: bool) {
+        self.eval_pause.set(paused);
+    }
+
     /// Start the background subscription + ticker.
+    ///
+    /// Idempotent: calling `start` on an already-running engine is a no-op. The
+    /// monitor set is snapshotted here (see the type-level v1-scope note).
     ///
     /// # Errors
     ///
     /// Fails if the changefeed subscription cannot be established.
     pub fn start(&self) -> Result<()> {
-        // Stage B (#3367): subscribe_changes(reserved-label-filtered) + worker.
-        let _ = &self.db;
-        todo!("Stage B (#3367): drift alarm background driver")
+        let mut state = self.state.lock();
+        if state.running.is_some() {
+            return Ok(());
+        }
+
+        // Snapshot the monitor set: partition on-write (changefeed-driven) from
+        // scheduled (ticker-driven).
+        let monitors = self.db.list_drift_monitors();
+        let mut labeled_on_write: std::collections::HashMap<String, Vec<MonitorId>> =
+            std::collections::HashMap::new();
+        let mut unlabeled_on_write: Vec<MonitorId> = Vec::new();
+        let mut scheduled: Vec<(MonitorId, Duration)> = Vec::new();
+        for monitor in &monitors {
+            match monitor.spec.mode {
+                EvalMode::OnWrite => match &monitor.spec.label {
+                    Some(label) => labeled_on_write
+                        .entry(label.clone())
+                        .or_default()
+                        .push(monitor.id),
+                    None => unlabeled_on_write.push(monitor.id),
+                },
+                EvalMode::Scheduled { interval } => {
+                    if !interval.is_zero() {
+                        scheduled.push((monitor.id, interval));
+                    }
+                }
+            }
+        }
+
+        let running = Arc::new(AtomicBool::new(true));
+        // Bounded evaluation queue: `try_send` never blocks the producer; a full
+        // queue yields `TrySendError::Full`, which the producers count as a shed.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<MonitorId>(self.capacity);
+        let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
+        // Dispatcher: only needed if there is at least one on-write monitor.
+        let has_on_write = !labeled_on_write.is_empty() || !unlabeled_on_write.is_empty();
+        if has_on_write {
+            // If any on-write monitor is entity-scoped (no label), we cannot
+            // restrict the subscription by label — subscribe to all node changes
+            // and filter in the dispatcher. Otherwise restrict to the watched
+            // labels (the reserved alarm label is never among them, so alarm
+            // materialization never reaches this subscription).
+            let filter = if unlabeled_on_write.is_empty() {
+                let labels: Vec<String> = labeled_on_write.keys().cloned().collect();
+                crate::core::changefeed_subscription::ChangeFilter::all().with_node_labels(labels)
+            } else {
+                crate::core::changefeed_subscription::ChangeFilter::all()
+            };
+            let subscription = self.db.subscribe_changes(filter)?;
+            let dispatcher_tx = tx.clone();
+            let dispatcher_running = Arc::clone(&running);
+            let dispatcher_shed = Arc::clone(&self.shed_count);
+            handles.push(std::thread::spawn(move || {
+                dispatcher_loop(
+                    &subscription,
+                    &dispatcher_tx,
+                    &dispatcher_running,
+                    &dispatcher_shed,
+                    &labeled_on_write,
+                    &unlabeled_on_write,
+                );
+            }));
+        }
+
+        // Ticker: only needed if there is at least one scheduled monitor.
+        if !scheduled.is_empty() {
+            let ticker_tx = tx.clone();
+            let ticker_running = Arc::clone(&running);
+            let ticker_shed = Arc::clone(&self.shed_count);
+            handles.push(std::thread::spawn(move || {
+                ticker_loop(&scheduled, &ticker_tx, &ticker_running, &ticker_shed);
+            }));
+        }
+
+        // Worker: drains the queue and evaluates. Exits when every sender
+        // (the original `tx` plus dispatcher/ticker clones) has been dropped.
+        drop(tx);
+        let worker_db = Arc::clone(&self.db);
+        let worker_pause = Arc::clone(&self.eval_pause);
+        handles.push(std::thread::spawn(move || {
+            loop {
+                // Park while paused BEFORE consuming, so a paused worker stops
+                // draining entirely and the bounded queue saturates (AC6 shed).
+                worker_pause.wait_while_paused();
+                match rx.recv() {
+                    // Best-effort: a since-deleted monitor or transient read
+                    // error is dropped; the next change/tick re-drives it.
+                    Ok(id) => {
+                        let _ = worker_db.evaluate_drift_monitor_now(id);
+                    }
+                    // Every sender dropped (shutdown): exit.
+                    Err(_) => break,
+                }
+            }
+        }));
+
+        state.running = Some(running);
+        state.handles = handles;
+        Ok(())
     }
 
     /// Stop the background driver and deregister the subscription.
+    ///
+    /// Signals shutdown, then joins every spawned thread. Safe to call more than
+    /// once and safe to call when never started (both are no-ops). Never panics,
+    /// even if a background thread panicked (its join error is discarded).
     pub fn stop(&self) {
-        // Stage B (#3367): signal the worker to drain and join.
-        todo!("Stage B (#3367): drift alarm driver shutdown")
+        let (running, handles) = {
+            let mut state = self.state.lock();
+            (state.running.take(), std::mem::take(&mut state.handles))
+        };
+        if let Some(running) = running {
+            running.store(false, Ordering::SeqCst);
+        }
+        // Unpause so a worker parked on the eval gate observes the dropped
+        // senders (below) and exits instead of blocking `join` forever.
+        self.eval_pause.set(false);
+        // Joining outside the `state` lock: the background threads never touch
+        // `state`, so this cannot deadlock, and a concurrent `start`/`stop`
+        // simply observes the already-cleared state.
+        for handle in handles {
+            let _ = handle.join();
+        }
     }
 
     /// Number of evaluation tasks shed due to queue saturation (observable
@@ -949,6 +1189,98 @@ impl DriftAlarmEngine {
     #[must_use]
     pub fn shed_count(&self) -> u64 {
         self.shed_count.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for DriftAlarmEngine {
+    fn drop(&mut self) {
+        // Ensure background threads are torn down even if `stop` was not called.
+        self.stop();
+    }
+}
+
+/// Drain the changefeed subscription and enqueue monitor evaluations, shedding
+/// (incrementing `shed`) when the bounded queue is full. Never blocks the
+/// producer side of the queue.
+fn dispatcher_loop(
+    subscription: &crate::core::changefeed_subscription::Subscription,
+    tx: &std::sync::mpsc::SyncSender<MonitorId>,
+    running: &AtomicBool,
+    shed: &AtomicU64,
+    labeled: &std::collections::HashMap<String, Vec<MonitorId>>,
+    unlabeled: &[MonitorId],
+) {
+    while running.load(Ordering::Relaxed) {
+        match subscription.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
+            Ok(records) => {
+                for record in records {
+                    // Never re-trigger on our own alarm-node writes (avoid a
+                    // feedback loop); the label filter already excludes them when
+                    // present, but guard unconditionally for the all-labels case.
+                    if record.label == DRIFT_ALARM_LABEL {
+                        continue;
+                    }
+                    if let Some(ids) = labeled.get(&record.label) {
+                        for &id in ids {
+                            enqueue_or_shed(tx, id, shed);
+                        }
+                    }
+                    for &id in unlabeled {
+                        enqueue_or_shed(tx, id, shed);
+                    }
+                }
+            }
+            // Timeout with nothing buffered: loop to re-check the shutdown flag.
+            Err(crate::core::changefeed_subscription::RecvError::Lagged { .. }) => {
+                // The subscription overflowed (the dispatcher itself never lags in
+                // practice, since enqueue is non-blocking). Nothing more will
+                // arrive on this handle; stop draining. Evaluation for any missed
+                // change is re-driven by the next change or a scheduled tick.
+                break;
+            }
+        }
+        // `recv_timeout` returns `Ok(vec![])` on a plain timeout, so the loop
+        // naturally re-checks `running` above.
+    }
+    // Dropping `subscription` (owned by this thread) deregisters it; dropping
+    // `tx` (the caller's clone lives here) releases one sender.
+}
+
+/// Enqueue `id` for evaluation, or count a shed if the bounded queue is full.
+/// Returns early on a disconnected queue (worker gone).
+fn enqueue_or_shed(tx: &std::sync::mpsc::SyncSender<MonitorId>, id: MonitorId, shed: &AtomicU64) {
+    match tx.try_send(id) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            shed.fetch_add(1, Ordering::Relaxed);
+        }
+        // Worker gone: nothing to do (the loop's `running` check will exit).
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+    }
+}
+
+/// Enqueue each scheduled monitor on its own interval until shutdown, shedding
+/// when the bounded queue is full.
+fn ticker_loop(
+    scheduled: &[(MonitorId, Duration)],
+    tx: &std::sync::mpsc::SyncSender<MonitorId>,
+    running: &AtomicBool,
+    shed: &AtomicU64,
+) {
+    let start = std::time::Instant::now();
+    // Next fire instant (relative to `start`) per monitor.
+    let mut next: Vec<Duration> = scheduled.iter().map(|&(_, interval)| interval).collect();
+    while running.load(Ordering::Relaxed) {
+        let elapsed = start.elapsed();
+        for (slot, &(id, interval)) in next.iter_mut().zip(scheduled.iter()) {
+            if elapsed >= *slot {
+                enqueue_or_shed(tx, id, shed);
+                // Advance to the next multiple strictly beyond `elapsed` so a
+                // slow tick does not burst-fire to catch up.
+                *slot = elapsed + interval;
+            }
+        }
+        std::thread::sleep(SHUTDOWN_POLL_INTERVAL);
     }
 }
 
