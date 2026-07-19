@@ -73,13 +73,23 @@
 use aletheiadb::{AletheiaDB, NodeId, PropertyValue, Timestamp, time};
 use std::path::{Path, PathBuf};
 
-/// Absolute path to the checked-in 0.1.1 fixture (never opened in place).
+/// Absolute path to the checked-in 0.1.1 WAL-tail fixture (never opened in place).
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("compat")
         .join("aletheiadb-0.1.1")
+}
+
+/// Absolute path to the checked-in 0.1.1 CLEANLY CHECKPOINTED fixture (WAL
+/// drained; never opened in place). Deliberate opposite of `fixture_dir()`.
+fn checkpointed_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("compat")
+        .join("aletheiadb-0.1.1-checkpointed")
 }
 
 /// Recursively copy `src` into `dst`, preserving the `wal/` +
@@ -107,6 +117,13 @@ struct FixtureCopy {
 
 impl FixtureCopy {
     fn new() -> Self {
+        Self::from_source(&fixture_dir())
+    }
+
+    /// Copy an arbitrary checked-in fixture dir into a unique tempdir. Used by
+    /// both the WAL-tail (`fixture_dir`) and checkpointed
+    /// (`checkpointed_fixture_dir`) fixtures so neither is ever opened in place.
+    fn from_source(src: &Path) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -114,7 +131,7 @@ impl FixtureCopy {
         let unique = format!("aletheiadb-compat-0_1_1-{}-{}", std::process::id(), nanos);
         let path = std::env::temp_dir().join(unique);
         let _ = std::fs::remove_dir_all(&path);
-        copy_dir_recursive(&fixture_dir(), &path).expect("copy 0.1.1 fixture into tempdir");
+        copy_dir_recursive(src, &path).expect("copy 0.1.1 fixture into tempdir");
         FixtureCopy { path }
     }
 }
@@ -314,6 +331,222 @@ fn opens_0_1_1_data_dir_with_full_integrity() {
         violations.len(),
         violations.join("\n  - ")
     );
+}
+
+/// Cross-version integrity check for the CLEANLY CHECKPOINTED / WAL-drained
+/// 0.1.1 fixture (`tests/fixtures/compat/aletheiadb-0.1.1-checkpointed/`).
+///
+/// This is the deliberate opposite of `opens_0_1_1_data_dir_with_full_integrity`
+/// above: that fixture carries an unreplayed WAL tail and reproduces the label
+/// corruption blocker; THIS fixture captured every node/edge/version in a single
+/// `persist_indexes()` snapshot and then shut down gracefully, so reopening under
+/// trunk replays ZERO WAL entries. The question this test answers: does a cleanly
+/// checkpointed 0.1.x data dir open under 0.2.0 with FULL integrity? Ground truth
+/// is `tests/fixtures/compat/README.md` (the checkpointed section) — note the ids
+/// differ from fixture 1: eve=9, frank=10, umbrella=11, and there is NO sentinel.
+#[test]
+fn checkpointed_0_1_1_datadir_opens_under_trunk_with_full_integrity() {
+    // Open a COPY, never the checked-in fixture in place (opening replays /
+    // re-snapshots and would mutate the committed fixture bytes).
+    let copy = FixtureCopy::from_source(&checkpointed_fixture_dir());
+    let db = AletheiaDB::open(&copy.path)
+        .expect("trunk (0.2.0) must open a cleanly-checkpointed 0.1.1 data directory");
+
+    // --- Current-state counts -------------------------------------------------
+    // Everything was captured in ONE index snapshot; the WAL tail is drained (all
+    // entries <= the snapshot watermark, so reopen replays 0). Unlike the WAL-tail
+    // fixture (which yields 13/12 because trunk replays the dropped sentinel slot),
+    // there is no sentinel and no tail here, so counts are exactly 12/12.
+    assert_eq!(
+        db.node_count(),
+        12,
+        "checkpointed fixture: node_count must be 12 (no WAL tail, no sentinel)"
+    );
+    assert_eq!(
+        db.edge_count(),
+        12,
+        "checkpointed fixture: edge_count must be 12"
+    );
+
+    // --- No sentinel node -----------------------------------------------------
+    // Fixture 1 has a throwaway Sentinel at id 9; this fixture omits it entirely,
+    // so id 9 is Eve (a real Person), not a sentinel. id 12 does not exist.
+    assert!(
+        db.get_node(NodeId::new(12).unwrap()).is_err(),
+        "checkpointed fixture: node id 12 must NOT exist (only 0..=11)"
+    );
+
+    // --- Labels are CORRECT — including the entities corrupted in fixture 1 ----
+    // In the WAL-tail fixture, trunk mis-resolves eve/frank/umbrella labels to
+    // interned property-key strings ("founded"/"since"). Here every label — batch-1
+    // AND the ex-"batch 2" nodes — comes straight from the index snapshot's string
+    // table, so labels round-trip correctly. This is the whole point of the second
+    // fixture: checkpointing before upgrade is the LABEL-SAFE path.
+    let mut violations: Vec<String> = Vec::new();
+
+    // Batch-1 control group (from snapshot; correct in BOTH fixtures).
+    check_node(
+        &db,
+        0,
+        "Person",
+        "name",
+        "String(\"Alice\")",
+        &mut violations,
+    );
+    check_node(
+        &db,
+        4,
+        "Company",
+        "name",
+        "String(\"Acme\")",
+        &mut violations,
+    );
+    check_node(
+        &db,
+        7,
+        "City",
+        "name",
+        "String(\"London\")",
+        &mut violations,
+    );
+
+    // The three ex-"batch 2" nodes: eve=9, frank=10, umbrella=11. These labels are
+    // CORRUPTED in the WAL-tail fixture (eve/frank -> "founded", umbrella -> "since")
+    // but must be CORRECT here because they were checkpointed, not replayed.
+    check_node(&db, 9, "Person", "name", "String(\"Eve\")", &mut violations);
+    check_node(
+        &db,
+        10,
+        "Person",
+        "name",
+        "String(\"Frank\")",
+        &mut violations,
+    );
+    check_node(
+        &db,
+        11,
+        "Company",
+        "name",
+        "String(\"Umbrella\")",
+        &mut violations,
+    );
+
+    // --- Property round-trips (String/Int/Float/Bool) -------------------------
+    // alice (id 0): name/age/score/active.
+    check_int(&db, 0, "age", 30, &mut violations);
+    check_float(&db, 0, "score", 4.5, &mut violations);
+    check_bool(&db, 0, "active", true, &mut violations);
+    // acme (id 4): name/founded/public.
+    check_int(&db, 4, "founded", 1999, &mut violations);
+    check_bool(&db, 4, "public", true, &mut violations);
+    // eve (id 9): name/age.
+    check_int(&db, 9, "age", 34, &mut violations);
+
+    // --- Specific edges with label + property ---------------------------------
+    // (Person:Alice) -[WORKS_AT role="Engineer"]-> (Company:Acme)  [snapshot].
+    let acme_id = NodeId::new(4).unwrap();
+    let alice_works_at_acme = db
+        .get_outgoing_edges(NodeId::new(0).unwrap())
+        .into_iter()
+        .filter_map(|eid| db.get_edge(eid).ok())
+        .find(|e| e.has_label_str("WORKS_AT") && e.target == acme_id);
+    match alice_works_at_acme {
+        Some(e) if e.get_property("role").and_then(|v| v.as_str()) == Some("Engineer") => {}
+        Some(e) => violations.push(format!(
+            "alice->acme WORKS_AT role = {} (expected Engineer)",
+            prop_str(e.get_property("role"))
+        )),
+        None => violations.push("alice -[WORKS_AT]-> acme edge not found by label".to_string()),
+    }
+
+    // (Person:Eve) -[WORKS_AT role="Researcher"]-> (Company:Umbrella).
+    // In the WAL-tail fixture this find-by-label can fail because eve's/umbrella's
+    // labels are interner-corrupted; here it must succeed with correct labels.
+    let umbrella_id = NodeId::new(11).unwrap();
+    let eve_works_at_umbrella = db
+        .get_outgoing_edges(NodeId::new(9).unwrap())
+        .into_iter()
+        .filter_map(|eid| db.get_edge(eid).ok())
+        .find(|e| e.has_label_str("WORKS_AT") && e.target == umbrella_id);
+    match eve_works_at_umbrella {
+        Some(e) if e.get_property("role").and_then(|v| v.as_str()) == Some("Researcher") => {}
+        Some(e) => violations.push(format!(
+            "eve->umbrella WORKS_AT role = {} (expected Researcher)",
+            prop_str(e.get_property("role"))
+        )),
+        None => violations.push("eve -[WORKS_AT]-> umbrella edge not found by label".to_string()),
+    }
+
+    // --- Temporal: Bob's superseded history (from the temporal snapshot) ------
+    // get_node_history(bob=1) must return 2 versions, age 41 then 42, correctly
+    // intervalled: v1's valid interval is CLOSED and abuts v2's OPEN valid interval.
+    let bob = NodeId::new(1).unwrap();
+    match db.get_node_history(bob) {
+        Ok(h) if h.versions.len() == 2 => {
+            if prop_str(h.versions[0].properties.get("age")) != "Int(41)" {
+                violations.push(format!(
+                    "bob v1 age = {} (expected Int(41))",
+                    prop_str(h.versions[0].properties.get("age"))
+                ));
+            }
+            if prop_str(h.versions[1].properties.get("age")) != "Int(42)" {
+                violations.push(format!(
+                    "bob v2 age = {} (expected Int(42))",
+                    prop_str(h.versions[1].properties.get("age"))
+                ));
+            }
+            // Correctly intervalled: v1.valid_to == v2.valid_from (contiguous),
+            // v1's valid interval is closed, v2's is open (current).
+            let v1_valid = h.versions[0].temporal.valid_time();
+            let v2_valid = h.versions[1].temporal.valid_time();
+            if v1_valid.end().wallclock() != v2_valid.start().wallclock() {
+                violations.push(format!(
+                    "bob v1.valid_to ({}) != v2.valid_from ({}) — not contiguous",
+                    v1_valid.end().wallclock(),
+                    v2_valid.start().wallclock()
+                ));
+            }
+            if v1_valid.is_current() {
+                violations
+                    .push("bob v1 valid interval is open (expected closed/superseded)".to_string());
+            }
+            if !v2_valid.is_current() {
+                violations
+                    .push("bob v2 valid interval is closed (expected open/current)".to_string());
+            }
+        }
+        Ok(h) => violations.push(format!(
+            "bob history has {} versions (expected 2)",
+            h.versions.len()
+        )),
+        Err(e) => violations.push(format!("bob history errored: {e:?}")),
+    }
+
+    assert!(
+        violations.is_empty(),
+        "\ncheckpointed 0.1.1 -> trunk cross-version integrity violations ({}):\n  - {}\n",
+        violations.len(),
+        violations.join("\n  - ")
+    );
+
+    // --- Probe (SOFT — never fails the integrity test) ------------------------
+    // Orthogonal to the checkpoint question: does trunk fix 0.1.1's restore-path
+    // limitation where get_node_at_time() returns NodeNotFound for RESTORED nodes?
+    // before_update_valid_micros is the authoritative pre-update coordinate from
+    // the checkpointed fixture's ground truth (README): Bob was age 41 at this time.
+    let before_update: Timestamp = Timestamp::from(1_784_437_154_389_396_i64);
+    let now = time::now();
+    match db.get_node_at_time(bob, before_update, now) {
+        Ok(node) => eprintln!(
+            "PROBE (checkpointed): trunk FIXED the 0.1.1 restore-path limitation — \
+             get_node_at_time(bob, before_update, now) = {} (expected Int(41))",
+            prop_str(node.get_property("age"))
+        ),
+        Err(err) => eprintln!(
+            "PROBE (checkpointed): 0.1.1 restore-path limitation NOT fixed — \
+             get_node_at_time(bob, before_update, now) = Err({err:?})"
+        ),
+    }
 }
 
 fn check_node(
