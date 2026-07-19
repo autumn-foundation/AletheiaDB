@@ -15,6 +15,8 @@ change forces a minor bump, and there are several (see Breaking changes below),
 so a minor bump off 0.1.x is mandatory. MSRV: Rust 1.92, edition 2024. License:
 MIT OR Apache-2.0.
 
+**Upgrading from 0.1.x?** See the [0.1 → 0.2 migration guide](docs/guides/migration-0.1-to-0.2.md).
+
 ### ⚠️ Breaking changes
 
 - `ReadOps::get_outgoing_edges`, `ReadOps::get_incoming_edges`, and

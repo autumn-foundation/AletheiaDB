@@ -195,6 +195,7 @@ aletheiadb = { version = "0.2", features = ["nova", "semantic-search"] }
 | [Why AletheiaDB](docs/guides/why-aletheiadb.md) | The problem it solves; when to use it |
 | [Core Concepts](docs/guides/core-concepts.md) | Bi-temporal model, nodes, edges, WAL, vector search |
 | [Installation](docs/guides/installation.md) | Prerequisites, feature flags, building from source |
+| [0.1 → 0.2 Migration](docs/guides/migration-0.1-to-0.2.md) | Upgrading an embedded 0.1.x deployment to 0.2.0 |
 | [Getting Started](docs/guides/getting-started.md) | First database, CRUD, time-travel, hybrid queries |
 | [Docker](docs/guides/docker.md) | Container image, compose quickstart, MCP mode, volumes |
 | [Persistence Guide](docs/guides/PERSISTENCE.md) | WAL, index persistence, cold storage |
