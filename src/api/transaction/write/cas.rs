@@ -64,7 +64,7 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::namespace;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
-use crate::core::temporal::Timestamp;
+use crate::core::temporal::{Timestamp, time};
 
 /// The entity a [`CasPrecondition`] guards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +89,24 @@ pub(crate) struct LeaseCondition {
     pub(crate) lease_until_key: String,
 }
 
+/// The monotonic-fence branch of a claim precondition (DBOS Phase 3e).
+///
+/// When present, the claim is admitted only if the caller-supplied `new_fence`
+/// is **strictly greater** than the entity's committed fence (the integer value
+/// of the `fence_key` property; absent / non-integer is treated as `i64::MIN`,
+/// i.e. no fence held). Re-read under the commit-serialization guard, this makes
+/// the stale-fence steal collision impossible: two stealers computing the same
+/// `new_fence` from a stale read cannot both commit — the second re-reads the
+/// first's stored fence and fails the strict-`>` check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FenceCondition {
+    /// Property key whose integer value holds the monotonic fence token.
+    pub(crate) fence_key: String,
+    /// The fence value the caller stamps into the full-replace map; it must be
+    /// strictly greater than the committed fence for the claim to be admitted.
+    pub(crate) new_fence: i64,
+}
+
 /// A buffered CAS precondition, carried on the [`WriteTransaction`] until the
 /// commit-time re-check under the `historical.write()` guard.
 ///
@@ -103,6 +121,10 @@ pub(crate) struct CasPrecondition {
     pub(crate) expected_version: VersionId,
     /// Optional lease/expiry OR-branch (present for `claim_with_lease`).
     pub(crate) lease: Option<LeaseCondition>,
+    /// Optional monotonic-fence AND-branch (present for a fenced claim,
+    /// `claim_with_lease_fenced`). AND-composed with the version/lease gate:
+    /// the claim must be a valid claim *and* beat the stored fence.
+    pub(crate) fence: Option<FenceCondition>,
 }
 
 impl WriteTransaction {
@@ -146,6 +168,7 @@ impl WriteTransaction {
         expected_version: VersionId,
         properties: PropertyMap,
         lease: Option<LeaseCondition>,
+        fence: Option<FenceCondition>,
         options: WriteRequestOptions,
     ) -> Result<VersionId> {
         if self.state != TxState::Active {
@@ -221,6 +244,7 @@ impl WriteTransaction {
             target: CasTarget::Node(node_id),
             expected_version,
             lease,
+            fence,
         });
 
         Ok(version_id)
@@ -302,6 +326,7 @@ impl WriteTransaction {
             target: CasTarget::Edge(edge_id),
             expected_version,
             lease: None,
+            fence: None,
         });
 
         Ok(version_id)
@@ -350,6 +375,72 @@ impl WriteTransaction {
             Some(LeaseCondition {
                 lease_until_key: lease_until_key.to_string(),
             }),
+            None,
+            options,
+        )
+    }
+
+    /// Fenced claim (DBOS Phase 3e): a [`claim_with_lease_impl`] that ALSO
+    /// enforces a server-side monotonic fence and computes the lease deadline
+    /// on the **DB** clock.
+    ///
+    /// Two safety extensions over `claim_with_lease_impl`:
+    ///
+    /// - **Piece 1 (fence).** The claim stamps `fence_key = new_fence` and is
+    ///   admitted at commit only if `new_fence` is **strictly greater** than the
+    ///   entity's committed fence (re-read under the commit-serialization guard).
+    ///   This makes the stale-fence steal collision impossible (see
+    ///   [`FenceCondition`]); a violation aborts with
+    ///   [`TransactionError::FenceTooLow`](crate::core::error::TransactionError::FenceTooLow).
+    /// - **Piece 2 (DB-side lease deadline).** `lease_until` is computed as
+    ///   `time::now() + lease_ttl` on the **engine** HLC, not the caller's
+    ///   clock — a skewed-fast executor can no longer install a far-future,
+    ///   un-stealable lease. `time::now()` is taken at buffer-build time (holding
+    ///   no locks, before the `current_timestamp → wal → historical` chain); it
+    ///   is within the transaction's own microsecond-scale duration of the commit
+    ///   HLC and, being at most that sliver earlier, yields an if-anything-shorter
+    ///   lease — the safe direction for liveness.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn claim_with_lease_fenced_impl(
+        &mut self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        // Piece 2: compute the lease deadline on the DB clock (buffer-build
+        // time), never the caller's. Saturating so a huge TTL cannot overflow.
+        let ttl_us = i64::try_from(lease_ttl.as_micros()).unwrap_or(i64::MAX);
+        let lease_until_us = time::now().wallclock().saturating_add(ttl_us);
+
+        // Stamp owner, DB-computed lease deadline, and the fence token into the
+        // claim's full-replace map. Interning mirrors the write path.
+        let owner_key = GLOBAL_INTERNER.intern(lease_owner_key)?;
+        let until_key = GLOBAL_INTERNER.intern(lease_until_key)?;
+        let fkey = GLOBAL_INTERNER.intern(fence_key)?;
+        let claimed = PropertyMapBuilder::from_map(properties)
+            .insert_by_key(owner_key, owner)
+            .insert_by_key(until_key, PropertyValue::Int(lease_until_us))
+            .insert_by_key(fkey, PropertyValue::Int(new_fence))
+            .build();
+
+        self.cas_node_impl(
+            node_id,
+            expected_version,
+            claimed,
+            Some(LeaseCondition {
+                lease_until_key: lease_until_key.to_string(),
+            }),
+            Some(FenceCondition {
+                fence_key: fence_key.to_string(),
+                new_fence,
+            }),
             options,
         )
     }
@@ -393,19 +484,35 @@ pub(crate) fn detect_cas_precondition_violations(
                 // historical head (both are written together in
                 // `apply_node_write`), so this is the committed current version.
                 let actual = tx.current.get_node(node_id).ok().map(|n| n.current_version);
-                if actual == Some(precondition.expected_version) {
-                    continue; // version matches — CAS satisfied
+                // Claim gate: version matches OR (lease claim) the lease is
+                // expired / unclaimed at the commit timestamp.
+                let claim_ok = actual == Some(precondition.expected_version)
+                    || precondition.lease.as_ref().is_some_and(|lease| {
+                        node_lease_expired(tx, node_id, &lease.lease_until_key, commit_timestamp)
+                    });
+                if !claim_ok {
+                    return Err(TransactionError::CasMismatch {
+                        expected: precondition.expected_version,
+                        actual,
+                    }
+                    .into());
                 }
-                if let Some(lease) = &precondition.lease
-                    && node_lease_expired(tx, node_id, &lease.lease_until_key, commit_timestamp)
-                {
-                    continue; // lease expired / unclaimed — claim allowed
+                // Fence gate (DBOS Phase 3e): AND-composed with the claim gate.
+                // The committed fence is re-read under this guard, so a stale
+                // `new_fence` computed from an earlier queue read is rejected —
+                // making the stale-fence steal collision impossible.
+                if let Some(fence) = &precondition.fence {
+                    let stored = node_stored_fence(tx, node_id, &fence.fence_key);
+                    if fence.new_fence <= stored {
+                        return Err(TransactionError::FenceTooLow {
+                            fence_key: fence.fence_key.clone(),
+                            new_fence: fence.new_fence,
+                            stored,
+                        }
+                        .into());
+                    }
                 }
-                return Err(TransactionError::CasMismatch {
-                    expected: precondition.expected_version,
-                    actual,
-                }
-                .into());
+                continue;
             }
             CasTarget::Edge(edge_id) => {
                 let actual = tx.current.get_edge(edge_id).ok().map(|e| e.current_version);
@@ -450,6 +557,21 @@ fn node_lease_expired(
             lease_until_expired_at(until_us, commit_timestamp.wallclock())
         }
         Err(_) => false,
+    }
+}
+
+/// Read a committed node's monotonic fence (DBOS Phase 3e): the integer value
+/// of its `fence_key` property, or `i64::MIN` when the node is absent, the key
+/// is missing, or the value is non-integer (all meaning "no fence held", so any
+/// non-negative `new_fence` strictly beats it and a first claim is admitted).
+fn node_stored_fence(tx: &WriteTransaction, node_id: NodeId, fence_key: &str) -> i64 {
+    match tx.current.get_node(node_id) {
+        Ok(node) => node
+            .properties
+            .get(fence_key)
+            .and_then(|v| v.as_int())
+            .unwrap_or(i64::MIN),
+        Err(_) => i64::MIN,
     }
 }
 

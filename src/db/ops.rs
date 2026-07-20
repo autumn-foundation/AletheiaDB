@@ -784,6 +784,82 @@ impl AletheiaDB {
         })
     }
 
+    /// Fenced claim (DBOS Phase 3e): a safe-for-multi-executor
+    /// [`claim_with_lease`](Self::claim_with_lease) that enforces a **server-side
+    /// monotonic fence** and computes the lease deadline on the **DB** clock.
+    ///
+    /// The claim stamps `fence_key = new_fence` and is admitted only if
+    /// `new_fence` is strictly greater than the entity's committed fence (re-read
+    /// under the commit-serialization guard), making the stale-fence steal
+    /// collision impossible — a violation aborts with
+    /// [`TransactionError::FenceTooLow`](crate::core::error::TransactionError::FenceTooLow)
+    /// (non-retriable). `lease_until` is computed as `engine_now + lease_ttl`, so
+    /// a skewed-fast executor cannot install a far-future, un-stealable lease.
+    /// See
+    /// [`WriteOps::claim_with_lease_fenced`](crate::api::transaction::WriteOps::claim_with_lease_fenced).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_lease_fenced(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.claim_with_lease_fenced(
+                node_id,
+                expected_version,
+                lease_owner_key,
+                lease_until_key,
+                fence_key,
+                owner,
+                lease_ttl,
+                new_fence,
+                properties,
+            )
+        })
+    }
+
+    /// [`claim_with_lease_fenced`](Self::claim_with_lease_fenced) with a
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle (backdated `valid_from` and/or write-time provenance).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_lease_fenced_with_options(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.claim_with_lease_fenced_with_options(
+                node_id,
+                expected_version,
+                lease_owner_key,
+                lease_until_key,
+                fence_key,
+                owner,
+                lease_ttl,
+                new_fence,
+                properties,
+                options,
+            )
+        })
+    }
+
     // ===== Replace / tombstone (non-PATCH) writes (Issue #3549) =====
 
     /// Replace a node's entire property map AND label (full overwrite, non-PATCH).

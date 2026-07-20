@@ -899,6 +899,73 @@ pub trait WriteOps: ReadOps {
         options: WriteRequestOptions,
     ) -> Result<crate::core::id::VersionId>;
 
+    /// Fenced claim (DBOS Phase 3e): a safe-for-multi-executor
+    /// [`claim_with_lease`](Self::claim_with_lease) that additionally enforces a
+    /// **server-side monotonic fence** and computes the lease deadline on the
+    /// **DB** clock.
+    ///
+    /// Over `claim_with_lease` it adds two extensions:
+    ///
+    /// - **Monotonic fence:** the claim stamps `fence_key = new_fence` and is
+    ///   admitted at commit only if `new_fence` is **strictly greater** than the
+    ///   entity's committed fence (re-read under the commit-serialization guard).
+    ///   This makes the stale-fence steal collision impossible; a violation
+    ///   aborts with
+    ///   [`TransactionError::FenceTooLow`](crate::core::error::TransactionError::FenceTooLow)
+    ///   (non-retriable — recompute the fence). AND-composed with the usual
+    ///   version-match-OR-lease-expired claim gate.
+    /// - **DB-side lease deadline:** the caller passes a `lease_ttl` and the DB
+    ///   computes `lease_until = engine_now + lease_ttl`, so a skewed-fast
+    ///   executor can no longer install a far-future, un-stealable lease.
+    ///
+    /// The `lease_owner_key` / `lease_until_key` / `fence_key` names are
+    /// caller-supplied conventions, not a hardcoded schema. Delegates to
+    /// [`claim_with_lease_fenced_with_options`](Self::claim_with_lease_fenced_with_options).
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_fenced(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+    ) -> Result<crate::core::id::VersionId> {
+        self.claim_with_lease_fenced_with_options(
+            node_id,
+            expected_version,
+            lease_owner_key,
+            lease_until_key,
+            fence_key,
+            owner,
+            lease_ttl,
+            new_fence,
+            properties,
+            WriteRequestOptions::default(),
+        )
+    }
+
+    /// [`claim_with_lease_fenced`](Self::claim_with_lease_fenced) with a
+    /// [`WriteRequestOptions`] bundle (backdated `valid_from` and/or write-time
+    /// provenance). The most general fenced-claim method.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_fenced_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<crate::core::id::VersionId>;
+
     /// Update a node's properties.
     ///
     /// This performs a PATCH update: only the specified properties are updated;
