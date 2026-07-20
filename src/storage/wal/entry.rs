@@ -416,8 +416,16 @@ mod sentry_tests {
         // (like the checksum) so the comparison targets the payload fidelity.
         original_entry.framed = parsed_entry.framed;
         // Parsing also stamps the decoded segment/payload version (Issue #3746);
-        // the freshly-built original defaults to `None`. Normalize it likewise so
-        // the comparison targets payload fidelity, not this in-memory metadata.
+        // assert the stamp is the version we parsed at BEFORE normalizing it away,
+        // so the pre-v13 guard's input (`WalEntry::segment_version`) is proven to
+        // carry the decode version rather than silently staying `None`.
+        assert_eq!(
+            parsed_entry.segment_version,
+            Some(crate::storage::wal::segment_reader::WAL_VERSION_STRING_LABELS),
+            "parse_entry_at must stamp the decoded segment/payload version (Issue #3746)"
+        );
+        // Normalize it (like the checksum/framed) so the equality below targets
+        // payload fidelity, not this in-memory metadata.
         original_entry.segment_version = parsed_entry.segment_version;
 
         // Now assert strict equality

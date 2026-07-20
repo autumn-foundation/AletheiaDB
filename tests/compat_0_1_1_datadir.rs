@@ -75,7 +75,7 @@
 //!
 //! Run: `cargo test --test compat_0_1_1_datadir -- --nocapture`.
 
-use aletheiadb::{AletheiaDB, NodeId, PropertyValue, Timestamp, time};
+use aletheiadb::{AletheiaDB, NodeId, PropertyValue, StorageError, Timestamp, time};
 use std::path::{Path, PathBuf};
 
 /// Absolute path to the checked-in 0.1.1 WAL-tail fixture (never opened in place).
@@ -187,6 +187,19 @@ fn refuses_to_open_0_1_1_data_dir_with_pre_v13_wal_tail() {
         ),
         Err(e) => e,
     };
+
+    // The refusal must be the TYPED variant, not merely a message that happens to
+    // contain the right substrings — this pins the classification (a caller
+    // matching on `StorageError::PreV13WalTailRequiresMigration` gets a stable
+    // FAILED_PRECONDITION contract, per src/mcp/error.rs / src/http/error.rs).
+    assert!(
+        matches!(
+            &err,
+            aletheiadb::Error::Storage(StorageError::PreV13WalTailRequiresMigration { .. })
+        ),
+        "refusal must be the typed StorageError::PreV13WalTailRequiresMigration variant; got: {err:?}"
+    );
+
     let msg = err.to_string();
 
     // The refusal must point the operator at the migration guide.
@@ -211,57 +224,145 @@ fn refuses_to_open_0_1_1_data_dir_with_pre_v13_wal_tail() {
     );
 }
 
-/// Positive control (Issue #3746): the pre-v13 guard must NOT be over-broad. A
-/// CURRENT-version data directory dropped WITHOUT an explicit `persist_indexes()`
-/// still leaves an unreplayed WAL tail — but that tail is v13+ (string labels),
-/// so reopening it must succeed with labels intact. If this regresses, the guard
-/// is refusing healthy modern databases.
+/// RAII tempdir guard: recursively removes its path on drop, even on panic
+/// (Q6). Used by the positive-control test so no leaked
+/// `/tmp/aletheiadb-3746-current-tail-*` directory survives a run (success OR
+/// failure). Mirrors `FixtureCopy`'s cleanup discipline for a dir we create
+/// rather than copy.
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Positive control (Issue #3746): the pre-v13 guard must NOT be over-broad — it
+/// must still admit a genuine **v13+ (current-version) unreplayed WAL tail** and
+/// replay it with labels intact.
+///
+/// # Why this test forces a REAL replay tail (non-vacuous)
+///
+/// The earlier version of this test merely created two nodes and dropped the db
+/// without `persist_indexes()`. That proved nothing: `open()`'s drop-time final
+/// persist drains the whole tail into the index snapshot, so on reopen the replay
+/// window is EMPTY and the guard passes trivially (a vacuous positive control —
+/// it never exercised a non-empty v13+ replay window at all).
+///
+/// This version forces a genuine post-snapshot WAL tail and PROVES it was
+/// replayed, so it actually guards against the pre-v13 refusal being over-broad:
+///
+/// 1. Open with **`DurabilityMode::Synchronous`** (fsync on every commit) so each
+///    write is durably on disk in the WAL *before* we abandon the handle — no
+///    reliance on the drop-time final persist.
+/// 2. `create_node(A)` (label `PersonAlpha`), then `persist_indexes()` — the index
+///    snapshot now captures A at the manifest LSN (call it LSN₁).
+/// 3. `create_node(B)` (label `CompanyBeta`) — B is durably in the WAL but AHEAD
+///    of LSN₁, i.e. genuinely inside the reopen replay window.
+/// 4. `std::mem::forget(db)` — abandon the handle WITHOUT running `Drop`, so the
+///    drop-time final persist does NOT snapshot B. Synchronous durability already
+///    put B on disk; the background persistence thread will not tick within this
+///    sub-second window (default policy is 300 s / 1000-mutation), so B is left
+///    undrained in the replay window. (`forget` leaks the first db's WAL
+///    threads/handles; on Linux reopening the same dir is fine, and the RAII
+///    `TempDirGuard` unlinks the dir at test end regardless.)
+///
+/// On reopen the snapshot restores ONLY A, so **B's presence with the correct
+/// label is the proof** that `open()` permitted and replayed a non-empty v13+
+/// tail — the pre-v13 guard is confirmed not over-broad. If the guard regresses
+/// to refusing modern tails, phase 2 fails to open; if replay itself regresses, B
+/// is missing.
 #[test]
 fn current_version_data_dir_with_unreplayed_tail_opens() {
-    // A fresh durable data dir written by THIS build.
+    use aletheiadb::{AletheiaDBConfig, DurabilityMode, PersistenceConfig, WalConfigBuilder};
+
+    // A fresh durable data dir written by THIS build; RAII-cleaned on drop (Q6).
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "aletheiadb-3746-current-tail-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = TempDirGuard {
+        path: std::env::temp_dir().join(format!(
+            "aletheiadb-3746-current-tail-{}-{}",
+            std::process::id(),
+            nanos
+        )),
+    };
+    let _ = std::fs::remove_dir_all(&dir.path);
 
-    // Phase 1: write labeled nodes, then drop WITHOUT persist_indexes() so a live
-    // WAL tail remains (nothing snapshotted to the index tier past LSN 0).
+    // Durable config with SYNCHRONOUS durability: a committed write is fsync'd to
+    // the WAL before the call returns, so B survives an abandoned handle without a
+    // graceful shutdown. Same layout as `AletheiaDB::open` (wal/ + indexes/,
+    // load_on_startup) but with the durability mode swapped for determinism.
+    let make_config = |data_dir: &Path| -> AletheiaDBConfig {
+        AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(data_dir.join("wal"))
+                    .durability_mode(DurabilityMode::Synchronous)
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.join("indexes"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .build()
+    };
+
+    // Phase 1: snapshot A, then write B AFTER the snapshot so B is a genuine
+    // post-snapshot replay-window entry, and abandon the handle without draining.
     {
-        let db = AletheiaDB::open(&dir).expect("open fresh current-version data dir");
+        let db = AletheiaDB::with_unified_config(make_config(&dir.path))
+            .expect("open fresh current-version data dir");
         db.create_node(
-            "Person",
+            "PersonAlpha",
             aletheiadb::PropertyMapBuilder::new()
                 .insert("name", "Ada")
                 .build(),
         )
-        .expect("create Person node");
+        .expect("create PersonAlpha node (A)");
+        // Snapshot: captures A at the manifest LSN. Nothing after this is in the
+        // snapshot.
+        db.persist_indexes()
+            .expect("persist_indexes must snapshot A at LSN1");
         db.create_node(
-            "Company",
+            "CompanyBeta",
             aletheiadb::PropertyMapBuilder::new()
                 .insert("name", "Analytical")
                 .build(),
         )
-        .expect("create Company node");
-        // Drop here (no persist_indexes) — leaves an unreplayed WAL tail.
+        .expect("create CompanyBeta node (B) — durably in WAL, ahead of LSN1");
+        // Abandon WITHOUT Drop so the drop-time final persist does NOT drain B
+        // into the snapshot. B remains an unreplayed v13+ WAL tail.
+        std::mem::forget(db);
     }
 
-    // Phase 2: reopen. The guard must NOT fire (this tail is v13+ string-labels),
-    // and the labels must round-trip correctly through replay.
-    let db = AletheiaDB::open(&dir)
+    // Phase 2: reopen. The guard must NOT fire (this tail is v13+ string-labels).
+    let db = AletheiaDB::with_unified_config(make_config(&dir.path))
         .expect("current-version data dir with an unreplayed v13+ WAL tail must open cleanly");
 
     let mut violations: Vec<String> = Vec::new();
-    check_node(&db, 0, "Person", "name", "String(\"Ada\")", &mut violations);
+    // A is restored from the snapshot.
+    check_node(
+        &db,
+        0,
+        "PersonAlpha",
+        "name",
+        "String(\"Ada\")",
+        &mut violations,
+    );
+    // PROOF OF NON-VACUITY: the snapshot held ONLY A (id 0), so B (id 1) can be
+    // present with the correct label ONLY IF open() replayed the non-empty v13+
+    // WAL tail past the snapshot LSN. Its presence is what distinguishes this
+    // positive control from the old vacuous one (empty replay window).
     check_node(
         &db,
         1,
-        "Company",
+        "CompanyBeta",
         "name",
         "String(\"Analytical\")",
         &mut violations,
@@ -273,7 +374,10 @@ fn current_version_data_dir_with_unreplayed_tail_opens() {
         violations.join("\n  - ")
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    // Drop the phase-2 db BEFORE the guard unlinks the dir (Q6): a live db still
+    // holds WAL handles/threads on files under `dir.path`.
+    drop(db);
+    drop(dir);
 }
 
 /// Cross-version integrity check for the CLEANLY CHECKPOINTED / WAL-drained
@@ -382,8 +486,11 @@ fn checkpointed_0_1_1_datadir_opens_under_trunk_with_full_integrity() {
     // acme (id 4): name/founded/public.
     check_int(&db, 4, "founded", 1999, &mut violations);
     check_bool(&db, 4, "public", true, &mut violations);
-    // eve (id 9): name/age.
+    // eve (id 9): name/age/score. The float `score` round-trip (Float(5.0)) is
+    // restored here (previously covered by a since-deleted test) to keep a
+    // batch-2 Float property in the checkpointed integrity net.
     check_int(&db, 9, "age", 34, &mut violations);
+    check_float(&db, 9, "score", 5.0, &mut violations);
 
     // --- Specific edges with label + property ---------------------------------
     // (Person:Alice) -[WORKS_AT role="Engineer"]-> (Company:Acme)  [snapshot].

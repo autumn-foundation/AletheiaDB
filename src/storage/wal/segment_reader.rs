@@ -2538,6 +2538,20 @@ mod tests {
         );
     }
 
+    /// Issue #3746: the exact boundary of the string-labels predicate the open()
+    /// guard gates on. Pre-v13 (raw-id labels) is `false`; v13 (the first
+    /// string-label version, `WAL_VERSION_STRING_LABELS`) and above are `true`.
+    /// The guard refuses precisely the `false` half of this boundary.
+    #[test]
+    fn carries_string_labels_boundary() {
+        assert!(!carries_string_labels(1)); // 0.1.x raw-id labels
+        assert!(!carries_string_labels(12)); // last pre-v13 version
+        assert!(carries_string_labels(13)); // WAL_VERSION_STRING_LABELS
+        assert!(carries_string_labels(14)); // any later version
+        // Pin the boundary constant so a version bump can't silently move it.
+        assert_eq!(WAL_VERSION_STRING_LABELS, 13);
+    }
+
     #[test]
     fn test_read_nonexistent_segment() {
         let dir = TempDir::new().unwrap();

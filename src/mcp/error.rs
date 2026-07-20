@@ -686,6 +686,19 @@ mod tests {
     }
 
     #[test]
+    fn pre_v13_wal_tail_maps_to_non_retriable_failed_precondition() {
+        // Issue #3746: a refused pre-v13 WAL tail is a caller precondition
+        // failure (drain/checkpoint on the old version first), never retriable.
+        let e = StorageError::PreV13WalTailRequiresMigration {
+            reason: "unreplayed pre-v13 tail; see docs/guides/migration-0.1-to-0.2.md".into(),
+        };
+        assert_eq!(
+            classify_storage_error(&e),
+            (McpErrorCode::FailedPrecondition, false)
+        );
+    }
+
+    #[test]
     fn retriable_true_only_for_transient_classes() {
         // Transient: serialization failure, write conflict, timeout, clock skew.
         let transient: Vec<Error> = vec![
