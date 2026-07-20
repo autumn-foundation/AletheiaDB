@@ -306,6 +306,17 @@ impl PersistenceTracker {
         self.shutdown.store(true, Ordering::Release);
     }
 
+    /// Re-arm a previously-shutdown tracker so a freshly-spawned worker loops
+    /// again (Issue #3708 hot-live enable). The hot-live enable driver quiesces
+    /// the worker (`signal_shutdown` + join) while still plaintext, then — after
+    /// installing every live keyring — respawns the worker on this SAME shared
+    /// tracker (so the write path's mutation counters and persisted-LSN watermarks
+    /// carry over). Clears only the in-memory shutdown flag; counters/timestamps
+    /// are untouched.
+    pub fn clear_shutdown(&self) {
+        self.shutdown.store(false, Ordering::Release);
+    }
+
     /// Check if shutdown has been signaled.
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
