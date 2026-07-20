@@ -41,7 +41,10 @@ use std::path::PathBuf;
 
 use parking_lot::{Mutex, RwLock};
 
-use crate::core::error::{Error, Result};
+use crate::core::error::Result;
+// `Error` is only referenced by the serde-gated `save_serialized` path (LOW-1).
+#[cfg(feature = "serde")]
+use crate::core::error::Error;
 use crate::core::temporal::Timestamp;
 
 /// Persisted-format version for the trust-policy registry sidecar file. Bumped
@@ -269,7 +272,10 @@ pub struct TrustBreakdown {
 pub struct TrustOptions {
     /// Maximum transitive depth to expand before marking a subtree truncated.
     pub max_depth: usize,
-    /// Maximum number of breakdown nodes to serialize before truncation.
+    /// Maximum number of **descendant** breakdown nodes to serialize before
+    /// truncation. The root node is always emitted and does NOT count against
+    /// this budget, so `max_nodes = N` serializes up to `root + N` nodes
+    /// (adversarial #6).
     pub max_nodes: usize,
     /// Optional `AS OF` transaction-time bound: evaluate lineage and
     /// confidences as recorded by this transaction time (AC5). `None` = now.

@@ -629,6 +629,15 @@ pick):
 - **`PERSIST_FORMAT_VERSION = 1`** — the sidecar starts at format version 1
   (§2.4 spoke of a bump-on-incompatible `version` tag generically; locked value
   is 1). Load accepts `version <= 1`, quarantines higher/corrupt.
+- **Rollback-vs-disk on a post-rename fsync failure (LOW-2)** — `set_default` /
+  `set_label` / `drop_label` roll the in-memory change back if `save_serialized`
+  returns `Err`. If the atomic `rename(tmp, path)` has already succeeded but the
+  subsequent parent-directory `fsync` then fails, the on-disk file holds the NEW
+  policy while RAM rolls back to the OLD one — a momentary RAM/disk divergence
+  until the next successful save or restart (restart loads the new file). This is
+  **inherited verbatim** from the #3370 snapshot registry's `save_serialized`
+  dance and is left unchanged deliberately (matching the snapshot-registry
+  pattern); the window is vanishingly small and self-heals on the next save.
 - **`MissingConfidencePolicy` field named `missing`** on `TrustPolicy`; §2.5
   called the enum `MissingConfidenceRule`. LOCKED name: `MissingConfidencePolicy`.
 - **All-excluded / empty included set → `(NEUTRAL=0.5, true)`** rather than an
