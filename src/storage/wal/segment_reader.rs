@@ -2485,6 +2485,19 @@ mod tests {
             raw_flag,
             "a pre-v13 raw-label segment must report raw_labels = true (keeps the PITR guard armed)"
         );
+        // Issue #3745 — PER-ENTRY tag: the recovered v11 entry stamps its decoded
+        // payload version (`WAL_VERSION_DESTRUCTIVE_PROVENANCE`), which is
+        // `!carries_string_labels` — i.e. raw-label. The PITR guard reads exactly
+        // this field to arm only over raw entries in the replay window.
+        assert_eq!(
+            raw_entries[0].segment_version,
+            Some(WAL_VERSION_DESTRUCTIVE_PROVENANCE),
+            "the v11 entry must carry its decoded payload version"
+        );
+        assert!(
+            !carries_string_labels(raw_entries[0].segment_version.unwrap()),
+            "a v11 entry must be tagged raw-label (per-entry)"
+        );
 
         // ---- v13 inline-string segment: stores the label STRING. ----
         let v13_dir = TempDir::new().unwrap();
@@ -2511,6 +2524,19 @@ mod tests {
         assert!(
             !v13_flag,
             "an all-v13 archive must report raw_labels = false (PITR guard safely skipped)"
+        );
+        // Issue #3745 — PER-ENTRY tag: the recovered v13 entry stamps
+        // `WAL_VERSION_STRING_LABELS`, which IS `carries_string_labels` — i.e.
+        // NOT raw-label, so the PITR guard leaves it unchecked even in a mixed
+        // archive.
+        assert_eq!(
+            v13_entries[0].segment_version,
+            Some(WAL_VERSION_STRING_LABELS),
+            "the v13 entry must carry its decoded payload version"
+        );
+        assert!(
+            carries_string_labels(v13_entries[0].segment_version.unwrap()),
+            "a v13 entry must be tagged NOT raw-label (per-entry)"
         );
     }
 
