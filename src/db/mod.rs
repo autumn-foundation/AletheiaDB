@@ -82,6 +82,9 @@ pub mod temporal;
 pub mod tests;
 /// Transaction management.
 pub mod transaction;
+/// Trust propagation: computed confidence over derivation lineage (Issue #3382).
+#[cfg(feature = "semantic-reasoning")]
+pub mod trust;
 /// Vector index operations.
 pub mod vector;
 /// Vector index builder pattern.
@@ -303,6 +306,19 @@ pub struct AletheiaDB {
     /// persistence is enabled; in-memory-only for ephemeral databases. See
     /// [`crate::db::namespace`].
     pub(crate) namespaces: Arc<namespace::NamespaceRegistry>,
+    /// Trust-propagation policy registry (Issue #3382).
+    ///
+    /// Maps the database default combinator + missing-confidence rule, plus any
+    /// per-label overrides, used to compute a derived fact's confidence from its
+    /// upstream lineage. Entirely off the data write path (a leaf, like
+    /// [`snapshots`](Self::snapshots)). Durably persisted to a
+    /// `{data_dir}/trust_policy.json` sidecar when index persistence is enabled;
+    /// in-memory-only for ephemeral databases. Gated to the experimental
+    /// `semantic-reasoning` cohort so it compiles out (zero cost) when the
+    /// feature is off. See [`crate::experimental::reasoning::trust_propagation`].
+    #[cfg(feature = "semantic-reasoning")]
+    pub(crate) trust_policies:
+        Arc<crate::experimental::reasoning::trust_propagation::TrustRegistry>,
     /// Knowledge half-life analytics cohort-statistics cache (Issue #3377,
     /// Fix-B). In-memory, recomputable, and **off the write path** (no
     /// write-time hook): it backs the sub-millisecond warm `fact_freshness`

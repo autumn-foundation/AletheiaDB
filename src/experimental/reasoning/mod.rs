@@ -17,3 +17,5 @@ pub mod omen;
 pub mod oracle;
 pub mod prophet;
 pub mod synergy;
+/// Trust propagation: computed confidence over derivation lineage (Issue #3382).
+pub mod trust_propagation;
