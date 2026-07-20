@@ -219,6 +219,27 @@ fn first_unresolved_interned_id<'a>(
         .find_map(|e| first_out_of_range_id(&e.operation, restored_count))
 }
 
+/// Whether a replay-window entry must be range-checked by the vocabulary-drift
+/// guard (Issue #3745).
+///
+/// An entry is checked **unless it is KNOWN to carry inline string labels** — a
+/// v13+ (`carries_string_labels`) segment whose label / property-key ids were
+/// re-interned to LIVE global-interner ids on read and are therefore always
+/// resolvable regardless of the foreign backup's file-space layout. Only such an
+/// entry is skipped.
+///
+/// This is deliberately **fail-closed on uncertainty**: an entry whose
+/// `segment_version` is `None`/unknown is treated as raw-labeled and IS
+/// range-checked. Every entry decoded from disk is stamped `Some(payload_version)`
+/// at the single decode site (Issue #3746), so no `None`-bearing entry reaches
+/// this guard today — but for a data-corruption guard the correct polarity on the
+/// impossible case is to check (refuse dangling ids), never to skip: a future
+/// code path that ever surfaces an unstamped raw entry must not be able to
+/// silently bypass the range check. `Some(v)` with `v < 13` is likewise checked.
+pub(crate) fn entry_needs_vocab_check(e: &WalEntry) -> bool {
+    !e.segment_version.is_some_and(carries_string_labels)
+}
+
 /// Is this a data-bearing operation (as opposed to a control/framing marker)?
 fn is_data_op(op: &WalOperation) -> bool {
     matches!(
@@ -682,10 +703,18 @@ impl AletheiaDB {
         // from (`WalEntry::segment_version`, Issue #3746, stamped at the single
         // decode site and preserved intact through band filtering and the
         // constraint slice, which move/clone whole entries). An entry is
-        // raw-label iff `!carries_string_labels(segment_version)`. We range-check
+        // raw-label iff `entry_needs_vocab_check` returns true. We range-check
         // ONLY the raw-label entries in the replay window (band prefix +
         // constraint slice), so a fully-v13 window is never checked even when the
         // archive ALSO contains out-of-band ≤v12 segments.
+        //
+        // The predicate is fail-CLOSED on uncertainty: an entry is skipped ONLY
+        // when it is KNOWN to carry inline string labels (`Some(v>=13)`); a
+        // `None`/unknown version — or any `Some(v<13)` — is checked. Every
+        // disk-decoded entry is stamped `Some(payload_version)` at the single
+        // decode site (Issue #3746), so no `None` entry reaches here today; the
+        // fail-closed polarity guarantees that if one ever did, a dangling raw id
+        // would still be refused rather than silently replayed.
         //
         // This lifts the former over-rejection (a database created under a ≤v12
         // binary and later upgraded to v13 produces a genuinely MIXED archive:
@@ -707,7 +736,7 @@ impl AletheiaDB {
                     .entries
                     .iter()
                     .chain(constraint_slice.iter())
-                    .filter(|e| e.segment_version.is_some_and(|v| !carries_string_labels(v))),
+                    .filter(|e| entry_needs_vocab_check(e)),
                 restored_interner_count,
             )
         {
@@ -950,6 +979,44 @@ mod band_filter_tests {
         bands.into_iter().flatten().collect()
     }
 
+    /// Build an entry carrying an explicit `segment_version` (the only field the
+    /// vocabulary-guard predicate inspects).
+    fn entry_with_version(segment_version: Option<u8>) -> WalEntry {
+        WalEntry {
+            lsn: LSN(1),
+            timestamp: ts(1),
+            operation: create_node_op(1),
+            checksum: 0,
+            framed: true,
+            segment_version,
+        }
+    }
+
+    /// Locks the fail-closed-on-unknown polarity of the #3745 vocabulary guard.
+    /// A future `None`-bearing raw entry must be CHECKED (true), never silently
+    /// skipped, and only a segment KNOWN to carry inline string labels
+    /// (`Some(v>=13)`) is skipped (false).
+    #[test]
+    fn entry_needs_vocab_check_is_fail_closed_on_unknown() {
+        // Known raw (pre-v13) segment: MUST be range-checked.
+        assert!(
+            entry_needs_vocab_check(&entry_with_version(Some(11))),
+            "a pre-v13 (raw-label) entry must be checked"
+        );
+        // Unknown/unstamped version: fail CLOSED — MUST be range-checked, not
+        // skipped (this is the case the old `is_some_and(!string)` form failed
+        // OPEN on).
+        assert!(
+            entry_needs_vocab_check(&entry_with_version(None)),
+            "an entry with unknown segment version must fail closed and be checked"
+        );
+        // Known string-label (v13+) segment: safe to skip.
+        assert!(
+            !entry_needs_vocab_check(&entry_with_version(Some(13))),
+            "a v13+ (inline-string) entry needs no range check"
+        );
+    }
+
     #[test]
     fn asof_exact_boundary_is_inclusive() {
         // Two transactions committing at t=100 and t=200; target exactly 100
@@ -1183,7 +1250,9 @@ mod vocab_guard_e2e_tests {
     use crate::storage::wal::segment_reader::{
         WAL_MAGIC, WAL_VERSION_DESTRUCTIVE_PROVENANCE, WAL_VERSION_STRING_LABELS,
     };
-    use crate::storage::wal::serialization::{OP_BEGIN_TX, OP_COMMIT_TX, OP_CREATE_NODE};
+    use crate::storage::wal::serialization::{
+        OP_BEGIN_TX, OP_COMMIT_TX, OP_CREATE_NODE, OP_DECLARE_UNIQUE_CONSTRAINT,
+    };
     use std::io::Write;
     use std::path::Path;
     use tempfile::TempDir;
@@ -1220,6 +1289,37 @@ mod vocab_guard_e2e_tests {
         PropertyMap::new().serialize_into(buf).unwrap();
         valid_from.serialize_into(buf); // op-level valid_from
         buf.push(0u8); // provenance: absent
+    }
+
+    /// v11 (≤v12) `DeclareUniqueConstraint` codec: two RAW u32 file-space
+    /// interner ids (label + property key), no inline strings and no re-intern —
+    /// the un-resolvable ≤v12 shape the vocabulary guard must range-check when the
+    /// declaration reaches the constraint slice. An out-of-range `raw_label` is
+    /// the dangling id the guard must refuse.
+    fn write_declare_constraint_raw(buf: &mut Vec<u8>, raw_label: u32, raw_property: u32) {
+        buf.push(OP_DECLARE_UNIQUE_CONSTRAINT);
+        buf.extend_from_slice(&raw_label.to_le_bytes());
+        buf.extend_from_slice(&raw_property.to_le_bytes());
+    }
+
+    /// Write a single framed control/data op as its own segment under WAL format
+    /// `version`, at `lsn`/`ts`. A framed control op (e.g. a constraint
+    /// declaration) parses as a self-committing singleton band, so no
+    /// `BeginTx`/`CommitTx` framing is needed (Issue #3745 constraint-slice
+    /// coverage).
+    fn write_single_op_segment(
+        path: &Path,
+        version: u8,
+        lsn: u64,
+        ts: Timestamp,
+        write_op: &dyn Fn(&mut Vec<u8>),
+    ) {
+        let entry = build_framed_entry(lsn, ts, write_op);
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(&WAL_MAGIC).unwrap();
+        f.write_all(&[version]).unwrap();
+        f.write_all(&entry).unwrap();
+        f.sync_all().unwrap();
     }
 
     /// v13+ `CreateNode` label codec: the label STRING inline (length-prefixed
@@ -1624,5 +1724,85 @@ mod vocab_guard_e2e_tests {
             "an allowed restore must materialize the target"
         );
         drop(db);
+    }
+
+    /// Constraint-slice fail-closed (Issue #3745). The guard filters
+    /// `filtered.entries.chain(constraint_slice.iter())`, so a raw ≤v12
+    /// `DeclareUniqueConstraint` op carrying an OUT-OF-RANGE interned label id
+    /// must be range-checked and REFUSED just like a raw data op — the constraint
+    /// arm of the chain, not previously exercised end-to-end. Here the raw
+    /// constraint band commits IN the replay window (at-or-before the target), so
+    /// it lands in the constraint slice with `segment_version = Some(v11)`
+    /// (`entry_needs_vocab_check == true`); its dangling label id must drive an
+    /// actual [`BackupError::WindowCrossesVocabularyChange`] refusal BEFORE
+    /// materialize, leaving the target unmaterialized.
+    #[test]
+    #[serial_test::serial]
+    fn raw_constraint_declaration_in_window_out_of_range_refuses() {
+        let tmp = TempDir::new().unwrap();
+        let (albk, source_lsn, base_wall) = make_base_backup(tmp.path());
+
+        // A v13 data band supplies the window's reachable tail (its `CommitTx`
+        // fixes `latest_ts`); the target is its commit so the window validates.
+        let t_v13 = HybridTimestamp::new_unchecked(base_wall + 1_000, 0);
+        // The raw constraint declaration commits at-or-before the target, so it
+        // is collected into the constraint slice.
+        let t_constraint = HybridTimestamp::new_unchecked(base_wall + 500, 0);
+        let target = t_v13;
+
+        let archive = tmp.path().join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        // 0.log: v13 data band IN the window — its live re-interned id resolves
+        // and is (correctly) never range-checked.
+        write_band_segment(
+            &archive.join("0.log"),
+            WAL_VERSION_STRING_LABELS,
+            source_lsn + 1,
+            3745,
+            t_v13,
+            &|b| {
+                write_create_node_string(
+                    b,
+                    NodeId::new(3745).unwrap(),
+                    "ConstraintSliceWindowLabel3745",
+                    t_v13,
+                )
+            },
+        );
+        // 1.log: a single ≤v12 (v11) raw `DeclareUniqueConstraint` op IN the
+        // window whose raw label id is astronomically out of range of the base
+        // backup's interner. It reaches the guard via the constraint slice.
+        write_single_op_segment(
+            &archive.join("1.log"),
+            WAL_VERSION_DESTRUCTIVE_PROVENANCE,
+            source_lsn + 4,
+            t_constraint,
+            &|b| write_declare_constraint_raw(b, 2_000_000_000, 1),
+        );
+
+        let dst = TempDir::new().unwrap();
+        let data_dir = dst.path().join("db");
+        let err = AletheiaDB::restore_to_data_dir_at(
+            &albk,
+            &archive,
+            PitrTarget::AsOf(target),
+            &data_dir,
+        )
+        .expect_err(
+            "a raw ≤v12 constraint declaration with an out-of-range label id in the \
+             replay window must be REFUSED fail-closed via the constraint slice \
+             (Issue #3745)",
+        );
+        assert!(
+            matches!(
+                err,
+                Error::Backup(BackupError::WindowCrossesVocabularyChange { .. })
+            ),
+            "expected WindowCrossesVocabularyChange, got {err:?}"
+        );
+        assert!(
+            !data_dir.join("indexes").exists(),
+            "a refused restore must leave the target directory unmaterialized"
+        );
     }
 }
