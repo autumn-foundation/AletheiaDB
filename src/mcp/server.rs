@@ -12638,4 +12638,572 @@ mod server_unit_tests {
             "the disabled-limits fast path must not alter the response"
         );
     }
+
+    // =====================================================================
+    // In-query `USE / IN NAMESPACE` clause through the MCP/HTTP `query` tool
+    // (Issue #3349 follow-up). The tool reconciles the `namespace` request
+    // parameter (programmatic scope `P`) with an in-statement clause (`C`):
+    //   (None,   None)   -> Single("default")        (fail-closed default)
+    //   (None,   Some C) -> C                         (honor the clause)
+    //   (Some P, None)   -> P                         (unchanged)
+    //   (Some P, Some C) -> P iff semantically equal to C, else INVALID_ARGUMENT
+    // Never widen past `P`. Covered for BOTH Cypher and AQL, incl. EXPLAIN /
+    // PROFILE, with an explicit cross-namespace leak sweep.
+    // =====================================================================
+    mod namespace_query_reconcile_tests {
+        use super::*;
+
+        /// Seed one Person per namespace: `Legacy` (default), `Alice`
+        /// (agent:a), `Bob` (agent:b).
+        fn seed(server: &AletheiaMcpServer) {
+            use crate::core::property::PropertyMapBuilder;
+            let mk = |name: &str| PropertyMapBuilder::new().insert("name", name).build();
+            server.db.create_node("Person", mk("Legacy")).unwrap();
+            server
+                .db
+                .create_node_in_namespace("Person", mk("Alice"), "agent:a")
+                .unwrap();
+            server
+                .db
+                .create_node_in_namespace("Person", mk("Bob"), "agent:b")
+                .unwrap();
+        }
+
+        fn run(server: &AletheiaMcpServer, args: serde_json::Value) -> serde_json::Value {
+            let text = AletheiaMcpServer::extract_text(server.handle_query(args));
+            serde_json::from_str(&text).unwrap()
+        }
+
+        /// Sorted `name` properties across all returned entity rows.
+        fn names(val: &serde_json::Value) -> Vec<String> {
+            let mut out: Vec<String> = val["rows"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| {
+                            r["entity"]["properties"]["name"].as_str().map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.sort();
+            out
+        }
+
+        fn assert_conflict(val: &serde_json::Value) {
+            assert_eq!(
+                val["error"]["code"].as_str(),
+                Some("INVALID_ARGUMENT"),
+                "a scope conflict is INVALID_ARGUMENT: {val}"
+            );
+            assert_eq!(
+                val["error"]["retriable"].as_bool(),
+                Some(false),
+                "a scope conflict is never retriable: {val}"
+            );
+            assert_eq!(
+                val["error"]["kind"].as_str(),
+                Some("invalid_request"),
+                "the clause IS supported now, so the kind is invalid_request, \
+                 not unsupported_construct: {val}"
+            );
+            assert!(
+                val.get("rows").is_none(),
+                "a refused query returns no rows: {val}"
+            );
+            // The error message must NOT leak namespace contents.
+            let msg = val["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                !msg.contains("agent:a") && !msg.contains("agent:b"),
+                "the conflict message must not disclose namespace names: {val}"
+            );
+        }
+
+        // ---- (1) no param + `USE NAMESPACE foo` -> only ns-foo data --------
+        #[test]
+        fn aql_omitted_param_honors_in_query_clause() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "clause must be honored: {val}");
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_omitted_param_honors_in_query_clause() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "clause must be honored: {val}");
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        // ---- (2) no param + no clause -> only default ----------------------
+        #[test]
+        fn aql_omitted_param_no_clause_is_default_only() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({ "language": "aql", "query": "MATCH (n:Person) RETURN n" }),
+            );
+            assert_eq!(names(&val), vec!["Legacy".to_string()]);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_omitted_param_no_clause_is_default_only() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({ "language": "cypher", "query": "MATCH (n:Person) RETURN n" }),
+            );
+            assert_eq!(names(&val), vec!["Legacy".to_string()]);
+        }
+
+        // ---- (3) param=foo + no clause -> foo ------------------------------
+        #[test]
+        fn aql_param_only_scopes() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        // ---- (4) param=foo + identical clause -> allow, foo ----------------
+        #[test]
+        fn aql_param_plus_identical_clause_allowed() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert!(val.get("error").is_none(), "identical scope is allowed: {val}");
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_param_plus_identical_clause_allowed() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert!(val.get("error").is_none(), "identical scope is allowed: {val}");
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        // ---- (5) param=foo + disjoint clause -> refuse ---------------------
+        #[test]
+        fn aql_param_plus_disjoint_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:b' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_param_plus_disjoint_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:b' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (6) param=foo + wider `USE ALL NAMESPACES` -> refuse ----------
+        #[test]
+        fn aql_param_plus_wider_all_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_param_plus_wider_all_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (7) param=ALL + narrower clause -> refuse (safest shape) ------
+        #[test]
+        fn aql_param_all_plus_narrower_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "all",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_param_all_plus_narrower_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "all",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (8) no param + `USE ALL NAMESPACES` -> All, >= 2 namespaces ---
+        #[test]
+        fn aql_omitted_param_all_clause_spans_all_namespaces() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "ALL clause is allowed: {val}");
+            assert_eq!(
+                names(&val),
+                vec!["Alice".to_string(), "Bob".to_string(), "Legacy".to_string()],
+            );
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_omitted_param_all_clause_spans_all_namespaces() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "ALL clause is allowed: {val}");
+            assert_eq!(
+                names(&val),
+                vec!["Alice".to_string(), "Bob".to_string(), "Legacy".to_string()],
+            );
+        }
+
+        // ---- (9) List order-insensitive; strict-subset refused ------------
+        #[test]
+        fn aql_list_param_vs_clause_order_insensitive_allowed() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:b', 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": ["agent:a", "agent:b"],
+                }),
+            );
+            assert!(val.get("error").is_none(), "same set, any order -> allow: {val}");
+            assert_eq!(names(&val), vec!["Alice".to_string(), "Bob".to_string()]);
+        }
+
+        #[test]
+        fn aql_list_param_strict_subset_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a', 'agent:b' MATCH (n:Person) RETURN n",
+                    "namespace": ["agent:a"],
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (10) normalization: case is NOT a bypass ---------------------
+        #[test]
+        fn aql_case_differing_names_are_not_equal_refused() {
+            let server = make_server();
+            seed(&server);
+            // `Agent:A` is a distinct (valid, case-sensitive) namespace name.
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'Agent:A' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (11) EXPLAIN (cypher only) -----------------------------------
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_explain_omitted_param_honors_clause_no_leak() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "EXPLAIN USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "scoped EXPLAIN must plan: {val}");
+            let rows = val["rows"].as_array().expect("plan rows");
+            assert_eq!(rows.len(), 1, "EXPLAIN yields one plan row: {val}");
+            let plan = rows[0]["plan"].as_str().unwrap_or_default();
+            // The plan text must not surface other namespaces' data.
+            assert!(
+                !plan.contains("Bob") && !plan.contains("Legacy"),
+                "EXPLAIN must not surface cross-namespace data: {plan}"
+            );
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_explain_param_plus_conflicting_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "EXPLAIN USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:b",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (12) PROFILE (cypher only): scoped counters, no leak ---------
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_profile_omitted_param_honors_clause_scoped_counts() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "PROFILE USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "scoped PROFILE must run: {val}");
+            let plan = val["rows"][0]["plan"].as_str().unwrap_or_default();
+            assert!(
+                plan.contains("actual rows: 1"),
+                "scoped PROFILE reports the scoped count (1): {plan}"
+            );
+            // The unscoped total across the 3 seeded namespaces is 3; a scoped
+            // PROFILE must never leak that cardinality side channel.
+            assert!(
+                !plan.contains("actual rows: 3"),
+                "scoped PROFILE must not leak the unscoped total: {plan}"
+            );
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_profile_param_plus_conflicting_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "PROFILE USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:b",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (13) multi-pattern omitted scope stays rejected --------------
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_multi_pattern_omitted_scope_still_rejected() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "MATCH (a:Person),(b:Person) RETURN a,b",
+                }),
+            );
+            // Default-only (fail-closed) is restricting; the multi-variable
+            // evaluator cannot thread it -> unsupported_construct.
+            assert_eq!(val["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{val}");
+            assert_eq!(
+                val["error"]["kind"].as_str(),
+                Some("unsupported_construct"),
+                "{val}"
+            );
+        }
+
+        // ---- (14) HTTP `/query` shares handle_query (dispatch parity) -----
+        #[test]
+        fn http_dispatch_shares_reconcile_outcome_aql() {
+            let server = make_server();
+            seed(&server);
+            let args = serde_json::json!({
+                "language": "aql",
+                "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+            });
+            let via_handle =
+                AletheiaMcpServer::extract_text(server.handle_query(args.clone()));
+            let via_dispatch = server.dispatch_tool_json("query", args);
+            assert_eq!(
+                via_handle, via_dispatch,
+                "the autumn-server /query dispatch path must be byte-identical to handle_query"
+            );
+            let val: serde_json::Value = serde_json::from_str(&via_dispatch).unwrap();
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        // ---- (15) cross-namespace leak sweep: scope A never returns B -----
+        #[test]
+        fn aql_scope_a_never_leaks_b_or_default() {
+            let server = make_server();
+            seed(&server);
+            // Every composition path that resolves to agent:a.
+            let via_clause = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            let via_param = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            for val in [&via_clause, &via_param] {
+                assert_eq!(names(val), vec!["Alice".to_string()], "{val}");
+                let all = serde_json::to_string(val).unwrap();
+                assert!(!all.contains("Bob") && !all.contains("Legacy"), "leak: {val}");
+            }
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_scope_a_never_leaks_b_or_default() {
+            let server = make_server();
+            seed(&server);
+            let via_clause = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            let via_param = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            for val in [&via_clause, &via_param] {
+                assert_eq!(names(val), vec!["Alice".to_string()], "{val}");
+                let all = serde_json::to_string(val).unwrap();
+                assert!(!all.contains("Bob") && !all.contains("Legacy"), "leak: {val}");
+            }
+            // EXPLAIN + PROFILE scoped to agent:a must not surface B/Legacy.
+            for directive in ["EXPLAIN", "PROFILE"] {
+                let val = run(
+                    &server,
+                    serde_json::json!({
+                        "language": "cypher",
+                        "query": format!(
+                            "{directive} USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n"
+                        ),
+                    }),
+                );
+                let plan = val["rows"][0]["plan"].as_str().unwrap_or_default();
+                assert!(
+                    !plan.contains("Bob") && !plan.contains("Legacy"),
+                    "{directive} leaked cross-namespace data: {plan}"
+                );
+            }
+        }
+    }
 }
