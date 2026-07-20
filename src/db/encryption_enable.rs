@@ -1233,12 +1233,14 @@ mod tests {
         );
     }
 
-    /// AC(i) NEGATIVE reopen-contract test: an explicit `persist_indexes()` on the
-    /// QUIESCED post-enable handle is fail-closed and does NOT corrupt the
-    /// encrypted (`AEIX`) snapshot with plaintext. Proves the documented v1
-    /// limitation is enforced, not merely described.
+    /// T1/T16 (Issue #3708 hot-live driver): the post-enable handle is LIVE, not
+    /// quiesced. Because the live driver installs the index keyring in-process
+    /// (`None → Some`), the `admin.rs` fail-closed guard no longer fires, so an
+    /// explicit `persist_indexes()` on the SAME handle SUCCEEDS and writes `AEIX`
+    /// — never plaintext over the encrypted snapshot. This inverts the old
+    /// reopen-centric fail-closed contract: no reopen is required.
     #[test]
-    fn persist_on_quiesced_post_enable_handle_is_refused_and_preserves_aeix() {
+    fn persist_on_live_post_enable_handle_succeeds_and_preserves_aeix() {
         let dir = tempfile::tempdir().unwrap();
         let key = key_source_at(dir.path());
         let idx_dir = index_files_dir(dir.path());
@@ -1258,20 +1260,15 @@ mod tests {
         assert_eq!(plain, 0, "index files are AEIX after enable");
         assert_eq!(aeix, total);
 
-        // The fail-closed guard: an explicit persist through the quiesced handle is
-        // REFUSED rather than silently writing plaintext over the AEIX snapshot.
-        let err = db.persist_indexes().unwrap_err();
-        assert!(
-            matches!(err, crate::core::error::Error::FailedPrecondition(_)),
-            "persist on a post-enable quiesced handle must be fail-closed, got: {err:?}"
-        );
+        // The live install closed the fail-closed window: an explicit persist
+        // through the SAME handle now SUCCEEDS (no reopen) and stays AEIX.
+        db.persist_indexes()
+            .expect("persist_indexes must succeed on a live post-enable handle");
 
-        // The snapshot is untouched: still every-file-AEIX, zero plaintext.
+        // The snapshot is still every-file-AEIX, zero plaintext (the live persist
+        // wrote AEIX through the installed keyring, not plaintext).
         let (total2, plain2, aeix2) = classify_index_files(&idx_dir);
-        assert_eq!(
-            total2, total,
-            "no file added/removed by the refused persist"
-        );
+        assert_eq!(total2, total, "no file added/removed by the live persist");
         assert_eq!(
             plain2, 0,
             "no plaintext index file was written over the AEIX snapshot"
@@ -1292,6 +1289,84 @@ mod tests {
             aeix3 > 0 && plain3 == 0,
             "index dir remains AEIX after reopen"
         );
+    }
+
+    /// T1 (Issue #3708): after `enable_encryption` returns, the SAME handle is
+    /// fully live-encrypted with **no reopen required**. The live driver installs
+    /// the index keyring in-process (`manager.keyring().is_some()`) and the WAL is
+    /// encrypted, so the handle keeps serving reads and writes immediately.
+    #[test]
+    fn enable_is_live_no_reopen_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let mut db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+        db.create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        db.persist_indexes().unwrap();
+
+        db.enable_encryption(key.clone()).unwrap();
+
+        // Live: the index manager keyring flipped None -> Some in-process.
+        let manager = db
+            .persistence_manager
+            .clone()
+            .expect("durable manager present");
+        assert!(
+            manager.keyring().is_some(),
+            "index keyring installed live (None -> Some) — no reopen required"
+        );
+        assert!(db.wal.is_encrypted(), "WAL live-encrypted after enable");
+
+        // The same handle keeps serving reads AND writes with no reopen.
+        assert_eq!(db.node_count(), 1);
+        db.create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        assert_eq!(db.node_count(), 2, "writes continue on the same live handle");
+        // And an explicit persist succeeds (the fail-closed guard does not fire).
+        db.persist_indexes()
+            .expect("persist succeeds on the live handle");
+    }
+
+    /// T16 (Issue #3708): the background persistence worker is RESTARTED in-process
+    /// after enable (a true no-reopen completion). A post-enable mutation followed
+    /// by an explicit persist writes ONLY `AEIX` files, and the worker handle is
+    /// present + running.
+    #[test]
+    fn restarted_worker_persists_encrypted_after_enable() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let idx_dir = index_files_dir(dir.path());
+        let mut db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+        db.create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        db.persist_indexes().unwrap();
+
+        db.enable_encryption(key.clone()).unwrap();
+
+        // The worker was respawned in-process (handle present, not stopped).
+        assert!(
+            db.persistence_thread_handle.is_some(),
+            "the persistence worker is restarted in-process after enable"
+        );
+        assert!(
+            !db.persistence_thread_stopped
+                .load(std::sync::atomic::Ordering::Acquire),
+            "the restarted worker is running (stopped flag cleared)"
+        );
+
+        // A post-enable mutation + explicit persist through the SAME live handle.
+        db.create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        db.persist_indexes().expect("live persist succeeds");
+
+        // Whole-dir sweep: every persisted index file is AEIX, none plaintext.
+        let (total, plain, aeix) = classify_index_files(&idx_dir);
+        assert!(total > 0);
+        assert_eq!(
+            plain, 0,
+            "no plaintext index file written by the restarted worker / live handle"
+        );
+        assert_eq!(aeix, total);
     }
 
     /// Checkpoint files ride the index DEK/format, so an index snapshot (the
