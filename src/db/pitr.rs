@@ -26,29 +26,47 @@
 //! the coordinate: every transaction committed at-or-before the target is
 //! present, every transaction after it is absent.
 //!
-//! # Interner vocabulary guard (v1)
+//! # Interner vocabulary guard (version-aware since WAL v13)
 //!
-//! The WAL stores node/edge **labels** and **property keys** as raw `u32`
-//! interner ids (not strings); property *values* are self-contained. The base
-//! backup carries the interner as of `source_lsn`, so a post-backup transaction
-//! that introduces a **brand-new label or property key** has an id `>= K`, where
-//! `K` is the restored interner's string count. Replaying such an id verbatim is
-//! **silent data corruption**, not a mere failed lookup: the id first dangles,
-//! then — because the restored interner's `next_id` equals `K` — the first
-//! genuinely-new string a later write interns collides with the dangling id, so
-//! a replayed node/edge is **mislabeled** (e.g. "Manager" becomes the user's new
-//! "Department") or its property silently dropped.
+//! Node/edge **labels** and **property keys** are interned; property *values*
+//! are self-contained. The base backup carries the interner as of `source_lsn`.
+//! How a WAL segment records those labels/keys — and thus whether the guard is
+//! needed at all — depends on the segment's WAL version (Issue #3506, #3745):
 //!
-//! PITR therefore **refuses** such a window: before materializing anything, it
-//! scans the included band prefix and constraint-declaration slice for any
-//! interner id that references a string the base snapshot does not contain and,
-//! if found, fails with
+//! - **WAL v13+ (the common case):** segments store label / property-key
+//!   **strings inline** and re-intern them to LIVE global-interner ids on read.
+//!   Those ids are self-describing and always resolve, regardless of a foreign
+//!   backup's file-space interner layout, so a post-backup transaction that
+//!   introduces a **brand-new label or property key** restores **correctly**.
+//!   The guard is therefore **skipped** for an all-v13 archive — range-checking
+//!   a live re-interned id against the backup's file-space string count is an
+//!   id-space mismatch that would false-reject a perfectly recoverable restore.
+//!
+//! - **Legacy WAL ≤v12:** segments store labels/keys as raw `u32` file-space
+//!   interner ids (`InternedString::from_raw`, with NO re-intern). A post-backup
+//!   id `>= K` (where `K` is the restored interner's string count) references a
+//!   string the base snapshot does not carry. Replaying it verbatim is **silent
+//!   data corruption**, not a mere failed lookup: the id first dangles, then —
+//!   because the restored interner's `next_id` equals `K` — the first
+//!   genuinely-new string a later write interns collides with the dangling id,
+//!   so a replayed node/edge is **mislabeled** (e.g. "Manager" becomes the
+//!   user's new "Department") or its property silently dropped.
+//!
+//! PITR is **fail-closed** for the legacy case: when any ≤v12 raw-label segment
+//! is present in the archive, it scans the included band prefix and
+//! constraint-declaration slice for any interner id that references a string the
+//! base snapshot does not contain and, if found, refuses with
 //! [`BackupError::WindowCrossesVocabularyChange`](crate::storage::backup::BackupError::WindowCrossesVocabularyChange)
-//! (mapped to `FAILED_PRECONDITION` at the MCP boundary). This converts silent
-//! mislabeling/dropping into a clean, honest error. Keep the label/key
-//! vocabulary stable across the window, take a fresh base backup that includes
-//! the new vocabulary, or target a coordinate before the change (a durable
-//! interner archive is a follow-up).
+//! (mapped to `FAILED_PRECONDITION` at the MCP boundary) **before materializing
+//! anything** — converting silent mislabeling/dropping into a clean, honest
+//! error. To recover a legacy window, keep the label/key vocabulary stable
+//! across it, take a fresh base backup that includes the new vocabulary, or
+//! target a coordinate before the change.
+//!
+//! The read-boundary signal that distinguishes the two eras is
+//! [`read_entries_from_dir_with_options_reporting_raw_labels`](crate::storage::wal::segment_reader::read_entries_from_dir_with_options_reporting_raw_labels)
+//! (Issue #3745); the inline rationale at the guard site in
+//! [`AletheiaDB::restore_to_data_dir_at`] documents the gating in full.
 
 use std::path::Path;
 
@@ -60,7 +78,9 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::storage::backup::{BackupError, check_target_empty, materialize_to_dir, read_artifact};
-use crate::storage::wal::segment_reader::read_entries_from_dir_with_options;
+use crate::storage::wal::segment_reader::{
+    read_entries_from_dir_with_options, read_entries_from_dir_with_options_reporting_raw_labels,
+};
 use crate::storage::wal::{LSN, WalEntry, WalOperation};
 
 /// A PITR stop target: an absolute transaction-time coordinate.
@@ -596,7 +616,20 @@ impl AletheiaDB {
         // at or above this references a string introduced after the backup.
         let restored_interner_count = payload.interner.strings.len() as u32;
 
-        let all = read_entries_from_dir_with_options(wal_archive, LSN::initial(), None, true)?;
+        // Read the whole archive, and learn whether ANY segment used the pre-v13
+        // raw-label encoding (Issue #3506). v13+ segments store label /
+        // property-key STRINGS inline and re-intern them to LIVE global-interner
+        // ids on read, so their ids are self-describing and always resolvable;
+        // only pre-v13 (`from_raw`) segments carry raw file-space ids that can
+        // dangle past a foreign backup's archived interner. This flag gates the
+        // vocabulary-drift guard below.
+        let (all, archive_has_raw_labels) =
+            read_entries_from_dir_with_options_reporting_raw_labels(
+                wal_archive,
+                LSN::initial(),
+                None,
+                true,
+            )?;
         let window = compute_window(&all, source_lsn);
         window.validate(&target)?;
 
@@ -621,14 +654,52 @@ impl AletheiaDB {
         // Parsing from the FULL stream eliminates band-straddle (F5).
         let filtered = filter_bands(all, &target, source_lsn);
 
-        // Vocabulary-change guard (F1): if any included op — data band or
-        // constraint declaration — references an interner id the base backup
-        // does not define, replaying it verbatim would silently mislabel/drop
-        // data. Refuse cleanly BEFORE materializing anything.
-        if let Some(first_unresolved_id) = first_unresolved_interned_id(
-            filtered.entries.iter().chain(constraint_slice.iter()),
-            restored_interner_count,
-        ) {
+        // Vocabulary-change guard (F1) — version-aware since WAL v13 (Issue
+        // #3506, made this guard obsolete for v13; kept for ≤v12).
+        //
+        // The guard compares each included op's label / property-key interner ids
+        // against the base backup's *file-space* interner count. That comparison
+        // is only meaningful for RAW ids: a pre-v13 (`!carries_string_labels`)
+        // segment stores raw file-space ids via `InternedString::from_raw` with
+        // NO re-intern, so an id `>= restored_interner_count` references a string
+        // the base backup does not carry and would silently mislabel/drop data on
+        // replay — we MUST still refuse (fail-closed).
+        //
+        // v13+ segments instead store the label / property-key STRINGS inline and
+        // re-intern them into the process-global interner on read
+        // (`segment_reader::read_label`, `PropertyMap` key codec). By the time the
+        // entries reach this guard those strings have ALREADY interned
+        // successfully (else the archive read above would have errored), so their
+        // (live) ids are always resolvable regardless of the foreign backup's
+        // file-space layout. Range-checking those live ids against the backup's
+        // file-space count is an id-space mismatch that false-rejects perfectly
+        // recoverable foreign restores — so when the archive is all-v13 we skip
+        // the check entirely.
+        //
+        // Gating is coarse ("any pre-v13 segment in the archive ⇒ keep the guard
+        // for the WHOLE included stream, incl. its v13 entries"): the current
+        // writer only ever emits v13, so a freshly-written archive is all-v13 and
+        // takes the skip path.
+        //
+        // KNOWN LIMITATION (conservative, fails CLOSED): a database created under
+        // a ≤v12 binary and later upgraded to v13 produces a genuinely MIXED
+        // archive (old ≤v12 raw-label segments + new v13 inline-string appends).
+        // For such an archive a legitimate, fully-recoverable v13-vocabulary
+        // restore is currently FALSE-REJECTED: the presence of any ≤v12 segment
+        // arms the guard over the whole stream, including v13 entries whose live
+        // re-interned ids would resolve fine. This is an availability
+        // over-rejection, NOT a correctness hole — it never corrupts and never
+        // silently replaces data (a raw ≤v12 entry is never silently replayed);
+        // the operator gets a clean `WindowCrossesVocabularyChange` refusal.
+        // Per-entry raw-label tagging (arming the guard only over the entries
+        // that actually came from a raw-label segment, leaving v13 entries
+        // unchecked) would lift the over-rejection and is a tracked follow-up.
+        if archive_has_raw_labels
+            && let Some(first_unresolved_id) = first_unresolved_interned_id(
+                filtered.entries.iter().chain(constraint_slice.iter()),
+                restored_interner_count,
+            )
+        {
             return Err(Error::Backup(BackupError::WindowCrossesVocabularyChange {
                 first_unresolved_id,
                 restored_interner_count,
@@ -1030,5 +1101,196 @@ mod band_filter_tests {
             "band carries its CommitTx timestamp, not a data op's"
         );
         assert_eq!(stop.lsn, 6, "stop is the CommitTx LSN");
+    }
+
+    /// Fail-closed contract (Issue #3745): the vocabulary-drift predicate must
+    /// still flag an out-of-range RAW label id — the shape a legacy ≤v12
+    /// (`InternedString::from_raw`, un-re-interned) segment carries. The
+    /// version-aware gating in `restore_to_data_dir_at` only RUNS this predicate
+    /// when a pre-v13 raw-label segment is present in the archive (see the
+    /// `read_entries_from_dir_with_options_reporting_raw_labels` seam and its
+    /// `reports_raw_labels_for_pre_v13_segment_only` unit test), so a raw id past
+    /// the archived interner is never silently replayed. This test pins the
+    /// predicate itself: in-range ids resolve (None), an out-of-range id is
+    /// detected (Some), across both a single op and a stream.
+    #[test]
+    fn vocabulary_guard_predicate_still_flags_out_of_range_raw_label() {
+        use crate::core::interning::InternedString;
+
+        // Base interner defines file-space ids 0..5.
+        let restored_count = 5u32;
+
+        let make_op = |label_raw: u32| WalOperation::CreateNode {
+            node_id: crate::core::NodeId::new(1).unwrap(),
+            label: InternedString::from_raw(label_raw),
+            properties: PropertyMap::new(),
+            valid_from: ts(1),
+            provenance: None,
+        };
+
+        // In-range label id (< restored_count): fully resolvable, no drift.
+        assert_eq!(first_out_of_range_id(&make_op(3), restored_count), None);
+
+        // Out-of-range label id (>= restored_count): references a string the base
+        // backup does not carry — MUST be flagged (fail-closed).
+        assert_eq!(first_out_of_range_id(&make_op(7), restored_count), Some(7));
+
+        // And the stream aggregator surfaces the first offending id.
+        let entries = vec![framed(1, make_op(2), ts(1)), framed(2, make_op(9), ts(1))];
+        assert_eq!(
+            first_unresolved_interned_id(&entries, restored_count),
+            Some(9)
+        );
+    }
+}
+
+/// End-to-end wiring coverage for the version-aware vocabulary guard
+/// (Issue #3745). The two unit conjuncts in `band_filter_tests`
+/// (`reports_raw_labels_for_pre_v13_segment_only`, living in
+/// `segment_reader.rs`, proves the raw-label FLAG; and
+/// `vocabulary_guard_predicate_still_flags_out_of_range_raw_label` proves the
+/// PREDICATE) verify the two halves in isolation — but neither drives a real
+/// ≤v12 raw-label archive through [`AletheiaDB::restore_to_data_dir_at`], so
+/// deleting the guard's `if` block would leave both green. This test closes
+/// that gap: it constructs a genuine on-disk v11 raw-label WAL archive plus a
+/// real base backup and asserts the public restore API actually REFUSES
+/// fail-closed, materializing nothing.
+///
+/// It lives here (a crate-internal `#[cfg(test)]` module) rather than in
+/// `tests/pitr.rs` because building the raw-label segment requires the
+/// `pub(crate)` WAL wire constants (`WAL_MAGIC`, `WAL_VERSION_DESTRUCTIVE_PROVENANCE`,
+/// `OP_CREATE_NODE`) that the external integration crate cannot name; it reuses
+/// the exact segment-writer technique proven by
+/// `reports_raw_labels_for_pre_v13_segment_only`.
+#[cfg(test)]
+mod vocab_guard_e2e_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::core::property::PropertyMap;
+    use crate::core::temporal::time;
+    use crate::storage::wal::segment_reader::{WAL_MAGIC, WAL_VERSION_DESTRUCTIVE_PROVENANCE};
+    use crate::storage::wal::serialization::{OP_BEGIN_TX, OP_COMMIT_TX, OP_CREATE_NODE};
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    /// Fail-closed, end-to-end (Issue #3745): a REAL on-disk ≤v12 (v11)
+    /// raw-label WAL archive whose post-backup band carries a label id OUT OF
+    /// RANGE of the base backup's interner must drive
+    /// [`AletheiaDB::restore_to_data_dir_at`] to an actual
+    /// [`BackupError::WindowCrossesVocabularyChange`] refusal — and, because the
+    /// guard fires BEFORE `materialize_to_dir`, must leave the target directory
+    /// **unmaterialized** (no partial restore). Deleting the guard's `if` block
+    /// in `restore_to_data_dir_at` would replay the dangling raw id and make this
+    /// test fail (it would `Ok`), which the two isolated unit conjuncts cannot
+    /// catch.
+    #[test]
+    #[serial_test::serial]
+    fn pre_v13_raw_label_out_of_range_archive_refuses_and_leaves_target_unmaterialized() {
+        let tmp = TempDir::new().unwrap();
+
+        // --- 1. A real base backup with a small base vocabulary. Its archived
+        //        interner defines only ids `0..restored_interner_count`. ---
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("PitrBase3745", PropertyMap::new()).unwrap();
+        let albk = tmp.path().join("base.albk");
+        let source_lsn = db.backup(&albk).unwrap().source_lsn;
+        drop(db);
+
+        // --- 2. A hand-built v11 (≤v12) raw-label WAL archive: one FRAMED
+        //        transaction band `[BeginTx, CreateNode, CommitTx]` (a v11
+        //        segment is a framed WAL version, so a bare data op is not a
+        //        window-forming transaction; the `CommitTx` supplies the band's
+        //        stop coordinate). The `CreateNode`'s RAW file-space label id is
+        //        astronomically beyond any interner count, so it is guaranteed
+        //        `>=` the base backup's `restored_interner_count` regardless of
+        //        live interner state. LSNs sit above `source_lsn` so the band is
+        //        post-backup and included in the replay window; the commit
+        //        timestamp is the PITR target. The per-entry framing (LSN +
+        //        timestamp + CRC over header + payload) mirrors the writer's
+        //        `serialize_operation_into` and the segment-writer technique
+        //        proven by `reports_raw_labels_for_pre_v13_segment_only`. ---
+        const OUT_OF_RANGE_RAW_LABEL: u32 = 2_000_000_000;
+        let tx_id = 3745u64;
+        let node_id = NodeId::new(3745).unwrap();
+        let commit_ts = time::now();
+
+        // Frame one WAL entry: LSN + 12-byte HLC timestamp + 4-byte CRC slot +
+        // op payload, with the CRC taken over the header and the payload (the
+        // 4-byte checksum slot excluded), exactly as `serialize_operation_into`.
+        let build_entry = |lsn: u64, ts: Timestamp, write_op: &dyn Fn(&mut Vec<u8>)| -> Vec<u8> {
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&LSN(lsn).0.to_le_bytes());
+            ts.serialize_into(&mut buffer);
+            let cs = buffer.len();
+            buffer.extend_from_slice(&[0u8; 4]); // checksum placeholder
+            write_op(&mut buffer);
+            let mut h = crc32fast::Hasher::new();
+            h.update(&buffer[0..cs]);
+            h.update(&buffer[cs + 4..]);
+            buffer[cs..cs + 4].copy_from_slice(&h.finalize().to_le_bytes());
+            buffer
+        };
+
+        let begin_lsn = source_lsn + 1;
+        let begin = build_entry(begin_lsn, commit_ts, &|buf| {
+            buf.push(OP_BEGIN_TX);
+            buf.extend_from_slice(&tx_id.to_le_bytes());
+        });
+        let create = build_entry(begin_lsn + 1, commit_ts, &|buf| {
+            buf.push(OP_CREATE_NODE);
+            buf.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            // v11 label codec: a raw u32 file-space id (no inline string, no
+            // re-intern) — the un-resolvable ≤v12 shape the guard must catch.
+            buf.extend_from_slice(&OUT_OF_RANGE_RAW_LABEL.to_le_bytes());
+            PropertyMap::new().serialize_into(buf).unwrap();
+            commit_ts.serialize_into(buf); // op-level valid_from
+            buf.push(0u8); // provenance: absent
+        });
+        let commit = build_entry(begin_lsn + 2, commit_ts, &|buf| {
+            buf.push(OP_COMMIT_TX);
+            buf.extend_from_slice(&tx_id.to_le_bytes());
+            buf.extend_from_slice(&1u32.to_le_bytes()); // entry_count
+            commit_ts.serialize_into(buf);
+        });
+
+        let archive = tmp.path().join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        {
+            let mut f = std::fs::File::create(archive.join("0.log")).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_DESTRUCTIVE_PROVENANCE]).unwrap();
+            f.write_all(&begin).unwrap();
+            f.write_all(&create).unwrap();
+            f.write_all(&commit).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // --- 3. Drive it through the PUBLIC restore API. The guard must REFUSE. ---
+        let dst = TempDir::new().unwrap();
+        let data_dir = dst.path().join("db");
+        let err = AletheiaDB::restore_to_data_dir_at(
+            &albk,
+            &archive,
+            PitrTarget::AsOf(commit_ts),
+            &data_dir,
+        )
+        .expect_err(
+            "a ≤v12 raw-label archive with an out-of-range label id must be REFUSED \
+             fail-closed, not silently replayed (Issue #3745)",
+        );
+        assert!(
+            matches!(
+                err,
+                Error::Backup(BackupError::WindowCrossesVocabularyChange { .. })
+            ),
+            "expected WindowCrossesVocabularyChange, got {err:?}"
+        );
+
+        // --- 4. Fail-closed: the guard fires BEFORE materialize, so the target
+        //        `indexes/` must NOT exist (no partial restore left behind). ---
+        assert!(
+            !data_dir.join("indexes").exists(),
+            "a refused restore must leave the target directory unmaterialized"
+        );
     }
 }

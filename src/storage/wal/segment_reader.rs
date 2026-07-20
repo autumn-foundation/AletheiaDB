@@ -557,6 +557,32 @@ pub fn read_entries_from_dir_with_options(
     read_entries_from_dir_with_source(wal_dir, start_lsn, &cipher.into(), tolerate_torn_tail)
 }
 
+/// Same as [`read_entries_from_dir_with_options`], but also reports whether ANY
+/// segment read used the **pre-v13 raw-label encoding** (Issue #3506).
+///
+/// The boolean is the logical OR of every read segment's
+/// [`read_segment_with_cipher_tolerant_flagged`] flag: `true` iff at least one
+/// segment stored raw file-space label / property-key ids (`from_raw`, not
+/// re-interned). When it is `false`, every entry returned holds live global
+/// interner ids (v13+ inline strings, re-interned on read), so an id-range check
+/// against a foreign backup's file-space interner count is meaningless and must
+/// be skipped. Callers that need this distinction (the PITR vocabulary-drift
+/// guard) use it to stay fail-closed for legacy raw archives while no longer
+/// false-rejecting recoverable v13 restores.
+pub fn read_entries_from_dir_with_options_reporting_raw_labels(
+    wal_dir: &Path,
+    start_lsn: LSN,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+    tolerate_torn_tail: bool,
+) -> Result<(Vec<WalEntry>, bool)> {
+    read_entries_from_dir_with_source_flagged(
+        wal_dir,
+        start_lsn,
+        &cipher.into(),
+        tolerate_torn_tail,
+    )
+}
+
 /// Read all WAL entries from a directory using a multi-generation
 /// [`WalKeyring`](crate::encryption::wal_encryption::WalKeyring) (Issue #3617).
 ///
@@ -584,7 +610,21 @@ fn read_entries_from_dir_with_source(
     source: &WalCipherSource<'_>,
     tolerate_torn_tail: bool,
 ) -> Result<Vec<WalEntry>> {
+    read_entries_from_dir_with_source_flagged(wal_dir, start_lsn, source, tolerate_torn_tail)
+        .map(|(entries, _raw_labels)| entries)
+}
+
+/// Directory read that additionally reports whether ANY read segment used the
+/// pre-v13 raw-label encoding (see
+/// [`read_entries_from_dir_with_options_reporting_raw_labels`]).
+fn read_entries_from_dir_with_source_flagged(
+    wal_dir: &Path,
+    start_lsn: LSN,
+    source: &WalCipherSource<'_>,
+    tolerate_torn_tail: bool,
+) -> Result<(Vec<WalEntry>, bool)> {
     let mut entries = Vec::new();
+    let mut any_raw_labels = false;
 
     // Only the FINAL segment is allowed to tolerate a torn trailing entry, and
     // only when the caller's recovery policy leaves tolerance on.
@@ -592,8 +632,9 @@ fn read_entries_from_dir_with_source(
     let last_idx = segment_paths.len().saturating_sub(1);
     for (i, (_, path)) in segment_paths.iter().enumerate() {
         let segment_tolerates = tolerate_torn_tail && i == last_idx;
-        let segment_entries =
-            read_segment_with_cipher_tolerant(path, start_lsn, source, segment_tolerates)?;
+        let (segment_entries, segment_raw_labels) =
+            read_segment_with_cipher_tolerant_flagged(path, start_lsn, source, segment_tolerates)?;
+        any_raw_labels |= segment_raw_labels;
         entries.extend(segment_entries);
     }
 
@@ -602,7 +643,7 @@ fn read_entries_from_dir_with_source(
     // in an order that differs from their LSN assignment order.
     entries.sort_by_key(|entry| entry.lsn);
 
-    Ok(entries)
+    Ok((entries, any_raw_labels))
 }
 
 /// Enumerate `*.log` WAL segment files in `wal_dir`, sorted by segment ID.
@@ -1049,10 +1090,32 @@ fn read_segment_with_cipher_tolerant(
     source: &WalCipherSource<'_>,
     tolerate_torn_tail: bool,
 ) -> Result<Vec<WalEntry>> {
+    read_segment_with_cipher_tolerant_flagged(path, start_lsn, source, tolerate_torn_tail)
+        .map(|(entries, _raw_labels)| entries)
+}
+
+/// Same as [`read_segment_with_cipher_tolerant`], but also reports whether this
+/// segment used the **pre-v13 raw-label encoding** (`!carries_string_labels`,
+/// Issue #3506).
+///
+/// A `true` flag means the segment stored label / property-key ids as raw
+/// file-space [`InternedString`] ids (`InternedString::from_raw`, no re-intern),
+/// so those ids are only correct when the replaying process reproduces the
+/// writer's interner layout. Consumers that must distinguish self-describing
+/// (v13+, re-interned to live ids on read) segments from raw legacy ones — e.g.
+/// the PITR vocabulary-drift guard in `src/db/pitr.rs` — use this to gate a
+/// range check that is only meaningful for raw ids. An empty / torn-header /
+/// NotFound segment contributes no entries and reports `false`.
+fn read_segment_with_cipher_tolerant_flagged(
+    path: &Path,
+    start_lsn: LSN,
+    source: &WalCipherSource<'_>,
+    tolerate_torn_tail: bool,
+) -> Result<(Vec<WalEntry>, bool)> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), false)),
         Err(e) => {
             return Err(StorageError::IoError(format!(
                 "Failed to open WAL segment {:?}: {}",
@@ -1079,7 +1142,7 @@ fn read_segment_with_cipher_tolerant(
     // Handle empty files explicitly to avoid mmap failure on some platforms (e.g. macOS/Windows)
     // A zero-byte file can occur if a crash happens immediately after segment creation.
     if metadata.len() == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
 
     // Memory-map the file for efficient reading without loading entire file into memory.
@@ -1126,7 +1189,7 @@ fn read_segment_with_cipher_tolerant(
                 // recovery on the whole segment.
                 Err(e) if tolerate_torn_tail => {
                     log_torn_tail_warning(path, WAL_HEADER_SIZE, &e);
-                    return Ok(Vec::new());
+                    return Ok((Vec::new(), false));
                 }
                 Err(e) => return Err(e),
             };
@@ -1138,7 +1201,7 @@ fn read_segment_with_cipher_tolerant(
             )
             .into());
         } else {
-            return Ok(Vec::new()); // Empty segment
+            return Ok((Vec::new(), false)); // Empty segment
         };
 
     // Encrypted segments require a WAL DEK. Resolve the right generation for
@@ -1197,7 +1260,12 @@ fn read_segment_with_cipher_tolerant(
         )?;
     }
 
-    Ok(entries)
+    // Raw-label ids are only emitted by pre-v13 (`!carries_string_labels`)
+    // payload layouts; v13+ segments store labels/keys as inline strings and
+    // re-intern them to live global-interner ids on read (Issue #3506), so a
+    // v13+ segment never yields a raw file-space id.
+    let raw_labels = !carries_string_labels(payload_version(version));
+    Ok((entries, raw_labels))
 }
 
 /// Log a WARNING that replay stopped at a crash-torn trailing entry, under both
@@ -2353,6 +2421,96 @@ mod tests {
                 .resolve_with(new_label, |s| s == "PersonTarget3506")
                 .unwrap(),
             "v13 string decode must recover the correct label \"PersonTarget3506\""
+        );
+    }
+
+    /// Issue #3745 — the read-boundary raw-label signal that gates the PITR
+    /// vocabulary-drift guard (`src/db/pitr.rs`). A pre-v13 (raw-label,
+    /// `from_raw`) segment must report `raw_labels = true`; an all-v13
+    /// (inline-string, re-interned on read) archive must report `false`. This is
+    /// the seam that lets PITR stay fail-closed for legacy ≤v12 archives (whose
+    /// raw ids can dangle past a foreign backup's interner) while no longer
+    /// false-rejecting recoverable v13 restores.
+    #[test]
+    fn reports_raw_labels_for_pre_v13_segment_only() {
+        use crate::storage::wal::serialization::OP_CREATE_NODE;
+        use std::io::Write;
+
+        let node_id = NodeId::new(3745).unwrap();
+        let valid_from = time::now();
+
+        // Shared entry-body builder (LSN + valid_from + CRC framing, provenance
+        // absent); only the label codec differs between the v11 (raw id) and v13
+        // (inline string) variants. Mirrors the framing used by
+        // `raw_id_decode_corrupts_under_nonidentity_layout_string_decode_does_not`.
+        let build_entry = |lsn: u64, write_label: &dyn Fn(&mut Vec<u8>)| -> Vec<u8> {
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&LSN(lsn).0.to_le_bytes());
+            valid_from.serialize_into(&mut buffer);
+            let cs = buffer.len();
+            buffer.extend_from_slice(&[0u8; 4]); // checksum placeholder
+            buffer.push(OP_CREATE_NODE);
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            write_label(&mut buffer);
+            PropertyMap::new().serialize_into(&mut buffer).unwrap();
+            valid_from.serialize_into(&mut buffer);
+            buffer.push(0u8); // provenance: absent
+            let mut h = crc32fast::Hasher::new();
+            h.update(&buffer[0..20]);
+            h.update(&buffer[cs + 4..]);
+            buffer[cs..cs + 4].copy_from_slice(&h.finalize().to_le_bytes());
+            buffer
+        };
+
+        // ---- v11 raw-label segment: stores a raw file-space id (4242) with NO
+        //      matching interned string — the un-re-internable ≤v12 case. ----
+        let raw_dir = TempDir::new().unwrap();
+        {
+            let mut f = File::create(raw_dir.path().join("0.log")).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_DESTRUCTIVE_PROVENANCE]).unwrap();
+            let entry = build_entry(3745, &|buf| buf.extend_from_slice(&4242u32.to_le_bytes()));
+            f.write_all(&entry).unwrap();
+            f.sync_all().unwrap();
+        }
+        let (raw_entries, raw_flag) = read_entries_from_dir_with_options_reporting_raw_labels(
+            raw_dir.path(),
+            LSN(1),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(raw_entries.len(), 1, "the v11 entry must parse");
+        assert!(
+            raw_flag,
+            "a pre-v13 raw-label segment must report raw_labels = true (keeps the PITR guard armed)"
+        );
+
+        // ---- v13 inline-string segment: stores the label STRING. ----
+        let v13_dir = TempDir::new().unwrap();
+        {
+            let mut f = File::create(v13_dir.path().join("0.log")).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_STRING_LABELS]).unwrap();
+            let entry = build_entry(3745, &|buf| {
+                let bytes = "Person3745".as_bytes();
+                buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(bytes);
+            });
+            f.write_all(&entry).unwrap();
+            f.sync_all().unwrap();
+        }
+        let (v13_entries, v13_flag) = read_entries_from_dir_with_options_reporting_raw_labels(
+            v13_dir.path(),
+            LSN(1),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(v13_entries.len(), 1, "the v13 entry must parse");
+        assert!(
+            !v13_flag,
+            "an all-v13 archive must report raw_labels = false (PITR guard safely skipped)"
         );
     }
 
