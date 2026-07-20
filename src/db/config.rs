@@ -1770,6 +1770,74 @@ impl AletheiaDB {
 mod ephemeral_tests {
     use super::*;
 
+    /// Shared deadline for the interner-cap tests that re-spawn the whole test
+    /// binary as a child process to run one `#[ignore]` helper in isolation.
+    ///
+    /// These tests were originally hard-coded to a 30s deadline. That is fine on
+    /// Linux/macOS, but on the `windows-latest` CI cell the entire test binary
+    /// takes ~560s to run and process spawn + large debug-binary load under
+    /// heavy parallel load routinely blows past 30s, so the parent's poll loop
+    /// panics with "helper did not complete" — a false timeout, not a real hang
+    /// (ubuntu/macOS pass the same tests in the same run).
+    ///
+    /// So: keep the POSIX default at 30s (unchanged behavior), but give Windows
+    /// a generous 180s. 180s is still comfortably inside the observed ~560s
+    /// whole-binary runtime, so a genuine hang in a single helper is still
+    /// detected well before the suite would otherwise finish. An env override
+    /// (`ALETHEIADB_SUBPROCESS_TEST_TIMEOUT_SECS`) wins on any platform, for CI
+    /// tuning or local debugging.
+    fn subprocess_test_timeout() -> std::time::Duration {
+        subprocess_test_timeout_from(std::env::var("ALETHEIADB_SUBPROCESS_TEST_TIMEOUT_SECS").ok())
+    }
+
+    /// Resolve the subprocess-test deadline from an explicit override value.
+    /// Pure (no env access) so it is unit-testable without mutating process-global state.
+    /// A missing, malformed, or zero override falls back to the platform default
+    /// (Windows CI spawns a large debug binary under heavy parallel load, so ~30s is too tight there;
+    /// the whole test binary has been observed to take ~560s on Windows).
+    fn subprocess_test_timeout_from(override_secs: Option<String>) -> std::time::Duration {
+        if let Some(v) = override_secs
+            && let Ok(secs) = v.parse::<u64>()
+            && secs > 0
+        {
+            return std::time::Duration::from_secs(secs);
+        }
+        #[cfg(windows)]
+        {
+            std::time::Duration::from_secs(180)
+        }
+        #[cfg(not(windows))]
+        {
+            std::time::Duration::from_secs(30)
+        }
+    }
+
+    /// The subprocess-test deadline resolution is a pure function of the override
+    /// value, so it is exercised without touching any process-global env var: an
+    /// explicit override is honored exactly, a malformed or zero override falls
+    /// back to the platform default, and the default has a sane per-platform floor.
+    #[test]
+    fn subprocess_test_timeout_resolves_override_and_defaults() {
+        use std::time::Duration;
+
+        // Explicit override is honored exactly, on any platform.
+        assert_eq!(
+            subprocess_test_timeout_from(Some("7".to_string())),
+            Duration::from_secs(7)
+        );
+        // Malformed and zero overrides fall back to the platform default.
+        assert!(
+            subprocess_test_timeout_from(Some("not-a-number".to_string()))
+                >= Duration::from_secs(30)
+        );
+        assert!(subprocess_test_timeout_from(Some("0".to_string())) >= Duration::from_secs(30));
+        // Default (no override) has a sane platform floor.
+        let default = subprocess_test_timeout_from(None);
+        assert!(default >= Duration::from_secs(30));
+        #[cfg(windows)]
+        assert_eq!(default, Duration::from_secs(180)); // pin the Windows margin
+    }
+
     /// Configurable interner cap bounds (finding 2): `0` is rejected (it would
     /// brick all writes/open), and any value at/above `u32::MAX` is clamped to
     /// `u32::MAX` (ids are `AtomicU32`, so a higher cap is unreachable). Pure,
@@ -1898,7 +1966,8 @@ mod ephemeral_tests {
             .spawn()
             .expect("failed to spawn subprocess for config-vs-env precedence test");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let timeout = subprocess_test_timeout();
+        let deadline = Instant::now() + timeout;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -1909,7 +1978,9 @@ mod ephemeral_tests {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
-                        panic!("config-vs-env precedence helper did not complete");
+                        panic!(
+                            "config-vs-env precedence helper did not complete within {timeout:?}"
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -2199,7 +2270,8 @@ mod ephemeral_tests {
             .spawn()
             .expect("failed to spawn subprocess for interner-cap reopen test");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let timeout = subprocess_test_timeout();
+        let deadline = Instant::now() + timeout;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -2210,7 +2282,7 @@ mod ephemeral_tests {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
-                        panic!("interner-cap reopen helper did not complete");
+                        panic!("interner-cap reopen helper did not complete within {timeout:?}");
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -2385,7 +2457,8 @@ mod ephemeral_tests {
             .spawn()
             .expect("failed to spawn subprocess for multi-DB interner-cap test");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let timeout = subprocess_test_timeout();
+        let deadline = Instant::now() + timeout;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -2396,7 +2469,7 @@ mod ephemeral_tests {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
-                        panic!("multi-DB interner-cap helper did not complete");
+                        panic!("multi-DB interner-cap helper did not complete within {timeout:?}");
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -2495,7 +2568,8 @@ mod ephemeral_tests {
             .spawn()
             .expect("failed to spawn subprocess for concurrent-opens interner-cap test");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let timeout = subprocess_test_timeout();
+        let deadline = Instant::now() + timeout;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -2509,7 +2583,9 @@ mod ephemeral_tests {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
-                        panic!("concurrent-opens interner-cap helper did not complete");
+                        panic!(
+                            "concurrent-opens interner-cap helper did not complete within {timeout:?}"
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
