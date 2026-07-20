@@ -63,6 +63,19 @@ This is the enforcement of the *drain-first* rule above: the guard scans only th
 entries that would actually be replayed (the post-snapshot window), so a drained
 directory (empty window) and a current-version v13+ tail both open normally.
 
+**Scope of the guard.** The refusal keys on the WAL segment *format version*,
+not on the "0.1.x" label per se: **any** pre-string-labels format — every
+plaintext or encrypted WAL segment at version **< 13** (`WAL_VERSION_STRING_LABELS`),
+including the intermediate 0.2.0-dev formats written before string labels
+landed — is refused on open for exactly the same raw-interner-id reason. The
+guard's predicate is `!carries_string_labels(version)` applied to the decoded
+segment version. Because every segment (plaintext or encrypted-then-decrypted)
+routes through a single decode site that stamps the payload version, the
+encrypted pre-v13 path is **logically covered** by the same check; it simply
+lacks a checked-in encrypted-pre-v13 fixture, so that specific path is a
+**documented test gap** (the plaintext pre-v13 path is fixture-verified in
+`tests/compat_0_1_1_datadir.rs`).
+
 Before this guard, opening such a directory *succeeded* but the tail-replayed
 entities came back with **silently corrupted labels** — a verified failure
 reproduced in `tests/compat_0_1_1_datadir.rs`: tail nodes were mislabeled to

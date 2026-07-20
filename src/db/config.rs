@@ -83,6 +83,55 @@ fn refuse_pre_v13_wal_tail(replay_entries: &[crate::storage::wal::WalEntry]) -> 
     Ok(())
 }
 
+/// Refuse a pre-v13 (0.1.x) WAL **unique-constraint declaration** (Issue #3746,
+/// Finding A).
+///
+/// [`apply_constraint_declarations`](crate::storage::recovery::apply_constraint_declarations)
+/// folds `DeclareUniqueConstraint` / `DropUniqueConstraint` ops out of the FULL
+/// WAL history — including entries BELOW the index-snapshot LSN that the
+/// differential node/edge replay drains away, so those are NOT covered by
+/// [`refuse_pre_v13_wal_tail`] (which scans only the post-drain replay window).
+/// On pre-v13 segments a constraint op encodes its label/property as raw
+/// process-local interner ids, exactly the drift that corrupts node/edge labels;
+/// a pre-v13 constraint declaration below a drained window would otherwise apply
+/// a MIS-RESOLVED label/property on an otherwise-successful open.
+///
+/// This scans ONLY constraint-declaration ops, so it is scoped and safe: a
+/// cleanly-checkpointed fixture (no constraint ops) still opens, and pre-v13
+/// node/edge entries below the window are handled by the differential-replay
+/// guard rather than refused here. Run BEFORE `apply_constraint_declarations`
+/// (fail-fast: no throwaway interning on a to-be-refused open). The WAL-only
+/// branch does not need this scan — it replays from LSN 0, so its
+/// `refuse_pre_v13_wal_tail` already spans the whole history, constraint ops
+/// included.
+fn refuse_pre_v13_constraint_declarations(entries: &[crate::storage::wal::WalEntry]) -> Result<()> {
+    use crate::storage::wal::WalOperation;
+    let pre_v13 = entries.iter().find_map(|entry| {
+        let is_constraint_decl = matches!(
+            entry.operation,
+            WalOperation::DeclareUniqueConstraint { .. }
+                | WalOperation::DropUniqueConstraint { .. }
+        );
+        entry.segment_version.filter(|&v| {
+            is_constraint_decl && !crate::storage::wal::segment_reader::carries_string_labels(v)
+        })
+    });
+    if let Some(version) = pre_v13 {
+        return Err(StorageError::PreV13WalTailRequiresMigration {
+            reason: format!(
+                "this data directory has a pre-v13 (0.1.x) WAL unique-constraint declaration \
+                 (segment format version {version} < v13): those segments store the constraint's \
+                 label/property as raw process-local interner ids, and applying them under this \
+                 build's rebuilt interner would resolve them to the WRONG label/property. Drain \
+                 the WAL on the old version first — call `persist_indexes()` (checkpoint) and \
+                 shut down gracefully — then upgrade. See docs/guides/migration-0.1-to-0.2.md."
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// The outcome of reconciling a newly-opened database's requested interner cap
 /// against the process-global cap already in effect (Issue #3724).
 ///
@@ -1136,6 +1185,16 @@ impl AletheiaDB {
                 // whole history from LSN 0), so this no longer re-reads the
                 // segment directory. Below-manifest declarations are still
                 // applied because the borrowed slice includes them.
+                //
+                // Issue #3746 (Finding A): a pre-v13 constraint declaration may
+                // sit BELOW the snapshot LSN (drained out of the node/edge replay
+                // window, so `refuse_pre_v13_wal_tail` below wouldn't see it) yet
+                // still be applied here with a mis-resolved raw-id label/property.
+                // Refuse it FIRST (fail-fast, before any throwaway interning),
+                // scoped to constraint-declaration ops so a checkpointed fixture
+                // (no such ops) still opens.
+                refuse_pre_v13_constraint_declarations(&startup_wal_entries)?;
+
                 crate::storage::recovery::apply_constraint_declarations(
                     &startup_wal_entries,
                     &db.constraint_registry,
@@ -1743,6 +1802,53 @@ mod ephemeral_tests {
             validate_interner_cap(usize::MAX).unwrap(),
             u32::MAX as usize
         );
+    }
+
+    /// Issue #3746: unit table for the `refuse_pre_v13_wal_tail` predicate that
+    /// the open() path runs over the computed replay window. An empty window
+    /// (drained dir) opens; a pre-v13 entry (`segment_version < 13`) is refused
+    /// with the typed `PreV13WalTailRequiresMigration` variant; a v13 entry (the
+    /// first string-label version) and an in-memory-constructed entry
+    /// (`segment_version: None`, never decoded from disk) both pass. Constructs
+    /// minimal `WalEntry` values with `segment_version` set explicitly — the same
+    /// field the segment reader stamps on decode.
+    #[test]
+    fn refuse_pre_v13_wal_tail_table() {
+        use crate::storage::wal::{LSN, WalEntry, WalOperation};
+
+        fn entry_with_version(seg: Option<u8>) -> WalEntry {
+            let mut e = WalEntry::new(
+                LSN(1),
+                WalOperation::Checkpoint {
+                    lsn: LSN(1),
+                    timestamp: time::now(),
+                },
+            );
+            e.segment_version = seg;
+            e
+        }
+
+        // Empty replay window (drained / cleanly-checkpointed dir) -> Ok.
+        assert!(refuse_pre_v13_wal_tail(&[]).is_ok());
+
+        // A pre-v13 (0.1.x) entry in the window -> refused with the TYPED variant.
+        let err = refuse_pre_v13_wal_tail(&[entry_with_version(Some(1))])
+            .expect_err("a pre-v13 (segment_version=1) tail must be refused");
+        assert!(
+            matches!(
+                err,
+                crate::core::error::Error::Storage(
+                    StorageError::PreV13WalTailRequiresMigration { .. }
+                )
+            ),
+            "refusal must be the typed PreV13WalTailRequiresMigration variant; got: {err:?}"
+        );
+
+        // v13 (WAL_VERSION_STRING_LABELS, first string-label version) -> Ok.
+        assert!(refuse_pre_v13_wal_tail(&[entry_with_version(Some(13))]).is_ok());
+
+        // In-memory-constructed entry (no on-disk decode version) -> Ok.
+        assert!(refuse_pre_v13_wal_tail(&[entry_with_version(None)]).is_ok());
     }
 
     /// `with_unified_config` rejects a zero interner cap up front (before it
