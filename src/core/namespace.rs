@@ -266,6 +266,21 @@ pub enum NamespaceError {
     /// silent no-op. Maps to `INVALID_ARGUMENT`.
     #[error("namespace is immutable and cannot be changed after creation")]
     Immutable,
+    /// A programmatic namespace scope (a request parameter) and an in-query
+    /// `USE / IN NAMESPACE` clause were both supplied and are **not**
+    /// semantically identical (Issue #3349). Rather than silently pick a winner
+    /// — which could widen an intended restriction and leak another agent's
+    /// facts — the combination is refused; the caller must specify the scope in
+    /// exactly one place, or make the two identical. Maps to `INVALID_ARGUMENT`.
+    ///
+    /// The offending namespace names are deliberately **not** carried on this
+    /// error, so an isolation boundary is never disclosed through the error
+    /// surface.
+    #[error(
+        "in-query namespace clause conflicts with the namespace request parameter; supply only \
+         one, or make them identical"
+    )]
+    ScopeConflict,
 }
 
 // ============================================================================
@@ -404,6 +419,78 @@ impl NamespaceScope {
                     }
                 }
                 Some(out)
+            }
+        }
+    }
+
+    /// Whether this scope and `other` select **exactly the same set** of
+    /// namespaces (Issue #3349).
+    ///
+    /// Comparison is by resolved membership set, so it is order-insensitive and
+    /// duplicate-insensitive for a [`List`](Self::List) (reusing
+    /// [`explicit_namespaces`](Self::explicit_namespaces)'s dedup), and a
+    /// `Single(x)` compares equal to a `List([x])` (both select `{x}`).
+    /// [`All`](Self::All) — the "every namespace, no filter" sentinel — is only
+    /// equal to another `All`; it is never equal to any finite scope, so a
+    /// finite scope can never be treated as widening to `All`. Namespace-name
+    /// equality is the codebase's existing exact, case-sensitive
+    /// [`Namespace`] equality (no separate normalization is invented here).
+    #[must_use]
+    pub fn same_scope(&self, other: &NamespaceScope) -> bool {
+        match (self.explicit_namespaces(), other.explicit_namespaces()) {
+            // `All` vs `All`.
+            (None, None) => true,
+            // `All` vs a finite scope (or vice-versa) — never equal.
+            (None, Some(_)) | (Some(_), None) => false,
+            (Some(a), Some(b)) => {
+                let sa: std::collections::BTreeSet<Namespace> = a.into_iter().collect();
+                let sb: std::collections::BTreeSet<Namespace> = b.into_iter().collect();
+                sa == sb
+            }
+        }
+    }
+}
+
+/// Reconcile a programmatic namespace scope (a request-parameter *ceiling*) with
+/// an in-query `USE / IN NAMESPACE` clause, producing the single effective read
+/// scope (Issue #3349).
+///
+/// This is the **one** decision point shared by the AQL and Cypher execution
+/// paths, so the two surfaces can never diverge (previously AQL last-wins-dropped
+/// the clause while Cypher refused any combination). Let `P` be the programmatic
+/// scope (`None` when the request `namespace` parameter is omitted) and `C` the
+/// in-query clause lowered to a scope (`None` when the statement carries none):
+///
+/// | `P`      | `C`      | effective                                             |
+/// |----------|----------|-------------------------------------------------------|
+/// | `None`   | `None`   | `Single("default")` — the fail-closed default         |
+/// | `None`   | `Some C` | `C` — the in-query clause governs (incl. `ALL`)        |
+/// | `Some P` | `None`   | `P` — unchanged                                        |
+/// | `Some P` | `Some C` | `P` iff [`same_scope`](NamespaceScope::same_scope), else [`NamespaceError::ScopeConflict`] |
+///
+/// The `(Some, Some)` rule is deliberately strict: **any** non-identical
+/// combination is refused — including a clause *narrower* than `P` — because we
+/// do not compute subset relations, which keeps a widen-by-accident leak
+/// impossible. The effective scope is never wider than `P`.
+///
+/// # Errors
+///
+/// [`NamespaceError::ScopeConflict`] (→ `INVALID_ARGUMENT`) when both a
+/// programmatic scope and an in-query clause are present and they are not
+/// semantically identical.
+pub fn reconcile_namespace_scope(
+    programmatic: Option<NamespaceScope>,
+    in_query: Option<NamespaceScope>,
+) -> Result<NamespaceScope, NamespaceError> {
+    match (programmatic, in_query) {
+        (None, None) => Ok(NamespaceScope::default()),
+        (None, Some(c)) => Ok(c),
+        (Some(p), None) => Ok(p),
+        (Some(p), Some(c)) => {
+            if p.same_scope(&c) {
+                Ok(p)
+            } else {
+                Err(NamespaceError::ScopeConflict)
             }
         }
     }
@@ -918,5 +1005,120 @@ mod tests {
                 "reserved key {name} leaked into user-facing view"
             );
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Scope reconciliation (Issue #3349): `same_scope` + `reconcile_namespace_scope`.
+    // ------------------------------------------------------------------------
+
+    fn ns(name: &str) -> Namespace {
+        Namespace::new(name).unwrap()
+    }
+
+    fn single(name: &str) -> NamespaceScope {
+        NamespaceScope::single(ns(name))
+    }
+
+    fn list(names: &[&str]) -> NamespaceScope {
+        NamespaceScope::list(names.iter().map(|n| ns(n)).collect()).unwrap()
+    }
+
+    #[test]
+    fn same_scope_all_equals_only_all() {
+        assert!(NamespaceScope::All.same_scope(&NamespaceScope::All));
+        assert!(!NamespaceScope::All.same_scope(&single("agent:a")));
+        assert!(!single("agent:a").same_scope(&NamespaceScope::All));
+        assert!(!NamespaceScope::All.same_scope(&list(&["agent:a", "agent:b"])));
+    }
+
+    #[test]
+    fn same_scope_single_equals_singleton_list() {
+        // `Single(x)` and `List([x])` both select exactly `{x}`.
+        assert!(single("agent:a").same_scope(&list(&["agent:a"])));
+        assert!(list(&["agent:a"]).same_scope(&single("agent:a")));
+    }
+
+    #[test]
+    fn same_scope_list_is_order_and_duplicate_insensitive() {
+        assert!(list(&["agent:a", "agent:b"]).same_scope(&list(&["agent:b", "agent:a"])));
+        assert!(list(&["agent:a", "agent:a", "agent:b"]).same_scope(&list(&["agent:b", "agent:a"])));
+        // A strict subset is NOT the same set.
+        assert!(!list(&["agent:a"]).same_scope(&list(&["agent:a", "agent:b"])));
+    }
+
+    #[test]
+    fn same_scope_is_case_sensitive() {
+        // Namespace equality is the codebase's exact, case-sensitive equality;
+        // no normalization silently equates differing cases.
+        assert!(!single("agent:a").same_scope(&single("Agent:A")));
+    }
+
+    #[test]
+    fn reconcile_both_none_is_default() {
+        assert_eq!(
+            reconcile_namespace_scope(None, None).unwrap(),
+            NamespaceScope::default()
+        );
+    }
+
+    #[test]
+    fn reconcile_none_plus_clause_honors_clause() {
+        assert_eq!(
+            reconcile_namespace_scope(None, Some(single("agent:a"))).unwrap(),
+            single("agent:a")
+        );
+        assert_eq!(
+            reconcile_namespace_scope(None, Some(NamespaceScope::All)).unwrap(),
+            NamespaceScope::All
+        );
+    }
+
+    #[test]
+    fn reconcile_param_plus_none_is_param() {
+        assert_eq!(
+            reconcile_namespace_scope(Some(single("agent:a")), None).unwrap(),
+            single("agent:a")
+        );
+    }
+
+    #[test]
+    fn reconcile_identical_param_and_clause_allowed() {
+        assert_eq!(
+            reconcile_namespace_scope(Some(single("agent:a")), Some(list(&["agent:a"]))).unwrap(),
+            single("agent:a")
+        );
+        assert_eq!(
+            reconcile_namespace_scope(
+                Some(list(&["agent:a", "agent:b"])),
+                Some(list(&["agent:b", "agent:a"])),
+            )
+            .unwrap(),
+            list(&["agent:a", "agent:b"])
+        );
+    }
+
+    #[test]
+    fn reconcile_conflicting_param_and_clause_is_scope_conflict() {
+        // Disjoint.
+        assert_eq!(
+            reconcile_namespace_scope(Some(single("agent:a")), Some(single("agent:b"))),
+            Err(NamespaceError::ScopeConflict)
+        );
+        // Wider clause than the param ceiling.
+        assert_eq!(
+            reconcile_namespace_scope(Some(single("agent:a")), Some(NamespaceScope::All)),
+            Err(NamespaceError::ScopeConflict)
+        );
+        // Narrower clause than an `All` param (still refused — we never compute
+        // subset relations, to avoid any widen-by-accident leak).
+        assert_eq!(
+            reconcile_namespace_scope(Some(NamespaceScope::All), Some(single("agent:a"))),
+            Err(NamespaceError::ScopeConflict)
+        );
+        // Strict-subset list.
+        assert_eq!(
+            reconcile_namespace_scope(Some(list(&["agent:a"])), Some(list(&["agent:a", "agent:b"]))),
+            Err(NamespaceError::ScopeConflict)
+        );
     }
 }

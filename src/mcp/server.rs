@@ -8927,6 +8927,18 @@ impl AletheiaMcpServer {
                         McpErrorCode::InvalidArgument,
                         json!({ "namespace": name }),
                     ),
+                    // Issue #3349: a programmatic scope colliding with an
+                    // in-query `USE / IN NAMESPACE` clause is a malformed
+                    // *request* (the caller specified the scope in two
+                    // conflicting places) — `invalid_request`, not
+                    // `unsupported_construct` (the clause IS supported now).
+                    // No `details.namespace` is carried: the message and
+                    // details must never disclose an isolation boundary.
+                    NamespaceError::ScopeConflict => (
+                        "invalid_request",
+                        McpErrorCode::InvalidArgument,
+                        serde_json::Value::Null,
+                    ),
                     NamespaceError::AlreadyExists { .. }
                     | NamespaceError::ReservedPropertyKey { .. }
                     | NamespaceError::Immutable => (
@@ -9149,17 +9161,20 @@ impl AletheiaMcpServer {
         // (Issue #3360); captured before `args` is consumed by deserialization.
         let cursor_requested = Self::cursor_requested(&args);
 
-        // Issue #3349 (PR3d): real declarative (AQL/Cypher) namespace scoping.
-        // Parse the optional `namespace` read scope; an omitted scope resolves to
-        // the `default` namespace only (isolated-by-default, consistent with the
-        // structured scoped read tools), `"all"` imposes no filter. Captured
-        // before `args` is consumed by deserialization; validated (unknown ns ⇒
-        // NOT_FOUND, empty list ⇒ INVALID_ARGUMENT) inside the scoped executor.
+        // Issue #3349: real declarative (AQL/Cypher) namespace scoping. Parse the
+        // optional `namespace` read scope as the *programmatic* scope `P`. It is
+        // kept as an `Option` (NOT collapsed to `default` here): the executor's
+        // `reconcile_namespace_scope` distinguishes an omitted parameter (`None`
+        // — let any in-query `USE / IN NAMESPACE` clause govern, else the
+        // fail-closed `default` namespace) from an explicit one (`Some` — a hard
+        // ceiling that must match any in-query clause). `"all"` imposes no
+        // filter. Captured before `args` is consumed by deserialization;
+        // validated (unknown ns ⇒ NOT_FOUND, empty list ⇒ INVALID_ARGUMENT)
+        // inside the scoped executor.
         let scope = match self.parse_opt_scope(&args.get("namespace").cloned()) {
             Ok(s) => s,
             Err(result) => return result,
-        }
-        .unwrap_or_default();
+        };
 
         let req: QueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -9285,7 +9300,7 @@ impl AletheiaMcpServer {
         language: String,
         req: QueryRequest,
         row_limit: usize,
-        scope: crate::core::namespace::NamespaceScope,
+        scope: Option<crate::core::namespace::NamespaceScope>,
     ) -> CallToolResult {
         if effective.timeout_ms == 0 {
             // Inline (unlimited-timeout) path: no worker thread is spawned, so
@@ -9466,14 +9481,17 @@ impl AletheiaMcpServer {
         language: &str,
         req: &QueryRequest,
         row_limit: usize,
-        scope: &crate::core::namespace::NamespaceScope,
+        scope: &Option<crate::core::namespace::NamespaceScope>,
     ) -> CallToolResult {
         let has_params = req.params.as_ref().is_some_and(|p| !p.is_empty());
 
-        // Issue #3349 (PR3d): the query executes under the parsed namespace read
-        // scope (omitted ⇒ `default`-only, `"all"` ⇒ no filter). The scope rides
-        // the `Query` IR into the same executor source-leaf filter + traversal
-        // boundary the Rust builder uses.
+        // Issue #3349: the query executes under the *reconciled* namespace read
+        // scope. `scope` is the programmatic parameter `P` (`None` when omitted);
+        // the executor's `reconcile_namespace_scope` folds it with any in-query
+        // `USE / IN NAMESPACE` clause `C` (omitted+none ⇒ `default`-only,
+        // omitted+clause ⇒ the clause, explicit ⇒ a ceiling that must match the
+        // clause), then rides the `Query` IR into the same executor source-leaf
+        // filter + traversal boundary the Rust builder uses.
         let execution = match language {
             "aql" => {
                 if has_params {
@@ -9485,16 +9503,16 @@ impl AletheiaMcpServer {
                         Some("aql"),
                     );
                 }
-                self.db.execute_aql_scoped(&req.query, scope.clone())
+                self.db.execute_aql_reconciled(&req.query, scope.clone())
             }
             "cypher" => {
                 #[cfg(feature = "cypher")]
                 {
                     match self.json_to_cypher_params(req.params.as_ref()) {
                         Ok(params) if params.is_empty() => {
-                            self.db.execute_cypher_scoped(&req.query, scope.clone())
+                            self.db.execute_cypher_reconciled(&req.query, scope.clone())
                         }
-                        Ok(params) => self.db.execute_cypher_with_params_scoped(
+                        Ok(params) => self.db.execute_cypher_with_params_reconciled(
                             &req.query,
                             params,
                             scope.clone(),
@@ -11817,6 +11835,21 @@ mod server_unit_tests {
             feature: "DISTINCT".to_string(),
         });
         assert_eq!(error_kind(&server, err), "unsupported_construct");
+    }
+
+    #[test]
+    fn map_query_error_scope_conflict_yields_invalid_request() {
+        use crate::core::namespace::NamespaceError;
+        let server = make_server();
+        let payload = error_payload(
+            &server,
+            Error::Namespace(NamespaceError::ScopeConflict),
+        );
+        assert_eq!(payload["kind"].as_str(), Some("invalid_request"));
+        assert_eq!(payload["code"].as_str(), Some("INVALID_ARGUMENT"));
+        assert_eq!(payload["retriable"].as_bool(), Some(false));
+        // Must not disclose namespace contents.
+        assert!(payload["details"].is_null(), "no namespace details: {payload}");
     }
 
     #[test]
