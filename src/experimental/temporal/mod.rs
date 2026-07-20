@@ -12,6 +12,11 @@ pub mod aura;
 /// changed (correction / world-change / retraction / reaffirmation) — Issue #3362.
 pub mod belief_revision;
 pub mod chronos;
+/// Contradiction genealogy: reconstruct the bi-temporal life of every competing
+/// claim behind a value conflict, attribute each to its sources, locate the
+/// divergence point, and classify retroactive corrections vs contemporaneous
+/// disagreement — read-only and deterministic (Issue #3352).
+pub mod contradiction_genealogy;
 /// Counterfactual exclusion replay: materialize a read-only shadow view of the
 /// database as it would exist had a named source's writes never been recorded,
 /// with a divergence (blast-radius) report — Issue #3357.
