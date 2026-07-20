@@ -170,15 +170,13 @@ pub fn plan_cypher_with_params(
             // namespaces. Reject it with a structured error rather than run
             // unscoped. A non-restricting `USE ALL NAMESPACES` imposes no filter
             // and runs unchanged.
-            if let Some(clause) = statement_namespace(&other) {
-                if clause.is_restricting() {
-                    return Err(CypherError::UnsupportedFeature(
-                        "namespace scoping is not supported by the multi-variable pattern \
-                         evaluator in v1; scope a single-variable MATCH, or use USE ALL \
-                         NAMESPACES to run unscoped"
-                            .to_string(),
-                    ));
-                }
+            if statement_namespace(&other).is_some_and(CypherNamespaceClause::is_restricting) {
+                return Err(CypherError::UnsupportedFeature(
+                    "namespace scoping is not supported by the multi-variable pattern \
+                     evaluator in v1; scope a single-variable MATCH, or use USE ALL \
+                     NAMESPACES to run unscoped"
+                        .to_string(),
+                ));
             }
             // A multi-variable / multi-pattern MATCH has no faithful
             // single-entity `Query` representation; route it to the dedicated

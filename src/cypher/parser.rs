@@ -556,14 +556,15 @@ impl CypherParser {
         &self,
         namespace: &Option<CypherNamespaceClause>,
     ) -> Result<(), CypherError> {
-        if let Some(clause) = namespace {
-            if clause.is_restricting() {
-                return Err(CypherError::UnsupportedFeature(
-                    "a namespace read scope cannot be applied to a mutating Cypher statement \
-                     (CREATE / MERGE / SET / DELETE); pass USE ALL NAMESPACES to run unscoped"
-                        .to_string(),
-                ));
-            }
+        if namespace
+            .as_ref()
+            .is_some_and(CypherNamespaceClause::is_restricting)
+        {
+            return Err(CypherError::UnsupportedFeature(
+                "a namespace read scope cannot be applied to a mutating Cypher statement \
+                 (CREATE / MERGE / SET / DELETE); pass USE ALL NAMESPACES to run unscoped"
+                    .to_string(),
+            ));
         }
         Ok(())
     }
