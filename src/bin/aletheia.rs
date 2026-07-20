@@ -259,9 +259,15 @@ Usage:\n\
 /// subcommand surface. The actual argument dispatch in [`run`] remains the
 /// hand-rolled parser and is left 100% untouched.
 ///
-/// The feature-gated subcommands are wrapped in the SAME `cfg` as their
-/// dispatch arms, so a completion script always matches the features the binary
-/// was actually compiled with.
+/// This clap `Command` is a **hand-maintained MIRROR** of the hand-rolled
+/// dispatch in [`run`], existing solely to drive `clap_complete`. The
+/// feature-gated subcommands are wrapped in the SAME `cfg` as their dispatch
+/// arms, so a completion script always matches the features the binary was
+/// actually compiled with. Subcommand presence and feature-gate parity with
+/// the dispatch are asserted by tests (see `completions_tests`); per-command
+/// FLAG coverage, however, is illustrative / best-effort and NOT exhaustive —
+/// individual `--flag` args here are a convenience for completion, not a
+/// verified 1:1 reflection of every flag `run` accepts.
 ///
 /// NOTE (future work): this `Command` is intended to be the seed a future full
 /// clap migration — the real blocker behind #3619 — can adopt as its parser,
@@ -359,14 +365,25 @@ fn build_cli() -> clap::Command {
                 .arg(Arg::new("latest").long("latest").num_args(0))
                 .arg(Arg::new("dry-run").long("dry-run").num_args(0)),
         )
-        .subcommand(
-            Command::new("verify")
+        .subcommand({
+            // `--entity`/`--json` are always accepted by `handle_verify`; the
+            // `--export-head`/`--against` chain-head anchor flags are only
+            // wired up under `#[cfg(feature = "serde")]` there, so gate them
+            // identically here to keep completions honest under
+            // `--no-default-features`.
+            #[cfg_attr(not(feature = "serde"), allow(unused_mut))]
+            let mut verify = Command::new("verify")
                 .about("Verify the tamper-evident provenance hash chain")
                 .arg(Arg::new("entity").long("entity"))
-                .arg(Arg::new("export-head").long("export-head"))
-                .arg(Arg::new("against").long("against"))
-                .arg(Arg::new("json").long("json").num_args(0)),
-        )
+                .arg(Arg::new("json").long("json").num_args(0));
+            #[cfg(feature = "serde")]
+            {
+                verify = verify
+                    .arg(Arg::new("export-head").long("export-head"))
+                    .arg(Arg::new("against").long("against"));
+            }
+            verify
+        })
         .subcommand(
             Command::new("keys")
                 .about("Encryption key operator commands")
@@ -516,7 +533,8 @@ fn handle_completions(args: Vec<String>) -> Result<(), String> {
     let shell: clap_complete::Shell = shell_arg
         .parse()
         .map_err(|_| format!("unknown shell '{shell_arg}'; {SUPPORTED}"))?;
-    clap_complete::generate(shell, &mut build_cli(), "aletheia", &mut io::stdout());
+    let mut out = io::stdout().lock();
+    clap_complete::generate(shell, &mut build_cli(), "aletheia", &mut out);
     Ok(())
 }
 
@@ -4367,8 +4385,11 @@ mod completions_tests {
     // The ungated top-level command set the real dispatcher (`run()`) routes,
     // plus the new `completions` verb. This is the drift guard: if a command is
     // added/removed from the hand-rolled `run()` match without updating the
-    // clap mirror, this list must be updated in lockstep and the assertion below
-    // keeps the mirror a superset of the real surface.
+    // clap mirror, this list and the mirror drift apart and the exact
+    // set-equality assertion below fails.
+    //
+    // MUST be edited in lockstep with the ungated arms of run()'s match and
+    // build_cli()'s ungated subcommands.
     const EXPECTED_UNGATED: &[&str] = &[
         "demo",
         "node",
@@ -4382,6 +4403,19 @@ mod completions_tests {
         "encryption",
         "import",
         "completions",
+    ];
+
+    // Verbs that appear in the clap mirror only under a feature flag; they are
+    // excluded from the ungated set-equality check so the guard holds under any
+    // feature configuration.
+    const FEATURE_GATED_VERBS: &[&str] = &[
+        "export",
+        "audit-keygen",
+        "audit-export",
+        "audit-verify",
+        "audit-render",
+        "designate-subject",
+        "erase-subject",
     ];
 
     /// `clap_complete::generate` yields non-empty output for every shell,
@@ -4403,17 +4437,29 @@ mod completions_tests {
         }
     }
 
-    /// DRIFT GUARD: the clap mirror's subcommands must be a SUPERSET of the real
-    /// dispatcher's ungated command surface.
+    /// DRIFT GUARD: the clap mirror's ungated subcommand set must EXACTLY equal
+    /// the real dispatcher's ungated command surface — no missing, no extra.
+    /// clap's auto-injected `help` verb and the feature-gated verbs are excluded
+    /// so the comparison is over exactly the ungated surface.
     #[test]
     fn mirror_covers_ungated_dispatch_surface() {
+        use std::collections::BTreeSet;
+
         let cli = build_cli();
-        let present: Vec<&str> = cli.get_subcommands().map(|c| c.get_name()).collect();
-        for expected in EXPECTED_UNGATED {
-            assert!(
-                present.contains(expected),
-                "clap mirror is missing subcommand `{expected}`; present={present:?}"
-            );
-        }
+        let actual: BTreeSet<&str> = cli
+            .get_subcommands()
+            .map(|c| c.get_name())
+            .filter(|name| *name != "help")
+            .filter(|name| !FEATURE_GATED_VERBS.contains(name))
+            .collect();
+        let expected: BTreeSet<&str> = EXPECTED_UNGATED.iter().copied().collect();
+
+        let missing: Vec<&&str> = expected.difference(&actual).collect();
+        let extra: Vec<&&str> = actual.difference(&expected).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "clap mirror ungated subcommand set drifted from EXPECTED_UNGATED: \
+             missing from mirror={missing:?}, extra in mirror={extra:?}"
+        );
     }
 }

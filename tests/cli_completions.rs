@@ -45,7 +45,17 @@ fn run(args: &[&str], data_dir: Option<&Path>) -> CliRun {
 
 #[test]
 fn completions_generate_for_every_supported_shell() {
-    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+    // Each shell asserts a shell-SPECIFIC hallmark (case-sensitive, as
+    // clap_complete emits it) rather than a generic `aletheia` substring, so a
+    // regression that emits the wrong dialect for a shell is caught.
+    let hallmarks = [
+        ("bash", "complete"),
+        ("zsh", "#compdef"),
+        ("fish", "complete -c aletheia"),
+        ("powershell", "Register-ArgumentCompleter"),
+        ("elvish", "edit:completion"),
+    ];
+    for (shell, hallmark) in hallmarks {
         let dir = TempDir::new().expect("tempdir");
         let r = run(&["completions", shell], Some(dir.path()));
         assert_eq!(
@@ -63,7 +73,30 @@ fn completions_generate_for_every_supported_shell() {
             "completions {shell} script must reference the binary name; stdout len={}",
             r.stdout.len()
         );
+        assert!(
+            r.stdout.contains(hallmark),
+            "completions {shell} script must contain shell-specific hallmark `{hallmark}`; \
+             stdout len={}",
+            r.stdout.len()
+        );
     }
+}
+
+/// The completions command is pure output: it must never create the data
+/// directory or write anything into it.
+#[test]
+fn completions_do_not_touch_data_dir() {
+    let dir = TempDir::new().expect("tempdir");
+    let r = run(&["completions", "bash"], Some(dir.path()));
+    assert_eq!(
+        r.code, 0,
+        "completions bash must exit 0; stderr={:?}",
+        r.stderr
+    );
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "completions must not create data-dir contents"
+    );
 }
 
 #[test]
@@ -104,6 +137,15 @@ fn completions_unknown_shell_errors() {
         r.code, 0,
         "unknown shell must exit non-zero; stdout={:?}",
         r.stdout
+    );
+    let msg = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        msg.contains("bogusshell"),
+        "error must name the bad value `bogusshell`; got={msg:?}"
+    );
+    assert!(
+        msg.contains("bash"),
+        "error must list a supported shell (bash); got={msg:?}"
     );
 }
 

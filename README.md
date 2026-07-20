@@ -125,16 +125,25 @@ Install it once so `aletheia <TAB>` completes subcommands and flags:
 # bash — system-wide (needs write access to the completion dir)
 aletheia completions bash | sudo tee /etc/bash_completion.d/aletheia > /dev/null
 
-# bash — per user (add the line to ~/.bashrc)
+# bash — per user (the file-write approach requires the `bash-completion` package)
 mkdir -p ~/.local/share/bash-completion/completions
 aletheia completions bash > ~/.local/share/bash-completion/completions/aletheia
-# ...or source it directly:
+# ...or source it directly (add this line to ~/.bashrc):
 eval "$(aletheia completions bash)"
+```
 
-# zsh — write into a directory on your $fpath, then restart the shell
-aletheia completions zsh > "${fpath[1]}/_aletheia"
+```zsh
+# zsh — write into a user-owned completions dir and ensure compinit runs
+# Ensure ~/.zshrc initializes completions:  autoload -Uz compinit && compinit
+mkdir -p ~/.zsh/completions
+aletheia completions zsh > ~/.zsh/completions/_aletheia
+# add to ~/.zshrc BEFORE compinit:  fpath=(~/.zsh/completions $fpath)
+# then reload: rm -f ~/.zcompdump; compinit   (or restart the shell)
+```
 
+```fish
 # fish
+mkdir -p ~/.config/fish/completions
 aletheia completions fish > ~/.config/fish/completions/aletheia.fish
 ```
 
