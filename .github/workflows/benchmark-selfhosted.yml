@@ -1,0 +1,260 @@
+name: Benchmarks (self-hosted, heavy)
+
+# ============================================================================
+# HEAVY / SELF-HOSTED benchmark lane (Issue #3628).
+#
+# NON-GATING. This workflow is deliberately SEPARATE from ci.yml and is NOT a
+# required status check. It has NO `push` / `pull_request` triggers, so it can
+# never block a merge. It exists to move the heavy benchmark runs (SF1, the
+# 1M-vector k-NN run, and the Docker-based incumbent comparisons) off the shared
+# GitHub-hosted runners and onto a dedicated self-hosted Hetzner box that has the
+# cores, RAM, and disk headroom those runs need.
+#
+# Every job runs on `runs-on: [self-hosted, benchmarks]` — a runner the USER
+# registers on the box with the `benchmarks` label (see
+# docs/guides/benchmark-infra.md). No secrets or hostnames appear in this file;
+# targeting is purely by runner label.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: 'LDBC scale point'
+        type: choice
+        options:
+          - smoke
+          - sf0.1
+          - sf1
+        default: sf0.1
+      vector_count:
+        description: "Vector-extension corpus size (e.g. 1000000). Empty = preset."
+        type: string
+        default: ''
+      vector_dim:
+        description: 'Embedding dimensionality (e.g. 384). Empty = preset.'
+        type: string
+        default: ''
+      iterations:
+        description: 'Measured iterations per operation'
+        type: string
+        default: '200'
+      warmup:
+        description: 'Warmup iterations (discarded)'
+        type: string
+        default: '20'
+      datagen_dir:
+        description: "Absolute path on the box to an official LDBC SNB Datagen CSV dir. Empty = synthetic."
+        type: string
+        default: ''
+      run_incumbents:
+        description: 'Also run the Docker-based incumbent comparison (needs Docker on the box)'
+        type: boolean
+        default: false
+  # Optional nightly perf run on real hardware. Guarded to the canonical repo so
+  # forks/mirrors that register their own self-hosted runners do not run it.
+  # 04:30 UTC (offset from the GitHub-hosted ldbc-bench-nightly at 03:30 UTC).
+  schedule:
+    - cron: '30 4 * * *'
+
+# One heavy run at a time on the box: overlapping dispatches queue instead of
+# fighting for cores/RAM/disk. Do not cancel an in-progress heavy run.
+concurrency:
+  group: benchmark-selfhosted
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # --------------------------------------------------------------------------
+  # LDBC-style harness (aletheia-bench-ldbc) at the requested scale/vector size,
+  # optionally against an official Datagen directory, optionally with incumbents.
+  # --------------------------------------------------------------------------
+  ldbc:
+    name: LDBC harness (self-hosted)
+    # Guard the SCHEDULED run to the canonical repo; workflow_dispatch is always
+    # allowed (a human on a fork who set up their own box can still dispatch).
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'autumn-foundation/AletheiaDB'
+    runs-on: [self-hosted, benchmarks]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Resolve inputs: on the scheduled run there are no `inputs`, so fall back
+      # to the same defaults the workflow_dispatch form advertises.
+      - name: Resolve run parameters
+        id: params
+        run: |
+          echo "scale=${{ github.event.inputs.scale || 'sf0.1' }}" >> "$GITHUB_OUTPUT"
+          echo "iterations=${{ github.event.inputs.iterations || '200' }}" >> "$GITHUB_OUTPUT"
+          echo "warmup=${{ github.event.inputs.warmup || '20' }}" >> "$GITHUB_OUTPUT"
+          echo "vector_count=${{ github.event.inputs.vector_count || '' }}" >> "$GITHUB_OUTPUT"
+          echo "vector_dim=${{ github.event.inputs.vector_dim || '' }}" >> "$GITHUB_OUTPUT"
+          echo "datagen_dir=${{ github.event.inputs.datagen_dir || '' }}" >> "$GITHUB_OUTPUT"
+          echo "run_incumbents=${{ github.event.inputs.run_incumbents || 'false' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Run LDBC-style harness
+        id: bench
+        env:
+          SCALE: ${{ steps.params.outputs.scale }}
+          ITERATIONS: ${{ steps.params.outputs.iterations }}
+          WARMUP: ${{ steps.params.outputs.warmup }}
+          VECTOR_COUNT: ${{ steps.params.outputs.vector_count }}
+          VECTOR_DIM: ${{ steps.params.outputs.vector_dim }}
+          DATAGEN_DIR: ${{ steps.params.outputs.datagen_dir }}
+        run: |
+          set -euo pipefail
+          OUT="ldbc_results_${SCALE}.json"
+          echo "out=${OUT}" >> "$GITHUB_OUTPUT"
+
+          # Build the arg list so empty optional inputs are OMITTED entirely
+          # (the CLI has no notion of an empty-string flag value).
+          args=(--scale "${SCALE}" --iterations "${ITERATIONS}" --warmup "${WARMUP}" --out "${OUT}")
+          if [ -n "${VECTOR_COUNT}" ]; then
+            args+=(--vector-count "${VECTOR_COUNT}")
+          fi
+          if [ -n "${VECTOR_DIM}" ]; then
+            args+=(--vector-dim "${VECTOR_DIM}")
+          fi
+          if [ -n "${DATAGEN_DIR}" ]; then
+            args+=(--datagen-dir "${DATAGEN_DIR}")
+          fi
+
+          echo "Running: ldbc-bench ${args[*]}"
+          cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- "${args[@]}"
+
+      - name: Upload LDBC results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldbc-results-${{ steps.params.outputs.scale }}
+          path: ${{ steps.bench.outputs.out }}
+          if-no-files-found: warn
+
+      - name: Summarize results to job summary
+        if: always()
+        env:
+          RESULTS: ${{ steps.bench.outputs.out }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "${RESULTS}" ]; then
+            echo "No results file (${RESULTS}) produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Parse the report JSON into a Markdown table. python3 is used for
+          # robustness (jq may not be present on the box); this reads only the
+          # documented report schema (config + operations[].stats).
+          python3 - "${RESULTS}" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as f:
+              r = json.load(f)
+          cfg = r.get("config", {})
+          hw = r.get("hardware", {})
+          print(f"## LDBC-style results — {cfg.get('scale','?')} "
+                f"(source: {cfg.get('source','?')})")
+          print()
+          print(f"- nodes: {cfg.get('node_count','?')}, edges: {cfg.get('edge_count','?')}, "
+                f"vectors: {cfg.get('vector_count','?')} (dim {cfg.get('vector_dim','?')})")
+          print(f"- iterations: {cfg.get('iterations','?')}, warmup: {cfg.get('warmup','?')}")
+          print(f"- hardware: {hw.get('arch','?')} {hw.get('os','?')}, "
+                f"{hw.get('logical_cpus','?')} logical CPUs"
+                + (f", {hw['cpu_model']}" if hw.get('cpu_model') else ""))
+          print()
+          print(r.get("disclaimer", ""))
+          print()
+          print("| key | description | p50 (µs) | p95 (µs) | p99 (µs) | vectors |")
+          print("|-----|-------------|---------:|---------:|---------:|--------:|")
+          vc = cfg.get("vector_count", "")
+          for op in r.get("operations", []):
+              s = op.get("stats", {})
+              print("| {key} | {desc} | {p50:.2f} | {p95:.2f} | {p99:.2f} | {vc} |".format(
+                  key=op.get("key", ""),
+                  desc=op.get("description", ""),
+                  p50=s.get("p50_us", 0.0),
+                  p95=s.get("p95_us", 0.0),
+                  p99=s.get("p99_us", 0.0),
+                  vc=vc,
+              ))
+          PY
+
+      # Incumbent comparison is opt-in and best-effort: it needs Docker + the
+      # engine images on the box, so a failure here must never redden the run.
+      - name: Run incumbent comparison (opt-in, needs Docker)
+        if: ${{ steps.params.outputs.run_incumbents == 'true' }}
+        continue-on-error: true
+        env:
+          DATAGEN_DIR: ${{ steps.params.outputs.datagen_dir }}
+          ITERATIONS: ${{ steps.params.outputs.iterations }}
+          WARMUP: ${{ steps.params.outputs.warmup }}
+        run: |
+          set -euo pipefail
+          cd crates/aletheia-bench-ldbc/incumbents
+          extra=()
+          if [ -n "${DATAGEN_DIR}" ]; then
+            extra+=(--datagen-dir "${DATAGEN_DIR}")
+          fi
+          ./run_all.sh --iterations "${ITERATIONS}" --warmup "${WARMUP}" "${extra[@]}"
+
+      - name: Upload incumbent results artifact
+        if: ${{ always() && steps.params.outputs.run_incumbents == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: incumbent-results
+          path: crates/aletheia-bench-ldbc/incumbents/results/**
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # Criterion micro-benchmarks on real hardware. Independent of `ldbc`
+  # (needs: []). Curated subset — the FULL `cargo bench` across every bench
+  # target is minutes-to-tens-of-minutes; this set covers the four performance
+  # axes the project's targets are stated against (see CLAUDE.md "Mandatory
+  # Benchmarks"): the performance-target harness, current-state single-hop
+  # traversal, temporal reconstruction, vector k-NN, and recovery. A full run
+  # is still available manually via `cargo bench` / `just criterion`.
+  #
+  # Non-gating (this is a separate, non-required workflow) but NOT
+  # continue-on-error, so a broken bench build surfaces here. Can also be run
+  # nightly via the schedule above.
+  # --------------------------------------------------------------------------
+  criterion:
+    name: Criterion micro-benches (self-hosted)
+    needs: []
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'autumn-foundation/AletheiaDB'
+    runs-on: [self-hosted, benchmarks]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run curated Criterion benches
+        run: |
+          set -o pipefail
+          # embeddings-onnx is excluded (needs a native ONNX Runtime lib); no
+          # bench in this subset uses it.
+          cargo bench --features "config-toml,observability,semantic-search,embeddings" \
+            --bench performance_targets \
+            --bench current_state \
+            --bench temporal_query \
+            --bench vector_similarity \
+            --bench checkpoints | tee criterion_output.txt
+
+      - name: Upload Criterion artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-results
+          path: |
+            criterion_output.txt
+            target/criterion/**
+          if-no-files-found: warn
