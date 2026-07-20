@@ -45,6 +45,7 @@ fn report_with(ops: &[(&str, f64)]) -> BenchmarkReport {
             total_mem_mib: None,
         },
         config: RunConfig {
+            source: "synthetic".to_string(),
             scale: "smoke".to_string(),
             seed: 1,
             warmup: 0,

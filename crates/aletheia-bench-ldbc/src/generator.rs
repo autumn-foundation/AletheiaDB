@@ -463,7 +463,11 @@ fn generate_with_params(scale_label: &str, params: GenParams, seed: u64) -> Gene
 }
 
 /// Produce a deterministic unit-ish embedding vector.
-fn deterministic_embedding(rng: &mut SplitMix64, dim: usize) -> Vec<f32> {
+///
+/// Shared by the synthetic generator and the Datagen ingest front-end
+/// ([`crate::datagen`]) so both draw their vector corpus from the same
+/// deterministic path (official LDBC Datagen ships no embeddings).
+pub(crate) fn deterministic_embedding(rng: &mut SplitMix64, dim: usize) -> Vec<f32> {
     let mut v: Vec<f32> = (0..dim).map(|_| rng.next_f32() - 0.5).collect();
     // Normalize to unit length so cosine similarity is well-behaved.
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();

@@ -51,6 +51,7 @@ fn vector_overrides_flow_into_reported_config() {
         iterations: 3,
         vector_count: Some(24),
         vector_dim: Some(48),
+        datagen_dir: None,
     };
     let report = run_suite(&opts).expect("suite should run with overrides");
     // vector_count is honest: post embeddings PLUS the 24-vector corpus.

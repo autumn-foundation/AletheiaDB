@@ -24,6 +24,7 @@
 //!
 //! See `docs/METHODOLOGY.md` for the full methodology and deviation list.
 
+pub mod datagen;
 pub mod gate;
 pub mod generator;
 pub mod loader;
