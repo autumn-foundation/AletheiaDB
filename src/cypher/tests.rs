@@ -9215,6 +9215,29 @@ mod namespace_grammar {
         names
     }
 
+    /// Set of every `name` property across a result set, following BOTH the
+    /// single-entity `entity` field and the multi-variable `bindings` field, so
+    /// it works for multi-pattern (`MATCH (a),(b)`) rows too.
+    fn multivar_names(results: crate::query::QueryResults) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut push = |ent: &crate::query::executor::EntityResult| {
+            if let Some(n) = ent.as_node() {
+                if let Some(PropertyValue::String(s)) = n.get_property("name") {
+                    names.insert(s.to_string());
+                }
+            }
+        };
+        for r in results.collect_all().expect("collect rows") {
+            push(&r.entity);
+            if let Some(bindings) = &r.bindings {
+                for (_var, ent) in bindings {
+                    push(ent);
+                }
+            }
+        }
+        names
+    }
+
     /// Parse to the AST and return the namespace clause on a `MATCH` statement.
     fn match_namespace(query: &str) -> Option<CypherNamespaceClause> {
         match CypherParser::parse(query).expect("should parse") {
@@ -9277,6 +9300,10 @@ mod namespace_grammar {
     #[test]
     fn use_all_namespaces_sees_everything() {
         let db = AletheiaDB::new().unwrap();
+        // Span the DEFAULT namespace too (a plain `create_node`) alongside two
+        // agent namespaces, so `USE ALL NAMESPACES` is proven to include the
+        // default namespace, not just the explicit agent ones (review T-8).
+        db.create_node("Person", person("Legacy")).unwrap();
         db.create_node_in_namespace("Person", person("Alice"), "agent:a")
             .unwrap();
         db.create_node_in_namespace("Person", person("Bob"), "agent:b")
@@ -9286,7 +9313,11 @@ mod namespace_grammar {
             db.execute_cypher("USE ALL NAMESPACES MATCH (n:Person) RETURN n")
                 .unwrap(),
         );
-        assert_eq!(names, vec!["Alice".to_string(), "Bob".to_string()]);
+        assert_eq!(
+            names,
+            vec!["Alice".to_string(), "Bob".to_string(), "Legacy".to_string()],
+            "USE ALL NAMESPACES spans default + every agent namespace"
+        );
     }
 
     // ---- Case 4: IN NAMESPACE synonym == USE NAMESPACE -------------------
@@ -9651,15 +9682,24 @@ mod namespace_grammar {
     fn all_namespaces_on_multi_pattern_is_allowed() {
         let db = AletheiaDB::new().unwrap();
         // `All` imposes no restriction, so the multi-variable evaluator runs
-        // unchanged (empty result on an empty db is fine -- the point is it does
-        // NOT error the way a restricting clause would).
-        let result = db.execute_cypher(
-            "USE ALL NAMESPACES MATCH (a:Person)-[:KNOWS]->(b), (c:Person) RETURN a, b",
-        );
+        // unchanged. Seed Person nodes across THREE namespaces (including the
+        // DEFAULT namespace via a plain `create_node`) and prove `USE ALL
+        // NAMESPACES` actually returns rows spanning all of them through the
+        // multi-pattern evaluator -- not merely `is_ok()` on an empty db.
+        db.create_node("Person", person("Legacy")).unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+
+        let result = db
+            .execute_cypher("USE ALL NAMESPACES MATCH (a:Person), (b:Person) RETURN a, b")
+            .expect("USE ALL NAMESPACES on a multi-pattern must be allowed");
+        let names = multivar_names(result);
         assert!(
-            result.is_ok(),
-            "USE ALL NAMESPACES on a multi-pattern must be allowed, got error: {:?}",
-            result.err()
+            names.contains("Alice") && names.contains("Bob") && names.contains("Legacy"),
+            "USE ALL NAMESPACES spans every namespace through the multi-pattern \
+             evaluator (default + both agents); got {names:?}"
         );
     }
 
@@ -9694,5 +9734,273 @@ mod namespace_grammar {
             Err(other) => panic!("expected NOT_FOUND, got {other:?}"),
             Ok(_) => panic!("unknown-namespace EXPLAIN must be NOT_FOUND"),
         }
+    }
+
+    // ---- T-1: bare / quoted `all` name lowers to the All (no-filter) scope ----
+
+    /// Mirrors AQL's `convert_bare_all_name_sets_all_scope`: a lone `all` in the
+    /// NAME position (bare OR quoted, via `USE` OR the `IN` synonym) is the
+    /// no-filter selector, lowering to `NamespaceScope::All` rather than a scope
+    /// to a namespace literally named `all`.
+    ///
+    /// FOOTGUN pinned here on purpose: `Namespace::new("all")` is rejected as an
+    /// uncreatable reserved selector, so no data can ever live in a namespace
+    /// named `all`; `USE NAMESPACE all` therefore has exactly one sensible
+    /// meaning (all namespaces). But it means the single-name form can never
+    /// address a namespace *spelled* `all` -- there is none. This is documented
+    /// AQL parity, not an accident.
+    #[test]
+    fn bare_and_quoted_all_name_lowers_to_all_scope() {
+        assert_eq!(
+            lowered_scope("USE NAMESPACE all MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All),
+            "bare `all` name is the no-filter selector"
+        );
+        assert_eq!(
+            lowered_scope("USE NAMESPACE 'all' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All),
+            "quoted 'all' behaves identically to bare all (parser keeps no quote flag)"
+        );
+        assert_eq!(
+            lowered_scope("IN NAMESPACE all MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All),
+            "the IN synonym maps bare `all` to All as well"
+        );
+    }
+
+    // ---- T-2: PROFILE threads the in-query scope --------------------------
+
+    /// PROFILE (like EXPLAIN) must thread the in-query namespace scope. An
+    /// UNKNOWN restricting namespace is caught by `validate_scope` as NOT_FOUND
+    /// -- proving the scope reaches the PROFILE path rather than being dropped
+    /// (mirror of `explain_restricting_unknown_namespace_is_not_found`).
+    #[test]
+    fn profile_restricting_unknown_namespace_is_not_found() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        match db.execute_cypher("PROFILE USE NAMESPACE 'agent:nope' MATCH (n:Person) RETURN n") {
+            Err(Error::Namespace(NamespaceError::NotFound { namespace })) => {
+                assert_eq!(namespace, "agent:nope");
+            }
+            Err(other) => panic!("expected NOT_FOUND, got {other:?}"),
+            Ok(_) => panic!("unknown-namespace PROFILE must be NOT_FOUND"),
+        }
+    }
+
+    /// PROFILE *executes* under the scope, so its per-operator "actual rows"
+    /// counters must reflect the scoped cardinality, never the unscoped total --
+    /// otherwise the counters would be a cross-namespace cardinality side
+    /// channel. Seed 1 node in `agent:a` and 2 in `agent:b` (unscoped total 3),
+    /// scope to `agent:a`, and assert the annotated plan reports the scoped
+    /// count and never the unscoped 3.
+    #[test]
+    fn profile_over_scoped_namespace_reports_scoped_row_counts() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Carol"), "agent:b")
+            .unwrap();
+
+        let results = db
+            .execute_cypher("PROFILE USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n")
+            .expect("scoped PROFILE should execute");
+        let rows: Vec<_> = results.collect::<Result<Vec<_>, _>>().unwrap();
+        let plan = match &rows[0].columns.as_ref().unwrap()[0].1 {
+            PropertyValue::String(s) => s.to_string(),
+            other => panic!("plan column must be a string, got {other:?}"),
+        };
+        assert!(
+            plan.contains("actual rows: 1"),
+            "scoped PROFILE reports the scoped count: {plan}"
+        );
+        assert!(
+            !plan.contains("actual rows: 3"),
+            "scoped PROFILE must NOT report the unscoped total (3): {plan}"
+        );
+    }
+
+    // ---- T-3: MCP-injected default scope + in-query clause -> reject ------
+
+    /// Pins the MCP `query`-tool reachability boundary (v1): that tool always
+    /// injects a programmatic scope via `parse_opt_scope(...).unwrap_or_default()`
+    /// == `NamespaceScope::default()` (`Single(default)`), then dispatches through
+    /// `execute_cypher_scoped`. The fail-closed collision guard therefore refuses
+    /// EVERY in-query clause submitted through MCP -- documented, not accidental.
+    /// (Companion to `programmatic_scope_plus_in_query_clause_is_rejected`, which
+    /// uses an explicit `All`.)
+    #[test]
+    fn mcp_default_scope_plus_in_query_clause_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        // Exact scope the MCP query tool injects for an omitted `namespace` arg.
+        match db.execute_cypher_scoped(
+            "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+            NamespaceScope::default(),
+        ) {
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
+            Ok(_) => panic!("MCP default scope + in-query clause must be rejected"),
+        }
+        // Even a non-restricting `USE ALL NAMESPACES` in-query clause is refused
+        // under a programmatic scope: the guard keys on presence, not narrowing.
+        match db.execute_cypher_scoped(
+            "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+            NamespaceScope::default(),
+        ) {
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
+            Ok(_) => panic!("USE ALL NAMESPACES + programmatic scope must be rejected"),
+        }
+    }
+
+    // ---- T-4: union order-independence + un-deduped duplicate names ------
+
+    /// A union scope is a set-membership test, so listing the same namespaces in
+    /// a different order returns the identical result set.
+    #[test]
+    fn union_scope_is_order_independent() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Carol"), "agent:c")
+            .unwrap();
+
+        let ab = returned_names(
+            db.execute_cypher("USE NAMESPACE 'agent:a', 'agent:b' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        let ba = returned_names(
+            db.execute_cypher("USE NAMESPACE 'agent:b', 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(ab, ba, "union result set is independent of listing order");
+        assert_eq!(ab, vec!["Alice".to_string(), "Bob".to_string()]);
+    }
+
+    /// A duplicate name in a union is accepted un-deduped: it lowers to
+    /// `List([a, a])` (`NamespaceScope::list` does not dedup, mirroring
+    /// `namespace.rs`), and membership still resolves correctly. Pins current
+    /// behavior so a future dedup is a deliberate, tested change.
+    #[test]
+    fn duplicate_name_in_union_is_accepted_undeduped() {
+        assert_eq!(
+            lowered_scope("USE NAMESPACE 'agent:a', 'agent:a' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::List(vec![
+                Namespace::new("agent:a").unwrap(),
+                Namespace::new("agent:a").unwrap(),
+            ])),
+            "duplicate names are kept un-deduped in the lowered List scope"
+        );
+
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        let names = returned_names(
+            db.execute_cypher("USE NAMESPACE 'agent:a', 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(
+            names,
+            vec!["Alice".to_string()],
+            "a duplicated name still resolves to that one namespace's rows"
+        );
+    }
+
+    // ---- T-5: contextual keywords are case-insensitive -------------------
+
+    /// The prefix keywords (`use`/`in`/`namespace`/`namespaces`/`all`) are
+    /// matched case-insensitively (`eq_ignore_ascii_case`), so any casing parses
+    /// and lowers to the same scope. (Namespace *names* stay case-sensitive; the
+    /// bare-`all` selector only fires for lowercase `all` -- covered elsewhere.)
+    #[test]
+    fn contextual_keywords_are_case_insensitive() {
+        assert_eq!(
+            lowered_scope("use namespace 'agent:a' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap())),
+            "lowercase `use namespace` parses"
+        );
+        assert_eq!(
+            lowered_scope("Use Namespace 'agent:a' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap())),
+            "mixed-case `Use Namespace` parses"
+        );
+        assert_eq!(
+            lowered_scope("In All Namespaces MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All),
+            "mixed-case `In All Namespaces` parses to All"
+        );
+    }
+
+    // ---- T-6: composes with BETWEEN and FOR SYSTEM_TIME, either order ----
+
+    /// The namespace prefix composes with EVERY temporal form in either source
+    /// order, not just `AS OF TIMESTAMP`. Cover `BETWEEN ... AND ...` and
+    /// `FOR SYSTEM_TIME AS OF ...` in both orders.
+    #[test]
+    fn namespace_composes_with_between_and_system_time_either_order() {
+        for query in [
+            "USE NAMESPACE 'agent:a' BETWEEN '2024-01-01T00:00:00Z' AND '2024-12-31T00:00:00Z' \
+             MATCH (n:Person) RETURN n",
+            "BETWEEN '2024-01-01T00:00:00Z' AND '2024-12-31T00:00:00Z' USE NAMESPACE 'agent:a' \
+             MATCH (n:Person) RETURN n",
+            "USE NAMESPACE 'agent:a' FOR SYSTEM_TIME AS OF '2024-01-01T00:00:00Z' \
+             MATCH (n:Person) RETURN n",
+            "FOR SYSTEM_TIME AS OF '2024-01-01T00:00:00Z' USE NAMESPACE 'agent:a' \
+             MATCH (n:Person) RETURN n",
+        ] {
+            let stmt = CypherParser::parse(query).expect("should parse");
+            match stmt {
+                CypherStatement::Match {
+                    namespace,
+                    temporal,
+                    ..
+                } => {
+                    assert!(namespace.is_some(), "namespace clause present in `{query}`");
+                    assert!(temporal.is_some(), "temporal clause present in `{query}`");
+                }
+                other => panic!("expected MATCH for `{query}`, got {other:?}"),
+            }
+            // The namespace still lowers onto the query alongside the temporal.
+            let q = CypherConverter::new()
+                .convert(CypherParser::parse(query).unwrap())
+                .expect("should convert");
+            assert_eq!(
+                q.scope,
+                Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap())),
+                "namespace lowers onto the query for `{query}`"
+            );
+            assert!(
+                q.temporal_context.is_some(),
+                "temporal lowers for `{query}`"
+            );
+        }
+    }
+
+    // ---- T-7: `USE ALL` and plural `USE NAMESPACES` are parse errors -----
+
+    /// `USE ALL` without the required `NAMESPACES` keyword, and `USE NAMESPACES`
+    /// (plural, without `ALL`), are both parse errors.
+    #[test]
+    fn use_all_without_namespaces_and_plural_without_all_are_parse_errors() {
+        assert!(
+            CypherParser::parse("USE ALL MATCH (n:Person) RETURN n").is_err(),
+            "USE ALL without NAMESPACES must be a parse error"
+        );
+        assert!(
+            CypherParser::parse("USE NAMESPACES 'agent:a' MATCH (n:Person) RETURN n").is_err(),
+            "USE NAMESPACES (plural, no ALL) must be a parse error"
+        );
+        assert!(
+            CypherParser::parse("USE NAMESPACES MATCH (n:Person) RETURN n").is_err(),
+            "bare USE NAMESPACES (plural) must be a parse error"
+        );
     }
 }
