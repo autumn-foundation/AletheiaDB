@@ -51,17 +51,41 @@ INFO aletheiadb: opened data directory, 0 WAL entries to replay
 INFO aletheiadb: Replaying 42 WAL entries
 ```
 
-**⚠️ Do NOT upgrade a directory with an unreplayed WAL tail.** If a 0.1.x
-directory is opened by 0.2.0 while it still has un-checkpointed WAL entries
-(e.g. the process was killed, or you skipped `persist_indexes()`), the
-tail-replayed entities come back with **silently corrupted labels** — this is a
-verified failure, reproduced in `tests/compat_0_1_1_datadir.rs` (the
-`#[ignore]`d blocker test): tail nodes were mislabeled to unrelated interned
-strings (for example, nodes coming back labeled with property-key strings such
-as `founded`/`since`), and the recovered node count also diverged. The cause is
-that 0.1.x's pre-v13 WAL stores labels as process-local interner ids that
-0.2.0's rebuilt interner resolves to different strings. There is no in-place
-fix; drain the WAL first (above).
+**⚠️ A directory with an unreplayed pre-v13 WAL tail is REFUSED on open
+(Issue #3746).** If a 0.1.x directory is opened by 0.2.0 while it still has
+un-checkpointed WAL entries (e.g. the process was killed, or you skipped
+`persist_indexes()`), `AletheiaDB::open()` now **fails fast** with a
+`FAILED_PRECONDITION`-class error
+(`StorageError::PreV13WalTailRequiresMigration`) that names the pre-v13 tail,
+explains it would otherwise silently corrupt interned labels, and points back to
+this guide. It does **not** open the database and does **not** replay the tail.
+This is the enforcement of the *drain-first* rule above: the guard scans only the
+entries that would actually be replayed (the post-snapshot window), so a drained
+directory (empty window) and a current-version v13+ tail both open normally.
+
+**Scope of the guard.** The refusal keys on the WAL segment *format version*,
+not on the "0.1.x" label per se: **any** pre-string-labels format — every
+plaintext or encrypted WAL segment at version **< 13** (`WAL_VERSION_STRING_LABELS`),
+including the intermediate 0.2.0-dev formats written before string labels
+landed — is refused on open for exactly the same raw-interner-id reason. The
+guard's predicate is `!carries_string_labels(version)` applied to the decoded
+segment version. Because every segment (plaintext or encrypted-then-decrypted)
+routes through a single decode site that stamps the payload version, the
+encrypted pre-v13 path is **logically covered** by the same check; it simply
+lacks a checked-in encrypted-pre-v13 fixture, so that specific path is a
+**documented test gap** (the plaintext pre-v13 path is fixture-verified in
+`tests/compat_0_1_1_datadir.rs`).
+
+Before this guard, opening such a directory *succeeded* but the tail-replayed
+entities came back with **silently corrupted labels** — a verified failure
+reproduced in `tests/compat_0_1_1_datadir.rs`: tail nodes were mislabeled to
+unrelated interned strings (for example, nodes coming back labeled with
+property-key strings such as `founded`/`since`), and the recovered node count
+also diverged. The cause is that 0.1.x's pre-v13 WAL stores labels as
+process-local interner ids that 0.2.0's rebuilt interner resolves to different
+strings; because the label string was never written to disk, there is nothing to
+recover it from at replay time. There is no in-place fix — drain the WAL first
+(above), which captures every label as a string in the index snapshot.
 
 **There is no backup/restore off-ramp.** The `.albk` backup format did **not**
 exist in 0.1.x — 0.1.1 has no `backup()` at all — so the usual "back up on the
@@ -81,11 +105,19 @@ anything looks wrong.
   `get_node_history`, which returns the correct versioned history. This applies
   to both the cleanly-checkpointed and WAL-tail cases and is tracked
   separately.
-- **A distinct, still-unverified discrepancy is under investigation.** 0.2.0
-  has been observed recovering a *different* node count than 0.1.x from the
-  same WAL tail (a possible replay-watermark off-by-one). This is not yet
-  fully characterized — it is a further reason to drain the WAL before
-  upgrading rather than rely on tail replay.
+- **Recovered-node-count discrepancy vs 0.1.x — RESOLVED (Issue #3747).**
+  0.2.0 was observed recovering a *different* (higher) node count than 0.1.x
+  from the same WAL tail. This is now understood and is **not** a 0.2.0 bug:
+  0.2.0's replay watermark (Issue #3419) is **inclusive** and its replay is
+  idempotent, so it correctly replays every post-snapshot entry exactly once.
+  0.1.1's watermark used an **exclusive** `.next()` boundary that dropped the
+  first entry after the snapshot — a real recovery gap on the old version. (The
+  test fixture deliberately parks a throwaway `Sentinel` node in that first
+  post-snapshot slot, so 0.1.1's "12" silently omitted a real slot that 0.2.0
+  recovers.) This count difference is orthogonal to the interned-label story
+  above and is independent of the pre-v13 refusal — but it is moot in practice,
+  because a pre-v13 tail is now refused outright: drain the WAL before upgrading
+  and neither concern applies.
 
 ---
 
@@ -201,7 +233,7 @@ unaffected).
 
 | Artifact | Written by 0.1.x | 0.2.0 reader accepts | Notes |
 |---|---|---|---|
-| WAL segment | magic `GWAL`, **v1** (unencrypted) | `≤ 14` | v1 accepted; pre-v13 labels are raw interner ids resolved from the restored interner. End-to-end tested (`tests/compat_0_1_1_datadir.rs`): a **drained** 0.1.x dir opens with full integrity; an **un-drained WAL tail** corrupts labels — drain first (see above). |
+| WAL segment | magic `GWAL`, **v1** (unencrypted) | `≤ 14` | v1 accepted; pre-v13 labels are raw interner ids. End-to-end tested (`tests/compat_0_1_1_datadir.rs`): a **drained** 0.1.x dir opens with full integrity; an **un-drained pre-v13 WAL tail** is now **refused** on open (`FAILED_PRECONDITION`, Issue #3746) instead of silently corrupting labels — drain first (see above). |
 | Index-persistence manifest | **v1** | `≤ 4` | Magic `GGRP`/`GDLT` unchanged; persisted graph structs byte-identical → v1 decodes correctly. **Verified.** |
 | `.albk` backup | **did not exist** in 0.1.x | writes v7, reads v1–v7 | No backup off-ramp for this upgrade; 0.2.0 can produce backups going forward. **Verified.** |
 | Temporal index / cold storage records | (as written) | backward-compatible (`principal: None` for older records) | **Maintainer-asserted; not independently re-verified here.** A 0.1.x embedded user almost certainly has no cold storage (it is manual opt-in). |

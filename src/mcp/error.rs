@@ -436,6 +436,13 @@ fn classify_storage_error(e: &StorageError) -> (McpErrorCode, bool) {
         StorageError::ColdKeyringAlreadyInstalled { .. } => {
             (McpErrorCode::FailedPrecondition, false)
         }
+        // A pre-v13 (0.1.x) WAL tail refused on open (Issue #3746) is a caller
+        // precondition failure — the operator must drain/checkpoint the WAL on
+        // the old version before upgrading; retrying the same open cannot
+        // succeed, so it is non-retriable.
+        StorageError::PreV13WalTailRequiresMigration { .. } => {
+            (McpErrorCode::FailedPrecondition, false)
+        }
         // A per-principal changefeed quota breach (Issue #3678) is a transient
         // fairness limit: another of this principal's subscriptions may drop, so
         // retrying with backoff can succeed → RESOURCE_EXHAUSTED, retriable.
@@ -676,6 +683,19 @@ mod tests {
         assert_eq!(json["details"]["resource"], "string interner");
         assert_eq!(json["details"]["current"], 200);
         assert_eq!(json["details"]["limit"], 200);
+    }
+
+    #[test]
+    fn pre_v13_wal_tail_maps_to_non_retriable_failed_precondition() {
+        // Issue #3746: a refused pre-v13 WAL tail is a caller precondition
+        // failure (drain/checkpoint on the old version first), never retriable.
+        let e = StorageError::PreV13WalTailRequiresMigration {
+            reason: "unreplayed pre-v13 tail; see docs/guides/migration-0.1-to-0.2.md".into(),
+        };
+        assert_eq!(
+            classify_storage_error(&e),
+            (McpErrorCode::FailedPrecondition, false)
+        );
     }
 
     #[test]

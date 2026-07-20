@@ -351,6 +351,26 @@ impl AletheiaHttpError {
             };
         }
 
+        // --- Pre-v13 WAL tail refused on open (Issue #3746). ---
+        // A 0.1.x data directory with an unreplayed pre-v13 WAL tail is refused
+        // on open: it is a caller precondition failure (drain/checkpoint the WAL
+        // on the old version before upgrading), not malformed input. Retrying the
+        // same open is futile → FAILED_PRECONDITION (412, non-retriable), mirroring
+        // the MCP surface's classification (byte-shape-identical envelope) instead
+        // of the fallthrough 400 BadRequest below.
+        if let E::Storage(crate::core::error::StorageError::PreV13WalTailRequiresMigration {
+            ..
+        }) = e
+        {
+            return Self::Structured {
+                code: "FAILED_PRECONDITION",
+                status: StatusCode::PRECONDITION_FAILED,
+                retriable: false,
+                message: e.to_string(),
+                details: None,
+            };
+        }
+
         // Every other db error keeps the prior write-path mapping (400
         // BadRequest), preserving the contract that genuine bad input stays 400.
         Self::BadRequest(e.to_string())
@@ -1007,6 +1027,26 @@ mod tests {
             "message must name the knob, got: {}",
             body["error"]["message"]
         );
+    }
+
+    /// Issue #3746: a refused pre-v13 WAL tail renders as `412
+    /// FAILED_PRECONDITION`, `retriable: false` (nested envelope) — not the
+    /// fallthrough `400 BadRequest` — matching the MCP surface.
+    #[tokio::test]
+    async fn pre_v13_wal_tail_renders_412_failed_precondition() {
+        use crate::core::error::StorageError;
+        let db_err: crate::core::error::Error = StorageError::PreV13WalTailRequiresMigration {
+            reason: "unreplayed pre-v13 tail; see docs/guides/migration-0.1-to-0.2.md".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
     }
 
     /// A NON-interner `CapacityExceeded` (some other resource) still renders as

@@ -255,6 +255,22 @@ pub struct WalEntry {
     /// Entries constructed in-process (e.g. via [`WalEntry::new`]) default to
     /// `false` — the flag is meaningful only for entries recovered from disk.
     pub framed: bool,
+    /// The WAL segment/payload format version this entry was decoded from
+    /// (`None` for entries constructed in-process, `Some(v)` for entries
+    /// recovered from disk), Issue #3746.
+    ///
+    /// Additive, in-memory-only metadata set by the segment parsers from the
+    /// segment header (mapped to its plaintext payload version); like
+    /// [`framed`](Self::framed) it is NOT part of the serialized entry — the
+    /// on-disk format is unchanged. Recovery uses it to detect a pre-v13 WAL
+    /// tail (labels encoded as raw process-local interner ids) that would be
+    /// replayed under a differently-ordered interner and silently corrupt those
+    /// labels; `open()` refuses such a tail instead of replaying it (see
+    /// `carries_string_labels` and
+    /// `StorageError::PreV13WalTailRequiresMigration`). Entries constructed
+    /// in-process (e.g. via [`WalEntry::new`]) default to `None` — the version
+    /// is meaningful only for entries recovered from disk.
+    pub segment_version: Option<u8>,
 }
 
 impl WalEntry {
@@ -268,6 +284,7 @@ impl WalEntry {
             operation,
             checksum: 0, // Will be set during serialization
             framed: false,
+            segment_version: None,
         }
     }
 
@@ -398,6 +415,18 @@ mod sentry_tests {
         // `framed`; the freshly-built original defaults to false. Normalize it
         // (like the checksum) so the comparison targets the payload fidelity.
         original_entry.framed = parsed_entry.framed;
+        // Parsing also stamps the decoded segment/payload version (Issue #3746);
+        // assert the stamp is the version we parsed at BEFORE normalizing it away,
+        // so the pre-v13 guard's input (`WalEntry::segment_version`) is proven to
+        // carry the decode version rather than silently staying `None`.
+        assert_eq!(
+            parsed_entry.segment_version,
+            Some(crate::storage::wal::segment_reader::WAL_VERSION_STRING_LABELS),
+            "parse_entry_at must stamp the decoded segment/payload version (Issue #3746)"
+        );
+        // Normalize it (like the checksum/framed) so the equality below targets
+        // payload fidelity, not this in-memory metadata.
+        original_entry.segment_version = parsed_entry.segment_version;
 
         // Now assert strict equality
         assert_eq!(
@@ -420,6 +449,7 @@ mod sentry_tests {
             operation: op,
             checksum: 0,
             framed: false,
+            segment_version: None,
         };
 
         // Serialize

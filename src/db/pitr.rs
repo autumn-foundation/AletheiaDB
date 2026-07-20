@@ -824,6 +824,9 @@ mod band_filter_tests {
             operation: op,
             checksum: 0,
             framed: true,
+            // In-memory test fixture; segment version is irrelevant to the PITR
+            // framing logic under test (Issue #3746).
+            segment_version: None,
         }
     }
 
@@ -834,6 +837,9 @@ mod band_filter_tests {
             operation: op,
             checksum: 0,
             framed: false,
+            // In-memory test fixture; segment version is irrelevant to the PITR
+            // framing logic under test (Issue #3746).
+            segment_version: None,
         }
     }
 
