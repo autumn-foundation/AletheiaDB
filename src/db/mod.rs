@@ -89,6 +89,10 @@ pub mod trust;
 pub mod vector;
 /// Vector index builder pattern.
 pub mod vector_builder;
+/// Durable workflow-execution journal — schema convention + exactly-once step
+/// recording (DBOS Phase 3a, `durable-execution` feature).
+#[cfg(feature = "durable-execution")]
+pub mod workflow;
 
 pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
@@ -115,6 +119,11 @@ pub use stats::{
     HistoricalDepthStats, TierAccessStats, WalStateStats,
 };
 pub use vector_builder::VectorIndexBuilder;
+#[cfg(feature = "durable-execution")]
+pub use workflow::{
+    CreateRunSpec, StepExecError, StepOutcome, StepRecord, StepRecordSpec, StepStatus, StepValue,
+    WorkflowError, WorkflowJournal, WorkflowJournalExt, WorkflowRun, WorkflowStatus,
+};
 
 /// Main AletheiaDB database.
 ///

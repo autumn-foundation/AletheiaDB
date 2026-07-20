@@ -151,6 +151,12 @@ pub use db::namespace_query::TraverseDirection;
 pub use db::{
     FusedHit, FusionBreakdown, FusionError, FusionPolicy, FusionPolicyBuilder, FusionPolicyError,
 };
+// Durable workflow-execution journal (DBOS Phase 3a, Issue #3a).
+#[cfg(feature = "durable-execution")]
+pub use db::{
+    CreateRunSpec, StepExecError, StepOutcome, StepRecord, StepRecordSpec, StepStatus, StepValue,
+    WorkflowError, WorkflowJournal, WorkflowJournalExt, WorkflowRun, WorkflowStatus,
+};
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
     vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},

@@ -292,6 +292,14 @@ semantic-characterization = ["semantic-temporal"]
 # the stable `semantic-search` flag on day one (ADR-0050 graduation pattern).
 semantic-retrieval-fusion = []
 
+# Experimental: durable workflow execution — DBOS-style journal (Phase 3a).
+# Adds a workflow-run / step schema convention plus exactly-once step recording
+# on top of the existing bi-temporal store. Empty deps: builds only on the
+# always-compiled write-transaction + unique-constraint primitives. Standalone
+# experimental flag (NOT folded into `nova`), mirroring `semantic-retrieval-fusion`
+# per the ADR-0050 graduation pattern.
+durable-execution = []
+
 # Experimental "Nova" R&D umbrella.
 # Enables every semantic-* cohort that is still marked experimental. Removing a
 # cohort from this list is how we "graduate" it — the flag itself stays, so
