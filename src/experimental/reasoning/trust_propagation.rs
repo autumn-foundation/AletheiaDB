@@ -227,6 +227,42 @@ pub struct ComputedConfidence {
     pub truncated: bool,
 }
 
+/// One node of the explainable computation tree (AC3).
+///
+/// Each node names the fact ([`reference`](Self::reference)), its current-state
+/// [`status`](Self::status), its resulting `confidence`, the classification of
+/// that confidence ([`source`](Self::source)), the `combinator` applied at this
+/// node over its children (or `None` for a leaf), and the child breakdowns.
+///
+/// **Truncation is honest** (review-fix #1): when the tree is bounded by a
+/// depth or node-count cap the node's `confidence` remains the **full-accuracy**
+/// computed value — the cap governs how many nodes are *serialized*, never how
+/// many confidences are *combined* — so a truncated explanation never inflates
+/// (or deflates) the reported number. A truncated node carries
+/// `truncated == true` and empty `children`.
+///
+/// Not `serde`-serializable (it embeds [`LineageRef`] and [`FactStatus`]); the
+/// MCP projection is a deferred follow-up (§2.11).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrustBreakdown {
+    /// The version-pinned fact this node explains.
+    pub reference: crate::core::lineage::LineageRef,
+    /// The referenced fact's current-state status at the evaluation time.
+    pub status: crate::db::lineage::FactStatus,
+    /// This node's resulting (full-accuracy) computed confidence.
+    pub confidence: f64,
+    /// The classification of this node's contribution.
+    pub source: ConfidenceSource,
+    /// The combinator applied at this node over its children, or `None` for a
+    /// leaf / terminal (retracted / absent) node.
+    pub combinator: Option<TrustCombinator>,
+    /// The child breakdowns (empty for a leaf, terminal, or truncated node).
+    pub children: Vec<TrustBreakdown>,
+    /// `true` when this node's subtree was elided by a depth / node-count /
+    /// cycle bound. The `confidence` is still full-accuracy (review-fix #1).
+    pub truncated: bool,
+}
+
 /// Options bounding a [`trust_breakdown`](crate::AletheiaDB::trust_breakdown)
 /// walk and an optional `AS OF` transaction-time coordinate.
 #[derive(Debug, Clone, Copy)]

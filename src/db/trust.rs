@@ -40,9 +40,10 @@ use crate::core::lineage::{LineageRecord, LineageRef};
 use crate::core::provenance::Provenance;
 use crate::core::temporal::{Timestamp, time};
 use crate::db::AletheiaDB;
+use crate::db::lineage::FactStatus;
 use crate::experimental::reasoning::trust_propagation::{
     ComputedConfidence, ConfidenceSource, MissingConfidencePolicy, NEUTRAL, SCALAR_MAX_DEPTH,
-    TrustPolicy, TrustPolicyView, clamp01, combine_values,
+    TrustBreakdown, TrustOptions, TrustPolicy, TrustPolicyView, clamp01, combine_values,
 };
 use crate::storage::historical::HistoricalStorage;
 
@@ -51,6 +52,9 @@ use crate::storage::historical::HistoricalStorage;
 struct ResolvedRef {
     /// The visible version (meaningful only when `terminal` is `None`).
     version: VersionId,
+    /// Current-vs-superseded status of the pinned reference against the visible
+    /// version (only meaningful when `terminal` is `None`).
+    status: FactStatus,
     /// The visible version's declared provenance confidence, if any.
     confidence: Option<f64>,
     /// The visible version's entity label, used to resolve the per-label policy.
@@ -298,8 +302,14 @@ impl AletheiaDB {
                         let valid = version.temporal.valid_time();
                         let terminal =
                             classify_valid_interval(valid.start(), valid.end(), valid.is_closed());
+                        let status = if version.id == reference.version {
+                            FactStatus::Current
+                        } else {
+                            FactStatus::Superseded
+                        };
                         return ResolvedRef {
                             version: version.id,
+                            status,
                             confidence: version
                                 .provenance
                                 .as_deref()
@@ -322,8 +332,14 @@ impl AletheiaDB {
                         let valid = version.temporal.valid_time();
                         let terminal =
                             classify_valid_interval(valid.start(), valid.end(), valid.is_closed());
+                        let status = if version.id == reference.version {
+                            FactStatus::Current
+                        } else {
+                            FactStatus::Superseded
+                        };
                         return ResolvedRef {
                             version: version.id,
+                            status,
                             confidence: version
                                 .provenance
                                 .as_deref()
@@ -449,6 +465,162 @@ impl AletheiaDB {
             }
         }
     }
+
+    /// A full-accuracy scalar evaluation of `reference` at `tt` with fresh memo
+    /// and stack — used by the breakdown so a node's reported confidence stays
+    /// honest regardless of the presentation depth / node-count cap (review-fix
+    /// #1).
+    fn eval_scalar_value(
+        &self,
+        reference: LineageRef,
+        tt: Timestamp,
+        historical: &HistoricalStorage,
+    ) -> f64 {
+        let mut memo: HashMap<VersionId, ScalarEval> = HashMap::new();
+        let mut stack: HashSet<VersionId> = HashSet::new();
+        self.eval_scalar(reference, tt, historical, &mut memo, &mut stack, 0)
+            .value
+    }
+
+    // ===================================================================
+    // Explainable breakdown (AC3)
+    // ===================================================================
+
+    /// The explainable computation tree for `reference` (AC3).
+    ///
+    /// Returns the per-fact breakdown: each upstream fact's contribution, its
+    /// own confidence (declared or computed), the combinator applied at each
+    /// node, and the resulting value — bounded by
+    /// [`TrustOptions::max_depth`] and [`TrustOptions::max_nodes`] with the
+    /// standard truncation signal ([`TrustBreakdown::truncated`], Issue #3226).
+    ///
+    /// The reported per-node `confidence` is always the **full-accuracy**
+    /// computed value, even where the tree is truncated (review-fix #1): the
+    /// caps govern how many nodes are serialized, never how many confidences are
+    /// combined, so a truncated explanation never over- or under-trusts.
+    #[must_use]
+    pub fn trust_breakdown(&self, reference: LineageRef, options: &TrustOptions) -> TrustBreakdown {
+        let tt = options.as_of.unwrap_or_else(time::now);
+        let historical = self.historical.read();
+        let mut budget = options.max_nodes;
+        let mut stack: HashSet<VersionId> = HashSet::new();
+        self.build_breakdown(
+            reference,
+            tt,
+            &historical,
+            options.max_depth,
+            0,
+            &mut budget,
+            &mut stack,
+        )
+    }
+
+    /// Build one node of the breakdown tree, descending into children while the
+    /// depth / node-count budget allows.
+    #[allow(clippy::too_many_arguments)]
+    fn build_breakdown(
+        &self,
+        reference: LineageRef,
+        tt: Timestamp,
+        historical: &HistoricalStorage,
+        max_depth: usize,
+        depth: usize,
+        budget: &mut usize,
+        stack: &mut HashSet<VersionId>,
+    ) -> TrustBreakdown {
+        let resolved = self.resolve_ref(reference, tt, historical);
+
+        // Terminal: retracted / absent -> 0.0, no children.
+        if let Some(terminal) = resolved.terminal {
+            return TrustBreakdown {
+                reference,
+                status: FactStatus::Absent,
+                confidence: 0.0,
+                source: terminal,
+                combinator: None,
+                children: Vec::new(),
+                truncated: false,
+            };
+        }
+
+        let vid = resolved.version;
+        let status = resolved.status;
+
+        // Leaf: no visible lineage -> declared or missing-policy value.
+        let Some(record) = self.visible_lineage(vid, tt) else {
+            let (confidence, source) = leaf_confidence_source(self, &resolved);
+            return TrustBreakdown {
+                reference,
+                status,
+                confidence,
+                source,
+                combinator: None,
+                children: Vec::new(),
+                truncated: false,
+            };
+        };
+
+        let combinator = self.trust_policy_for_label(&resolved.label).combinator;
+        // The node's reported confidence is ALWAYS the full-accuracy value.
+        let confidence = self.eval_scalar_value(reference, tt, historical);
+
+        // Stop descent at the depth cap or on the (impossible) cycle: keep the
+        // full-accuracy confidence, drop the children, flag truncated.
+        if depth >= max_depth || !stack.insert(vid) {
+            return TrustBreakdown {
+                reference,
+                status,
+                confidence,
+                source: ConfidenceSource::Computed,
+                combinator: Some(combinator),
+                children: Vec::new(),
+                truncated: true,
+            };
+        }
+
+        let mut children = Vec::with_capacity(record.sources.len());
+        let mut truncated = false;
+        for source in &record.sources {
+            if *budget == 0 {
+                // Node budget exhausted: stop emitting siblings, flag truncated.
+                truncated = true;
+                break;
+            }
+            *budget -= 1;
+            let child =
+                self.build_breakdown(*source, tt, historical, max_depth, depth + 1, budget, stack);
+            truncated |= child.truncated;
+            children.push(child);
+        }
+
+        stack.remove(&vid);
+
+        TrustBreakdown {
+            reference,
+            status,
+            confidence,
+            source: ConfidenceSource::Computed,
+            combinator: Some(combinator),
+            children,
+            truncated,
+        }
+    }
+}
+
+/// The displayed confidence and [`ConfidenceSource`] of a leaf fact (no visible
+/// lineage): its declared confidence, or the per-label missing-confidence
+/// policy value when none was written.
+fn leaf_confidence_source(db: &AletheiaDB, resolved: &ResolvedRef) -> (f64, ConfidenceSource) {
+    match resolved.confidence {
+        Some(c) => (clamp01(c), ConfidenceSource::Declared),
+        None => {
+            let value = match db.trust_policy_for_label(&resolved.label).missing {
+                MissingConfidencePolicy::Zero => 0.0,
+                MissingConfidencePolicy::Neutral | MissingConfidencePolicy::Ignore => NEUTRAL,
+            };
+            (value, ConfidenceSource::Missing)
+        }
+    }
 }
 
 /// Classify a version's valid interval into a terminal source, if any.
@@ -476,6 +648,7 @@ fn classify_valid_interval(
 fn absent_ref() -> ResolvedRef {
     ResolvedRef {
         version: VersionId::new_unchecked(0),
+        status: FactStatus::Absent,
         confidence: None,
         label: String::new(),
         terminal: Some(ConfidenceSource::Absent),
@@ -845,5 +1018,143 @@ mod tests {
             let cc = db.node_computed_confidence(nid).unwrap();
             approx(cc.computed, 0.75);
         }
+    }
+
+    // ---- M4: explainable breakdown ----
+
+    // AC3: the breakdown matches the hand-computed tree node by node.
+    #[test]
+    fn breakdown_matches_hand_computed_tree() {
+        let db = AletheiaDB::new().unwrap(); // weakest-link default
+        let r1 = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let r3 = mk(&db, "Doc", Some(0.3), &[]);
+        let m1 = mk(&db, "Merge", None, &[r1, r2]); // 0.8
+        let m2 = mk(&db, "Merge", None, &[r3]); // 0.3
+        let top = mk(&db, "Merge", None, &[m1, m2]); // 0.3
+
+        let bd = db.trust_breakdown(top, &TrustOptions::new());
+        assert_eq!(bd.reference, top);
+        approx(bd.confidence, 0.3);
+        assert_eq!(bd.source, ConfidenceSource::Computed);
+        assert_eq!(bd.combinator, Some(TrustCombinator::WeakestLink));
+        assert_eq!(bd.status, FactStatus::Current);
+        assert!(!bd.truncated);
+        assert_eq!(bd.children.len(), 2);
+
+        // child 0 == m1 (0.8) over two declared roots.
+        let m1_bd = &bd.children[0];
+        assert_eq!(m1_bd.reference, m1);
+        approx(m1_bd.confidence, 0.8);
+        assert_eq!(m1_bd.children.len(), 2);
+        assert_eq!(m1_bd.children[0].reference, r1);
+        approx(m1_bd.children[0].confidence, 0.9);
+        assert_eq!(m1_bd.children[0].source, ConfidenceSource::Declared);
+        assert_eq!(m1_bd.children[0].combinator, None);
+        assert!(m1_bd.children[0].children.is_empty());
+        approx(m1_bd.children[1].confidence, 0.8);
+
+        // child 1 == m2 (0.3) over one declared root.
+        let m2_bd = &bd.children[1];
+        assert_eq!(m2_bd.reference, m2);
+        approx(m2_bd.confidence, 0.3);
+        assert_eq!(m2_bd.children.len(), 1);
+        approx(m2_bd.children[0].confidence, 0.3);
+        assert_eq!(m2_bd.children[0].source, ConfidenceSource::Declared);
+    }
+
+    // T-1: a depth-truncated breakdown keeps full-accuracy confidence values.
+    #[test]
+    fn breakdown_truncated_value_intact() {
+        let db = AletheiaDB::new().unwrap();
+        let r1 = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let r3 = mk(&db, "Doc", Some(0.3), &[]);
+        let m1 = mk(&db, "Merge", None, &[r1, r2]);
+        let m2 = mk(&db, "Merge", None, &[r3]);
+        let top = mk(&db, "Merge", None, &[m1, m2]);
+
+        let full = db.computed_confidence(top).unwrap().computed;
+        // Depth cap of 1: children present but their subtrees are elided.
+        let bd = db.trust_breakdown(top, &TrustOptions::new().with_max_depth(1));
+        approx(bd.confidence, full); // NO over-trust despite truncation.
+        assert!(bd.truncated);
+        assert_eq!(bd.children.len(), 2);
+        for child in &bd.children {
+            assert!(child.truncated, "depth-capped child is truncated");
+            assert!(child.children.is_empty(), "child subtree elided");
+        }
+        // The elided child still reports its own full-accuracy value.
+        approx(bd.children[0].confidence, 0.8);
+        approx(bd.children[1].confidence, 0.3);
+    }
+
+    // T-2: a node-budget-truncated breakdown is conservative (full value, fewer
+    // serialized nodes).
+    #[test]
+    fn breakdown_node_budget_conservative() {
+        let db = AletheiaDB::new().unwrap();
+        let r1 = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let r3 = mk(&db, "Doc", Some(0.3), &[]);
+        let m1 = mk(&db, "Merge", None, &[r1, r2]);
+        let m2 = mk(&db, "Merge", None, &[r3]);
+        let top = mk(&db, "Merge", None, &[m1, m2]);
+
+        let full = db.computed_confidence(top).unwrap().computed;
+        let bd = db.trust_breakdown(top, &TrustOptions::new().with_max_nodes(1));
+        approx(bd.confidence, full);
+        assert!(bd.truncated);
+        // Only one child fit within the node budget.
+        assert_eq!(bd.children.len(), 1);
+        approx(bd.children[0].confidence, 0.8);
+    }
+
+    // Review-fix #2: the breakdown distinguishes Retracted from Absent.
+    #[test]
+    fn breakdown_retracted_vs_absent_distinct() {
+        // Retracted upstream.
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let d = mk(&db, "Merge", None, &[r]);
+        if let EntityId::Node(nid) = r.entity {
+            let valid_to = Timestamp::new_unchecked(time::now().wallclock() + 86_400_000_000, 0);
+            db.retract_node(nid, valid_to).unwrap();
+        }
+        let bd = db.trust_breakdown(d, &TrustOptions::new());
+        assert_eq!(bd.children.len(), 1);
+        assert_eq!(
+            bd.children[0].source,
+            ConfidenceSource::Retracted,
+            "retraction is labelled Retracted"
+        );
+        assert_eq!(bd.children[0].status, FactStatus::Absent);
+
+        // Deleted upstream.
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let d = mk(&db, "Merge", None, &[r]);
+        if let EntityId::Node(nid) = r.entity {
+            db.write(|tx| tx.delete_node(nid)).unwrap();
+        }
+        let bd = db.trust_breakdown(d, &TrustOptions::new());
+        assert_eq!(
+            bd.children[0].source,
+            ConfidenceSource::Absent,
+            "deletion is labelled Absent, distinct from Retracted"
+        );
+    }
+
+    // A leaf breakdown reports its declared confidence with no combinator.
+    #[test]
+    fn breakdown_leaf_is_declared() {
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.7), &[]);
+        let bd = db.trust_breakdown(r, &TrustOptions::new());
+        approx(bd.confidence, 0.7);
+        assert_eq!(bd.source, ConfidenceSource::Declared);
+        assert_eq!(bd.combinator, None);
+        assert!(bd.children.is_empty());
+        assert!(!bd.truncated);
     }
 }
