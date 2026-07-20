@@ -21,6 +21,9 @@ pub mod counterfactual;
 /// bi-temporal, changefeed-delivered alarm events — Issue #3367.
 pub mod drift_alarm;
 pub mod echo;
+/// Knowledge half-life analytics: survival analysis over fact volatility —
+/// per-cohort half-lives, per-fact freshness, staleness inventories (Issue #3377).
+pub mod half_life;
 pub mod kairos;
 pub mod mnemosyne;
 pub mod sherlock;

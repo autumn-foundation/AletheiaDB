@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use arc_swap::ArcSwapOption;
 
 use super::common::IndexKeyring;
 use super::error::Result;
@@ -26,7 +28,27 @@ pub struct IndexPersistenceManager {
     /// back by dispatching on each file's header `key_version` (so a mix of
     /// old- and new-key files during a rotation reads correctly). A legacy
     /// plaintext file is still read correctly via header sniffing.
-    keyring: Option<IndexKeyring>,
+    ///
+    /// The cell is an [`ArcSwapOption`] so a keyring can be **installed at
+    /// runtime** (`None` -> `Some`, Issue #3708) into a live plaintext manager —
+    /// the index-tier mirror of the WAL's `install_wal_keyring` seam (#3669) and
+    /// the cold tier's
+    /// [`install_cold_keyring`](crate::storage::redb_cold_storage::RedbColdStorage::install_cold_keyring)
+    /// (#3733) — without reopening. Every persist/load path `load()`s it
+    /// lock-free through [`Self::keyring`], so an install is observed atomically
+    /// and never as a torn read; the install itself is serialized by
+    /// [`install_lock`](Self::install_lock).
+    keyring: ArcSwapOption<IndexKeyring>,
+    /// Serializes runtime keyring installs (Issue #3708) so two concurrent
+    /// installers cannot both observe the cell as `None`, both pass the presence
+    /// check, and both store -- the second silently replacing the first keyring.
+    /// Held for the entire [`install_index_keyring`](Self::install_index_keyring)
+    /// body (presence check + store) so a second concurrent installer blocks,
+    /// then observes `Some`, and returns the existing rejection `Err`. A private
+    /// LEAF taken only at the top of install; the hot persist/load paths never
+    /// touch it, and the install body acquires no other AletheiaDB primitive
+    /// while holding it (CLAUDE.md lock order).
+    install_lock: Mutex<()>,
 }
 
 impl IndexPersistenceManager {
@@ -34,7 +56,8 @@ impl IndexPersistenceManager {
     pub fn new(base_path: impl Into<PathBuf>) -> Self {
         Self {
             base_path: base_path.into(),
-            keyring: None,
+            keyring: ArcSwapOption::empty(),
+            install_lock: Mutex::new(()),
         }
     }
 
@@ -49,7 +72,8 @@ impl IndexPersistenceManager {
     ) -> Self {
         Self {
             base_path: base_path.into(),
-            keyring: index_cipher.map(IndexKeyring::single),
+            keyring: ArcSwapOption::new(index_cipher.map(|c| Arc::new(IndexKeyring::single(c)))),
+            install_lock: Mutex::new(()),
         }
     }
 
@@ -71,7 +95,10 @@ impl IndexPersistenceManager {
     ) -> Self {
         Self {
             base_path: base_path.into(),
-            keyring: index_cipher.map(|c| IndexKeyring::single_versioned(c, key_version)),
+            keyring: ArcSwapOption::new(
+                index_cipher.map(|c| Arc::new(IndexKeyring::single_versioned(c, key_version))),
+            ),
+            install_lock: Mutex::new(()),
         }
     }
 
@@ -86,13 +113,79 @@ impl IndexPersistenceManager {
     ) -> Self {
         Self {
             base_path: base_path.into(),
-            keyring,
+            keyring: ArcSwapOption::new(keyring.map(Arc::new)),
+            install_lock: Mutex::new(()),
         }
     }
 
     /// The index keyring, if encryption-at-rest is enabled.
-    pub(crate) fn keyring(&self) -> Option<&IndexKeyring> {
-        self.keyring.as_ref()
+    ///
+    /// Returns an **owned** clone of the keyring (a cheap `Arc`-bump — the
+    /// [`IndexKeyring`] is `Arc<RwLock<..>>`-backed, so the clone shares the same
+    /// generations and observes concurrent `add_generation`/`retire`). The cell
+    /// is `load()`ed lock-free, so a concurrent runtime install (Issue #3708) is
+    /// observed atomically as either the old `None` or the fully-valid `Some`,
+    /// never a torn read. Callers passing the keyring into a
+    /// `*_with_keyring(Option<&IndexKeyring>)` persist/load fn use
+    /// `keyring().as_ref()`.
+    pub(crate) fn keyring(&self) -> Option<IndexKeyring> {
+        self.keyring.load_full().map(|arc| (*arc).clone())
+    }
+
+    /// Install an index keyring into a live plaintext manager at runtime
+    /// (Issue #3708): the `None` -> `Some` transition that flips
+    /// encryption-at-rest on **without reopening** the database. The index-tier
+    /// mirror of the WAL's `install_wal_keyring` (#3669) and the cold tier's
+    /// [`install_cold_keyring`](crate::storage::redb_cold_storage::RedbColdStorage::install_cold_keyring)
+    /// (#3733) seams. Unlike the WAL there is no on-disk seal step — the index
+    /// header is per-file and sniffed on read, so pre-install plaintext files
+    /// keep reading correctly and post-install writes are AEIX-encrypted.
+    ///
+    /// Installing the keyring alone does **not** retroactively encrypt
+    /// already-persisted plaintext index files; the hot-live enable driver runs
+    /// a separate wrap pass (`reencrypt`) after installing. Presence is a
+    /// one-way transition: key rotation extends an already-installed keyring via
+    /// its shared `add_generation` handle, not this seam.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::IndexKeyringAlreadyInstalled`] if a keyring is
+    /// already installed (a double-install) — a caller precondition failure the
+    /// MCP surface maps to `FAILED_PRECONDITION` (non-retriable), never a silent
+    /// replace.
+    ///
+    /// [`StorageError::IndexKeyringAlreadyInstalled`]:
+    /// crate::core::error::StorageError::IndexKeyringAlreadyInstalled
+    // The production consumer is the hot-live plaintext -> encrypted enable
+    // engine (Issue #3708 follow-up driver), mirroring the WAL/cold seams whose
+    // drivers likewise land separately; mark the seam allow(dead_code) until it
+    // is wired in. TODO(#3708): remove once the enable driver calls this.
+    #[allow(dead_code)]
+    pub(crate) fn install_index_keyring(
+        &self,
+        keyring: IndexKeyring,
+    ) -> crate::core::error::Result<()> {
+        // Serialize the ENTIRE install -- presence check + store -- under a
+        // dedicated leaf mutex. Without it two concurrent installers could both
+        // observe `None`, both pass the check, and both store, the second
+        // silently replacing the first keyring.
+        let _install_guard = self.install_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Reject a double-install: presence is a one-way None -> Some transition.
+        if self.keyring.load().is_some() {
+            return Err(
+                crate::core::error::StorageError::IndexKeyringAlreadyInstalled {
+                    reason: "an index keyring is already installed; runtime install only \
+                         supports the plaintext -> encrypted (None -> Some) transition \
+                         (key rotation extends the keyring via add_generation)"
+                        .to_string(),
+                }
+                .into(),
+            );
+        }
+
+        self.keyring.store(Some(Arc::new(keyring)));
+        Ok(())
     }
 
     /// Get the base path.
@@ -195,7 +288,8 @@ impl IndexPersistenceManager {
             // (Issue #481); `restore_string_interner` returns the file-id ->
             // live-id remap (Issue #3490) the caller threads through the graph /
             // temporal index data.
-            let interner_data = load_string_interner_with_keyring(&interner_path, self.keyring())?;
+            let interner_data =
+                load_string_interner_with_keyring(&interner_path, self.keyring().as_ref())?;
             let remap = restore_string_interner(&interner_data)?;
             (true, remap)
         } else {
@@ -222,7 +316,7 @@ impl IndexPersistenceManager {
         }
 
         // 3. Load manifest
-        let manifest = load_manifest_with_keyring(&manifest_path, self.keyring())?;
+        let manifest = load_manifest_with_keyring(&manifest_path, self.keyring().as_ref())?;
 
         Ok((manifest, remap))
     }
@@ -230,13 +324,13 @@ impl IndexPersistenceManager {
     /// Save the manifest.
     pub fn save_manifest(&self, manifest: &IndexManifest) -> Result<()> {
         self.ensure_directories()?;
-        save_manifest_with_keyring(manifest, &self.manifest_path(), self.keyring())
+        save_manifest_with_keyring(manifest, &self.manifest_path(), self.keyring().as_ref())
     }
 
     /// Save the string interner, returning the exact number of strings written.
     pub fn save_string_interner(&self) -> Result<u64> {
         self.ensure_directories()?;
-        save_string_interner_with_keyring(&self.interner_path(), self.keyring())
+        save_string_interner_with_keyring(&self.interner_path(), self.keyring().as_ref())
     }
 }
 
@@ -344,5 +438,242 @@ mod tests {
         // Load back
         let loaded = manager.load_manifest_and_strings().unwrap();
         assert_eq!(loaded.lsn, 100);
+    }
+
+    // ── Issue #3708: runtime keyring-install seam ──────────────────────────────
+
+    /// The `None -> Some` runtime install flips encryption-at-rest on a live
+    /// plaintext manager: post-install index writes carry the `AEIX` header,
+    /// while pre-install plaintext files still read back (header sniffing).
+    #[test]
+    fn install_index_keyring_none_to_some_transition() {
+        use crate::storage::index_persistence::common::is_encrypted_index;
+
+        let dir = tempdir().unwrap();
+
+        // A plaintext-opened manager reports no keyring and writes cleartext.
+        let manager = IndexPersistenceManager::new(dir.path());
+        assert!(
+            manager.keyring().is_none(),
+            "a plain manager has no keyring"
+        );
+
+        GLOBAL_INTERNER.intern("install_seam_label").unwrap();
+        manager.save_string_interner().unwrap();
+        manager.save_manifest(&IndexManifest::new(11)).unwrap();
+
+        // Pre-install files are plaintext at rest.
+        let interner_raw = std::fs::read(manager.interner_path()).unwrap();
+        assert!(
+            !is_encrypted_index(&interner_raw),
+            "pre-install interner must be plaintext at rest"
+        );
+
+        // Install a keyring at runtime (the plaintext -> encrypted enable seam).
+        manager
+            .install_index_keyring(IndexKeyring::single(enc_cipher(0x51)))
+            .unwrap();
+        assert!(
+            manager.keyring().is_some(),
+            "installing a keyring must flip the manager to encrypted"
+        );
+
+        // A manifest written AFTER the install is AEIX-encrypted at rest.
+        manager.save_manifest(&IndexManifest::new(22)).unwrap();
+        let manifest_raw = std::fs::read(manager.manifest_path()).unwrap();
+        assert!(
+            is_encrypted_index(&manifest_raw),
+            "post-install manifest must be AEIX-encrypted at rest (found plaintext)"
+        );
+
+        // A runtime install must encrypt MORE than just the manifest: re-saving
+        // the string interner after the install (the same re-save the manifest
+        // gets) must also carry the AEIX header, proving the keyring is threaded
+        // through every persist path — not just the manifest write.
+        manager.save_string_interner().unwrap();
+        let interner_raw_post = std::fs::read(manager.interner_path()).unwrap();
+        assert!(
+            is_encrypted_index(&interner_raw_post),
+            "post-install string interner must be AEIX-encrypted at rest (found plaintext)"
+        );
+
+        // The now-encrypted manifest and re-saved interner both round-trip
+        // through the installed keyring (header sniffing selects the encrypted
+        // read path for each).
+        let manifest = manager.load_manifest_and_strings().unwrap();
+        assert_eq!(
+            manifest.lsn, 22,
+            "post-install encrypted manifest must round-trip"
+        );
+    }
+
+    /// Fail-closed double-install: installing when a keyring is already present is
+    /// rejected with `IndexKeyringAlreadyInstalled` (never a silent replace), and
+    /// data written under the first keyring still decrypts afterward.
+    #[test]
+    fn install_index_keyring_twice_is_rejected() {
+        use crate::core::error::{Error, StorageError};
+
+        let dir = tempdir().unwrap();
+        let manager = IndexPersistenceManager::new(dir.path());
+
+        // Install the first keyring and persist a manifest under it.
+        manager
+            .install_index_keyring(IndexKeyring::single(enc_cipher(0x11)))
+            .unwrap();
+        GLOBAL_INTERNER.intern("twice_label").unwrap();
+        manager.save_manifest(&IndexManifest::new(7)).unwrap();
+
+        // A second install with a DIFFERENT cipher must be rejected, not applied.
+        let err = manager
+            .install_index_keyring(IndexKeyring::single(enc_cipher(0x22)))
+            .expect_err("a second install must be rejected, not silently applied");
+        assert!(
+            matches!(
+                err,
+                Error::Storage(StorageError::IndexKeyringAlreadyInstalled { .. })
+            ),
+            "double-install must return IndexKeyringAlreadyInstalled, got: {err:?}"
+        );
+
+        // Still encrypted under the FIRST keyring: had the 0x22 keyring silently
+        // replaced it, the 0x11-encrypted manifest would fail to decrypt.
+        assert!(manager.keyring().is_some());
+        let manifest = manager.load_manifest_and_strings().unwrap();
+        assert_eq!(
+            manifest.lsn, 7,
+            "a rejected double-install must not lose (or re-key) existing data"
+        );
+    }
+
+    /// Torn-read-free atomic visibility of the install across concurrent readers.
+    /// The `ArcSwapOption` presence cell makes a *literal* torn read structurally
+    /// impossible (a load atomically observes the whole pointer), so what this
+    /// test actually validates is cross-thread STORE VISIBILITY: while one thread
+    /// installs, concurrent loaders read `keyring()` and must always see either
+    /// the old `None` or a fully-valid `Some` (a resolvable current generation),
+    /// never a partial/half-published state. The saw_none/saw_some records prove
+    /// the `None -> Some` store is actually made visible across threads.
+    /// (Name kept aligned with the WAL/cold sibling tests.)
+    #[test]
+    fn install_index_keyring_no_torn_reads_on_cell() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
+
+        let dir = tempdir().unwrap();
+        let manager = Arc::new(IndexPersistenceManager::new(dir.path()));
+
+        let loaders = 6usize;
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(loaders + 1));
+
+        let mut handles = Vec::new();
+        for _ in 0..loaders {
+            let manager = Arc::clone(&manager);
+            let stop = Arc::clone(&stop);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut saw_none = false;
+                let mut saw_some = false;
+                barrier.wait();
+                while !stop.load(AtOrd::Relaxed) {
+                    match manager.keyring() {
+                        Some(k) => {
+                            saw_some = true;
+                            // Any observed keyring must be fully constructed: an
+                            // installed keyring always resolves a current cipher.
+                            assert!(
+                                k.current().is_some(),
+                                "an installed keyring must resolve a current generation"
+                            );
+                        }
+                        None => saw_none = true,
+                    }
+                }
+                (saw_none, saw_some)
+            }));
+        }
+
+        barrier.wait();
+        // Let loaders observe the pre-install `None` before the store flips it.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        manager
+            .install_index_keyring(IndexKeyring::single(enc_cipher(0x71)))
+            .unwrap();
+        // Keep loaders running long enough to observe the post-install `Some`.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        stop.store(true, AtOrd::Relaxed);
+
+        let mut any_saw_none = false;
+        let mut any_saw_some = false;
+        for h in handles {
+            let (saw_none, saw_some) = h.join().unwrap();
+            any_saw_none |= saw_none;
+            any_saw_some |= saw_some;
+        }
+        assert!(
+            any_saw_none,
+            "loaders must have observed the pre-install None state"
+        );
+        assert!(
+            any_saw_some,
+            "loaders must have observed the post-install Some state \
+             (proving the store is seen across threads)"
+        );
+        assert!(
+            manager.keyring().is_some(),
+            "install must be visible after the store"
+        );
+    }
+
+    /// Concurrent double-install TOCTOU: two threads race `install_index_keyring`
+    /// on the same manager. Without the install lock both could observe `None`,
+    /// both pass the presence check, and both store — the second silently
+    /// replacing the first. With the lock, EXACTLY one returns `Ok` and one
+    /// returns `Err`, and the manager ends encrypted.
+    #[test]
+    fn install_index_keyring_concurrent_double_install_rejected() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
+
+        let dir = tempdir().unwrap();
+        let manager = Arc::new(IndexPersistenceManager::new(dir.path()));
+
+        let ok_count = Arc::new(AtomicUsize::new(0));
+        let err_count = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for seed in [0x11u8, 0x22u8] {
+            let manager = Arc::clone(&manager);
+            let ok_count = Arc::clone(&ok_count);
+            let err_count = Arc::clone(&err_count);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                match manager.install_index_keyring(IndexKeyring::single(enc_cipher(seed))) {
+                    Ok(()) => ok_count.fetch_add(1, AtOrd::Relaxed),
+                    Err(_) => err_count.fetch_add(1, AtOrd::Relaxed),
+                };
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            ok_count.load(AtOrd::Relaxed),
+            1,
+            "exactly one concurrent install must succeed"
+        );
+        assert_eq!(
+            err_count.load(AtOrd::Relaxed),
+            1,
+            "exactly one concurrent install must be rejected"
+        );
+        assert!(
+            manager.keyring().is_some(),
+            "the survivor keyring must be installed"
+        );
     }
 }

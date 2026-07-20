@@ -303,6 +303,20 @@ pub struct AletheiaDB {
     /// persistence is enabled; in-memory-only for ephemeral databases. See
     /// [`crate::db::namespace`].
     pub(crate) namespaces: Arc<namespace::NamespaceRegistry>,
+    /// Knowledge half-life analytics cohort-statistics cache (Issue #3377,
+    /// Fix-B). In-memory, recomputable, and **off the write path** (no
+    /// write-time hook): it backs the sub-millisecond warm `fact_freshness`
+    /// path by memoizing a cohort's `(VolatilityStats, KmCurve)` keyed on the
+    /// full result determinant `(cohort, as_of, min_events, max_entities)`.
+    /// `as_of == None` ("now") entries are invalidated lazily by comparing the
+    /// WAL append generation captured at compute against the current one (an
+    /// O(1) atomic read) — no write-path cost; `as_of == Some(_)` entries pin an
+    /// immutable past tx snapshot and are cached indefinitely. Its internal
+    /// mutex is a leaf (never held while acquiring a write-path primitive, and
+    /// no storage read happens under it). Gated to `semantic-temporal`; the
+    /// field compiles out entirely when the feature is off.
+    #[cfg(feature = "semantic-temporal")]
+    pub(crate) half_life_cache: Arc<crate::experimental::temporal::half_life::CohortStatsCache>,
     /// Temporal semantic drift-monitor registry (Issue #3367).
     ///
     /// Declarative rules that watch an embedding property's evolution against a

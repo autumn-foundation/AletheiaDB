@@ -1222,15 +1222,20 @@ impl RedbColdStorage {
     ///
     /// # Errors
     ///
-    /// Returns an error if a keyring is already installed (a double-install).
+    /// Returns [`StorageError::ColdKeyringAlreadyInstalled`] if a keyring is
+    /// already installed (a double-install) — a caller precondition failure the
+    /// MCP surface maps to `FAILED_PRECONDITION` (non-retriable), never a silent
+    /// replace.
+    ///
+    /// [`StorageError::ColdKeyringAlreadyInstalled`]:
+    /// crate::core::error::StorageError::ColdKeyringAlreadyInstalled
     // The production consumer is the hot-live plaintext -> encrypted enable
     // engine (Issue #3708 follow-up), which drives this from `enable_encryption`
-    // after the WAL's `install_wal_keyring` and a bare -> `ACV1` wrap pass. A
-    // dedicated `StorageError` variant for the double-install rejection (so the
-    // enable engine can map ONLY it to `FAILED_PRECONDITION`, as the WAL seam's
-    // `WalKeyringAlreadyInstalled` allows) is a trivial follow-up for the
-    // enable lane; reusing `InconsistentState` here keeps the change within the
-    // cold-storage module.
+    // after the WAL's `install_wal_keyring` and a bare -> `ACV1` wrap pass. The
+    // double-install rejection uses a dedicated `StorageError` variant
+    // (`ColdKeyringAlreadyInstalled`) so the enable engine can map ONLY it to
+    // `FAILED_PRECONDITION`, exactly as the WAL seam's `WalKeyringAlreadyInstalled`
+    // and the index seam's `IndexKeyringAlreadyInstalled` allow.
     pub fn install_cold_keyring(&self, keyring: ColdKeyring) -> Result<()> {
         // Serialize the ENTIRE install -- presence check + store -- under a
         // dedicated leaf mutex. Without it two concurrent installers could both
@@ -1240,7 +1245,7 @@ impl RedbColdStorage {
 
         // Reject a double-install: presence is a one-way None -> Some transition.
         if self.keyring.load().is_some() {
-            return Err(StorageError::InconsistentState {
+            return Err(StorageError::ColdKeyringAlreadyInstalled {
                 reason: "a cold keyring is already installed; runtime install only \
                          supports the plaintext -> encrypted (None -> Some) transition \
                          (key rotation is install_cold_generation)"

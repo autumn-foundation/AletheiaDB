@@ -3633,6 +3633,16 @@ fn install_cold_keyring_twice_is_rejected() {
     let err = storage
         .install_cold_keyring(ColdKeyring::single(cipher_with_byte(0x22)))
         .expect_err("a second install must be rejected, not silently applied");
+    assert!(
+        matches!(
+            err,
+            crate::core::error::Error::Storage(
+                crate::core::error::StorageError::ColdKeyringAlreadyInstalled { .. }
+            )
+        ),
+        "double-install must return the distinguishable ColdKeyringAlreadyInstalled \
+         variant (mapped to FAILED_PRECONDITION), got: {err:?}"
+    );
     let msg = err.to_string();
     assert!(
         msg.contains("already") || msg.contains("installed"),
@@ -3753,7 +3763,19 @@ fn install_cold_keyring_concurrent_double_install_rejected() {
             barrier.wait();
             match storage.install_cold_keyring(ColdKeyring::single(cipher_with_byte(seed))) {
                 Ok(()) => ok_count.fetch_add(1, AtOrd::Relaxed),
-                Err(_) => err_count.fetch_add(1, AtOrd::Relaxed),
+                Err(e) => {
+                    assert!(
+                        matches!(
+                            e,
+                            crate::core::error::Error::Storage(
+                                crate::core::error::StorageError::ColdKeyringAlreadyInstalled { .. }
+                            )
+                        ),
+                        "the rejected concurrent install must return the distinguishable \
+                         ColdKeyringAlreadyInstalled variant, got: {e:?}"
+                    );
+                    err_count.fetch_add(1, AtOrd::Relaxed)
+                }
             };
         }));
     }
