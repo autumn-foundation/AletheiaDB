@@ -598,6 +598,11 @@ harness = false
 path = "benches/belief_revision.rs"
 required-features = ["semantic-temporal"]
 
+[[bench]]
+name = "counterfactual_replay"
+harness = false
+path = "benches/counterfactual_replay.rs"
+
 # Knowledge half-life analytics (Issue #3377, Fix-B): a cold cohort scan +
 # Kaplan-Meier over a sizeable synthetic cohort (SM3 < 10s / 1M versions,
 # extrapolated) and the warm fact_freshness cache path (SM3 < 1ms warm).
