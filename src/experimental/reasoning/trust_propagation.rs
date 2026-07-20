@@ -36,6 +36,12 @@
 //! ("Nova") cohort flag — zero write-path/read-path overhead when disabled
 //! (AC8).
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use parking_lot::{Mutex, RwLock};
+
+use crate::core::error::{Error, Result};
 use crate::core::temporal::Timestamp;
 
 /// Persisted-format version for the trust-policy registry sidecar file. Bumped
@@ -325,6 +331,336 @@ pub(crate) fn combine_values(children: &[Option<f64>], combinator: TrustCombinat
     (clamp01(value), false)
 }
 
+/// A read-only view of the active trust policies (AC1 "discoverable"): the
+/// database default plus every per-label override in a stable, label-sorted
+/// order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TrustPolicyView {
+    /// The database-wide default policy applied when no label override matches.
+    pub default: TrustPolicy,
+    /// Per-label / per-edge-type overrides, sorted by label.
+    pub labels: Vec<(String, TrustPolicy)>,
+}
+
+/// In-memory state of the trust-policy registry: the default policy plus any
+/// per-label overrides.
+///
+/// The derived [`Default`] uses [`TrustPolicy::default`] (weakest-link + Zero)
+/// and an empty override map.
+#[derive(Debug, Clone, Default)]
+struct RegistryState {
+    default: TrustPolicy,
+    labels: HashMap<String, TrustPolicy>,
+}
+
+/// The on-disk registry envelope (versioned, mirrors the snapshot registry).
+///
+/// Only compiled with the `serde` feature; without it the registry is
+/// in-memory-only and never (de)serialized.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedRegistry {
+    version: u32,
+    default: TrustPolicy,
+    /// Overrides as a sorted `(label, policy)` list for deterministic output.
+    labels: Vec<(String, TrustPolicy)>,
+}
+
+/// In-process registry of trust policies, optionally persisted to a sidecar
+/// JSON file (Issue #3382).
+///
+/// Entirely off the data write path — mutating it never touches
+/// current/historical storage, the WAL, or `current_timestamp` — so it is a
+/// leaf like the #3370 snapshot registry it mirrors. Durably persisted to
+/// `{data_dir}/trust_policy.json` when index persistence is enabled;
+/// in-memory-only for ephemeral databases.
+pub(crate) struct TrustRegistry {
+    state: RwLock<RegistryState>,
+    /// Sidecar file path when persistence is enabled; `None` for ephemeral,
+    /// in-memory-only registries (`AletheiaDB::new()`).
+    persist_path: Option<PathBuf>,
+    /// Serializes concurrent disk saves (the in-memory state has its own
+    /// `RwLock`; this guards the temp-file+rename dance).
+    save_lock: Mutex<()>,
+}
+
+// The read/mutate accessors below are consumed by the `AletheiaDB` policy
+// methods landing in a later milestone (M3); until then they are exercised only
+// by unit tests, which the lib target does not see.
+#[allow(dead_code)]
+impl TrustRegistry {
+    /// Create an empty, memory-only registry (no file is ever written).
+    pub(crate) fn in_memory() -> Self {
+        Self {
+            state: RwLock::new(RegistryState::default()),
+            persist_path: None,
+            save_lock: Mutex::new(()),
+        }
+    }
+
+    /// Open a registry, loading any existing sidecar at `path`.
+    ///
+    /// `path` is `None` for an in-memory-only registry. A missing file yields
+    /// an empty registry (first run).
+    ///
+    /// # Tolerant load (mirrors the #3370 snapshot registry)
+    ///
+    /// Trust policies are non-critical configuration: losing them reverts to
+    /// the conservative default policy, costing at most a re-declaration. So —
+    /// like the snapshot registry and unlike the security-critical auth key
+    /// store — a corrupt, unparseable, or unknown-future-version
+    /// `trust_policy.json` must **not brick database startup**. On such a file
+    /// we warn, quarantine it aside (rename to `*.corrupt`, preserving the
+    /// bytes), and start with an empty registry. The load is driven off a
+    /// single `read_to_string` (no `exists()` pre-check, so no TOCTOU gap): a
+    /// `NotFound` error is the normal first-run case; any other read I/O error
+    /// is treated exactly like a parse failure.
+    pub(crate) fn open(path: Option<PathBuf>) -> Result<Self> {
+        let registry = Self {
+            state: RwLock::new(RegistryState::default()),
+            persist_path: path.clone(),
+            save_lock: Mutex::new(()),
+        };
+        #[cfg(feature = "serde")]
+        if let Some(path) = path {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => match serde_json::from_str::<PersistedRegistry>(&contents) {
+                    Ok(parsed) if parsed.version <= PERSIST_FORMAT_VERSION => {
+                        let mut state = registry.state.write();
+                        state.default = parsed.default;
+                        state.labels = parsed.labels.into_iter().collect();
+                    }
+                    Ok(parsed) => {
+                        log_registry_warning(&format!(
+                            "trust-policy registry at {} has unsupported future version {} (this \
+                             build understands up to {}); quarantining it and starting with an \
+                             empty registry",
+                            path.display(),
+                            parsed.version,
+                            PERSIST_FORMAT_VERSION
+                        ));
+                        quarantine_corrupt_registry(&path);
+                    }
+                    Err(e) => {
+                        log_registry_warning(&format!(
+                            "failed to parse trust-policy registry at {} ({e}); quarantining it \
+                             and starting with an empty registry",
+                            path.display()
+                        ));
+                        quarantine_corrupt_registry(&path);
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    log_registry_warning(&format!(
+                        "failed to read trust-policy registry at {} ({e}); quarantining it and \
+                         starting with an empty registry",
+                        path.display()
+                    ));
+                    quarantine_corrupt_registry(&path);
+                }
+            }
+        }
+        Ok(registry)
+    }
+
+    /// The database-wide default policy.
+    pub(crate) fn default_policy(&self) -> TrustPolicy {
+        self.state.read().default
+    }
+
+    /// The policy governing `label`: the per-label override if one is
+    /// registered, else the database default.
+    pub(crate) fn policy_for_label(&self, label: &str) -> TrustPolicy {
+        let state = self.state.read();
+        state.labels.get(label).copied().unwrap_or(state.default)
+    }
+
+    /// A stable, label-sorted view of all active policies (AC1 discoverable).
+    pub(crate) fn view(&self) -> TrustPolicyView {
+        let state = self.state.read();
+        let mut labels: Vec<(String, TrustPolicy)> =
+            state.labels.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        labels.sort_by(|a, b| a.0.cmp(&b.0));
+        TrustPolicyView {
+            default: state.default,
+            labels,
+        }
+    }
+
+    /// Set the database-wide default policy, persisting the change.
+    ///
+    /// Rolls back the in-memory change if the disk save fails, so RAM and disk
+    /// never diverge (the caller sees `Err` *and* the default is unchanged).
+    pub(crate) fn set_default(&self, policy: TrustPolicy) -> Result<()> {
+        let _guard = self.save_lock.lock();
+        let previous = {
+            let mut state = self.state.write();
+            let previous = state.default;
+            state.default = policy;
+            previous
+        };
+        if let Err(e) = self.save_locked() {
+            self.state.write().default = previous;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Set a per-label override policy, persisting the change.
+    ///
+    /// Rolls back the in-memory change (restoring any prior override, or
+    /// removing the entry if there was none) if the disk save fails.
+    pub(crate) fn set_label(&self, label: &str, policy: TrustPolicy) -> Result<()> {
+        let _guard = self.save_lock.lock();
+        let previous = {
+            let mut state = self.state.write();
+            state.labels.insert(label.to_string(), policy)
+        };
+        if let Err(e) = self.save_locked() {
+            let mut state = self.state.write();
+            match previous {
+                Some(prev) => {
+                    state.labels.insert(label.to_string(), prev);
+                }
+                None => {
+                    state.labels.remove(label);
+                }
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Remove a per-label override, persisting the change. Removing an absent
+    /// label is a no-op (still re-saved, harmlessly).
+    pub(crate) fn drop_label(&self, label: &str) -> Result<()> {
+        let _guard = self.save_lock.lock();
+        let previous = {
+            let mut state = self.state.write();
+            state.labels.remove(label)
+        };
+        if let Err(e) = self.save_locked() {
+            if let Some(prev) = previous {
+                self.state.write().labels.insert(label.to_string(), prev);
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The durable-write body, **assuming `save_lock` is already held**. A
+    /// no-op for in-memory-only registries.
+    fn save_locked(&self) -> Result<()> {
+        let Some(path) = &self.persist_path else {
+            return Ok(());
+        };
+
+        #[cfg(not(feature = "serde"))]
+        {
+            let _ = path;
+            Ok(())
+        }
+
+        #[cfg(feature = "serde")]
+        {
+            self.save_serialized(path)
+        }
+    }
+
+    /// Serialize the registry to `path` (temp file + rename + parent fsync),
+    /// mirroring the snapshot registry.
+    #[cfg(feature = "serde")]
+    fn save_serialized(&self, path: &std::path::Path) -> Result<()> {
+        let (default, mut labels) = {
+            let state = self.state.read();
+            let labels: Vec<(String, TrustPolicy)> =
+                state.labels.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            (state.default, labels)
+        };
+        labels.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let serialized = serde_json::to_vec_pretty(&PersistedRegistry {
+            version: PERSIST_FORMAT_VERSION,
+            default,
+            labels,
+        })
+        .map_err(|e| Error::Other(format!("failed to serialize trust-policy registry: {e}")))?;
+
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let tmp_path = path.with_extension("tmp");
+        let _ = std::fs::remove_file(&tmp_path);
+        {
+            use std::io::Write as _;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            let mut file = options.open(&tmp_path)?;
+            file.write_all(&serialized)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    }
+}
+
+/// Emit a warning about the trust-policy registry under either logging
+/// configuration (mirrors the snapshot registry's `log_registry_warning`).
+///
+/// Only used by the serde-gated sidecar load path.
+#[cfg(feature = "serde")]
+fn log_registry_warning(message: &str) {
+    #[cfg(feature = "observability")]
+    tracing::warn!("{}", message);
+    #[cfg(not(feature = "observability"))]
+    eprintln!("WARNING: {}", message);
+}
+
+/// Move a corrupt/unreadable sidecar aside (`path.corrupt`) so startup can
+/// proceed with an empty registry while preserving the bad bytes. Failure to
+/// quarantine is logged but never fatal.
+///
+/// Only used by the serde-gated sidecar load path.
+#[cfg(feature = "serde")]
+fn quarantine_corrupt_registry(path: &std::path::Path) {
+    let mut corrupt = path.as_os_str().to_owned();
+    corrupt.push(".corrupt");
+    let corrupt = PathBuf::from(corrupt);
+    if let Err(e) = std::fs::rename(path, &corrupt) {
+        log_registry_warning(&format!(
+            "could not quarantine corrupt trust-policy registry {} -> {}: {e}",
+            path.display(),
+            corrupt.display()
+        ));
+    }
+}
+
+/// Build the sidecar path for a database's trust-policy registry, or `None`
+/// when the database is ephemeral (persistence disabled).
+///
+/// The file lives **inside** the configured persistence directory, at
+/// `{persistence.data_dir}/trust_policy.json`, mirroring the snapshot
+/// registry's placement.
+pub(crate) fn registry_path_for(
+    persistence: &crate::storage::index_persistence::PersistenceConfig,
+) -> Option<PathBuf> {
+    if !persistence.enabled {
+        return None;
+    }
+    Some(persistence.data_dir.join("trust_policy.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +812,160 @@ mod tests {
     fn zero_dominates_weakest_link() {
         let (v, _) = combine_values(&[Some(0.0), Some(0.9)], TrustCombinator::WeakestLink);
         approx(v, 0.0);
+    }
+
+    // ---- registry (M2) ----
+
+    #[test]
+    fn registry_default_and_label_override() {
+        let reg = TrustRegistry::in_memory();
+        // Fresh registry: conservative default, no overrides.
+        assert_eq!(reg.default_policy(), TrustPolicy::default());
+        assert_eq!(reg.policy_for_label("Person"), TrustPolicy::default());
+
+        // Set a new default.
+        let noisy = TrustPolicy::noisy_or(MissingConfidencePolicy::Neutral);
+        reg.set_default(noisy).unwrap();
+        assert_eq!(reg.default_policy(), noisy);
+        // A label with no override inherits the (new) default.
+        assert_eq!(reg.policy_for_label("Person"), noisy);
+
+        // Per-label override wins over the default.
+        let wl_ignore = TrustPolicy::weakest_link(MissingConfidencePolicy::Ignore);
+        reg.set_label("Claim", wl_ignore).unwrap();
+        assert_eq!(reg.policy_for_label("Claim"), wl_ignore);
+        assert_eq!(reg.policy_for_label("Person"), noisy);
+
+        // Dropping the override reverts to the default.
+        reg.drop_label("Claim").unwrap();
+        assert_eq!(reg.policy_for_label("Claim"), noisy);
+    }
+
+    #[test]
+    fn registry_view_sorts_labels() {
+        let reg = TrustRegistry::in_memory();
+        reg.set_label("Zeta", TrustPolicy::default()).unwrap();
+        reg.set_label(
+            "Alpha",
+            TrustPolicy::noisy_or(MissingConfidencePolicy::Zero),
+        )
+        .unwrap();
+        reg.set_label("Mu", TrustPolicy::default()).unwrap();
+        let view = reg.view();
+        let labels: Vec<&str> = view.labels.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(labels, vec!["Alpha", "Mu", "Zeta"]);
+    }
+
+    #[test]
+    fn registry_path_is_none_when_persistence_disabled() {
+        let cfg = crate::storage::index_persistence::PersistenceConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(registry_path_for(&cfg), None);
+    }
+
+    #[test]
+    fn registry_path_is_inside_data_dir() {
+        let cfg = crate::storage::index_persistence::PersistenceConfig {
+            enabled: true,
+            data_dir: PathBuf::from("/var/lib/aletheia/indexes"),
+            ..Default::default()
+        };
+        assert_eq!(
+            registry_path_for(&cfg),
+            Some(PathBuf::from("/var/lib/aletheia/indexes/trust_policy.json"))
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn registry_persistence_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust_policy.json");
+
+        {
+            let reg = TrustRegistry::open(Some(path.clone())).unwrap();
+            reg.set_default(TrustPolicy::noisy_or(MissingConfidencePolicy::Neutral))
+                .unwrap();
+            reg.set_label(
+                "Claim",
+                TrustPolicy::weakest_link(MissingConfidencePolicy::Ignore),
+            )
+            .unwrap();
+        }
+
+        // Reopen: default + override survive the round-trip.
+        let reopened = TrustRegistry::open(Some(path)).unwrap();
+        assert_eq!(
+            reopened.default_policy(),
+            TrustPolicy::noisy_or(MissingConfidencePolicy::Neutral)
+        );
+        assert_eq!(
+            reopened.policy_for_label("Claim"),
+            TrustPolicy::weakest_link(MissingConfidencePolicy::Ignore)
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn registry_open_quarantines_corrupt_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust_policy.json");
+        std::fs::write(&path, b"not valid json {{{").unwrap();
+
+        // A corrupt sidecar must NOT brick startup: quarantine + empty (default).
+        let reg = TrustRegistry::open(Some(path.clone())).unwrap();
+        assert_eq!(reg.default_policy(), TrustPolicy::default());
+        assert!(reg.view().labels.is_empty());
+        assert!(!path.exists(), "corrupt file was moved aside");
+        assert!(
+            dir.path().join("trust_policy.json.corrupt").exists(),
+            "quarantined file exists"
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn registry_open_quarantines_future_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust_policy.json");
+        let future = format!(
+            r#"{{ "version": {}, "default": {{"combinator":"weakest_link","missing":"zero"}}, "labels": [] }}"#,
+            PERSIST_FORMAT_VERSION + 1
+        );
+        std::fs::write(&path, future.as_bytes()).unwrap();
+
+        let reg = TrustRegistry::open(Some(path.clone())).unwrap();
+        assert_eq!(reg.default_policy(), TrustPolicy::default());
+        assert!(!path.exists(), "future-version file was moved aside");
+        assert!(dir.path().join("trust_policy.json.corrupt").exists());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn registry_set_default_rolls_back_on_save_failure() {
+        // Point the sidecar at a path whose parent is a *file*, so the atomic
+        // write cannot succeed and save() returns Err.
+        let dir = tempfile::tempdir().unwrap();
+        let blocking_file = dir.path().join("not_a_dir");
+        std::fs::write(&blocking_file, b"x").unwrap();
+        let bad_path = blocking_file.join("nested").join("trust_policy.json");
+
+        let reg = TrustRegistry::open(Some(bad_path)).unwrap();
+        let err = reg.set_default(TrustPolicy::noisy_or(MissingConfidencePolicy::Ignore));
+        assert!(err.is_err(), "save failure surfaces as Err");
+        // RAM did not diverge: the failed set rolled back to the prior default.
+        assert_eq!(reg.default_policy(), TrustPolicy::default());
+    }
+
+    #[test]
+    fn registry_ephemeral_in_memory_no_path() {
+        let reg = TrustRegistry::in_memory();
+        // in_memory registry saves are no-ops and never fail.
+        reg.set_default(TrustPolicy::noisy_or(MissingConfidencePolicy::Zero))
+            .unwrap();
+        assert_eq!(
+            reg.default_policy(),
+            TrustPolicy::noisy_or(MissingConfidencePolicy::Zero)
+        );
     }
 }
