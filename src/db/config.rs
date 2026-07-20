@@ -1675,14 +1675,21 @@ mod ephemeral_tests {
     /// (`ALETHEIADB_SUBPROCESS_TEST_TIMEOUT_SECS`) wins on any platform, for CI
     /// tuning or local debugging.
     fn subprocess_test_timeout() -> std::time::Duration {
-        // Env override wins on any platform (for CI tuning / local debugging).
-        if let Ok(v) = std::env::var("ALETHEIADB_SUBPROCESS_TEST_TIMEOUT_SECS")
+        subprocess_test_timeout_from(std::env::var("ALETHEIADB_SUBPROCESS_TEST_TIMEOUT_SECS").ok())
+    }
+
+    /// Resolve the subprocess-test deadline from an explicit override value.
+    /// Pure (no env access) so it is unit-testable without mutating process-global state.
+    /// A missing, malformed, or zero override falls back to the platform default
+    /// (Windows CI spawns a large debug binary under heavy parallel load, so ~30s is too tight there;
+    /// the whole test binary has been observed to take ~560s on Windows).
+    fn subprocess_test_timeout_from(override_secs: Option<String>) -> std::time::Duration {
+        if let Some(v) = override_secs
             && let Ok(secs) = v.parse::<u64>()
+            && secs > 0
         {
             return std::time::Duration::from_secs(secs);
         }
-        // Windows CI spawns a large debug binary under heavy parallel load; 30s
-        // is too tight (the whole binary takes ~560s there).
         #[cfg(windows)]
         {
             std::time::Duration::from_secs(180)
@@ -1693,59 +1700,30 @@ mod ephemeral_tests {
         }
     }
 
-    /// The subprocess-test deadline honors the env override on any platform, and
-    /// its platform default is generous enough to reflect real hangs rather than
-    /// spawn overhead. Env-var access is process-global, so this test sets, reads,
-    /// and restores the override within its own body to stay self-contained; no
-    /// other test reads `ALETHEIADB_SUBPROCESS_TEST_TIMEOUT_SECS`.
+    /// The subprocess-test deadline resolution is a pure function of the override
+    /// value, so it is exercised without touching any process-global env var: an
+    /// explicit override is honored exactly, a malformed or zero override falls
+    /// back to the platform default, and the default has a sane per-platform floor.
     #[test]
-    fn subprocess_test_timeout_honors_env_override_and_sane_default() {
+    fn subprocess_test_timeout_resolves_override_and_defaults() {
         use std::time::Duration;
 
-        const KEY: &str = "ALETHEIADB_SUBPROCESS_TEST_TIMEOUT_SECS";
-        let saved = std::env::var(KEY).ok();
-
-        // Env override wins on any platform.
-        // SAFETY: set/read/restore is confined to this test; no other test reads
-        // this key. std::env::set_var is `unsafe` on the 2024 edition.
-        unsafe {
-            std::env::set_var(KEY, "7");
-        }
+        // Explicit override is honored exactly, on any platform.
         assert_eq!(
-            subprocess_test_timeout(),
-            Duration::from_secs(7),
-            "env override must set the timeout exactly"
+            subprocess_test_timeout_from(Some("7".to_string())),
+            Duration::from_secs(7)
         );
-
-        // A non-numeric value is ignored (falls through to the platform default).
-        unsafe {
-            std::env::set_var(KEY, "not-a-number");
-        }
+        // Malformed and zero overrides fall back to the platform default.
         assert!(
-            subprocess_test_timeout() >= Duration::from_secs(30),
-            "a malformed override must fall back to a sane default"
+            subprocess_test_timeout_from(Some("not-a-number".to_string()))
+                >= Duration::from_secs(30)
         );
-
-        // Restore the environment for any sibling test.
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var(KEY, v),
-                None => std::env::remove_var(KEY),
-            }
-        }
-
-        // The platform default (no env) is never tighter than the historical 30s,
-        // and is generously larger on Windows to absorb spawn/binary-load latency.
-        let default = subprocess_test_timeout();
-        assert!(
-            default >= Duration::from_secs(30),
-            "default timeout must be >= 30s, got {default:?}"
-        );
+        assert!(subprocess_test_timeout_from(Some("0".to_string())) >= Duration::from_secs(30));
+        // Default (no override) has a sane platform floor.
+        let default = subprocess_test_timeout_from(None);
+        assert!(default >= Duration::from_secs(30));
         #[cfg(windows)]
-        assert!(
-            default >= Duration::from_secs(120),
-            "windows default timeout must be >= 120s, got {default:?}"
-        );
+        assert_eq!(default, Duration::from_secs(180)); // pin the Windows margin
     }
 
     /// Configurable interner cap bounds (finding 2): `0` is rejected (it would
