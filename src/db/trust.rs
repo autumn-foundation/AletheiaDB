@@ -42,8 +42,9 @@ use crate::core::temporal::{Timestamp, time};
 use crate::db::AletheiaDB;
 use crate::db::lineage::FactStatus;
 use crate::experimental::reasoning::trust_propagation::{
-    ComputedConfidence, ConfidenceSource, MissingConfidencePolicy, NEUTRAL, SCALAR_MAX_DEPTH,
-    TrustBreakdown, TrustOptions, TrustPolicy, TrustPolicyView, clamp01, combine_values,
+    ComputedConfidence, ComputedConfidenceFilter, ConfidenceSource, MissingConfidencePolicy,
+    NEUTRAL, SCALAR_MAX_DEPTH, TrustBreakdown, TrustOptions, TrustPolicy, TrustPolicyView, clamp01,
+    combine_values,
 };
 use crate::storage::historical::HistoricalStorage;
 
@@ -242,8 +243,116 @@ impl AletheiaDB {
     }
 
     // ===================================================================
+    // Computed-confidence predicate & composition (AC7)
+    // ===================================================================
+
+    /// Whether `reference`'s computed confidence satisfies `filter` (AC7).
+    ///
+    /// An inactive filter matches every fact. Composes with the declared
+    /// confidence [`ProvenanceFilter`](crate::core::provenance::ProvenanceFilter)
+    /// via [`passes_confidence_filters`](Self::passes_confidence_filters).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::VersionNotFound`] if `reference` does not resolve.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn computed_confidence_matches(
+        &self,
+        reference: LineageRef,
+        filter: &ComputedConfidenceFilter,
+    ) -> Result<bool> {
+        if !filter.is_active() {
+            // Inactive filter still validates that the reference exists, so a
+            // dangling ref is reported rather than silently "matching".
+            self.ensure_ref_exists(reference)?;
+            return Ok(true);
+        }
+        let cc = self.computed_confidence(reference)?;
+        Ok(filter.matches(cc.computed))
+    }
+
+    /// Whether `reference` passes BOTH the declared-confidence
+    /// [`ProvenanceFilter`](crate::core::provenance::ProvenanceFilter) (evaluated
+    /// against the reference's pinned version) AND the computed-confidence
+    /// [`ComputedConfidenceFilter`] (AC7). The two constraints AND together.
+    ///
+    /// A `None` declared filter (or an inactive one) imposes no declared
+    /// constraint; an inactive computed filter imposes no computed constraint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::VersionNotFound`] if `reference` does not resolve.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn passes_confidence_filters(
+        &self,
+        reference: LineageRef,
+        declared: Option<&crate::core::provenance::ProvenanceFilter>,
+        computed: &ComputedConfidenceFilter,
+    ) -> Result<bool> {
+        self.ensure_ref_exists(reference)?;
+        if let Some(declared) = declared
+            && declared.is_active()
+        {
+            let provenance = self.pinned_version_provenance(reference)?;
+            if !declared.matches(provenance.as_ref()) {
+                return Ok(false);
+            }
+        }
+        self.computed_confidence_matches(reference, computed)
+    }
+
+    /// Retain only the references whose computed confidence satisfies `filter`,
+    /// preserving input order (AC7 — filtering reads/traversal results).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::VersionNotFound`] if any reference does not
+    /// resolve.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn filter_by_computed_confidence(
+        &self,
+        references: &[LineageRef],
+        filter: &ComputedConfidenceFilter,
+    ) -> Result<Vec<LineageRef>> {
+        let mut kept = Vec::new();
+        for reference in references {
+            if self.computed_confidence_matches(*reference, filter)? {
+                kept.push(*reference);
+            }
+        }
+        Ok(kept)
+    }
+
+    /// The computed confidence of `reference` as a fusion signal for
+    /// provenance-weighted retrieval (Issue #3372), or `None` if it cannot be
+    /// evaluated. Gated behind both the `semantic-reasoning` and
+    /// `semantic-retrieval-fusion` cohorts — #3372 owns the fusion mechanics;
+    /// this only supplies the signal.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[must_use]
+    pub fn computed_confidence_signal(&self, reference: LineageRef) -> Option<f64> {
+        self.computed_confidence(reference)
+            .ok()
+            .map(|cc| cc.computed)
+    }
+
+    // ===================================================================
     // Internal evaluation helpers
     // ===================================================================
+
+    /// The provenance bundle recorded on the reference's pinned version, if any.
+    fn pinned_version_provenance(&self, reference: LineageRef) -> Result<Option<Provenance>> {
+        let historical = self.historical.read();
+        let provenance = match reference.entity {
+            EntityId::Node(_) => historical
+                .get_node_version(reference.version)
+                .and_then(|v| v.provenance.as_deref().cloned()),
+            EntityId::Edge(_) => historical
+                .get_edge_version(reference.version)
+                .and_then(|v| v.provenance.as_deref().cloned()),
+        };
+        Ok(provenance)
+    }
 
     /// Validate that `reference` resolves to an existing version whose entity
     /// matches the reference.
@@ -1156,5 +1265,107 @@ mod tests {
         assert_eq!(bd.combinator, None);
         assert!(bd.children.is_empty());
         assert!(!bd.truncated);
+    }
+
+    // ---- M5: computed-confidence predicate (AC7) ----
+
+    #[test]
+    fn computed_confidence_filter_threshold() {
+        let db = AletheiaDB::new().unwrap(); // weakest-link
+        let r1 = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.3), &[]);
+        let d = mk(&db, "Merge", None, &[r1, r2]); // computed = 0.3
+
+        assert!(
+            db.computed_confidence_matches(d, &ComputedConfidenceFilter::at_least(0.2))
+                .unwrap()
+        );
+        assert!(
+            !db.computed_confidence_matches(d, &ComputedConfidenceFilter::at_least(0.5))
+                .unwrap()
+        );
+        // Inactive filter matches (and validates existence).
+        assert!(
+            db.computed_confidence_matches(d, &ComputedConfidenceFilter::default())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn filter_by_computed_confidence_retains_order() {
+        let db = AletheiaDB::new().unwrap();
+        let a = mk(&db, "Doc", Some(0.9), &[]); // 0.9
+        let low_root = mk(&db, "Doc", Some(0.1), &[]);
+        let b = mk(&db, "Merge", None, &[low_root]); // 0.1
+        let c = mk(&db, "Doc", Some(0.6), &[]); // 0.6
+
+        let kept = db
+            .filter_by_computed_confidence(&[a, b, c], &ComputedConfidenceFilter::at_least(0.5))
+            .unwrap();
+        assert_eq!(
+            kept,
+            vec![a, c],
+            "0.1-confidence fact filtered out, order kept"
+        );
+    }
+
+    #[test]
+    fn passes_confidence_filters_ands_declared_and_computed() {
+        use crate::core::provenance::ProvenanceFilter;
+        let db = AletheiaDB::new().unwrap();
+        // Derived fact: writer declared 0.95, but computed from a 0.2 root = 0.2.
+        let root = mk(&db, "Doc", Some(0.2), &[]);
+        let (nid, vid) = db
+            .create_node_with_options_and_lineage(
+                "Merge",
+                PropertyMap::new(),
+                WriteRequestOptions::new().with_provenance(prov(0.95)),
+                &[root],
+            )
+            .unwrap();
+        let d = LineageRef::new(nid, vid);
+
+        // Declared filter (>= 0.9) passes; computed filter (>= 0.5) fails -> AND = false.
+        let declared = ProvenanceFilter::validated(None, None, Some(0.9), false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !db.passes_confidence_filters(
+                d,
+                Some(&declared),
+                &ComputedConfidenceFilter::at_least(0.5),
+            )
+            .unwrap(),
+            "declared passes but computed fails -> filtered out"
+        );
+
+        // Both satisfiable: declared >= 0.9 and computed >= 0.1 -> AND = true.
+        assert!(
+            db.passes_confidence_filters(
+                d,
+                Some(&declared),
+                &ComputedConfidenceFilter::at_least(0.1),
+            )
+            .unwrap()
+        );
+
+        // Declared filter that the fact fails (>= 0.99) -> AND = false regardless.
+        let strict = ProvenanceFilter::validated(None, None, Some(0.99), false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !db.passes_confidence_filters(d, Some(&strict), &ComputedConfidenceFilter::default())
+                .unwrap()
+        );
+    }
+
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[test]
+    fn computed_confidence_signal_supplies_value() {
+        let db = AletheiaDB::new().unwrap();
+        let r1 = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.3), &[]);
+        let d = mk(&db, "Merge", None, &[r1, r2]);
+        assert_eq!(db.computed_confidence_signal(d), Some(0.3));
     }
 }

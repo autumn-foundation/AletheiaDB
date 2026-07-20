@@ -314,6 +314,130 @@ impl Default for TrustOptions {
     }
 }
 
+/// Error returned when constructing a [`ComputedConfidenceFilter`] from
+/// caller-supplied bounds (mirrors
+/// [`ProvenanceFilterError`](crate::core::provenance::ProvenanceFilterError)).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ComputedConfidenceFilterError {
+    /// A bound was NaN or outside the inclusive `[0.0, 1.0]` range.
+    #[error("{field} must be between 0.0 and 1.0, got {value}")]
+    InvalidBound {
+        /// Which bound was invalid (`"min"` / `"max"`).
+        field: &'static str,
+        /// The rejected value (may be NaN).
+        value: f64,
+    },
+    /// `min` exceeded `max` — an empty range that can never match.
+    #[error("computed-confidence min {min} must not exceed max {max}")]
+    InvertedRange {
+        /// The supplied lower bound.
+        min: f64,
+        /// The supplied upper bound.
+        max: f64,
+    },
+}
+
+/// A predicate filtering facts by their **computed** confidence (AC7).
+///
+/// A reusable, surface-agnostic threshold that composes with the declared
+/// confidence [`ProvenanceFilter`](crate::core::provenance::ProvenanceFilter):
+/// both constraints AND together (a fact is kept iff it satisfies both). The
+/// filter itself is a pure bound holder — evaluating a fact's computed
+/// confidence requires the database's lineage walk, so it is applied via
+/// [`AletheiaDB::computed_confidence_matches`](crate::AletheiaDB::computed_confidence_matches).
+///
+/// # Semantics
+///
+/// - `min` is an **inclusive** lower bound; `max` an **inclusive** upper bound.
+/// - An **inactive** filter (both bounds `None`) matches everything, so omitting
+///   it is byte-identical to no filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ComputedConfidenceFilter {
+    /// Inclusive lower bound on computed confidence, if any.
+    pub min: Option<f64>,
+    /// Inclusive upper bound on computed confidence, if any.
+    pub max: Option<f64>,
+}
+
+impl ComputedConfidenceFilter {
+    /// A filter keeping facts whose computed confidence is `>= min`.
+    pub const fn at_least(min: f64) -> Self {
+        Self {
+            min: Some(min),
+            max: None,
+        }
+    }
+
+    /// A filter keeping facts whose computed confidence is `<= max`.
+    pub const fn at_most(max: f64) -> Self {
+        Self {
+            min: None,
+            max: Some(max),
+        }
+    }
+
+    /// A filter keeping facts whose computed confidence is in `[min, max]`.
+    pub const fn range(min: f64, max: f64) -> Self {
+        Self {
+            min: Some(min),
+            max: Some(max),
+        }
+    }
+
+    /// Validate caller-supplied bounds, returning `Ok(None)` when neither bound
+    /// is set (so callers can cheaply skip all filtering).
+    ///
+    /// # Errors
+    ///
+    /// - [`ComputedConfidenceFilterError::InvalidBound`] if a bound is NaN or
+    ///   outside `[0.0, 1.0]`.
+    /// - [`ComputedConfidenceFilterError::InvertedRange`] if `min > max`.
+    pub fn validated(
+        min: Option<f64>,
+        max: Option<f64>,
+    ) -> std::result::Result<Option<ComputedConfidenceFilter>, ComputedConfidenceFilterError> {
+        for (field, bound) in [("min", min), ("max", max)] {
+            if let Some(v) = bound
+                && (v.is_nan() || !(0.0..=1.0).contains(&v))
+            {
+                return Err(ComputedConfidenceFilterError::InvalidBound { field, value: v });
+            }
+        }
+        if let (Some(lo), Some(hi)) = (min, max)
+            && lo > hi
+        {
+            return Err(ComputedConfidenceFilterError::InvertedRange { min: lo, max: hi });
+        }
+        if min.is_none() && max.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(ComputedConfidenceFilter { min, max }))
+    }
+
+    /// Whether this filter imposes any constraint.
+    pub fn is_active(&self) -> bool {
+        self.min.is_some() || self.max.is_some()
+    }
+
+    /// Evaluate the predicate against a concrete computed-confidence value.
+    ///
+    /// An inactive filter matches everything.
+    pub fn matches(&self, value: f64) -> bool {
+        if let Some(min) = self.min
+            && value < min
+        {
+            return false;
+        }
+        if let Some(max) = self.max
+            && value > max
+        {
+            return false;
+        }
+        true
+    }
+}
+
 /// Clamp a value into `[0.0, 1.0]`, mapping `NaN` to `0.0`.
 ///
 /// Used on every confidence value fed into or out of a combinator so a
@@ -977,6 +1101,57 @@ mod tests {
         assert!(err.is_err(), "save failure surfaces as Err");
         // RAM did not diverge: the failed set rolled back to the prior default.
         assert_eq!(reg.default_policy(), TrustPolicy::default());
+    }
+
+    // ---- computed-confidence filter (M5) ----
+
+    #[test]
+    fn filter_inactive_matches_everything() {
+        let f = ComputedConfidenceFilter::default();
+        assert!(!f.is_active());
+        assert!(f.matches(0.0));
+        assert!(f.matches(1.0));
+        assert_eq!(
+            ComputedConfidenceFilter::validated(None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn filter_bounds_are_inclusive() {
+        let f = ComputedConfidenceFilter::at_least(0.5);
+        assert!(f.matches(0.5));
+        assert!(f.matches(0.9));
+        assert!(!f.matches(0.49));
+
+        let f = ComputedConfidenceFilter::at_most(0.5);
+        assert!(f.matches(0.5));
+        assert!(!f.matches(0.51));
+
+        let f = ComputedConfidenceFilter::range(0.3, 0.7);
+        assert!(f.matches(0.3));
+        assert!(f.matches(0.7));
+        assert!(!f.matches(0.2));
+        assert!(!f.matches(0.8));
+    }
+
+    #[test]
+    fn filter_validation_rejects_bad_bounds() {
+        for bad in [1.5_f64, -0.1, f64::NAN] {
+            assert!(matches!(
+                ComputedConfidenceFilter::validated(Some(bad), None),
+                Err(ComputedConfidenceFilterError::InvalidBound { field: "min", .. })
+            ));
+        }
+        assert!(matches!(
+            ComputedConfidenceFilter::validated(Some(0.8), Some(0.2)),
+            Err(ComputedConfidenceFilterError::InvertedRange { .. })
+        ));
+        // A valid range round-trips.
+        assert_eq!(
+            ComputedConfidenceFilter::validated(Some(0.2), Some(0.8)).unwrap(),
+            Some(ComputedConfidenceFilter::range(0.2, 0.8))
+        );
     }
 
     #[test]
