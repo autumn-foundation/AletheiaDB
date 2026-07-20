@@ -40,6 +40,9 @@ After those four, pick the guides relevant to what you're building.
 - [Sharding Guide](sharding-guide.md) — Domain-based horizontal scaling with 2PC transactions
 - [HTTP State Management](http-state-management.md) — Session and state management for the HTTP API
 
+### Durable Execution
+- [Workflow Journal](workflow-journal.md) — DBOS-style exactly-once step recording: the `durable-execution` schema convention (`WorkflowRun`/`Step`/`HAS_STEP`) and memoized replay (Phase 3a)
+
 ### Migration
 - [Migrating from XTDB](migrating-from-xtdb.md) — History-preserving concept mapping, valid-time backfill, and query translation from XTDB
 - [Migrating from Datomic](migrating-from-datomic.md) — Datomic's single-axis (tx-time) history mapped onto AletheiaDB's bi-temporal model, with provenance and query translation
