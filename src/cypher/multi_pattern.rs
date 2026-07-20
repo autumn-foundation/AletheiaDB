@@ -167,6 +167,11 @@ pub fn evaluate(
         where_clause,
         return_clause,
         temporal,
+        // A restricting namespace scope on a multi-pattern MATCH is rejected
+        // up front in `plan_cypher` (fail-closed, Issue #3349); only a
+        // non-restricting `All` (no filter) reaches the evaluator, which is a
+        // no-op here, so the clause is intentionally ignored.
+        namespace: _,
         with_clauses,
         optional_matches,
     } = statement

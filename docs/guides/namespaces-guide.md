@@ -29,6 +29,12 @@ accurate against the merged implementation.
 > **AQL availability.** The in-statement `USE NAMESPACE` clause (shown below)
 > lands with Issue #3736. The MCP `query` tool's `namespace` scope parameter and
 > every Rust/MCP API in this guide are already merged.
+>
+> **Cypher availability.** The same in-statement `USE / IN NAMESPACE` prefix
+> clause is available in Cypher via the embedded Rust `execute_cypher` /
+> `execute_cypher_scoped` API (Issue #3349). See
+> [Cypher `USE NAMESPACE`](#cypher-use-namespace) below, including its v1
+> limitations (MCP `query`-tool / HTTP surfacing is a deferred follow-up).
 
 ---
 
@@ -359,6 +365,105 @@ does not enumerate edges by namespace in v1; a narrowing scope there is
 `USE NAMESPACE '<a>', '<b>'` (union), `USE ALL NAMESPACES` (no filter); `IN` is a
 synonym for `USE`. The clause is a prefix and composes with `AS OF` in either
 order.
+
+## Cypher `USE NAMESPACE`
+
+Cypher gains the **same** in-statement read-scope prefix as AQL (Issue #3349),
+mirroring the AQL surface form for form. It is available through the embedded
+Rust `execute_cypher` / `execute_cypher_scoped` API.
+
+### Grammar
+
+```cypher
+-- single namespace
+USE NAMESPACE 'agent:planner' MATCH (n:Note) RETURN n
+
+-- union of several namespaces
+USE NAMESPACE 'agent:planner', 'shared' MATCH (n:Note) RETURN n
+
+-- no filter (every namespace)
+USE ALL NAMESPACES MATCH (n:Note) RETURN n
+
+-- IN is a synonym for USE
+IN NAMESPACE 'agent:planner' MATCH (n:Note) RETURN n
+```
+
+- **`IN` synonym.** `IN NAMESPACE` / `IN ALL NAMESPACES` mean exactly
+  `USE NAMESPACE` / `USE ALL NAMESPACES`. The reserved `IN` operator inside a
+  `WHERE` (e.g. `WHERE n.age IN [30, 40]`) is unaffected — only a leading
+  `IN NAMESPACE` at statement start is the prefix.
+- **Composes with temporal, either order.** The namespace prefix and a temporal
+  clause (`AS OF TIMESTAMP '…'`, `FOR VALID_TIME AS OF '…'`,
+  `FOR SYSTEM_TIME AS OF '…'`, `BETWEEN '…' AND '…'`) may appear in either source
+  order and both lower onto the one query.
+- **Contextual keywords are case-insensitive** (`use namespace`,
+  `In All Namespaces` all parse) and non-breaking: `use`, `namespace`,
+  `namespaces`, and `all` remain usable as variables, labels, and property keys
+  because no valid Cypher statement body begins with `USE` or `IN`.
+- **Names** are a string literal (`'agent:a'`) or a bare identifier (`shared`).
+  A name containing characters outside `[A-Za-z0-9_]` (e.g. the `:` in
+  `agent:planner`) **must** be quoted — the Cypher lexer does not accept those in
+  a bare identifier. Reserved Cypher words used as names must also be quoted.
+- **Omitted ⇒ agnostic (Rust API) / fail-closed default (MCP).** With no clause,
+  raw `execute_cypher` is namespace-agnostic (every node, exactly as before the
+  feature); the lowered scope is `None`, never `Some(All)`. At the MCP/HTTP
+  boundary an omitted scope resolves to `default`-only (fail-closed), unchanged
+  by this feature.
+- **Validation timing** matches AQL: malformed clause structure is a **parse
+  error**; a name outside the charset is `INVALID_ARGUMENT` at conversion; an
+  **unknown** namespace is `NOT_FOUND` at execution (for `EXPLAIN` and `PROFILE`
+  too — the scope is validated even though `EXPLAIN` never executes, and
+  `PROFILE` executes *under* the scope so its per-operator counters are scoped).
+
+### v1 limitations / footguns
+
+1. **Embedded-Rust-API only in v1; MCP `query`-tool + HTTP surfacing is a
+   deferred follow-up.** The MCP `query` tool always injects a programmatic scope
+   (`parse_opt_scope(...).unwrap_or_default()` = `default`-only when the
+   `namespace` arg is omitted) and dispatches through `execute_cypher_scoped`.
+   The fail-closed collision guard (limitation 4) then **refuses** any in-query
+   `USE / IN NAMESPACE` clause submitted through MCP, rather than silently
+   mis-scoping it. So through MCP today you scope a Cypher query with the tool's
+   `namespace` **parameter**, not an in-query clause. This is the same
+   embedded-API-first shape AQL's clause shipped with; surfacing the in-query
+   clause through MCP/HTTP is tracked as a follow-up. (This is *safer* than the
+   AQL path, which last-wins-overwrites a programmatic scope over an in-query one
+   silently.)
+2. **A restricting clause on a multi-pattern or a mutation is rejected.** A
+   restricting `USE NAMESPACE '<name>'` on a `MATCH (a),(b) …` (multi-variable)
+   or on a `CREATE` / `MERGE` / `MATCH … SET/DELETE` statement returns a
+   structured `UnsupportedFeature` error rather than running unscoped — the
+   multi-pattern evaluator and the write paths cannot thread the scope in v1. Use
+   `USE ALL NAMESPACES` (which imposes no filter and *is* allowed on those
+   paths), or scope those operations via the programmatic
+   `*_scoped` / `create_node_in_namespace` API.
+3. **`USE NAMESPACE all` means all-namespaces (a footgun).** A lone `all` in the
+   name position — bare or quoted (`USE NAMESPACE 'all'`) — is the no-filter
+   selector and lowers to `NamespaceScope::All`, identical to
+   `USE ALL NAMESPACES` (documented AQL parity, mirrors the MCP `namespace:"all"`
+   string). Because `Namespace::new("all")` is rejected as a reserved,
+   uncreatable name, no data can ever live in a namespace literally named `all`,
+   so `USE NAMESPACE all` has exactly one sensible meaning — but the single-name
+   form can therefore never address a namespace *spelled* `all` (there is none).
+   Note also that the `all` selector is case-sensitive: `USE NAMESPACE ALL`
+   (uppercase) is a restricting filter to a namespace *named* `ALL`, not the
+   no-filter selector — prefer `USE ALL NAMESPACES` for "no filter".
+4. **An in-query clause combined with a programmatic scope is refused.** Calling
+   `execute_cypher_scoped(query_with_USE_NAMESPACE, scope)` returns
+   `UnsupportedFeature` regardless of the two scopes' values — a programmatic
+   scope is a hard ceiling and specifying the scope in two places is refused
+   (fail-closed double-specification), never silently picking a winner that could
+   widen an intended restriction. Even a non-restricting `USE ALL NAMESPACES`
+   in-query clause is refused under a programmatic scope: the guard keys on the
+   clause's *presence*, not on whether it narrows. Specify the scope in exactly
+   one place.
+5. **Union lists are not deduped.** `USE NAMESPACE 'a', 'a'` lowers to
+   `List(['a', 'a'])` un-deduped (membership still resolves correctly); parity
+   with the Rust `NamespaceScope::list` behavior.
+
+**Rust API forms:** `db.execute_cypher("USE NAMESPACE 'agent:a' MATCH … RETURN …")`
+(in-query clause governs); `db.execute_cypher_scoped(query, scope)` (programmatic
+ceiling — reject if the query *also* carries an in-query clause).
 
 ## See also
 

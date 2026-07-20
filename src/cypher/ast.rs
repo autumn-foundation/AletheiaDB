@@ -43,6 +43,14 @@ pub enum CypherStatement {
         return_clause: CypherReturn,
         /// An optional temporal qualifier (e.g., `AS OF TIMESTAMP ...`).
         temporal: Option<CypherTemporal>,
+        /// An optional namespace read-scope qualifier
+        /// (`USE / IN NAMESPACE ...`, Issue #3349). When present the converter
+        /// lowers it to a
+        /// [`NamespaceScope`](crate::core::namespace::NamespaceScope) on the
+        /// produced [`Query`](crate::query::Query) IR; when absent the query
+        /// stays namespace-agnostic exactly as before (`scope: None`). It is a
+        /// prefix clause that composes with `temporal` in either source order.
+        namespace: Option<CypherNamespaceClause>,
         /// Zero or more intermediate `WITH` projections.
         with_clauses: Vec<CypherWith>,
         /// Zero or more subsequent `OPTIONAL MATCH` clauses.
@@ -105,6 +113,47 @@ pub enum CypherStatement {
     ///
     /// [`Query`]: crate::query::Query
     Write(CypherWriteStatement),
+}
+
+/// A parsed namespace read-scope clause (`USE / IN NAMESPACE ...`, Issue #3349).
+///
+/// This mirrors [`crate::query::ast::NamespaceClause`] on the AQL side. It is
+/// produced by the parser as a cross-cutting prefix (composing with the
+/// temporal clause in either order) and lowered by the converter into a
+/// [`NamespaceScope`](crate::core::namespace::NamespaceScope) on the query IR.
+/// Names are captured raw (a string literal or a bare identifier) and validated
+/// in the converter (charset / length / reserved rules via
+/// [`Namespace::new`](crate::core::namespace::Namespace::new)), so a malformed
+/// *name* surfaces as a structured `INVALID_ARGUMENT`, while a malformed *clause
+/// structure* is a parse error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CypherNamespaceClause {
+    /// `USE ALL NAMESPACES` (or the single selector name `all`) -- no filter.
+    All,
+    /// `USE NAMESPACE <name> [, <name>]*` -- a non-empty list of raw namespace
+    /// names (one ⇒ single scope, more ⇒ union).
+    Names(Vec<String>),
+}
+
+impl CypherNamespaceClause {
+    /// Whether this clause *narrows* the result set (i.e. imposes a real
+    /// namespace filter).
+    ///
+    /// [`All`](Self::All) -- and the lone bare selector name `all`, which the
+    /// converter treats identically to `USE ALL NAMESPACES` -- impose no filter
+    /// and are therefore **not** restricting. Every other name list is
+    /// restricting. This is the single source of truth for the fail-closed
+    /// rejection of a restricting clause on an execution path that cannot thread
+    /// the scope (a mutation, or the multi-variable pattern evaluator): dropping
+    /// such a clause silently would *widen* results and leak other namespaces,
+    /// so those paths reject a restricting clause rather than execute unscoped.
+    #[must_use]
+    pub fn is_restricting(&self) -> bool {
+        match self {
+            CypherNamespaceClause::All => false,
+            CypherNamespaceClause::Names(names) => !(names.len() == 1 && names[0] == "all"),
+        }
+    }
 }
 
 /// A complete Cypher write statement (Issue #560).

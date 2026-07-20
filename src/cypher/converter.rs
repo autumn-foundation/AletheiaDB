@@ -253,6 +253,7 @@ impl CypherConverter {
                 where_clause,
                 return_clause,
                 temporal,
+                namespace,
                 with_clauses,
                 optional_matches,
             } => {
@@ -486,12 +487,18 @@ impl CypherConverter {
                     ops.push(op);
                 }
 
+                // Lower the namespace read-scope clause (Issue #3349) onto the
+                // query IR. An omitted clause stays `None` (namespace-agnostic,
+                // byte-for-byte prior behavior); it is NEVER defaulted to `All`,
+                // so the fail-closed `default`-namespace resolution the MCP layer
+                // applies to an omitted scope is preserved.
+                let scope = Self::convert_namespace_clause(namespace.as_ref())?;
+
                 Ok(Query {
                     ops,
                     temporal_context,
                     hints: QueryHints::default(),
-                    // Cypher namespace scoping is a follow-up (PR2b).
-                    scope: None,
+                    scope,
                 })
             }
             // A standalone `UNWIND` produces scalar rows, not stored entities,
@@ -530,6 +537,65 @@ impl CypherConverter {
                     .to_string(),
             )),
         }
+    }
+
+    /// Lower a parsed namespace read-scope clause (`USE / IN NAMESPACE ...`,
+    /// Issue #3349) into an optional
+    /// [`NamespaceScope`](crate::core::namespace::NamespaceScope) on the query
+    /// IR. Mirrors the AQL `convert_namespace_clause` exactly, so both surfaces
+    /// share identical semantics:
+    ///
+    /// - Omitted clause ⇒ `None` (namespace-agnostic; prior behavior). Never
+    ///   `Some(All)`.
+    /// - `USE ALL NAMESPACES`, or a lone bare selector name `all`, ⇒ `All`.
+    /// - One name ⇒ `Single`; several ⇒ a `List` union.
+    ///
+    /// Name validation is delegated to
+    /// [`Namespace::new`](crate::core::namespace::Namespace::new); a malformed
+    /// name (or an empty union, already prevented by the parser but guarded
+    /// again by [`NamespaceScope::list`](crate::core::namespace::NamespaceScope::list))
+    /// surfaces as a [`CypherError::ParameterError`], which maps to the same
+    /// `INVALID_ARGUMENT` MCP code as the AQL side and the MCP `namespace`
+    /// parameter. An unknown-but-well-formed namespace is NOT rejected here; it
+    /// is caught at execution by `validate_scope` as `NOT_FOUND`.
+    ///
+    /// # Errors
+    ///
+    /// [`CypherError::ParameterError`] for a malformed name or an empty union.
+    fn convert_namespace_clause(
+        clause: Option<&CypherNamespaceClause>,
+    ) -> Result<Option<crate::core::namespace::NamespaceScope>, CypherError> {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+
+        let Some(clause) = clause else {
+            return Ok(None);
+        };
+        let scope = match clause {
+            CypherNamespaceClause::All => NamespaceScope::All,
+            // A lone `all` name is the no-filter selector, mirroring the MCP
+            // `namespace: "all"` string and the AQL converter (exact match).
+            CypherNamespaceClause::Names(names) if names.len() == 1 && names[0] == "all" => {
+                NamespaceScope::All
+            }
+            CypherNamespaceClause::Names(names) => {
+                let mut namespaces = Vec::with_capacity(names.len());
+                for name in names {
+                    namespaces.push(
+                        Namespace::new(name.as_str())
+                            .map_err(|e| CypherError::ParameterError(e.to_string()))?,
+                    );
+                }
+                if namespaces.len() == 1 {
+                    NamespaceScope::Single(namespaces.into_iter().next().expect("len == 1"))
+                } else {
+                    // Empty is unreachable (the parser requires >= 1 name), but
+                    // `list` still guards it as an `INVALID_ARGUMENT`.
+                    NamespaceScope::list(namespaces)
+                        .map_err(|e| CypherError::ParameterError(e.to_string()))?
+                }
+            }
+        };
+        Ok(Some(scope))
     }
 
     // =======================================================================

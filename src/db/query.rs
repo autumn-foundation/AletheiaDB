@@ -388,10 +388,12 @@ impl AletheiaDB {
                 self.execute_multi_pattern(&statement, &params)
             }
             crate::cypher::CypherExecution::Explain(query) => {
-                self.explain_cypher_query(query, crate::core::namespace::NamespaceScope::All)
+                let scope = Self::in_query_scope_or_all(&query);
+                self.explain_cypher_query(query, scope)
             }
             crate::cypher::CypherExecution::Profile(query) => {
-                self.profile_cypher_query(query, crate::core::namespace::NamespaceScope::All)
+                let scope = Self::in_query_scope_or_all(&query);
+                self.profile_cypher_query(query, scope)
             }
             crate::cypher::CypherExecution::Mutation { statement, params } => {
                 self.execute_mutation(&statement, &params)
@@ -444,10 +446,12 @@ impl AletheiaDB {
                 self.execute_multi_pattern(&statement, &params)
             }
             crate::cypher::CypherExecution::Explain(query) => {
-                self.explain_cypher_query(query, crate::core::namespace::NamespaceScope::All)
+                let scope = Self::in_query_scope_or_all(&query);
+                self.explain_cypher_query(query, scope)
             }
             crate::cypher::CypherExecution::Profile(query) => {
-                self.profile_cypher_query(query, crate::core::namespace::NamespaceScope::All)
+                let scope = Self::in_query_scope_or_all(&query);
+                self.profile_cypher_query(query, scope)
             }
             crate::cypher::CypherExecution::Mutation { statement, params } => {
                 self.execute_mutation(&statement, &params)
@@ -522,6 +526,35 @@ impl AletheiaDB {
     ) -> Result<QueryResults> {
         use crate::core::namespace::NamespaceScope;
         use crate::cypher::CypherExecution;
+
+        // Fail-closed collision rule (Issue #3349): a programmatic scope is a
+        // hard ceiling. If the statement ALSO carries an in-statement
+        // `USE / IN NAMESPACE` clause, the two could disagree -- and blindly
+        // letting the programmatic scope overwrite the in-query one could WIDEN
+        // an intended restriction (programmatic `All` erasing an in-query
+        // `Single`). Rather than silently pick a winner in either direction, we
+        // refuse the combination and require the caller to specify the scope in
+        // exactly one place. (This is stricter than the AQL side, which
+        // last-wins-overwrites; the divergence is deliberate for this
+        // security-sensitive isolation feature.)
+        let has_in_query_scope = match &execution {
+            CypherExecution::Query(q)
+            | CypherExecution::Explain(q)
+            | CypherExecution::Profile(q) => q.scope.is_some(),
+            CypherExecution::MultiPattern { statement, .. } => {
+                crate::cypher::statement_namespace(statement).is_some()
+            }
+            CypherExecution::Mutation { .. } | CypherExecution::Rows(_) => false,
+        };
+        if has_in_query_scope {
+            return Err(crate::cypher::CypherError::UnsupportedFeature(
+                "a programmatic namespace scope cannot be combined with an in-statement \
+                 USE / IN NAMESPACE clause; specify the namespace scope in exactly one place"
+                    .to_string(),
+            )
+            .into());
+        }
+
         let restricting = !matches!(scope, NamespaceScope::All);
         match execution {
             CypherExecution::Query(mut query) => {
@@ -596,6 +629,20 @@ impl AletheiaDB {
         Ok(crate::cypher::multi_pattern::evaluate(
             self, statement, params,
         )?)
+    }
+
+    /// The namespace read scope to apply to a Cypher `EXPLAIN` / `PROFILE`
+    /// (Issue #3349): the in-statement `USE / IN NAMESPACE` clause lowered onto
+    /// the query IR, or [`NamespaceScope::All`](crate::core::namespace::NamespaceScope::All)
+    /// (no filter) when the statement carries none. Threading the in-query scope
+    /// here (instead of hardcoding `All`) makes a scoped `EXPLAIN` honor the
+    /// `NOT_FOUND` contract for an unknown namespace and a scoped `PROFILE`
+    /// report per-operator counts for the *scoped* query, never unscoped data.
+    fn in_query_scope_or_all(query: &Query) -> crate::core::namespace::NamespaceScope {
+        query
+            .scope
+            .clone()
+            .unwrap_or(crate::core::namespace::NamespaceScope::All)
     }
 
     /// Plan (but do not execute) a Cypher `EXPLAIN` query, returning the
