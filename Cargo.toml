@@ -598,6 +598,16 @@ harness = false
 path = "benches/belief_revision.rs"
 required-features = ["semantic-temporal"]
 
+# Knowledge half-life analytics (Issue #3377, Fix-B): a cold cohort scan +
+# Kaplan-Meier over a sizeable synthetic cohort (SM3 < 10s / 1M versions,
+# extrapolated) and the warm fact_freshness cache path (SM3 < 1ms warm).
+# Bench-reported, not CI-gated. Gated on semantic-temporal.
+[[bench]]
+name = "half_life"
+harness = false
+path = "benches/half_life.rs"
+required-features = ["semantic-temporal"]
+
 # Drift-alarm write-path overhead (Issue #3367): GroupCommit commit throughput
 # baseline vs 10 active on-write monitors + engine (target: <10% reduction).
 [[bench]]
