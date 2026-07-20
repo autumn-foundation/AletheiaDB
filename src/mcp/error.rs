@@ -436,6 +436,13 @@ fn classify_storage_error(e: &StorageError) -> (McpErrorCode, bool) {
         StorageError::ColdKeyringAlreadyInstalled { .. } => {
             (McpErrorCode::FailedPrecondition, false)
         }
+        // A pre-v13 (0.1.x) WAL tail refused on open (Issue #3746) is a caller
+        // precondition failure — the operator must drain/checkpoint the WAL on
+        // the old version before upgrading; retrying the same open cannot
+        // succeed, so it is non-retriable.
+        StorageError::PreV13WalTailRequiresMigration { .. } => {
+            (McpErrorCode::FailedPrecondition, false)
+        }
         // A per-principal changefeed quota breach (Issue #3678) is a transient
         // fairness limit: another of this principal's subscriptions may drop, so
         // retrying with backoff can succeed → RESOURCE_EXHAUSTED, retriable.

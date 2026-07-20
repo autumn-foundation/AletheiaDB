@@ -1,16 +1,22 @@
 //! Cross-version compatibility: open a data directory written by the published
 //! AletheiaDB **0.1.1** crate under the current trunk (0.2.0) code.
 //!
-//! # STATUS: RELEASE BLOCKER (test is `#[ignore]`d so CI stays green)
+//! # STATUS: RESOLVED (Issue #3746) — open() now REFUSES the corrupting tail
 //!
-//! Opening a real 0.1.1-written data directory under trunk **corrupts the
-//! interned-string labels of every entity recovered from the 0.1.1 WAL tail**,
-//! and diverges from 0.1.1's own recovered state. Trunk *does* open the
-//! directory without erroring, and the batch-1 index-snapshot entities (nodes
-//! 0..8) and Bob's temporal version chain survive intact — but the WAL-replay
-//! path mis-resolves interned strings for the post-snapshot tail.
+//! Opening a real 0.1.1-written data directory that still carries an unreplayed
+//! **pre-v13 WAL tail** used to silently **corrupt the interned-string labels of
+//! every entity recovered from that tail** (see the `Observed failure` transcript
+//! below). Rather than replay a tail whose raw interner ids can no longer be
+//! resolved to their original strings, `AletheiaDB::open()` now **refuses** such a
+//! directory with a FAILED_PRECONDITION-style error that points at
+//! `docs/guides/migration-0.1-to-0.2.md` and tells the operator to drain /
+//! checkpoint the WAL on 0.1.x before upgrading (`refuses_to_open_..._pre_v13_wal_tail`).
+//! A cleanly-checkpointed 0.1.1 directory (zero replay) still opens with full
+//! integrity (`checkpointed_..._with_full_integrity`), and a CURRENT-version
+//! (v13+) unreplayed tail still opens cleanly (`current_version_..._opens`) — the
+//! guard is scoped to the pre-v13 replay window only.
 //!
-//! ## Observed failure (verbatim, `AletheiaDB::open()` on a copy of the fixture)
+//! ## Observed failure BEFORE the fix (verbatim, on a copy of the fixture)
 //!
 //! ```text
 //! Index restoration completed successfully: 9 nodes, 9 edges loaded
@@ -46,17 +52,17 @@
 //! mislabeled. Batch-1 (snapshot) labels are unaffected because they were
 //! materialized directly from the snapshot's string table.
 //!
-//! ## Why this blocks the in-place 0.1.x -> 0.2.0 upgrade
+//! ## Why refusing is the right fix for the in-place 0.1.x -> 0.2.0 upgrade
 //!
 //! The documented, supported upgrade path is an **in-place open** (there is no
 //! 0.1.x `.albk` backup off-ramp). Any 0.1.x deployment with committed writes
 //! after its last index-persistence snapshot — i.e. any non-cleanly-snapshotted
-//! shutdown — will, on first 0.2.0 open, silently mislabel exactly those
-//! tail entities. Label-based reads/traversals (`find_nodes`, `MATCH (n:Label)`)
-//! then return wrong results with no error surfaced. This must be fixed (or the
-//! migration path re-scoped) before 0.2.0 ships; the migration guide's
-//! data-safety section must NOT be upgraded to a "tested / safe in-place"
-//! claim on the strength of this fixture.
+//! shutdown — would, on first 0.2.0 open, silently mislabel exactly those tail
+//! entities. Because the pre-v13 WAL never stored the label *string* (only a raw
+//! process-local interner id), there is nothing to recover it from at replay
+//! time; the only safe answer is to refuse and direct the operator to drain the
+//! WAL on 0.1.x first (`persist_indexes()` + graceful shutdown), which captures
+//! every label as a string in the index snapshot.
 //!
 //! ## What the fixture is
 //!
@@ -67,8 +73,7 @@
 //! the full regeneration recipe and ground truth. Regenerate ONLY via the
 //! pinned 0.1.1 crate, never trunk.
 //!
-//! This test is retained (`#[ignore]`d) as an executable reproduction of the
-//! blocker: `cargo test --test compat_0_1_1_datadir -- --ignored --nocapture`.
+//! Run: `cargo test --test compat_0_1_1_datadir -- --nocapture`.
 
 use aletheiadb::{AletheiaDB, NodeId, PropertyValue, Timestamp, time};
 use std::path::{Path, PathBuf};
@@ -154,183 +159,121 @@ fn prop_str(v: Option<&PropertyValue>) -> String {
     }
 }
 
-/// Cross-version integrity check. Encodes the fixture's CORRECT ground truth
-/// (`tests/fixtures/compat/README.md`) — the state a faithful 0.1.x -> 0.2.0
-/// open should reproduce — and collects every divergence. It currently FAILS
-/// (hence `#[ignore]`): trunk mislabels the WAL-tail entities. Re-enable by
-/// removing `#[ignore]` once the WAL-replay interner-ID drift is fixed.
+/// Cross-version SAFETY check (Issue #3746): opening a 0.1.x data directory that
+/// still carries an **unreplayed pre-v13 WAL tail** must be REFUSED, not silently
+/// corrupted. Pre-v13 (0.1.x) WAL segments encode node/edge labels as raw
+/// process-local interner ids; trunk rebuilds `GLOBAL_INTERNER` in a different
+/// order, so replaying that tail resolves labels to WRONG strings (verified in
+/// the `//! Observed failure` header above: node 10 -> "founded", node 12 ->
+/// "since"). The accepted fix is REFUSE-DON'T-CORRUPT: `AletheiaDB::open()`
+/// detects a pre-v13 tail inside the replay window and fails with a
+/// FAILED_PRECONDITION-style error that points at the migration guide, so the
+/// operator drains/checkpoints on 0.1.x first.
+///
+/// (This test replaces the former `#[ignore]`d `opens_..._with_full_integrity`
+/// blocker reproduction: we no longer aspire to replay the corrupt tail
+/// losslessly — there is no string to recover from a raw id — we refuse it.)
 #[test]
-#[ignore = "BLOCKER: 0.1.x data dir does not open cleanly under trunk — WAL-tail interned labels are corrupted; see the //! header and PR body"]
-fn opens_0_1_1_data_dir_with_full_integrity() {
+fn refuses_to_open_0_1_1_data_dir_with_pre_v13_wal_tail() {
     // Open a COPY (opening the checked-in fixture in place would let WAL
     // replay / re-snapshot mutate the committed fixture).
     let copy = FixtureCopy::new();
-    let db = AletheiaDB::open(&copy.path)
-        .expect("trunk (0.2.0) must at least open a data directory written by 0.1.1");
+    let result = AletheiaDB::open(&copy.path);
 
-    // Collect all integrity violations rather than stopping at the first, so a
-    // single `--ignored` run documents the full blast radius.
+    let err = match result {
+        Ok(_) => panic!(
+            "trunk (0.2.0) must REFUSE to open a 0.1.x data dir with an unreplayed pre-v13 WAL \
+             tail rather than silently corrupt its interned labels"
+        ),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+
+    // The refusal must point the operator at the migration guide.
+    assert!(
+        msg.contains("migration-0.1-to-0.2"),
+        "refusal must cite docs/guides/migration-0.1-to-0.2.md; got: {msg}"
+    );
+    // ...and tell them HOW to make the directory safe: drain / checkpoint the WAL
+    // (persist_indexes) before upgrading.
+    let lower = msg.to_lowercase();
+    assert!(
+        lower.contains("drain")
+            || lower.contains("checkpoint")
+            || lower.contains("persist_indexes"),
+        "refusal must direct the operator to drain/checkpoint the WAL before upgrading; got: {msg}"
+    );
+    // ...and it must name what it is protecting: interned labels that would
+    // otherwise be silently corrupted.
+    assert!(
+        lower.contains("label"),
+        "refusal must explain the interned-label corruption it prevents; got: {msg}"
+    );
+}
+
+/// Positive control (Issue #3746): the pre-v13 guard must NOT be over-broad. A
+/// CURRENT-version data directory dropped WITHOUT an explicit `persist_indexes()`
+/// still leaves an unreplayed WAL tail — but that tail is v13+ (string labels),
+/// so reopening it must succeed with labels intact. If this regresses, the guard
+/// is refusing healthy modern databases.
+#[test]
+fn current_version_data_dir_with_unreplayed_tail_opens() {
+    // A fresh durable data dir written by THIS build.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "aletheiadb-3746-current-tail-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Phase 1: write labeled nodes, then drop WITHOUT persist_indexes() so a live
+    // WAL tail remains (nothing snapshotted to the index tier past LSN 0).
+    {
+        let db = AletheiaDB::open(&dir).expect("open fresh current-version data dir");
+        db.create_node(
+            "Person",
+            aletheiadb::PropertyMapBuilder::new()
+                .insert("name", "Ada")
+                .build(),
+        )
+        .expect("create Person node");
+        db.create_node(
+            "Company",
+            aletheiadb::PropertyMapBuilder::new()
+                .insert("name", "Analytical")
+                .build(),
+        )
+        .expect("create Company node");
+        // Drop here (no persist_indexes) — leaves an unreplayed WAL tail.
+    }
+
+    // Phase 2: reopen. The guard must NOT fire (this tail is v13+ string-labels),
+    // and the labels must round-trip correctly through replay.
+    let db = AletheiaDB::open(&dir)
+        .expect("current-version data dir with an unreplayed v13+ WAL tail must open cleanly");
+
     let mut violations: Vec<String> = Vec::new();
-
-    // --- Current-state counts -------------------------------------------------
-    // Fixture ground truth is 12 / 12. Trunk yields 13 / 12: it replays one more
-    // WAL entry than 0.1.1 (the throwaway "Sentinel" boundary slot 0.1.1's
-    // snapshot-boundary off-by-one dropped), so the recovered set diverges from
-    // the data 0.1.1 itself recovers.
-    if db.node_count() != 12 {
-        violations.push(format!(
-            "node_count = {} (expected 12; trunk replays the sentinel boundary slot 0.1.1 dropped)",
-            db.node_count()
-        ));
-    }
-    if db.edge_count() != 12 {
-        violations.push(format!("edge_count = {} (expected 12)", db.edge_count()));
-    }
-
-    // --- Quirk (1): sentinel node id 9 should be absent -----------------------
-    // 0.1.1 dropped node 9 via its snapshot-boundary off-by-one. Trunk instead
-    // replays it — but cannot resolve its label (shows as `Interned(N)`).
-    let sentinel = NodeId::new(9).unwrap();
-    if let Ok(n) = db.get_node(sentinel) {
-        violations.push(format!(
-            "sentinel node id 9 is PRESENT under trunk (expected absent); label renders as {}",
-            n.label
-        ));
-    }
-
-    // --- Batch-1 nodes (index snapshot): expected fully intact ----------------
-    // These come from the 0.1.1 index snapshot's string table and are the
-    // control group — they must round-trip correctly.
+    check_node(&db, 0, "Person", "name", "String(\"Ada\")", &mut violations);
     check_node(
         &db,
-        0,
-        "Person",
-        "name",
-        "String(\"Alice\")",
-        &mut violations,
-    );
-    check_int(&db, 0, "age", 30, &mut violations);
-    check_float(&db, 0, "score", 4.5, &mut violations);
-    check_bool(&db, 0, "active", true, &mut violations);
-    check_node(
-        &db,
-        4,
+        1,
         "Company",
         "name",
-        "String(\"Acme\")",
+        "String(\"Analytical\")",
         &mut violations,
     );
-    check_int(&db, 4, "founded", 1999, &mut violations);
-    check_bool(&db, 4, "public", true, &mut violations);
-
-    // --- Batch-2 nodes (WAL tail): where the corruption lives -----------------
-    // Names survive; labels are mis-resolved to unrelated interned strings.
-    check_node(
-        &db,
-        10,
-        "Person",
-        "name",
-        "String(\"Eve\")",
-        &mut violations,
-    );
-    check_int(&db, 10, "age", 34, &mut violations);
-    check_float(&db, 10, "score", 5.0, &mut violations);
-    check_node(
-        &db,
-        12,
-        "Company",
-        "name",
-        "String(\"Umbrella\")",
-        &mut violations,
-    );
-
-    // --- Specific edges with properties --------------------------------------
-    // (Person:Alice) -[WORKS_AT role="Engineer"]-> (Company:Acme)  [batch-1]
-    let acme_id = NodeId::new(4).unwrap();
-    let alice_works_at_acme = db
-        .get_outgoing_edges(NodeId::new(0).unwrap())
-        .into_iter()
-        .filter_map(|eid| db.get_edge(eid).ok())
-        .find(|e| e.has_label_str("WORKS_AT") && e.target == acme_id);
-    match alice_works_at_acme {
-        Some(e) if e.get_property("role").and_then(|v| v.as_str()) == Some("Engineer") => {}
-        Some(e) => violations.push(format!(
-            "alice->acme WORKS_AT role = {} (expected Engineer)",
-            prop_str(e.get_property("role"))
-        )),
-        None => violations
-            .push("alice -[WORKS_AT]-> acme edge not found by label (batch-1)".to_string()),
-    }
-
-    // (Person:Eve) -[WORKS_AT role="Researcher"]-> (Company:Umbrella) [batch-2].
-    // If batch-2 EDGE labels are also interner-corrupted, this find-by-label
-    // fails too — additional evidence of the same root cause.
-    let umbrella_id = NodeId::new(12).unwrap();
-    let eve_works_at_umbrella = db
-        .get_outgoing_edges(NodeId::new(10).unwrap())
-        .into_iter()
-        .filter_map(|eid| db.get_edge(eid).ok())
-        .find(|e| e.has_label_str("WORKS_AT") && e.target == umbrella_id);
-    match eve_works_at_umbrella {
-        Some(e) if e.get_property("role").and_then(|v| v.as_str()) == Some("Researcher") => {}
-        Some(e) => violations.push(format!(
-            "eve->umbrella WORKS_AT role = {} (expected Researcher)",
-            prop_str(e.get_property("role"))
-        )),
-        None => violations.push(
-            "eve -[WORKS_AT]-> umbrella edge not found by label (batch-2 WAL tail)".to_string(),
-        ),
-    }
-
-    // --- Temporal: Bob's superseded history (from the snapshot) ---------------
-    // This path (temporal index snapshot) survives — asserted as a control.
-    let bob = NodeId::new(1).unwrap();
-    match db.get_node_history(bob) {
-        Ok(h) if h.versions.len() == 2 => {
-            if prop_str(h.versions[0].properties.get("age")) != "Int(41)" {
-                violations.push(format!(
-                    "bob v1 age = {} (expected Int(41))",
-                    prop_str(h.versions[0].properties.get("age"))
-                ));
-            }
-            if prop_str(h.versions[1].properties.get("age")) != "Int(42)" {
-                violations.push(format!(
-                    "bob v2 age = {} (expected Int(42))",
-                    prop_str(h.versions[1].properties.get("age"))
-                ));
-            }
-        }
-        Ok(h) => violations.push(format!(
-            "bob history has {} versions (expected 2)",
-            h.versions.len()
-        )),
-        Err(e) => violations.push(format!("bob history errored: {e:?}")),
-    }
-
-    // --- Probe (non-fatal): get_node_at_time on a restored node ---------------
-    // 0.1.1 returned NodeNotFound here for restored nodes. This records whether
-    // trunk fixed it. On the observed run trunk did NOT (same NodeNotFound), so
-    // this is reported, not counted as a blocker violation.
-    let before_update: Timestamp = Timestamp::from(1_784_435_154_774_824_i64);
-    let now = time::now();
-    match db.get_node_at_time(bob, before_update, now) {
-        Ok(node) => eprintln!(
-            "PROBE: trunk FIXED the 0.1.1 restore-path limitation — \
-             get_node_at_time(bob, before_update, now) = {} (expected Int(41))",
-            prop_str(node.get_property("age"))
-        ),
-        Err(err) => eprintln!(
-            "PROBE: 0.1.1 restore-path limitation NOT fixed — \
-             get_node_at_time(bob, before_update, now) = Err({err:?})"
-        ),
-    }
-
     assert!(
         violations.is_empty(),
-        "\n0.1.1 -> trunk cross-version integrity violations ({}):\n  - {}\n",
+        "\ncurrent-version WAL-tail reopen violations ({}):\n  - {}\n",
         violations.len(),
         violations.join("\n  - ")
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Cross-version integrity check for the CLEANLY CHECKPOINTED / WAL-drained

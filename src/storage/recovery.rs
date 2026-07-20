@@ -1213,6 +1213,10 @@ mod framing_tests {
             operation: op,
             checksum: 0,
             framed: true,
+            // In-memory test fixture; the pre-v13 refusal (Issue #3746) is
+            // enforced in the open/replay-window path, not in this replay unit,
+            // so the decoded segment version is irrelevant here.
+            segment_version: None,
         }
     }
 
@@ -1224,6 +1228,10 @@ mod framing_tests {
             operation: op,
             checksum: 0,
             framed: false,
+            // In-memory test fixture; the pre-v13 refusal (Issue #3746) is
+            // enforced in the open/replay-window path, not in this replay unit,
+            // so the decoded segment version is irrelevant here.
+            segment_version: None,
         }
     }
 

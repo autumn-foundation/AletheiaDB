@@ -449,6 +449,25 @@ pub enum StorageError {
         /// The rejection reason.
         reason: String,
     },
+    /// Opening a data directory was refused because its unreplayed WAL tail is a
+    /// **pre-v13** (0.1.x) segment, which encodes node/edge labels as raw
+    /// process-local interner ids (Issue #3746).
+    ///
+    /// Replaying such a tail under a differently-ordered `GLOBAL_INTERNER` would
+    /// silently resolve those ids to the WRONG strings — corrupting the labels of
+    /// every entity recovered from the tail — and the original string was never
+    /// written to disk, so it cannot be recovered at replay time. Distinct from
+    /// the generic [`CorruptedData`](Self::CorruptedData) / [`WalError`](Self::WalError)
+    /// so this **precondition** failure classifies as `FAILED_PRECONDITION` (the
+    /// caller must drain/checkpoint the WAL on the old version before upgrading)
+    /// rather than `INTERNAL`, mirroring the keyring-precondition variants above.
+    /// It is non-retriable: reopening the same directory cannot succeed until the
+    /// operator drains the tail.
+    #[error("pre-v13 (0.1.x) WAL tail cannot be replayed safely: {reason}")]
+    PreV13WalTailRequiresMigration {
+        /// The refusal reason, including remediation guidance.
+        reason: String,
+    },
     /// Checkpoint error.
     #[error("Checkpoint error: {reason}")]
     CheckpointError {

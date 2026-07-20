@@ -313,8 +313,12 @@ fn carries_destructive_provenance(version: u8) -> bool {
 /// Independent of the framing/delete-version-id/destructive-provenance gates:
 /// all are monotonic `>=` predicates on the same version byte, so v13/v14
 /// segments carry every prior field AND string labels.
+///
+/// Exposed `pub(crate)` (Issue #3746) so the recovery/open path can refuse a
+/// pre-v13 WAL tail (`!carries_string_labels`) whose raw-id labels would resolve
+/// to the wrong strings under a rebuilt interner.
 #[inline]
-fn carries_string_labels(version: u8) -> bool {
+pub(crate) fn carries_string_labels(version: u8) -> bool {
     version >= WAL_VERSION_STRING_LABELS
 }
 
@@ -2187,6 +2191,13 @@ pub(crate) fn parse_entry_at(
         // (encrypted container versions are mapped via `payload_version`
         // before reaching this function), so the comparison is uniform.
         framed: is_framed_version(version),
+        // Stamp the decoded plaintext/payload version (Issue #3746). This is the
+        // single per-entry decode site for BOTH the plaintext and the
+        // encrypted-then-decrypted paths (`parse_plaintext_entries` and
+        // `parse_encrypted_entries` both call `parse_entry_at` with the payload
+        // version), so recovery can later refuse a pre-v13 tail whose raw-id
+        // labels would resolve to the wrong strings under a rebuilt interner.
+        segment_version: Some(version),
     };
     let bytes_consumed = cur - start_offset;
     Ok((entry, bytes_consumed))

@@ -41,6 +41,48 @@ fn validate_interner_cap(configured: usize) -> Result<usize> {
     Ok(configured.min(u32::MAX as usize))
 }
 
+/// Refuse to replay a WAL tail written by a **pre-v13** (0.1.x) segment
+/// (Issue #3746).
+///
+/// Pre-v13 WAL segments encode node/edge labels as raw process-local
+/// [`InternedString`](crate::core::interning::InternedString) ids rather than the
+/// label string itself. On startup this process rebuilds `GLOBAL_INTERNER` in a
+/// different order than the 0.1.x writer, so replaying such a tail resolves those
+/// ids to the WRONG strings — silently corrupting the labels of every entity
+/// recovered from the tail (verified in `tests/compat_0_1_1_datadir.rs`). The
+/// original string was never written to disk, so it cannot be recovered at replay
+/// time; the only safe response is to refuse.
+///
+/// This scans ONLY the entries that will actually be replayed (the replay
+/// window: `lsn >= start_lsn`, after the drain). A cleanly-checkpointed /
+/// WAL-drained directory has an empty window and is never refused, and a
+/// CURRENT-version (v13+) tail carries string labels and is never refused. An
+/// entry with `segment_version == None` is in-memory-constructed (not decoded
+/// from disk) and is likewise not refused.
+fn refuse_pre_v13_wal_tail(replay_entries: &[crate::storage::wal::WalEntry]) -> Result<()> {
+    let pre_v13 = replay_entries.iter().find_map(|entry| {
+        entry
+            .segment_version
+            .filter(|&v| !crate::storage::wal::segment_reader::carries_string_labels(v))
+    });
+    if let Some(version) = pre_v13 {
+        return Err(StorageError::PreV13WalTailRequiresMigration {
+            reason: format!(
+                "this data directory has an unreplayed pre-v13 (0.1.x) WAL tail (segment \
+                 format version {version} < v13): those segments store node/edge labels as raw \
+                 process-local interner ids, and replaying them under this build's rebuilt \
+                 interner would silently corrupt every recovered label. The label strings were \
+                 never written to disk, so they cannot be recovered here. Drain the WAL on the \
+                 old version first — call `persist_indexes()` (checkpoint) and shut down \
+                 gracefully so the tail is captured in the index snapshot as strings — then \
+                 upgrade. See docs/guides/migration-0.1-to-0.2.md."
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// The outcome of reconciling a newly-opened database's requested interner cap
 /// against the process-global cap already in effect (Issue #3724).
 ///
@@ -1160,6 +1202,12 @@ impl AletheiaDB {
                 startup_wal_entries.drain(..split);
                 let replay_entries = std::mem::take(&mut startup_wal_entries);
 
+                // Issue #3746: refuse a pre-v13 (0.1.x) WAL tail in the replay
+                // window before it can silently corrupt interned labels. A
+                // drained directory has an empty window (nothing to refuse); a
+                // v13+ tail carries string labels and passes.
+                refuse_pre_v13_wal_tail(&replay_entries)?;
+
                 let mut historical_guard = db.historical.write();
                 let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
                     crate::storage::recovery::replay_entries_into_storage_with_constraints(
@@ -1208,6 +1256,11 @@ impl AletheiaDB {
                 // moves the entries out of the (persistence-branch-shared)
                 // binding; only one of the two branches runs.
                 let replay_entries = std::mem::take(&mut startup_wal_entries);
+
+                // Issue #3746: refuse a pre-v13 (0.1.x) WAL tail before replay
+                // (this WAL-only branch replays from LSN 0, so the whole history
+                // is the replay window). Symmetric with the persistence branch.
+                refuse_pre_v13_wal_tail(&replay_entries)?;
 
                 let mut historical_guard = db.historical.write();
                 let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
