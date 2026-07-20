@@ -1419,6 +1419,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md)** - Authentication, RBAC roles, API-key lifecycle
 - **[docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)** - Canonical role/operation authorization matrix
 - **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Fact-to-fact derivation lineage: version-pinned upstream/downstream closures (Issue #3371)
+- **[docs/guides/trust-propagation.md](docs/guides/trust-propagation.md)** - Computed confidence over lineage: combinators, per-label policy, trust_breakdown explainability, retraction/valid-time rules (Issue #3382)
 - **[docs/guides/namespaces-guide.md](docs/guides/namespaces-guide.md)** - Agent-scoped namespaces: shared knowledge base + private agent scratch, isolated-by-default read scoping (Issue #3349)
 
 ### Architecture Decision Records (ADRs)

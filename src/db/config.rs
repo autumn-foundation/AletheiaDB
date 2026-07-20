@@ -966,6 +966,18 @@ impl AletheiaDB {
                 ),
                 snapshots,
                 namespaces,
+                // Trust-policy registry (Issue #3382): durable sidecar at
+                // `{data_dir}/trust_policy.json` when index persistence is
+                // enabled, in-memory-only otherwise. Loaded here so declared
+                // policies survive restart. Gated to `semantic-reasoning`.
+                #[cfg(feature = "semantic-reasoning")]
+                trust_policies: Arc::new(
+                    crate::experimental::reasoning::trust_propagation::TrustRegistry::open(
+                        crate::experimental::reasoning::trust_propagation::registry_path_for(
+                            &config.persistence,
+                        ),
+                    )?,
+                ),
                 // Knowledge half-life cohort-stats cache (Issue #3377, Fix-B):
                 // in-memory, recomputable, off the write path. Gated to
                 // `semantic-temporal`.
@@ -1597,6 +1609,11 @@ impl AletheiaDB {
                 snapshots: Arc::new(crate::db::snapshot::SnapshotRegistry::in_memory()),
                 // Ephemeral namespace registry (Issue #3349): in-memory only.
                 namespaces: Arc::new(crate::db::namespace::NamespaceRegistry::in_memory()),
+                // Ephemeral trust-policy registry (Issue #3382): in-memory only.
+                #[cfg(feature = "semantic-reasoning")]
+                trust_policies: Arc::new(
+                    crate::experimental::reasoning::trust_propagation::TrustRegistry::in_memory(),
+                ),
                 // Knowledge half-life cohort-stats cache (Issue #3377, Fix-B):
                 // in-memory, recomputable, off the write path. Gated to
                 // `semantic-temporal`.
