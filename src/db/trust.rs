@@ -1058,8 +1058,15 @@ mod tests {
         }
     }
 
-    // ---- C-7: diamond DAG, shared ancestor combined once ----
-
+    // ---- C-7: diamond DAG ----
+    //
+    // NOTE: memoization computes the shared ancestor's value once, but that is
+    // NOT de-duplication of its influence: noisy-OR treats the two parents `b`
+    // and `c` as independent evidence and counts the shared ancestor's 0.6 in
+    // EACH, so `d = noisy_or{b=0.6, c=0.6} = 1-(0.4)(0.4) = 0.84`, higher than
+    // the ancestor's own 0.6. This is the documented independence approximation
+    // (§2.3 / Out-of-Scope probabilistic caveat), not a bug. Under weakest-link
+    // the same diamond is `min = 0.6` (min is idempotent under repetition).
     #[test]
     fn c7_diamond_dag() {
         let db = AletheiaDB::new().unwrap();
@@ -1068,7 +1075,7 @@ mod tests {
         let r = mk(&db, "Doc", Some(0.6), &[]);
         let b = mk(&db, "Merge", None, &[r]);
         let c = mk(&db, "Merge", None, &[r]);
-        let d = mk(&db, "Merge", None, &[b, c]); // 1-(0.4)(0.4)=0.84
+        let d = mk(&db, "Merge", None, &[b, c]); // 1-(0.4)(0.4)=0.84 (each parent counts r)
         approx(db.computed_confidence(d).unwrap().computed, 0.84);
 
         // Weakest-link over the same diamond -> 0.6.
@@ -1339,6 +1346,44 @@ mod tests {
         }
         // Single-parent chain passes the value through; no panic/overflow.
         approx(db.computed_confidence(prev).unwrap().computed, 0.9);
+    }
+
+    // T-2 backstop: a chain deeper than SCALAR_MAX_DEPTH (1024) exercises the
+    // scalar truncation / conservative-leaf backstop and flags `truncated`.
+    #[test]
+    fn scalar_depth_backstop_truncates_beyond_1024() {
+        let db = AletheiaDB::new().unwrap();
+        let mut prev = mk(&db, "Doc", Some(0.9), &[]);
+        // Build a single-parent chain deeper than SCALAR_MAX_DEPTH so the
+        // recursion hits the hard depth cap and marks the result truncated.
+        for _ in 0..(SCALAR_MAX_DEPTH + 32) {
+            prev = mk(&db, "L", None, &[prev]);
+        }
+        let cc = db.computed_confidence(prev).unwrap();
+        assert!(
+            cc.truncated,
+            "a chain deeper than SCALAR_MAX_DEPTH must set truncated"
+        );
+    }
+
+    // Lazy policy reflection: a per-label policy set AFTER the facts already
+    // exist is honored on the NEXT computed-confidence read (nothing is stored).
+    #[test]
+    fn policy_change_after_facts_is_lazily_reflected() {
+        let db = AletheiaDB::new().unwrap(); // default weakest-link
+        let r1 = mk(&db, "Doc", Some(0.6), &[]);
+        let r2 = mk(&db, "Doc", Some(0.6), &[]);
+        let d = mk(&db, "Merge", None, &[r1, r2]);
+        // Weakest-link now: min(0.6, 0.6) = 0.6.
+        approx(db.computed_confidence(d).unwrap().computed, 0.6);
+        // Change the "Merge" label policy to noisy-OR AFTER the facts exist.
+        db.set_trust_policy_for_label(
+            "Merge",
+            TrustPolicy::noisy_or(MissingConfidencePolicy::Zero),
+        )
+        .unwrap();
+        // The next read reflects the NEW policy: 1-(0.4)(0.4) = 0.84.
+        approx(db.computed_confidence(d).unwrap().computed, 0.84);
     }
 
     // ---- A-1 / A-2 / A-3: bi-temporal honesty ----

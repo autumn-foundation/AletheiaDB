@@ -461,7 +461,30 @@ Bi-temporal (AC5, review-fix #4):
 
 (Cases A-1/A-2/A-3 are grouped under matrix slot 20; 22 concrete asserts across
 20 named cases. `just check-features` compiles the `semantic-reasoning` module
-standalone; AC8 zero-overhead is a `#[cfg(not(feature))]` bench guard.)
+standalone.)
+
+### 4.2 AC8 — zero-overhead-when-disabled + opt-in on-cost bench
+
+AC8's **zero write-path/read-path overhead when disabled** is guaranteed **by
+construction**, not merely by benchmark: every trust item — the module, the
+`AletheiaDB::computed_confidence` / `trust_breakdown` methods, the
+`TrustRegistry` field on `AletheiaDB`, and the `db/trust.rs` evaluator — is
+`#[cfg(feature = "semantic-reasoning")]`-gated and is **never referenced from the
+write path or from any non-trust read path**. With the feature off the code
+compiles out entirely; this is verified by `cargo build --no-default-features`
+(and `just check-features`). There is therefore no runtime guard to benchmark on
+the disabled path — its cost is provably zero.
+
+What *does* warrant measurement is the **opt-in on-cost** you pay when the
+feature is enabled: `benches/trust_propagation.rs` (a Criterion bench, gated
+`#[cfg(feature = "semantic-reasoning")]`, wired in `Cargo.toml` `[[bench]]` with
+`required-features = ["semantic-reasoning"]`) samples `computed_confidence` and
+`trust_breakdown` over a fixed derivation-lineage fixture at depths 8 and 32 for
+both combinators, so the read-time cost of the lazy scalar walk and the
+shared-memo (O(n)) breakdown build is quantified. It rides `cargo bench
+--all-features` (`just bench-tables`); plain `just bench` skips it (the feature
+is not default), matching every other feature-gated bench (e.g.
+`fusion_scoring`).
 
 ### 4.1 The four review fixes, mapped
 
