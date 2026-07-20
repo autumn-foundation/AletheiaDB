@@ -82,6 +82,9 @@ pub mod temporal;
 pub mod tests;
 /// Transaction management.
 pub mod transaction;
+/// Trust propagation: computed confidence over derivation lineage (Issue #3382).
+#[cfg(feature = "semantic-reasoning")]
+pub mod trust;
 /// Vector index operations.
 pub mod vector;
 /// Vector index builder pattern.
@@ -313,10 +316,7 @@ pub struct AletheiaDB {
     /// in-memory-only for ephemeral databases. Gated to the experimental
     /// `semantic-reasoning` cohort so it compiles out (zero cost) when the
     /// feature is off. See [`crate::experimental::reasoning::trust_propagation`].
-    // Read by the `AletheiaDB` trust-policy + computed-confidence methods
-    // landing in a later milestone (M3); constructed here in M2.
     #[cfg(feature = "semantic-reasoning")]
-    #[allow(dead_code)]
     pub(crate) trust_policies:
         Arc<crate::experimental::reasoning::trust_propagation::TrustRegistry>,
     /// Knowledge half-life analytics cohort-statistics cache (Issue #3377,

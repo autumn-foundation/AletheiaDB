@@ -49,9 +49,7 @@ use crate::core::temporal::Timestamp;
 ///
 /// Only referenced by the serde-gated persistence path; the in-memory registry
 /// needs no on-disk format version.
-// Consumed by the durable registry landing in a later milestone (M2).
 #[cfg(feature = "serde")]
-#[allow(dead_code)]
 pub(crate) const PERSIST_FORMAT_VERSION: u32 = 1;
 
 /// Default maximum transitive depth for a [`trust_breakdown`](crate::AletheiaDB::trust_breakdown)
@@ -67,15 +65,11 @@ pub const DEFAULT_MAX_NODES: usize = 1000;
 /// [`DEFAULT_MAX_DEPTH`]. Cycles are impossible by construction (Issue #3371
 /// rejects them); this is defence-in-depth so a pathological or future-relaxed
 /// graph cannot overflow the stack.
-// Consumed by the scalar evaluator landing in a later milestone (M3).
-#[allow(dead_code)]
 pub(crate) const SCALAR_MAX_DEPTH: usize = 1024;
 
 /// The documented neutral confidence constant used by
 /// [`MissingConfidencePolicy::Neutral`] and as the flagged fallback for a node
 /// whose entire contributing child set was excluded.
-// Consumed by the scalar evaluator landing in a later milestone (M3).
-#[allow(dead_code)]
 pub(crate) const NEUTRAL: f64 = 0.5;
 
 /// The two built-in confidence combinators (AC1).
@@ -289,8 +283,6 @@ impl Default for TrustOptions {
 /// Used on every confidence value fed into or out of a combinator so a
 /// malformed provenance value can never produce an out-of-range or `NaN`
 /// computed confidence.
-// Consumed by the scalar evaluator landing in a later milestone (M3).
-#[allow(dead_code)]
 pub(crate) fn clamp01(value: f64) -> f64 {
     if value.is_nan() {
         0.0
@@ -311,8 +303,6 @@ pub(crate) fn clamp01(value: f64) -> f64 {
 /// - [`TrustCombinator::NoisyOr`] computes `1 − ∏(1 − c)`.
 ///
 /// Every input is passed through [`clamp01`], and the result is clamped too.
-// Consumed by the scalar evaluator landing in a later milestone (M3).
-#[allow(dead_code)]
 pub(crate) fn combine_values(children: &[Option<f64>], combinator: TrustCombinator) -> (f64, bool) {
     let included: Vec<f64> = children.iter().filter_map(|c| c.map(clamp01)).collect();
 
@@ -385,10 +375,6 @@ pub(crate) struct TrustRegistry {
     save_lock: Mutex<()>,
 }
 
-// The read/mutate accessors below are consumed by the `AletheiaDB` policy
-// methods landing in a later milestone (M3); until then they are exercised only
-// by unit tests, which the lib target does not see.
-#[allow(dead_code)]
 impl TrustRegistry {
     /// Create an empty, memory-only registry (no file is ever written).
     pub(crate) fn in_memory() -> Self {

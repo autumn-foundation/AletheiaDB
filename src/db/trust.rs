@@ -1,0 +1,849 @@
+//! Database-level trust propagation: computed confidence over lineage (Issue #3382).
+//!
+//! Wires the [`TrustRegistry`](crate::experimental::reasoning::trust_propagation::TrustRegistry)
+//! into a lazy, read-time evaluator that walks a fact's derivation lineage
+//! (Issue #3371) and combines its upstream confidences under the active
+//! [`TrustPolicy`]. Computed confidence is **never stored**: every read
+//! recomputes from current state, so a superseding write or an Issue #3230
+//! retraction of an upstream fact flows downstream for free (AC4), and asking
+//! `AS OF` transaction time `T` replays confidences as recorded at `T` (AC5).
+//!
+//! # Reactive-at-now, stable-as-of
+//!
+//! [`resolve_ref`](AletheiaDB::resolve_ref) resolves each version-pinned lineage
+//! reference to the **visible** version at the evaluation transaction time
+//! (the latest version whose transaction-time start `<= tt`) and reads that
+//! version's provenance confidence. With `tt = now` the visible version is the
+//! current head, so an upstream update is reflected immediately; with `tt = T`
+//! the visible version is the head as recorded at `T`, so a historical read is
+//! revision-stable.
+//!
+//! # Leaf & status rules
+//!
+//! - A fact with **no visible lineage** is a leaf: its computed confidence is
+//!   its declared confidence (`computed == declared`), or the per-label
+//!   [`MissingConfidencePolicy`] value when the writer asserted none (always
+//!   flagged, AC6).
+//! - A **retracted** (valid-time-closed) or **absent** (deleted / dangling)
+//!   upstream contributes `0.0` and **dominates** — it stops the recursion so
+//!   it cannot be silently absorbed as a noisy-OR identity term (AC4). The two
+//!   are distinct [`ConfidenceSource`] variants (review-fix #2).
+
+#![cfg(feature = "semantic-reasoning")]
+
+use std::collections::{HashMap, HashSet};
+
+use crate::core::error::{Error, Result, StorageError};
+use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
+use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::core::lineage::{LineageRecord, LineageRef};
+use crate::core::provenance::Provenance;
+use crate::core::temporal::{Timestamp, time};
+use crate::db::AletheiaDB;
+use crate::experimental::reasoning::trust_propagation::{
+    ComputedConfidence, ConfidenceSource, MissingConfidencePolicy, NEUTRAL, SCALAR_MAX_DEPTH,
+    TrustPolicy, TrustPolicyView, clamp01, combine_values,
+};
+use crate::storage::historical::HistoricalStorage;
+
+/// The result of resolving a version-pinned [`LineageRef`] to the fact version
+/// visible at a given transaction time.
+struct ResolvedRef {
+    /// The visible version (meaningful only when `terminal` is `None`).
+    version: VersionId,
+    /// The visible version's declared provenance confidence, if any.
+    confidence: Option<f64>,
+    /// The visible version's entity label, used to resolve the per-label policy.
+    label: String,
+    /// `Some` when the fact is gone: [`ConfidenceSource::Retracted`] (valid-time
+    /// closed) or [`ConfidenceSource::Absent`] (deleted / dangling). Both
+    /// contribute `0.0` and dominate.
+    terminal: Option<ConfidenceSource>,
+}
+
+/// The scalar result of evaluating a fact's computed confidence, plus the flags
+/// propagated up the recursion.
+#[derive(Clone)]
+struct ScalarEval {
+    /// The computed confidence value in `[0, 1]`.
+    value: f64,
+    /// `true` when this input should be dropped from its parent's contributing
+    /// set (an [`MissingConfidencePolicy::Ignore`]-excluded missing leaf).
+    excluded: bool,
+    /// Whether any missing-confidence input was encountered in this subtree.
+    has_missing: bool,
+    /// Whether any retracted/absent input was encountered in this subtree.
+    has_retracted: bool,
+    /// Whether a hard depth/cycle bound truncated this subtree.
+    truncated: bool,
+}
+
+fn intern_to_string(label: InternedString) -> String {
+    GLOBAL_INTERNER
+        .resolve_with(label, |s| s.to_string())
+        .unwrap_or_else(|| label.to_string())
+}
+
+impl AletheiaDB {
+    // ===================================================================
+    // Policy management (durable sidecar registry)
+    // ===================================================================
+
+    /// The database-wide default trust policy (AC1 discoverable).
+    #[must_use]
+    pub fn trust_policy(&self) -> TrustPolicy {
+        self.trust_policies.default_policy()
+    }
+
+    /// The trust policy governing facts with `label` — the per-label override
+    /// if one is registered, else the database default.
+    #[must_use]
+    pub fn trust_policy_for_label(&self, label: &str) -> TrustPolicy {
+        self.trust_policies.policy_for_label(label)
+    }
+
+    /// A stable, label-sorted view of every active trust policy (AC1).
+    #[must_use]
+    pub fn list_trust_policies(&self) -> TrustPolicyView {
+        self.trust_policies.view()
+    }
+
+    /// Set the database-wide default trust policy, persisting the change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable sidecar write fails (the in-memory
+    /// change is rolled back).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn set_trust_policy(&self, policy: TrustPolicy) -> Result<()> {
+        self.trust_policies.set_default(policy)
+    }
+
+    /// Set a per-label / per-edge-type override policy, persisting the change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable sidecar write fails (the in-memory
+    /// change is rolled back).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn set_trust_policy_for_label(&self, label: &str, policy: TrustPolicy) -> Result<()> {
+        self.trust_policies.set_label(label, policy)
+    }
+
+    /// Remove a per-label override, reverting facts with that label to the
+    /// database default. Dropping an absent label is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable sidecar write fails.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn drop_trust_policy_for_label(&self, label: &str) -> Result<()> {
+        self.trust_policies.drop_label(label)
+    }
+
+    // ===================================================================
+    // Computed confidence (lazy, AC2/AC4/AC5)
+    // ===================================================================
+
+    /// The computed confidence of `reference` as of now (AC2).
+    ///
+    /// Walks the fact's upstream derivation lineage and combines the upstream
+    /// confidences under the active policy, keeping the writer-declared value
+    /// (`declared`) distinct from the derived value (`computed`). A fact with no
+    /// lineage keeps its declared confidence unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::VersionNotFound`] if `reference` does not resolve
+    /// to an existing version of its entity.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn computed_confidence(&self, reference: LineageRef) -> Result<ComputedConfidence> {
+        self.computed_confidence_as_of(reference, time::now())
+    }
+
+    /// The computed confidence of `reference` as recorded at transaction time
+    /// `tt` (AC5) — "how confident were we then?".
+    ///
+    /// With `tt` at or after the latest transaction time this equals
+    /// [`computed_confidence`](Self::computed_confidence) (review-fix #4).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::VersionNotFound`] if `reference` does not resolve
+    /// to an existing version of its entity.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn computed_confidence_as_of(
+        &self,
+        reference: LineageRef,
+        tt: Timestamp,
+    ) -> Result<ComputedConfidence> {
+        self.ensure_ref_exists(reference)?;
+        let historical = self.historical.read();
+
+        let resolved = self.resolve_ref(reference, tt, &historical);
+        let mut memo: HashMap<VersionId, ScalarEval> = HashMap::new();
+        let mut stack: HashSet<VersionId> = HashSet::new();
+        let eval = self.eval_scalar(reference, tt, &historical, &mut memo, &mut stack, 0);
+
+        // Root lineage decides `has_lineage` / `combinator` for the response.
+        let root_lineage = if resolved.terminal.is_none() {
+            self.visible_lineage(resolved.version, tt)
+        } else {
+            None
+        };
+        let has_lineage = root_lineage.is_some();
+        let combinator = if has_lineage {
+            Some(self.trust_policy_for_label(&resolved.label).combinator)
+        } else {
+            None
+        };
+
+        Ok(ComputedConfidence {
+            declared: resolved.confidence,
+            computed: eval.value,
+            has_lineage,
+            combinator,
+            has_missing_inputs: eval.has_missing,
+            has_retracted_inputs: eval.has_retracted,
+            truncated: eval.truncated,
+        })
+    }
+
+    /// The computed confidence of a node's current version (AC2).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NodeNotFound`] if the node has no current
+    /// version.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn node_computed_confidence(&self, node_id: NodeId) -> Result<ComputedConfidence> {
+        let reference = self
+            .node_lineage_ref(node_id)
+            .ok_or_else(|| Error::from(StorageError::NodeNotFound(node_id)))?;
+        self.computed_confidence(reference)
+    }
+
+    /// The computed confidence of an edge's current version (AC2).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::EdgeNotFound`] if the edge has no current
+    /// version.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn edge_computed_confidence(&self, edge_id: EdgeId) -> Result<ComputedConfidence> {
+        let reference = self
+            .edge_lineage_ref(edge_id)
+            .ok_or_else(|| Error::from(StorageError::EdgeNotFound(edge_id)))?;
+        self.computed_confidence(reference)
+    }
+
+    // ===================================================================
+    // Internal evaluation helpers
+    // ===================================================================
+
+    /// Validate that `reference` resolves to an existing version whose entity
+    /// matches the reference.
+    fn ensure_ref_exists(&self, reference: LineageRef) -> Result<()> {
+        let historical = self.historical.read();
+        let ok = match reference.entity {
+            EntityId::Node(node_id) => historical
+                .get_node_version(reference.version)
+                .is_some_and(|v| v.node_id == node_id),
+            EntityId::Edge(edge_id) => historical
+                .get_edge_version(reference.version)
+                .is_some_and(|v| v.edge_id == edge_id),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(StorageError::VersionNotFound(reference.version).into())
+        }
+    }
+
+    /// The visible lineage record for `version` at transaction time `tt`: the
+    /// record for that version, dropped if it was recorded after `tt`.
+    pub(crate) fn visible_lineage(
+        &self,
+        version: VersionId,
+        tt: Timestamp,
+    ) -> Option<LineageRecord> {
+        self.lineage
+            .record_for(version)
+            .filter(|record| record.recorded_at <= tt)
+    }
+
+    /// Resolve a version-pinned reference to the fact version visible at
+    /// transaction time `tt`.
+    ///
+    /// Walks the entity's version chain from its current head backward to the
+    /// latest version whose transaction-time start `<= tt`. A closed valid
+    /// interval on that visible version means the fact is gone: an **empty**
+    /// interval (`start == end`) is a delete tombstone
+    /// ([`ConfidenceSource::Absent`]); a **non-empty** closed interval is an
+    /// Issue #3230 retraction ([`ConfidenceSource::Retracted`]).
+    fn resolve_ref(
+        &self,
+        reference: LineageRef,
+        tt: Timestamp,
+        historical: &HistoricalStorage,
+    ) -> ResolvedRef {
+        match reference.entity {
+            EntityId::Node(node_id) => {
+                let mut current = historical.get_current_node_version(node_id);
+                while let Some(vid) = current {
+                    let Some(version) = historical.get_node_version(vid) else {
+                        break;
+                    };
+                    if version.commit_timestamp <= tt {
+                        let valid = version.temporal.valid_time();
+                        let terminal =
+                            classify_valid_interval(valid.start(), valid.end(), valid.is_closed());
+                        return ResolvedRef {
+                            version: version.id,
+                            confidence: version
+                                .provenance
+                                .as_deref()
+                                .and_then(Provenance::confidence),
+                            label: intern_to_string(version.label),
+                            terminal,
+                        };
+                    }
+                    current = version.prev_version;
+                }
+                absent_ref()
+            }
+            EntityId::Edge(edge_id) => {
+                let mut current = historical.get_current_edge_version(edge_id);
+                while let Some(vid) = current {
+                    let Some(version) = historical.get_edge_version(vid) else {
+                        break;
+                    };
+                    if version.commit_timestamp <= tt {
+                        let valid = version.temporal.valid_time();
+                        let terminal =
+                            classify_valid_interval(valid.start(), valid.end(), valid.is_closed());
+                        return ResolvedRef {
+                            version: version.id,
+                            confidence: version
+                                .provenance
+                                .as_deref()
+                                .and_then(Provenance::confidence),
+                            label: intern_to_string(version.label),
+                            terminal,
+                        };
+                    }
+                    current = version.prev_version;
+                }
+                absent_ref()
+            }
+        }
+    }
+
+    /// Recursively evaluate the computed confidence of `reference` at `tt`.
+    ///
+    /// Memoizes per visible [`VersionId`] so a diamond DAG evaluates each shared
+    /// ancestor once, guards the DFS path with `stack` (belt-and-braces against
+    /// the impossible cycle), and hard-caps recursion at [`SCALAR_MAX_DEPTH`].
+    fn eval_scalar(
+        &self,
+        reference: LineageRef,
+        tt: Timestamp,
+        historical: &HistoricalStorage,
+        memo: &mut HashMap<VersionId, ScalarEval>,
+        stack: &mut HashSet<VersionId>,
+        depth: usize,
+    ) -> ScalarEval {
+        let resolved = self.resolve_ref(reference, tt, historical);
+
+        // Retracted / absent dominates: 0.0, stop recursion (AC4).
+        if resolved.terminal.is_some() {
+            return ScalarEval {
+                value: 0.0,
+                excluded: false,
+                has_missing: false,
+                has_retracted: true,
+                truncated: false,
+            };
+        }
+
+        let vid = resolved.version;
+        if let Some(cached) = memo.get(&vid) {
+            return cached.clone();
+        }
+
+        // Hard depth backstop (review-fix #3): treat conservatively as a leaf,
+        // never over-trusting the unreached subtree.
+        if depth >= SCALAR_MAX_DEPTH || !stack.insert(vid) {
+            return ScalarEval {
+                value: resolved.confidence.map(clamp01).unwrap_or(0.0),
+                excluded: false,
+                has_missing: resolved.confidence.is_none(),
+                has_retracted: false,
+                truncated: true,
+            };
+        }
+
+        let eval = match self.visible_lineage(vid, tt) {
+            None => self.leaf_eval(&resolved),
+            Some(record) => {
+                let combinator = self.trust_policy_for_label(&resolved.label).combinator;
+                let mut child_values: Vec<Option<f64>> = Vec::with_capacity(record.sources.len());
+                let mut has_missing = false;
+                let mut has_retracted = false;
+                let mut truncated = false;
+                for source in &record.sources {
+                    let child = self.eval_scalar(*source, tt, historical, memo, stack, depth + 1);
+                    has_missing |= child.has_missing;
+                    has_retracted |= child.has_retracted;
+                    truncated |= child.truncated;
+                    child_values.push(if child.excluded {
+                        None
+                    } else {
+                        Some(child.value)
+                    });
+                }
+                let (value, all_excluded) = combine_values(&child_values, combinator);
+                if all_excluded {
+                    has_missing = true;
+                }
+                ScalarEval {
+                    value,
+                    excluded: false,
+                    has_missing,
+                    has_retracted,
+                    truncated,
+                }
+            }
+        };
+
+        stack.remove(&vid);
+        memo.insert(vid, eval.clone());
+        eval
+    }
+
+    /// Evaluate a leaf fact (no visible lineage): its declared confidence, or
+    /// the per-label missing-confidence policy value when none was written.
+    fn leaf_eval(&self, resolved: &ResolvedRef) -> ScalarEval {
+        match resolved.confidence {
+            Some(c) => ScalarEval {
+                value: clamp01(c),
+                excluded: false,
+                has_missing: false,
+                has_retracted: false,
+                truncated: false,
+            },
+            None => {
+                let missing = self.trust_policy_for_label(&resolved.label).missing;
+                let (value, excluded) = match missing {
+                    MissingConfidencePolicy::Zero => (0.0, false),
+                    MissingConfidencePolicy::Neutral => (NEUTRAL, false),
+                    MissingConfidencePolicy::Ignore => (NEUTRAL, true),
+                };
+                ScalarEval {
+                    value,
+                    excluded,
+                    has_missing: true,
+                    has_retracted: false,
+                    truncated: false,
+                }
+            }
+        }
+    }
+}
+
+/// Classify a version's valid interval into a terminal source, if any.
+///
+/// A closed, **empty** interval (`start == end`) is a delete tombstone
+/// ([`ConfidenceSource::Absent`]); a closed, **non-empty** interval is an
+/// Issue #3230 retraction ([`ConfidenceSource::Retracted`]); an open interval is
+/// a live fact (`None`).
+fn classify_valid_interval(
+    start: Timestamp,
+    end: Timestamp,
+    is_closed: bool,
+) -> Option<ConfidenceSource> {
+    if !is_closed {
+        return None;
+    }
+    if start == end {
+        Some(ConfidenceSource::Absent)
+    } else {
+        Some(ConfidenceSource::Retracted)
+    }
+}
+
+/// A resolved reference for a fact that is gone / dangling in current state.
+fn absent_ref() -> ResolvedRef {
+    ResolvedRef {
+        version: VersionId::new_unchecked(0),
+        confidence: None,
+        label: String::new(),
+        terminal: Some(ConfidenceSource::Absent),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::transaction::{WriteOps, WriteRequestOptions};
+    use crate::core::property::PropertyMap;
+    use crate::experimental::reasoning::trust_propagation::TrustCombinator;
+
+    fn approx(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "expected {b}, got {a}");
+    }
+
+    fn prov(confidence: f64) -> Provenance {
+        Provenance::builder()
+            .confidence(confidence)
+            .build()
+            .unwrap()
+    }
+
+    fn opts(confidence: Option<f64>) -> WriteRequestOptions {
+        match confidence {
+            Some(c) => WriteRequestOptions::new().with_provenance(prov(c)),
+            None => WriteRequestOptions::new(),
+        }
+    }
+
+    /// Create a node with the given label + optional confidence, derived from
+    /// `sources`, returning its version-pinned reference.
+    fn mk(
+        db: &AletheiaDB,
+        label: &str,
+        confidence: Option<f64>,
+        sources: &[LineageRef],
+    ) -> LineageRef {
+        let (node_id, version) = db
+            .create_node_with_options_and_lineage(
+                label,
+                PropertyMap::new(),
+                opts(confidence),
+                sources,
+            )
+            .expect("create node with lineage");
+        LineageRef::new(node_id, version)
+    }
+
+    // ---- C-4 / C-5: 3-level trees, hand-computed both combinators ----
+
+    #[test]
+    fn c4_three_level_weakest_link() {
+        let db = AletheiaDB::new().unwrap();
+        // default policy = weakest-link + Zero.
+        let r1 = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let r3 = mk(&db, "Doc", Some(0.3), &[]);
+        let m1 = mk(&db, "Merge", None, &[r1, r2]); // min(0.9,0.8)=0.8
+        let m2 = mk(&db, "Merge", None, &[r3]); // pass-through 0.3
+        let top = mk(&db, "Merge", None, &[m1, m2]); // min(0.8,0.3)=0.3
+
+        let cc = db.computed_confidence(top).unwrap();
+        approx(cc.computed, 0.3);
+        assert!(cc.has_lineage);
+        assert_eq!(cc.combinator, Some(TrustCombinator::WeakestLink));
+        assert!(!cc.has_missing_inputs);
+        assert!(!cc.has_retracted_inputs);
+    }
+
+    #[test]
+    fn c5_three_level_noisy_or() {
+        let db = AletheiaDB::new().unwrap();
+        db.set_trust_policy(TrustPolicy::noisy_or(MissingConfidencePolicy::Zero))
+            .unwrap();
+        let r1 = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let r3 = mk(&db, "Doc", Some(0.3), &[]);
+        let m1 = mk(&db, "Merge", None, &[r1, r2]); // 1-(0.1)(0.2)=0.98
+        let m2 = mk(&db, "Merge", None, &[r3]); // 0.3
+        let top = mk(&db, "Merge", None, &[m1, m2]); // 1-(0.02)(0.7)=0.986
+
+        let cc = db.computed_confidence(top).unwrap();
+        approx(cc.computed, 0.986);
+        assert_eq!(cc.combinator, Some(TrustCombinator::NoisyOr));
+    }
+
+    // ---- C-3: single upstream passes through ----
+
+    #[test]
+    fn c3_single_upstream_pass_through() {
+        for policy in [
+            TrustPolicy::weakest_link(MissingConfidencePolicy::Zero),
+            TrustPolicy::noisy_or(MissingConfidencePolicy::Zero),
+        ] {
+            let db = AletheiaDB::new().unwrap();
+            db.set_trust_policy(policy).unwrap();
+            let r = mk(&db, "Doc", Some(0.42), &[]);
+            let d = mk(&db, "Merge", None, &[r]);
+            approx(db.computed_confidence(d).unwrap().computed, 0.42);
+        }
+    }
+
+    // ---- C-6: 5-level chain, both combinators, hand-computed ----
+
+    #[test]
+    fn c6_five_level_chain() {
+        // roots 0.9,0.8,0.7,0.6,0.5,0.4 nested one level at a time.
+        for (policy, expected) in [
+            (
+                TrustPolicy::weakest_link(MissingConfidencePolicy::Zero),
+                0.4,
+            ),
+            (
+                TrustPolicy::noisy_or(MissingConfidencePolicy::Zero),
+                0.99928,
+            ),
+        ] {
+            let db = AletheiaDB::new().unwrap();
+            db.set_trust_policy(policy).unwrap();
+            let r0 = mk(&db, "Doc", Some(0.9), &[]);
+            let a1 = mk(&db, "Doc", Some(0.8), &[]);
+            let l1 = mk(&db, "L", None, &[r0, a1]);
+            let a2 = mk(&db, "Doc", Some(0.7), &[]);
+            let l2 = mk(&db, "L", None, &[l1, a2]);
+            let a3 = mk(&db, "Doc", Some(0.6), &[]);
+            let l3 = mk(&db, "L", None, &[l2, a3]);
+            let a4 = mk(&db, "Doc", Some(0.5), &[]);
+            let l4 = mk(&db, "L", None, &[l3, a4]);
+            let a5 = mk(&db, "Doc", Some(0.4), &[]);
+            let l5 = mk(&db, "L", None, &[l4, a5]);
+            approx(db.computed_confidence(l5).unwrap().computed, expected);
+        }
+    }
+
+    // ---- C-7: diamond DAG, shared ancestor combined once ----
+
+    #[test]
+    fn c7_diamond_dag() {
+        let db = AletheiaDB::new().unwrap();
+        db.set_trust_policy(TrustPolicy::noisy_or(MissingConfidencePolicy::Zero))
+            .unwrap();
+        let r = mk(&db, "Doc", Some(0.6), &[]);
+        let b = mk(&db, "Merge", None, &[r]);
+        let c = mk(&db, "Merge", None, &[r]);
+        let d = mk(&db, "Merge", None, &[b, c]); // 1-(0.4)(0.4)=0.84
+        approx(db.computed_confidence(d).unwrap().computed, 0.84);
+
+        // Weakest-link over the same diamond -> 0.6.
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.6), &[]);
+        let b = mk(&db, "Merge", None, &[r]);
+        let c = mk(&db, "Merge", None, &[r]);
+        let d = mk(&db, "Merge", None, &[b, c]);
+        approx(db.computed_confidence(d).unwrap().computed, 0.6);
+    }
+
+    // ---- C-8: per-label override resolved per fact ----
+
+    #[test]
+    fn c8_per_label_override() {
+        let db = AletheiaDB::new().unwrap();
+        // default weakest-link; override "OrNode" to noisy-OR.
+        db.set_trust_policy_for_label(
+            "OrNode",
+            TrustPolicy::noisy_or(MissingConfidencePolicy::Zero),
+        )
+        .unwrap();
+        let r1 = mk(&db, "Doc", Some(0.6), &[]);
+        let r2 = mk(&db, "Doc", Some(0.6), &[]);
+        // Weakest-link label.
+        let wl = mk(&db, "MinNode", None, &[r1, r2]);
+        approx(db.computed_confidence(wl).unwrap().computed, 0.6);
+        // Noisy-OR label over the SAME roots.
+        let or = mk(&db, "OrNode", None, &[r1, r2]);
+        approx(db.computed_confidence(or).unwrap().computed, 0.84);
+    }
+
+    // ---- C-9 / C-10: no-lineage & declared-vs-computed distinct ----
+
+    #[test]
+    fn c9_no_lineage_fact_computed_equals_declared() {
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.7), &[]);
+        let cc = db.computed_confidence(r).unwrap();
+        approx(cc.computed, 0.7);
+        assert_eq!(cc.declared, Some(0.7));
+        assert!(!cc.has_lineage);
+        assert_eq!(cc.combinator, None);
+    }
+
+    #[test]
+    fn c10_declared_vs_computed_distinct() {
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        // The derived fact's writer *typed* 0.2, but it is derived from 0.9.
+        let d = mk(&db, "Merge", Some(0.2), &[r]);
+        let cc = db.computed_confidence(d).unwrap();
+        assert_eq!(cc.declared, Some(0.2), "declared is untouched");
+        approx(cc.computed, 0.9);
+        assert!(cc.has_lineage);
+    }
+
+    // ---- M-1 / M-2 / M-3: missing-confidence policies ----
+
+    #[test]
+    fn m1_missing_zero_flagged() {
+        let db = AletheiaDB::new().unwrap(); // default missing = Zero
+        let r = mk(&db, "Doc", None, &[]); // root without confidence
+        let cc = db.computed_confidence(r).unwrap();
+        approx(cc.computed, 0.0);
+        assert_eq!(cc.declared, None);
+        assert!(cc.has_missing_inputs, "missing must be flagged");
+    }
+
+    #[test]
+    fn m2_missing_neutral_flagged() {
+        let db = AletheiaDB::new().unwrap();
+        db.set_trust_policy(TrustPolicy::weakest_link(MissingConfidencePolicy::Neutral))
+            .unwrap();
+        let r = mk(&db, "Doc", None, &[]);
+        let cc = db.computed_confidence(r).unwrap();
+        approx(cc.computed, 0.5);
+        assert!(cc.has_missing_inputs);
+    }
+
+    #[test]
+    fn m3_missing_ignore_dropped_flagged() {
+        let db = AletheiaDB::new().unwrap();
+        db.set_trust_policy(TrustPolicy::weakest_link(MissingConfidencePolicy::Ignore))
+            .unwrap();
+        let r_missing = mk(&db, "Doc", None, &[]);
+        let r_ok = mk(&db, "Doc", Some(0.8), &[]);
+        // Ignore drops the missing input; weakest-link over the rest = 0.8.
+        let d = mk(&db, "Merge", None, &[r_missing, r_ok]);
+        let cc = db.computed_confidence(d).unwrap();
+        approx(cc.computed, 0.8);
+        assert!(cc.has_missing_inputs);
+    }
+
+    // ---- R-1 / R-2 / R-3: retracted & absent dominate ----
+
+    #[test]
+    fn r1_retracted_weakest_link_dominates() {
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let d = mk(&db, "Merge", None, &[r, r2]);
+        // Retract r as of a future valid time (non-empty closed interval).
+        if let EntityId::Node(nid) = r.entity {
+            // Close the valid interval ~1 day out: a non-empty closed interval
+            // (a retraction), within the max-future-offset guard.
+            let valid_to = Timestamp::new_unchecked(time::now().wallclock() + 86_400_000_000, 0);
+            db.retract_node(nid, valid_to).unwrap();
+        }
+        let cc = db.computed_confidence(d).unwrap();
+        approx(cc.computed, 0.0); // min(0.0 retracted, 0.8) = 0.0
+        assert!(cc.has_retracted_inputs);
+    }
+
+    #[test]
+    fn r2_retracted_noisy_or_caps_node() {
+        let db = AletheiaDB::new().unwrap();
+        db.set_trust_policy(TrustPolicy::noisy_or(MissingConfidencePolicy::Zero))
+            .unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let d = mk(&db, "Merge", None, &[r]); // single retracted source
+        if let EntityId::Node(nid) = r.entity {
+            let valid_to = Timestamp::new_unchecked(time::now().wallclock() + 86_400_000_000, 0);
+            db.retract_node(nid, valid_to).unwrap();
+        }
+        let cc = db.computed_confidence(d).unwrap();
+        approx(cc.computed, 0.0); // 1-(1-0)=0 : retracted does not vanish
+        assert!(cc.has_retracted_inputs);
+    }
+
+    #[test]
+    fn r3_absent_deleted_upstream_dominates() {
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let d = mk(&db, "Merge", None, &[r, r2]);
+        // Delete r: an empty-valid tombstone -> Absent (distinct from Retracted).
+        if let EntityId::Node(nid) = r.entity {
+            db.write(|tx| tx.delete_node(nid)).unwrap();
+        }
+        let cc = db.computed_confidence(d).unwrap();
+        approx(cc.computed, 0.0);
+        assert!(cc.has_retracted_inputs);
+    }
+
+    // ---- D-1: deep chain is cycle/overflow-safe; memoization exercised ----
+
+    #[test]
+    fn d1_deep_chain_no_overflow() {
+        let db = AletheiaDB::new().unwrap();
+        let mut prev = mk(&db, "Doc", Some(0.9), &[]);
+        for _ in 0..200 {
+            prev = mk(&db, "L", None, &[prev]);
+        }
+        // Single-parent chain passes the value through; no panic/overflow.
+        approx(db.computed_confidence(prev).unwrap().computed, 0.9);
+    }
+
+    // ---- A-1 / A-2 / A-3: bi-temporal honesty ----
+
+    #[test]
+    fn as_of_reactive_and_stable() {
+        let db = AletheiaDB::new().unwrap();
+        // Root at 0.9, derived D from it.
+        let (r_nid, r_v_old) = db
+            .create_node_with_options_and_lineage("Doc", PropertyMap::new(), opts(Some(0.9)), &[])
+            .unwrap();
+        let r_ref = LineageRef::new(r_nid, r_v_old);
+        let d = mk(&db, "Merge", None, &[r_ref]);
+
+        // A-1 anchor: D's own commit time — after D (and its lineage) exist, but
+        // before the update. `resolve_ref` at this tt sees the old root version.
+        let t_anchor = db
+            .historical
+            .read()
+            .get_node_version(d.version)
+            .unwrap()
+            .commit_timestamp;
+
+        // Supersede the root with new confidence 0.5.
+        db.update_node_with_options_and_lineage(r_nid, PropertyMap::new(), opts(Some(0.5)), &[])
+            .unwrap();
+
+        // A-2 reactive-at-now: D reflects the NEW upstream confidence.
+        approx(db.computed_confidence(d).unwrap().computed, 0.5);
+
+        // A-1 as-of earlier: D reflects the confidence as recorded at t_anchor.
+        approx(
+            db.computed_confidence_as_of(d, t_anchor).unwrap().computed,
+            0.9,
+        );
+
+        // A-3 no-op AS OF: at/after the latest tx == unscoped.
+        let late = Timestamp::new_unchecked(i64::MAX / 2, 0);
+        approx(
+            db.computed_confidence_as_of(d, late).unwrap().computed,
+            db.computed_confidence(d).unwrap().computed,
+        );
+    }
+
+    // ---- error surface: dangling ref -> VersionNotFound ----
+
+    #[test]
+    fn dangling_ref_is_version_not_found() {
+        let db = AletheiaDB::new().unwrap();
+        let node = db.create_node("Doc", PropertyMap::new()).unwrap();
+        let bogus = LineageRef::new(node, VersionId::new(999_999).unwrap());
+        let err = db.computed_confidence(bogus).unwrap_err();
+        assert!(
+            matches!(err, Error::Storage(StorageError::VersionNotFound(_))),
+            "expected VersionNotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn node_computed_confidence_resolves_current_ref() {
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.75), &[]);
+        if let EntityId::Node(nid) = r.entity {
+            let cc = db.node_computed_confidence(nid).unwrap();
+            approx(cc.computed, 0.75);
+        }
+    }
+}
