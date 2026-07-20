@@ -12979,7 +12979,7 @@ mod apply_batch_tests {
     /// op variant names, so an added/renamed variant that misses the schema
     /// (or a schemars regression collapsing the tagged enum) fails loudly.
     #[test]
-    fn apply_batch_schema_advertises_all_six_op_variants() {
+    fn apply_batch_schema_advertises_all_op_variants() {
         let server = create_test_server();
         let schema = server
             .tool_input_schema_for_test("apply_batch")
@@ -12992,6 +12992,8 @@ mod apply_batch_tests {
             "update_edge",
             "delete_node",
             "delete_edge",
+            // DBOS Phase 3e: the seventh variant.
+            "compare_and_set_node",
         ] {
             assert!(
                 schema_text.contains(variant),
@@ -13169,6 +13171,150 @@ mod apply_batch_tests {
             })
             .unwrap_or_default();
         assert!(weight.contains('5'), "edge update must apply: {weight}");
+    }
+
+    // ------------------------------------------------------------------
+    // compare_and_set_node op (DBOS Phase 3e, Piece 3): fence a step-record
+    // batch on the owning run's version, atomically.
+    // ------------------------------------------------------------------
+
+    /// Current head version of a committed node id.
+    fn node_version(server: &AletheiaMcpServer, id: u64) -> u64 {
+        server
+            .db()
+            .get_node(NodeId::new(id).unwrap())
+            .unwrap()
+            .current_version
+            .as_u64()
+    }
+
+    #[test]
+    fn apply_batch_cas_matching_version_records_step() {
+        let server = create_test_server();
+        let run = seed_person(&server, "run-W1"); // stand-in for a WorkflowRun node
+        let v = node_version(&server, run);
+
+        // Atomic fenced step-record: CAS the run (still v -> I own it), then
+        // create the Step and a HAS_STEP edge, all-or-nothing.
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "compare_and_set_node", "node_id": run, "expected_version": v,
+                 "properties": {"name": "run-W1", "status": "running"}},
+                {"op": "create_node", "label": "Step", "ref": "s",
+                 "properties": {"idem_key": "W1:0", "output": "42"}},
+                {"op": "create_edge", "source_id": run, "target_id": "$s",
+                 "label": "HAS_STEP"},
+            ]),
+        );
+
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results[0]["op"], json!("compare_and_set_node"));
+        assert!(
+            results[0]["version_id"].as_u64().is_some_and(|nv| nv != v),
+            "CAS installed a new version: {value}"
+        );
+        // The run's full-replace map now carries status=running.
+        let node = server.db().get_node(NodeId::new(run).unwrap()).unwrap();
+        let status = node
+            .properties
+            .iter()
+            .find_map(|(k, val)| {
+                crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s == "status")
+                    .unwrap_or(false)
+                    .then(|| format!("{val:?}"))
+            })
+            .unwrap_or_default();
+        assert!(
+            status.contains("running"),
+            "CAS full-replace applied: {status}"
+        );
+        // The Step was recorded.
+        let steps = server.db().find_nodes_by_property(
+            "Step",
+            "idem_key",
+            &crate::core::PropertyValue::String("W1:0".into()),
+        );
+        assert_eq!(steps.len(), 1, "exactly one Step recorded");
+    }
+
+    #[test]
+    fn apply_batch_cas_stale_version_aborts_whole_batch() {
+        let server = create_test_server();
+        let run = seed_person(&server, "run-W2");
+        let stale = node_version(&server, run);
+
+        // A successor "steals" the run: advance its version so `stale` is stale.
+        server
+            .db()
+            .update_node_with_valid_time(
+                NodeId::new(run).unwrap(),
+                crate::PropertyMapBuilder::new()
+                    .insert("owner", "successor")
+                    .build(),
+                None,
+            )
+            .unwrap();
+        assert_ne!(node_version(&server, run), stale);
+
+        let nodes_before = server.db().node_count();
+        let edges_before = server.db().edge_count();
+
+        // A zombie tries to fence-record a Step on the STALE version. The CAS
+        // fails at the commit guard -> the WHOLE batch aborts, Step never
+        // poisoned.
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "compare_and_set_node", "node_id": run, "expected_version": stale,
+                 "properties": {"name": "run-W2", "status": "running"}},
+                {"op": "create_node", "label": "Step", "ref": "s",
+                 "properties": {"idem_key": "W2:0", "output": "zombie"}},
+                {"op": "create_edge", "source_id": run, "target_id": "$s",
+                 "label": "HAS_STEP"},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        // The CAS mismatch surfaces at commit (after execute_batch buffers the
+        // ops), so it is a commit-phase failure: `failed_op_index` is present
+        // but null, exactly like the unique-constraint abort.
+        assert!(
+            value["error"]["details"].get("failed_op_index").is_some(),
+            "details must carry failed_op_index (null for commit-phase CAS abort): {value}"
+        );
+
+        // Zero writes: no Step node, no edge, counts unchanged.
+        assert_eq!(server.db().node_count(), nodes_before);
+        assert_eq!(server.db().edge_count(), edges_before);
+        let steps = server.db().find_nodes_by_property(
+            "Step",
+            "idem_key",
+            &crate::core::PropertyValue::String("W2:0".into()),
+        );
+        assert!(steps.is_empty(), "the poisoning Step must NOT be recorded");
+    }
+
+    #[test]
+    fn apply_batch_cas_of_batch_created_node_rejected() {
+        let server = create_test_server();
+        // CAS targeting a node created earlier in the same batch (a local ref)
+        // is the documented v1-scope rejection (mirrors update/delete).
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Run", "ref": "r",
+                 "properties": {"wf": "W3"}},
+                {"op": "compare_and_set_node", "node_id": "$r", "expected_version": 1,
+                 "properties": {"wf": "W3"}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(
+            value["error"]["details"]["failed_op_index"],
+            json!(1),
+            "the CAS op index must be reported: {value}"
+        );
     }
 
     #[test]
