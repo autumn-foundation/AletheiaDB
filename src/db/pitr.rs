@@ -60,7 +60,9 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::storage::backup::{BackupError, check_target_empty, materialize_to_dir, read_artifact};
-use crate::storage::wal::segment_reader::read_entries_from_dir_with_options;
+use crate::storage::wal::segment_reader::{
+    read_entries_from_dir_with_options, read_entries_from_dir_with_options_reporting_raw_labels,
+};
 use crate::storage::wal::{LSN, WalEntry, WalOperation};
 
 /// A PITR stop target: an absolute transaction-time coordinate.
@@ -596,7 +598,20 @@ impl AletheiaDB {
         // at or above this references a string introduced after the backup.
         let restored_interner_count = payload.interner.strings.len() as u32;
 
-        let all = read_entries_from_dir_with_options(wal_archive, LSN::initial(), None, true)?;
+        // Read the whole archive, and learn whether ANY segment used the pre-v13
+        // raw-label encoding (Issue #3506). v13+ segments store label /
+        // property-key STRINGS inline and re-intern them to LIVE global-interner
+        // ids on read, so their ids are self-describing and always resolvable;
+        // only pre-v13 (`from_raw`) segments carry raw file-space ids that can
+        // dangle past a foreign backup's archived interner. This flag gates the
+        // vocabulary-drift guard below.
+        let (all, archive_has_raw_labels) =
+            read_entries_from_dir_with_options_reporting_raw_labels(
+                wal_archive,
+                LSN::initial(),
+                None,
+                true,
+            )?;
         let window = compute_window(&all, source_lsn);
         window.validate(&target)?;
 
@@ -621,14 +636,39 @@ impl AletheiaDB {
         // Parsing from the FULL stream eliminates band-straddle (F5).
         let filtered = filter_bands(all, &target, source_lsn);
 
-        // Vocabulary-change guard (F1): if any included op — data band or
-        // constraint declaration — references an interner id the base backup
-        // does not define, replaying it verbatim would silently mislabel/drop
-        // data. Refuse cleanly BEFORE materializing anything.
-        if let Some(first_unresolved_id) = first_unresolved_interned_id(
-            filtered.entries.iter().chain(constraint_slice.iter()),
-            restored_interner_count,
-        ) {
+        // Vocabulary-change guard (F1) — version-aware since WAL v13 (Issue
+        // #3506, made this guard obsolete for v13; kept for ≤v12).
+        //
+        // The guard compares each included op's label / property-key interner ids
+        // against the base backup's *file-space* interner count. That comparison
+        // is only meaningful for RAW ids: a pre-v13 (`!carries_string_labels`)
+        // segment stores raw file-space ids via `InternedString::from_raw` with
+        // NO re-intern, so an id `>= restored_interner_count` references a string
+        // the base backup does not carry and would silently mislabel/drop data on
+        // replay — we MUST still refuse (fail-closed).
+        //
+        // v13+ segments instead store the label / property-key STRINGS inline and
+        // re-intern them into the process-global interner on read
+        // (`segment_reader::read_label`, `PropertyMap` key codec). By the time the
+        // entries reach this guard those strings have ALREADY interned
+        // successfully (else the archive read above would have errored), so their
+        // (live) ids are always resolvable regardless of the foreign backup's
+        // file-space layout. Range-checking those live ids against the backup's
+        // file-space count is an id-space mismatch that false-rejects perfectly
+        // recoverable foreign restores — so when the archive is all-v13 we skip
+        // the check entirely.
+        //
+        // Gating is coarse ("any pre-v13 segment in the archive ⇒ keep the guard
+        // for the whole included stream"): the current writer only ever emits
+        // v13, so real archives are all-v13 and take the skip path; the only case
+        // conservatively refused is a near-impossible mixed-era archive, which is
+        // sound (a raw entry is never silently replayed).
+        if archive_has_raw_labels
+            && let Some(first_unresolved_id) = first_unresolved_interned_id(
+                filtered.entries.iter().chain(constraint_slice.iter()),
+                restored_interner_count,
+            )
+        {
             return Err(Error::Backup(BackupError::WindowCrossesVocabularyChange {
                 first_unresolved_id,
                 restored_interner_count,
@@ -1024,5 +1064,45 @@ mod band_filter_tests {
             "band carries its CommitTx timestamp, not a data op's"
         );
         assert_eq!(stop.lsn, 6, "stop is the CommitTx LSN");
+    }
+
+    /// Fail-closed contract (Issue #3745): the vocabulary-drift predicate must
+    /// still flag an out-of-range RAW label id — the shape a legacy ≤v12
+    /// (`InternedString::from_raw`, un-re-interned) segment carries. The
+    /// version-aware gating in `restore_to_data_dir_at` only RUNS this predicate
+    /// when a pre-v13 raw-label segment is present in the archive (see the
+    /// `read_entries_from_dir_with_options_reporting_raw_labels` seam and its
+    /// `reports_raw_labels_for_pre_v13_segment_only` unit test), so a raw id past
+    /// the archived interner is never silently replayed. This test pins the
+    /// predicate itself: in-range ids resolve (None), an out-of-range id is
+    /// detected (Some), across both a single op and a stream.
+    #[test]
+    fn vocabulary_guard_predicate_still_flags_out_of_range_raw_label() {
+        use crate::core::interning::InternedString;
+
+        // Base interner defines file-space ids 0..5.
+        let restored_count = 5u32;
+
+        let make_op = |label_raw: u32| WalOperation::CreateNode {
+            node_id: crate::core::NodeId::new(1).unwrap(),
+            label: InternedString::from_raw(label_raw),
+            properties: PropertyMap::new(),
+            valid_from: ts(1),
+            provenance: None,
+        };
+
+        // In-range label id (< restored_count): fully resolvable, no drift.
+        assert_eq!(first_out_of_range_id(&make_op(3), restored_count), None);
+
+        // Out-of-range label id (>= restored_count): references a string the base
+        // backup does not carry — MUST be flagged (fail-closed).
+        assert_eq!(first_out_of_range_id(&make_op(7), restored_count), Some(7));
+
+        // And the stream aggregator surfaces the first offending id.
+        let entries = vec![framed(1, make_op(2), ts(1)), framed(2, make_op(9), ts(1))];
+        assert_eq!(
+            first_unresolved_interned_id(&entries, restored_count),
+            Some(9)
+        );
     }
 }

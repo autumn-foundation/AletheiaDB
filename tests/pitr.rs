@@ -759,11 +759,21 @@ fn cli_pitr_restore_latest_replays_full_tail() {
 
 #[test]
 #[serial]
-fn pitr_window_crossing_vocabulary_change_errors() {
-    // A PITR whose window crosses a post-backup vocabulary change (a brand-new
-    // label whose interner id is absent from the base backup) must FAIL with a
-    // structured error rather than silently mislabel/drop the replayed node.
-    // A PITR to a target BEFORE the vocabulary change still succeeds.
+fn pitr_window_crossing_v13_vocabulary_change_now_succeeds() {
+    // Issue #3745 (inversion of the former `..._vocabulary_change_errors`): under
+    // WAL v13 (Issue #3506) a post-backup vocabulary change — a brand-new label
+    // whose FILE-SPACE id is absent from the base backup's interner — is fully
+    // recoverable: v13 stores the label STRING inline and re-interns it to a live
+    // global-interner id on read, so a PITR whose window crosses the change must
+    // now SUCCEED and read the new label back correctly, NOT refuse with
+    // `WindowCrossesVocabularyChange`.
+    //
+    // This test previously PINNED the buggy false-rejection (asserting case (a)
+    // errored). The guard compared the band's LIVE re-interned id against the
+    // base backup's file-space interner count — two different id spaces — and
+    // false-rejected a restore whose data was entirely re-internable. The guard
+    // is now version-aware: it is skipped for an all-v13 archive and kept only
+    // for legacy ≤v12 raw-label segments.
     let tmp = TempDir::new().unwrap();
     let wal = tmp.path().join("wal");
     let db = AletheiaDB::with_unified_config(source_config(&wal)).unwrap();
@@ -800,32 +810,38 @@ fn pitr_window_crossing_vocabulary_change_errors() {
     copy_wal_dir(&wal, &archive);
     drop(db);
 
-    // (a) Target at/after the vocabulary change → structured refusal.
-    let dst_fail = TempDir::new().unwrap();
-    let data_dir_fail = dst_fail.path().join("db");
-    let err = AletheiaDB::restore_to_data_dir_at(
+    // (a) Target at/after the vocabulary change → SUCCESS with the new label
+    //     correctly resolved (was: structured refusal, the false-rejection bug).
+    let dst_ok_after = TempDir::new().unwrap();
+    let data_dir_after = dst_ok_after.path().join("db");
+    let restored_after = AletheiaDB::restore_to_data_dir_at(
         &tmp.path().join("base.albk"),
         &archive,
         PitrTarget::AsOf(ts_after_change),
-        &data_dir_fail,
+        &data_dir_after,
     )
-    .unwrap_err();
-    match err {
-        Error::Backup(BackupError::WindowCrossesVocabularyChange {
-            first_unresolved_id,
-            restored_interner_count,
-        }) => {
-            assert!(
-                first_unresolved_id >= restored_interner_count,
-                "the unresolved id must be outside the base interner"
-            );
-        }
-        other => panic!("expected WindowCrossesVocabularyChange, got {other:?}"),
-    }
-    assert!(
-        !data_dir_fail.join("indexes").exists(),
-        "a vocabulary-crossing restore must not materialize the data dir"
+    .expect("a v13 restore crossing a post-backup vocabulary change must succeed (Issue #3745)");
+    assert_eq!(
+        restored_after.node_count(),
+        3,
+        "alice + bob + the new-label node are all at-or-before the target"
     );
+    assert!(restored_after.get_node(pre).is_ok());
+    assert!(restored_after.get_node(bob).is_ok());
+    let mgr_node = restored_after
+        .get_node(mgr)
+        .expect("the new-label node is at-or-before the target and must be present");
+    assert_eq!(
+        mgr_node.get_property("name").and_then(|v| v.as_str()),
+        Some("boss")
+    );
+    let by_label = restored_after.get_nodes_by_label("MgrNovelLabel3374");
+    assert_eq!(
+        by_label.len(),
+        1,
+        "the brand-new label must resolve to its string after restore"
+    );
+    assert_eq!(by_label[0].id, mgr);
 
     // (b) Target BEFORE the vocabulary change → clean success (Manager absent).
     let dst_ok = TempDir::new().unwrap();
@@ -848,6 +864,100 @@ fn pitr_window_crossing_vocabulary_change_errors() {
         restored.get_node(mgr).is_err(),
         "the new-label node is after the target and must be absent"
     );
+}
+
+#[test]
+#[serial]
+fn pitr_foreign_v13_restore_new_label_and_key_succeeds() {
+    // Issue #3745 — the headline fix: a v13 archive whose post-backup band
+    // introduces BRAND-NEW vocabulary — a label AND a property key, neither in
+    // the base backup's interner — must RESTORE SUCCESSFULLY to a target after
+    // that band, with the new label AND the new property key resolving correctly.
+    //
+    // Foreignness (without relying on same-process interner identity): the band's
+    // label/key strings are interned only AFTER the base backup, so their live
+    // ids necessarily exceed the base file-space interner count — precisely the
+    // id-space drift a foreign restore exhibits — and the source DB is dropped
+    // before the restore (the proven `restore_interner_isolation` technique). Both
+    // the label position AND the property-key position of the vocabulary guard are
+    // exercised. Before the fix this errored `WindowCrossesVocabularyChange`.
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let db = AletheiaDB::with_unified_config(source_config(&wal)).unwrap();
+
+    // Base vocabulary: Person / name only.
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "alice").build(),
+        )
+        .unwrap();
+    db.backup(&tmp.path().join("base.albk")).unwrap();
+
+    // Post-backup band: a node with a brand-new LABEL and a brand-new property
+    // KEY, neither present in the base interner.
+    let mgr = db
+        .create_node(
+            "MgrNovelLabel3745",
+            PropertyMapBuilder::new()
+                .insert("name", "boss")
+                .insert("novel_key_3745", "novel_value")
+                .build(),
+        )
+        .unwrap();
+    let ts_after = db.get_node(mgr).unwrap().metadata.commit_timestamp.unwrap();
+
+    let archive = tmp.path().join("archive");
+    copy_wal_dir(&wal, &archive);
+    drop(db);
+
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+    let restored = AletheiaDB::restore_to_data_dir_at(
+        &tmp.path().join("base.albk"),
+        &archive,
+        PitrTarget::AsOf(ts_after),
+        &data_dir,
+    )
+    .expect("a v13 foreign restore introducing new vocab must succeed (Issue #3745)");
+
+    // Base node survives with correct label + name (base file-space -> live remap
+    // via the #3490 InternerRemap; consistent with the band's live re-intern).
+    let alice_node = restored.get_node(alice).unwrap();
+    assert_eq!(
+        alice_node.get_property("name").and_then(|v| v.as_str()),
+        Some("alice")
+    );
+    let base_by_label = restored.get_nodes_by_label("Person");
+    assert_eq!(
+        base_by_label.len(),
+        1,
+        "base label must resolve after restore"
+    );
+
+    // Band node present with the NEW label and NEW property key correctly
+    // resolved.
+    let mgr_node = restored
+        .get_node(mgr)
+        .expect("post-backup band node must be present");
+    assert_eq!(
+        mgr_node.get_property("name").and_then(|v| v.as_str()),
+        Some("boss")
+    );
+    assert_eq!(
+        mgr_node
+            .get_property("novel_key_3745")
+            .and_then(|v| v.as_str()),
+        Some("novel_value"),
+        "the brand-new property KEY must resolve after restore"
+    );
+    let by_label = restored.get_nodes_by_label("MgrNovelLabel3745");
+    assert_eq!(
+        by_label.len(),
+        1,
+        "the brand-new LABEL must resolve to its string after restore"
+    );
+    assert_eq!(by_label[0].id, mgr);
 }
 
 // ============================================================================
