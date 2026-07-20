@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Valid-time-aware trust evaluation (#3382 follow-up): new public
+  `AletheiaDB::computed_confidence_as_of_bitemporal` plus
+  `TrustOptions::as_of_valid_time` / `TrustOptions::with_as_of_valid_time`, so
+  computed confidence over lineage can be evaluated at a caller-supplied
+  valid-time coordinate (defaulting to wallclock now when unscoped).
+
 ## [0.2.0] - 2026-07-18
 
 First crates.io release since 0.1.1. This release ships the trunk work

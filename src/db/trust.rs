@@ -479,7 +479,9 @@ impl AletheiaDB {
 
     /// Resolve a version-pinned reference to the fact version visible at
     /// transaction time `tt`, classifying its terminality against the
-    /// valid-time reference `valid_now` (wallclock now, independent of `tt`).
+    /// valid-time evaluation coordinate `valid_now` (the caller-supplied
+    /// valid-time at which trust is evaluated, defaulting to wallclock now when
+    /// unscoped; independent of `tt`).
     ///
     /// Walks the entity's version chain from its current head backward to the
     /// latest version whose transaction-time start `<= tt`. Its valid interval
@@ -928,7 +930,8 @@ fn leaf_confidence_source(db: &AletheiaDB, resolved: &ResolvedRef) -> (f64, Conf
 }
 
 /// Classify a version's valid interval into a terminal source, if any, relative
-/// to the valid-time reference `valid_now` (wallclock now).
+/// to the valid-time evaluation coordinate `valid_now` (defaults to wallclock
+/// now).
 ///
 /// - An **empty** interval (`start == end`) is a delete tombstone
 ///   ([`ConfidenceSource::Absent`]).
@@ -941,6 +944,13 @@ fn leaf_confidence_source(db: &AletheiaDB, resolved: &ResolvedRef) -> (f64, Conf
 /// Group 2 fix: a fact retracted **effective-future** (still valid now) and a
 /// naturally-bounded interval that currently **contains** now are both LIVE, not
 /// scored `0.0`.
+///
+/// **v1: terminality is END-only.** A not-yet-valid input (`start > valid_now`,
+/// e.g. a #3221 future-dated create) is deliberately still classified live and
+/// contributes its confidence at a coordinate before it is valid — the inverse
+/// of the tx-time `not_yet_recorded` carve-out. This is a conscious v1 decision;
+/// symmetric not-yet-valid (Absent-class) handling that gates on interval START
+/// is a tracked follow-up.
 fn classify_valid_interval(
     start: Timestamp,
     end: Timestamp,
