@@ -36,7 +36,27 @@ fn tiny_opts() -> RunOptions {
         seed: 42,
         warmup: 2,
         iterations: 10,
+        ..RunOptions::default()
     }
+}
+
+#[test]
+fn vector_overrides_flow_into_reported_config() {
+    // A tiny dedicated corpus + dim override; proves the overrides reach the
+    // reported config end-to-end without materializing anything large.
+    let opts = RunOptions {
+        scale: Scale::Smoke,
+        seed: 42,
+        warmup: 1,
+        iterations: 3,
+        vector_count: Some(24),
+        vector_dim: Some(48),
+    };
+    let report = run_suite(&opts).expect("suite should run with overrides");
+    // vector_count is honest: post embeddings PLUS the 24-vector corpus.
+    let posts = 6 * 8; // smoke: forums * posts_per_forum
+    assert_eq!(report.config.vector_count, posts + 24);
+    assert_eq!(report.config.vector_dim, 48);
 }
 
 #[test]

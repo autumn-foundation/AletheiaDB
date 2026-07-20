@@ -28,6 +28,12 @@ pub struct RunOptions {
     pub warmup: usize,
     /// Measured iterations per operation.
     pub iterations: usize,
+    /// Optional override of the dedicated vector-extension corpus size,
+    /// independent of the SNB scale. `None` uses the preset (no extra corpus).
+    pub vector_count: Option<usize>,
+    /// Optional override of the embedding dimensionality. `None` uses the
+    /// preset dim. Must be `> 0` when supplied.
+    pub vector_dim: Option<usize>,
 }
 
 impl Default for RunOptions {
@@ -37,6 +43,8 @@ impl Default for RunOptions {
             seed: 42,
             warmup: 20,
             iterations: 200,
+            vector_count: None,
+            vector_dim: None,
         }
     }
 }
@@ -47,7 +55,13 @@ impl Default for RunOptions {
 ///
 /// Returns any error from graph loading or the underlying database queries.
 pub fn run_suite(opts: &RunOptions) -> aletheiadb::Result<BenchmarkReport> {
-    let graph = generator::generate(opts.scale, opts.seed);
+    let graph = generator::generate_with_overrides(
+        opts.scale,
+        opts.seed,
+        opts.vector_count,
+        opts.vector_dim,
+    )
+    .map_err(|e| aletheiadb::Error::Other(e.to_string()))?;
     let loaded = loader::load(&graph)?;
 
     let mut operations = Vec::new();

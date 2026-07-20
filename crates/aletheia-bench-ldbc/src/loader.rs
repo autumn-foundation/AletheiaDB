@@ -257,12 +257,31 @@ pub fn load(graph: &GeneratedGraph) -> aletheiadb::Result<LoadedGraph> {
         set
     };
 
+    // --- Dedicated standalone vector-extension corpus (Issue #3628) ---
+    // Present only when a `--vector-count` override dialed one in; indexed on
+    // the same `embedding` property so the k-NN workload scales over posts +
+    // corpus. Each is a lightweight `Embedding` node.
+    for v in &graph.vectors {
+        db.create_node_with_valid_time(
+            "Embedding",
+            PropertyMapBuilder::new()
+                .insert("corpus_idx", v.idx as i64)
+                .insert_vector("embedding", &v.embedding)
+                .build(),
+            Some(base_ts),
+        )?;
+        node_count += 1;
+    }
+
     let query_embedding = graph
         .posts
         .first()
         .map(|p| p.embedding.clone())
+        .or_else(|| graph.vectors.first().map(|v| v.embedding.clone()))
         .unwrap_or_else(|| vec![0.0; dim]);
-    let vector_count = post_ids.len();
+    // Honest count of vectors actually indexed: post embeddings plus the
+    // dedicated corpus.
+    let vector_count = post_ids.len() + graph.vectors.len();
 
     Ok(LoadedGraph {
         db,

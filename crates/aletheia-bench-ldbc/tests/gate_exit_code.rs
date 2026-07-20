@@ -25,6 +25,7 @@ fn tiny_opts() -> RunOptions {
         seed: 42,
         warmup: 2,
         iterations: 5,
+        ..RunOptions::default()
     }
 }
 
