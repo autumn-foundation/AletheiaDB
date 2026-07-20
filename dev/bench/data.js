@@ -1,5 +1,5 @@
 {
-  "lastUpdate": 1784561119372,
+  "lastUpdate": 1784561803868,
   "repoUrl": "https://github.com/autumn-foundation/AletheiaDB",
   "entries": {
     "AletheiaDB Benchmarks": [
@@ -16,43 +16,43 @@
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "3ebb3cd82eaefbc7eecea771ba70f5e6d7a6ac7b",
-          "message": "feat(semantic-reasoning): trust propagation over derivation lineage (#3382) (#3748)\n\nImplements #3382: a derived fact's confidence is computed from its\nupstream evidence through a declared, deterministic combination policy,\nkept distinct from the writer-declared value, and recomputed lazily on\nread so evidence changes flow downstream. Design:\n`docs/plans/2026-07-20-trust-propagation.md`; user guide:\n`docs/guides/trust-propagation.md`. Closes #3382.\n\n- Combinators: weakest-link (min) and noisy-OR (1−∏(1−c)); per-database\ndefault + per-label overrides, discoverable via `list_trust_policies`;\ndurable `trust_policy.json` sidecar (atomic write, corrupt-quarantine),\nin-memory for ephemeral DBs.\n- `ComputedConfidence { declared, computed, … }` — computation never\noverwrites `provenance.confidence()`.\n- Explainable `trust_breakdown` tree bounded by depth/size; node\nconfidence stays full-accuracy under truncation.\n- Leaf rules: retracted/absent contributes 0.0 and dominates; missing\nconfidence resolved by explicit policy (zero/neutral/ignore), always\nflagged, never silently defaulted; `ConfidenceSource::Absent` distinct\nfrom `Retracted`.\n- Bi-temporal: `computed_confidence_as_of` replays confidences as\nrecorded at T; reactive at now to superseding writes; recorded history\nnever mutated.\n- Cycle-safe: version memoization + DFS stack guard + hard depth cap.\n- AC7: `ComputedConfidenceFilter` predicate composing with the\ndeclared-confidence filter; fusion-signal glue behind both flags.\n- Gated under `semantic-reasoning` (zero overhead when off, guaranteed\nby construction).\n\n## Review fixes (this round)\n\n- **Retraction dominates under BOTH combinators (HIGH).** A\nretracted/absent child yields `0.0`; under noisy-OR `1−∏(1−c)` a `0.0`\nterm is the *identity* and was silently absorbed by a live sibling\n(`noisy_or{retracted, 0.9}` gave `0.9`). Fixed with an **explicit\nterminal-child check** in the node combine step (`db/trust.rs`): if any\ndirect child is `Retracted`/`Absent` the node short-circuits to `0.0`\nunder both combinators and flags `has_retracted_inputs`.\n`combine_values` stays a pure combinator; domination is local (the `0.0`\nflows to the parent as an ordinary value while the flag bubbles up). The\ndesign §2.6/§5 \"recursion stops so it is not absorbed\" justification was\nmathematically false and has been corrected.\n- **Valid-time-aware terminality (MED, PRIMARY path).**\n`classify_valid_interval` now keys terminality on wallclock now, not\nmerely `is_closed()`: empty interval → `Absent`, interval *ended as of\nnow* (`valid_to <= now`) → `Retracted`, an interval that currently\n*contains* now (incl. an effective-future retraction) → **live**.\nValid-time reference is `time::now()` for both `computed_confidence` and\n`computed_confidence_as_of` (the as-of scopes tx-time only) — a\ndocumented approximation, fully valid-time-scoped eval is a tracked\nfollow-up. Adversarial #7: a fact that predates the as-of `T` is\n`Absent` without flagging `has_retracted_inputs`.\n- **O(n) `trust_breakdown` (MED).** The breakdown previously called a\nfresh full-subtree `eval_scalar` at every node (O(n²)). It now computes\none shared `HashMap<VersionId, ScalarEval>` via a single root\n`eval_scalar` and reads each node's full-accuracy confidence from that\nmemo — preserving review-fix #1 (values stay full-accuracy under\ntruncation).\n- **Bench + guide.** Added `benches/trust_propagation.rs` (Criterion,\ngated `semantic-reasoning`, wired in `Cargo.toml [[bench]]` with\n`required-features`) quantifying the opt-in on-cost; added the user\nguide `docs/guides/trust-propagation.md`. Zero-overhead-when-disabled is\nby construction and verified via `cargo build --no-default-features`.\n- Plus polish: valid-time depth-backstop (>1024) truncation test, lazy\npolicy-change test, diamond-DAG comment fix (independence approximation,\nnot de-dup), serde-gated `Error` import (LOW-1), `max_nodes`\nroot-not-counted doc (adversarial #6), §2.9 head-as-of-`tt` wording fix\n(L1), snapshot-registry rollback note (LOW-2).\n\n## Tests / gates\n\n- **60 trust-propagation tests** under `--features semantic-reasoning`:\n27 in `trust_propagation.rs` (combinator math + registry\npersistence/quarantine/rollback) + 33 in `db/trust.rs` (3/5-level trees,\ndiamond DAG, per-label override, declared-vs-computed, missing-policy\nzero/neutral/ignore, retracted/absent domination incl. multi-source\nnoisy-OR, valid-time terminality (future-effective /\nbounded-containing-now / predates-T), deep-chain + 1024 backstop, lazy\npolicy change, bi-temporal AS-OF, explainable breakdown +\ntruncation-honesty, AC7 predicate/composition/fusion-signal). All green.\n- Full lib suite under `--features semantic-reasoning`: **4556 passed, 0\nfailed, 10 ignored**.\n- `cargo fmt --all` clean; `cargo clippy --all-targets --all-features --\n-D warnings` clean; `cargo clippy --no-default-features --features\nsemantic-reasoning -- -D warnings` clean; `cargo build\n--no-default-features` compiles (feature fully compiled out).\n\nMCP surface (`trust_breakdown` tool + predicate params) designed but\ndeferred to the registry batch, per the one-registry-PR rule. Note:\nCoverage/Mutants checks are red repo-wide until #3737 merges — unrelated\nto this PR.",
-          "timestamp": "2026-07-20T10:14:00-05:00",
-          "tree_id": "f37ad2997861195648175ef66f57dbc5afa08af0",
-          "url": "https://github.com/autumn-foundation/AletheiaDB/commit/3ebb3cd82eaefbc7eecea771ba70f5e6d7a6ac7b"
+          "id": "6853de83da627c4d11e593da96215cc108b149f9",
+          "message": "feat(semantic-temporal): contradiction genealogy (#3352) (#3742)\n\n## What & why\n\nImplements **contradiction genealogy** (issue #3352): a read-only\nanalysis engine that, given a conflict target, reconstructs how\nconflicting claims about the same fact evolved across bi-temporal\nhistory and provenance.\n\n**Before:** when two facts disagree (\"Acme's CEO is Alice\" vs \"Bob\"), a\ncaller can only pick one — the raw material to adjudicate (valid time,\ntransaction time, per-fact source/confidence, supersession) is in the\nengine but not assembled.\n**After:** two new Rust APIs on `AletheiaDB`:\n- `find_contradictions(scope)` — scan by label / property / time-window\n(paginated) for entity+property pairs holding ≥2 differing values over\noverlapping valid-time intervals.\n- `contradiction_genealogy(target, options)` — for a conflict, return\nevery competing claim's valid/transaction intervals, provenance, the\nsupersession chain, the **divergence point** (earliest bi-temporal\ncoordinate both claims coexist), a per-source trust summary, and a prose\n`narrative`.\n\n## Key design point\n\nAletheiaDB linearizes versions on transaction time but leaves a\nsuperseded version's **valid interval open and unsplit** (Issue #3504).\nSo changing a value *without retracting* the prior claim leaves two\nversions with overlapping valid intervals and differing values — the\nstructural contradiction this feature surfaces (the \"silent\nknowledge-base rot\" case). Retraction (#3230) closes the old interval\nand removes the overlap. Each conflicting pair is classified\n**retroactive correction** vs **contemporaneous disagreement** (AC3),\nreusing the belief-revision classifier from #3709.\n\n## How\n\nNew `src/experimental/temporal/contradiction_genealogy.rs` behind the\nexperimental `semantic-temporal` flag (ADR-0050), reusing\n`belief_revision::classify` (added `pub(crate) classify_history`),\n`EntityHistory`, and `Provenance`. Pure read over append-only history;\ndeterministic (byte-identical, key-order independent). Design doc:\n`docs/plans/2026-07-19-contradiction-genealogy.md`.\n\n## Scope note\n\nPer lane policy (one registry-changing PR at a time), the **MCP tools\nare designed but deferred** to the MCP-registry batch follow-up; this PR\nlands the full Rust API + tests + bench. See design doc §11.\n\n## Tests / gates\n\n25 lib + 3 e2e tests (20-case matrix incl. `find_contradictions`\nrecall/precision), bench `benches/contradiction_genealogy.rs`. `cargo\nfmt --all --check`, clippy (CI feature set / `--all-features` /\n`--no-default-features`), and `cargo check --no-default-features\n--tests` all clean; standalone flag compiles.\n\n## AC evidence\n\n_Evidence table added after the in-flight multi-angle review pass; this\nis a draft in active development._\n\n## CI note\n\nIf the repo-wide Coverage/Mutants checks are red, that is a stale-trunk\ncondition tracked by #3737 (already merged into trunk), unrelated to\nthis diff.\n\n---\n_Generated by [Claude\nCode](https://claude.ai/code/session_011v4JNsR9tgXxxM1vQx9FYn)_\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2026-07-20T10:14:22-05:00",
+          "tree_id": "d2dca2fedb194328b327fe51fc3b3b0f0ad0a840",
+          "url": "https://github.com/autumn-foundation/AletheiaDB/commit/6853de83da627c4d11e593da96215cc108b149f9"
         },
-        "date": 1784561119371,
+        "date": 1784561803868,
         "tool": "customSmallerIsBetter",
         "benches": [
           {
             "name": "target_3_hop/traverse_three_hops",
-            "value": 160.93475147555296,
+            "value": 154.156968486261,
             "unit": "ns"
           },
           {
             "name": "target_single_hop/traverse_one_hop",
-            "value": 19.0682043163403,
+            "value": 19.21571931723487,
             "unit": "ns"
           },
           {
             "name": "target_batch_insertion/insert_1000_edges",
-            "value": 481379.6587968466,
+            "value": 478237.8532110095,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/worst_case_9_deltas",
-            "value": 182.9722588767533,
+            "value": 180.1818685788703,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/at_anchor",
-            "value": 176.23171823255268,
+            "value": 175.78467875621143,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/with_5_deltas",
-            "value": 172.13342038485555,
+            "value": 173.35416551155828,
             "unit": "ns"
           }
         ]
