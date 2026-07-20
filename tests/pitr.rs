@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::core::error::Error;
 use aletheiadb::core::id::NodeId;
+use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::provenance::Provenance;
 use aletheiadb::storage::backup::BackupError;
 use aletheiadb::{AletheiaDB, DurabilityMode, PitrTarget, PropertyMapBuilder, Timestamp};
@@ -958,6 +959,211 @@ fn pitr_foreign_v13_restore_new_label_and_key_succeeds() {
         "the brand-new LABEL must resolve to its string after restore"
     );
     assert_eq!(by_label[0].id, mgr);
+}
+
+#[test]
+#[serial]
+fn pitr_foreign_v13_restore_new_edge_type_and_key_succeeds() {
+    // Issue #3745 (finding D) — exercises the `CreateEdge` arm of the vocabulary
+    // guard end-to-end. A post-backup band creates an edge with a BRAND-NEW edge
+    // TYPE and a BRAND-NEW edge property KEY, neither present in the base
+    // backup's interner. A v13 restore to a target after that band must SUCCEED,
+    // and both the edge type and the property key must resolve to their strings.
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let db = AletheiaDB::with_unified_config(source_config(&wal)).unwrap();
+
+    // Base vocabulary: Person / name; two nodes to connect (both pre-backup, so
+    // they live in the base snapshot).
+    let a = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "alice").build(),
+        )
+        .unwrap();
+    let b = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "bob").build(),
+        )
+        .unwrap();
+    db.backup(&tmp.path().join("base.albk")).unwrap();
+
+    // Post-backup band: a brand-new edge TYPE + brand-new edge property KEY.
+    let edge = db
+        .create_edge(
+            a,
+            b,
+            "NOVEL_EDGE_3745",
+            PropertyMapBuilder::new()
+                .insert("novel_edge_key_3745", "e-val")
+                .build(),
+        )
+        .unwrap();
+    let ts_after = db
+        .get_edge(edge)
+        .unwrap()
+        .metadata
+        .commit_timestamp
+        .unwrap();
+
+    let archive = tmp.path().join("archive");
+    copy_wal_dir(&wal, &archive);
+    drop(db);
+
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+    let restored = AletheiaDB::restore_to_data_dir_at(
+        &tmp.path().join("base.albk"),
+        &archive,
+        PitrTarget::AsOf(ts_after),
+        &data_dir,
+    )
+    .expect("a v13 restore introducing a new edge type + key must succeed (Issue #3745)");
+
+    let restored_edge = restored
+        .get_edge(edge)
+        .expect("post-backup edge must be present");
+    assert!(
+        GLOBAL_INTERNER
+            .resolve_with(restored_edge.label, |s| s == "NOVEL_EDGE_3745")
+            .unwrap_or(false),
+        "the brand-new edge TYPE must resolve to its string after restore"
+    );
+    assert_eq!(
+        restored_edge
+            .get_property("novel_edge_key_3745")
+            .and_then(|v| v.as_str()),
+        Some("e-val"),
+        "the brand-new edge property KEY must resolve after restore"
+    );
+    assert_eq!(restored_edge.source, a);
+    assert_eq!(restored_edge.target, b);
+}
+
+#[test]
+#[serial]
+fn pitr_foreign_v13_restore_update_new_key_succeeds() {
+    // Issue #3745 (finding E) — exercises the UPDATE write path (distinct from
+    // create) through the guard. A post-backup `update_node` PATCH introduces a
+    // BRAND-NEW property key not present in the base interner. A v13 restore to a
+    // target after the update must SUCCEED and the new key must resolve to its
+    // value, alongside the preserved original property.
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let db = AletheiaDB::with_unified_config(source_config(&wal)).unwrap();
+
+    let n = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "alice").build(),
+        )
+        .unwrap();
+    db.backup(&tmp.path().join("base.albk")).unwrap();
+
+    // Post-backup update: PATCH in a brand-new property key.
+    db.update_node_with_valid_time(
+        n,
+        PropertyMapBuilder::new()
+            .insert("novel_update_key_3745", "u-val")
+            .build(),
+        None,
+    )
+    .unwrap();
+    let ts_after = db.get_node(n).unwrap().metadata.commit_timestamp.unwrap();
+
+    let archive = tmp.path().join("archive");
+    copy_wal_dir(&wal, &archive);
+    drop(db);
+
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+    let restored = AletheiaDB::restore_to_data_dir_at(
+        &tmp.path().join("base.albk"),
+        &archive,
+        PitrTarget::AsOf(ts_after),
+        &data_dir,
+    )
+    .expect("a v13 restore whose update introduces a new key must succeed (Issue #3745)");
+
+    let node = restored.get_node(n).expect("updated node must be present");
+    assert_eq!(
+        node.get_property("name").and_then(|v| v.as_str()),
+        Some("alice"),
+        "PATCH semantics preserve the original property key"
+    );
+    assert_eq!(
+        node.get_property("novel_update_key_3745")
+            .and_then(|v| v.as_str()),
+        Some("u-val"),
+        "the brand-new property KEY introduced by update must resolve after restore"
+    );
+}
+
+#[test]
+#[serial]
+fn pitr_constraint_declared_in_v13_band_enforced_after_restore() {
+    // Issue #3745 (finding F) — exercises the `constraint_slice` position of the
+    // guard-skip. A unique constraint is declared on a BRAND-NEW label + property
+    // (neither in the base interner) in a POST-BACKUP band. A v13 restore to a
+    // target after the declaration must SUCCEED, and the constraint must be
+    // enforced in the restored DB.
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let db = AletheiaDB::with_unified_config(source_config(&wal)).unwrap();
+
+    // Base: a single Person so the base is non-empty; the Widget vocabulary is
+    // introduced only AFTER the backup.
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new().insert("name", "alice").build(),
+    )
+    .unwrap();
+    db.backup(&tmp.path().join("base.albk")).unwrap();
+
+    // Post-backup band: declare a unique constraint on brand-new vocab, then
+    // insert one conforming node whose commit is the restore target.
+    db.unique_constraint("Widget3745", "serial")
+        .enable()
+        .unwrap();
+    let w = db
+        .create_node(
+            "Widget3745",
+            PropertyMapBuilder::new().insert("serial", "SN-1").build(),
+        )
+        .unwrap();
+    let ts_after = db.get_node(w).unwrap().metadata.commit_timestamp.unwrap();
+
+    let archive = tmp.path().join("archive");
+    copy_wal_dir(&wal, &archive);
+    drop(db);
+
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+    let restored = AletheiaDB::restore_to_data_dir_at(
+        &tmp.path().join("base.albk"),
+        &archive,
+        PitrTarget::AsOf(ts_after),
+        &data_dir,
+    )
+    .expect(
+        "a v13 restore whose band declares a constraint on brand-new vocab must succeed (Issue #3745)",
+    );
+
+    // The conforming node survives, and the constraint declared in the band is
+    // enforced (a duplicate serial is rejected).
+    assert!(
+        restored.get_node(w).is_ok(),
+        "the conforming node committed in the band must be present"
+    );
+    let dup = restored.create_node(
+        "Widget3745",
+        PropertyMapBuilder::new().insert("serial", "SN-1").build(),
+    );
+    assert!(
+        dup.is_err(),
+        "the unique constraint declared in the v13 band must be enforced after PITR"
+    );
 }
 
 // ============================================================================
