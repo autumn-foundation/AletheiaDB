@@ -110,6 +110,36 @@ graceful shutdown, and measured footprint/startup.
 
 ---
 
+## Shell completions
+
+The `aletheia` CLI can print a tab-completion script for your shell. The script
+reflects the subcommands compiled into your binary.
+
+```bash
+aletheia completions <bash|zsh|fish|powershell|elvish>
+```
+
+Install it once so `aletheia <TAB>` completes subcommands and flags:
+
+```bash
+# bash — system-wide (needs write access to the completion dir)
+aletheia completions bash | sudo tee /etc/bash_completion.d/aletheia > /dev/null
+
+# bash — per user (add the line to ~/.bashrc)
+mkdir -p ~/.local/share/bash-completion/completions
+aletheia completions bash > ~/.local/share/bash-completion/completions/aletheia
+# ...or source it directly:
+eval "$(aletheia completions bash)"
+
+# zsh — write into a directory on your $fpath, then restart the shell
+aletheia completions zsh > "${fpath[1]}/_aletheia"
+
+# fish
+aletheia completions fish > ~/.config/fish/completions/aletheia.fish
+```
+
+---
+
 ## Hybrid Queries
 
 Graph traversal, vector ranking, and temporal snapshots compose into a single
