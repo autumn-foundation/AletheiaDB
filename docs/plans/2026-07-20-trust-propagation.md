@@ -263,13 +263,24 @@ Per-upstream contribution, by `ConfidenceSource` (resolved against #3371's
 | #3230 valid-time-retracted (`FactStatus::Absent` via retraction tombstone) | `Retracted` | **0.0, dominates** |
 | Deleted / dangling in current state | `Absent` | **0.0, dominates** |
 
-"Dominates": under weakest-link a 0.0 forces the min to 0.0; under noisy-OR a
-0.0 factor `(1 − 0)` is the identity so it must be handled so a retracted/absent
-input cannot silently vanish — the node is **flagged** and, per AC4's "never
-silently retains its old weight", a retracted/absent contributor caps the node
-(documented rule: a dominating-zero contributor forces the node's computed value
-toward 0.0 rather than being absorbed as a noisy-OR identity term). Exact
-noisy-OR domination handling is pinned in §5 test cases R-1/R-2.
+"Dominates": when **any** contributor at a node resolves to `Retracted` or
+`Absent`, the node **short-circuits to 0.0** — retraction/absence dominates under
+BOTH combinators. This is implemented by an **explicit terminal-child check** in
+the node combine step (the node knows each child's terminal status and, if any
+child is terminal, forces its own computed value to `0.0` and sets
+`has_retracted_inputs`), **NOT** by relying on `0.0` being a noisy-OR identity
+term. That distinction is load-bearing: under noisy-OR `1 − ∏(1 − c)` a `0.0`
+term is the *identity* `(1 − 0) = 1`, so a retracted `0.0` contributed
+positionally would be **silently absorbed** by a live sibling (e.g.
+`noisy_or{retracted 0.0, live 0.9} = 0.9`) — the earlier "recursion stops so it
+is not absorbed" justification was mathematically false. The explicit
+terminal-child cap is what makes domination hold under noisy-OR. `combine_values`
+stays a pure combinator (it never sees terminal status); the domination decision
+lives entirely in the node combine step. Domination is **local** to the node with
+the terminal contributor: the resulting `0.0` then flows to the parent as an
+ordinary value (a parent's noisy-OR may legitimately corroborate that dead `0.0`
+with other live evidence), while `has_retracted_inputs` bubbles up the whole
+subtree. Pinned in §5 test cases R-1 / R-2 / R-2b.
 
 **`Retracted` vs `Absent` are DISTINCT** (review-fix #2): both contribute 0.0
 today, but they are separate `ConfidenceSource` variants and separate breakdown
@@ -408,7 +419,11 @@ Leaf / status rules (AC6, review-fix #2):
 12. **M-2 missing-confidence Neutral rule** — → neutral constant, flagged.
 13. **M-3 missing-confidence Ignore rule** — dropped from set, combinator over rest, flagged.
 14. **R-1 retracted upstream weakest-link** — `Retracted` → 0.0 dominates min.
-15. **R-2 retracted upstream noisy-OR** — `Retracted` caps node (does not vanish as identity term).
+15. **R-2 retracted upstream noisy-OR** — single `Retracted` source caps the node
+    to 0.0 (does not vanish as identity term).
+    **R-2b multi-source noisy-OR domination** — `noisy_or{retracted, live 0.9}` is
+    0.0, NOT 0.9: the explicit terminal-child cap prevents the live sibling from
+    absorbing the retracted 0.0 as the noisy-OR identity term.
 16. **R-3 absent (deleted) upstream** — `Absent` → 0.0, DISTINCT variant/label from `Retracted` (review-fix #2).
 
 Truncation (review-fix #1):
@@ -452,9 +467,10 @@ Things inferred (NOT verbatim from the issue), called out for review:
 - **Neutral constant = 0.5** for `MissingConfidenceRule::Neutral` — a documented
   choice, not from the issue; finalize in the guide.
 - **Noisy-OR domination of retracted/absent** (§2.6): the issue says retracted
-  "contribution drops to zero"; because 0.0 is the noisy-OR identity, we add an
-  explicit domination/flag rule so a retracted input is not silently absorbed.
-  Pinned by R-2; revisit if a non-dominating interpretation is preferred.
+  "contribution drops to zero"; because 0.0 is the noisy-OR identity, an explicit
+  terminal-child cap in the node combine step (not a positional 0.0) forces the
+  node to 0.0 so a retracted input is not silently absorbed by a live sibling.
+  Pinned by R-2 / R-2b; revisit if a non-dominating interpretation is preferred.
 - **Sidecar filename** `trust_policy.json` and its dir — mirrors the snapshot
   registry; confirm against `PersistenceConfig` at implementation.
 
@@ -583,12 +599,21 @@ pick):
   per-policy `MissingConfidencePolicy` (Zero/Neutral/Ignore); the `NEUTRAL`
   fallback is the distinct case of a node whose entire contributing child set
   was Ignore-excluded.
-- **Retracted/Absent dominate by STOPPING recursion and returning `Some(0.0)`**
-  — the locked semantics implement §2.6's "dominates" precisely: a
-  retracted/absent contributor is `0.0` and halts descent, so under both
-  combinators it forces the node toward 0.0 (min → 0.0; and because recursion
-  stops with an explicit 0.0 contribution rather than a noisy-OR identity term,
-  it is not silently absorbed). `has_retracted_inputs` flags it (AC4/AC6).
+- **Retracted/Absent dominate via an explicit terminal-child cap in the node
+  combine step** — a retracted/absent contributor resolves to `0.0` and halts
+  descent, but that alone is **not** sufficient under noisy-OR (where a `0.0`
+  term is the identity and a live sibling would absorb it). So the node combine
+  step, which knows each direct child's terminal status, explicitly forces its
+  own value to `0.0` (and sets `has_retracted_inputs`) whenever ANY direct child
+  is `Retracted`/`Absent` — under BOTH combinators. `combine_values` remains a
+  pure combinator and is never asked to encode domination. The earlier
+  "recursion stops so it is not absorbed" reasoning was mathematically false and
+  is corrected here (see §2.6). Domination is local to the node holding the
+  terminal contributor; the resulting `0.0` propagates to the parent as an
+  ordinary value while `has_retracted_inputs` bubbles up. A fact that merely
+  **predates** the evaluation `tt` (not yet recorded) resolves terminal-absent
+  too but is NOT a retraction: it contributes `0.0` without dominating and
+  without flagging `has_retracted_inputs` (adversarial #7).
 - **`SCALAR_MAX_DEPTH = 1024`** private hard recursion ceiling is separate from
   the caller-facing `DEFAULT_MAX_DEPTH = 32` (`TrustOptions.max_depth`): the
   former is the overflow backstop (review-fix #3), the latter the default

@@ -64,6 +64,12 @@ struct ResolvedRef {
     /// closed) or [`ConfidenceSource::Absent`] (deleted / dangling). Both
     /// contribute `0.0` and dominate.
     terminal: Option<ConfidenceSource>,
+    /// `true` when `terminal` is `Absent` **only because the fact predates the
+    /// evaluation transaction time** (no version was recorded at or before `tt`)
+    /// rather than because it was deleted / retracted. Such a fact contributes
+    /// `0.0` but is NOT a retraction: it does not dominate and does not flag
+    /// `has_retracted_inputs` (adversarial #7).
+    not_yet_recorded: bool,
 }
 
 /// The scalar result of evaluating a fact's computed confidence, plus the flags
@@ -75,6 +81,14 @@ struct ScalarEval {
     /// `true` when this input should be dropped from its parent's contributing
     /// set (an [`MissingConfidencePolicy::Ignore`]-excluded missing leaf).
     excluded: bool,
+    /// `true` when this eval is itself a directly-terminal, **dominating**
+    /// retracted/absent contributor (contributes `0.0` and forces its parent's
+    /// value to `0.0` under BOTH combinators). Set only on the terminal leaf,
+    /// never propagated: a node capped to `0.0` by a dominating child reports
+    /// `dominating == false`, so its `0.0` flows to *its* parent as an ordinary
+    /// value. A fact that merely predates the evaluation time (not-yet-recorded)
+    /// is NOT dominating (adversarial #7).
+    dominating: bool,
     /// Whether any missing-confidence input was encountered in this subtree.
     has_missing: bool,
     /// Whether any retracted/absent input was encountered in this subtree.
@@ -425,6 +439,7 @@ impl AletheiaDB {
                                 .and_then(Provenance::confidence),
                             label: intern_to_string(version.label),
                             terminal,
+                            not_yet_recorded: false,
                         };
                     }
                     current = version.prev_version;
@@ -455,6 +470,7 @@ impl AletheiaDB {
                                 .and_then(Provenance::confidence),
                             label: intern_to_string(version.label),
                             terminal,
+                            not_yet_recorded: false,
                         };
                     }
                     current = version.prev_version;
@@ -480,13 +496,18 @@ impl AletheiaDB {
     ) -> ScalarEval {
         let resolved = self.resolve_ref(reference, tt, historical);
 
-        // Retracted / absent dominates: 0.0, stop recursion (AC4).
+        // Retracted / absent dominates: 0.0, stop recursion (AC4). A fact that
+        // merely predates `tt` (not yet recorded at the evaluation time) also
+        // resolves terminal-absent but is NOT a retraction and does NOT dominate
+        // or flag `has_retracted` (adversarial #7).
         if resolved.terminal.is_some() {
+            let dominating = !resolved.not_yet_recorded;
             return ScalarEval {
                 value: 0.0,
                 excluded: false,
+                dominating,
                 has_missing: false,
-                has_retracted: true,
+                has_retracted: dominating,
                 truncated: false,
             };
         }
@@ -502,6 +523,7 @@ impl AletheiaDB {
             return ScalarEval {
                 value: resolved.confidence.map(clamp01).unwrap_or(0.0),
                 excluded: false,
+                dominating: false,
                 has_missing: resolved.confidence.is_none(),
                 has_retracted: false,
                 truncated: true,
@@ -516,27 +538,47 @@ impl AletheiaDB {
                 let mut has_missing = false;
                 let mut has_retracted = false;
                 let mut truncated = false;
+                let mut any_dominating = false;
                 for source in &record.sources {
                     let child = self.eval_scalar(*source, tt, historical, memo, stack, depth + 1);
                     has_missing |= child.has_missing;
                     has_retracted |= child.has_retracted;
                     truncated |= child.truncated;
+                    any_dominating |= child.dominating;
                     child_values.push(if child.excluded {
                         None
                     } else {
                         Some(child.value)
                     });
                 }
-                let (value, all_excluded) = combine_values(&child_values, combinator);
-                if all_excluded {
-                    has_missing = true;
-                }
-                ScalarEval {
-                    value,
-                    excluded: false,
-                    has_missing,
-                    has_retracted,
-                    truncated,
+                if any_dominating {
+                    // A directly-terminal (retracted / absent) contributor forces
+                    // this node to 0.0 under BOTH combinators — an explicit
+                    // terminal-child short-circuit, never relying on 0.0 being a
+                    // noisy-OR identity term (Group 1 review fix). Domination is
+                    // local: the resulting 0.0 flows to the parent as an ordinary
+                    // value (`dominating: false`), while `has_retracted` bubbles up.
+                    ScalarEval {
+                        value: 0.0,
+                        excluded: false,
+                        dominating: false,
+                        has_missing,
+                        has_retracted: true,
+                        truncated,
+                    }
+                } else {
+                    let (value, all_excluded) = combine_values(&child_values, combinator);
+                    if all_excluded {
+                        has_missing = true;
+                    }
+                    ScalarEval {
+                        value,
+                        excluded: false,
+                        dominating: false,
+                        has_missing,
+                        has_retracted,
+                        truncated,
+                    }
                 }
             }
         };
@@ -553,6 +595,7 @@ impl AletheiaDB {
             Some(c) => ScalarEval {
                 value: clamp01(c),
                 excluded: false,
+                dominating: false,
                 has_missing: false,
                 has_retracted: false,
                 truncated: false,
@@ -567,6 +610,7 @@ impl AletheiaDB {
                 ScalarEval {
                     value,
                     excluded,
+                    dominating: false,
                     has_missing: true,
                     has_retracted: false,
                     truncated: false,
@@ -761,6 +805,7 @@ fn absent_ref() -> ResolvedRef {
         confidence: None,
         label: String::new(),
         terminal: Some(ConfidenceSource::Absent),
+        not_yet_recorded: false,
     }
 }
 
@@ -1032,6 +1077,27 @@ mod tests {
         }
         let cc = db.computed_confidence(d).unwrap();
         approx(cc.computed, 0.0); // 1-(1-0)=0 : retracted does not vanish
+        assert!(cc.has_retracted_inputs);
+    }
+
+    // R-2b: a retracted contributor dominates a MULTI-source noisy-OR node — the
+    // 0.0 must NOT be absorbed as the noisy-OR identity term by a live sibling.
+    #[test]
+    fn r2b_retracted_noisy_or_multisource_dominates() {
+        let db = AletheiaDB::new().unwrap();
+        db.set_trust_policy(TrustPolicy::noisy_or(MissingConfidencePolicy::Zero))
+            .unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let live = mk(&db, "Doc", Some(0.9), &[]);
+        let d = mk(&db, "Merge", None, &[r, live]);
+        // Retract r effective-now: a non-empty closed interval ending at now.
+        if let EntityId::Node(nid) = r.entity {
+            db.retract_node(nid, time::now()).unwrap();
+        }
+        let cc = db.computed_confidence(d).unwrap();
+        // WITHOUT the terminal-child short-circuit this would be
+        // noisy_or{0.0, 0.9} = 0.9 (the retraction silently absorbed).
+        approx(cc.computed, 0.0);
         assert!(cc.has_retracted_inputs);
     }
 
