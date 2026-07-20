@@ -424,6 +424,31 @@ pub enum StorageError {
         /// The rejection reason.
         reason: String,
     },
+    /// A runtime INDEX keyring install was attempted while one is already present
+    /// (Issue #3708). The index-tier mirror of
+    /// [`WalKeyringAlreadyInstalled`](Self::WalKeyringAlreadyInstalled): distinct
+    /// from the generic [`InconsistentState`](Self::InconsistentState) so the
+    /// enable engine can classify this **precondition** failure as
+    /// `FAILED_PRECONDITION` (a caller cannot enable an already-encrypted index
+    /// tier) while genuine index I/O faults keep falling through to `INTERNAL`.
+    #[error("index keyring already installed: {reason}")]
+    IndexKeyringAlreadyInstalled {
+        /// The rejection reason.
+        reason: String,
+    },
+    /// A runtime COLD keyring install was attempted while one is already present
+    /// (Issue #3708). The cold-tier mirror of
+    /// [`IndexKeyringAlreadyInstalled`](Self::IndexKeyringAlreadyInstalled) and
+    /// [`WalKeyringAlreadyInstalled`](Self::WalKeyringAlreadyInstalled): distinct
+    /// from the generic [`InconsistentState`](Self::InconsistentState) so the
+    /// double-install **precondition** maps to `FAILED_PRECONDITION` rather than
+    /// `INTERNAL`, keeping all three tiers' install-seam rejections classified
+    /// alike.
+    #[error("cold keyring already installed: {reason}")]
+    ColdKeyringAlreadyInstalled {
+        /// The rejection reason.
+        reason: String,
+    },
     /// Checkpoint error.
     #[error("Checkpoint error: {reason}")]
     CheckpointError {

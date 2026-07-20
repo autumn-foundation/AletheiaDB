@@ -422,6 +422,20 @@ fn classify_storage_error(e: &StorageError) -> (McpErrorCode, bool) {
         // failure, not an internal fault (Issue #3616 PR4) — the mirror of the
         // already-installed rejection above, and likewise non-retriable.
         StorageError::WalKeyringNotInstalled { .. } => (McpErrorCode::FailedPrecondition, false),
+        // Enabling encryption on an already-encrypted index tier is a caller
+        // precondition failure, not an internal fault (Issue #3708) — the
+        // index-tier mirror of the WAL already-installed rejection, likewise
+        // non-retriable.
+        StorageError::IndexKeyringAlreadyInstalled { .. } => {
+            (McpErrorCode::FailedPrecondition, false)
+        }
+        // Enabling encryption on an already-encrypted cold tier is a caller
+        // precondition failure, not an internal fault (Issue #3708) — the
+        // cold-tier mirror of the WAL/index already-installed rejections,
+        // likewise non-retriable.
+        StorageError::ColdKeyringAlreadyInstalled { .. } => {
+            (McpErrorCode::FailedPrecondition, false)
+        }
         // A per-principal changefeed quota breach (Issue #3678) is a transient
         // fairness limit: another of this principal's subscriptions may drop, so
         // retrying with backoff can succeed → RESOURCE_EXHAUSTED, retriable.
@@ -911,6 +925,31 @@ mod tests {
         let (code, retriable) = classify_constraint_error(&non_conforming);
         assert_eq!(code, McpErrorCode::FailedPrecondition);
         assert!(!retriable);
+    }
+
+    #[test]
+    fn keyring_already_installed_errors_classify_as_failed_precondition() {
+        // Issue #3708: the index and cold runtime keyring-install seams reject a
+        // double-install with a distinguishable `*AlreadyInstalled` variant, each
+        // of which must classify to FAILED_PRECONDITION (non-retriable): a second
+        // install is a caller-fault precondition breach, never a transient retry.
+        let index_err = StorageError::IndexKeyringAlreadyInstalled {
+            reason: "None -> Some transition only".to_string(),
+        };
+        assert_eq!(
+            classify_storage_error(&index_err),
+            (McpErrorCode::FailedPrecondition, false),
+            "IndexKeyringAlreadyInstalled must be FAILED_PRECONDITION, non-retriable"
+        );
+
+        let cold_err = StorageError::ColdKeyringAlreadyInstalled {
+            reason: "None -> Some transition only".to_string(),
+        };
+        assert_eq!(
+            classify_storage_error(&cold_err),
+            (McpErrorCode::FailedPrecondition, false),
+            "ColdKeyringAlreadyInstalled must be FAILED_PRECONDITION, non-retriable"
+        );
     }
 
     #[test]
