@@ -330,9 +330,26 @@ confidences **as recorded at transaction time T** (AC5):
 - Lineage closure is already `AS OF`-scopable: `LineageQueryOptions::with_as_of(T)`
   filters to records with `recorded_at <= T` (see `neighbours_upstream`/
   `neighbours_downstream`). We pass `T` straight through.
-- Each contributing version's confidence is read from its historical version
-  (version-pinned by `LineageRef`, immutable), so "confidence as recorded" is a
-  historical read, not a current read.
+- Each contributing reference's confidence is read from the entity's **head as
+  recorded at `T`** — `resolve_ref` walks the entity's version chain to the
+  latest version whose transaction-time start `<= T` and reads *that* version's
+  provenance confidence. The version pinned in the `LineageRef` sets only the
+  reference's Current-vs-Superseded status; the confidence itself is NOT read
+  from the pinned `reference.version` (correctness L1). This is what makes the
+  now-eval reactive (head = current) and the as-of eval revision-stable (head =
+  as recorded at `T`).
+- **Valid-time terminality is keyed on wallclock `time::now()`**, NOT on the
+  as-of `T`: the `AS OF` coordinate scopes **transaction-time only**. A fact
+  whose valid interval has *ended as of now* (`valid_to <= now`) is `Retracted`;
+  a fact retracted **effective-future** (still valid now) or holding a
+  naturally-bounded interval that currently **contains** now is **live** and
+  contributes its confidence (Group 2 fix). Using wallclock now for both
+  `computed_confidence` and `computed_confidence_as_of` is a **documented
+  approximation** for the as-of path (a fully valid-time-scoped trust evaluation
+  — replaying valid-time terminality as it stood at `T` — is a tracked
+  follow-up). A version that merely **predates** `T` (not yet recorded at `T`) is
+  `Absent`, contributes `0.0`, but is NOT a retraction and does not flag
+  `has_retracted_inputs` (adversarial #7).
 - Recorded history is never mutated (nothing is written; §2.2).
 - **No-op AS OF (review-fix #4)**: `computed_confidence_as_of(ref, T)` with `T`
   at or after the latest transaction time MUST equal the unscoped

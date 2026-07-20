@@ -24,10 +24,29 @@
 //!   its declared confidence (`computed == declared`), or the per-label
 //!   [`MissingConfidencePolicy`] value when the writer asserted none (always
 //!   flagged, AC6).
-//! - A **retracted** (valid-time-closed) or **absent** (deleted / dangling)
-//!   upstream contributes `0.0` and **dominates** — it stops the recursion so
-//!   it cannot be silently absorbed as a noisy-OR identity term (AC4). The two
-//!   are distinct [`ConfidenceSource`] variants (review-fix #2).
+//! - A **retracted** (valid interval ended as of now) or **absent** (deleted /
+//!   dangling) upstream contributes `0.0` and **dominates**: the node combine
+//!   step explicitly checks each direct child's terminal status and forces its
+//!   own value to `0.0` under BOTH combinators (never relying on `0.0` being a
+//!   noisy-OR identity term, which would let a live sibling absorb it — Group 1
+//!   fix). The two are distinct [`ConfidenceSource`] variants (review-fix #2).
+//!
+//! # Valid-time terminality (wallclock-now approximation)
+//!
+//! Terminality is keyed on the **valid-time reference `time::now()`** (wallclock
+//! now), independent of the transaction-time `AS OF` scope: a fact whose valid
+//! interval has *ended* as of now (`valid_to <= now`) is [`Retracted`], while a
+//! fact retracted **effective-future** or holding a naturally-bounded interval
+//! that currently **contains** now is still **live** and contributes its
+//! confidence. The transaction-time `AS OF` coordinate scopes tx-time only.
+//! Using wallclock now for both `computed_confidence` and
+//! `computed_confidence_as_of` is a **documented approximation** for the as-of
+//! path (a fully valid-time-scoped trust evaluation is a tracked follow-up).
+//! A version that merely **predates** the as-of `tt` (not yet recorded at `T`)
+//! is Absent and contributes `0.0`, but is NOT a retraction and does not flag
+//! `has_retracted_inputs` (adversarial #7).
+//!
+//! [`Retracted`]: ConfidenceSource::Retracted
 
 #![cfg(feature = "semantic-reasoning")]
 
@@ -199,10 +218,25 @@ impl AletheiaDB {
         self.ensure_ref_exists(reference)?;
         let historical = self.historical.read();
 
-        let resolved = self.resolve_ref(reference, tt, &historical);
+        // Valid-time terminality is keyed on wallclock now, independent of the
+        // transaction-time `tt` scope (the `as_of` bound scopes tx-time only): a
+        // fact retracted/bounded effective-future is still LIVE now, and a
+        // naturally-bounded interval that currently contains now still
+        // contributes (Group 2 fix). This is a documented approximation for the
+        // as-of path — see the module docs.
+        let valid_now = time::now();
+        let resolved = self.resolve_ref(reference, tt, valid_now, &historical);
         let mut memo: HashMap<VersionId, ScalarEval> = HashMap::new();
         let mut stack: HashSet<VersionId> = HashSet::new();
-        let eval = self.eval_scalar(reference, tt, &historical, &mut memo, &mut stack, 0);
+        let eval = self.eval_scalar(
+            reference,
+            tt,
+            valid_now,
+            &historical,
+            &mut memo,
+            &mut stack,
+            0,
+        );
 
         // Root lineage decides `has_lineage` / `combinator` for the response.
         let root_lineage = if resolved.terminal.is_none() {
@@ -400,31 +434,43 @@ impl AletheiaDB {
     }
 
     /// Resolve a version-pinned reference to the fact version visible at
-    /// transaction time `tt`.
+    /// transaction time `tt`, classifying its terminality against the
+    /// valid-time reference `valid_now` (wallclock now, independent of `tt`).
     ///
     /// Walks the entity's version chain from its current head backward to the
-    /// latest version whose transaction-time start `<= tt`. A closed valid
-    /// interval on that visible version means the fact is gone: an **empty**
-    /// interval (`start == end`) is a delete tombstone
-    /// ([`ConfidenceSource::Absent`]); a **non-empty** closed interval is an
-    /// Issue #3230 retraction ([`ConfidenceSource::Retracted`]).
+    /// latest version whose transaction-time start `<= tt`. Its valid interval
+    /// is then classified by [`classify_valid_interval`]: an **empty** interval
+    /// is a delete tombstone ([`ConfidenceSource::Absent`]); an interval that
+    /// has **ended** as of `valid_now` (`valid_to <= valid_now`) is a retraction
+    /// ([`ConfidenceSource::Retracted`]); an interval still open or that
+    /// currently **contains** `valid_now` is live and contributes its confidence
+    /// (Group 2 fix — an effective-future retraction or a naturally-bounded
+    /// interval containing now is NOT terminal).
+    ///
+    /// When no version was recorded at or before `tt`, the fact is absent: it is
+    /// flagged `not_yet_recorded` when versions exist but were all recorded after
+    /// `tt` (predates `tt`, not a retraction — adversarial #7), and a plain
+    /// dangling absence otherwise.
     fn resolve_ref(
         &self,
         reference: LineageRef,
         tt: Timestamp,
+        valid_now: Timestamp,
         historical: &HistoricalStorage,
     ) -> ResolvedRef {
         match reference.entity {
             EntityId::Node(node_id) => {
                 let mut current = historical.get_current_node_version(node_id);
+                let mut saw_any = false;
                 while let Some(vid) = current {
                     let Some(version) = historical.get_node_version(vid) else {
                         break;
                     };
+                    saw_any = true;
                     if version.commit_timestamp <= tt {
                         let valid = version.temporal.valid_time();
                         let terminal =
-                            classify_valid_interval(valid.start(), valid.end(), valid.is_closed());
+                            classify_valid_interval(valid.start(), valid.end(), valid_now);
                         let status = if version.id == reference.version {
                             FactStatus::Current
                         } else {
@@ -444,18 +490,23 @@ impl AletheiaDB {
                     }
                     current = version.prev_version;
                 }
-                absent_ref()
+                // No version at or before `tt`: dangling (no versions at all) vs
+                // predates `tt` (versions exist but were all recorded after `tt`,
+                // i.e. not yet recorded at `tt`). Only the former is a retraction.
+                absent_ref(saw_any)
             }
             EntityId::Edge(edge_id) => {
                 let mut current = historical.get_current_edge_version(edge_id);
+                let mut saw_any = false;
                 while let Some(vid) = current {
                     let Some(version) = historical.get_edge_version(vid) else {
                         break;
                     };
+                    saw_any = true;
                     if version.commit_timestamp <= tt {
                         let valid = version.temporal.valid_time();
                         let terminal =
-                            classify_valid_interval(valid.start(), valid.end(), valid.is_closed());
+                            classify_valid_interval(valid.start(), valid.end(), valid_now);
                         let status = if version.id == reference.version {
                             FactStatus::Current
                         } else {
@@ -475,7 +526,7 @@ impl AletheiaDB {
                     }
                     current = version.prev_version;
                 }
-                absent_ref()
+                absent_ref(saw_any)
             }
         }
     }
@@ -485,16 +536,18 @@ impl AletheiaDB {
     /// Memoizes per visible [`VersionId`] so a diamond DAG evaluates each shared
     /// ancestor once, guards the DFS path with `stack` (belt-and-braces against
     /// the impossible cycle), and hard-caps recursion at [`SCALAR_MAX_DEPTH`].
+    #[allow(clippy::too_many_arguments)]
     fn eval_scalar(
         &self,
         reference: LineageRef,
         tt: Timestamp,
+        valid_now: Timestamp,
         historical: &HistoricalStorage,
         memo: &mut HashMap<VersionId, ScalarEval>,
         stack: &mut HashSet<VersionId>,
         depth: usize,
     ) -> ScalarEval {
-        let resolved = self.resolve_ref(reference, tt, historical);
+        let resolved = self.resolve_ref(reference, tt, valid_now, historical);
 
         // Retracted / absent dominates: 0.0, stop recursion (AC4). A fact that
         // merely predates `tt` (not yet recorded at the evaluation time) also
@@ -540,7 +593,15 @@ impl AletheiaDB {
                 let mut truncated = false;
                 let mut any_dominating = false;
                 for source in &record.sources {
-                    let child = self.eval_scalar(*source, tt, historical, memo, stack, depth + 1);
+                    let child = self.eval_scalar(
+                        *source,
+                        tt,
+                        valid_now,
+                        historical,
+                        memo,
+                        stack,
+                        depth + 1,
+                    );
                     has_missing |= child.has_missing;
                     has_retracted |= child.has_retracted;
                     truncated |= child.truncated;
@@ -627,12 +688,15 @@ impl AletheiaDB {
         &self,
         reference: LineageRef,
         tt: Timestamp,
+        valid_now: Timestamp,
         historical: &HistoricalStorage,
     ) -> f64 {
         let mut memo: HashMap<VersionId, ScalarEval> = HashMap::new();
         let mut stack: HashSet<VersionId> = HashSet::new();
-        self.eval_scalar(reference, tt, historical, &mut memo, &mut stack, 0)
-            .value
+        self.eval_scalar(
+            reference, tt, valid_now, historical, &mut memo, &mut stack, 0,
+        )
+        .value
     }
 
     // ===================================================================
@@ -654,12 +718,16 @@ impl AletheiaDB {
     #[must_use]
     pub fn trust_breakdown(&self, reference: LineageRef, options: &TrustOptions) -> TrustBreakdown {
         let tt = options.as_of.unwrap_or_else(time::now);
+        // Valid-time terminality is keyed on wallclock now, independent of the
+        // tx-time `as_of` scope (Group 2 fix), matching `computed_confidence`.
+        let valid_now = time::now();
         let historical = self.historical.read();
         let mut budget = options.max_nodes;
         let mut stack: HashSet<VersionId> = HashSet::new();
         self.build_breakdown(
             reference,
             tt,
+            valid_now,
             &historical,
             options.max_depth,
             0,
@@ -675,13 +743,14 @@ impl AletheiaDB {
         &self,
         reference: LineageRef,
         tt: Timestamp,
+        valid_now: Timestamp,
         historical: &HistoricalStorage,
         max_depth: usize,
         depth: usize,
         budget: &mut usize,
         stack: &mut HashSet<VersionId>,
     ) -> TrustBreakdown {
-        let resolved = self.resolve_ref(reference, tt, historical);
+        let resolved = self.resolve_ref(reference, tt, valid_now, historical);
 
         // Terminal: retracted / absent -> 0.0, no children.
         if let Some(terminal) = resolved.terminal {
@@ -715,7 +784,7 @@ impl AletheiaDB {
 
         let combinator = self.trust_policy_for_label(&resolved.label).combinator;
         // The node's reported confidence is ALWAYS the full-accuracy value.
-        let confidence = self.eval_scalar_value(reference, tt, historical);
+        let confidence = self.eval_scalar_value(reference, tt, valid_now, historical);
 
         // Stop descent at the depth cap or on the (impossible) cycle: keep the
         // full-accuracy confidence, drop the children, flag truncated.
@@ -740,8 +809,16 @@ impl AletheiaDB {
                 break;
             }
             *budget -= 1;
-            let child =
-                self.build_breakdown(*source, tt, historical, max_depth, depth + 1, budget, stack);
+            let child = self.build_breakdown(
+                *source,
+                tt,
+                valid_now,
+                historical,
+                max_depth,
+                depth + 1,
+                budget,
+                stack,
+            );
             truncated |= child.truncated;
             children.push(child);
         }
@@ -776,36 +853,49 @@ fn leaf_confidence_source(db: &AletheiaDB, resolved: &ResolvedRef) -> (f64, Conf
     }
 }
 
-/// Classify a version's valid interval into a terminal source, if any.
+/// Classify a version's valid interval into a terminal source, if any, relative
+/// to the valid-time reference `valid_now` (wallclock now).
 ///
-/// A closed, **empty** interval (`start == end`) is a delete tombstone
-/// ([`ConfidenceSource::Absent`]); a closed, **non-empty** interval is an
-/// Issue #3230 retraction ([`ConfidenceSource::Retracted`]); an open interval is
-/// a live fact (`None`).
+/// - An **empty** interval (`start == end`) is a delete tombstone
+///   ([`ConfidenceSource::Absent`]).
+/// - An interval that has **ended** as of `valid_now` (`end <= valid_now`) is an
+///   Issue #3230 retraction / natural expiry ([`ConfidenceSource::Retracted`]).
+/// - Otherwise the interval is live — open, or closed but still containing (or
+///   entirely ahead of) `valid_now` — and contributes its confidence (`None`).
+///
+/// Keying terminality on `valid_now` rather than merely on `is_closed()` is the
+/// Group 2 fix: a fact retracted **effective-future** (still valid now) and a
+/// naturally-bounded interval that currently **contains** now are both LIVE, not
+/// scored `0.0`.
 fn classify_valid_interval(
     start: Timestamp,
     end: Timestamp,
-    is_closed: bool,
+    valid_now: Timestamp,
 ) -> Option<ConfidenceSource> {
-    if !is_closed {
-        return None;
-    }
     if start == end {
-        Some(ConfidenceSource::Absent)
-    } else {
+        return Some(ConfidenceSource::Absent);
+    }
+    if end <= valid_now {
         Some(ConfidenceSource::Retracted)
+    } else {
+        None
     }
 }
 
-/// A resolved reference for a fact that is gone / dangling in current state.
-fn absent_ref() -> ResolvedRef {
+/// A resolved reference for an absent fact.
+///
+/// `not_yet_recorded` is `true` when the absence is because the fact **predates**
+/// the evaluation transaction time (versions exist but were all recorded later) —
+/// not a retraction, so it must not flag `has_retracted_inputs` (adversarial #7).
+/// It is `false` for a genuinely dangling / deleted-from-current-state fact.
+fn absent_ref(not_yet_recorded: bool) -> ResolvedRef {
     ResolvedRef {
         version: VersionId::new_unchecked(0),
         status: FactStatus::Absent,
         confidence: None,
         label: String::new(),
         terminal: Some(ConfidenceSource::Absent),
-        not_yet_recorded: false,
+        not_yet_recorded,
     }
 }
 
@@ -1052,12 +1142,10 @@ mod tests {
         let r = mk(&db, "Doc", Some(0.9), &[]);
         let r2 = mk(&db, "Doc", Some(0.8), &[]);
         let d = mk(&db, "Merge", None, &[r, r2]);
-        // Retract r as of a future valid time (non-empty closed interval).
+        // Retract r effective-now: a non-empty valid interval that has ENDED as
+        // of now, so it is terminal (Group 2 valid-time-aware terminality).
         if let EntityId::Node(nid) = r.entity {
-            // Close the valid interval ~1 day out: a non-empty closed interval
-            // (a retraction), within the max-future-offset guard.
-            let valid_to = Timestamp::new_unchecked(time::now().wallclock() + 86_400_000_000, 0);
-            db.retract_node(nid, valid_to).unwrap();
+            db.retract_node(nid, time::now()).unwrap();
         }
         let cc = db.computed_confidence(d).unwrap();
         approx(cc.computed, 0.0); // min(0.0 retracted, 0.8) = 0.0
@@ -1072,8 +1160,7 @@ mod tests {
         let r = mk(&db, "Doc", Some(0.9), &[]);
         let d = mk(&db, "Merge", None, &[r]); // single retracted source
         if let EntityId::Node(nid) = r.entity {
-            let valid_to = Timestamp::new_unchecked(time::now().wallclock() + 86_400_000_000, 0);
-            db.retract_node(nid, valid_to).unwrap();
+            db.retract_node(nid, time::now()).unwrap();
         }
         let cc = db.computed_confidence(d).unwrap();
         approx(cc.computed, 0.0); // 1-(1-0)=0 : retracted does not vanish
@@ -1114,6 +1201,102 @@ mod tests {
         let cc = db.computed_confidence(d).unwrap();
         approx(cc.computed, 0.0);
         assert!(cc.has_retracted_inputs);
+    }
+
+    // ---- Group 2: valid-time-aware terminality ----
+
+    // The classifier keys terminality on the eval instant, not merely on
+    // is_closed(): empty -> Absent, ended-as-of-now -> Retracted, an interval
+    // containing (or ahead of) now -> live.
+    #[test]
+    fn classify_valid_interval_is_valid_time_aware() {
+        let now = time::now();
+        let past = Timestamp::new_unchecked(now.wallclock() - 1_000_000, 0);
+        let future = Timestamp::new_unchecked(now.wallclock() + 86_400_000_000, 0);
+        let far_future = Timestamp::new_unchecked(i64::MAX / 2, 0);
+        // Empty interval -> delete tombstone (Absent).
+        assert_eq!(
+            classify_valid_interval(past, past, now),
+            Some(ConfidenceSource::Absent)
+        );
+        // Interval ended as of now -> Retracted.
+        assert_eq!(
+            classify_valid_interval(past, now, now),
+            Some(ConfidenceSource::Retracted)
+        );
+        // (b) Bounded interval [past, future) currently CONTAINING now -> live.
+        assert_eq!(classify_valid_interval(past, future, now), None);
+        // (a) Effective-future retraction [~now, future) -> live.
+        assert_eq!(classify_valid_interval(now, future, now), None);
+        // Open-ended (effectively unbounded) interval -> live.
+        assert_eq!(classify_valid_interval(past, far_future, now), None);
+    }
+
+    // (a) A fact retracted effective-FUTURE is still valid now, so it
+    // contributes its confidence (provenance re-stamped so the live version
+    // keeps it) — NOT scored 0.0.
+    #[test]
+    fn future_effective_retraction_still_contributes() {
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let d = mk(&db, "Merge", None, &[r, r2]);
+        // Close the valid interval ~1 day out (still valid now); preserve the
+        // 0.9 confidence on the live version by re-stamping provenance.
+        if let EntityId::Node(nid) = r.entity {
+            let valid_to = Timestamp::new_unchecked(time::now().wallclock() + 86_400_000_000, 0);
+            db.retract_node_with_provenance(nid, valid_to, Some(prov(0.9)))
+                .unwrap();
+        }
+        let cc = db.computed_confidence(d).unwrap();
+        approx(cc.computed, 0.8); // r is live: min(0.9, 0.8) = 0.8
+        assert!(!cc.has_retracted_inputs);
+    }
+
+    // (b) A fact with a naturally-bounded valid interval [past, future) that
+    // currently CONTAINS now contributes its confidence.
+    #[test]
+    fn bounded_interval_containing_now_contributes() {
+        let db = AletheiaDB::new().unwrap();
+        let now = time::now().wallclock();
+        let past = Timestamp::new_unchecked(now - 86_400_000_000, 0); // 1 day ago
+        let (nid, vid) = db
+            .create_node_with_options_and_lineage(
+                "Doc",
+                PropertyMap::new(),
+                WriteRequestOptions::new()
+                    .with_valid_from(past)
+                    .with_provenance(prov(0.9)),
+                &[],
+            )
+            .unwrap();
+        let r = LineageRef::new(nid, vid);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let d = mk(&db, "Merge", None, &[r, r2]);
+        // Bound the interval 1 day in the future: [1-day-ago, 1-day-hence)
+        // contains now; keep the confidence on the live version.
+        let future = Timestamp::new_unchecked(now + 86_400_000_000, 0);
+        db.retract_node_with_provenance(nid, future, Some(prov(0.9)))
+            .unwrap();
+        let cc = db.computed_confidence(d).unwrap();
+        approx(cc.computed, 0.8); // r live -> min(0.9, 0.8) = 0.8
+        assert!(!cc.has_retracted_inputs);
+    }
+
+    // Adversarial #7: a fact that PREDATES the as-of transaction time (not yet
+    // recorded at T) is Absent and contributes 0.0, but is NOT a retraction — it
+    // must not flag `has_retracted_inputs`.
+    #[test]
+    fn predates_transaction_time_is_absent_without_retracted_flag() {
+        let db = AletheiaDB::new().unwrap();
+        let t_before = time::now(); // captured BEFORE the fact is recorded
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let cc = db.computed_confidence_as_of(r, t_before).unwrap();
+        approx(cc.computed, 0.0); // did not exist at T -> 0.0
+        assert!(
+            !cc.has_retracted_inputs,
+            "predates-T is not a retraction, must not flag has_retracted_inputs"
+        );
     }
 
     // ---- D-1: deep chain is cycle/overflow-safe; memoization exercised ----
@@ -1293,8 +1476,7 @@ mod tests {
         let r = mk(&db, "Doc", Some(0.9), &[]);
         let d = mk(&db, "Merge", None, &[r]);
         if let EntityId::Node(nid) = r.entity {
-            let valid_to = Timestamp::new_unchecked(time::now().wallclock() + 86_400_000_000, 0);
-            db.retract_node(nid, valid_to).unwrap();
+            db.retract_node(nid, time::now()).unwrap();
         }
         let bd = db.trust_breakdown(d, &TrustOptions::new());
         assert_eq!(bd.children.len(), 1);
