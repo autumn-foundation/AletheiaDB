@@ -421,7 +421,11 @@ pub(crate) fn classify_history(history: &EntityHistory) -> Vec<RevisionClass> {
 /// (the value the design leans on for the table-driven fixture test). The diff
 /// is cheap relative to the single `historical.read()` the audit already paid
 /// for, and the audit is a cold read, not a hot path.
-fn classify(
+///
+// `pub(crate)` (not module-private) so it is the single source of truth for the
+// terminating-event oracle: used by half_life (#3377) to decide which
+// transitions (WorldChange / Retraction) end a fact's valid-time lifespan.
+pub(crate) fn classify(
     version: &VersionInfo,
     predecessor: Option<&VersionInfo>,
     max_prior_valid_from: Option<Timestamp>,

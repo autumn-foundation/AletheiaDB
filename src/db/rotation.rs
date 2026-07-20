@@ -640,7 +640,6 @@ impl AletheiaDB {
         let manager = self.require_rotation_prereqs()?;
         let keyring = manager
             .keyring()
-            .cloned()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
         let cipher = keyring
             .current_cipher()
@@ -678,7 +677,6 @@ impl AletheiaDB {
         let manager = self.require_rotation_prereqs()?;
         let keyring = manager
             .keyring()
-            .cloned()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
         let cipher = keyring
             .current_cipher()
@@ -847,7 +845,6 @@ impl AletheiaDB {
         let started = Instant::now();
         let keyring = manager
             .keyring()
-            .cloned()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
         // The keyring's current generation is the one written by the interrupted
         // forward pass; the *old* generation to roll back to is `enc_cfg`.
@@ -962,7 +959,6 @@ impl AletheiaDB {
         // Shared, mutable keyring handle (mutations are observed by the manager).
         let keyring = manager
             .keyring()
-            .cloned()
             .ok_or_else(|| rotation_err(RotationError::NotConfigured))?;
         // Verify the current index generation exists before doing any work.
         keyring
@@ -2689,7 +2685,7 @@ pub fn resume_pending_rotation(
     ) {
         return Ok(None);
     }
-    let Some(keyring) = manager.keyring().cloned() else {
+    let Some(keyring) = manager.keyring() else {
         // Encryption not configured on this startup; leave the ledger.
         return Ok(None);
     };
@@ -3580,7 +3576,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let keyring = manager.keyring().cloned().unwrap();
+        let keyring = manager.keyring().unwrap();
         let new_index_cipher = std::sync::Arc::clone(
             EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
                 .unwrap()
@@ -4290,7 +4286,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let keyring = manager.keyring().cloned().unwrap();
+        let keyring = manager.keyring().unwrap();
         let new_index_cipher = std::sync::Arc::clone(
             EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
                 .unwrap()
@@ -5005,7 +5001,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let keyring = manager.keyring().cloned().unwrap();
+        let keyring = manager.keyring().unwrap();
         let new_index_cipher = std::sync::Arc::clone(
             EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
                 .unwrap()
@@ -5121,7 +5117,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let keyring = manager.keyring().cloned().unwrap();
+        let keyring = manager.keyring().unwrap();
         let new_index_cipher = std::sync::Arc::clone(
             EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
                 .unwrap()
@@ -5210,7 +5206,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let keyring = manager.keyring().cloned().unwrap();
+        let keyring = manager.keyring().unwrap();
         let new_index_cipher = std::sync::Arc::clone(
             EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
                 .unwrap()
@@ -6190,7 +6186,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let keyring = manager.keyring().cloned().unwrap();
+        let keyring = manager.keyring().unwrap();
         let new_index_cipher = index_cipher_for_source(&pp_source);
         keyring.add_generation(2, Arc::clone(&new_index_cipher));
 
@@ -6312,7 +6308,7 @@ mod tests {
                     .index_cipher(),
             )),
         ));
-        let keyring = manager.keyring().cloned().unwrap();
+        let keyring = manager.keyring().unwrap();
         keyring.add_generation(2, index_cipher_for_source(&pp_source));
         let mut ledger =
             RotationLedger::index_scope(RotationDirection::Forward, 2, pp_source.clone());

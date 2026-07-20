@@ -1537,15 +1537,16 @@ fn snapshot_persist_from_snapshot_uses_keyring_and_writes_encrypted() {
     );
 
     // ── Round-trip: the encrypted bytes decrypt through the keyring ─────────
-    let graph_data = load_graph_index_with_keyring(&graph_path, manager.keyring())
+    let graph_data = load_graph_index_with_keyring(&graph_path, manager.keyring().as_ref())
         .expect("encrypted graph snapshot must decrypt through the keyring");
     assert_eq!(
         graph_data.nodes.len(),
         1,
         "round-tripped graph snapshot must recover the single persisted node"
     );
-    let temporal_data = load_temporal_index_with_keyring(&temporal_path, manager.keyring())
-        .expect("encrypted temporal snapshot must decrypt through the keyring");
+    let temporal_data =
+        load_temporal_index_with_keyring(&temporal_path, manager.keyring().as_ref())
+            .expect("encrypted temporal snapshot must decrypt through the keyring");
     assert_eq!(
         temporal_data.node_versions.len(),
         1,

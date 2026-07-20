@@ -3810,14 +3810,22 @@ impl HistoricalStorage {
 
         // For each node, sort versions by tx_time and link them
         for (node_id, mut version_ids) in node_versions_by_id {
-            // Sort by transaction time start (ascending order)
+            // Sort by transaction time start (ascending order), tie-breaking on
+            // the unique `version_id`. The `version_id` tie-break makes the chain
+            // order deterministic when two versions share a `tx_start` (the input
+            // `version_ids` come from HashMap iteration, whose order is
+            // non-deterministic); without it the head and every reconstructed read
+            // would depend on iteration order (AC6 for counterfactual replay).
             // Phase 2: Use TIMESTAMP_MAX instead of i64::MAX
             use crate::core::temporal::TIMESTAMP_MAX;
             version_ids.sort_by_key(|vid| {
-                self.node_versions
-                    .get(vid)
-                    .map(|v| v.temporal.transaction_time().start())
-                    .unwrap_or(TIMESTAMP_MAX)
+                (
+                    self.node_versions
+                        .get(vid)
+                        .map(|v| v.temporal.transaction_time().start())
+                        .unwrap_or(TIMESTAMP_MAX),
+                    *vid,
+                )
             });
 
             // Link prev/next
@@ -3911,13 +3919,18 @@ impl HistoricalStorage {
 
         // For each edge, sort versions by tx_time and link them
         for (edge_id, mut version_ids) in edge_versions_by_id {
-            // Sort by transaction time start (ascending order)
+            // Sort by transaction time start (ascending order), tie-breaking on
+            // the unique `version_id` for deterministic chain order under equal
+            // `tx_start` (see the node-chain comment above).
             // Phase 2: Use TIMESTAMP_MAX (already imported above)
             version_ids.sort_by_key(|vid| {
-                self.edge_versions
-                    .get(vid)
-                    .map(|v| v.temporal.transaction_time().start())
-                    .unwrap_or(TIMESTAMP_MAX)
+                (
+                    self.edge_versions
+                        .get(vid)
+                        .map(|v| v.temporal.transaction_time().start())
+                        .unwrap_or(TIMESTAMP_MAX),
+                    *vid,
+                )
             });
 
             // Link prev/next
