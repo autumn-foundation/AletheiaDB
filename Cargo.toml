@@ -611,6 +611,7 @@ required-features = ["semantic-temporal"]
 name = "counterfactual_replay"
 harness = false
 path = "benches/counterfactual_replay.rs"
+required-features = ["semantic-temporal"]
 
 # Knowledge half-life analytics (Issue #3377, Fix-B): a cold cohort scan +
 # Kaplan-Meier over a sizeable synthetic cohort (SM3 < 10s / 1M versions,
