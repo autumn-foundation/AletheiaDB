@@ -681,9 +681,10 @@ impl AletheiaDB {
     }
 
     /// A full-accuracy scalar evaluation of `reference` at `tt` with fresh memo
-    /// and stack — used by the breakdown so a node's reported confidence stays
-    /// honest regardless of the presentation depth / node-count cap (review-fix
-    /// #1).
+    /// and stack. The breakdown reads confidences from a single shared memo
+    /// (Group 3); this is the defensive fallback for a node absent from that memo
+    /// so a reported confidence stays full-accuracy regardless of the
+    /// presentation depth / node-count cap (review-fix #1).
     fn eval_scalar_value(
         &self,
         reference: LineageRef,
@@ -722,6 +723,25 @@ impl AletheiaDB {
         // tx-time `as_of` scope (Group 2 fix), matching `computed_confidence`.
         let valid_now = time::now();
         let historical = self.historical.read();
+
+        // Compute the full-accuracy scalar values for the WHOLE closure ONCE
+        // (Group 3): a single `eval_scalar` from the root fills a shared memo the
+        // breakdown then reads per node, turning the previous per-node fresh
+        // subtree walk (O(n^2)) into O(n). The memo holds full values computed
+        // independently of the presentation depth/node caps, so a truncated
+        // breakdown still reports full-accuracy confidences (review-fix #1).
+        let mut memo: HashMap<VersionId, ScalarEval> = HashMap::new();
+        let mut scalar_stack: HashSet<VersionId> = HashSet::new();
+        let _ = self.eval_scalar(
+            reference,
+            tt,
+            valid_now,
+            &historical,
+            &mut memo,
+            &mut scalar_stack,
+            0,
+        );
+
         let mut budget = options.max_nodes;
         let mut stack: HashSet<VersionId> = HashSet::new();
         self.build_breakdown(
@@ -729,6 +749,7 @@ impl AletheiaDB {
             tt,
             valid_now,
             &historical,
+            &memo,
             options.max_depth,
             0,
             &mut budget,
@@ -745,6 +766,7 @@ impl AletheiaDB {
         tt: Timestamp,
         valid_now: Timestamp,
         historical: &HistoricalStorage,
+        memo: &HashMap<VersionId, ScalarEval>,
         max_depth: usize,
         depth: usize,
         budget: &mut usize,
@@ -783,8 +805,14 @@ impl AletheiaDB {
         };
 
         let combinator = self.trust_policy_for_label(&resolved.label).combinator;
-        // The node's reported confidence is ALWAYS the full-accuracy value.
-        let confidence = self.eval_scalar_value(reference, tt, valid_now, historical);
+        // The node's reported confidence is ALWAYS the full-accuracy value: read
+        // it from the shared memo (Group 3, O(n)); fall back to a fresh scalar
+        // eval only if the version was not memoized (defensive — not reached for
+        // trees within the scalar depth cap).
+        let confidence = memo
+            .get(&vid)
+            .map(|eval| eval.value)
+            .unwrap_or_else(|| self.eval_scalar_value(reference, tt, valid_now, historical));
 
         // Stop descent at the depth cap or on the (impossible) cycle: keep the
         // full-accuracy confidence, drop the children, flag truncated.
@@ -814,6 +842,7 @@ impl AletheiaDB {
                 tt,
                 valid_now,
                 historical,
+                memo,
                 max_depth,
                 depth + 1,
                 budget,
