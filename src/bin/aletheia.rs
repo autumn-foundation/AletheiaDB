@@ -69,6 +69,10 @@ fn run() -> Result<(), String> {
         // and dispatches to the neo4j-csv (Issue #3356) or parquet (Issue #3364) path.
         // `handle_import` is always defined (a stub when the `import` feature is off).
         Some("import") => handle_import(args.collect()),
+        // Shell completions (Issue #3619): generate a bash/zsh/fish/powershell/
+        // elvish completion script from the standalone clap mirror in
+        // `build_cli()`. Pure output generation — never opens the database.
+        Some("completions") => handle_completions(args.collect()),
         #[cfg(feature = "parquet")]
         Some("export") => parquet_io::handle_export(args.collect()),
         #[cfg(feature = "audit-export")]
@@ -121,7 +125,8 @@ Usage:\n\
   aletheia keys rotate (--new-key <PATH> | --new-env-var <NAME>) | --status | --resume | --cancel\n\
   aletheia encryption status [--key-file PATH | --env-var NAME]\n\
   aletheia encryption verify [--key-file PATH | --env-var NAME]\n\
-  aletheia encryption enable (--key-file PATH | --env-var NAME) | disable"
+  aletheia encryption enable (--key-file PATH | --env-var NAME) | disable\n\
+  aletheia completions <bash|zsh|fish|powershell|elvish>"
     );
     // The neo4j-csv import verb is gated behind the `import` feature; only advertise it
     // when it is compiled in.
@@ -234,8 +239,303 @@ Usage:\n\
                        index, checkpoints, and cold storage crash-consistently and\n\
                        flips the durable authority; the next open comes up encrypted.\n\
   encryption disable — Migrate an encrypted DB back to plaintext-at-rest in place\n\
-                       (inverse of enable; sources the current key from the config).\n"
+                       (inverse of enable; sources the current key from the config).\n\
+\nShell completions (Issue #3619):\n\
+  completions — Print a tab-completion script for your shell to stdout.\n\
+                Supported: bash, zsh, fish, powershell, elvish. The script\n\
+                reflects the subcommands compiled into this binary. See the\n\
+                \"Shell completions\" section of the README for install snippets,\n\
+                e.g. `aletheia completions bash > /etc/bash_completion.d/aletheia`.\n"
     );
+}
+
+/// Builds a standalone clap `Command` that MIRRORS the CLI's hand-rolled command
+/// surface (Issue #3619).
+///
+/// This is deliberately built with the clap **builder** API (not the derive
+/// macro) and is used for exactly one purpose today: driving
+/// `clap_complete::generate` so `aletheia completions <shell>` can emit real
+/// bash/zsh/fish/powershell/elvish completion scripts that reflect the current
+/// subcommand surface. The actual argument dispatch in [`run`] remains the
+/// hand-rolled parser and is left 100% untouched.
+///
+/// This clap `Command` is a **hand-maintained MIRROR** of the hand-rolled
+/// dispatch in [`run`], existing solely to drive `clap_complete`. The
+/// feature-gated subcommands are wrapped in the SAME `cfg` as their dispatch
+/// arms, so a completion script always matches the features the binary was
+/// actually compiled with. Subcommand presence and feature-gate parity with
+/// the dispatch are asserted by tests (see `completions_tests`); per-command
+/// FLAG coverage, however, is illustrative / best-effort and NOT exhaustive —
+/// individual `--flag` args here are a convenience for completion, not a
+/// verified 1:1 reflection of every flag `run` accepts.
+///
+/// NOTE (future work): this `Command` is intended to be the seed a future full
+/// clap migration — the real blocker behind #3619 — can adopt as its parser,
+/// replacing the hand-rolled `match` in [`run`] and [`print_usage`].
+fn build_cli() -> clap::Command {
+    use clap::{Arg, Command, value_parser};
+
+    // `cli` is reassigned only inside the `parquet` / `audit-export` cfg blocks
+    // below; when neither feature is compiled in it is never mutated, so scope
+    // the `unused_mut` suppression to exactly that configuration.
+    #[cfg_attr(
+        not(any(feature = "parquet", feature = "audit-export")),
+        allow(unused_mut)
+    )]
+    let mut cli = Command::new("aletheia")
+        .about("AletheiaDB CLI — local bi-temporal graph operations and daemon management")
+        .subcommand_required(false)
+        .arg_required_else_help(false)
+        .subcommand(
+            Command::new("demo").about("Boot a seeded ephemeral graph and run a guided tour"),
+        )
+        .subcommand(
+            Command::new("node")
+                .about("Node operations")
+                .subcommand(
+                    Command::new("create")
+                        .about("Create a node")
+                        .arg(Arg::new("label").required(true))
+                        .arg(Arg::new("properties").long("properties")),
+                )
+                .subcommand(
+                    Command::new("get")
+                        .about("Get a node by id")
+                        .arg(Arg::new("node_id").required(true)),
+                ),
+        )
+        .subcommand(
+            Command::new("edge")
+                .about("Edge operations")
+                .subcommand(
+                    Command::new("create")
+                        .about("Create an edge")
+                        .arg(Arg::new("source_id").required(true))
+                        .arg(Arg::new("target_id").required(true))
+                        .arg(Arg::new("label").required(true))
+                        .arg(Arg::new("properties").long("properties")),
+                )
+                .subcommand(
+                    Command::new("get")
+                        .about("Get an edge by id")
+                        .arg(Arg::new("edge_id").required(true)),
+                ),
+        )
+        .subcommand(
+            Command::new("traverse")
+                .about("Single-hop graph traversal from a start node")
+                .arg(Arg::new("start_node_id").required(true))
+                .arg(Arg::new("edge_label").required(true))
+                .arg(Arg::new("direction").long("direction")),
+        )
+        .subcommand(
+            Command::new("daemon")
+                .about("Manage the background HTTP server process")
+                .subcommand(
+                    Command::new("start")
+                        .about("Start the daemon")
+                        .arg(Arg::new("pid-file").long("pid-file"))
+                        .arg(Arg::new("log-file").long("log-file"))
+                        .arg(Arg::new("host").long("host"))
+                        .arg(Arg::new("port").long("port")),
+                )
+                .subcommand(
+                    Command::new("stop")
+                        .about("Stop the daemon")
+                        .arg(Arg::new("pid-file").long("pid-file")),
+                )
+                .subcommand(
+                    Command::new("status")
+                        .about("Report daemon status")
+                        .arg(Arg::new("pid-file").long("pid-file")),
+                ),
+        )
+        .subcommand(
+            Command::new("backup")
+                .about("Write a portable .albk backup artifact")
+                .arg(Arg::new("path").required(true)),
+        )
+        .subcommand(
+            Command::new("restore")
+                .about("Restore a .albk artifact (optionally point-in-time)")
+                .arg(Arg::new("path").required(true))
+                .arg(Arg::new("wal-archive").long("wal-archive"))
+                .arg(Arg::new("as-of").long("as-of"))
+                .arg(Arg::new("lsn").long("lsn"))
+                .arg(Arg::new("latest").long("latest").num_args(0))
+                .arg(Arg::new("dry-run").long("dry-run").num_args(0)),
+        )
+        .subcommand({
+            // `--entity`/`--json` are always accepted by `handle_verify`; the
+            // `--export-head`/`--against` chain-head anchor flags are only
+            // wired up under `#[cfg(feature = "serde")]` there, so gate them
+            // identically here to keep completions honest under
+            // `--no-default-features`.
+            #[cfg_attr(not(feature = "serde"), allow(unused_mut))]
+            let mut verify = Command::new("verify")
+                .about("Verify the tamper-evident provenance hash chain")
+                .arg(Arg::new("entity").long("entity"))
+                .arg(Arg::new("json").long("json").num_args(0));
+            #[cfg(feature = "serde")]
+            {
+                verify = verify
+                    .arg(Arg::new("export-head").long("export-head"))
+                    .arg(Arg::new("against").long("against"));
+            }
+            verify
+        })
+        .subcommand(
+            Command::new("keys")
+                .about("Encryption key operator commands")
+                .subcommand(
+                    Command::new("generate")
+                        .about("Provision a new master key file")
+                        .arg(Arg::new("output").long("output"))
+                        .arg(Arg::new("force").long("force").num_args(0))
+                        .arg(Arg::new("passphrase").long("passphrase").num_args(0)),
+                )
+                .subcommand(
+                    Command::new("status")
+                        .visible_alias("info")
+                        .about("Show key configuration (no key material)")
+                        .arg(Arg::new("key-file").long("key-file"))
+                        .arg(Arg::new("env-var").long("env-var")),
+                )
+                .subcommand(
+                    Command::new("verify")
+                        .about("Verify a key file loads and is valid")
+                        .arg(Arg::new("key-file").long("key-file")),
+                )
+                .subcommand(
+                    Command::new("rotate")
+                        .about("Rotate the master encryption key")
+                        .arg(Arg::new("new-key").long("new-key"))
+                        .arg(Arg::new("new-env-var").long("new-env-var"))
+                        .arg(Arg::new("status").long("status").num_args(0))
+                        .arg(Arg::new("resume").long("resume").num_args(0))
+                        .arg(Arg::new("cancel").long("cancel").num_args(0)),
+                ),
+        )
+        .subcommand(
+            Command::new("encryption")
+                .about("Encryption-at-rest operator commands")
+                .subcommand(
+                    Command::new("status")
+                        .about("Per-layer encryption status")
+                        .arg(Arg::new("key-file").long("key-file"))
+                        .arg(Arg::new("env-var").long("env-var")),
+                )
+                .subcommand(
+                    Command::new("verify")
+                        .about("Verify the configured DB's encrypted data decrypts")
+                        .arg(Arg::new("key-file").long("key-file"))
+                        .arg(Arg::new("env-var").long("env-var")),
+                )
+                .subcommand(
+                    Command::new("enable")
+                        .about("Migrate a plaintext DB to encrypted-at-rest")
+                        .arg(Arg::new("key-file").long("key-file"))
+                        .arg(Arg::new("env-var").long("env-var")),
+                )
+                .subcommand(
+                    Command::new("disable")
+                        .about("Migrate an encrypted DB back to plaintext-at-rest"),
+                ),
+        )
+        .subcommand(
+            Command::new("import")
+                .about("Import data into the database")
+                .arg(Arg::new("format").long("format"))
+                .arg(Arg::new("nodes").long("nodes"))
+                .arg(Arg::new("relationships").long("relationships"))
+                .arg(Arg::new("report").long("report")),
+        );
+
+    // Feature-gated verbs — mirror the dispatcher's `cfg` exactly so a completion
+    // script never advertises a command the compiled binary does not have.
+    #[cfg(feature = "parquet")]
+    {
+        cli = cli.subcommand(
+            Command::new("export")
+                .about("Export the database to Parquet")
+                .arg(Arg::new("out_prefix").required(true))
+                .arg(Arg::new("format").long("format"))
+                .arg(Arg::new("mode").long("mode")),
+        );
+    }
+    #[cfg(feature = "audit-export")]
+    {
+        cli = cli
+            .subcommand(
+                Command::new("audit-keygen")
+                    .about("Generate an Ed25519 audit signing key")
+                    .arg(Arg::new("key_file").required(true)),
+            )
+            .subcommand(
+                Command::new("audit-export")
+                    .about("Sign an entity's full bi-temporal history")
+                    .arg(Arg::new("kind").required(true))
+                    .arg(Arg::new("id").required(true))
+                    .arg(Arg::new("key").long("key"))
+                    .arg(Arg::new("out").long("out"))
+                    .arg(Arg::new("db-id").long("db-id"))
+                    .arg(Arg::new("redact").long("redact")),
+            )
+            .subcommand(
+                Command::new("audit-verify")
+                    .about("Verify an audit artifact offline")
+                    .arg(Arg::new("artifact_path").required(true))
+                    .arg(Arg::new("public-key").long("public-key")),
+            )
+            .subcommand(
+                Command::new("audit-render")
+                    .about("Render an audit artifact as a chronology")
+                    .arg(Arg::new("artifact_path").required(true)),
+            )
+            .subcommand(
+                Command::new("designate-subject")
+                    .about("Group entities under a GDPR erasure subject")
+                    .arg(Arg::new("subject_id").required(true))
+                    .arg(Arg::new("target").long("target")),
+            )
+            .subcommand(
+                Command::new("erase-subject")
+                    .about("Irreversibly erase a designated subject")
+                    .arg(Arg::new("subject_id").required(true)),
+            );
+    }
+
+    // The completions verb itself, so `aletheia completions <TAB>` completes the
+    // shell name too.
+    cli.subcommand(
+        Command::new("completions")
+            .about("Generate a shell completion script (bash, zsh, fish, powershell, elvish)")
+            .arg(
+                Arg::new("shell")
+                    .required(true)
+                    .value_parser(value_parser!(clap_complete::Shell)),
+            ),
+    )
+}
+
+/// `aletheia completions <shell>` — print a shell completion script (Issue #3619).
+///
+/// Parses the first argument as a [`clap_complete::Shell`] (bash, zsh, fish,
+/// powershell, elvish) and writes the generated completion script for the
+/// [`build_cli`] mirror to stdout. A missing or unrecognized shell returns an
+/// error naming the supported shells. This never opens the database or touches
+/// the data directory.
+fn handle_completions(args: Vec<String>) -> Result<(), String> {
+    const SUPPORTED: &str = "supported shells: bash, zsh, fish, powershell, elvish";
+    let shell_arg = args
+        .first()
+        .ok_or_else(|| format!("usage: aletheia completions <shell>\n{SUPPORTED}"))?;
+    let shell: clap_complete::Shell = shell_arg
+        .parse()
+        .map_err(|_| format!("unknown shell '{shell_arg}'; {SUPPORTED}"))?;
+    let mut out = io::stdout().lock();
+    clap_complete::generate(shell, &mut build_cli(), "aletheia", &mut out);
+    Ok(())
 }
 
 /// `aletheia backup <output_path>` — create a portable backup artifact.
@@ -4074,5 +4374,92 @@ MATCH (a:`UNIQUE IMPORT LABEL`{`UNIQUE IMPORT ID`:0}), (b:`UNIQUE IMPORT LABEL`{
         let b = write_dump(&dir, "b.cypher");
         let err = super::handle_import(vec![s("--nodes"), a, s("--nodes"), b]).unwrap_err();
         assert!(err.contains("single dump file"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod completions_tests {
+    use super::build_cli;
+    use clap::ValueEnum as _;
+
+    // The ungated top-level command set the real dispatcher (`run()`) routes,
+    // plus the new `completions` verb. This is the drift guard: if a command is
+    // added/removed from the hand-rolled `run()` match without updating the
+    // clap mirror, this list and the mirror drift apart and the exact
+    // set-equality assertion below fails.
+    //
+    // MUST be edited in lockstep with the ungated arms of run()'s match and
+    // build_cli()'s ungated subcommands.
+    const EXPECTED_UNGATED: &[&str] = &[
+        "demo",
+        "node",
+        "edge",
+        "traverse",
+        "daemon",
+        "backup",
+        "restore",
+        "verify",
+        "keys",
+        "encryption",
+        "import",
+        "completions",
+    ];
+
+    // Verbs that appear in the clap mirror only under a feature flag; they are
+    // excluded from the ungated set-equality check so the guard holds under any
+    // feature configuration.
+    const FEATURE_GATED_VERBS: &[&str] = &[
+        "export",
+        "audit-keygen",
+        "audit-export",
+        "audit-verify",
+        "audit-render",
+        "designate-subject",
+        "erase-subject",
+    ];
+
+    /// `clap_complete::generate` yields non-empty output for every shell,
+    /// exercised purely (no process spawn).
+    #[test]
+    fn generates_completions_for_every_shell() {
+        for shell in clap_complete::Shell::value_variants() {
+            let mut buf: Vec<u8> = Vec::new();
+            clap_complete::generate(*shell, &mut build_cli(), "aletheia", &mut buf);
+            assert!(
+                !buf.is_empty(),
+                "completion script for {shell:?} must be non-empty"
+            );
+            let text = String::from_utf8_lossy(&buf);
+            assert!(
+                text.contains("aletheia"),
+                "completion script for {shell:?} must reference the binary name"
+            );
+        }
+    }
+
+    /// DRIFT GUARD: the clap mirror's ungated subcommand set must EXACTLY equal
+    /// the real dispatcher's ungated command surface — no missing, no extra.
+    /// clap's auto-injected `help` verb and the feature-gated verbs are excluded
+    /// so the comparison is over exactly the ungated surface.
+    #[test]
+    fn mirror_covers_ungated_dispatch_surface() {
+        use std::collections::BTreeSet;
+
+        let cli = build_cli();
+        let actual: BTreeSet<&str> = cli
+            .get_subcommands()
+            .map(|c| c.get_name())
+            .filter(|name| *name != "help")
+            .filter(|name| !FEATURE_GATED_VERBS.contains(name))
+            .collect();
+        let expected: BTreeSet<&str> = EXPECTED_UNGATED.iter().copied().collect();
+
+        let missing: Vec<&&str> = expected.difference(&actual).collect();
+        let extra: Vec<&&str> = actual.difference(&expected).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "clap mirror ungated subcommand set drifted from EXPECTED_UNGATED: \
+             missing from mirror={missing:?}, extra in mirror={extra:?}"
+        );
     }
 }

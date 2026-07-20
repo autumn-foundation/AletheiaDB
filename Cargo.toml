@@ -60,6 +60,14 @@ default-members = ["."]
 exclude = ["python", "fuzz"]
 
 [dependencies]
+# CLI shell completions (Issue #3619). `clap`/`clap_complete` drive
+# `aletheia completions <shell>`; the CLI itself still uses a hand-rolled
+# parser, so these are plain, unconditional deps (available even under
+# `--no-default-features`) rather than being gated behind a feature. Pinned to
+# 4.6.x to match the already-resolved transitive `clap` 4.6.1 and avoid a
+# duplicate major.
+clap = "4.6"
+clap_complete = "4.6"
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
 crc32fast = "1.4"
