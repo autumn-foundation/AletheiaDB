@@ -9221,10 +9221,10 @@ mod namespace_grammar {
     fn multivar_names(results: crate::query::QueryResults) -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let mut push = |ent: &crate::query::executor::EntityResult| {
-            if let Some(n) = ent.as_node() {
-                if let Some(PropertyValue::String(s)) = n.get_property("name") {
-                    names.insert(s.to_string());
-                }
+            if let Some(n) = ent.as_node()
+                && let Some(PropertyValue::String(s)) = n.get_property("name")
+            {
+                names.insert(s.to_string());
             }
         };
         for r in results.collect_all().expect("collect rows") {
