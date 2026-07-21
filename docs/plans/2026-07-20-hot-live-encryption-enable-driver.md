@@ -472,9 +472,9 @@ the new P2/P4/P6/P7 from the brief.
 |---|---|---|---|---|
 | T1 | Live installs never happen; reopen still mandatory | `enable_is_live_no_reopen_required` | After `enable_encryption` returns, the SAME handle serves reads/writes and `persist_indexes()` succeeds (guard not fired); `manager.keyring().is_some()` | Red (guard fires today) → Green |
 | T2 | Plaintext index file survives the AEIX sweep | `no_plaintext_index_file_survives_aeix_sweep` | Whole-dir sweep: every persisted index file (manifest/interner/graph/temporal/temporal_adjacency/vector-meta + native usearch) satisfies `is_encrypted_index(bytes)` | Green (extends existing sweep) |
-| T3 | Authority flips before all bytes wrapped (split-key) | `authority_flip_precedes_ledger_clear` | After success: authority `enabled`, ledger cleared, and NO layer bare/plaintext under the enabled authority | Green |
-| T4 | Seam install nests under an ordered lock → deadlock | `enable_is_lock_order_safe` | Drives enable under a concurrent reader/writer; no deadlock; asserts no seam install occurs while `historical`/`wal`/`current_timestamp` held (structural + runtime) | Green |
-| T5 | Concurrent writes during migration corrupt/split state | `concurrent_create_edge_during_migration` | A `create_edge` racing the migration either serializes cleanly or aborts `ValidationFailed`; final state consistent (all-encrypted or resumable) | Green |
+| T3 | Authority flips before all bytes wrapped (split-key) | `authority_flip_precedes_ledger_clear` | Drives the LIVE `enable_encryption` and injects a crash at the exact seam BETWEEN the durable authority flip and the ledger clear (thread-local `enable_test_hooks` seam, `src/db/encryption_enable.rs`); asserts on-disk (authority `enabled`, ledger still PRESENT, every layer `Complete`) then that resume is a clean no-op clearing the ledger and re-wrapping no tier | Green (implemented — closes GAP-1) |
+| T4 | Seam install nests under an ordered lock → deadlock | ~~`enable_is_lock_order_safe`~~ **— covered by structural concurrency review, not a runtime test** (see note ‡ below) | `&mut self` serializes handle access; each seam install (`install_wal_keyring`/`install_enable_index_keyring`/`install_enable_cold_keyring`) takes only its own leaf lock; the cold path clones the tiered `Arc` under a temporary `historical.read()` and RELEASES the guard before wrap/install — no earlier ordered primitive is held across a later one. There is no nested lock acquisition to invert. | Structural (no meaningful runtime test) |
+| T5 | Concurrent writes during migration corrupt/split state | ~~`concurrent_create_edge_during_migration`~~ **— not writeable through the public API** (see note ‡ below) | `enable_encryption(&mut self)` needs an exclusive borrow, so the borrow checker forbids a second handle method (e.g. `create_edge`) racing it on the same handle — a true concurrent-write race cannot be expressed. The cross-handle concurrent-orphan case is separately covered by Issue #3416's first-committer-wins `ValidationFailed` abort. | Structural (unwriteable as a true race) |
 | T6 | **C0 / P0** crash before ledger | `resume_c0_crash_before_ledger_reopens_plaintext` | No ledger → plaintext reopen, authority `disabled`, all layers plaintext | Green (existing C0) |
 | T7 | **C1 / P1** crash after ledger before WAL roll (wal+index Pending) | `resume_c1_crash_after_ledger_before_wal_roll` | Resume installs+rolls WAL, wraps index, flips only after; converge encrypted | Green (existing C1) |
 | T8 | **P2 (NEW)** crash after WAL install + index on-disk wrap but BEFORE live `install_index_keyring` / `mark_index_complete` | `resume_after_index_wrap_before_install` | Reopen rebuilds index manager under enable index DEK (`enable_resume_ciphers`, keyring `Some`); `resume_pending_enable` re-runs the idempotent wrap; converge; whole-dir AEIX sweep passes | Red (no driver) → Green |
@@ -493,6 +493,42 @@ Every convergence test additionally runs the invariant sweep from the brief §9:
 whole-dir AEIX sweep + `raw_node_value_is_acv1_for_test` + `wal.is_encrypted()`
 + authority `enabled`, confirming NO layer is bare/plaintext under an `enabled`
 authority and NO layer is encrypted under a `disabled`/absent authority.
+
+**‡ T4 / T5 — structural-review coverage, deliberately NOT runtime tests.**
+Both rows were originally sketched as runtime tests but, on implementation, a
+faithful runtime test is either meaningless or unwriteable, so they are covered
+by structural concurrency review instead (evidence at the file:line below):
+
+- **T4 (`enable_is_lock_order_safe`).** The lock-order hazard a runtime/loom test
+  guards against is a *nested* acquisition that could invert (the reason the
+  existing `tests/havoc_loom_flush_coordinator.rs` model exists — it has a real
+  `writer → sync_handle` nesting). The enable path has **no such nesting**:
+  `enable_encryption_migrate` (`src/db/encryption_enable.rs:448`) installs each
+  live keyring through a leaf-lock-only seam
+  (`self.wal.install_wal_keyring` `:466`; `install_enable_index_keyring` `:479`;
+  the cold install `:510`), and the cold path takes `historical.read()` ONLY to
+  clone the tiered `Arc` and drops that guard *before* the wrap+install
+  (`:501`–`:511`). No ordered write-path primitive (`current_timestamp` / `wal` /
+  `historical` / `temporal_indexes` / adjacency, per CLAUDE.md's lock-acquisition
+  order) is held across a later one, and the worker restart is a plain thread
+  spawn holding no ordered lock (`restart_persistence_worker` `:541`). A loom
+  model of this path would have to fabricate a nesting that does not exist; a
+  liveness "drive enable, assert no hang" smoke test proves only liveness, not
+  ordering. So the invariant is established by the structural trace, not a runtime
+  assertion.
+- **T5 (`concurrent_create_edge_during_migration`).** `enable_encryption(&mut self)`
+  requires an exclusive borrow of the handle, so the borrow checker forbids a
+  second handle method (a `create_edge`) from running concurrently on the same
+  handle — a true concurrent-write-vs-migration race **cannot be expressed**
+  through the public API, so there is nothing for a runtime test to exercise. The
+  genuinely-concurrent hazard in the neighbourhood — a cross-handle
+  `create_edge`/`delete_node` racing to orphan an edge — is already covered by
+  Issue #3416's first-committer-wins `ValidationFailed` abort under the
+  commit-serialization (`historical` write) guard, independent of this driver.
+
+This is **structural-review coverage, not runtime coverage**; it is recorded here
+and in the AC-evidence dossier (§D GAP-2) so the traceability matrix stays honest
+rather than naming two tests that were never (and should never be) written.
 
 ---
 
