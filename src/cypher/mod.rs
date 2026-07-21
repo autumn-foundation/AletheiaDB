@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! aletheiadb = { version = "0.1", features = ["cypher"] }
+//! aletheiadb = { version = "0.2", features = ["cypher"] }
 //! ```
 //!
 //! # Architecture
