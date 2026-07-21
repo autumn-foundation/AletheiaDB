@@ -292,6 +292,14 @@ semantic-characterization = ["semantic-temporal"]
 # the stable `semantic-search` flag on day one (ADR-0050 graduation pattern).
 semantic-retrieval-fusion = []
 
+# Experimental: durable workflow execution — DBOS-style journal (Phase 3a).
+# Adds a workflow-run / step schema convention plus exactly-once step recording
+# on top of the existing bi-temporal store. Empty deps: builds only on the
+# always-compiled write-transaction + unique-constraint primitives. Standalone
+# experimental flag (NOT folded into `nova`), mirroring `semantic-retrieval-fusion`
+# per the ADR-0050 graduation pattern.
+durable-execution = []
+
 # Experimental "Nova" R&D umbrella.
 # Enables every semantic-* cohort that is still marked experimental. Removing a
 # cohort from this list is how we "graduate" it — the flag itself stays, so
@@ -545,6 +553,16 @@ name = "trust_propagation"
 harness = false
 path = "benches/trust_propagation.rs"
 required-features = ["semantic-reasoning"]
+
+# Workflow journal (DBOS Phase 3a, Issue #3577): §7 OQ9 baseline harness for the
+# exactly-once step-recording primitive. Measures `record_step` throughput and
+# the fresh vs adopt-winner (dedup) paths; write amplification is 1 node + 1 edge
+# per recorded step. Targets are TBD (OQ9 leaves the target set open).
+[[bench]]
+name = "workflow_journal"
+harness = false
+path = "benches/workflow_journal.rs"
+required-features = ["durable-execution"]
 
 # Temporal aggregation windows (Issue #3363): 12-window monthly aggregation
 # over ~1,000 historical versions, targeting < 50ms end-to-end.
