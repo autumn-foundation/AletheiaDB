@@ -1,5 +1,7 @@
 # Hot-Live Encryption Enable Driver (Issue #3708)
 
+> **Status: Implemented — shipped on trunk (as of 2026-07-21).** This plan is retained for historical/design context; see the corresponding guide for current behavior.
+
 **Status:** Design (implementation in progress)
 **Author:** encryption lane
 **Date:** 2026-07-20

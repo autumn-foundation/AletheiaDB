@@ -511,7 +511,7 @@ aletheiadb = "0.2"  # config-toml enabled by default
 
 ```toml
 [dependencies]
-aletheiadb = { version = "0.1.0", default-features = false }
+aletheiadb = { version = "0.2.0", default-features = false }
 ```
 
 This reduces compile time and binary size when only using programmatic configuration.

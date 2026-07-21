@@ -1,5 +1,7 @@
 # Plan: Temporal Aggregation Windows over Entity History in AQL (Issue #3363)
 
+> **Status: Implemented — shipped on trunk (as of 2026-07-21).** This plan is retained for historical/design context; see the corresponding guide for current behavior.
+
 Complexity tier: **L**. Lane: `src/query/**` (+ `src/cypher`, `src/sql` owned but
 untouched — Cypher aggregation is explicitly out of scope per the issue).
 Constraint: **must not** edit `src/mcp/**` or `crates/aletheia-server`.
