@@ -738,9 +738,13 @@ pub use sparse::{
 };
 
 // Sharded vector index (VS-103)
+// Uses rayon (OS threads) and the usearch-backed HnswIndex; not part of the
+// Phase 1 wasm profile (vector search is OFF). Gated out on wasm.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sharded;
 
 // Re-export sharded types for convenience
+#[cfg(not(target_arch = "wasm32"))]
 pub use sharded::{
     RebalanceConfig as ShardedRebalanceConfig, ShardStats, ShardedVectorConfig, ShardedVectorIndex,
     ShardingStrategy,
@@ -820,9 +824,13 @@ pub(crate) fn merge_top_k_results(
 }
 
 // Distributed vector index (VS-107)
+// Uses rayon (OS threads) and the usearch-backed HnswIndex; not part of the
+// Phase 1 wasm profile (vector search is OFF). Gated out on wasm.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
 
 // Re-export distributed types for convenience
+#[cfg(not(target_arch = "wasm32"))]
 pub use distributed::{
     CircuitBreakerConfig as DistributedCircuitBreakerConfig, CircuitState, DistributedError,
     DistributedIndexStats, DistributedVectorConfig, DistributedVectorIndex, MockVectorNodeClient,
