@@ -72,7 +72,6 @@ bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
-usearch = "2.25.2"
 # SIMD-accelerated vector distance kernels (Issue #426). Optional: enabled via
 # the `simsimd` feature (on by default). Provides runtime-dispatched x86
 # AVX2/AVX-512 AND ARM NEON/SVE kernels, replacing the crate's hand-written
@@ -84,8 +83,6 @@ arc-swap = "1.9"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
 bitcode = "0.6"
-zstd = "0.13"
-memmap2 = "0.9"
 thiserror = "2.0"
 smallvec = "1.13"
 chrono = "0.4"
@@ -148,9 +145,6 @@ candle-transformers = { version = "=0.10.2", optional = true }
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false, optional = true }
 serde_json = { version = "1.0", optional = false }
 
-# Redb for tiered cold storage (pure Rust, ADR-0025)
-redb = "4.1"
-
 # SQL parser for SQL:2011 temporal syntax support (optional)
 sqlparser = { version = "0.40", optional = true }
 
@@ -169,10 +163,6 @@ parquet = { version = "59", default-features = false, features = ["arrow", "snap
 # are unconditional so the compute/csv/json/ipc kernels are not pulled in.
 arrow = { version = "59", default-features = false, optional = true }
 
-# Parallel iteration for sharded vector index
-rayon = "1.12"
-comfy-table = "7.2.2"
-crossterm = "0.29.0"
 rand = { version = "0.8", features = ["small_rng"] }
 # tempfile is needed at runtime: AletheiaDB::new() backs its WAL with a
 # temporary directory so the default constructor is truly ephemeral.
@@ -220,6 +210,36 @@ libc = "0.2"
 # Chosen over HMAC so third parties verify offline with ONLY the signer's public
 # key. Pure-Rust, RFC 8032 deterministic signatures → reproducible artifacts.
 ed25519-dalek = { version = "2", optional = true }
+
+# WASM compatibility (Issue: wasm Phase-1 dependency surgery).
+# These dependencies are wasm-hostile: usearch (C++/cxx FFI), zstd (zstd-sys C),
+# memmap2 (mmap syscalls), redb (fs/mmap), rayon (OS threads), crossterm +
+# comfy-table (terminal I/O). Gating them to `cfg(not(target_arch = "wasm32"))`
+# means they remain fully present for EVERY native build (any feature set,
+# including `--no-default-features`) — native compiles unchanged — and are only
+# absent under wasm32. This is native-safe by construction: nothing is removed
+# from native.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+usearch = "2.25.2"
+zstd = "0.13"
+memmap2 = "0.9"
+# Redb for tiered cold storage (pure Rust, ADR-0025)
+redb = "4.1"
+# Parallel iteration for sharded vector index
+rayon = "1.12"
+comfy-table = "7.2.2"
+crossterm = "0.29.0"
+
+# WASM-only: enable the JS backend for the transitive getrandom users via
+# feature unification, so getrandom resolves on wasm32-unknown-unknown (which
+# has no OS RNG). getrandom 0.2 uses the `js` feature; getrandom 0.3 uses the
+# `wasm_js` feature AND additionally requires the rustflag
+# `--cfg getrandom_backend="wasm_js"` (see .cargo/config.toml note / the
+# 0.3 webassembly-support docs). Both major versions appear in the tree via
+# different transitive users, so both shims are declared.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 criterion = "0.8"

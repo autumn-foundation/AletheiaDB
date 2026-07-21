@@ -136,12 +136,16 @@ pub use core::error::{
     ConstraintError, Error, QueryError, Result, StorageError, TemporalError, TransactionError,
 };
 pub use db::{
-    AletheiaDB, BackupSummary, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats,
-    DatabaseStats, EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent,
-    LabelSchema, LineageView, LineageViewEntry, NamespaceCount, NamespaceInfo, PitrCoord, PitrPlan,
-    PitrTarget, SchemaInstant, SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats,
-    TimeBounds, UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
+    AletheiaDB, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
+    EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent, LabelSchema,
+    LineageView, LineageViewEntry, NamespaceCount, NamespaceInfo, SchemaInstant, SimilarityQuery,
+    SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds, UniqueConstraintBuilder,
+    VectorIndexBuilder, WalStateStats,
 };
+// Backup/restore and point-in-time-restore are durability features absent on
+// the wasm32 ephemeral profile (see `db::backup` / `db::pitr`).
+#[cfg(not(target_arch = "wasm32"))]
+pub use db::{BackupSummary, PitrCoord, PitrPlan, PitrTarget};
 // Issue #3349 (PR3d): re-export `TraverseDirection` at the crate root via its
 // owning `namespace_query` module path, deliberately WITHOUT adding it to the
 // `db` module's own re-export block (`src/db/mod.rs` is owned by the concurrent
@@ -163,7 +167,9 @@ pub use index::{
     vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},
 };
 pub use storage::CurrentStorage;
+#[cfg(not(target_arch = "wasm32"))]
 pub use storage::backup::BackupError;
+#[cfg(not(target_arch = "wasm32"))]
 pub use storage::index_persistence::PersistenceConfig;
 pub use storage::wal::{DurabilityMode, WriteOptions};
 
