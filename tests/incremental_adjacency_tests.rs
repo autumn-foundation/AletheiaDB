@@ -931,12 +931,29 @@ mod phase5_background_compaction {
             attempts += 1;
         }
 
-        // Should now compact
-        assert_eq!(index.delta_edge_count(), 0);
-        assert_eq!(index.frozen_edge_count(), 15);
+        // Loose lower-bound while the background thread may still be mid-compaction:
+        // frozen_edge_count and delta_edge_count are independent Relaxed atomics with no
+        // synchronization edge between them, so an exact assert here can observe a
+        // stale-nonzero delta while frozen has already reached 15. Passing it proves the
+        // resumed background thread compacted on its own BEFORE we quiesce it below.
+        // Note `>= 15` is effectively `== 15` here: exactly 15 distinct edges are inserted,
+        // so frozen can never exceed 15 -- the loose bound cannot pass while under-compacted.
+        assert!(
+            index.frozen_edge_count() >= 15,
+            "Compaction should have frozen all edges after resume within {} attempts",
+            attempts
+        );
 
+        // Join the background thread before the exact-count asserts. shutdown() forces a
+        // final drain and join() synchronizes-with thread termination, establishing the
+        // happens-before edge so delta/frozen are read as a consistent fully-drained
+        // snapshot instead of racing a mid-compaction store.
         scheduler.shutdown();
         handle.join().unwrap();
+
+        // Deterministic exact state, post-join (fully drained).
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 15);
     }
 
     // Step 5.7 GREEN: Test graceful shutdown
@@ -1045,15 +1062,33 @@ mod phase5_background_compaction {
             attempts += 1;
         }
 
-        // Verify normal compaction worked after panic
-        assert_eq!(index.delta_edge_count(), 0);
-        assert_eq!(index.frozen_edge_count(), 12);
+        // Loose lower-bound while the background thread may still be mid-compaction:
+        // frozen_edge_count and delta_edge_count are independent Relaxed atomics with no
+        // synchronization edge between them, so an exact assert here can observe a
+        // stale-nonzero delta while frozen has already reached 12. Passing it proves the
+        // recovered background thread compacted on its own BEFORE we quiesce it below.
+        // Note `>= 12` is effectively `== 12` here: exactly 12 distinct edges are inserted,
+        // so frozen can never exceed 12 -- the loose bound cannot pass while under-compacted.
+        assert!(
+            index.frozen_edge_count() >= 12,
+            "Background compaction should have recovered and frozen all edges after {} attempts",
+            attempts
+        );
 
-        // Panic count should still be 1 (no new panics)
+        // Panic count is a one-shot injected panic; it is coherent under the spin-poll
+        // above (the recovered thread never re-panics), so it can be checked here.
         assert_eq!(scheduler.panic_count(), 1);
 
+        // Join the background thread before the exact-count asserts. shutdown() forces a
+        // final drain and join() synchronizes-with thread termination, establishing the
+        // happens-before edge so delta/frozen are read as a consistent fully-drained
+        // snapshot instead of racing a mid-compaction store.
         scheduler.shutdown();
         handle.join().unwrap();
+
+        // Deterministic exact state, post-join (fully drained).
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 12);
     }
 
     // Step 5.11: Test shutdown triggers final compaction for remaining items

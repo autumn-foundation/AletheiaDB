@@ -1707,7 +1707,7 @@ impl WriteOps for WriteTransaction {
         properties: PropertyMap,
         options: WriteRequestOptions,
     ) -> Result<VersionId> {
-        self.cas_node_impl(node_id, expected_version, properties, None, options)
+        self.cas_node_impl(node_id, expected_version, properties, None, None, options)
             .record_error_metric()
     }
 
@@ -1741,6 +1741,35 @@ impl WriteOps for WriteTransaction {
             lease_until_key,
             owner,
             lease_until,
+            properties,
+            options,
+        )
+        .record_error_metric()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_fenced_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.claim_with_lease_fenced_impl(
+            node_id,
+            expected_version,
+            lease_owner_key,
+            lease_until_key,
+            fence_key,
+            owner,
+            lease_ttl,
+            new_fence,
             properties,
             options,
         )

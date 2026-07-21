@@ -909,6 +909,46 @@ pub enum TransactionError {
         /// The entity's actual committed head version, or `None` if absent.
         actual: Option<VersionId>,
     },
+    /// A fenced claim's supplied fence token was not strictly greater than the
+    /// entity's committed fence at commit time (DBOS Phase 3e).
+    ///
+    /// The monotonic fence guards against a zombie writer / stale-fence steal:
+    /// under the commit-serialization guard the committed fence is re-read, and
+    /// a claim is admitted only when `new_fence > stored`. A collision (two
+    /// stealers computing the same `new_fence` from a stale read) makes the
+    /// second one fail here.
+    ///
+    /// This is a **caller-fault precondition failure**, NOT a transient
+    /// conflict: the correct response is to re-read the current fence and
+    /// recompute a strictly-greater one, so it is non-retriable (maps to MCP
+    /// `FAILED_PRECONDITION`, like `CasMismatch`).
+    ///
+    /// # Caveat: the fence rejection is runtime-only, not crash-durable
+    ///
+    /// The rejection is enforced only at commit time, under the historical
+    /// guard. A fenced claim's property map (its new fence + DB-computed
+    /// lease/owner) is serialized and fsync'd to the WAL *before* the
+    /// commit-guard fence re-check runs, and crash recovery replays WAL frames
+    /// without re-running the precondition check — so a claim correctly rejected
+    /// live with `FenceTooLow` is nonetheless **re-applied on crash recovery**,
+    /// resurrecting the stale-steal the fence exists to prevent. This is the
+    /// inherited #3413 WAL-abort-framing gap (the same accepted caveat as
+    /// `CasMismatch` and the #3416 write-skew checks), not a new defect and not
+    /// fixable in Phase 3e. Until #3413 lands, operators must not rely on the
+    /// fence for recovery / zombie fencing across a crash.
+    #[error(
+        "fenced claim rejected: supplied fence {new_fence} for key '{fence_key}' is not strictly \
+         greater than the committed fence {stored}"
+    )]
+    FenceTooLow {
+        /// The property key holding the monotonic fence token.
+        fence_key: String,
+        /// The fence value the caller tried to install.
+        new_fence: i64,
+        /// The entity's committed fence at commit time (`i64::MIN` when absent /
+        /// non-integer, i.e. no fence was held).
+        stored: i64,
+    },
     /// Clock skew exceeds acceptable bounds.
     ///
     /// This occurs when the system clock jumps forward or backward by more than

@@ -535,7 +535,10 @@ fn classify_transaction_error(e: &TransactionError) -> (McpErrorCode, bool) {
         // A lost compare-and-set (Issue #3577) is a caller-fault precondition
         // failure: retrying the same call with the same stale `expected` version
         // can never succeed, so it is NON-retriable (unlike SerializationFailure).
-        | TransactionError::CasMismatch { .. } => (McpErrorCode::FailedPrecondition, false),
+        // A fenced claim rejected for a too-low fence (DBOS Phase 3e) is the same
+        // caller-fault, non-retriable precondition class (recompute the fence).
+        | TransactionError::CasMismatch { .. }
+        | TransactionError::FenceTooLow { .. } => (McpErrorCode::FailedPrecondition, false),
         TransactionError::ClockSkew { .. } => (McpErrorCode::Unavailable, true),
         TransactionError::CommitFailed { .. }
         | TransactionError::RollbackFailed { .. }

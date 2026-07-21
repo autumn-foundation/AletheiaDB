@@ -1,5 +1,7 @@
 # USearch Integration Implementation Plan
 
+> **Status: Implemented — shipped on trunk (as of 2026-07-21).** This plan is retained for historical/design context; see the corresponding guide for current behavior.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Replace hnsw_rs with usearch backend, adding native deletes, quantization (f16/i8), memory-mapped indexes, and custom distance metrics.

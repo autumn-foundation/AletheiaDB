@@ -7,11 +7,23 @@
 //! ## Usage
 //!
 //! ```text
-//! ldbc-bench [--scale smoke|sf0.1] [--seed N] [--iterations N] [--warmup N]
+//! ldbc-bench [--scale smoke|sf0.1|sf1] [--seed N] [--iterations N] [--warmup N]
+//!            [--vector-count N] [--vector-dim D]
+//!            [--datagen-dir PATH]
 //!            [--out results.json]
 //!            [--write-baseline path.json]
 //!            [--check-gate --baseline path.json [--threshold PCT]]
 //! ```
+//!
+//! `--vector-count` / `--vector-dim` dial the vector-extension corpus
+//! independently of `--scale` (e.g. `--scale sf0.1 --vector-count 1000000
+//! --vector-dim 384` for a 1M-vector k-NN run over an SF0.1-sized graph).
+//!
+//! `--datagen-dir` ingests an **official LDBC SNB Datagen** CSV output directory
+//! (composite-merged-fk format) instead of the built-in synthetic generator
+//! (see [`aletheia_bench_ldbc::datagen`]); the synthetic `--scale` graph sizing
+//! is then ignored, though `--vector-count`/`--vector-dim` still size the
+//! synthetic vector corpus layered on the real SNB graph.
 //!
 //! Exit codes: `0` success (and gate passed, if checked); `1` runtime error;
 //! `2` gate regression detected.
@@ -45,15 +57,24 @@ fn main() -> ExitCode {
         seed: cli.seed,
         warmup: cli.warmup,
         iterations: cli.iterations,
+        vector_count: cli.vector_count,
+        vector_dim: cli.vector_dim,
+        datagen_dir: cli.datagen_dir.clone().map(std::path::PathBuf::from),
     };
 
-    eprintln!(
-        "Running LDBC-style suite: scale={}, seed={}, warmup={}, iterations={}",
-        cli.scale.label(),
-        cli.seed,
-        cli.warmup,
-        cli.iterations
-    );
+    match &cli.datagen_dir {
+        Some(dir) => eprintln!(
+            "Running LDBC-style suite: source=datagen dir={dir}, warmup={}, iterations={}",
+            cli.warmup, cli.iterations
+        ),
+        None => eprintln!(
+            "Running LDBC-style suite: scale={}, seed={}, warmup={}, iterations={}",
+            cli.scale.label(),
+            cli.seed,
+            cli.warmup,
+            cli.iterations
+        ),
+    }
 
     let report = match run_suite(&opts) {
         Ok(r) => r,
@@ -242,6 +263,9 @@ struct Cli {
     baseline: Option<String>,
     threshold: f64,
     min_abs_delta_us: f64,
+    vector_count: Option<usize>,
+    vector_dim: Option<usize>,
+    datagen_dir: Option<String>,
     help: bool,
 }
 
@@ -251,10 +275,20 @@ USAGE:\n    \
 ldbc-bench [OPTIONS]\n\
 \n\
 OPTIONS:\n    \
---scale <smoke|sf0.1>      Scale point (default: smoke)\n    \
+--scale <smoke|sf0.1|sf1>  Scale point (default: smoke)\n    \
 --seed <N>                 PRNG seed (default: 42)\n    \
 --iterations <N>           Measured iterations per op (default: 200)\n    \
 --warmup <N>               Warmup iterations discarded (default: 20)\n    \
+--vector-count <N>         Override the dedicated vector-extension corpus size,\n    \
+                           independent of --scale (e.g. 1000000 for a 1M-vector\n    \
+                           k-NN run). Default: preset (no extra corpus)\n    \
+--vector-dim <D>           Override the embedding dimensionality (must be > 0,\n    \
+                           e.g. 384). Default: preset dim\n    \
+--datagen-dir <PATH>       Ingest an official LDBC SNB Datagen CSV directory\n    \
+                           (composite-merged-fk format) instead of generating a\n    \
+                           synthetic graph. Mutually exclusive with the synthetic\n    \
+                           --scale sizing; --vector-count/--vector-dim still size\n    \
+                           the synthetic vector corpus layered on the real graph\n    \
 --out <PATH>               JSON report output (default: ldbc_results.json)\n    \
 --write-baseline <PATH>    Also write this run as a baseline JSON\n    \
 --check-gate               Compare against --baseline and exit 2 on regression\n    \
@@ -277,6 +311,9 @@ impl Cli {
             baseline: None,
             threshold: DEFAULT_THRESHOLD_PCT,
             min_abs_delta_us: DEFAULT_MIN_ABS_DELTA_US,
+            vector_count: None,
+            vector_dim: None,
+            datagen_dir: None,
             help: false,
         };
         let mut it = args.iter();
@@ -333,6 +370,29 @@ impl Cli {
                         .ok_or("--min-abs-delta-us requires a value")?
                         .parse()
                         .map_err(|_| "invalid --min-abs-delta-us")?;
+                }
+                "--datagen-dir" => {
+                    cli.datagen_dir =
+                        Some(it.next().ok_or("--datagen-dir requires a value")?.clone());
+                }
+                "--vector-count" => {
+                    let n = it
+                        .next()
+                        .ok_or("--vector-count requires a value")?
+                        .parse()
+                        .map_err(|_| "invalid --vector-count")?;
+                    cli.vector_count = Some(n);
+                }
+                "--vector-dim" => {
+                    let d: usize = it
+                        .next()
+                        .ok_or("--vector-dim requires a value")?
+                        .parse()
+                        .map_err(|_| "invalid --vector-dim")?;
+                    if d == 0 {
+                        return Err("--vector-dim must be > 0".to_string());
+                    }
+                    cli.vector_dim = Some(d);
                 }
                 other => return Err(format!("unknown argument: {other}")),
             }

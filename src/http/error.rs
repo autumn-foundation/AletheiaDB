@@ -290,12 +290,14 @@ impl AletheiaHttpError {
                     }
                 }
                 // Well-formed but forbidden by current state (e.g. the #3416
-                // concurrent-orphan validation guard, a lost compare-and-set):
-                // retrying the identical call cannot succeed.
+                // concurrent-orphan validation guard, a lost compare-and-set,
+                // or a fenced claim rejected for a too-low fence): retrying the
+                // identical call cannot succeed.
                 TE::ValidationFailed { .. }
                 | TE::InvalidState { .. }
                 | TE::AlreadyCommitted { .. }
-                | TE::CasMismatch { .. } => Self::Structured {
+                | TE::CasMismatch { .. }
+                | TE::FenceTooLow { .. } => Self::Structured {
                     code: "FAILED_PRECONDITION",
                     status: StatusCode::PRECONDITION_FAILED,
                     retriable: false,

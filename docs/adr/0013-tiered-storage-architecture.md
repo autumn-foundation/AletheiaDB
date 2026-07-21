@@ -366,7 +366,7 @@ This allows users to opt-in to the additional dependency.
 
 ## References
 
-- GitHub Issues: [#119](https://github.com/madmax983/AletheiaDB/issues/119), [#120](https://github.com/madmax983/AletheiaDB/issues/120), [#121](https://github.com/madmax983/AletheiaDB/issues/121), [#122](https://github.com/madmax983/AletheiaDB/issues/122)
+- GitHub Issues: [#119](https://github.com/autumn-foundation/AletheiaDB/issues/119), [#120](https://github.com/autumn-foundation/AletheiaDB/issues/120), [#121](https://github.com/autumn-foundation/AletheiaDB/issues/121), [#122](https://github.com/autumn-foundation/AletheiaDB/issues/122)
 - Project: [AletheiaDB Scalability Roadmap](https://github.com/users/madmax983/projects/4)
 - RocksDB: [Documentation](https://rocksdb.org/docs/)
 - ADR-0001: Hybrid Storage Architecture (foundation for this design)

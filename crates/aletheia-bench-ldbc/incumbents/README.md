@@ -1,35 +1,60 @@
 # Comparative incumbents — framework only (NOT executed in this environment)
 
-This directory ships the **runner configuration and query mappings** to run the
-same logical queries against incumbent engines on the same generated data and
-hardware. **None of these were executed in the sandbox that produced the
-committed AletheiaDB results** (no Docker, no Neo4j/KuzuDB/XTDB binaries, no
-network). Every incumbent cell in the capability table below is therefore
-marked either **not measured here** (expressible, but not run in this
-environment) or **not expressible** (the engine cannot represent the workload).
-No incumbent numbers are fabricated.
+This directory ships **runnable drivers plus the query mappings** to run the
+same logical queries against incumbent engines on the same data and hardware.
+**None of these were executed in the sandbox that produced the committed
+AletheiaDB results** (no Docker, no Neo4j/KuzuDB/XTDB binaries, no network) —
+they are meant to run **on the self-hosted box** (see
+[../../../docs/guides/benchmark-infra.md](../../../docs/guides/benchmark-infra.md)),
+where Docker and the engine images are available. Every incumbent cell in the
+capability table below is therefore marked either **not measured here**
+(expressible, but not run in this environment) or **not expressible** (the
+engine cannot represent the workload). No incumbent numbers are fabricated: the
+drivers only ever record latencies from real timed query invocations, and fail
+loudly rather than emit a value for a stopped engine or an empty database.
 
-## One command per engine (intended)
+## Running on the box
+
+Prerequisites on the self-hosted box: `docker` + `docker compose` v2, `bash` 5+
+(for `$EPOCHREALTIME` microsecond timing), `python3` (percentile math / JSON
+emit), and `curl` (the XTDB HTTP client). The engine CLIs (`cypher-shell`,
+`kuzu`) run **inside** the containers, so no host install of those is needed.
 
 ```bash
-# Bring up the incumbents (requires Docker + docker compose):
-docker compose -f incumbents/docker-compose.yml up -d
+cd crates/aletheia-bench-ldbc/incumbents
 
-# AletheiaDB (this crate — actually runnable here):
-cargo run -p aletheia-bench-ldbc --bin ldbc-bench -- --scale sf0.1 --out results/aletheiadb.json
+# 1. Bring up the incumbents:
+docker compose up -d                    # or: up -d neo4j kuzu xtdb (pick engines)
 
-# Neo4j: load the generated CSV, then run the mapped queries:
-#   incumbents/neo4j/run.sh        (loads + times incumbents/neo4j/queries.cypher)
-# KuzuDB:
-#   incumbents/kuzu/run.sh         (loads + times incumbents/kuzu/queries.cypher)
-# XTDB (temporal extension only, where expressible):
-#   incumbents/xtdb/run.sh         (times incumbents/xtdb/queries.edn)
+# 2. Load the SHARED graph into each engine (see "Data interchange" below).
+#    The drivers do NOT bulk-load for you — ETL is engine/dataset specific —
+#    they verify the graph is non-empty and fail loudly over an empty DB.
+
+# 3. Drive all engines (warmup + N timed iters, writes results/<engine>_results.json):
+./run_all.sh --iterations 200 --warmup 20 [--datagen-dir /abs/path/to/ldbc/sfN]
+
+# Or one engine at a time:
+ITERATIONS=200 WARMUP=20 ./neo4j/run.sh
+ITERATIONS=200 WARMUP=20 ./kuzu/run.sh
+ITERATIONS=200 WARMUP=20 ./xtdb/run.sh
+
+# AletheiaDB side (this crate) for the same-shape comparison:
+cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- \
+    --scale sf0.1 --out results/aletheiadb.json
 ```
 
-`run.sh` scripts are documented stubs (they print the exact steps and the query
-files to execute); wiring them to live drivers is a follow-up once an
-environment with the engines is available. They deliberately do **not**
-synthesize numbers.
+Each `run.sh` **actually executes** the mapped queries against the running
+container — `neo4j/run.sh` via `cypher-shell`, `kuzu/run.sh` by piping Cypher
+into the `kuzu` CLI, `xtdb/run.sh` by POSTing EDN Datalog to the XTDB HTTP API —
+timing every iteration with the shell's microsecond clock (`lib.sh:time_once_us`)
+and computing p50/p95/p99 with the **nearest-rank** method (`emit_results.py`,
+matching `../src/stats.rs`) so the numbers line up with the AletheiaDB report.
+Queries an engine cannot express natively are written as `{not_expressible:true}`
+capability facts, never as a fabricated latency. `run_all.sh` returns non-zero
+if any engine driver fails, so a stopped container or empty DB surfaces loudly.
+
+> The `run_all.sh` / `lib.sh` / `emit_results.py` helpers are re-included past
+> the repo-wide `*.sh` / `*.py` ignore rules (see the root `.gitignore`).
 
 ## Data interchange
 

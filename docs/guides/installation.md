@@ -42,14 +42,14 @@ This gives you the core database with TOML config support. Feature flags are add
 
 ```toml
 [dependencies]
-aletheiadb = { version = "0.1", features = ["mcp-server", "observability", "embeddings"] }
+aletheiadb = { version = "0.2", features = ["mcp-server", "observability", "embeddings"] }
 ```
 
 **Example: Minimal — core database only, no extras**
 
 ```toml
 [dependencies]
-aletheiadb = { version = "0.1", default-features = false }
+aletheiadb = { version = "0.2", default-features = false }
 ```
 
 ### Experimental Features
@@ -59,7 +59,7 @@ The `nova` umbrella enables every `semantic-*` experimental module. The stable
 all modules:
 
 ```toml
-aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
+aletheiadb = { version = "0.2", features = ["nova", "semantic-search"] }
 ```
 
 If you see a compiler error like `unresolved import` or `item is gated behind the 'nova' feature`, add `features = ["nova"]` to your dependency.
@@ -69,7 +69,7 @@ If you see a compiler error like `unresolved import` or `item is gated behind th
 ## Building from Source
 
 ```bash
-git clone https://github.com/madmax983/AletheiaDB
+git clone https://github.com/autumn-foundation/AletheiaDB
 cd AletheiaDB
 
 # Build the library

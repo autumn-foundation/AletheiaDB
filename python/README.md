@@ -1,6 +1,6 @@
 # AletheiaDB Python SDK
 
-Native Python bindings for [AletheiaDB](https://github.com/madmax983/AletheiaDB) — a high-performance **bi-temporal graph database** built in Rust, designed for LLM integration. Track both *valid time* (when facts were true in reality) and *transaction time* (when they were recorded), with first-class vector search and Cypher queries.
+Native Python bindings for [AletheiaDB](https://github.com/autumn-foundation/AletheiaDB) — a high-performance **bi-temporal graph database** built in Rust, designed for LLM integration. Track both *valid time* (when facts were true in reality) and *transaction time* (when they were recorded), with first-class vector search and Cypher queries.
 
 ## Install
 

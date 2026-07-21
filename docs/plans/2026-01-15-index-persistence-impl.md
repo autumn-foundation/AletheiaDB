@@ -2181,8 +2181,8 @@ Update the module doc comment in `src/storage/index_persistence/mod.rs`:
 //!
 //! # Design Documents
 //!
-//! - [Design](../../../docs/plans/2026-01-15-index-persistence-design.md)
-//! - [ADR-0023](../../../docs/adr/0023-index-persistence-layer.md)
+//! - [Design](2026-01-15-index-persistence-design.md)
+//! - [ADR-0023](../adr/0023-index-persistence-layer.md)
 ```
 
 **Step 2: Export from lib.rs**

@@ -82,6 +82,8 @@ Also handy on day one:
 - [Migrating from XTDB](migrating-from-xtdb.md) — History-preserving concept mapping and query translation
 - [Migrating from Datomic](migrating-from-datomic.md) — Datomic's single-axis history mapped onto the bi-temporal model
 - [0.1 → 0.2 Migration](migration-0.1-to-0.2.md) — Upgrading an embedded 0.1.x deployment to 0.2.0
+### Durable Execution
+- [Workflow Journal](workflow-journal.md) — DBOS-style exactly-once step recording: the `durable-execution` schema convention (`WorkflowRun`/`Step`/`HAS_STEP`) and memoized replay (Phase 3a)
 
 ---
 

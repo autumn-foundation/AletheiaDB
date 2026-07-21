@@ -67,6 +67,15 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
     // (#3413) a crash would replay that rejected write.
     for precondition in &tx.cas_preconditions {
         // Lease claims MUST reach the authoritative under-guard check unchanged.
+        // A fenced claim (DBOS Phase 3e) always carries a lease today
+        // (`claim_with_lease_fenced_impl` sets both `lease` and `fence`), so this
+        // `lease.is_some()` skip already routes every fenced claim to the
+        // authoritative under-guard fence check — the pre-lock fast-path never
+        // sees (and so cannot mis-reject on a stale read) a fence. A future
+        // fence-ONLY claim variant (`lease: None, fence: Some(_)`) would slip
+        // past this guard into the pure-CAS branch below and MUST revisit this:
+        // it would need its own `fence.is_none()` clause here so it, too, falls
+        // through to the under-guard fence gate.
         if precondition.lease.is_some() {
             continue;
         }

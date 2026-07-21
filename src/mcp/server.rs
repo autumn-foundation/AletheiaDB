@@ -11841,15 +11841,15 @@ mod server_unit_tests {
     fn map_query_error_scope_conflict_yields_invalid_request() {
         use crate::core::namespace::NamespaceError;
         let server = make_server();
-        let payload = error_payload(
-            &server,
-            Error::Namespace(NamespaceError::ScopeConflict),
-        );
+        let payload = error_payload(&server, Error::Namespace(NamespaceError::ScopeConflict));
         assert_eq!(payload["kind"].as_str(), Some("invalid_request"));
         assert_eq!(payload["code"].as_str(), Some("INVALID_ARGUMENT"));
         assert_eq!(payload["retriable"].as_bool(), Some(false));
         // Must not disclose namespace contents.
-        assert!(payload["details"].is_null(), "no namespace details: {payload}");
+        assert!(
+            payload["details"].is_null(),
+            "no namespace details: {payload}"
+        );
     }
 
     #[test]
@@ -12714,7 +12714,9 @@ mod server_unit_tests {
                 .map(|rows| {
                     rows.iter()
                         .filter_map(|r| {
-                            r["entity"]["properties"]["name"].as_str().map(str::to_string)
+                            r["entity"]["properties"]["name"]
+                                .as_str()
+                                .map(str::to_string)
                         })
                         .collect()
                 })
@@ -12837,7 +12839,10 @@ mod server_unit_tests {
                     "namespace": "agent:a",
                 }),
             );
-            assert!(val.get("error").is_none(), "identical scope is allowed: {val}");
+            assert!(
+                val.get("error").is_none(),
+                "identical scope is allowed: {val}"
+            );
             assert_eq!(names(&val), vec!["Alice".to_string()]);
         }
 
@@ -12854,7 +12859,10 @@ mod server_unit_tests {
                     "namespace": "agent:a",
                 }),
             );
-            assert!(val.get("error").is_none(), "identical scope is allowed: {val}");
+            assert!(
+                val.get("error").is_none(),
+                "identical scope is allowed: {val}"
+            );
             assert_eq!(names(&val), vec!["Alice".to_string()]);
         }
 
@@ -13005,7 +13013,10 @@ mod server_unit_tests {
                     "namespace": ["agent:a", "agent:b"],
                 }),
             );
-            assert!(val.get("error").is_none(), "same set, any order -> allow: {val}");
+            assert!(
+                val.get("error").is_none(),
+                "same set, any order -> allow: {val}"
+            );
             assert_eq!(names(&val), vec!["Alice".to_string(), "Bob".to_string()]);
         }
 
@@ -13054,7 +13065,10 @@ mod server_unit_tests {
                     "query": "EXPLAIN USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
                 }),
             );
-            assert!(val.get("error").is_none(), "scoped EXPLAIN must plan: {val}");
+            assert!(
+                val.get("error").is_none(),
+                "scoped EXPLAIN must plan: {val}"
+            );
             let rows = val["rows"].as_array().expect("plan rows");
             assert_eq!(rows.len(), 1, "EXPLAIN yields one plan row: {val}");
             let plan = rows[0]["plan"].as_str().unwrap_or_default();
@@ -13139,7 +13153,11 @@ mod server_unit_tests {
             );
             // Default-only (fail-closed) is restricting; the multi-variable
             // evaluator cannot thread it -> unsupported_construct.
-            assert_eq!(val["error"]["code"].as_str(), Some("INVALID_ARGUMENT"), "{val}");
+            assert_eq!(
+                val["error"]["code"].as_str(),
+                Some("INVALID_ARGUMENT"),
+                "{val}"
+            );
             assert_eq!(
                 val["error"]["kind"].as_str(),
                 Some("unsupported_construct"),
@@ -13156,8 +13174,7 @@ mod server_unit_tests {
                 "language": "aql",
                 "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
             });
-            let via_handle =
-                AletheiaMcpServer::extract_text(server.handle_query(args.clone()));
+            let via_handle = AletheiaMcpServer::extract_text(server.handle_query(args.clone()));
             let via_dispatch = server.dispatch_tool_json("query", args);
             assert_eq!(
                 via_handle, via_dispatch,
@@ -13191,7 +13208,10 @@ mod server_unit_tests {
             for val in [&via_clause, &via_param] {
                 assert_eq!(names(val), vec!["Alice".to_string()], "{val}");
                 let all = serde_json::to_string(val).unwrap();
-                assert!(!all.contains("Bob") && !all.contains("Legacy"), "leak: {val}");
+                assert!(
+                    !all.contains("Bob") && !all.contains("Legacy"),
+                    "leak: {val}"
+                );
             }
         }
 
@@ -13218,7 +13238,10 @@ mod server_unit_tests {
             for val in [&via_clause, &via_param] {
                 assert_eq!(names(val), vec!["Alice".to_string()], "{val}");
                 let all = serde_json::to_string(val).unwrap();
-                assert!(!all.contains("Bob") && !all.contains("Legacy"), "leak: {val}");
+                assert!(
+                    !all.contains("Bob") && !all.contains("Legacy"),
+                    "leak: {val}"
+                );
             }
             // EXPLAIN + PROFILE scoped to agent:a must not surface B/Legacy.
             for directive in ["EXPLAIN", "PROFILE"] {

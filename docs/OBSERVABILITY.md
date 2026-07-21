@@ -5,13 +5,13 @@ AletheiaDB's observability surface is a contract, not an exporter stack.
 Enable spans and the metrics contract:
 
 ```toml
-aletheiadb = { version = "0.1", features = ["observability"] }
+aletheiadb = { version = "0.2", features = ["observability"] }
 ```
 
 Enable the `metrics` facade adapter:
 
 ```toml
-aletheiadb = { version = "0.1", features = ["metrics-rs"] }
+aletheiadb = { version = "0.2", features = ["metrics-rs"] }
 ```
 
 ## Tracing
