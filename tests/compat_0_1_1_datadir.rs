@@ -77,6 +77,41 @@
 
 use aletheiadb::{AletheiaDB, NodeId, PropertyValue, StorageError, Timestamp, time};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-global monotonic counter that makes every test tempdir path this
+/// module hands out distinct, even when two constructors are invoked within the
+/// same nanosecond on a coarse-resolution clock. Before this existed the two
+/// 0.1.1 compat tests derived their tempdir name from ONLY pid + nanosecond
+/// clock and, running concurrently in one binary (same pid) on macOS (coarser
+/// `SystemTime` resolution), computed the SAME path and clobbered each other's
+/// fixture copy. pid + nanos keep cross-process / cross-run uniqueness; this
+/// atomic keeps per-call uniqueness within one process regardless of clock
+/// resolution.
+static FIXTURE_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Build a collision-proof tempdir path under `std::env::temp_dir()`. Composes
+/// the pid (cross-process), a caller `tag` (readability), a nanosecond timestamp
+/// (cross-run), and a process-global monotonic sequence number (per-call
+/// uniqueness, independent of clock resolution). Every fixture-copy / temp-dir
+/// constructor in this file routes through here so no two calls can ever return
+/// the same path within one process. We do not depend on the `tempfile` crate
+/// (not a dev-dependency), so we build the path by hand.
+fn unique_temp_dir(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = FIXTURE_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let unique = format!(
+        "aletheiadb-compat-0_1_1-{}-{}-{}-{}",
+        std::process::id(),
+        tag,
+        nanos,
+        seq
+    );
+    std::env::temp_dir().join(unique)
+}
 
 /// Absolute path to the checked-in 0.1.1 WAL-tail fixture (never opened in place).
 fn fixture_dir() -> PathBuf {
@@ -113,9 +148,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A tempdir holding a fresh copy of the fixture; cleaned up on drop. We do not
-/// depend on the `tempfile` crate (not a dev-dependency), so we build a unique
-/// path under `std::env::temp_dir()` from pid + a nanosecond timestamp.
+/// A tempdir holding a fresh copy of the fixture; cleaned up on drop. The unique
+/// path is built by `unique_temp_dir` (pid + tag + nanos + a process-global
+/// monotonic sequence), so two concurrent copies never collide even when the
+/// wall clock returns identical nanos.
 struct FixtureCopy {
     path: PathBuf,
 }
@@ -129,12 +165,14 @@ impl FixtureCopy {
     /// both the WAL-tail (`fixture_dir`) and checkpointed
     /// (`checkpointed_fixture_dir`) fixtures so neither is ever opened in place.
     fn from_source(src: &Path) -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let unique = format!("aletheiadb-compat-0_1_1-{}-{}", std::process::id(), nanos);
-        let path = std::env::temp_dir().join(unique);
+        // Tag the tempdir with the source fixture's basename for readability;
+        // the monotonic sequence in `unique_temp_dir` (not the tag) is what
+        // guarantees uniqueness between the two concurrent compat tests.
+        let tag = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("fixture");
+        let path = unique_temp_dir(tag);
         let _ = std::fs::remove_dir_all(&path);
         copy_dir_recursive(src, &path).expect("copy 0.1.1 fixture into tempdir");
         FixtureCopy { path }
@@ -226,8 +264,8 @@ fn refuses_to_open_0_1_1_data_dir_with_pre_v13_wal_tail() {
 
 /// RAII tempdir guard: recursively removes its path on drop, even on panic
 /// (Q6). Used by the positive-control test so no leaked
-/// `/tmp/aletheiadb-3746-current-tail-*` directory survives a run (success OR
-/// failure). Mirrors `FixtureCopy`'s cleanup discipline for a dir we create
+/// `aletheiadb-compat-0_1_1-*-current-tail-*` directory survives a run (success
+/// OR failure). Mirrors `FixtureCopy`'s cleanup discipline for a dir we create
 /// rather than copy.
 struct TempDirGuard {
     path: PathBuf,
@@ -279,16 +317,10 @@ fn current_version_data_dir_with_unreplayed_tail_opens() {
     use aletheiadb::{AletheiaDBConfig, DurabilityMode, PersistenceConfig, WalConfigBuilder};
 
     // A fresh durable data dir written by THIS build; RAII-cleaned on drop (Q6).
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    // Routed through the same collision-proof `unique_temp_dir` helper as the
+    // fixture copies so it can never share a path with a concurrent constructor.
     let dir = TempDirGuard {
-        path: std::env::temp_dir().join(format!(
-            "aletheiadb-3746-current-tail-{}-{}",
-            std::process::id(),
-            nanos
-        )),
+        path: unique_temp_dir("current-tail"),
     };
     let _ = std::fs::remove_dir_all(&dir.path);
 
@@ -658,4 +690,50 @@ fn check_bool(db: &AletheiaDB, id: u64, key: &str, expected: bool, violations: &
             ));
         }
     }
+}
+
+/// Regression lock for the test-harness tempdir race.
+///
+/// This pins the structural hole that caused the two 0.1.1 compat tests to
+/// intermittently open each other's fixture directory on macOS: the tempdir
+/// path used to derive ONLY from pid + a nanosecond clock, so two constructors
+/// racing within one coarse-resolution tick (both tests run concurrently in the
+/// same binary, hence the same pid) computed the SAME path and clobbered each
+/// other's copy. `unique_temp_dir`'s process-global monotonic counter closes
+/// that hole: no two calls in one process can return the same path, regardless
+/// of clock resolution.
+///
+/// This test spawns many threads that each ask for one path at once and asserts
+/// they are all distinct. It is deterministic on the fixed code (the atomic
+/// guarantees uniqueness) and does NOT depend on any real fixture. A future
+/// revert to clock-only naming would collide under this concurrency and fail
+/// here.
+#[test]
+fn fixture_temp_dirs_are_unique_under_concurrency() {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    const THREADS: usize = 64;
+    let seen: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let seen = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                let path = unique_temp_dir("lock");
+                seen.lock().expect("seen mutex poisoned").insert(path);
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("temp-dir generator thread panicked");
+    }
+
+    let set = seen.lock().expect("seen mutex poisoned");
+    assert_eq!(
+        set.len(),
+        THREADS,
+        "expected {THREADS} distinct tempdir paths, got {}: a collision means the \
+         pid+nanos-only naming regressed and the macOS fixture-swap race is back",
+        set.len()
+    );
 }
