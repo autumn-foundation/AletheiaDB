@@ -39,16 +39,26 @@ impl AletheiaDB {
 
     /// Execute an AQL string scoped to a namespace read scope (Issue #3349, PR3d).
     ///
-    /// The parsed query is stamped with `scope` before planning/execution, so it
-    /// runs through exactly the same executor scope machinery as
+    /// `scope` is a programmatic *ceiling*: it is reconciled with any in-query
+    /// `USE / IN NAMESPACE` clause via
+    /// [`reconcile_namespace_scope`](crate::core::namespace::reconcile_namespace_scope)
+    /// — the two must be semantically identical, else the call is refused with
+    /// [`NamespaceError::ScopeConflict`](crate::core::namespace::NamespaceError::ScopeConflict)
+    /// (`INVALID_ARGUMENT`). This aligns the AQL path with the Cypher one: a
+    /// silently-dropped in-query restriction (the previous "last-wins" behavior)
+    /// could *widen* an intended scope and leak another agent's facts. The
+    /// effective query is stamped with the reconciled scope before
+    /// planning/execution, so it runs through exactly the same executor scope
+    /// machinery as
     /// [`QueryBuilder::in_namespace`](crate::query::QueryBuilder::in_namespace):
     /// produced entities are filtered to those whose (immutable) namespace ∈
-    /// `scope`, and graph traversal never crosses an out-of-scope edge nor
+    /// scope, and graph traversal never crosses an out-of-scope edge nor
     /// bridges through an out-of-scope node.
     ///
     /// # Errors
     ///
-    /// - `NOT_FOUND` if `scope` names an unregistered namespace,
+    /// - `INVALID_ARGUMENT` when `scope` conflicts with an in-query clause.
+    /// - `NOT_FOUND` if the effective scope names an unregistered namespace,
     ///   `INVALID_ARGUMENT` for an empty `List` scope (both via
     ///   [`validate_scope`](Self::validate_scope), invoked by
     ///   [`execute_query`](Self::execute_query)).
@@ -59,8 +69,40 @@ impl AletheiaDB {
         query_string: &str,
         scope: crate::core::namespace::NamespaceScope,
     ) -> Result<QueryResults> {
+        self.execute_aql_reconciled(query_string, Some(scope))
+    }
+
+    /// Execute an AQL string reconciling a *programmatic* namespace scope with
+    /// the statement's own in-query `USE / IN NAMESPACE` clause (Issue #3349).
+    ///
+    /// This is the entry point the MCP / HTTP `query` tool uses: it passes
+    /// `Some(scope)` when the `namespace` request parameter is present and
+    /// `None` when it is omitted, so
+    /// [`reconcile_namespace_scope`](crate::core::namespace::reconcile_namespace_scope)
+    /// resolves the effective scope (omitted + no clause ⇒ fail-closed
+    /// `default`-only; omitted + clause ⇒ the clause; explicit ⇒ a ceiling that
+    /// must match any clause). The embedded [`execute_aql`](Self::execute_aql)
+    /// entry point deliberately does **not** route through here — it keeps its
+    /// namespace-agnostic (`None`) default, honoring an in-query clause when
+    /// present without imposing the `default`-only fail-closed policy.
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_aql_scoped`](Self::execute_aql_scoped).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn execute_aql_reconciled(
+        &self,
+        query_string: &str,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
+    ) -> Result<QueryResults> {
         let mut query = crate::query::parse_query(query_string)?;
-        query.scope = Some(scope);
+        // The parser/converter has already lowered any in-query clause onto
+        // `query.scope`; take it as `C` and fold it with the programmatic `P`.
+        let in_query = query.scope.take();
+        query.scope = Some(crate::core::namespace::reconcile_namespace_scope(
+            programmatic,
+            in_query,
+        )?);
         self.execute_query(query)
     }
 
@@ -477,7 +519,53 @@ impl AletheiaDB {
         query_string: &str,
         scope: crate::core::namespace::NamespaceScope,
     ) -> Result<QueryResults> {
-        self.execute_cypher_execution_scoped(crate::cypher::plan_cypher(query_string)?, scope)
+        self.execute_cypher_execution_reconciled(
+            crate::cypher::plan_cypher(query_string)?,
+            Some(scope),
+        )
+    }
+
+    /// Execute a Cypher string reconciling a *programmatic* namespace scope with
+    /// the statement's own in-query `USE / IN NAMESPACE` clause (Issue #3349).
+    ///
+    /// The MCP / HTTP `query` tool entry point: `Some(scope)` when the
+    /// `namespace` request parameter is present, `None` when omitted. See
+    /// [`execute_aql_reconciled`](Self::execute_aql_reconciled) for the
+    /// reconciliation contract.
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_cypher_scoped`](Self::execute_cypher_scoped).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn execute_cypher_reconciled(
+        &self,
+        query_string: &str,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
+    ) -> Result<QueryResults> {
+        self.execute_cypher_execution_reconciled(
+            crate::cypher::plan_cypher(query_string)?,
+            programmatic,
+        )
+    }
+
+    /// Parameterized counterpart to
+    /// [`execute_cypher_reconciled`](Self::execute_cypher_reconciled)
+    /// (Issue #3349).
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_cypher_scoped`](Self::execute_cypher_scoped).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn execute_cypher_with_params_reconciled(
+        &self,
+        query_string: &str,
+        params: std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
+    ) -> Result<QueryResults> {
+        self.execute_cypher_execution_reconciled(
+            crate::cypher::plan_cypher_with_params(query_string, params)?,
+            programmatic,
+        )
     }
 
     /// Execute a parameterized Cypher string scoped to a namespace read scope
@@ -493,67 +581,77 @@ impl AletheiaDB {
         params: std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
         scope: crate::core::namespace::NamespaceScope,
     ) -> Result<QueryResults> {
-        self.execute_cypher_execution_scoped(
+        self.execute_cypher_execution_reconciled(
             crate::cypher::plan_cypher_with_params(query_string, params)?,
-            scope,
+            Some(scope),
         )
     }
 
-    /// Apply a namespace read scope to a planned [`CypherExecution`] and run it
-    /// (Issue #3349, PR3d).
+    /// Reconcile a programmatic namespace scope with a planned
+    /// [`CypherExecution`]'s in-query `USE / IN NAMESPACE` clause, then run it
+    /// under the effective scope (Issue #3349).
     ///
-    /// The single-entity `Query` pipeline runs through [`Self::execute_query`],
-    /// which validates the scope and applies the source-leaf filter + traversal
-    /// boundary via the standard executor. `EXPLAIN` and `PROFILE` over that same
-    /// pipeline thread the scope explicitly (they build their own planner /
-    /// executor rather than going through `execute_query`): both first
-    /// [`validate_scope`](Self::validate_scope) it (unknown ns ⇒ `NOT_FOUND`,
-    /// empty list ⇒ `INVALID_ARGUMENT`), and `PROFILE` additionally executes the
-    /// plan under [`with_namespace_scope`](crate::query::executor::QueryExecutor::with_namespace_scope)
+    /// First the in-query clause `C` is extracted (already lowered for the
+    /// single-`Query`/EXPLAIN/PROFILE arms; lowered on demand for the
+    /// multi-variable evaluator) and folded with the programmatic scope `P` via
+    /// [`reconcile_namespace_scope`](crate::core::namespace::reconcile_namespace_scope):
+    /// omitted+none ⇒ fail-closed `default`-only; omitted+clause ⇒ the clause;
+    /// explicit ⇒ a hard ceiling that must be semantically identical to any
+    /// clause, else [`NamespaceError::ScopeConflict`](crate::core::namespace::NamespaceError::ScopeConflict)
+    /// (`INVALID_ARGUMENT`). This is the SAME decision the AQL path takes, so the
+    /// two surfaces cannot diverge.
+    ///
+    /// The single-entity `Query` pipeline then runs through
+    /// [`Self::execute_query`], which validates the effective scope and applies
+    /// the source-leaf filter + traversal boundary via the standard executor.
+    /// `EXPLAIN` and `PROFILE` thread the effective scope explicitly (they build
+    /// their own planner / executor rather than going through `execute_query`):
+    /// both first [`validate_scope`](Self::validate_scope) it (unknown ns ⇒
+    /// `NOT_FOUND`, empty list ⇒ `INVALID_ARGUMENT`), and `PROFILE` additionally
+    /// executes the plan under
+    /// [`with_namespace_scope`](crate::query::executor::QueryExecutor::with_namespace_scope)
     /// so its per-operator row counts / timing reflect the **scoped** query, not
     /// unscoped data. `EXPLAIN` only plans (no execution) so validation is
     /// sufficient — no execution means no cross-namespace leak. A standalone
     /// `UNWIND` (`Rows`) yields scalar rows with no graph entities, so the scope
     /// only needs validating — there is nothing to filter. The
     /// multi-variable-binding evaluator and mutation paths do not thread scope in
-    /// v1: under a **restricting** scope they return a structured
+    /// v1: under a **restricting** effective scope they return a structured
     /// `UnsupportedFeature` (never silently unscoped); under `All` (the no-op
     /// selector) they run unchanged.
-    fn execute_cypher_execution_scoped(
+    fn execute_cypher_execution_reconciled(
         &self,
         execution: crate::cypher::CypherExecution,
-        scope: crate::core::namespace::NamespaceScope,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
     ) -> Result<QueryResults> {
-        use crate::core::namespace::NamespaceScope;
+        use crate::core::namespace::{NamespaceScope, reconcile_namespace_scope};
         use crate::cypher::CypherExecution;
 
-        // Fail-closed collision rule (Issue #3349): a programmatic scope is a
-        // hard ceiling. If the statement ALSO carries an in-statement
-        // `USE / IN NAMESPACE` clause, the two could disagree -- and blindly
-        // letting the programmatic scope overwrite the in-query one could WIDEN
-        // an intended restriction (programmatic `All` erasing an in-query
-        // `Single`). Rather than silently pick a winner in either direction, we
-        // refuse the combination and require the caller to specify the scope in
-        // exactly one place. (This is stricter than the AQL side, which
-        // last-wins-overwrites; the divergence is deliberate for this
-        // security-sensitive isolation feature.)
-        let has_in_query_scope = match &execution {
+        // Extract the in-query scope `C` (already lowered + name-validated) from
+        // the planned execution. For the single-`Query`/EXPLAIN/PROFILE arms the
+        // converter has stamped it onto `query.scope`; the multi-variable
+        // evaluator keeps the raw clause on the statement, so lower it here
+        // through the SAME converter (a malformed name surfaces as
+        // `INVALID_ARGUMENT`, exactly as on the other arms).
+        let in_query: Option<NamespaceScope> = match &execution {
             CypherExecution::Query(q)
             | CypherExecution::Explain(q)
-            | CypherExecution::Profile(q) => q.scope.is_some(),
+            | CypherExecution::Profile(q) => q.scope.clone(),
             CypherExecution::MultiPattern { statement, .. } => {
-                crate::cypher::statement_namespace(statement).is_some()
+                crate::cypher::CypherConverter::convert_namespace_clause(
+                    crate::cypher::statement_namespace(statement),
+                )?
             }
-            CypherExecution::Mutation { .. } | CypherExecution::Rows(_) => false,
+            CypherExecution::Mutation { .. } | CypherExecution::Rows(_) => None,
         };
-        if has_in_query_scope {
-            return Err(crate::cypher::CypherError::UnsupportedFeature(
-                "a programmatic namespace scope cannot be combined with an in-statement \
-                 USE / IN NAMESPACE clause; specify the namespace scope in exactly one place"
-                    .to_string(),
-            )
-            .into());
-        }
+
+        // Reconcile the programmatic ceiling `P` with the in-query clause `C`
+        // (Issue #3349): omitted+none ⇒ fail-closed `default`-only; omitted+clause
+        // ⇒ the clause; explicit ⇒ a ceiling that must be semantically identical
+        // to any clause (else `ScopeConflict`/`INVALID_ARGUMENT`). This is the
+        // single decision point shared with the AQL path — the two surfaces can
+        // no longer diverge.
+        let scope = reconcile_namespace_scope(programmatic, in_query)?;
 
         let restricting = !matches!(scope, NamespaceScope::All);
         match execution {

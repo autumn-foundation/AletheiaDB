@@ -9638,14 +9638,19 @@ mod namespace_grammar {
         }
     }
 
-    // ---- Case 15: programmatic scope + in-query clause -> reject ---------
+    // ---- Case 15: programmatic scope + conflicting in-query clause -> reject
 
-    /// Landed rule: a programmatic scope is a hard ceiling; combining it with an
-    /// in-statement `USE / IN NAMESPACE` clause is refused (never silently
-    /// picking a winner, which could widen an intended restriction). Stricter
-    /// than AQL's last-wins overwrite -- a deliberate fail-closed divergence.
+    /// Landed rule (Issue #3349 follow-up): a programmatic scope is a hard
+    /// ceiling reconciled with any in-query `USE / IN NAMESPACE` clause. When the
+    /// two are NOT semantically identical the combination is refused with a
+    /// structured [`NamespaceError::ScopeConflict`] (`INVALID_ARGUMENT`) rather
+    /// than silently picking a winner (which could widen an intended
+    /// restriction). Here `All` (programmatic) vs `agent:a` (in-query) are
+    /// disjoint, so the call is refused. This aligns AQL and Cypher on the SAME
+    /// reconcile decision (previously AQL last-wins-overwrote and Cypher raised
+    /// `UnsupportedFeature`).
     #[test]
-    fn programmatic_scope_plus_in_query_clause_is_rejected() {
+    fn programmatic_scope_plus_conflicting_in_query_clause_is_rejected() {
         let db = AletheiaDB::new().unwrap();
         db.create_node_in_namespace("Person", person("Alice"), "agent:a")
             .unwrap();
@@ -9653,10 +9658,27 @@ mod namespace_grammar {
             "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
             NamespaceScope::All,
         ) {
-            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
-            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
-            Ok(_) => panic!("programmatic scope + in-query clause must be rejected"),
+            Err(Error::Namespace(NamespaceError::ScopeConflict)) => {}
+            Err(other) => panic!("expected ScopeConflict, got {other:?}"),
+            Ok(_) => panic!("programmatic scope + conflicting in-query clause must be rejected"),
         }
+    }
+
+    /// Companion: a programmatic scope combined with an in-query clause that is
+    /// SEMANTICALLY IDENTICAL is allowed (not a conflict) and still isolates.
+    #[test]
+    fn programmatic_scope_plus_identical_in_query_clause_is_allowed() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        let scope = NamespaceScope::single(Namespace::new("agent:a").unwrap());
+        let names = returned_names(
+            db.execute_cypher_scoped("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n", scope)
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string()]);
     }
 
     /// Companion: with NO in-query clause, the programmatic scoped path is
@@ -9822,38 +9844,41 @@ mod namespace_grammar {
         );
     }
 
-    // ---- T-3: MCP-injected default scope + in-query clause -> reject ------
+    // ---- T-3: explicit programmatic scope + conflicting clause -> reject --
 
-    /// Pins the MCP `query`-tool reachability boundary (v1): that tool always
-    /// injects a programmatic scope via `parse_opt_scope(...).unwrap_or_default()`
-    /// == `NamespaceScope::default()` (`Single(default)`), then dispatches through
-    /// `execute_cypher_scoped`. The fail-closed collision guard therefore refuses
-    /// EVERY in-query clause submitted through MCP -- documented, not accidental.
-    /// (Companion to `programmatic_scope_plus_in_query_clause_is_rejected`, which
-    /// uses an explicit `All`.)
+    /// An EXPLICIT programmatic `default` scope (as if a caller passed
+    /// `namespace: "default"`) combined with a conflicting in-query clause is
+    /// refused with [`NamespaceError::ScopeConflict`] (`INVALID_ARGUMENT`).
+    ///
+    /// This encodes the Issue #3349 follow-up contract: the MCP `query` tool no
+    /// longer injects a `default` scope for an OMITTED `namespace` arg (it passes
+    /// `None`, letting an in-query clause govern); a `default` scope reaching
+    /// `execute_cypher_scoped` is now an *explicit* ceiling. `default` vs
+    /// `agent:a` and `default` vs `ALL` are both non-identical, so both are
+    /// refused as conflicts (never silently picking a winner).
     #[test]
-    fn mcp_default_scope_plus_in_query_clause_is_rejected() {
+    fn explicit_default_scope_plus_conflicting_clause_is_rejected() {
         let db = AletheiaDB::new().unwrap();
         db.create_node_in_namespace("Person", person("Alice"), "agent:a")
             .unwrap();
-        // Exact scope the MCP query tool injects for an omitted `namespace` arg.
+        // Explicit `default` ceiling vs a disjoint in-query `agent:a` clause.
         match db.execute_cypher_scoped(
             "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
             NamespaceScope::default(),
         ) {
-            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
-            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
-            Ok(_) => panic!("MCP default scope + in-query clause must be rejected"),
+            Err(Error::Namespace(NamespaceError::ScopeConflict)) => {}
+            Err(other) => panic!("expected ScopeConflict, got {other:?}"),
+            Ok(_) => panic!("explicit default scope + conflicting clause must be rejected"),
         }
-        // Even a non-restricting `USE ALL NAMESPACES` in-query clause is refused
-        // under a programmatic scope: the guard keys on presence, not narrowing.
+        // Explicit `default` ceiling vs a wider `USE ALL NAMESPACES` clause: also
+        // non-identical, so also refused (never widen past the ceiling).
         match db.execute_cypher_scoped(
             "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
             NamespaceScope::default(),
         ) {
-            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
-            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
-            Ok(_) => panic!("USE ALL NAMESPACES + programmatic scope must be rejected"),
+            Err(Error::Namespace(NamespaceError::ScopeConflict)) => {}
+            Err(other) => panic!("expected ScopeConflict, got {other:?}"),
+            Ok(_) => panic!("USE ALL NAMESPACES + explicit default scope must be rejected"),
         }
     }
 
