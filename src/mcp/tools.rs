@@ -2221,3 +2221,338 @@ pub struct ContextAspectsRequest {
     )]
     pub include_vectors: Option<bool>,
 }
+
+// ============================================================================
+// Temporal drift-alarm management (Issue #3367, `semantic-temporal`)
+// ============================================================================
+
+/// Request to declare a drift monitor (`create_drift_monitor`, Write).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CreateDriftMonitorRequest {
+    /// The vector property key to watch (e.g. `"embedding"`).
+    #[schemars(description = "The vector property key to watch (e.g. 'embedding'). A vector \
+                             index must be enabled for this property.")]
+    pub property_key: String,
+
+    /// Optional node-label restriction. Required when `target` is
+    /// `label_centroid`.
+    #[serde(default)]
+    #[schemars(description = "Optional node-label restriction. Required when target is \
+                             'label_centroid'.")]
+    pub label: Option<String>,
+
+    /// Optional explicit set of node ids to watch.
+    #[serde(default)]
+    #[schemars(description = "Optional explicit set of node ids to watch. An empty array is \
+                             an INVALID_ARGUMENT.")]
+    pub entities: Option<Vec<u64>>,
+
+    /// Distance metric: `cosine`, `euclidean`, or `angular`. Must match the
+    /// property's vector-index metric.
+    #[schemars(description = "Distance metric: 'cosine', 'euclidean', or 'angular'. Must be \
+                             consistent with the property's vector-index metric.")]
+    pub metric: String,
+
+    /// Firing threshold (strict `>`); must be positive and finite.
+    #[schemars(description = "Firing threshold (strict >). Must be positive and finite.")]
+    pub threshold: f32,
+
+    /// Comparison window in microseconds: current embedding vs the embedding as
+    /// of `now - window`.
+    #[schemars(description = "Comparison window in microseconds: the current embedding is \
+                             compared against the embedding as of (now - window). Must be \
+                             non-zero.")]
+    pub window_micros: u64,
+
+    /// Firing target: `per_entity` or `label_centroid`.
+    #[serde(default = "default_drift_target")]
+    #[schemars(description = "Firing target: 'per_entity' (default) fires per drifted entity; \
+                             'label_centroid' fires once for the label's population centroid \
+                             (requires label).")]
+    pub target: String,
+
+    /// Evaluation mode: `on_write` or `scheduled`.
+    #[serde(default = "default_drift_mode")]
+    #[schemars(description = "Evaluation mode: 'on_write' (default, reactive) or 'scheduled' \
+                             (fixed cadence; provide scheduled_interval_micros).")]
+    pub mode: String,
+
+    /// Evaluation interval in microseconds when `mode` is `scheduled`.
+    #[serde(default)]
+    #[schemars(description = "Evaluation interval in microseconds; required when mode is \
+                             'scheduled', ignored otherwise.")]
+    pub scheduled_interval_micros: Option<u64>,
+}
+
+fn default_drift_target() -> String {
+    "per_entity".to_string()
+}
+fn default_drift_mode() -> String {
+    "on_write".to_string()
+}
+
+/// Request to list all declared drift monitors (`list_drift_monitors`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ListDriftMonitorsRequest {}
+
+/// Request to delete a drift monitor (`delete_drift_monitor`, Write).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteDriftMonitorRequest {
+    /// The id of the monitor to delete.
+    #[schemars(description = "The id of the drift monitor to delete (from create/list). \
+                             An unknown id is a NOT_FOUND.")]
+    pub id: u64,
+}
+
+/// Request to query fired drift alarms (`query_drift_alarms`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct QueryDriftAlarmsRequest {
+    /// Restrict to a single monitor id.
+    #[serde(default)]
+    #[schemars(description = "Optional: restrict to alarms fired by this monitor id.")]
+    pub monitor_id: Option<u64>,
+
+    /// Restrict to a single label.
+    #[serde(default)]
+    #[schemars(description = "Optional: restrict to alarms carrying this label.")]
+    pub label: Option<String>,
+
+    /// Restrict by resolved state (omit for both).
+    #[serde(default)]
+    #[schemars(description = "Optional: restrict by resolved state (true/false). Omit for both.")]
+    pub resolved: Option<bool>,
+
+    /// Inclusive lower bound (transaction time) on fire time.
+    #[serde(default)]
+    #[schemars(description = "Optional inclusive lower bound (ISO 8601 / RFC 3339 or integer \
+                             microseconds since epoch) on the alarm fire (transaction) time. \
+                             Both time-range bounds must be supplied together.")]
+    pub time_range_start: Option<String>,
+
+    /// Exclusive upper bound (transaction time) on fire time.
+    #[serde(default)]
+    #[schemars(description = "Optional exclusive upper bound (ISO 8601 / RFC 3339 or integer \
+                             microseconds since epoch) on the alarm fire (transaction) time.")]
+    pub time_range_end: Option<String>,
+
+    /// Maximum alarms to return (clamped to 1000).
+    #[serde(default)]
+    #[schemars(description = "Maximum alarms to return (default 100, clamped to 1000).")]
+    pub limit: Option<usize>,
+}
+
+/// Request to resolve a drift alarm (`resolve_drift_alarm`, Write).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ResolveDriftAlarmRequest {
+    /// The graph node id of the alarm to resolve.
+    #[schemars(description = "The node id of the drift alarm to resolve (a recorded, AS OF-stable \
+                             update; the alarm is never deleted).")]
+    pub alarm_id: u64,
+}
+
+// ============================================================================
+// Contradiction genealogy (Issue #3352, `semantic-temporal`)
+// ============================================================================
+
+/// A version-pinned competing-claim reference for `contradiction_genealogy`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ClaimRefRequest {
+    /// Whether the claim belongs to a node or an edge.
+    #[schemars(description = "The claim's entity kind: 'node' or 'edge'.")]
+    pub entity_kind: String,
+    /// The entity id the claim belongs to.
+    #[schemars(description = "The entity id the claim belongs to (node id or edge id).")]
+    pub id: u64,
+    /// The version id that asserted the claim.
+    #[schemars(description = "The version id that asserted the claim.")]
+    pub version: u64,
+}
+
+/// Request to reconstruct a contradiction genealogy (`contradiction_genealogy`,
+/// Read). Provide EITHER `entity_kind` + `id` + `property` (a single entity's
+/// property) OR an explicit `claims` set.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ContradictionGenealogyRequest {
+    /// The entity kind when targeting one entity's property: 'node' or 'edge'.
+    #[serde(default)]
+    #[schemars(description = "Entity kind ('node' or 'edge') when targeting a single entity's \
+                             property. Provide with id and property, or use claims instead.")]
+    pub entity_kind: Option<String>,
+
+    /// The entity id when targeting one entity's property.
+    #[serde(default)]
+    #[schemars(description = "Entity id when targeting a single entity's property.")]
+    pub id: Option<u64>,
+
+    /// The property key when targeting one entity's property.
+    #[serde(default)]
+    #[schemars(description = "Property key when targeting a single entity's property.")]
+    pub property: Option<String>,
+
+    /// An explicit competing-claim set (may span entities); alternative to
+    /// `entity_kind`/`id`/`property`.
+    #[serde(default)]
+    #[schemars(description = "Explicit competing-claim set (may span entities). Alternative to \
+                             entity_kind/id/property; an empty array is an INVALID_ARGUMENT.")]
+    pub claims: Option<Vec<ClaimRefRequest>>,
+
+    /// Time-travel: only claims recorded at or before this transaction time.
+    #[serde(default)]
+    #[schemars(description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or \
+                             integer microseconds since epoch): only claims recorded at or before \
+                             it are considered.")]
+    pub as_of_transaction_time: Option<String>,
+
+    /// Bound the number of competing claims returned.
+    #[serde(default)]
+    #[schemars(description = "Optional cap on the number of competing claims returned (sets \
+                             truncated).")]
+    pub max_claims: Option<usize>,
+
+    /// Bound the number of source summaries returned.
+    #[serde(default)]
+    #[schemars(description = "Optional cap on the number of per-source summaries returned (sets \
+                             truncated).")]
+    pub max_sources: Option<usize>,
+}
+
+/// Request to scan for contradictions (`find_contradictions`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct FindContradictionsRequest {
+    /// Which entity kinds to scan: `nodes`, `edges`, or `both`.
+    #[serde(default = "default_entity_kind_scope")]
+    #[schemars(description = "Entity kinds to scan: 'nodes', 'edges', or 'both' (default).")]
+    pub entity_kind: String,
+
+    /// Optional node-label / edge-type filter.
+    #[serde(default)]
+    #[schemars(description = "Optional node-label / edge-type filter.")]
+    pub label: Option<String>,
+
+    /// Optional single property to analyze.
+    #[serde(default)]
+    #[schemars(description = "Optional single property to analyze (otherwise every property that \
+                             ever appeared is analyzed).")]
+    pub property: Option<String>,
+
+    /// Keep only contradictions whose divergence valid-time is in this window.
+    #[serde(default)]
+    #[schemars(description = "Optional valid-time window lower bound (ISO 8601 / RFC 3339 or \
+                             microseconds); both window bounds must be supplied together.")]
+    pub valid_time_start: Option<String>,
+    /// Valid-time window upper bound.
+    #[serde(default)]
+    #[schemars(description = "Optional valid-time window upper bound.")]
+    pub valid_time_end: Option<String>,
+
+    /// Keep only contradictions whose divergence transaction-time is in this
+    /// window.
+    #[serde(default)]
+    #[schemars(description = "Optional transaction-time window lower bound; both bounds together.")]
+    pub transaction_time_start: Option<String>,
+    /// Transaction-time window upper bound.
+    #[serde(default)]
+    #[schemars(description = "Optional transaction-time window upper bound.")]
+    pub transaction_time_end: Option<String>,
+
+    /// Page size (default 100, clamped to 1000).
+    #[serde(default)]
+    #[schemars(description = "Page size (default 100, clamped to 1000).")]
+    pub limit: Option<usize>,
+
+    /// Page offset.
+    #[serde(default)]
+    #[schemars(description = "Page offset for pagination (default 0).")]
+    pub offset: Option<usize>,
+}
+
+fn default_entity_kind_scope() -> String {
+    "both".to_string()
+}
+
+// ============================================================================
+// Counterfactual replay (Issue #3357, `semantic-temporal`)
+// ============================================================================
+
+/// Request to replay history excluding a source (`counterfactual_replay`,
+/// Read). The real database is never mutated; the response reports the
+/// blast-radius divergence and carries a `counterfactual: true` marker.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CounterfactualReplayRequest {
+    /// A human-readable name for the counterfactual view.
+    #[schemars(description = "A human-readable name for the counterfactual view.")]
+    pub name: String,
+
+    /// Exclude all writes attributed to this single source.
+    #[serde(default)]
+    #[schemars(description = "Exclude all writes attributed to this single source. Provide \
+                             exactly one of exclude_source or exclude_sources.")]
+    pub exclude_source: Option<String>,
+
+    /// Exclude all writes attributed to any source in this set (any-of).
+    #[serde(default)]
+    #[schemars(description = "Exclude all writes attributed to any source in this set (any-of). \
+                             Provide exactly one of exclude_source or exclude_sources.")]
+    pub exclude_sources: Option<Vec<String>>,
+
+    /// Bound exclusion to writes recorded at or after this transaction time.
+    #[serde(default)]
+    #[schemars(description = "Optional inclusive lower bound (ISO 8601 / RFC 3339 or microseconds) \
+                             on a write's transaction time for it to be excluded.")]
+    pub within_transaction_from: Option<String>,
+
+    /// Bound exclusion to writes recorded before this transaction time.
+    #[serde(default)]
+    #[schemars(description = "Optional exclusive upper bound (ISO 8601 / RFC 3339 or microseconds) \
+                             on a write's transaction time for it to be excluded.")]
+    pub within_transaction_to: Option<String>,
+
+    /// Maximum recorded versions to materialize before failing fast.
+    #[serde(default)]
+    #[schemars(description = "Optional cap on recorded versions to materialize; exceeding it is a \
+                             FAILED_PRECONDITION (history too large).")]
+    pub max_replay_versions: Option<usize>,
+}
+
+// ============================================================================
+// Trust propagation (Issue #3382, `semantic-reasoning`)
+// ============================================================================
+
+/// Request for a computed-trust breakdown (`trust_breakdown`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct TrustBreakdownRequest {
+    /// The root fact's entity kind: 'node' or 'edge'.
+    #[schemars(description = "The root fact's entity kind: 'node' or 'edge'.")]
+    pub entity_kind: String,
+
+    /// The root entity's id.
+    #[schemars(description = "The root entity's id (node id or edge id per entity_kind).")]
+    pub id: u64,
+
+    /// The root fact's version id (trust is version-pinned).
+    #[schemars(description = "The root fact's version id. Trust is version-pinned; use the \
+                             version whose computed-confidence breakdown you want.")]
+    pub version: u64,
+
+    /// Maximum transitive depth to expand before truncating.
+    #[serde(default)]
+    #[schemars(description = "Maximum transitive depth to expand before marking a subtree \
+                             truncated (defaults to the store's depth cap).")]
+    pub max_depth: Option<usize>,
+
+    /// Maximum descendant nodes to serialize before truncating.
+    #[serde(default)]
+    #[schemars(description = "Maximum descendant breakdown nodes to serialize (the root is always \
+                             emitted and does not count); defaults to the store's node cap.")]
+    pub limit: Option<usize>,
+
+    /// Optional AS OF transaction-time coordinate.
+    #[serde(default)]
+    #[schemars(description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or \
+                             microseconds): evaluate lineage and confidences as recorded by then.")]
+    pub as_of_transaction_time: Option<String>,
+}
+
+/// Request to list active trust policies (`list_trust_policies`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ListTrustPoliciesRequest {}
