@@ -8530,10 +8530,35 @@ impl AletheiaMcpServer {
         })
     }
 
+    /// Parse an `entity_kind` + id into an [`EntityId`], returning a structured
+    /// `INVALID_ARGUMENT` `CallToolResult` on a bad kind or out-of-range id.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); this is
+    // the established pattern for the MCP arg-parsing helpers (see the
+    // `parse_lineage_ref` cluster above).
+    #[cfg(feature = "semantic-temporal")]
+    #[allow(clippy::result_large_err)]
+    fn parse_entity_kind_ct(
+        &self,
+        kind: &str,
+        id: u64,
+    ) -> std::result::Result<crate::core::id::EntityId, CallToolResult> {
+        use crate::core::id::EntityId;
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "node" => NodeId::new(id)
+                .map(EntityId::Node)
+                .map_err(|e| self.invalid_argument(&e.to_string())),
+            "edge" => EdgeId::new(id)
+                .map(EntityId::Edge)
+                .map_err(|e| self.invalid_argument(&e.to_string())),
+            other => Err(self.invalid_argument(&format!(
+                "entity_kind must be 'node' or 'edge', got '{other}'"
+            ))),
+        }
+    }
+
     /// Handle `contradiction_genealogy` (Read, Issue #3352).
     #[cfg(feature = "semantic-temporal")]
     fn handle_contradiction_genealogy(&self, args: serde_json::Value) -> CallToolResult {
-        use crate::core::id::EntityId;
         use crate::experimental::temporal::contradiction_genealogy::{
             ClaimRef, ContradictionTarget, GenealogyOptions,
         };
@@ -8543,24 +8568,10 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
-        let parse_entity = |kind: &str, id: u64| -> std::result::Result<EntityId, CallToolResult> {
-            match kind.trim().to_ascii_lowercase().as_str() {
-                "node" => NodeId::new(id)
-                    .map(EntityId::Node)
-                    .map_err(|e| self.invalid_argument(&e.to_string())),
-                "edge" => EdgeId::new(id)
-                    .map(EntityId::Edge)
-                    .map_err(|e| self.invalid_argument(&e.to_string())),
-                other => Err(self.invalid_argument(&format!(
-                    "entity_kind must be 'node' or 'edge', got '{other}'"
-                ))),
-            }
-        };
-
         let target = if let Some(claims) = req.claims {
             let mut refs = Vec::with_capacity(claims.len());
             for c in &claims {
-                let entity = match parse_entity(&c.entity_kind, c.id) {
+                let entity = match self.parse_entity_kind_ct(&c.entity_kind, c.id) {
                     Ok(e) => e,
                     Err(r) => return r,
                 };
@@ -8594,7 +8605,7 @@ impl AletheiaMcpServer {
                         .invalid_argument("'property' is required when targeting a single entity");
                 }
             };
-            let entity = match parse_entity(kind, id) {
+            let entity = match self.parse_entity_kind_ct(kind, id) {
                 Ok(e) => e,
                 Err(r) => return r,
             };
