@@ -933,7 +933,11 @@ mod phase5_background_compaction {
 
         // Loose lower-bound while the background thread may still be mid-compaction:
         // frozen_edge_count and delta_edge_count are independent Relaxed atomics with no
-        // synchronization edge, so an exact assert here can race a mid-compaction store.
+        // synchronization edge between them, so an exact assert here can observe a
+        // stale-nonzero delta while frozen has already reached 15. Passing it proves the
+        // resumed background thread compacted on its own BEFORE we quiesce it below.
+        // Note `>= 15` is effectively `== 15` here: exactly 15 distinct edges are inserted,
+        // so frozen can never exceed 15 -- the loose bound cannot pass while under-compacted.
         assert!(
             index.frozen_edge_count() >= 15,
             "Compaction should have frozen all edges after resume within {} attempts",
@@ -1061,9 +1065,10 @@ mod phase5_background_compaction {
         // Loose lower-bound while the background thread may still be mid-compaction:
         // frozen_edge_count and delta_edge_count are independent Relaxed atomics with no
         // synchronization edge between them, so an exact assert here can observe a
-        // stale-nonzero delta while frozen has already reached 12. Mirror the safe
-        // sibling pattern (test_background_compaction_triggers_automatically) and only
-        // require the lower bound until the thread is quiesced below.
+        // stale-nonzero delta while frozen has already reached 12. Passing it proves the
+        // recovered background thread compacted on its own BEFORE we quiesce it below.
+        // Note `>= 12` is effectively `== 12` here: exactly 12 distinct edges are inserted,
+        // so frozen can never exceed 12 -- the loose bound cannot pass while under-compacted.
         assert!(
             index.frozen_edge_count() >= 12,
             "Background compaction should have recovered and frozen all edges after {} attempts",
