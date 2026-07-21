@@ -506,7 +506,7 @@ async fn mcp_tools_list_advertises_three_node_tools_with_read_class() {
 /// ship class-ungated.
 ///
 /// The reverse inclusion (registry ⊆ routable) is deliberately NOT asserted
-/// (coordinator-directed): the registry is inventory-anchored to all 51 tools
+/// (coordinator-directed): the registry is inventory-anchored to all 74 tools
 /// upfront (`registry_matches_inventory_exactly` in `tests/security_rbac.rs`
 /// pins it to `tests/parity/inventory.json`), while handlers become routable one
 /// slice at a time during the autumn port. The registry legitimately contains

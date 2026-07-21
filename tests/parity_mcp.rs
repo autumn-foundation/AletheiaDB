@@ -354,7 +354,7 @@ fn representative_tool_roundtrip_is_wellformed() {
 }
 
 // ===========================================================================
-// Golden tool inventory — the 64-tool advertised set + access classes.
+// Golden tool inventory — the 74-tool advertised set + access classes.
 //
 // This is the one place the FULL registry is pinned from an external test:
 // because the advertised list (`tool_definitions`) is not reachable through the
@@ -447,7 +447,7 @@ const TOOL_INVENTORY: [(&str, &str); 74] = [
 ];
 
 /// PARITY (external mirror, NOT a live drift detector): this constant is a
-/// cross-crate reference copy of the 64-tool inventory. Because the live
+/// cross-crate reference copy of the 74-tool inventory. Because the live
 /// registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)`
 /// and unreachable from this external test crate, this test only validates the
 /// mirror's internal consistency (74 tools, unique names, MCP-legal classes,

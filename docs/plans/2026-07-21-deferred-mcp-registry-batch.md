@@ -80,6 +80,36 @@ Cross-cutting:
 - `benches/mcp_round_trip.rs` one scenario per new tool.
 - `CLAUDE.md` tool tables.
 
+## Deferred to a dedicated follow-up (NOT in this PR)
+
+**Trust computed-confidence predicate params (#3748 AC7).** PR #3748 names "the
+registry batch" as the home for its AC7 `ComputedConfidenceFilter` predicate
+params and a `computed_confidence` read field. After review this was
+**deliberately deferred** to its own follow-up PR: faithfully mirroring the
+#3348 provenance-filter machinery for computed confidence requires a
+filterable-tools registry + schema-param injection + **per-result trust
+computation at the dispatch seam** (calling the semantic-reasoning-gated
+`computed_confidence` for every returned entity to filter/annotate) + adding a
+`computed_confidence` field to the read-response serialization of many
+filterable read tools. That is a cross-cutting query/filter + read-path change,
+not registry-registration work, and folding it in would balloon this batch and
+collide with the read-path lanes. The two trust **tools**
+(`trust_breakdown` / `list_trust_policies`) ARE fully registered here; only the
+AC7 filter machinery + `computed_confidence` field are deferred. Memory key:
+`aletheiadb-pr3775-trust-ac7-deferred`.
+
+## Budget enrollment (Group 5, expanded)
+
+`get_belief_revisions` plus the five new reader tools with a budgetable sibling
+— `list_drift_monitors`, `query_drift_alarms`, `contradiction_genealogy`,
+`find_contradictions`, `trust_breakdown` — are enrolled in
+`BUDGETABLE_READ_TOOLS` (21 → 26). `counterfactual_replay` is **excluded** (its
+AC8 `counterfactual: true` marker must never be stripped by budget-ladder
+truncation) and `list_trust_policies` is excluded (small/bounded, like
+`list_vector_indexes`). The two scan-heavy contradiction tools
+(`contradiction_genealogy`, `find_contradictions`) are additionally enrolled in
+`RESOURCE_LIMITED_READ_TOOLS` for wall-clock-timeout + byte-cap coverage.
+
 ## Acceptance criteria
 
 - Catalog advertises exactly 74 tools under all feature combinations.

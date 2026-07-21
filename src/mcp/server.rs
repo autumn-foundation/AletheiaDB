@@ -8746,18 +8746,25 @@ impl AletheiaMcpServer {
             CounterfactualConfig, CounterfactualError, ExclusionPredicate,
         };
 
-        let req: CounterfactualReplayRequest = match serde_json::from_value(args) {
+        let CounterfactualReplayRequest {
+            name,
+            exclude_source,
+            exclude_sources,
+            within_transaction_from,
+            within_transaction_to,
+            max_replay_versions,
+        } = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
-        let mut predicate = match (&req.exclude_source, &req.exclude_sources) {
-            (Some(s), None) => ExclusionPredicate::source(s.clone()),
+        let mut predicate = match (exclude_source, exclude_sources) {
+            (Some(s), None) => ExclusionPredicate::source(s),
             (None, Some(list)) => {
                 if list.is_empty() {
                     return self.invalid_argument("exclude_sources must be a non-empty array");
                 }
-                ExclusionPredicate::sources(list.clone())
+                ExclusionPredicate::sources(list)
             }
             (None, None) => {
                 return self.invalid_argument(
@@ -8771,14 +8778,12 @@ impl AletheiaMcpServer {
             }
         };
 
-        let from = match self
-            .parse_opt_timestamp("within_transaction_from", &req.within_transaction_from)
-        {
-            Ok(v) => v,
-            Err(r) => return r,
-        };
-        let to = match self.parse_opt_timestamp("within_transaction_to", &req.within_transaction_to)
-        {
+        let from =
+            match self.parse_opt_timestamp("within_transaction_from", &within_transaction_from) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+        let to = match self.parse_opt_timestamp("within_transaction_to", &within_transaction_to) {
             Ok(v) => v,
             Err(r) => return r,
         };
@@ -8787,11 +8792,11 @@ impl AletheiaMcpServer {
         }
 
         let mut config = CounterfactualConfig::default();
-        if let Some(cap) = req.max_replay_versions {
+        if let Some(cap) = max_replay_versions {
             config.max_replay_versions = cap;
         }
 
-        match self.db.counterfactual_replay(req.name, predicate, config) {
+        match self.db.counterfactual_replay(name, predicate, config) {
             Ok(view) => self.success_json(self.counterfactual_report_to_json(view.report())),
             Err(CounterfactualError::HistoryTooLarge { versions, cap }) => self.error_result(
                 McpError::new(
@@ -11028,6 +11033,16 @@ pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
     // Belief-revision audit (Issue #3362) — array-returning read, enrolled in
     // the token budget for parity with its `get_node_history` sibling (#3353).
     "get_belief_revisions",
+    // Deferred MCP-registry batch reads (Issue #3367 / #3352 / #3382) — each has
+    // a budgetable sibling and can return large arrays/trees, so budgetable.
+    // `counterfactual_replay` is deliberately EXCLUDED (its AC8 `counterfactual:
+    // true` marker must never be stripped by budget-ladder truncation), and
+    // `list_trust_policies` is small/bounded (like `list_vector_indexes`).
+    "list_drift_monitors",
+    "query_drift_alarms",
+    "contradiction_genealogy",
+    "find_contradictions",
+    "trust_breakdown",
     // Semantic-search analysis tools (Issue #2907) — all read-only and
     // potentially large, so budgetable.
     "semantic_path",
@@ -11066,6 +11081,12 @@ pub(crate) const RESOURCE_LIMITED_READ_TOOLS: &[&str] = &[
     "get_node_at_time",
     "get_edge_at_time",
     "find_nodes_at_time",
+    // Contradiction analysis (Issue #3352): `find_contradictions` runs an
+    // O(entities * versions^2) scan and `contradiction_genealogy` an
+    // O(versions^2) reconstruction — both potentially slow, so they enroll for
+    // the uniform wall-clock-timeout + result-byte-cap coverage (Issue #3368).
+    "contradiction_genealogy",
+    "find_contradictions",
     // Semantic-search analysis tools (Issue #2907): read-only, potentially slow
     // graph+vector scans. They carry their own per-operation bounds, but enroll
     // here for the uniform wall-clock-timeout + result-byte-cap coverage every

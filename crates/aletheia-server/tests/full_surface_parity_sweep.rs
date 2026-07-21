@@ -457,14 +457,14 @@ async fn budgetable_and_cursorable_sets_match_inventory() {
         .collect();
     assert_eq!(
         inv_budgetable.len(),
-        21,
-        "inventory must mark exactly 21 budgetable read tools"
+        26,
+        "inventory must mark exactly 26 budgetable read tools"
     );
     // Cross-check against the totals block too.
     assert_eq!(
         doc["totals"]["mcp_budgetable_read_tools"].as_u64(),
-        Some(21),
-        "totals.mcp_budgetable_read_tools must be 21"
+        Some(26),
+        "totals.mcp_budgetable_read_tools must be 26"
     );
 
     // The crate's DISPATCH_ROUTED_READ_TOOLS is precisely the budgetable set:
