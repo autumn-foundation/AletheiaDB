@@ -61,6 +61,7 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(io::Error),
     /// Backup or restore errors.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Backup error: {0}")]
     Backup(crate::storage::backup::BackupError),
     /// Feature not yet implemented.
@@ -178,6 +179,7 @@ impl From<io::Error> for Error {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<crate::storage::backup::BackupError> for Error {
     fn from(e: crate::storage::backup::BackupError) -> Self {
         Error::Backup(e)
@@ -327,6 +329,7 @@ impl std::fmt::Display for PersistenceErrorKind {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<&crate::storage::index_persistence::IndexPersistenceError> for PersistenceErrorKind {
     fn from(e: &crate::storage::index_persistence::IndexPersistenceError) -> Self {
         match e {
@@ -579,6 +582,7 @@ impl StorageError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<crate::storage::index_persistence::IndexPersistenceError> for StorageError {
     fn from(e: crate::storage::index_persistence::IndexPersistenceError) -> Self {
         let kind = PersistenceErrorKind::from(&e);

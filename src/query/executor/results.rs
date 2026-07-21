@@ -684,6 +684,10 @@ impl Default for QueryResult {
     }
 }
 
+// Native renders a rich terminal table via `comfy_table`, which is not
+// available on wasm32. The wasm build below produces an equivalent plain-text
+// rendering (same columns, no ANSI styling / box drawing).
+#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for QueryResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.nodes.is_empty() {
@@ -785,6 +789,88 @@ impl std::fmt::Display for QueryResult {
         }
 
         write!(f, "{}", table)
+    }
+}
+
+/// wasm fallback: plain-text rendering (no `comfy_table`).
+#[cfg(target_arch = "wasm32")]
+impl std::fmt::Display for QueryResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.nodes.is_empty() {
+            return write!(f, "QueryResult {{ 0 items }}");
+        }
+
+        // Header
+        let mut headers = vec!["Node ID"];
+        if self.scores.is_some() {
+            headers.push("Score");
+        }
+        if self.properties.is_some() {
+            headers.push("Properties");
+        }
+        if self.paths.is_some() {
+            headers.push("Path");
+        }
+        if self.versions.is_some() {
+            headers.push("Version");
+        }
+        writeln!(f, "{}", headers.join(" | "))?;
+
+        // Data rows
+        for (i, node_id) in self.nodes.iter().enumerate() {
+            let mut cells: Vec<String> = vec![format!("{}", node_id)];
+
+            if let Some(scores) = &self.scores {
+                match scores.get(i) {
+                    Some(score) => cells.push(format!("{:.4}", score)),
+                    None => cells.push("-".to_string()),
+                }
+            }
+
+            if let Some(props) = &self.properties {
+                if let Some(map) = props.get(i) {
+                    let mut parts: Vec<String> = map
+                        .iter()
+                        .take(MAX_DISPLAY_PROPERTIES)
+                        .map(|(k, v)| {
+                            let k_str = crate::core::interning::GLOBAL_INTERNER
+                                .resolve_with(*k, |s| s.to_string())
+                                .unwrap_or_else(|| format!("key:{}", k.as_u32()));
+                            format!("{}: {}", k_str, v)
+                        })
+                        .collect();
+                    if map.len() > MAX_DISPLAY_PROPERTIES {
+                        parts.push(format!("... (+{})", map.len() - MAX_DISPLAY_PROPERTIES));
+                    }
+                    let content = if parts.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        format!("{{ {} }}", parts.join(", "))
+                    };
+                    cells.push(content);
+                } else {
+                    cells.push("{}".to_string());
+                }
+            }
+
+            if let Some(paths) = &self.paths {
+                match paths.get(i) {
+                    Some(path) => cells.push(format!("len: {}", path.len())),
+                    None => cells.push("-".to_string()),
+                }
+            }
+
+            if let Some(versions) = &self.versions {
+                match versions.get(i) {
+                    Some(ver) => cells.push(format!("{:?}", ver)),
+                    None => cells.push("-".to_string()),
+                }
+            }
+
+            writeln!(f, "{}", cells.join(" | "))?;
+        }
+
+        Ok(())
     }
 }
 

@@ -3,3 +3,10 @@
 # Keep the whole MSVC build on one CRT so all-features doctests can link the
 # optional embedding stack without destabilizing native usearch tests.
 rustflags = ["-Ctarget-feature=+crt-static"]
+
+[target.wasm32-unknown-unknown]
+# getrandom 0.3 needs an explicit backend selection for wasm32: the browser
+# JS backend is chosen via this cfg (paired with the `wasm_js` feature in
+# Cargo.toml). Applies ONLY to the wasm32 target, so native builds are
+# unaffected.
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]

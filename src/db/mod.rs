@@ -20,6 +20,10 @@ use std::time::Instant;
 /// Administrative and maintenance operations.
 pub mod admin;
 /// Backup and restore operations.
+///
+/// Depends on the `backup` storage module (zstd/comfy-table) which is absent on
+/// wasm32; the ephemeral wasm profile has no on-disk backup/restore.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod backup;
 /// Provenance hash chain integration: capture, rebuild, and verification API
 /// (Issue #3351).
@@ -60,6 +64,10 @@ pub mod namespace_query;
 /// Basic graph operations (CRUD).
 pub mod ops;
 /// Point-in-time restore (PITR) to a transaction-time coordinate (Issue #3374).
+///
+/// Durability feature (WAL replay + backup restore) absent on the wasm32
+/// ephemeral profile.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod pitr;
 /// Secondary property (equality) index: opt-in, node-only, current-state.
 pub mod property_index;
@@ -96,6 +104,7 @@ pub mod vector_builder;
 #[cfg(feature = "durable-execution")]
 pub mod workflow;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
 #[cfg(feature = "audit-export")]
@@ -112,6 +121,7 @@ pub use lineage::{FactStatus, LineageView, LineageViewEntry};
 pub use namespace::NamespaceInfo;
 pub use namespace_query::NamespaceCount;
 pub use ops::NodesAtTime;
+#[cfg(not(target_arch = "wasm32"))]
 pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use property_index::PropertyIndexBuilder;
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};

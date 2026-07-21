@@ -255,6 +255,10 @@ pub struct HistoricalStorage {
     ///
     /// When configured, versions not found in hot storage will be looked up
     /// from cold storage via the tiered storage layer.
+    ///
+    /// The cold/tiered subsystem (redb-backed) is unavailable on `wasm32`, so
+    /// this field is elided there — the wasm profile is hot-only.
+    #[cfg(not(target_arch = "wasm32"))]
     tiered_storage: Option<Arc<super::tiered_storage::TieredStorage>>,
     /// Temporal indexes for O(log n) version lookups (Issue #209).
     ///
@@ -390,6 +394,7 @@ impl HistoricalStorage {
             hook_metrics: HookMetrics::default(),
             node_snapshot_policies: SnapshotPolicyRegistry::default(),
             edge_snapshot_policies: SnapshotPolicyRegistry::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             tiered_storage: None,
             temporal_indexes: None,
             temporal_adjacency_index: None,
@@ -2248,6 +2253,7 @@ impl HistoricalStorage {
     ///
     /// Lets a caller release the historical lock and then scan the cold tier (disk I/O) without
     /// holding the lock across that I/O.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn tiered_storage_arc(&self) -> Option<Arc<super::tiered_storage::TieredStorage>> {
         self.tiered_storage.clone()
     }
@@ -2277,18 +2283,30 @@ impl HistoricalStorage {
     /// let tiered = TieredStorage::with_default_config(Box::new(cold));
     /// historical.set_tiered_storage(Arc::new(tiered));
     /// ```
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_tiered_storage(&mut self, tiered: Arc<super::tiered_storage::TieredStorage>) {
         self.tiered_storage = Some(tiered);
     }
 
     /// Get the tiered storage instance, if configured.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn tiered_storage(&self) -> Option<&super::tiered_storage::TieredStorage> {
         self.tiered_storage.as_deref()
     }
 
     /// Check if tiered storage is enabled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn has_tiered_storage(&self) -> bool {
         self.tiered_storage.is_some()
+    }
+
+    /// Check if tiered storage is enabled.
+    ///
+    /// The cold/tiered subsystem is unavailable on `wasm32`, so this is always
+    /// `false` there (the wasm profile is hot-only).
+    #[cfg(target_arch = "wasm32")]
+    pub fn has_tiered_storage(&self) -> bool {
+        false
     }
 
     /// Set the temporal indexes for optimized version lookups (Issue #209).
@@ -2403,6 +2421,7 @@ impl HistoricalStorage {
     ) -> Result<Option<Arc<NodeVersion>>> {
         // Check hot storage first
         if let Some(version) = self.node_versions.get(&version_id) {
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(ref tiered) = self.tiered_storage {
                 tiered.record_hot_hit();
             }
@@ -2410,6 +2429,7 @@ impl HistoricalStorage {
         }
 
         // Fall back to cold storage if tiered storage is configured
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref tiered) = self.tiered_storage {
             return tiered.get_node_version_cold(version_id);
         }
@@ -2427,6 +2447,7 @@ impl HistoricalStorage {
     ) -> Result<Option<Arc<EdgeVersion>>> {
         // Check hot storage first
         if let Some(version) = self.edge_versions.get(&version_id) {
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(ref tiered) = self.tiered_storage {
                 tiered.record_hot_hit();
             }
@@ -2434,6 +2455,7 @@ impl HistoricalStorage {
         }
 
         // Fall back to cold storage if tiered storage is configured
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref tiered) = self.tiered_storage {
             return tiered.get_edge_version_cold(version_id);
         }
@@ -2454,6 +2476,7 @@ impl HistoricalStorage {
     /// # Returns
     ///
     /// Returns the number of versions migrated, or an error if migration fails.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn migrate_to_cold(
         &mut self,
         migration_service: &super::migration::MigrationService,
