@@ -2230,27 +2230,35 @@ pub struct ContextAspectsRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CreateDriftMonitorRequest {
     /// The vector property key to watch (e.g. `"embedding"`).
-    #[schemars(description = "The vector property key to watch (e.g. 'embedding'). A vector \
-                             index must be enabled for this property.")]
+    #[schemars(
+        description = "The vector property key to watch (e.g. 'embedding'). A vector \
+                             index must be enabled for this property."
+    )]
     pub property_key: String,
 
     /// Optional node-label restriction. Required when `target` is
     /// `label_centroid`.
     #[serde(default)]
-    #[schemars(description = "Optional node-label restriction. Required when target is \
-                             'label_centroid'.")]
+    #[schemars(
+        description = "Optional node-label restriction. Required when target is \
+                             'label_centroid'."
+    )]
     pub label: Option<String>,
 
     /// Optional explicit set of node ids to watch.
     #[serde(default)]
-    #[schemars(description = "Optional explicit set of node ids to watch. An empty array is \
-                             an INVALID_ARGUMENT.")]
+    #[schemars(
+        description = "Optional explicit set of node ids to watch. An empty array is \
+                             an INVALID_ARGUMENT."
+    )]
     pub entities: Option<Vec<u64>>,
 
     /// Distance metric: `cosine`, `euclidean`, or `angular`. Must match the
     /// property's vector-index metric.
-    #[schemars(description = "Distance metric: 'cosine', 'euclidean', or 'angular'. Must be \
-                             consistent with the property's vector-index metric.")]
+    #[schemars(
+        description = "Distance metric: 'cosine', 'euclidean', or 'angular'. Must be \
+                             consistent with the property's vector-index metric."
+    )]
     pub metric: String,
 
     /// Firing threshold (strict `>`); must be positive and finite.
@@ -2259,28 +2267,36 @@ pub struct CreateDriftMonitorRequest {
 
     /// Comparison window in microseconds: current embedding vs the embedding as
     /// of `now - window`.
-    #[schemars(description = "Comparison window in microseconds: the current embedding is \
+    #[schemars(
+        description = "Comparison window in microseconds: the current embedding is \
                              compared against the embedding as of (now - window). Must be \
-                             non-zero.")]
+                             non-zero."
+    )]
     pub window_micros: u64,
 
     /// Firing target: `per_entity` or `label_centroid`.
     #[serde(default = "default_drift_target")]
-    #[schemars(description = "Firing target: 'per_entity' (default) fires per drifted entity; \
+    #[schemars(
+        description = "Firing target: 'per_entity' (default) fires per drifted entity; \
                              'label_centroid' fires once for the label's population centroid \
-                             (requires label).")]
+                             (requires label)."
+    )]
     pub target: String,
 
     /// Evaluation mode: `on_write` or `scheduled`.
     #[serde(default = "default_drift_mode")]
-    #[schemars(description = "Evaluation mode: 'on_write' (default, reactive) or 'scheduled' \
-                             (fixed cadence; provide scheduled_interval_micros).")]
+    #[schemars(
+        description = "Evaluation mode: 'on_write' (default, reactive) or 'scheduled' \
+                             (fixed cadence; provide scheduled_interval_micros)."
+    )]
     pub mode: String,
 
     /// Evaluation interval in microseconds when `mode` is `scheduled`.
     #[serde(default)]
-    #[schemars(description = "Evaluation interval in microseconds; required when mode is \
-                             'scheduled', ignored otherwise.")]
+    #[schemars(
+        description = "Evaluation interval in microseconds; required when mode is \
+                             'scheduled', ignored otherwise."
+    )]
     pub scheduled_interval_micros: Option<u64>,
 }
 
@@ -2299,8 +2315,10 @@ pub struct ListDriftMonitorsRequest {}
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct DeleteDriftMonitorRequest {
     /// The id of the monitor to delete.
-    #[schemars(description = "The id of the drift monitor to delete (from create/list). \
-                             An unknown id is a NOT_FOUND.")]
+    #[schemars(
+        description = "The id of the drift monitor to delete (from create/list). \
+                             An unknown id is a NOT_FOUND."
+    )]
     pub id: u64,
 }
 
@@ -2324,15 +2342,19 @@ pub struct QueryDriftAlarmsRequest {
 
     /// Inclusive lower bound (transaction time) on fire time.
     #[serde(default)]
-    #[schemars(description = "Optional inclusive lower bound (ISO 8601 / RFC 3339 or integer \
+    #[schemars(
+        description = "Optional inclusive lower bound (ISO 8601 / RFC 3339 or integer \
                              microseconds since epoch) on the alarm fire (transaction) time. \
-                             Both time-range bounds must be supplied together.")]
+                             Both time-range bounds must be supplied together."
+    )]
     pub time_range_start: Option<String>,
 
     /// Exclusive upper bound (transaction time) on fire time.
     #[serde(default)]
-    #[schemars(description = "Optional exclusive upper bound (ISO 8601 / RFC 3339 or integer \
-                             microseconds since epoch) on the alarm fire (transaction) time.")]
+    #[schemars(
+        description = "Optional exclusive upper bound (ISO 8601 / RFC 3339 or integer \
+                             microseconds since epoch) on the alarm fire (transaction) time."
+    )]
     pub time_range_end: Option<String>,
 
     /// Maximum alarms to return (clamped to 1000).
@@ -2345,8 +2367,10 @@ pub struct QueryDriftAlarmsRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ResolveDriftAlarmRequest {
     /// The graph node id of the alarm to resolve.
-    #[schemars(description = "The node id of the drift alarm to resolve (a recorded, AS OF-stable \
-                             update; the alarm is never deleted).")]
+    #[schemars(
+        description = "The node id of the drift alarm to resolve (a recorded, AS OF-stable \
+                             update; the alarm is never deleted)."
+    )]
     pub alarm_id: u64,
 }
 
@@ -2375,8 +2399,10 @@ pub struct ClaimRefRequest {
 pub struct ContradictionGenealogyRequest {
     /// The entity kind when targeting one entity's property: 'node' or 'edge'.
     #[serde(default)]
-    #[schemars(description = "Entity kind ('node' or 'edge') when targeting a single entity's \
-                             property. Provide with id and property, or use claims instead.")]
+    #[schemars(
+        description = "Entity kind ('node' or 'edge') when targeting a single entity's \
+                             property. Provide with id and property, or use claims instead."
+    )]
     pub entity_kind: Option<String>,
 
     /// The entity id when targeting one entity's property.
@@ -2392,27 +2418,35 @@ pub struct ContradictionGenealogyRequest {
     /// An explicit competing-claim set (may span entities); alternative to
     /// `entity_kind`/`id`/`property`.
     #[serde(default)]
-    #[schemars(description = "Explicit competing-claim set (may span entities). Alternative to \
-                             entity_kind/id/property; an empty array is an INVALID_ARGUMENT.")]
+    #[schemars(
+        description = "Explicit competing-claim set (may span entities). Alternative to \
+                             entity_kind/id/property; an empty array is an INVALID_ARGUMENT."
+    )]
     pub claims: Option<Vec<ClaimRefRequest>>,
 
     /// Time-travel: only claims recorded at or before this transaction time.
     #[serde(default)]
-    #[schemars(description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or \
+    #[schemars(
+        description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or \
                              integer microseconds since epoch): only claims recorded at or before \
-                             it are considered.")]
+                             it are considered."
+    )]
     pub as_of_transaction_time: Option<String>,
 
     /// Bound the number of competing claims returned.
     #[serde(default)]
-    #[schemars(description = "Optional cap on the number of competing claims returned (sets \
-                             truncated).")]
+    #[schemars(
+        description = "Optional cap on the number of competing claims returned (sets \
+                             truncated)."
+    )]
     pub max_claims: Option<usize>,
 
     /// Bound the number of source summaries returned.
     #[serde(default)]
-    #[schemars(description = "Optional cap on the number of per-source summaries returned (sets \
-                             truncated).")]
+    #[schemars(
+        description = "Optional cap on the number of per-source summaries returned (sets \
+                             truncated)."
+    )]
     pub max_sources: Option<usize>,
 }
 
@@ -2431,14 +2465,18 @@ pub struct FindContradictionsRequest {
 
     /// Optional single property to analyze.
     #[serde(default)]
-    #[schemars(description = "Optional single property to analyze (otherwise every property that \
-                             ever appeared is analyzed).")]
+    #[schemars(
+        description = "Optional single property to analyze (otherwise every property that \
+                             ever appeared is analyzed)."
+    )]
     pub property: Option<String>,
 
     /// Keep only contradictions whose divergence valid-time is in this window.
     #[serde(default)]
-    #[schemars(description = "Optional valid-time window lower bound (ISO 8601 / RFC 3339 or \
-                             microseconds); both window bounds must be supplied together.")]
+    #[schemars(
+        description = "Optional valid-time window lower bound (ISO 8601 / RFC 3339 or \
+                             microseconds); both window bounds must be supplied together."
+    )]
     pub valid_time_start: Option<String>,
     /// Valid-time window upper bound.
     #[serde(default)]
@@ -2448,7 +2486,9 @@ pub struct FindContradictionsRequest {
     /// Keep only contradictions whose divergence transaction-time is in this
     /// window.
     #[serde(default)]
-    #[schemars(description = "Optional transaction-time window lower bound; both bounds together.")]
+    #[schemars(
+        description = "Optional transaction-time window lower bound; both bounds together."
+    )]
     pub transaction_time_start: Option<String>,
     /// Transaction-time window upper bound.
     #[serde(default)]
@@ -2485,32 +2525,42 @@ pub struct CounterfactualReplayRequest {
 
     /// Exclude all writes attributed to this single source.
     #[serde(default)]
-    #[schemars(description = "Exclude all writes attributed to this single source. Provide \
-                             exactly one of exclude_source or exclude_sources.")]
+    #[schemars(
+        description = "Exclude all writes attributed to this single source. Provide \
+                             exactly one of exclude_source or exclude_sources."
+    )]
     pub exclude_source: Option<String>,
 
     /// Exclude all writes attributed to any source in this set (any-of).
     #[serde(default)]
-    #[schemars(description = "Exclude all writes attributed to any source in this set (any-of). \
-                             Provide exactly one of exclude_source or exclude_sources.")]
+    #[schemars(
+        description = "Exclude all writes attributed to any source in this set (any-of). \
+                             Provide exactly one of exclude_source or exclude_sources."
+    )]
     pub exclude_sources: Option<Vec<String>>,
 
     /// Bound exclusion to writes recorded at or after this transaction time.
     #[serde(default)]
-    #[schemars(description = "Optional inclusive lower bound (ISO 8601 / RFC 3339 or microseconds) \
-                             on a write's transaction time for it to be excluded.")]
+    #[schemars(
+        description = "Optional inclusive lower bound (ISO 8601 / RFC 3339 or microseconds) \
+                             on a write's transaction time for it to be excluded."
+    )]
     pub within_transaction_from: Option<String>,
 
     /// Bound exclusion to writes recorded before this transaction time.
     #[serde(default)]
-    #[schemars(description = "Optional exclusive upper bound (ISO 8601 / RFC 3339 or microseconds) \
-                             on a write's transaction time for it to be excluded.")]
+    #[schemars(
+        description = "Optional exclusive upper bound (ISO 8601 / RFC 3339 or microseconds) \
+                             on a write's transaction time for it to be excluded."
+    )]
     pub within_transaction_to: Option<String>,
 
     /// Maximum recorded versions to materialize before failing fast.
     #[serde(default)]
-    #[schemars(description = "Optional cap on recorded versions to materialize; exceeding it is a \
-                             FAILED_PRECONDITION (history too large).")]
+    #[schemars(
+        description = "Optional cap on recorded versions to materialize; exceeding it is a \
+                             FAILED_PRECONDITION (history too large)."
+    )]
     pub max_replay_versions: Option<usize>,
 }
 
@@ -2530,26 +2580,34 @@ pub struct TrustBreakdownRequest {
     pub id: u64,
 
     /// The root fact's version id (trust is version-pinned).
-    #[schemars(description = "The root fact's version id. Trust is version-pinned; use the \
-                             version whose computed-confidence breakdown you want.")]
+    #[schemars(
+        description = "The root fact's version id. Trust is version-pinned; use the \
+                             version whose computed-confidence breakdown you want."
+    )]
     pub version: u64,
 
     /// Maximum transitive depth to expand before truncating.
     #[serde(default)]
-    #[schemars(description = "Maximum transitive depth to expand before marking a subtree \
-                             truncated (defaults to the store's depth cap).")]
+    #[schemars(
+        description = "Maximum transitive depth to expand before marking a subtree \
+                             truncated (defaults to the store's depth cap)."
+    )]
     pub max_depth: Option<usize>,
 
     /// Maximum descendant nodes to serialize before truncating.
     #[serde(default)]
-    #[schemars(description = "Maximum descendant breakdown nodes to serialize (the root is always \
-                             emitted and does not count); defaults to the store's node cap.")]
+    #[schemars(
+        description = "Maximum descendant breakdown nodes to serialize (the root is always \
+                             emitted and does not count); defaults to the store's node cap."
+    )]
     pub limit: Option<usize>,
 
     /// Optional AS OF transaction-time coordinate.
     #[serde(default)]
-    #[schemars(description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or \
-                             microseconds): evaluate lineage and confidences as recorded by then.")]
+    #[schemars(
+        description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or \
+                             microseconds): evaluate lineage and confidences as recorded by then."
+    )]
     pub as_of_transaction_time: Option<String>,
 }
 

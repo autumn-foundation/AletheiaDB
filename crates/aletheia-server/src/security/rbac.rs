@@ -31,7 +31,7 @@
 //!
 //! This registry is anchored on `tests/parity/inventory.json` — the inventory's
 //! `mcp.tools[].access_class` is the shared source of truth. It enumerates all
-//! 64 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
+//! 74 tools upfront (coordinator-directed): `registry_matches_inventory_exactly`
 //! checks it bidirectionally against the inventory, and
 //! `mcp_routable_tools_are_all_classified` checks the live routable set is a
 //! subset (every routable tool classified). Handlers become routable one slice
@@ -44,7 +44,7 @@ use aletheiadb::auth::{AccessClass, Role};
 /// tests derive from THIS list, so the routable-name set and the class-table
 /// set cannot silently drift into two independently-maintained lists.
 ///
-/// This registry is **inventory-anchored**: it enumerates all 64 tools from
+/// This registry is **inventory-anchored**: it enumerates all 74 tools from
 /// `tests/parity/inventory.json` (`mcp.tools[].access_class`) upfront, mirroring
 /// the legacy `src/mcp/auth.rs::TOOL_ACCESS_CLASSES` verbatim. The conformance
 /// test `registry_matches_inventory_exactly` (`tests/security_rbac.rs`) proves
@@ -95,6 +95,17 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     ("diff_edge_versions", AccessClass::Read),
     // Belief-revision audit (Issue #3362) — read-only.
     ("get_belief_revisions", AccessClass::Read),
+    // Temporal drift-alarm reads (Issue #3367) — read-only.
+    ("list_drift_monitors", AccessClass::Read),
+    ("query_drift_alarms", AccessClass::Read),
+    // Contradiction genealogy (Issue #3352) — read-only.
+    ("contradiction_genealogy", AccessClass::Read),
+    ("find_contradictions", AccessClass::Read),
+    // Counterfactual replay (Issue #3357) — read-only (view; real DB unmutated).
+    ("counterfactual_replay", AccessClass::Read),
+    // Trust propagation reads (Issue #3382) — read-only.
+    ("trust_breakdown", AccessClass::Read),
+    ("list_trust_policies", AccessClass::Read),
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
@@ -127,6 +138,10 @@ pub const MCP_TOOL_CLASSES: &[(&str, AccessClass)] = &[
     ("update_node_embedding", AccessClass::Write),
     // Namespace creation (Issue #3349, PR3b) — a write.
     ("create_namespace", AccessClass::Write),
+    // Temporal drift-alarm writes (Issue #3367).
+    ("create_drift_monitor", AccessClass::Write),
+    ("delete_drift_monitor", AccessClass::Write),
+    ("resolve_drift_alarm", AccessClass::Write),
     // ---- Admin: GDPR crypto-shred designation & irreversible erasure
     // (Issue #3359, Slice 4b) — the first Admin-class MCP tools. Erasure
     // destroys per-subject key material (irreversible), so it is Admin, not

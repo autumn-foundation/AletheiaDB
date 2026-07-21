@@ -14,6 +14,7 @@
 use crate::changefeed_stream;
 use crate::constraints_lineage_audit_tools;
 use crate::crypto_shred_tools;
+use crate::deferred_batch_tools;
 use crate::edge_tools;
 use crate::http_routes;
 use crate::metrics_exposition;
@@ -111,6 +112,16 @@ pub fn try_build_server_testapp(
             traverse_temporal_tools::get_edge_at_transaction_time,
             traverse_temporal_tools::diff_edge_versions,
             traverse_temporal_tools::get_belief_revisions,
+            deferred_batch_tools::create_drift_monitor,
+            deferred_batch_tools::list_drift_monitors,
+            deferred_batch_tools::delete_drift_monitor,
+            deferred_batch_tools::query_drift_alarms,
+            deferred_batch_tools::resolve_drift_alarm,
+            deferred_batch_tools::contradiction_genealogy,
+            deferred_batch_tools::find_contradictions,
+            deferred_batch_tools::counterfactual_replay,
+            deferred_batch_tools::trust_breakdown,
+            deferred_batch_tools::list_trust_policies,
             vector_query_tools::find_similar,
             vector_query_tools::hybrid_query,
             vector_query_tools::query,

@@ -8309,8 +8309,10 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
         let monitors = self.db.list_drift_monitors();
-        let list: Vec<serde_json::Value> =
-            monitors.iter().map(|m| self.drift_monitor_to_json(m)).collect();
+        let list: Vec<serde_json::Value> = monitors
+            .iter()
+            .map(|m| self.drift_monitor_to_json(m))
+            .collect();
         self.success_json(json!({ "monitors": list, "count": monitors.len() }))
     }
 
@@ -8581,7 +8583,8 @@ impl AletheiaMcpServer {
             let id = match req.id {
                 Some(i) => i,
                 None => {
-                    return self.invalid_argument("'id' is required when targeting a single entity");
+                    return self
+                        .invalid_argument("'id' is required when targeting a single entity");
                 }
             };
             let property = match req.property {
@@ -8757,16 +8760,17 @@ impl AletheiaMcpServer {
             }
         };
 
-        let from =
-            match self.parse_opt_timestamp("within_transaction_from", &req.within_transaction_from) {
-                Ok(v) => v,
-                Err(r) => return r,
-            };
-        let to =
-            match self.parse_opt_timestamp("within_transaction_to", &req.within_transaction_to) {
-                Ok(v) => v,
-                Err(r) => return r,
-            };
+        let from = match self
+            .parse_opt_timestamp("within_transaction_from", &req.within_transaction_from)
+        {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let to = match self.parse_opt_timestamp("within_transaction_to", &req.within_transaction_to)
+        {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
         if from.is_some() || to.is_some() {
             predicate = predicate.within_transaction_time(from, to);
         }
@@ -8939,9 +8943,7 @@ impl AletheiaMcpServer {
             MissingConfidencePolicy::Neutral => "neutral",
             MissingConfidencePolicy::Ignore => "ignore",
         };
-        let policy_json = |p: &TrustPolicy| {
-            json!({ "combinator": p.combinator.as_str(), "missing": missing_str(p.missing) })
-        };
+        let policy_json = |p: &TrustPolicy| json!({ "combinator": p.combinator.as_str(), "missing": missing_str(p.missing) });
         let labels: Vec<serde_json::Value> = view
             .labels
             .iter()
@@ -8952,7 +8954,6 @@ impl AletheiaMcpServer {
             "labels": labels,
         }))
     }
-
 
     /// Handle the `audit_export` tool (Issue #3358).
     ///
