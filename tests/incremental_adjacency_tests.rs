@@ -931,12 +931,25 @@ mod phase5_background_compaction {
             attempts += 1;
         }
 
-        // Should now compact
-        assert_eq!(index.delta_edge_count(), 0);
-        assert_eq!(index.frozen_edge_count(), 15);
+        // Loose lower-bound while the background thread may still be mid-compaction:
+        // frozen_edge_count and delta_edge_count are independent Relaxed atomics with no
+        // synchronization edge, so an exact assert here can race a mid-compaction store.
+        assert!(
+            index.frozen_edge_count() >= 15,
+            "Compaction should have frozen all edges after resume within {} attempts",
+            attempts
+        );
 
+        // Join the background thread before the exact-count asserts. shutdown() forces a
+        // final drain and join() synchronizes-with thread termination, establishing the
+        // happens-before edge so delta/frozen are read as a consistent fully-drained
+        // snapshot instead of racing a mid-compaction store.
         scheduler.shutdown();
         handle.join().unwrap();
+
+        // Deterministic exact state, post-join (fully drained).
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 15);
     }
 
     // Step 5.7 GREEN: Test graceful shutdown
@@ -1045,15 +1058,32 @@ mod phase5_background_compaction {
             attempts += 1;
         }
 
-        // Verify normal compaction worked after panic
-        assert_eq!(index.delta_edge_count(), 0);
-        assert_eq!(index.frozen_edge_count(), 12);
+        // Loose lower-bound while the background thread may still be mid-compaction:
+        // frozen_edge_count and delta_edge_count are independent Relaxed atomics with no
+        // synchronization edge between them, so an exact assert here can observe a
+        // stale-nonzero delta while frozen has already reached 12. Mirror the safe
+        // sibling pattern (test_background_compaction_triggers_automatically) and only
+        // require the lower bound until the thread is quiesced below.
+        assert!(
+            index.frozen_edge_count() >= 12,
+            "Background compaction should have recovered and frozen all edges after {} attempts",
+            attempts
+        );
 
-        // Panic count should still be 1 (no new panics)
+        // Panic count is a one-shot injected panic; it is coherent under the spin-poll
+        // above (the recovered thread never re-panics), so it can be checked here.
         assert_eq!(scheduler.panic_count(), 1);
 
+        // Join the background thread before the exact-count asserts. shutdown() forces a
+        // final drain and join() synchronizes-with thread termination, establishing the
+        // happens-before edge so delta/frozen are read as a consistent fully-drained
+        // snapshot instead of racing a mid-compaction store.
         scheduler.shutdown();
         handle.join().unwrap();
+
+        // Deterministic exact state, post-join (fully drained).
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 12);
     }
 
     // Step 5.11: Test shutdown triggers final compaction for remaining items
