@@ -49,6 +49,41 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::core::error::{Error, Result, StorageError};
+
+/// Read a WAL segment file's bytes for parsing.
+///
+/// Native builds memory-map the file (`memmap2`) for efficient reading without
+/// loading it fully into memory. The `wasm32` profile lacks `memmap2`, so it
+/// falls back to reading the whole segment into a `Vec<u8>`. Both return types
+/// deref to `[u8]`, so call sites are identical.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_segment_bytes(file: &File) -> Result<memmap2::Mmap> {
+    // SAFETY: We only read from the memory map, never write. The file is opened
+    // read-only. The mapping is valid for the caller's use and is automatically
+    // unmapped when dropped. Callers verify the file size before mapping to
+    // prevent out-of-bounds reads.
+    unsafe { memmap2::Mmap::map(file) }.map_err(|e| {
+        Error::from(StorageError::IoError(format!(
+            "Failed to memory-map WAL segment: {}",
+            e
+        )))
+    })
+}
+
+/// wasm fallback: read the entire segment into memory (no `memmap2`).
+#[cfg(target_arch = "wasm32")]
+fn read_segment_bytes(file: &File) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut f: &File = file;
+    f.read_to_end(&mut buf).map_err(|e| {
+        Error::from(StorageError::IoError(format!(
+            "Failed to read WAL segment: {}",
+            e
+        )))
+    })?;
+    Ok(buf)
+}
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::property::PropertyMap;
@@ -820,16 +855,9 @@ fn max_lsn_in_segment(
         return Ok(None);
     }
 
-    // Memory-map the file for efficient reading without loading it into memory.
-    // SAFETY: We only read from the memory map, never write. The file is opened
-    // read-only. The mapping is valid for the lifetime of this function and is
-    // automatically unmapped when dropped. We have verified the file size above
-    // to prevent out-of-bounds reads.
-    let mmap = unsafe {
-        memmap2::Mmap::map(&file).map_err(|e| {
-            StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
-        })?
-    };
+    // Read the segment bytes (mmap on native, in-memory read on wasm). We have
+    // verified the file size above to prevent excessive allocation / OOB reads.
+    let mmap = read_segment_bytes(&file)?;
     let buffer = &mmap[..];
 
     // Header validation: a segment that is undecodable from byte 0 (garbage
@@ -1145,17 +1173,11 @@ fn read_segment_with_cipher_tolerant_flagged(
         return Ok((Vec::new(), false));
     }
 
-    // Memory-map the file for efficient reading without loading entire file into memory.
-    // SAFETY: We only read from the memory map, never write. The file is opened read-only.
-    // The mapping is valid for the lifetime of this function and is automatically unmapped
-    // when dropped. We have verified the file size above to prevent out-of-bounds reads.
-    let mmap = unsafe {
-        memmap2::Mmap::map(&file).map_err(|e| {
-            StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
-        })?
-    };
+    // Read the segment bytes (mmap on native, in-memory read on wasm). We have
+    // verified the file size above to prevent excessive allocation / OOB reads.
+    let mmap = read_segment_bytes(&file)?;
 
-    // Use the memory-mapped region as a byte slice
+    // Use the resulting bytes as a slice
     let buffer = &mmap[..];
 
     // ⚡ Bolt Optimization: Pre-allocate vector based on buffer size.
