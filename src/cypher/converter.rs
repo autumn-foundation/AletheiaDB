@@ -562,7 +562,7 @@ impl CypherConverter {
     /// # Errors
     ///
     /// [`CypherError::ParameterError`] for a malformed name or an empty union.
-    fn convert_namespace_clause(
+    pub(crate) fn convert_namespace_clause(
         clause: Option<&CypherNamespaceClause>,
     ) -> Result<Option<crate::core::namespace::NamespaceScope>, CypherError> {
         use crate::core::namespace::{Namespace, NamespaceScope};

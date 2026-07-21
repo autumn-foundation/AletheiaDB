@@ -57,16 +57,20 @@ impl AletheiaDB {
                 }
             })?;
 
-            // Fail-closed guard for the QUIESCED post-`enable_encryption` handle
-            // (Issue #3616 PR3). After `enable_encryption` the live WAL is encrypted
-            // but this handle's index manager still carries a PLAINTEXT keyring
-            // (there is no live `None → Some` index-keyring install — see the loud
-            // reopen contract on `enable_encryption`). Persisting now would write
-            // PLAINTEXT index files OVER the freshly-wrapped `AEIX` snapshot — the
-            // exact corruption the enable engine exists to prevent. Refuse loudly and
-            // direct the caller to reopen; the resume path (which DOES build the
-            // manager under the enable index DEK, so its keyring is `Some`) is
-            // unaffected, as is a normally-encrypted reopen.
+            // Fail-closed guard for the encrypted-WAL-but-plaintext-index window
+            // (Issue #3616 PR3; belt-and-suspenders under the #3708 hot-live driver).
+            // If the live WAL is encrypted but this handle's index manager still
+            // carries a PLAINTEXT keyring, a persist would write PLAINTEXT index files
+            // OVER a freshly-wrapped `AEIX` snapshot — the exact corruption the enable
+            // engine exists to prevent. The #3708 hot-live `enable_encryption` CLOSES
+            // this window in-process: it installs the live index keyring (the
+            // `None → Some` flip) right after the index wrap, so `keyring()` is `Some`
+            // and this guard no longer fires on a completed live enable. The guard is
+            // retained for the narrow window BEFORE that install and for an
+            // interrupted-enable handle whose manager was somehow left plaintext.
+            // Refuse loudly and direct the caller to reopen; the resume path (which
+            // builds the manager under the enable index DEK, so its keyring is `Some`)
+            // is unaffected, as is a normally-encrypted reopen.
             if self.wal.is_encrypted() && manager.keyring().is_none() {
                 return Err(crate::core::error::Error::FailedPrecondition(
                     "cannot persist indexes on a post-enable quiesced handle: the WAL is \

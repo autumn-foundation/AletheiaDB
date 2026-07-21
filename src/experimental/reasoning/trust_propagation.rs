@@ -280,6 +280,13 @@ pub struct TrustOptions {
     /// Optional `AS OF` transaction-time bound: evaluate lineage and
     /// confidences as recorded by this transaction time (AC5). `None` = now.
     pub as_of: Option<Timestamp>,
+    /// Optional valid-time evaluation coordinate (Issue #3382): terminality is
+    /// keyed on this instant rather than wallclock now, so a fact whose valid
+    /// interval has ended at this coordinate is retracted-class and a
+    /// future-dated retraction is not yet terminal. Independent of `as_of`
+    /// (valid time and transaction time are orthogonal axes). `None` = now,
+    /// which reproduces the prior wallclock-now behavior exactly.
+    pub as_of_valid_time: Option<Timestamp>,
 }
 
 impl TrustOptions {
@@ -289,6 +296,7 @@ impl TrustOptions {
             max_depth: DEFAULT_MAX_DEPTH,
             max_nodes: DEFAULT_MAX_NODES,
             as_of: None,
+            as_of_valid_time: None,
         }
     }
 
@@ -310,6 +318,15 @@ impl TrustOptions {
     #[must_use]
     pub fn with_as_of(mut self, as_of: Timestamp) -> Self {
         self.as_of = Some(as_of);
+        self
+    }
+
+    /// Set the valid-time evaluation coordinate (Issue #3382). Independent of
+    /// [`with_as_of`](Self::with_as_of); omitting it keys terminality on
+    /// wallclock now (prior behavior).
+    #[must_use]
+    pub fn with_as_of_valid_time(mut self, as_of_valid_time: Timestamp) -> Self {
+        self.as_of_valid_time = Some(as_of_valid_time);
         self
     }
 }

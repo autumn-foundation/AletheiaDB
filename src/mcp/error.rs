@@ -307,7 +307,8 @@ fn classify_namespace_error(e: &crate::core::namespace::NamespaceError) -> (McpE
     match e {
         NamespaceError::InvalidName { .. }
         | NamespaceError::ReservedPropertyKey { .. }
-        | NamespaceError::Immutable => (McpErrorCode::InvalidArgument, false),
+        | NamespaceError::Immutable
+        | NamespaceError::ScopeConflict => (McpErrorCode::InvalidArgument, false),
         NamespaceError::NotFound { .. } => (McpErrorCode::NotFound, false),
         NamespaceError::AlreadyExists { .. } => (McpErrorCode::Conflict, false),
     }
