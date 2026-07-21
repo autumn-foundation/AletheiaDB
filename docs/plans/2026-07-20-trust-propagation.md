@@ -2,7 +2,7 @@
 
 > **Status: Implemented — shipped on trunk (as of 2026-07-21).** This plan is retained for historical/design context; see the corresponding guide for current behavior.
 
-Status: DRAFT / design locked, implementation pending
+Status: Implemented
 Owner: Mark Masterson
 Issue: [#3382 — Add trust propagation: infer confidence across derived facts](https://github.com/autumn-foundation/AletheiaDB/issues/3382)
 Depends on: #3371 (derivation lineage, landed), #3224 (declared provenance confidence, landed)
