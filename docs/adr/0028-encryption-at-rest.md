@@ -1,4 +1,4 @@
-# ADR-0026: Encryption-at-Rest Architecture
+# ADR-0028: Encryption-at-Rest Architecture
 
 **Status:** Accepted
 **Date:** 2026-01-27
