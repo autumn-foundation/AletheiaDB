@@ -371,10 +371,12 @@ pub fn ingest(
                 .map(|c| Table::field(row, c).to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("Forum{idx}"));
+            // An unknown/absent moderator FK yields `None` so the loader skips
+            // only the HAS_MODERATOR edge (rather than silently attributing it
+            // to person index 0); the Forum node is still ingested.
             let moderator = f_mod
                 .and_then(|c| Table::field(row, c).trim().parse::<i64>().ok())
-                .and_then(|pid| person_map.get(&pid).copied())
-                .unwrap_or(0);
+                .and_then(|pid| person_map.get(&pid).copied());
             forums.push(GenForum {
                 idx,
                 title,
@@ -414,17 +416,20 @@ pub fn ingest(
             let length = po_len
                 .and_then(|c| Table::field(row, c).trim().parse::<i64>().ok())
                 .unwrap_or(0);
+            // An unknown/absent creator FK yields `None` so the loader skips
+            // only the HAS_CREATOR edge instead of silently attributing the
+            // post to person index 0; the Post node is still ingested.
             let creator = po_creator
                 .and_then(|c| Table::field(row, c).trim().parse::<i64>().ok())
-                .and_then(|pid| person_map.get(&pid).copied())
-                .unwrap_or(0);
+                .and_then(|pid| person_map.get(&pid).copied());
             let forum_fk = post_forum_fk
                 .get(&id)
                 .copied()
                 .or_else(|| po_forum.and_then(|c| Table::field(row, c).trim().parse::<i64>().ok()));
-            let forum = forum_fk
-                .and_then(|fid| forum_map.get(&fid).copied())
-                .unwrap_or(0);
+            // Likewise, an unknown container-forum FK yields `None` so the
+            // loader skips only the CONTAINER_OF edge rather than attaching the
+            // post to forum index 0.
+            let forum = forum_fk.and_then(|fid| forum_map.get(&fid).copied());
             let embedding = deterministic_embedding(&mut rng, dim);
             posts.push(GenPost {
                 idx,

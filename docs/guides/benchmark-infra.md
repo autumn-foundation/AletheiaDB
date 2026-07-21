@@ -325,8 +325,10 @@ the drivers record that as a fact, never as a fabricated latency
 - **Neo4j / KuzuDB:** no native bi-temporal reconstruction → the temporal
   extension ops are **not expressible** natively.
 - **XTDB:** bi-temporal (its native axis) but **not** a property graph → the SNB
-  graph reads are a different modeling exercise, and it has **no** native
-  ANN/vector index → the vector ops are **not expressible**.
+  graph reads are a different modeling exercise and are **not measured here**
+  (the driver omits those keys entirely rather than labelling them
+  `not_expressible`); it has **no** native ANN/vector index → the vector ops
+  *are* recorded **not expressible**.
 - **Hybrid graph + vector in one planned query** is AletheiaDB-specific → **not
   expressible** as a single operation on any of the three.
 

@@ -4,10 +4,12 @@
 #
 # NOT executed in the sandbox that produced the committed AletheiaDB results.
 # Run this ON THE SELF-HOSTED BOX, where Docker and the engine images are
-# available. It brings up the selected engine(s) via docker-compose, loads the
-# shared SNB dataset, runs each mapped query with a warmup + N timed iterations,
-# computes p50/p95/p99 (nearest-rank, matching the AletheiaDB harness), and
-# writes results/<engine>_results.json.
+# available. It brings up the selected engine(s) via docker-compose, then runs
+# each mapped query with a warmup + N timed iterations, computes p50/p95/p99
+# (nearest-rank, matching the AletheiaDB harness), and writes
+# results/<engine>_results.json. It does NOT bulk-load the dataset — each driver
+# assumes the shared SNB graph has already been loaded into its engine (see the
+# per-driver README notes) and fails loudly against an empty store.
 #
 # REQUIRED TOOLING (fail loud if missing):
 #   * docker + docker compose v2   (engine containers)

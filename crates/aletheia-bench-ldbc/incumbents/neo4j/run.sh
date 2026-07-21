@@ -39,6 +39,8 @@ ITERATIONS="${ITERATIONS:-200}"
 WARMUP="${WARMUP:-20}"
 NEO4J_SERVICE="${NEO4J_SERVICE:-neo4j}"
 NEO4J_USER="${NEO4J_USER:-neo4j}"
+# Default password for the local, throwaway benchmark container only — never a
+# real credential (override NEO4J_PASSWORD if your box uses a different one).
 NEO4J_PASSWORD="${NEO4J_PASSWORD:-benchbench}"
 
 require_cmd docker

@@ -18,7 +18,7 @@ fn ingests_expected_entity_counts() {
     assert_eq!(g.persons.len(), 3, "3 persons");
     assert_eq!(g.knows.len(), 1, "1 knows edge");
     assert_eq!(g.forums.len(), 1, "1 forum");
-    assert_eq!(g.posts.len(), 2, "2 posts");
+    assert_eq!(g.posts.len(), 3, "3 posts");
     assert_eq!(g.comments.len(), 1, "1 comment");
     assert_eq!(g.tags.len(), 1, "1 tag");
     assert_eq!(g.scale, "datagen", "scale label reflects the source");
@@ -46,13 +46,31 @@ fn knows_edge_connects_the_right_two_persons() {
 fn relationship_fks_are_remapped() {
     let g = datagen::ingest(&fixture_dir(), None, None).expect("ingest should succeed");
     // Post 5000 -> idx 0 (creator person 100 -> idx 0, forum 10 -> idx 0).
-    assert_eq!(g.posts[0].creator, 0);
-    assert_eq!(g.posts[0].forum, 0);
+    assert_eq!(g.posts[0].creator, Some(0));
+    assert_eq!(g.posts[0].forum, Some(0));
     // Post 5001 -> idx 1 (creator person 200 -> idx 1).
-    assert_eq!(g.posts[1].creator, 1);
+    assert_eq!(g.posts[1].creator, Some(1));
     // Comment 9000: creator person 300 -> idx 2, replies to post 5000 -> idx 0.
     assert_eq!(g.comments[0].creator, 2);
     assert_eq!(g.comments[0].reply_to_post, 0);
+}
+
+#[test]
+fn unknown_creator_fk_drops_only_the_creator_edge() {
+    // Post 5002's CreatorPersonId (999) is not present in Person.csv. The Post
+    // node must still be ingested, but with `creator == None` so the loader
+    // emits NO HAS_CREATOR edge (rather than silently attributing it to person
+    // index 0). Its container forum (10) is known, so `forum` still resolves.
+    let g = datagen::ingest(&fixture_dir(), None, None).expect("ingest should succeed");
+    let post = g
+        .posts
+        .get(2)
+        .expect("post 5002 -> idx 2 is still ingested");
+    assert_eq!(
+        post.creator, None,
+        "unknown creator FK is dropped, not defaulted"
+    );
+    assert_eq!(post.forum, Some(0), "known container forum still resolves");
 }
 
 #[test]

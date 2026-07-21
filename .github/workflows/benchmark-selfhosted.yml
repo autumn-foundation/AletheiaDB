@@ -92,14 +92,25 @@ jobs:
       # to the same defaults the workflow_dispatch form advertises.
       - name: Resolve run parameters
         id: params
+        # Raw dispatch inputs are passed through `env:` and read as shell
+        # variables so no untrusted `${{ }}` value is ever interpolated into
+        # the `run:` script body (prevents shell/script injection).
+        env:
+          IN_SCALE: ${{ github.event.inputs.scale }}
+          IN_ITERATIONS: ${{ github.event.inputs.iterations }}
+          IN_WARMUP: ${{ github.event.inputs.warmup }}
+          IN_VECTOR_COUNT: ${{ github.event.inputs.vector_count }}
+          IN_VECTOR_DIM: ${{ github.event.inputs.vector_dim }}
+          IN_DATAGEN_DIR: ${{ github.event.inputs.datagen_dir }}
+          IN_RUN_INCUMBENTS: ${{ github.event.inputs.run_incumbents }}
         run: |
-          echo "scale=${{ github.event.inputs.scale || 'sf0.1' }}" >> "$GITHUB_OUTPUT"
-          echo "iterations=${{ github.event.inputs.iterations || '200' }}" >> "$GITHUB_OUTPUT"
-          echo "warmup=${{ github.event.inputs.warmup || '20' }}" >> "$GITHUB_OUTPUT"
-          echo "vector_count=${{ github.event.inputs.vector_count || '' }}" >> "$GITHUB_OUTPUT"
-          echo "vector_dim=${{ github.event.inputs.vector_dim || '' }}" >> "$GITHUB_OUTPUT"
-          echo "datagen_dir=${{ github.event.inputs.datagen_dir || '' }}" >> "$GITHUB_OUTPUT"
-          echo "run_incumbents=${{ github.event.inputs.run_incumbents || 'false' }}" >> "$GITHUB_OUTPUT"
+          echo "scale=${IN_SCALE:-sf0.1}" >> "$GITHUB_OUTPUT"
+          echo "iterations=${IN_ITERATIONS:-200}" >> "$GITHUB_OUTPUT"
+          echo "warmup=${IN_WARMUP:-20}" >> "$GITHUB_OUTPUT"
+          echo "vector_count=${IN_VECTOR_COUNT:-}" >> "$GITHUB_OUTPUT"
+          echo "vector_dim=${IN_VECTOR_DIM:-}" >> "$GITHUB_OUTPUT"
+          echo "datagen_dir=${IN_DATAGEN_DIR:-}" >> "$GITHUB_OUTPUT"
+          echo "run_incumbents=${IN_RUN_INCUMBENTS:-false}" >> "$GITHUB_OUTPUT"
 
       - name: Run LDBC-style harness
         id: bench
@@ -154,8 +165,14 @@ jobs:
           # documented report schema (config + operations[].stats).
           python3 - "${RESULTS}" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, sys
-          with open(sys.argv[1]) as f:
-              r = json.load(f)
+          try:
+              with open(sys.argv[1]) as f:
+                  r = json.load(f)
+          except (OSError, ValueError) as e:
+              # A missing/empty/corrupt results file must not fail the summary
+              # step; emit a short note instead of raising.
+              print(f"Could not parse results file for summary: {e}")
+              sys.exit(0)
           cfg = r.get("config", {})
           hw = r.get("hardware", {})
           print(f"## LDBC-style results — {cfg.get('scale','?')} "

@@ -13,8 +13,10 @@
 # It SYNTHESIZES NO NUMBERS: every latency is a real timed HTTP query against
 # loaded data. A stopped container, missing tooling, or an empty store is a HARD
 # ERROR. The SNB property-graph reads (a different modeling exercise, README
-# footnote 2) and the vector k-NN / hybrid (XTDB has no native ANN, footnotes 4
-# & 5) are recorded as {not_expressible:true} capability facts, never timed.
+# footnote 2) are simply NOT MEASURED HERE — their keys are omitted entirely
+# (an absent key == "not measured here"). Only the vector k-NN / hybrid keys are
+# recorded as {not_expressible:true} capability facts (XTDB has no native ANN,
+# footnotes 4 & 5); nothing is ever timed for either category.
 #
 # REQUIRED TOOLING (on the box):
 #   * docker + docker compose v2  (the xtdb service in ../docker-compose.yml)
@@ -105,13 +107,13 @@ measure ext_temporal_reconstruction "EXT-TEMPORAL point-in-time reconstruction A
 measure ext_temporal_as_of_traversal "EXT-TEMPORAL AS OF traversal (:knows neighbours)" \
     "{:query {:find [friend] :where [[e ${XTDB_ID_ATTR} ${PERSON_ID}] [e :knows friend]]} :valid-time #inst \"${XTDB_VALID_TIME}\"}"
 
-# ---- SNB property-graph reads: not expressed natively on XTDB (footnote 2) --
-for k in is1_person_profile is2_person_recent_messages is3_person_friends \
-         is5_message_creator is6_forum_of_message ic1_friends_within_2_hops \
-         ic2_recent_messages_by_friends ic9_messages_by_friends_of_friends; do
-    not_expressible "${k}" \
-        "XTDB is not a property-graph engine; the SNB interactive graph subset is a separate modeling exercise, not the same native operation (README footnote 2)."
-done
+# ---- SNB property-graph reads (is1..ic9): NOT MEASURED HERE -----------------
+# XTDB is a bi-temporal Datalog store, not a property-graph engine, so the SNB
+# interactive read subset is a separate modeling exercise (README footnote 2).
+# We deliberately DO NOT emit these keys at all — an absent key means "not
+# measured here", which is honest; emitting {not_expressible:true} would instead
+# assert the query CANNOT be expressed, contradicting the README. (The vector
+# k-NN / hybrid keys below stay not_expressible: XTDB genuinely has no ANN.)
 
 # ---- Vector extension: XTDB has no native ANN (footnotes 4 & 5) -------------
 not_expressible ext_vector_knn "XTDB has no native ANN / vector index (README footnote 4)."

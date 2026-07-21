@@ -206,8 +206,9 @@ pub struct GenForum {
     pub idx: usize,
     /// Forum title.
     pub title: String,
-    /// Moderator person index.
-    pub moderator: usize,
+    /// Moderator person index, or `None` when the source FK was unknown/absent
+    /// (the HAS_MODERATOR edge is then skipped rather than mis-attributed).
+    pub moderator: Option<usize>,
 }
 
 /// A generated post.
@@ -215,10 +216,12 @@ pub struct GenForum {
 pub struct GenPost {
     /// Zero-based index.
     pub idx: usize,
-    /// Owning forum index.
-    pub forum: usize,
-    /// Creator person index.
-    pub creator: usize,
+    /// Owning forum index, or `None` when the source container FK was
+    /// unknown/absent (the CONTAINER_OF edge is then skipped).
+    pub forum: Option<usize>,
+    /// Creator person index, or `None` when the source FK was unknown/absent
+    /// (the HAS_CREATOR edge is then skipped rather than mis-attributed).
+    pub creator: Option<usize>,
     /// Tag index attached to this post.
     pub tag: usize,
     /// Deterministic content length (a stand-in property).
@@ -377,7 +380,7 @@ fn generate_with_params(scale_label: &str, params: GenParams, seed: u64) -> Gene
         .map(|idx| GenForum {
             idx,
             title: format!("Forum{idx}"),
-            moderator: rng.next_below(params.persons.max(1)),
+            moderator: Some(rng.next_below(params.persons.max(1))),
         })
         .collect();
 
@@ -396,8 +399,8 @@ fn generate_with_params(scale_label: &str, params: GenParams, seed: u64) -> Gene
             let embedding = deterministic_embedding(&mut rng, params.embedding_dim);
             posts.push(GenPost {
                 idx: post_idx,
-                forum: forum.idx,
-                creator,
+                forum: Some(forum.idx),
+                creator: Some(creator),
                 tag,
                 length,
                 embedding,
