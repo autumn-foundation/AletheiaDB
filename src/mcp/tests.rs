@@ -20115,7 +20115,7 @@ mod namespace_tools_tests {
     }
 
     #[test]
-    fn three_tools_present_in_live_catalog_of_64() {
+    fn three_tools_present_in_live_catalog_of_74() {
         let server = create_test_server();
         let tools = server.list_tools_for_test();
         assert_eq!(tools.len(), 74, "the live catalog must be exactly 74 tools");
@@ -20652,6 +20652,195 @@ mod belief_revision_and_fusion_tests {
         assert!(
             results[0].get("score_breakdown").is_some(),
             "single-node hybrid fusion must attach score_breakdown: {out}"
+        );
+    }
+}
+
+/// Behavior tests for the deferred MCP-registry batch tools (Issue #3367 /
+/// #3352 / #3357 / #3382). Under the default (no-cohort) test build these
+/// exercise the feature-off twins; the advertising tests are feature-invariant.
+mod deferred_batch_tools_tests {
+    use super::*;
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("valid JSON response")
+    }
+
+    const TEMPORAL_TOOLS: [&str; 8] = [
+        "create_drift_monitor",
+        "list_drift_monitors",
+        "delete_drift_monitor",
+        "query_drift_alarms",
+        "resolve_drift_alarm",
+        "contradiction_genealogy",
+        "find_contradictions",
+        "counterfactual_replay",
+    ];
+    const REASONING_TOOLS: [&str; 2] = ["trust_breakdown", "list_trust_policies"];
+
+    /// Design A: every deferred tool is advertised regardless of feature flags,
+    /// so the catalog count is feature-invariant.
+    #[test]
+    fn all_ten_deferred_tools_are_advertised() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        for name in TEMPORAL_TOOLS.iter().chain(REASONING_TOOLS.iter()) {
+            assert!(
+                tools.iter().any(|t| t == name),
+                "{name} must be advertised (Design A: unconditional)"
+            );
+        }
+    }
+
+    /// Each deferred tool carries the correct RBAC access class.
+    #[test]
+    fn deferred_tools_have_expected_access_class() {
+        use crate::auth::AccessClass;
+        use crate::mcp::auth::tool_access_class;
+        let read = [
+            "list_drift_monitors",
+            "query_drift_alarms",
+            "contradiction_genealogy",
+            "find_contradictions",
+            "counterfactual_replay",
+            "trust_breakdown",
+            "list_trust_policies",
+        ];
+        let write = [
+            "create_drift_monitor",
+            "delete_drift_monitor",
+            "resolve_drift_alarm",
+        ];
+        for name in read {
+            assert_eq!(
+                tool_access_class(name),
+                Some(AccessClass::Read),
+                "{name} must be Read class"
+            );
+        }
+        for name in write {
+            assert_eq!(
+                tool_access_class(name),
+                Some(AccessClass::Write),
+                "{name} must be Write class"
+            );
+        }
+    }
+
+    /// Feature-off twin: the eight `semantic-temporal` tools return a structured
+    /// FAILED_PRECONDITION naming the required feature.
+    #[cfg(not(feature = "semantic-temporal"))]
+    #[test]
+    fn temporal_tools_feature_off_are_failed_precondition() {
+        let server = create_test_server();
+        for name in TEMPORAL_TOOLS {
+            let out = server.dispatch_tool_json(name, serde_json::json!({}));
+            let v = parse(&out);
+            assert_eq!(
+                v.pointer("/error/code").and_then(|c| c.as_str()),
+                Some("FAILED_PRECONDITION"),
+                "feature-off {name} must be FAILED_PRECONDITION: {out}"
+            );
+            assert_eq!(
+                v.pointer("/error/details/required_feature")
+                    .and_then(|c| c.as_str()),
+                Some("semantic-temporal"),
+                "{name} must name the required feature: {out}"
+            );
+            assert_eq!(
+                v.pointer("/error/retriable"),
+                Some(&serde_json::json!(false)),
+                "{name} feature-precondition is non-retriable: {out}"
+            );
+        }
+    }
+
+    /// Feature-off twin: the two `semantic-reasoning` tools return a structured
+    /// FAILED_PRECONDITION naming the required feature.
+    #[cfg(not(feature = "semantic-reasoning"))]
+    #[test]
+    fn reasoning_tools_feature_off_are_failed_precondition() {
+        let server = create_test_server();
+        for name in REASONING_TOOLS {
+            let out = server.dispatch_tool_json(name, serde_json::json!({}));
+            let v = parse(&out);
+            assert_eq!(
+                v.pointer("/error/code").and_then(|c| c.as_str()),
+                Some("FAILED_PRECONDITION"),
+                "feature-off {name} must be FAILED_PRECONDITION: {out}"
+            );
+            assert_eq!(
+                v.pointer("/error/details/required_feature")
+                    .and_then(|c| c.as_str()),
+                Some("semantic-reasoning"),
+                "{name} must name the required feature: {out}"
+            );
+        }
+    }
+
+    /// Feature-on happy path: with `semantic-temporal`, drift monitor CRUD works
+    /// and `counterfactual_replay` carries the AC8 `counterfactual: true` marker.
+    #[cfg(feature = "semantic-temporal")]
+    #[test]
+    fn temporal_tools_feature_on_smoke() {
+        let server = create_test_server();
+
+        // list_drift_monitors on an empty registry: success, zero monitors.
+        let out = server.dispatch_tool_json("list_drift_monitors", serde_json::json!({}));
+        let v = parse(&out);
+        assert!(v.get("error").is_none(), "list_drift_monitors: {out}");
+        assert_eq!(v.pointer("/count"), Some(&serde_json::json!(0)));
+
+        // query_drift_alarms on an empty registry: success, zero alarms.
+        let out = server.dispatch_tool_json("query_drift_alarms", serde_json::json!({}));
+        let v = parse(&out);
+        assert!(v.get("error").is_none(), "query_drift_alarms: {out}");
+        assert_eq!(v.pointer("/count"), Some(&serde_json::json!(0)));
+
+        // counterfactual_replay excluding an absent source: success, and the
+        // AC8 per-response marker is present.
+        let out = server.dispatch_tool_json(
+            "counterfactual_replay",
+            serde_json::json!({ "name": "cf", "exclude_source": "nobody" }),
+        );
+        let v = parse(&out);
+        assert!(v.get("error").is_none(), "counterfactual_replay: {out}");
+        assert_eq!(
+            v.pointer("/counterfactual"),
+            Some(&serde_json::json!(true)),
+            "counterfactual_replay must carry the AC8 marker: {out}"
+        );
+
+        // A create_drift_monitor with a non-positive threshold is INVALID_ARGUMENT.
+        let out = server.dispatch_tool_json(
+            "create_drift_monitor",
+            serde_json::json!({
+                "property_key": "embedding",
+                "metric": "cosine",
+                "threshold": 0.0,
+                "window_micros": 3_600_000_000_u64
+            }),
+        );
+        let v = parse(&out);
+        assert_eq!(
+            v.pointer("/error/code").and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "non-positive threshold must be INVALID_ARGUMENT: {out}"
+        );
+    }
+
+    /// Feature-on happy path: with `semantic-reasoning`, `list_trust_policies`
+    /// returns the default policy.
+    #[cfg(feature = "semantic-reasoning")]
+    #[test]
+    fn reasoning_tools_feature_on_smoke() {
+        let server = create_test_server();
+        let out = server.dispatch_tool_json("list_trust_policies", serde_json::json!({}));
+        let v = parse(&out);
+        assert!(v.get("error").is_none(), "list_trust_policies: {out}");
+        assert!(
+            v.pointer("/default/combinator").is_some(),
+            "list_trust_policies must return a default combinator: {out}"
         );
     }
 }
