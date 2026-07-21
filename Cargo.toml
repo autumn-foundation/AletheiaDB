@@ -173,7 +173,7 @@ arrow = { version = "59", default-features = false, optional = true }
 rayon = "1.12"
 comfy-table = "7.2.2"
 crossterm = "0.29.0"
-rand = { version = "0.8", features = ["small_rng"] }
+rand = { version = "0.9", features = ["small_rng"] }
 # tempfile is needed at runtime: AletheiaDB::new() backs its WAL with a
 # temporary directory so the default constructor is truly ephemeral.
 tempfile = "3.27"
@@ -233,7 +233,7 @@ lazy_static = "1.4"
 rustyline = "18.0"
 # Loom for concurrency testing
 loom = { version = "0.7.2", features = ["checkpoint"] }
-rand = "0.8"
+rand = "0.9"
 
 [features]
 # Test-only: exposes the write-path `race_seam` arming surface
