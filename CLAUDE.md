@@ -1071,7 +1071,7 @@ encryption code or write-path overhead.
   undecryptable, emitting a signed erasure attestation. Exposed as the
   Admin-class MCP tools `designate_subject` / `erase_subject`.
 
-**See [docs/ENCRYPTION.md](docs/ENCRYPTION.md), [docs/adr/0028-encryption-at-rest.md](docs/adr/0028-encryption-at-rest.md), and [docs/guides/crypto-shred.md](docs/guides/crypto-shred.md).**
+**Start here: [docs/guides/encryption.md](docs/guides/encryption.md)** — the end-to-end encryption narrative that ties these pieces together. **See also [docs/ENCRYPTION.md](docs/ENCRYPTION.md), [docs/adr/0028-encryption-at-rest.md](docs/adr/0028-encryption-at-rest.md), and [docs/guides/crypto-shred.md](docs/guides/crypto-shred.md).**
 
 ### Feature Flags: Stable vs Experimental
 
