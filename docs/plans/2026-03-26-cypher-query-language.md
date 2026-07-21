@@ -1,5 +1,7 @@
 # Cypher Query Language Implementation Plan
 
+> **Status: Implemented — shipped on trunk (as of 2026-07-21).** This plan is retained for historical/design context; see the corresponding guide for current behavior.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add openCypher query language support with temporal and vector extensions behind the `cypher` feature flag, enabling intuitive graph query syntax for AletheiaDB (Issue #312).
@@ -150,7 +152,7 @@ Create `src/cypher/mod.rs`:
 //!
 //! ```toml
 //! [dependencies]
-//! aletheiadb = { version = "0.1", features = ["cypher"] }
+//! aletheiadb = { version = "0.2", features = ["cypher"] }
 //! ```
 //!
 //! # Architecture

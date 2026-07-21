@@ -1,6 +1,8 @@
 # Hot-Live Encryption Enable Driver (Issue #3708)
 
-**Status:** Design (implementation in progress)
+> **Status: Implemented — shipped on trunk (as of 2026-07-21).** This plan is retained for historical/design context; see the corresponding guide for current behavior.
+
+**Status:** Implemented
 **Author:** encryption lane
 **Date:** 2026-07-20
 **Scope:** Turn `AletheiaDB::enable_encryption` from a *reopen-centric* migration

@@ -28,7 +28,7 @@ That split keeps the database out of the provider treadmill. The graveyard of ha
 
 ```toml
 [dependencies]
-aletheiadb = { version = "0.1", features = ["embeddings"] }
+aletheiadb = { version = "0.2", features = ["embeddings"] }
 ```
 
 | Feature | Purpose |

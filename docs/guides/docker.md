@@ -66,7 +66,7 @@ docker run --rm -p 1963:1963 \
   -e ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)" \
   -e AUTUMN_SECURITY__SIGNING_SECRET="$(openssl rand -hex 32)" \
   -v aletheiadb_data:/var/lib/aletheiadb \
-  ghcr.io/madmax983/aletheiadb:latest
+  ghcr.io/autumn-foundation/aletheiadb:latest
 ```
 
 ### MCP server (stdio)
@@ -79,7 +79,7 @@ and speak JSON-RPC over stdio. Override the command and keep stdin open
 docker run -i --rm \
   -e ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$YOUR_KEY" \
   -v aletheiadb_data:/var/lib/aletheiadb \
-  ghcr.io/madmax983/aletheiadb:latest aletheia-mcp
+  ghcr.io/autumn-foundation/aletheiadb:latest aletheia-mcp
 ```
 
 Example MCP client (`claude_desktop_config.json`-style) entry:
@@ -93,7 +93,7 @@ Example MCP client (`claude_desktop_config.json`-style) entry:
         "run", "-i", "--rm",
         "-e", "ALETHEIADB_BOOTSTRAP_ADMIN_KEY",
         "-v", "aletheiadb_data:/var/lib/aletheiadb",
-        "ghcr.io/madmax983/aletheiadb:latest", "aletheia-mcp"
+        "ghcr.io/autumn-foundation/aletheiadb:latest", "aletheia-mcp"
       ],
       "env": { "ALETHEIADB_BOOTSTRAP_ADMIN_KEY": "your-admin-key" }
     }
@@ -133,7 +133,7 @@ docker run --rm -p 1963:1963 \
   -e AUTUMN_SECURITY__SIGNING_SECRET="$SECRET" \
   -v $PWD/config.toml:/etc/aletheiadb/config.toml:ro \
   -v aletheiadb_data:/var/lib/aletheiadb \
-  ghcr.io/madmax983/aletheiadb:latest
+  ghcr.io/autumn-foundation/aletheiadb:latest
 ```
 
 ---
@@ -232,14 +232,14 @@ the CLI against the same volume:
 docker run --rm \
   -v aletheiadb_data:/var/lib/aletheiadb \
   -v $PWD:/out \
-  ghcr.io/madmax983/aletheiadb:latest \
+  ghcr.io/autumn-foundation/aletheiadb:latest \
   aletheia backup /out/snapshot.albk
 
 # Restore into the volume
 docker run --rm \
   -v aletheiadb_data:/var/lib/aletheiadb \
   -v $PWD:/out \
-  ghcr.io/madmax983/aletheiadb:latest \
+  ghcr.io/autumn-foundation/aletheiadb:latest \
   aletheia restore /out/snapshot.albk
 ```
 
@@ -249,7 +249,7 @@ See the [Backup / Restore guide](backup-restore.md).
 
 ## Publishing and tags
 
-CI publishes to GitHub Container Registry (`ghcr.io/madmax983/aletheiadb`):
+CI publishes to GitHub Container Registry (`ghcr.io/autumn-foundation/aletheiadb`):
 
 - **Release tag `vX.Y.Z`** → `X.Y.Z`, `X.Y`, `latest`, and `sha-<commit>`
   (multi-arch: `linux/amd64` + `linux/arm64`).

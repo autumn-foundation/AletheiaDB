@@ -1,6 +1,6 @@
 # Crash-Scenario Test Reference
 
-> Tracking issue: [#453](https://github.com/madmax983/AletheiaDB/issues/453) —
+> Tracking issue: [#453](https://github.com/autumn-foundation/AletheiaDB/issues/453) —
 > meta-issue for crash-recovery test coverage.
 
 This document catalogs the crash-, corruption-, and recovery-scenario tests that

@@ -432,7 +432,7 @@ where
 ## References
 
 - **Architecture Documentation:** [durability-modes.md](../architecture/durability-modes.md)
-- **GitHub Issues:** [#127](https://github.com/madmax983/AletheiaDB/issues/127), [#128](https://github.com/madmax983/AletheiaDB/issues/128), [#129](https://github.com/madmax983/AletheiaDB/issues/129), [#130](https://github.com/madmax983/AletheiaDB/issues/130), [#131](https://github.com/madmax983/AletheiaDB/issues/131)
+- **GitHub Issues:** [#127](https://github.com/autumn-foundation/AletheiaDB/issues/127), [#128](https://github.com/autumn-foundation/AletheiaDB/issues/128), [#129](https://github.com/autumn-foundation/AletheiaDB/issues/129), [#130](https://github.com/autumn-foundation/AletheiaDB/issues/130), [#131](https://github.com/autumn-foundation/AletheiaDB/issues/131)
 - **Project:** [AletheiaDB Write Performance](https://github.com/users/madmax983/projects/5)
 - **PostgreSQL synchronous_commit:** [Documentation](https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT)
 - **MongoDB Write Concern:** [Documentation](https://www.mongodb.com/docs/manual/reference/write-concern/)
