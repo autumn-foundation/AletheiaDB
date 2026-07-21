@@ -139,8 +139,9 @@ pub use db::{
     AletheiaDB, BackupSummary, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats,
     DatabaseStats, EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent,
     LabelSchema, LineageView, LineageViewEntry, NamespaceCount, NamespaceInfo, PitrCoord, PitrPlan,
-    PitrTarget, SchemaInstant, SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats,
-    TimeBounds, UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
+    PitrTarget, PropertyIndexBuilder, SchemaInstant, SimilarityQuery, SimilaritySource,
+    TemporalExtent, TierAccessStats, TimeBounds, UniqueConstraintBuilder, VectorIndexBuilder,
+    WalStateStats,
 };
 // Issue #3349 (PR3d): re-export `TraverseDirection` at the crate root via its
 // owning `namespace_query` module path, deliberately WITHOUT adding it to the
@@ -159,7 +160,7 @@ pub use db::{
     WorkflowError, WorkflowJournal, WorkflowJournalExt, WorkflowRun, WorkflowStatus,
 };
 pub use index::{
-    AdjacencyIndex, CurrentIndexes, TemporalIndexes,
+    AdjacencyIndex, CurrentIndexes, PropertyIndexInfo, TemporalIndexes,
     vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},
 };
 pub use storage::CurrentStorage;

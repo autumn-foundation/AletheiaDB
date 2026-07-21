@@ -2451,6 +2451,51 @@ impl CurrentStorage {
             .collect()
     }
 
+    // ========================================================================
+    // Secondary property (equality) index — opt-in, node-only, current-state.
+    // See `crate::index::property_index` for the design and scope boundaries.
+    // ========================================================================
+
+    /// Enable a current-state equality index on `(label, property)` and backfill
+    /// it from current nodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FailedPrecondition`](crate::core::error::Error::FailedPrecondition)
+    /// if an index is already enabled for this `(label, property)` pair.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn enable_property_index(&self, label: &str, property: &str) -> Result<()> {
+        // STUB (RED): not yet wired.
+        let _ = (label, property);
+        Ok(())
+    }
+
+    /// Whether an equality index is enabled for `(label, property)`.
+    pub fn has_property_index(&self, label: &str, property: &str) -> bool {
+        // STUB (RED): not yet wired.
+        let _ = (label, property);
+        false
+    }
+
+    /// List all enabled property indexes.
+    pub fn list_property_indexes(&self) -> Vec<crate::index::property_index::PropertyIndexInfo> {
+        // STUB (RED): not yet wired.
+        Vec::new()
+    }
+
+    /// Drop the equality index on `(label, property)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FailedPrecondition`](crate::core::error::Error::FailedPrecondition)
+    /// if no index is enabled for this `(label, property)` pair.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn drop_property_index(&self, label: &str, property: &str) -> Result<()> {
+        // STUB (RED): not yet wired.
+        let _ = (label, property);
+        Ok(())
+    }
+
     /// Get the name of the property used for vector indexing.
     ///
     /// Equivalent to `get_default_vector_property_name` (internal).
