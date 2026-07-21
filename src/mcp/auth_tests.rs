@@ -1018,7 +1018,7 @@ fn forged_principal_on_destructive_op_is_ignored() {
 /// adding a Write/Metrics tool) must touch this literal list too.
 #[test]
 fn write_and_metrics_sets_match_hardcoded_snapshot() {
-    const EXPECTED_WRITE: [&str; 15] = [
+    const EXPECTED_WRITE: [&str; 18] = [
         "create_node",
         "update_node",
         "delete_node",
@@ -1035,6 +1035,10 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
         "update_node_embedding",
         // Namespace creation (Issue #3349, PR3b).
         "create_namespace",
+        // Temporal drift-alarm writes (Issue #3367).
+        "create_drift_monitor",
+        "delete_drift_monitor",
+        "resolve_drift_alarm",
     ];
     const EXPECTED_METRICS: [&str; 1] = ["database_stats"];
     // GDPR crypto-shred designation & erasure (Issue #3359, Slice 4b) — the
@@ -1084,8 +1088,8 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
     // Everything else must be Read (no fifth class sneaking in).
     assert_eq!(
         TOOL_ACCESS_CLASSES.len(),
-        actual_write.len() + actual_metrics.len() + actual_admin.len() + 46,
-        "Read tool count changed (expected 46); if a tool was added or \
+        actual_write.len() + actual_metrics.len() + actual_admin.len() + 53,
+        "Read tool count changed (expected 53); if a tool was added or \
          removed, re-verify its classification and update this count"
     );
 }
@@ -1109,7 +1113,7 @@ fn classification_uses_known_classes_only() {
 // 6. Live tool-inventory golden (drift detection for the external mirror)
 //
 // The external `tests/parity_mcp.rs::tool_inventory_golden_is_stable` test can
-// only validate a hardcoded 64-tool constant against itself, because the live
+// only validate a hardcoded 74-tool constant against itself, because the live
 // registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)` and
 // unreachable from an external test crate. This in-crate test closes that gap:
 // it derives the LIVE advertised `(tool_name, access_class)` set from the
