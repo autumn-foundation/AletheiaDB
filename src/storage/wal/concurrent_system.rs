@@ -361,6 +361,7 @@ pub struct ConcurrentWalSystem {
     /// `historical`/`current_timestamp`/cold, it is never held across any lock
     /// ordered after `wal` -- it merely wraps the presence check and the
     /// coordinator-`writer`-guarded seal->store->reopen hand-off.
+    #[cfg(not(target_arch = "wasm32"))]
     install_lock: Mutex<()>,
 }
 
@@ -488,6 +489,7 @@ impl ConcurrentWalSystem {
             consecutive_flush_errors,
             tolerate_torn_tail: config.tolerate_torn_tail,
             wal_keyring,
+            #[cfg(not(target_arch = "wasm32"))]
             install_lock: Mutex::new(()),
         })
     }
@@ -833,6 +835,7 @@ impl ConcurrentWalSystem {
     /// switching the key provider afterward would render those un-rotated files
     /// undecryptable. Never exposes the cipher or any key material.
     #[must_use]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn is_encrypted(&self) -> bool {
         self.wal_keyring.load().is_some()
     }
@@ -845,6 +848,7 @@ impl ConcurrentWalSystem {
     /// generations), so a caller's `add_generation` is observed by every holder.
     /// Never returns key material directly — only the redacting-`Debug` handle.
     #[must_use]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn wal_keyring(&self) -> Option<crate::encryption::wal_encryption::WalKeyring> {
         self.wal_keyring.load_full().map(|k| (*k).clone())
     }
@@ -882,6 +886,7 @@ impl ConcurrentWalSystem {
     // PR2 (#3616) ships this structural install seam; its production consumer is
     // the plaintext → encrypted enable engine (#3616 PR3), which drives it from
     // `enable_encryption` and the startup `install_pending_enable_wal_keyring` hook.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn install_wal_keyring(
         &self,
         keyring: crate::encryption::wal_encryption::WalKeyring,
@@ -969,6 +974,7 @@ impl ConcurrentWalSystem {
     // PR4 (#3616) ships this structural uninstall seam; its production consumer is
     // the encrypted → plaintext disable engine (#3616 PR4), which drives it from
     // `disable_encryption` and the startup disable-resume hook.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn uninstall_wal_keyring(&self) -> Result<()> {
         // Serialize the ENTIRE uninstall — presence check, seal, store, reopen —
         // under the same dedicated leaf mutex install uses. Without it, two
@@ -1008,6 +1014,7 @@ impl ConcurrentWalSystem {
     /// Whether every on-disk WAL segment is stamped with `key_version` — the
     /// rotation driver's "old generation fully retired" signal (Issue #3617).
     /// See [`FlushCoordinator::all_segments_use_key_version`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn all_segments_use_key_version(&self, key_version: u32) -> bool {
         self.coordinator.all_segments_use_key_version(key_version)
     }
@@ -1015,6 +1022,7 @@ impl ConcurrentWalSystem {
     /// Retire (delete) every sealed old-generation WAL segment, keeping only
     /// segments stamped `keep_key_version` and the active segment (Issue #3617).
     /// See [`FlushCoordinator::retire_old_generation_segments`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn retire_old_generation_segments(&self, keep_key_version: u32) -> Result<usize> {
         self.coordinator
             .retire_old_generation_segments(keep_key_version)
@@ -1039,6 +1047,7 @@ impl ConcurrentWalSystem {
     /// next and written, consistently, to whatever segment is current at that
     /// flush. `advance` runs while holding only the `writer` mutex, so it must
     /// not acquire any lock ordered after `wal` (no cold flush inside it).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn seal_active_segment_for_rotation<F: FnOnce()>(&self, advance: F) -> Result<()> {
         // 1. Drain + flush all pending entries into the current (old) segment,
         //    with fsync, so nothing acknowledged is left only in the ring buffer.

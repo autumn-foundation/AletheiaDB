@@ -1,5 +1,6 @@
 //! Graph index persistence.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,12 +13,13 @@ use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::compression::decompress_with_limit;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::DELTA_MAGIC;
 use super::error::{IndexPersistenceError, Result};
-use super::formats::{
-    GraphIndexData, GraphIndexDelta, PersistedEdge, PersistedNode, PersistedPropertyMap,
-    PersistedPropertyValue,
-};
-use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
+use super::formats::{GraphIndexData, PersistedPropertyMap, PersistedPropertyValue};
+#[cfg(not(target_arch = "wasm32"))]
+use super::formats::{GraphIndexDelta, PersistedEdge, PersistedNode};
+use super::{GRAPH_MAGIC, MANIFEST_VERSION};
 use crate::encryption::cipher::Cipher;
 
 /// Write a fully-built plaintext graph-file buffer to disk, encrypting the
@@ -42,6 +44,7 @@ fn write_graph_buffer_maybe_encrypted(
 /// Write a graph-file buffer, encrypting with the current generation of an
 /// [`IndexKeyring`](super::common::IndexKeyring) and stamping its `key_version`
 /// (Issue #488 key rotation). A `None` keyring writes plaintext.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_graph_buffer_with_keyring(
     path: &Path,
     plaintext: &[u8],
@@ -226,6 +229,7 @@ pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<Property
 ///
 /// Shared by the checkpoint and backup code paths so the conversion logic
 /// lives in one place.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn extract_graph_data_from_snapshot(
     snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
 ) -> Result<GraphIndexData> {
@@ -308,6 +312,7 @@ pub fn save_graph_index_with_cipher(
 
 /// Save graph index data (uncompressed), encrypting with an
 /// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_graph_index_with_keyring(
     data: &GraphIndexData,
     path: &Path,

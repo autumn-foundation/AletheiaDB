@@ -758,16 +758,20 @@ pub use sharded::{
 ///
 /// NaN values are treated as less than all other values for consistent ordering.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct OrderedFloat(pub f32);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Eq for OrderedFloat {}
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PartialOrd for OrderedFloat {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Ord for OrderedFloat {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.0
@@ -784,6 +788,7 @@ impl Ord for OrderedFloat {
 /// Merge search results from multiple sources using a min-heap for top-k efficiency.
 ///
 /// O(n log k) where n is total results and k is the desired count.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn merge_top_k_results(
     all_results: Vec<Vec<(crate::core::id::NodeId, f32)>>,
     k: usize,

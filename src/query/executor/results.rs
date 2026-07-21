@@ -46,9 +46,11 @@ use crate::core::{EdgeId, NodeId};
 use super::iterators::ResultIterator;
 
 /// Score threshold above which results are highlighted green in display output.
+#[cfg(not(target_arch = "wasm32"))]
 const HIGH_SCORE_THRESHOLD: f64 = 0.8;
 
 /// Score threshold below which results are highlighted yellow in display output.
+#[cfg(not(target_arch = "wasm32"))]
 const LOW_SCORE_THRESHOLD: f64 = 0.5;
 
 /// Maximum number of properties shown per node in display output.

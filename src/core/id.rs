@@ -478,6 +478,7 @@ impl IdGenerator {
     /// Uses `Ordering::SeqCst` to ensure all threads observe the reset consistently.
     /// This is critical during recovery when re-initializing generators.
     #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn reset_to(&self, value: u64) {
         self.next_id.store(value, Ordering::SeqCst);
     }

@@ -37,6 +37,8 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 /// HNSW configuration and builder.
 pub mod config;
 /// Persistence logic for HNSW index.
+/// The real (usearch-backed) HNSW index is native-only, so its persistence is too.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
 /// Statistics for HNSW index.
 pub mod stats;
@@ -90,6 +92,7 @@ impl Drop for FilterCallbackGuard {
 }
 
 /// Maximum number of results that can be requested in a search.
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_K: usize = 100_000;
 
 /// Maximum valid usearch key.
@@ -98,9 +101,11 @@ const MAX_K: usize = 100_000;
 /// protection in `add`) and when restoring persisted mappings
 /// (`restore_mapping`), so a corrupted `mappings.idx` containing a huge key
 /// can never overflow `usearch_key + 1` or poison `next_key`.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const MAX_VALID_KEY: u64 = u64::MAX - 1000;
 
 /// Number of sharded locks for entry updates.
+#[cfg(not(target_arch = "wasm32"))]
 const NUM_ENTRY_LOCKS: usize = 64;
 
 /// Convert our DistanceMetric to usearch's MetricKind
@@ -149,6 +154,7 @@ fn validate_metric_quantization(config: &HnswConfig) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn tanimoto_distance(a: &[f32], b: &[f32]) -> f32 {
     let mut dot = 0.0f64;
     let mut norm_a = 0.0f64;
@@ -189,6 +195,7 @@ fn install_runtime_metric(index: &mut Index, config: &HnswConfig) {
 }
 
 /// Check if a usearch error is transient and should be retried.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn is_retryable_usearch_error(error_msg: &str) -> bool {
     error_msg.contains("No available threads to lock")
 }
@@ -1431,11 +1438,6 @@ impl HnswIndex {
     /// Return the configuration used to create this index.
     pub fn config(&self) -> HnswConfig {
         self.config.clone()
-    }
-
-    /// Stub: no persisted id mappings on wasm.
-    pub(crate) fn get_id_mappings(&self) -> Vec<(u64, u64)> {
-        Vec::new()
     }
 }
 

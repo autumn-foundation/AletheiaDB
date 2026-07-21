@@ -79,6 +79,7 @@ pub fn save_temporal_adjacency_index_with_cipher(
 
 /// Save the temporal adjacency index, encrypting with the current generation of
 /// an [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_temporal_adjacency_index_with_keyring(
     index: &TemporalAdjacencyIndex,
     data_dir: &Path,

@@ -556,7 +556,7 @@ impl AletheiaDB {
         Self::with_unified_config(config)
     }
 
-    #[cfg(not(feature = "config-toml"))]
+    #[cfg(all(not(feature = "config-toml"), not(target_arch = "wasm32")))]
     fn open_from_toml_path(_path: &std::path::Path) -> Result<Self> {
         Err(crate::core::error::Error::Other(format!(
             "{} is set but the `config-toml` feature is not enabled in this build",
@@ -797,7 +797,7 @@ impl AletheiaDB {
             };
             // Ephemeral wasm profile has no durable disk state to resume.
             #[cfg(target_arch = "wasm32")]
-            let enable_resume: Option<()> = None;
+            let _enable_resume: Option<()> = None;
 
             // Create encryption manager if encryption is enabled
             let encryption_manager = if config.encryption.enabled {
@@ -1004,7 +1004,10 @@ impl AletheiaDB {
             };
 
             // Extract cold storage configuration before config.historical is moved
+            // (the redb-backed cold tier is absent on the wasm32 ephemeral profile).
+            #[cfg(not(target_arch = "wasm32"))]
             let enable_cold_storage = config.historical.enable_cold_storage;
+            #[cfg(not(target_arch = "wasm32"))]
             let cold_storage_path = config.historical.cold_storage_path.clone();
 
             // Capture the changefeed caps (incl. the Issue #3678 per-principal
@@ -1168,13 +1171,13 @@ impl AletheiaDB {
             db.resume_pending_disable()?;
 
             // Load indexes on startup if enabled
-            if let Some(ref manager) = persistence_manager
+            if let Some(ref _manager) = persistence_manager
                 && config.persistence.load_on_startup
             {
                 #[cfg(not(target_arch = "wasm32"))]
                 let loaded_lsn =
                     crate::storage::index_persistence::operations::load_indexes_startup(
-                        manager,
+                        _manager,
                         &db.current,
                         &db.historical,
                         &db.node_id_gen,

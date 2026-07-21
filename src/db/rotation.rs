@@ -1767,6 +1767,7 @@ fn serialize_ledger(ledger: &RotationLedger) -> Result<String> {
 /// disk/encryption-only rotation engine. Re-exported here so the historical
 /// `crate::db::rotation::write_durable` path (and this module's internal ledger
 /// writers) keep working unchanged.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use crate::db::durable_write::write_durable;
 
 pub(crate) fn clear_rotation_state(manager: &IndexPersistenceManager) {

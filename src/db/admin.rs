@@ -1,7 +1,9 @@
 //! Administrative and test-only helper methods.
 //!
 //! Provides internal statistics, test visibility, and database maintenance operations.
-use crate::core::error::{PersistenceErrorKind, Result, ResultExt, StorageError};
+use crate::core::error::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::core::error::{PersistenceErrorKind, ResultExt, StorageError};
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;
