@@ -525,3 +525,304 @@ fn value_key_parity_and_drop() {
     // Dropping again is an error (nothing enabled).
     assert!(db.drop_property_index("Person", "name").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// 13. Label-changing replace re-homes the index entry (S1 regression)
+// ---------------------------------------------------------------------------
+#[test]
+fn replace_node_label_change_rehomes_entry() {
+    let db = AletheiaDB::new().expect("db");
+    db.property_index("Person", "name")
+        .enable()
+        .expect("enable Person");
+    db.property_index("Employee", "name")
+        .enable()
+        .expect("enable Employee");
+
+    // (a) Label change, SAME value.
+    let id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("create");
+    assert_eq!(
+        sorted(db.find_nodes_by_property("Person", "name", &PropertyValue::from("Alice"))),
+        vec![id.as_u64()]
+    );
+
+    db.replace_node(
+        id,
+        "Employee",
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+    )
+    .expect("replace with new label");
+
+    // No stale entry under the old label; present under the new label.
+    assert!(
+        db.find_nodes_by_property("Person", "name", &PropertyValue::from("Alice"))
+            .is_empty(),
+        "stale entry left under old label after label change"
+    );
+    assert_eq!(
+        sorted(db.find_nodes_by_property("Employee", "name", &PropertyValue::from("Alice"))),
+        vec![id.as_u64()],
+        "node missing under new label after label change"
+    );
+
+    // (b) Label change AND value change simultaneously.
+    let id2 = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .expect("create2");
+    db.replace_node(
+        id2,
+        "Employee",
+        PropertyMapBuilder::new().insert("name", "Bobby").build(),
+    )
+    .expect("replace label+value");
+
+    assert!(
+        db.find_nodes_by_property("Person", "name", &PropertyValue::from("Bob"))
+            .is_empty()
+    );
+    assert!(
+        db.find_nodes_by_property("Employee", "name", &PropertyValue::from("Bob"))
+            .is_empty()
+    );
+    assert_eq!(
+        sorted(db.find_nodes_by_property("Employee", "name", &PropertyValue::from("Bobby"))),
+        vec![id2.as_u64()]
+    );
+    // Cross-check every lookup against the scan oracle.
+    for (label, val) in [
+        ("Person", "Alice"),
+        ("Employee", "Alice"),
+        ("Person", "Bob"),
+        ("Employee", "Bobby"),
+    ] {
+        let indexed = sorted(db.find_nodes_by_property(label, "name", &PropertyValue::from(val)));
+        db.drop_property_index(label, "name").ok();
+        let scan = sorted(db.find_nodes_by_property(label, "name", &PropertyValue::from(val)));
+        db.property_index(label, "name").enable().ok();
+        assert_eq!(indexed, scan, "index != scan for ({label}, name={val})");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 14. enable() on a live store races concurrent writers → index == scan (S2)
+// ---------------------------------------------------------------------------
+#[test]
+fn enable_races_concurrent_writers_equals_scan() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // A few CPU burners to widen scheduling windows (race is load-sensitive).
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut burners = Vec::new();
+    for _ in 0..4 {
+        let stop = Arc::clone(&stop);
+        burners.push(thread::spawn(move || {
+            let mut x = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                std::hint::black_box(x);
+            }
+        }));
+    }
+
+    for _round in 0..20 {
+        let db = Arc::new(AletheiaDB::new().expect("db"));
+        // Pre-existing nodes so enable() has backfill work to race against.
+        for i in 0..300i64 {
+            db.create_node("U", PropertyMapBuilder::new().insert("k", i % 7).build())
+                .expect("seed");
+        }
+
+        // Writer thread: creates and updates same-label nodes concurrently.
+        let w = {
+            let db = Arc::clone(&db);
+            thread::spawn(move || {
+                let mut ids = Vec::new();
+                for i in 0..600i64 {
+                    let id = db
+                        .create_node("U", PropertyMapBuilder::new().insert("k", i % 7).build())
+                        .expect("create");
+                    ids.push(id);
+                    if i % 3 == 0 {
+                        // Update an earlier node to a new value in the domain.
+                        let victim = ids[(i as usize) / 3 % ids.len()];
+                        db.update_node_with_valid_time(
+                            victim,
+                            PropertyMapBuilder::new().insert("k", (i + 1) % 7).build(),
+                            None,
+                        )
+                        .expect("update");
+                    }
+                }
+            })
+        };
+
+        // Overlap enable() with the writer's create/update storm.
+        db.property_index("U", "k")
+            .enable()
+            .expect("enable mid-flight");
+        w.join().expect("writer");
+
+        // After quiescence, the index must agree with the scan oracle for every
+        // value in the domain.
+        for v in 0..7i64 {
+            let indexed = sorted(db.find_nodes_by_property("U", "k", &PropertyValue::Int(v)));
+            db.drop_property_index("U", "k").expect("drop");
+            let scan = sorted(db.find_nodes_by_property("U", "k", &PropertyValue::Int(v)));
+            db.property_index("U", "k").enable().expect("re-enable");
+            assert_eq!(indexed, scan, "index != scan for k={v} after enable race");
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for b in burners {
+        b.join().expect("burner");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 15. drop → mutate → re-enable reflects only post-mutation state (S3)
+// ---------------------------------------------------------------------------
+#[test]
+fn drop_mutate_reenable_no_ghosts() {
+    let db = AletheiaDB::new().expect("db");
+    db.property_index("Person", "city")
+        .enable()
+        .expect("enable");
+
+    let id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("city", "NYC").build(),
+        )
+        .expect("create");
+    assert_eq!(
+        sorted(db.find_nodes_by_property("Person", "city", &PropertyValue::from("NYC"))),
+        vec![id.as_u64()]
+    );
+
+    // Drop the index, then mutate while it is OFF (scan still correct).
+    db.drop_property_index("Person", "city").expect("drop");
+    db.update_node_with_valid_time(
+        id,
+        PropertyMapBuilder::new().insert("city", "SF").build(),
+        None,
+    )
+    .expect("update while dropped");
+
+    // Re-enable: buckets must reflect only the post-mutation value, no ghost
+    // under the pre-drop value.
+    db.property_index("Person", "city")
+        .enable()
+        .expect("re-enable");
+    assert!(
+        db.find_nodes_by_property("Person", "city", &PropertyValue::from("NYC"))
+            .is_empty(),
+        "ghost entry under pre-drop value after re-enable"
+    );
+    assert_eq!(
+        sorted(db.find_nodes_by_property("Person", "city", &PropertyValue::from("SF"))),
+        vec![id.as_u64()]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. Double-enable is a hard error, not a silent double-count
+// ---------------------------------------------------------------------------
+#[test]
+fn double_enable_errors() {
+    let db = AletheiaDB::new().expect("db");
+    db.property_index("Person", "email")
+        .enable()
+        .expect("first enable");
+    let second = db.property_index("Person", "email").enable();
+    assert!(
+        second.is_err(),
+        "second enable must error, not silently double-count"
+    );
+    assert!(db.has_property_index("Person", "email"));
+
+    // A single node must appear exactly once (no double-count).
+    let id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("email", "a@x").build(),
+        )
+        .expect("create");
+    assert_eq!(
+        db.find_nodes_by_property("Person", "email", &PropertyValue::from("a@x")),
+        vec![id]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 17. Concurrent creates + updates + deletes: index == scan under churn (S1/S2)
+// ---------------------------------------------------------------------------
+#[test]
+fn concurrent_churn_index_equals_scan() {
+    let db = Arc::new(AletheiaDB::new().expect("db"));
+    db.property_index("Item", "bucket")
+        .enable()
+        .expect("enable");
+
+    const THREADS: usize = 8;
+    const PER: usize = 150;
+    const DOMAIN: i64 = 5;
+
+    let mut handles = Vec::new();
+    for t in 0..THREADS {
+        let db = Arc::clone(&db);
+        handles.push(thread::spawn(move || {
+            let mut mine = Vec::new();
+            for i in 0..PER {
+                let v = ((t + i) as i64) % DOMAIN;
+                let id = db
+                    .create_node(
+                        "Item",
+                        PropertyMapBuilder::new().insert("bucket", v).build(),
+                    )
+                    .expect("create");
+                mine.push(id);
+                // Update a prior node to a different value.
+                if i % 2 == 0 && mine.len() > 1 {
+                    let victim = mine[i % mine.len()];
+                    db.update_node_with_valid_time(
+                        victim,
+                        PropertyMapBuilder::new()
+                            .insert("bucket", (v + 1) % DOMAIN)
+                            .build(),
+                        None,
+                    )
+                    .expect("update");
+                }
+                // Delete an even earlier node.
+                if i % 5 == 4 && mine.len() > 2 {
+                    let victim = mine.remove(0);
+                    db.delete_node_with_options(victim, WriteRequestOptions::new())
+                        .expect("delete");
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.join().expect("thread");
+    }
+
+    // After quiescence, the index must equal the scan oracle for every value.
+    for v in 0..DOMAIN {
+        let indexed = sorted(db.find_nodes_by_property("Item", "bucket", &PropertyValue::Int(v)));
+        db.drop_property_index("Item", "bucket").expect("drop");
+        let scan = sorted(db.find_nodes_by_property("Item", "bucket", &PropertyValue::Int(v)));
+        db.property_index("Item", "bucket")
+            .enable()
+            .expect("re-enable");
+        assert_eq!(indexed, scan, "index != scan for bucket={v} under churn");
+    }
+}

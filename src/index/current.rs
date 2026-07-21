@@ -255,54 +255,94 @@ impl CurrentIndexes {
         // Maintain the secondary property (equality) index. Only pay the cost
         // when at least one (label, property) is enabled; otherwise this is a
         // single `is_empty` check on the create/update hot path. On an in-place
-        // update the prior node is still present in `self.nodes`, so diff old vs
-        // new so a changed value de-indexes its stale entry (a create sees no
-        // prior node and is a pure add). This is the single choke point every
-        // hydration path funnels through (create, update, WAL replay,
-        // index-persistence load), so the index rebuilds for free at load.
+        // update the prior node is still present in `self.nodes`, so we capture
+        // its LABEL and properties before overwriting: a create sees no prior
+        // node (pure add), a same-label update diffs old vs new to de-index the
+        // stale value, and a LABEL-CHANGING replace (`replace_node`, Issue
+        // #3549 — full overwrite reaches `insert_node` with a new label)
+        // de-indexes under the old label and re-indexes under the new one. This
+        // is the single choke point every hydration path funnels through
+        // (create, update, replace, WAL replay, index-persistence load), so the
+        // index rebuilds for free at load.
         if !self.prop_index_enabled.is_empty() {
-            let old_props = self
-                .nodes
-                .get(&node_id)
-                .map(|e| e.value().properties.clone());
-            self.reindex_node_property(node_id, node.label, old_props.as_ref(), &node.properties);
+            let old = self.nodes.get(&node_id).map(|e| {
+                let prior = e.value();
+                (prior.label, prior.properties.clone())
+            });
+            let (old_label, old_props) = match &old {
+                Some((label, props)) => (Some(*label), Some(props)),
+                None => (None, None),
+            };
+            self.reindex_node_property(node_id, old_label, old_props, node.label, &node.properties);
         }
         self.nodes.insert(node.id, node);
         self.node_headers.insert(header.id, header);
         self.ns_nodes.entry(ns_id).or_default().insert(node_id);
     }
 
-    /// Diff a node's old vs new property values against every enabled
-    /// `(label, prop_key)` index, removing stale value entries and adding new
-    /// ones. Called from [`insert_node`](Self::insert_node); a pure create
-    /// passes `old_props = None`. See [`crate::index::property_index`].
+    /// Reconcile a node's property-index membership across a create, update, or
+    /// label-changing replace. Called from [`insert_node`](Self::insert_node); a
+    /// pure create passes `old_label = None` / `old_props = None`.
+    ///
+    /// Old and new labels are handled **independently** so a label change
+    /// (`old_label != new_label`, e.g. `replace_node`) both de-indexes the
+    /// node's old value under the *old* label and indexes its new value under
+    /// the *new* label — otherwise a lone new-label filter would leave a stale
+    /// entry under the old label (false positive) and, because the old and new
+    /// values compare equal, skip adding under the new label (false negative).
+    /// The `old_vk == new_vk` no-op fast path applies only to a same-label
+    /// update, where a bucket move is genuinely unnecessary.
     fn reindex_node_property(
         &self,
         id: NodeId,
-        label: InternedString,
+        old_label: Option<InternedString>,
         old_props: Option<&PropertyMap>,
+        new_label: InternedString,
         new_props: &PropertyMap,
     ) {
         for entry in self.prop_index_enabled.iter() {
             let (lbl, key) = *entry.key();
-            if lbl != label {
+            let is_old = Some(lbl) == old_label;
+            let is_new = lbl == new_label;
+            if !is_old && !is_new {
                 continue;
             }
-            let old_vk = old_props
-                .and_then(|p| p.get_by_interned_key(&key))
-                .and_then(value_key);
-            let new_vk = new_props.get_by_interned_key(&key).and_then(value_key);
-            if old_vk == new_vk {
-                continue;
-            }
-            if let Some(ov) = old_vk {
-                self.prop_index_remove((lbl, key, ov), id);
-            }
-            if let Some(nv) = new_vk {
-                self.prop_index
-                    .entry((lbl, key, nv))
-                    .or_default()
-                    .insert(id);
+            if is_old && is_new {
+                // Same-label create/update: move the value bucket only if it
+                // actually changed.
+                let old_vk = old_props
+                    .and_then(|p| p.get_by_interned_key(&key))
+                    .and_then(value_key);
+                let new_vk = new_props.get_by_interned_key(&key).and_then(value_key);
+                if old_vk == new_vk {
+                    continue;
+                }
+                if let Some(ov) = old_vk {
+                    self.prop_index_remove((lbl, key, ov), id);
+                }
+                if let Some(nv) = new_vk {
+                    self.prop_index
+                        .entry((lbl, key, nv))
+                        .or_default()
+                        .insert(id);
+                }
+            } else if is_old {
+                // Label changed away from `lbl`: drop the node's old value.
+                if let Some(ov) = old_props
+                    .and_then(|p| p.get_by_interned_key(&key))
+                    .and_then(value_key)
+                {
+                    self.prop_index_remove((lbl, key, ov), id);
+                }
+            } else {
+                // Label changed to `lbl` (or a fresh create under `lbl`): add the
+                // node's new value.
+                if let Some(nv) = new_props.get_by_interned_key(&key).and_then(value_key) {
+                    self.prop_index
+                        .entry((lbl, key, nv))
+                        .or_default()
+                        .insert(id);
+                }
             }
         }
     }
@@ -853,20 +893,37 @@ impl CurrentIndexes {
     /// Enable the equality index for `(label, prop_key)` and backfill it from
     /// current state. Returns `false` if it was already enabled (no-op).
     ///
-    /// The enabled flag is inserted **before** the backfill scan, so a node
-    /// created concurrently with the backfill is maintained by
-    /// [`insert_node`](Self::insert_node) too; the backfill's `DashSet::insert`
-    /// is idempotent, so neither path double-counts nor drops it.
+    /// # Serialization requirement
+    ///
+    /// The caller **must** hold the storage `snapshot_lock.write()` for the
+    /// duration of this call (see
+    /// [`CurrentStorage::enable_property_index`](crate::storage::current::CurrentStorage::enable_property_index)).
+    /// Every write path (`create_node`, `insert_node_direct`,
+    /// `update_node_direct`, `delete_node_direct`) holds `snapshot_lock.read()`,
+    /// so the write lock makes enable **mutually exclusive** with all concurrent
+    /// mutators. Without it, two interleavings corrupt the index: (a) a create
+    /// whose `insert_node` observed `prop_index_enabled` still empty (so it
+    /// skipped maintenance) but installs its node *after* the backfill scan
+    /// passed it — leaving the node in no bucket; and (b) a mid-update node read
+    /// by the backfill under its old value while the update installs the new
+    /// value — leaving it in two buckets.
+    ///
+    /// The enabled flag is published **last** (after the backfill completes), so
+    /// a lock-free reader — which takes no lock — never observes the index as
+    /// "enabled" while it is only half-populated: it keeps scanning until the
+    /// flag flips, and the flag's release on the `prop_index_enabled` shard
+    /// happens-after all bucket writes.
     pub fn enable_property_index(&self, label: InternedString, prop_key: InternedString) -> bool {
-        use dashmap::mapref::entry::Entry;
-        match self.prop_index_enabled.entry((label, prop_key)) {
-            Entry::Occupied(_) => return false,
-            Entry::Vacant(v) => {
-                v.insert(());
-            }
+        if self.prop_index_enabled.contains_key(&(label, prop_key)) {
+            return false;
         }
-        // Backfill: index every current node of this label whose property value
-        // is indexable.
+        // Defensively clear any stale buckets a prior disable may have left for
+        // this pair if it raced a concurrent writer (belt-and-suspenders for the
+        // #S3 race; the caller's snapshot_lock.write() already excludes writers).
+        self.prop_index
+            .retain(|k, _| !(k.0 == label && k.1 == prop_key));
+        // Backfill BEFORE publishing the flag: index every current node of this
+        // label whose property value is indexable.
         for entry in self.nodes.iter() {
             let node = entry.value();
             if node.label != label {
@@ -883,6 +940,10 @@ impl CurrentIndexes {
                     .insert(node.id);
             }
         }
+        // Publish the flag last (see the release-ordering note above). Enable
+        // calls are serialized by the caller's write lock, so the
+        // check-then-insert cannot race another enable.
+        self.prop_index_enabled.insert((label, prop_key), ());
         true
     }
 

@@ -49,6 +49,14 @@
 //! Like `ns_nodes`, the backing maps are a **leaf** in the lock-acquisition order:
 //! lock-free `DashMap`s mutated only inside `insert_node` / `remove_node`, never
 //! calling back into `historical`, `wal`, or `current_timestamp`.
+//!
+//! The index's write-write correctness relies on an **external per-node
+//! serialization invariant** it does not itself enforce: `insert_node` reads a
+//! node's prior `(label, properties)` and then overwrites it, so two writes to
+//! the *same* node must not interleave. The commit path guarantees this — every
+//! mutator holds `snapshot_lock.read()` and same-node writes are serialized by
+//! the `historical.write()` commit guard — and `enable`/`disable` take
+//! `snapshot_lock.write()` to exclude all mutators while (re)building the index.
 
 use crate::core::property::PropertyValue;
 

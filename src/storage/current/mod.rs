@@ -2479,6 +2479,12 @@ impl CurrentStorage {
     pub fn enable_property_index(&self, label: &str, property: &str) -> Result<()> {
         let label_id = GLOBAL_INTERNER.intern(label)?;
         let key_id = GLOBAL_INTERNER.intern(property)?;
+        // Exclude ALL concurrent writers (each holds `snapshot_lock.read()`) for
+        // the whole set-flag + backfill, so no create/update/delete can
+        // interleave and leave a node in the wrong bucket or no bucket. See
+        // `CurrentIndexes::enable_property_index` for the two racy interleavings
+        // this closes.
+        let _lock = self.snapshot_lock.write();
         if !self.indexes.enable_property_index(label_id, key_id) {
             return Err(crate::core::error::Error::FailedPrecondition(format!(
                 "property index already enabled for ({label}, {property})"
@@ -2530,6 +2536,10 @@ impl CurrentStorage {
         ) else {
             return Err(not_enabled());
         };
+        // Same exclusion as enable: hold the write lock so no concurrent writer's
+        // reindex can add a bucket after the purge (which a later re-enable would
+        // otherwise merge into fresh results — the #S3 race).
+        let _lock = self.snapshot_lock.write();
         if !self.indexes.disable_property_index(label_id, key_id) {
             return Err(not_enabled());
         }
