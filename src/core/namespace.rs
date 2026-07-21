@@ -1041,7 +1041,9 @@ mod tests {
     #[test]
     fn same_scope_list_is_order_and_duplicate_insensitive() {
         assert!(list(&["agent:a", "agent:b"]).same_scope(&list(&["agent:b", "agent:a"])));
-        assert!(list(&["agent:a", "agent:a", "agent:b"]).same_scope(&list(&["agent:b", "agent:a"])));
+        assert!(
+            list(&["agent:a", "agent:a", "agent:b"]).same_scope(&list(&["agent:b", "agent:a"]))
+        );
         // A strict subset is NOT the same set.
         assert!(!list(&["agent:a"]).same_scope(&list(&["agent:a", "agent:b"])));
     }
@@ -1117,7 +1119,10 @@ mod tests {
         );
         // Strict-subset list.
         assert_eq!(
-            reconcile_namespace_scope(Some(list(&["agent:a"])), Some(list(&["agent:a", "agent:b"]))),
+            reconcile_namespace_scope(
+                Some(list(&["agent:a"])),
+                Some(list(&["agent:a", "agent:b"]))
+            ),
             Err(NamespaceError::ScopeConflict)
         );
     }
