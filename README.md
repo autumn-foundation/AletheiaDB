@@ -1,6 +1,6 @@
 # AletheiaDB
 
-[![CI](https://github.com/madmax983/AletheiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/madmax983/AletheiaDB/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/madmax983/AletheiaDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/madmax983/AletheiaDB) [![crates.io](https://img.shields.io/crates/v/aletheiadb.svg)](https://crates.io/crates/aletheiadb) [![docs.rs](https://docs.rs/aletheiadb/badge.svg)](https://docs.rs/aletheiadb) [![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
+[![CI](https://github.com/autumn-foundation/AletheiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/autumn-foundation/AletheiaDB/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/autumn-foundation/AletheiaDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/autumn-foundation/AletheiaDB) [![crates.io](https://img.shields.io/crates/v/aletheiadb.svg)](https://crates.io/crates/aletheiadb) [![docs.rs](https://docs.rs/aletheiadb/badge.svg)](https://docs.rs/aletheiadb) [![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
 
 A high-performance **bi-temporal graph database** in Rust, combining graph
 traversal, vector similarity search, and full temporal history in a single
@@ -185,7 +185,7 @@ See the [Hybrid Query guide](docs/guides/hybrid-query-guide.md).
 ## Performance
 
 Benchmarks run on every push to trunk.
-[📊 Latest results](https://madmax983.github.io/AletheiaDB/benchmarks/)
+[📊 Latest results](https://autumn-foundation.github.io/AletheiaDB/benchmarks/)
 
 Averages across 30–212 datapoints of continuous CI runs:
 
@@ -278,7 +278,7 @@ request to get the full array back. Similarity scores (`score` /
 ## Contributing
 
 ```bash
-git clone https://github.com/madmax983/AletheiaDB
+git clone https://github.com/autumn-foundation/AletheiaDB
 cargo build
 just check-all   # format + lint + test + coverage
 ```

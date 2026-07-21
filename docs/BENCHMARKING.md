@@ -61,13 +61,13 @@ The generated page includes:
 
 Benchmark results are automatically published to GitHub Pages on every push to `trunk`:
 
-**New HTML Tables**: https://madmax983.github.io/AletheiaDB/benchmarks/
+**New HTML Tables**: https://autumn-foundation.github.io/AletheiaDB/benchmarks/
 - Clean table-based overview of all benchmark suites
 - Performance targets comparison
 - Mean, std dev, and median for each benchmark
 - Links to detailed Criterion reports
 
-**Historical Trends**: https://madmax983.github.io/AletheiaDB/dev/bench/
+**Historical Trends**: https://autumn-foundation.github.io/AletheiaDB/dev/bench/
 - Time-series charts showing benchmark trends over time
 - Regression detection and alerts
 - Comparison between commits

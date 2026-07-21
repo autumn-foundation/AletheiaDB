@@ -3,7 +3,7 @@
 **Version:** 1.0
 **Status:** Specification
 **Created:** 2026-01-20
-**Issue:** [#86](https://github.com/madmax983/AletheiaDB/issues/86) (VS-080)
+**Issue:** [#86](https://github.com/autumn-foundation/AletheiaDB/issues/86) (VS-080)
 **Related:** [Phase 5: Persistence & Performance](VECTOR_SEARCH_DESIGN.md#phase-5-persistence--performance)
 
 ## Executive Summary

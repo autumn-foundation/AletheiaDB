@@ -69,7 +69,7 @@ If you see a compiler error like `unresolved import` or `item is gated behind th
 ## Building from Source
 
 ```bash
-git clone https://github.com/madmax983/AletheiaDB
+git clone https://github.com/autumn-foundation/AletheiaDB
 cd AletheiaDB
 
 # Build the library
