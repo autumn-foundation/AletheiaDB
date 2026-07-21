@@ -28,6 +28,18 @@ pub struct RunOptions {
     pub warmup: usize,
     /// Measured iterations per operation.
     pub iterations: usize,
+    /// Optional override of the dedicated vector-extension corpus size,
+    /// independent of the SNB scale. `None` uses the preset (no extra corpus).
+    pub vector_count: Option<usize>,
+    /// Optional override of the embedding dimensionality. `None` uses the
+    /// preset dim. Must be `> 0` when supplied.
+    pub vector_dim: Option<usize>,
+    /// When set, ingest an official LDBC SNB Datagen CSV directory
+    /// ([`crate::datagen`]) instead of generating a synthetic graph. The
+    /// `scale` field is ignored for the SNB graph in this mode (real ingested
+    /// counts are used); `vector_count` / `vector_dim` still size the synthetic
+    /// vector corpus layered on the real graph.
+    pub datagen_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for RunOptions {
@@ -37,6 +49,9 @@ impl Default for RunOptions {
             seed: 42,
             warmup: 20,
             iterations: 200,
+            vector_count: None,
+            vector_dim: None,
+            datagen_dir: None,
         }
     }
 }
@@ -47,7 +62,20 @@ impl Default for RunOptions {
 ///
 /// Returns any error from graph loading or the underlying database queries.
 pub fn run_suite(opts: &RunOptions) -> aletheiadb::Result<BenchmarkReport> {
-    let graph = generator::generate(opts.scale, opts.seed);
+    let graph = match &opts.datagen_dir {
+        // Ingest an official LDBC SNB Datagen CSV directory. The SNB graph comes
+        // entirely from the CSVs; vector overrides still size the synthetic
+        // corpus layered on top (Datagen has no embeddings).
+        Some(dir) => crate::datagen::ingest(dir, opts.vector_count, opts.vector_dim)
+            .map_err(|e| aletheiadb::Error::Other(e.to_string()))?,
+        None => generator::generate_with_overrides(
+            opts.scale,
+            opts.seed,
+            opts.vector_count,
+            opts.vector_dim,
+        )
+        .map_err(|e| aletheiadb::Error::Other(e.to_string()))?,
+    };
     let loaded = loader::load(&graph)?;
 
     let mut operations = Vec::new();
@@ -58,18 +86,41 @@ pub fn run_suite(opts: &RunOptions) -> aletheiadb::Result<BenchmarkReport> {
     operations.extend(vector_extension(&loaded, opts)?);
 
     let unix = now_unix();
+    // The disclaimer is mode-aware: a datagen run really does ingest the
+    // official LDBC SNB Datagen *graph* (only the vectors are synthetic), so it
+    // must not claim the built-in synthetic generator was used.
+    let disclaimer = if opts.datagen_dir.is_some() {
+        "LDBC-STYLE, NOT AN AUDITED LDBC RESULT. Official LDBC SNB Datagen graph \
+         ingested (SNB subset), but with synthetic vectors layered on (Datagen \
+         ships no embeddings); single-node; incumbents not run in this \
+         environment. See docs/METHODOLOGY.md for every deviation."
+            .to_string()
+    } else {
+        "LDBC-STYLE, NOT AN AUDITED LDBC RESULT. Built-in synthetic \
+         generator (not official LDBC Datagen); single-node; incumbents not run \
+         in this environment. See docs/METHODOLOGY.md for every deviation."
+            .to_string()
+    };
     Ok(BenchmarkReport {
         schema_version: crate::report::SCHEMA_VERSION,
         suite: "ldbc-style-snb-subset".to_string(),
-        disclaimer: "LDBC-STYLE, NOT AN AUDITED LDBC RESULT. Built-in synthetic \
-             generator (not official LDBC Datagen); single-node; incumbents not run \
-             in this environment. See docs/METHODOLOGY.md for every deviation."
-            .to_string(),
+        disclaimer,
         generated_at: format_rfc3339(unix),
         generated_at_unix: unix,
         hardware: HardwareInfo::capture(),
         config: RunConfig {
-            scale: opts.scale.label().to_string(),
+            source: if opts.datagen_dir.is_some() {
+                "datagen".to_string()
+            } else {
+                "synthetic".to_string()
+            },
+            // In datagen mode the graph's own label ("datagen") is authoritative;
+            // otherwise the requested synthetic scale point.
+            scale: if opts.datagen_dir.is_some() {
+                graph.scale.clone()
+            } else {
+                opts.scale.label().to_string()
+            },
             seed: opts.seed,
             warmup: opts.warmup,
             iterations: opts.iterations,

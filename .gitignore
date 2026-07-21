@@ -110,3 +110,7 @@ pr_description.md
 
 # Re-include CI helper scripts (overrides "*.py" above)
 !.github/scripts/*.py
+
+# Re-include incumbent benchmark driver scripts (overrides "*.py"/"*.sh" above)
+!crates/aletheia-bench-ldbc/incumbents/**/*.sh
+!crates/aletheia-bench-ldbc/incumbents/**/*.py

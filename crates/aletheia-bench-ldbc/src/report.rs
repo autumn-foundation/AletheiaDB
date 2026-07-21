@@ -81,7 +81,13 @@ impl HardwareInfo {
 /// Run configuration echoed into the report for reproducibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
-    /// Scale point label (`"smoke"` or `"sf0.1"`).
+    /// Where the graph came from: `"synthetic"` (built-in generator) or
+    /// `"datagen"` (official LDBC SNB Datagen CSV ingest). Defaults to
+    /// `"synthetic"` when absent in an older report.
+    #[serde(default = "default_source")]
+    pub source: String,
+    /// Scale point label (`"smoke"` or `"sf0.1"`; `"datagen"` for an ingested
+    /// Datagen directory).
     pub scale: String,
     /// PRNG seed used to generate the fixture.
     pub seed: u64,
@@ -98,6 +104,11 @@ pub struct RunConfig {
     pub vector_count: usize,
     /// Embedding dimensionality used for the vector extension.
     pub vector_dim: usize,
+}
+
+/// Default `RunConfig::source` for reports written before the field existed.
+fn default_source() -> String {
+    "synthetic".to_string()
 }
 
 /// The complete benchmark report.

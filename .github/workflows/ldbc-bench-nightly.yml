@@ -27,7 +27,7 @@ jobs:
   ldbc-bench:
     name: LDBC-style suite + regression gate (non-gating)
     # Guard to the main repo so this informational job doesn't run on forks.
-    if: github.repository == 'madmax983/AletheiaDB'
+    if: github.repository == 'autumn-foundation/AletheiaDB'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

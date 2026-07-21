@@ -56,7 +56,7 @@ pub struct LoadedGraph {
     pub node_count: usize,
     /// Total edges loaded.
     pub edge_count: usize,
-    /// Number of embedding vectors indexed (== number of posts).
+    /// Number of embedding vectors indexed (== posts + standalone corpus).
     pub vector_count: usize,
 }
 
@@ -139,11 +139,12 @@ pub fn load(graph: &GeneratedGraph) -> aletheiadb::Result<LoadedGraph> {
         )?;
         forum_ids.push(id);
         node_count += 1;
-        // Forum moderator edge.
-        if !person_ids.is_empty() {
+        // Forum moderator edge. Skipped when the moderator FK was unknown or
+        // (defensively) out of range, so it is never mis-attributed.
+        if let Some(&moderator_id) = f.moderator.and_then(|m| person_ids.get(m)) {
             db.create_edge_with_valid_time(
                 id,
-                person_ids[f.moderator.min(person_ids.len() - 1)],
+                moderator_id,
                 "HAS_MODERATOR",
                 PropertyMapBuilder::new().build(),
                 Some(base_ts),
@@ -166,21 +167,25 @@ pub fn load(graph: &GeneratedGraph) -> aletheiadb::Result<LoadedGraph> {
         post_ids.push(id);
         node_count += 1;
 
-        // Forum -[:CONTAINER_OF]-> Post
-        db.create_edge_with_valid_time(
-            forum_ids[post.forum],
-            id,
-            "CONTAINER_OF",
-            PropertyMapBuilder::new().build(),
-            Some(base_ts),
-        )?;
-        edge_count += 1;
+        // Forum -[:CONTAINER_OF]-> Post. Skipped when the container FK was
+        // unknown or out of range, keeping the Post node without a bogus edge.
+        if let Some(&forum_id) = post.forum.and_then(|f| forum_ids.get(f)) {
+            db.create_edge_with_valid_time(
+                forum_id,
+                id,
+                "CONTAINER_OF",
+                PropertyMapBuilder::new().build(),
+                Some(base_ts),
+            )?;
+            edge_count += 1;
+        }
 
-        // Post -[:HAS_CREATOR]-> Person
-        if !person_ids.is_empty() {
+        // Post -[:HAS_CREATOR]-> Person. Skipped when the creator FK was
+        // unknown or out of range, so it is never mis-attributed.
+        if let Some(&creator_id) = post.creator.and_then(|c| person_ids.get(c)) {
             db.create_edge_with_valid_time(
                 id,
-                person_ids[post.creator.min(person_ids.len() - 1)],
+                creator_id,
                 "HAS_CREATOR",
                 PropertyMapBuilder::new().build(),
                 Some(base_ts),
@@ -212,15 +217,18 @@ pub fn load(graph: &GeneratedGraph) -> aletheiadb::Result<LoadedGraph> {
         comment_ids.push(id);
         node_count += 1;
 
-        // Comment -[:REPLY_OF]-> Post
-        db.create_edge_with_valid_time(
-            id,
-            post_ids[c.reply_to_post],
-            "REPLY_OF",
-            PropertyMapBuilder::new().build(),
-            Some(base_ts),
-        )?;
-        edge_count += 1;
+        // Comment -[:REPLY_OF]-> Post. Skipped (defensively) when the reply
+        // target index is out of range rather than panicking on the index.
+        if let Some(&reply_to_id) = post_ids.get(c.reply_to_post) {
+            db.create_edge_with_valid_time(
+                id,
+                reply_to_id,
+                "REPLY_OF",
+                PropertyMapBuilder::new().build(),
+                Some(base_ts),
+            )?;
+            edge_count += 1;
+        }
 
         // Comment -[:HAS_CREATOR]-> Person
         if !person_ids.is_empty() {
@@ -257,12 +265,31 @@ pub fn load(graph: &GeneratedGraph) -> aletheiadb::Result<LoadedGraph> {
         set
     };
 
+    // --- Dedicated standalone vector-extension corpus (Issue #3628) ---
+    // Present only when a `--vector-count` override dialed one in; indexed on
+    // the same `embedding` property so the k-NN workload scales over posts +
+    // corpus. Each is a lightweight `Embedding` node.
+    for v in &graph.vectors {
+        db.create_node_with_valid_time(
+            "Embedding",
+            PropertyMapBuilder::new()
+                .insert("corpus_idx", v.idx as i64)
+                .insert_vector("embedding", &v.embedding)
+                .build(),
+            Some(base_ts),
+        )?;
+        node_count += 1;
+    }
+
     let query_embedding = graph
         .posts
         .first()
         .map(|p| p.embedding.clone())
+        .or_else(|| graph.vectors.first().map(|v| v.embedding.clone()))
         .unwrap_or_else(|| vec![0.0; dim]);
-    let vector_count = post_ids.len();
+    // Honest count of vectors actually indexed: post embeddings plus the
+    // dedicated corpus.
+    let vector_count = post_ids.len() + graph.vectors.len();
 
     Ok(LoadedGraph {
         db,
