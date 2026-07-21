@@ -75,7 +75,7 @@ const ENCRYPTION_STATE_VERSION: u32 = if cfg!(feature = "serde") { 3 } else { 2 
 /// Serialize a concrete AEAD [`Algorithm`] to its stable on-disk token. `Auto` is
 /// resolved to its concrete form first so the pinned value is never ambiguous
 /// (the whole point of pinning is cross-host portability).
-fn algorithm_token(algorithm: Algorithm) -> &'static str {
+pub(crate) fn algorithm_token(algorithm: Algorithm) -> &'static str {
     match algorithm.resolve() {
         Algorithm::Aes256Gcm => "aes256gcm",
         Algorithm::ChaCha20Poly1305 => "chacha20poly1305",
@@ -86,7 +86,7 @@ fn algorithm_token(algorithm: Algorithm) -> &'static str {
 
 /// Parse a pinned-algorithm token written by [`algorithm_token`]. Returns `None`
 /// for an unrecognized token (treated as corrupt by the caller).
-fn algorithm_from_token(token: &str) -> Option<Algorithm> {
+pub(crate) fn algorithm_from_token(token: &str) -> Option<Algorithm> {
     match token {
         "aes256gcm" => Some(Algorithm::Aes256Gcm),
         "chacha20poly1305" => Some(Algorithm::ChaCha20Poly1305),

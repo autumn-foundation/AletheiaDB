@@ -157,10 +157,9 @@ impl IndexPersistenceManager {
     /// [`StorageError::IndexKeyringAlreadyInstalled`]:
     /// crate::core::error::StorageError::IndexKeyringAlreadyInstalled
     // The production consumer is the hot-live plaintext -> encrypted enable
-    // engine (Issue #3708 follow-up driver), mirroring the WAL/cold seams whose
-    // drivers likewise land separately; mark the seam allow(dead_code) until it
-    // is wired in. TODO(#3708): remove once the enable driver calls this.
-    #[allow(dead_code)]
+    // engine (Issue #3708), which drives this from `enable_encryption` after the
+    // WAL's `install_wal_keyring` and the index plaintext -> `AEIX` wrap pass,
+    // mirroring the WAL/cold seams.
     pub(crate) fn install_index_keyring(
         &self,
         keyring: IndexKeyring,

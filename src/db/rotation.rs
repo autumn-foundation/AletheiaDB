@@ -57,6 +57,7 @@ use zeroize::Zeroizing;
 
 use crate::core::error::{Error, Result, StorageError};
 use crate::db::AletheiaDB;
+use crate::db::encryption_state::{algorithm_from_token, algorithm_token};
 use crate::encryption::audit::{AuditEvent, EncryptionAuditLogger};
 use crate::encryption::cipher::Cipher;
 use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
@@ -263,6 +264,61 @@ pub(crate) fn verify_resumed_source_kcv(
     }
     let mek = load_mek(source).map_err(rotation_err)?;
     verify_mek_kcv_value(mek_kcv, &mek)
+}
+
+/// Verify a resumed plaintext → encrypted **enable**'s configured algorithm still
+/// matches the CONCRETE algorithm the ledger pinned at enable-start, and return the
+/// concrete algorithm every resume wrap/keyring-build MUST run under (Issue #3708).
+///
+/// `pinned` is the ledger's `algorithm` field; `config_algorithm` is the algorithm
+/// this `open()` resolved from its config (possibly `Auto`). The MEK-only `mek_kcv`
+/// cannot detect an algorithm change, so without this a resume on a different CPU
+/// class (`Auto` → AES on one host, ChaCha on another) or after an operator TOML
+/// edit would wrap the still-plaintext files under a DIFFERENT algorithm than the
+/// already-wrapped ones and pin the wrong algorithm as authority — a silent
+/// split-algorithm brick.
+///
+/// Fail-closed contract (mirrors [`verify_resumed_source_kcv`]): on a mismatch, or
+/// on a legacy `None` pin (an enable ledger that predates this field — its
+/// already-wrapped files' algorithm is unknowable), it returns a structured
+/// [`StorageError::InconsistentState`]. The caller leaves the ledger UNTOUCHED (no
+/// clear, no wrap), so a later `open()` under the original algorithm/host resumes
+/// losslessly. Logs/errors carry only the (non-secret) algorithm identifier, never
+/// key material.
+pub(crate) fn verify_resumed_enable_algorithm(
+    pinned: Option<Algorithm>,
+    config_algorithm: Algorithm,
+) -> Result<Algorithm> {
+    match pinned {
+        Some(pinned) => {
+            let now = config_algorithm.resolve();
+            if now == pinned {
+                Ok(pinned)
+            } else {
+                Err(StorageError::InconsistentState {
+                    reason: format!(
+                        "pending enable ledger pinned AEAD algorithm {} but this open() resolves \
+                         {} (the CPU class or configured `encryption.algorithm` changed since the \
+                         enable started); the ledger is RETAINED and the resume REFUSED. Reopen \
+                         under the original algorithm/host so the migration completes under the \
+                         same cipher every already-wrapped file uses.",
+                        algorithm_token(pinned),
+                        algorithm_token(now),
+                    ),
+                }
+                .into())
+            }
+        }
+        None => Err(StorageError::InconsistentState {
+            reason: "pending enable ledger has no pinned AEAD algorithm (it was written by a \
+                     pre-#3708 binary); refusing to resume under a possibly-different algorithm \
+                     that could split the tier. The ledger is RETAINED. Complete the migration \
+                     with the original binary/host, or clear the ledger only after confirming no \
+                     at-rest file was wrapped."
+                .to_string(),
+        }
+        .into()),
+    }
 }
 
 /// Re-derive the MEK recorded in a ledger's `new_source` AND verify it against
@@ -1386,6 +1442,22 @@ struct RotationLedger {
     /// `wal_retire` / `cold`) so a crash mid-re-wrap re-runs it. Absent in any
     /// pre-Slice-5 ledger, defaulting to `Skipped` on read.
     subject_keyring: LayerStatus,
+    /// The CONCRETE (resolved) AEAD algorithm a plaintext → encrypted **enable**
+    /// migration is wrapping every at-rest layer under (Issue #3708). Stamped at
+    /// enable-start as `algorithm.resolve()` so `Auto` is NEVER persisted here:
+    /// pinning the concrete variant lets an interrupted-enable resume detect a
+    /// host/config algorithm change (a cross-CPU-class reopen where `Auto`
+    /// resolves differently, or an operator TOML edit) and refuse BEFORE wrapping
+    /// the remaining files under a *different* algorithm than the already-wrapped
+    /// ones — the split-algorithm corruption the MEK-only `mek_kcv` cannot catch.
+    ///
+    /// `Some` only for a `direction=enable` ledger written by a post-#3708 binary;
+    /// `None` for every rotation/disable ledger, and for a legacy enable ledger
+    /// written before this field existed. A resume reading `None` on an enable
+    /// ledger fails **closed** (`verify_resumed_enable_algorithm`): it cannot
+    /// prove the resume host's algorithm matches what the already-wrapped files
+    /// used, so it retains the ledger and refuses rather than risk a split.
+    algorithm: Option<Algorithm>,
 }
 
 impl RotationLedger {
@@ -1409,6 +1481,8 @@ impl RotationLedger {
             mek_kcv: None,
             // The index-only PR1 path never re-wraps the subject keyring.
             subject_keyring: LayerStatus::Skipped,
+            // Algorithm pinning is an ENABLE-only concern (Issue #3708).
+            algorithm: None,
         }
     }
 
@@ -1445,6 +1519,8 @@ impl RotationLedger {
             // Slice 5: re-wrap the subject keyring when it holds stale-generation
             // wrapped DEKs (else nothing to do — record Skipped).
             subject_keyring: scope(subject_keyring_in_scope),
+            // Algorithm pinning is an ENABLE-only concern (Issue #3708).
+            algorithm: None,
         }
     }
 
@@ -1462,6 +1538,7 @@ impl RotationLedger {
         new_source: KeyProviderConfig,
         index_in_scope: bool,
         cold_in_scope: bool,
+        algorithm: Algorithm,
     ) -> Self {
         let scope = |in_scope: bool| {
             if in_scope {
@@ -1487,6 +1564,10 @@ impl RotationLedger {
             // is no prior subject-wrap generation to re-wrap from, so the
             // subject-keyring re-wrap step never runs on an enable.
             subject_keyring: LayerStatus::Skipped,
+            // Pin the CONCRETE algorithm (Issue #3708). `.resolve()` here means
+            // `Auto` is never persisted, so a cross-host/config resume can detect a
+            // divergence instead of silently wrapping under a different algorithm.
+            algorithm: Some(algorithm.resolve()),
         }
     }
 
@@ -1540,6 +1621,9 @@ impl RotationLedger {
             // enable case), so the subject-keyring re-wrap step never runs on a
             // disable — always `Skipped`, never `Pending`.
             subject_keyring: LayerStatus::Skipped,
+            // Algorithm pinning is an ENABLE-only concern (Issue #3708); a disable
+            // strips encryption, so there is no target algorithm to pin.
+            algorithm: None,
         }
     }
 }
@@ -1622,6 +1706,11 @@ fn serialize_ledger(ledger: &RotationLedger) -> Result<String> {
     if let Some(kcv) = &ledger.mek_kcv {
         body.push_str(&format!("mek_kcv={kcv}\n"));
     }
+    // The enable-pinned concrete AEAD algorithm (Issue #3708). Additive line,
+    // present only for a `direction=enable` ledger; absent for rotation/disable.
+    if let Some(algorithm) = ledger.algorithm {
+        body.push_str(&format!("algorithm={}\n", algorithm_token(algorithm)));
+    }
     body.push_str(&format!(
         "layer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\nlayer.wal_retire={}\nlayer.subject_keyring={}\n",
         ledger.index.as_str(),
@@ -1651,8 +1740,14 @@ fn serialize_ledger(ledger: &RotationLedger) -> Result<String> {
             .into());
         }
     };
+    // The enable-pinned concrete AEAD algorithm (Issue #3708). Additive line,
+    // present only for a `direction=enable` ledger; absent for rotation/disable.
+    let algorithm_line = match ledger.algorithm {
+        Some(algorithm) => format!("algorithm={}\n", algorithm_token(algorithm)),
+        None => String::new(),
+    };
     Ok(format!(
-        "version=2\ndirection={}\ntarget_version={}\nnew_source_kind={kind}\nnew_source_value={value}\nlayer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\nlayer.wal_retire={}\nlayer.subject_keyring={}\n",
+        "version=2\ndirection={}\ntarget_version={}\nnew_source_kind={kind}\nnew_source_value={value}\n{algorithm_line}layer.index={}\nlayer.checkpoint={}\nlayer.wal={}\nlayer.cold={}\nlayer.wal_retire={}\nlayer.subject_keyring={}\n",
         ledger.direction.as_str(),
         ledger.new_version,
         ledger.index.as_str(),
@@ -1782,6 +1877,7 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
     // v3 (#3620): full serde_json config + optional KCV.
     let mut new_source_json = None;
     let mut mek_kcv = None;
+    let mut algorithm_line = None;
     let mut layer_index = None;
     let mut layer_checkpoint = None;
     let mut layer_wal = None;
@@ -1822,6 +1918,8 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
             // `=`, i.e. the full compact JSON (internal `=` preserved).
             "new_source_json" => new_source_json = Some(v.to_string()),
             "mek_kcv" => mek_kcv = Some(v.to_string()),
+            // Issue #3708: the enable-pinned concrete AEAD algorithm token.
+            "algorithm" => algorithm_line = Some(v.to_string()),
             "layer.index" => layer_index = Some(parse_layer(v, "layer.index")?),
             "layer.checkpoint" => layer_checkpoint = Some(parse_layer(v, "layer.checkpoint")?),
             "layer.wal" => layer_wal = Some(parse_layer(v, "layer.wal")?),
@@ -1860,6 +1958,18 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
         other => return Err(corrupt(&format!("unsupported ledger version {other}"))),
     };
 
+    // Issue #3708: a present `algorithm=` token must parse to a known concrete
+    // algorithm; an unrecognized token is corrupt (fail-closed, never a silent
+    // wrong-cipher resume). Absent → `None` (a legacy enable ledger with no pin, or
+    // any rotation/disable ledger); the resume verifier fails closed on `None`.
+    let algorithm = match algorithm_line {
+        Some(token) => Some(
+            algorithm_from_token(&token)
+                .ok_or_else(|| corrupt(&format!("unknown algorithm {token:?}")))?,
+        ),
+        None => None,
+    };
+
     let new_version = target_version.ok_or_else(|| corrupt("missing target_version"))?;
     // Reconstruct the new-key SOURCE. Prefer the v3 full-config JSON when present
     // (round-trips passphrase/KMS/Vault); fall back to the v1/v2 two-string
@@ -1895,6 +2005,10 @@ fn read_rotation_state_at(path: &std::path::Path) -> Result<Option<RotationLedge
         // the subject keyring, so a resume must never fabricate a Pending re-wrap
         // pass from an ambiguous absent field.
         subject_keyring: layer_subject_keyring.unwrap_or(LayerStatus::Skipped),
+        // Issue #3708: absent `algorithm=` (any pre-#3708 ledger, or a
+        // rotation/disable ledger) loads `None`; the enable-resume verifier fails
+        // closed on `None`.
+        algorithm,
     }))
 }
 
@@ -2101,6 +2215,13 @@ pub(crate) struct EnableLedgerView {
     /// changed source secret is refused precisely instead of silently wrapping
     /// the still-plaintext files under a different key.
     pub(crate) mek_kcv: Option<String>,
+    /// The CONCRETE (resolved) AEAD algorithm the enable pinned at start (Issue
+    /// #3708), or `None` for a legacy enable ledger written before pinning existed.
+    /// Every resume path verifies the now-resolved algorithm against this via
+    /// [`verify_resumed_enable_algorithm`] BEFORE any wrap/unwrap, failing closed on
+    /// a mismatch (or on `None`) so a cross-host/config resume can never wrap the
+    /// remaining files under a different algorithm than the already-wrapped ones.
+    pub(crate) algorithm: Option<Algorithm>,
 }
 
 impl EnableLedgerView {
@@ -2115,6 +2236,7 @@ impl EnableLedgerView {
             wal_retire_pending: matches!(ledger.wal_retire, LayerStatus::Pending),
             new_source: ledger.new_source,
             mek_kcv: ledger.mek_kcv,
+            algorithm: ledger.algorithm,
         }
     }
 
@@ -2167,12 +2289,14 @@ pub(crate) fn write_enable_ledger(
     new_source: &KeyProviderConfig,
     index_in_scope: bool,
     cold_in_scope: bool,
+    algorithm: Algorithm,
 ) -> Result<()> {
     let mut ledger = RotationLedger::enable_scope(
         ENABLE_KEY_VERSION,
         new_source.clone(),
         index_in_scope,
         cold_in_scope,
+        algorithm,
     );
     // Stamp the KCV of the new MEK so a crash-resume can detect a wrong/changed
     // key at the source precisely (Issue #3620).
@@ -2218,7 +2342,18 @@ pub(crate) fn install_pending_enable_wal_keyring(
     if !(view.wal_pending || view.wal_complete) || wal.is_encrypted() {
         return Ok(());
     }
-    let keyring = build_enable_wal_keyring(&view.new_source, enc_cfg.algorithm)?;
+    // Issue #3708 (MEDIUM): verify the pinned algorithm AND the source-secret KCV
+    // BEFORE building/installing the keyring, because installing SEALS the active
+    // plaintext segment and FORCE-ROLLS a fresh encrypted segment — an irreversible
+    // side effect. A changed algorithm or out-of-band-changed source secret must
+    // refuse HERE (ledger retained, no seal/roll) so the resume surfaces the precise
+    // KCV/algorithm error and leaves NO stray wrong-key segment on disk — instead of
+    // the pre-fix behavior that sealed a wrong-key segment and only failed later at
+    // the KCV check in `resume_pending_enable`, bricking the DB even with the correct
+    // key restored.
+    let algorithm = verify_resumed_enable_algorithm(view.algorithm, enc_cfg.algorithm)?;
+    verify_resumed_source_kcv(&view.new_source, view.mek_kcv.as_deref())?;
+    let keyring = build_enable_wal_keyring(&view.new_source, algorithm)?;
     wal.install_wal_keyring(keyring)
 }
 
@@ -2352,9 +2487,15 @@ pub(crate) fn enable_resume_ciphers(
     let Some(view) = read_enable_ledger_at(&ledger_path)? else {
         return Ok(None);
     };
+    // Issue #3708: this is the EARLIEST resume touch-point (it builds the ciphers
+    // `open()` reads the at-rest layers under). Verify the pinned algorithm matches
+    // the resume host/config and build under the ledger's CONCRETE pinned algorithm,
+    // so a cross-host/config divergence refuses here (ledger retained, startup
+    // aborts) before any wrap can split the tier.
+    let resolved = verify_resumed_enable_algorithm(view.algorithm, algorithm)?;
     Ok(Some(EnableResumeCiphers {
-        index: build_enable_index_cipher(&view.new_source, algorithm)?,
-        cold: build_enable_cold_cipher(&view.new_source, algorithm)?,
+        index: build_enable_index_cipher(&view.new_source, resolved)?,
+        cold: build_enable_cold_cipher(&view.new_source, resolved)?,
     }))
 }
 
@@ -4505,6 +4646,7 @@ mod tests {
             wal_retire: super::LayerStatus::Skipped,
             mek_kcv: None,
             subject_keyring: super::LayerStatus::Skipped,
+            algorithm: None,
         };
         super::write_ledger(&manager, &ledger).unwrap();
 
@@ -4567,6 +4709,7 @@ mod tests {
             wal_retire: super::LayerStatus::Skipped,
             mek_kcv: None,
             subject_keyring: super::LayerStatus::Pending,
+            algorithm: None,
         };
         super::write_ledger(&manager, &ledger).unwrap();
 
@@ -5245,6 +5388,7 @@ mod tests {
                 wal_retire: super::LayerStatus::Skipped,
                 mek_kcv: None,
                 subject_keyring: super::LayerStatus::Skipped,
+                algorithm: None,
             },
         )
         .unwrap();
@@ -5326,6 +5470,7 @@ mod tests {
                 wal_retire: super::LayerStatus::Skipped,
                 mek_kcv: None,
                 subject_keyring: super::LayerStatus::Skipped,
+                algorithm: None,
             },
         )
         .unwrap();
@@ -5801,6 +5946,7 @@ mod tests {
             wal_retire: LayerStatus::Skipped,
             mek_kcv: kcv,
             subject_keyring: LayerStatus::Skipped,
+            algorithm: None,
         }
     }
 
@@ -5888,6 +6034,66 @@ mod tests {
         let got = ledger_roundtrip(&ledger);
         assert_eq!(got.mek_kcv.as_deref(), Some("0123456789abcdef"));
         assert_eq!(got, ledger);
+    }
+
+    /// Issue #3708: an enable ledger's pinned CONCRETE algorithm round-trips through
+    /// serialize→parse, `enable_scope` resolves `Auto` to a concrete variant (never
+    /// persisting `Auto`), and a legacy ledger with no `algorithm=` line loads
+    /// `None`. `verify_resumed_enable_algorithm` then accepts a matching config and
+    /// refuses a mismatch or a `None` (legacy) pin.
+    #[test]
+    fn enable_ledger_pins_and_roundtrips_concrete_algorithm() {
+        use crate::encryption::factory::Algorithm;
+        let src = KeyProviderConfig::File {
+            path: "/k.key".into(),
+        };
+
+        // `enable_scope` resolves Auto → a concrete variant (never `Auto`).
+        let pinned = super::RotationLedger::enable_scope(
+            super::ENABLE_KEY_VERSION,
+            src.clone(),
+            true,
+            false,
+            Algorithm::Auto,
+        );
+        let concrete = Algorithm::Auto.resolve();
+        assert_eq!(pinned.algorithm, Some(concrete));
+        assert_ne!(pinned.algorithm, Some(Algorithm::Auto));
+
+        // Round-trips through the on-disk ledger format.
+        let got = ledger_roundtrip(&pinned);
+        assert_eq!(got.algorithm, Some(concrete));
+        assert_eq!(got, pinned);
+        let body = super::serialize_ledger(&pinned).unwrap();
+        assert!(
+            body.contains("algorithm="),
+            "enable ledger emits the pin: {body}"
+        );
+
+        // A rotation (non-enable) ledger carries NO algorithm pin.
+        let rot = mk_ledger(RotationDirection::Forward, src.clone(), None);
+        assert_eq!(rot.algorithm, None);
+        assert!(
+            !super::serialize_ledger(&rot)
+                .unwrap()
+                .contains("algorithm=")
+        );
+
+        // Legacy ledger with no `algorithm=` line loads `None`.
+        assert_eq!(ledger_roundtrip(&rot).algorithm, None);
+
+        // The verifier: match → Ok(concrete); mismatch → Err; legacy `None` → Err.
+        let other = if concrete == Algorithm::Aes256Gcm {
+            Algorithm::ChaCha20Poly1305
+        } else {
+            Algorithm::Aes256Gcm
+        };
+        assert_eq!(
+            super::verify_resumed_enable_algorithm(Some(concrete), Algorithm::Auto).unwrap(),
+            concrete
+        );
+        assert!(super::verify_resumed_enable_algorithm(Some(concrete), other).is_err());
+        assert!(super::verify_resumed_enable_algorithm(None, Algorithm::Auto).is_err());
     }
 
     #[test]
@@ -6614,6 +6820,7 @@ mod tests {
                     wal_retire: super::super::LayerStatus::Skipped,
                     mek_kcv: None,
                     subject_keyring: super::super::LayerStatus::Pending,
+                    algorithm: None,
                 },
             )
             .unwrap();
