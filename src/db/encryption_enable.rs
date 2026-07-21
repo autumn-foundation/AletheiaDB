@@ -521,6 +521,15 @@ impl AletheiaDB {
             &EncryptionState::enabled_with_algorithm(key_source.clone(), algorithm),
         )?;
 
+        // Test-only crash-injection seam (Issue #3708 GAP-1): fires in the EXACT
+        // flip→clear window so a test can catch the LIVE driver here. When armed on
+        // the current thread it returns `Err`, aborting the migration AFTER the
+        // durable authority flip but BEFORE the ledger clear — directly observing
+        // that the Option-A ordering holds on the live path (not just on a
+        // hand-reconstructed durable state). Production builds compile this away.
+        #[cfg(test)]
+        enable_test_hooks::run_after_authority_before_clear()?;
+
         // === Step 4: clear the ledger (breadcrumb #6) ============================
         clear_rotation_state(manager);
         Ok(())
@@ -788,8 +797,65 @@ impl AletheiaDB {
     }
 }
 
+/// Test-only crash-injection seam for the hot-live enable driver (Issue #3708
+/// GAP-1), mirroring the `#[cfg(test)]` hook style of
+/// [`commit_test_hooks`](crate::api::transaction::write::commit_test_hooks) and
+/// `backup_test_hooks`.
+///
+/// The one seam it exposes fires inside
+/// [`enable_encryption_migrate`](AletheiaDB::enable_encryption_migrate) in the
+/// exact window between the durable `encryption.state` authority flip and the
+/// rotation-ledger clear, so a test can catch the LIVE driver mid-Option-A and
+/// prove the flip is durably ordered *before* the clear.
+///
+/// The armed flag is **thread-local**, not a global static: `enable_encryption`
+/// runs synchronously on its caller's thread, so a test arms the injection for
+/// its own thread only and never perturbs enable calls on other test threads
+/// running in parallel (no serialization lock required). Firing is one-shot — it
+/// disarms itself — and it is a pure no-op on unarmed threads. Production builds
+/// compile the call site away entirely.
+#[cfg(test)]
+pub(crate) mod enable_test_hooks {
+    use crate::core::error::{Error, Result};
+    use std::cell::Cell;
+
+    thread_local! {
+        static AFTER_AUTHORITY_BEFORE_CLEAR: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arm the flip→clear crash injection for the CURRENT thread. The next
+    /// `enable_encryption_migrate` on this thread returns an injected error in the
+    /// window after the durable authority flip and before the ledger clear.
+    pub(crate) fn arm_crash_after_authority_before_clear() {
+        AFTER_AUTHORITY_BEFORE_CLEAR.with(|f| f.set(true));
+    }
+
+    /// Disarm the flip→clear crash injection for the current thread (idempotent;
+    /// the seam also disarms itself when it fires).
+    pub(crate) fn disarm_crash_after_authority_before_clear() {
+        AFTER_AUTHORITY_BEFORE_CLEAR.with(|f| f.set(false));
+    }
+
+    /// Fired in `enable_encryption_migrate` between the authority flip and the
+    /// ledger clear. Returns `Err` (simulating a crash at that point) iff the
+    /// current thread armed the injection, then disarms it (one-shot). A no-op —
+    /// `Ok(())` — on unarmed threads.
+    pub(crate) fn run_after_authority_before_clear() -> Result<()> {
+        AFTER_AUTHORITY_BEFORE_CLEAR.with(|f| {
+            if f.replace(false) {
+                Err(Error::Other(
+                    "injected crash: enable flip→clear window (test seam)".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::enable_test_hooks;
     use crate::config::{AletheiaDBConfig, WalConfigBuilder};
     use crate::db::encryption_state::{encryption_state_path, read_encryption_state};
     use crate::db::rotation::write_enable_ledger;
@@ -1550,6 +1616,104 @@ mod tests {
             "flip->clear gap resume cleared the ledger"
         );
         assert!(read_encryption_state(&indexes).unwrap().unwrap().enabled);
+    }
+
+    /// Option-A ordering, observed DIRECTLY on the LIVE enable driver (Issue #3708
+    /// GAP-1). Unlike `enable_crash_after_authority_before_clear_resumes` (which
+    /// hand-lays the durable flip→clear-gap state and only proves the *resume*
+    /// converges), this test drives the real `enable_encryption` path and injects a
+    /// crash at the exact seam BETWEEN the durable authority flip and the ledger
+    /// clear (via the thread-local `enable_test_hooks` seam). It then asserts the
+    /// ON-DISK state is exactly (authority == enabled, ledger still PRESENT) —
+    /// proving the flip is durably ordered before the clear on the live path — and
+    /// that a subsequent resume is a clean no-op that only clears the ledger
+    /// (re-wrapping no tier), leaving authority=enabled and no ledger.
+    ///
+    /// Red→green guard: if the migrate ordering is neutered so the clear runs
+    /// before the flip, the crash at this seam leaves the ledger already cleared
+    /// (and/or the authority not yet flipped), so the (enabled + present) assertions
+    /// below fail.
+    #[test]
+    fn authority_flip_precedes_ledger_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_source_at(dir.path());
+        let indexes = dir.path().join("indexes");
+        let idx_dir = index_files_dir(dir.path());
+
+        // Drive the LIVE enable and inject a crash in the flip→clear window. The
+        // arming is thread-local + one-shot, so it perturbs only this call.
+        let result = {
+            let mut db =
+                AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+            db.create_node("N", PropertyMapBuilder::new().build())
+                .unwrap();
+            enable_test_hooks::arm_crash_after_authority_before_clear();
+            let r = db.enable_encryption(key.clone());
+            // Belt-and-suspenders (the seam already disarms itself when it fires).
+            enable_test_hooks::disarm_crash_after_authority_before_clear();
+            r
+            // `db` dropped here: the errored enable restored the persist worker,
+            // so Drop joins it and the on-disk state settles.
+        };
+        assert!(
+            result.is_err(),
+            "injected flip→clear crash aborts the live enable"
+        );
+
+        // ON-DISK proof of Option A on the LIVE path: the durable authority is
+        // ALREADY enabled while the rotation ledger is STILL present — the flip is
+        // durably ordered BEFORE the clear.
+        assert!(
+            read_encryption_state(&indexes)
+                .unwrap()
+                .map(|s| s.enabled)
+                .unwrap_or(false),
+            "authority durably flipped to enabled before the ledger clear"
+        );
+        let mgr = manager_for(dir.path());
+        let view = crate::db::rotation::read_enable_ledger(&mgr)
+            .unwrap()
+            .expect("rotation ledger still present at the flip→clear crash point");
+        // Every layer was already Complete at the crash point, so the resume below
+        // structurally takes NONE of the wrap branches — it re-wraps nothing.
+        assert!(
+            view.wal_complete
+                && view.index_complete
+                && !view.index_pending
+                && !view.checkpoint_pending
+                && !view.wal_retire_pending
+                && !view.cold_pending,
+            "all at-rest layers Complete at the flip→clear crash point (resume re-wraps nothing)"
+        );
+        // Index is already fully AEIX at the crash point.
+        let (total_before, plain_before, aeix_before) = classify_index_files(&idx_dir);
+        assert!(
+            total_before > 0 && plain_before == 0 && aeix_before == total_before,
+            "index dir fully AEIX at the crash point (no plaintext to re-wrap)"
+        );
+
+        // Resume on reopen: a clean no-op that just clears the ledger and leaves the
+        // authority enabled — re-wrapping no tier, data intact.
+        {
+            let db = AletheiaDB::with_unified_config(plaintext_durable_config(dir.path())).unwrap();
+            assert_eq!(db.node_count(), 1, "data intact after flip→clear resume");
+            assert!(db.wal.is_encrypted(), "WAL stays encrypted after resume");
+        }
+        assert!(
+            read_encryption_state(&indexes).unwrap().unwrap().enabled,
+            "authority stays enabled after resume"
+        );
+        assert!(
+            !indexes.join("rotation.state").exists(),
+            "resume cleared the ledger"
+        );
+        // Still fully AEIX after resume: the resume introduced no plaintext (it did
+        // not re-wrap, and could not have un-wrapped) — the tier is untouched.
+        let (total_after, plain_after, aeix_after) = classify_index_files(&idx_dir);
+        assert!(
+            total_after > 0 && plain_after == 0 && aeix_after == total_after,
+            "index dir still fully AEIX after resume (no tier re-wrapped)"
+        );
     }
 
     /// C6: on disk a completed enable is authority-flipped, ledger-cleared, WAL
