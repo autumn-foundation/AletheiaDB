@@ -795,7 +795,14 @@ impl AletheiaDB {
     /// [`TransactionError::FenceTooLow`](crate::core::error::TransactionError::FenceTooLow)
     /// (non-retriable). `lease_until` is computed as `engine_now + lease_ttl`, so
     /// a skewed-fast executor cannot install a far-future, un-stealable lease.
-    /// See
+    ///
+    /// # Caveat: the fence is runtime-only, not crash-durable
+    ///
+    /// The rejected claim's map is fsync'd to the WAL before the commit-guard
+    /// fence re-check runs, and crash recovery replays WAL frames without that
+    /// check, so a `FenceTooLow`-rejected claim is **re-applied on crash
+    /// recovery** (the inherited #3413 WAL-abort-framing gap). Do not rely on the
+    /// fence for zombie fencing across a crash until #3413 lands. See
     /// [`WriteOps::claim_with_lease_fenced`](crate::api::transaction::WriteOps::claim_with_lease_fenced).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     #[allow(clippy::too_many_arguments)]

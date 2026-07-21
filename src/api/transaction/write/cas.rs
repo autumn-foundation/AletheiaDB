@@ -503,7 +503,7 @@ pub(crate) fn detect_cas_precondition_violations(
                 // making the stale-fence steal collision impossible.
                 if let Some(fence) = &precondition.fence {
                     let stored = node_stored_fence(tx, node_id, &fence.fence_key);
-                    if fence.new_fence <= stored {
+                    if !fence_beats_stored(fence.new_fence, stored) {
                         return Err(TransactionError::FenceTooLow {
                             fence_key: fence.fence_key.clone(),
                             new_fence: fence.new_fence,
@@ -575,6 +575,21 @@ fn node_stored_fence(tx: &WriteTransaction, node_id: NodeId, fence_key: &str) ->
     }
 }
 
+/// Pure boundary predicate for the monotonic fence gate (DBOS Phase 3e): does
+/// `new_fence` **strictly beat** the committed `stored` fence?
+///
+/// A claim is admitted only when `new_fence > stored`, so an equal fence is
+/// rejected (`8 > 8` is false — this is what makes a stale-fence steal
+/// collision impossible: two stealers computing the same value cannot both
+/// commit) and a strictly-greater one accepted. When no fence is held the
+/// caller passes `stored == i64::MIN` (see [`node_stored_fence`]), so any
+/// non-negative `new_fence` beats it and a first claim is admitted. Extracted
+/// as a pure fn so the exact `>` boundary is unit-testable without a live
+/// transaction, mirroring [`lease_until_expired_at`].
+fn fence_beats_stored(new_fence: i64, stored: i64) -> bool {
+    new_fence > stored
+}
+
 /// Pure boundary predicate for lease expiry: is a `lease_until` of `until_us`
 /// microseconds (or `None` for absent/non-integer, i.e. unclaimed) expired at
 /// commit wallclock `commit_wallclock`?
@@ -627,6 +642,45 @@ mod lease_boundary_tests {
         assert!(
             lease_until_expired_at(None, 1_000),
             "absent / non-integer lease must be treated as unclaimed (expired)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fence_boundary_tests {
+    use super::fence_beats_stored;
+
+    #[test]
+    fn fence_equal_to_stored_is_rejected() {
+        // Boundary: new_fence == stored. The gate is strict `>`, so an equal
+        // fence must NOT beat the stored one — this is what makes the
+        // stale-fence steal collision impossible (two stealers computing the
+        // same value cannot both commit).
+        assert!(
+            !fence_beats_stored(8, 8),
+            "new_fence == stored must be rejected (strict > boundary)"
+        );
+    }
+
+    #[test]
+    fn fence_greater_than_stored_is_accepted() {
+        assert!(
+            fence_beats_stored(9, 8),
+            "new_fence strictly greater than stored must be accepted"
+        );
+    }
+
+    #[test]
+    fn any_fence_beats_absent_stored() {
+        // `node_stored_fence` maps a missing / non-integer / absent-node fence
+        // to `i64::MIN`, so a first claim's fence always beats it.
+        assert!(
+            fence_beats_stored(1, i64::MIN),
+            "a positive fence must beat the i64::MIN 'no fence held' sentinel"
+        );
+        assert!(
+            fence_beats_stored(0, i64::MIN),
+            "even fence 0 must beat the i64::MIN 'no fence held' sentinel"
         );
     }
 }

@@ -329,7 +329,9 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 **Atomic multi-write batches (Issue #3231)**: `apply_batch` accepts an
 **ordered** array of write operations (`create_node`, `create_edge`,
 `update_node`, `update_edge`, `delete_node`, `delete_edge`, each supporting
-the #3221 optional `valid_time`) committing **all-or-nothing** in one
+the #3221 optional `valid_time`, plus `compare_and_set_node` — a
+version-precondition CAS on a committed node whose stale expected version
+aborts the whole batch → zero writes) committing **all-or-nothing** in one
 `WriteTransaction` (single WAL batch append / GroupCommit fsync) — an LLM
 builds an entity-with-relationships subgraph in ONE call instead of N calls
 with N−1 possible partially-committed states. A `create_node` may carry a

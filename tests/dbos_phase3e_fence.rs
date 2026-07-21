@@ -259,8 +259,21 @@ fn fenced_claim_still_refused_when_lease_held() {
 }
 
 // -------------------------------------------------------------------------
-// Piece 1: concurrent fenced steal of an expired lease — exactly one wins, and
-// the winner's committed fence strictly exceeds the pre-steal fence.
+// Piece 1: concurrent fenced steal of an expired lease — exactly one wins, the
+// loser is fenced out (`FenceTooLow`, not merely a lost version race), and the
+// winner's committed fence strictly exceeds the pre-steal fence.
+//
+// Both threads request `lease_ttl = 0`, so the winner's DB-computed lease is
+// already expired for the later-committing loser. That routes the loser through
+// the lease-expired OR-branch of the CLAIM gate (its stale base version no
+// longer matches), so it reaches — and is stopped by — the FENCE gate. This is
+// the whole point: with a long ttl the loser would abort on the version/lease
+// claim gate (`CasMismatch`) and never exercise the fence gate at all, so the
+// test would pass even if Piece 1's fence gate were deleted. Asserting the
+// loser's error is specifically `FenceTooLow` (and that both stealers computed
+// the SAME new_fence = 11) makes this test FAIL-IF-FENCE-REMOVED: without the
+// fence gate the loser's lease-expired steal would COMMIT (`successes == 2`,
+// tripping the exactly-one-winner assertion) instead of being rejected.
 // -------------------------------------------------------------------------
 #[test]
 fn concurrent_fenced_steal_one_winner_distinct_fence() {
@@ -280,7 +293,8 @@ fn concurrent_fenced_steal_one_winner_distinct_fence() {
     let v1 = db.get_node(id).unwrap().current_version;
 
     // B and C both open on the same base (expired lease, fence 10) and race to
-    // commit a fenced steal with new_fence = 11.
+    // commit a fenced steal with new_fence = 11 and a zero-length lease (so the
+    // winner's lease is already expired for the loser's later commit).
     let barrier = Arc::new(Barrier::new(2));
     let mut handles = Vec::new();
     for owner in ["B", "C"] {
@@ -295,7 +309,7 @@ fn concurrent_fenced_steal_one_winner_distinct_fence() {
                 "lease_until",
                 "fence",
                 PropertyValue::from(owner),
-                std::time::Duration::from_secs(3600),
+                std::time::Duration::from_secs(0), // lease expires immediately
                 11,
                 PropertyMapBuilder::new().build(),
             )
@@ -307,6 +321,26 @@ fn concurrent_fenced_steal_one_winner_distinct_fence() {
     let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let successes = results.iter().filter(|r| r.is_ok()).count();
     assert_eq!(successes, 1, "exactly one fenced steal wins: {results:?}");
+
+    // The loser must be fenced out (its stale-read fence 11 does not beat the
+    // winner's now-committed 11), NOT merely a version/lease race loss. This is
+    // the assertion that exercises — and depends on — Piece 1's fence gate.
+    let loser_err = results
+        .into_iter()
+        .find_map(|r| r.err())
+        .expect("exactly one commit must fail");
+    match loser_err {
+        Error::Transaction(TransactionError::FenceTooLow {
+            new_fence, stored, ..
+        }) => {
+            assert_eq!(
+                new_fence, 11,
+                "the loser tried to install the stale-read 11"
+            );
+            assert_eq!(stored, 11, "the winner had already committed fence 11");
+        }
+        other => panic!("expected the loser to be fenced out (FenceTooLow), got {other:?}"),
+    }
 
     let node = db.get_node(id).unwrap();
     assert_eq!(

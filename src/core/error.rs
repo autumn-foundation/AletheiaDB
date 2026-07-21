@@ -922,6 +922,20 @@ pub enum TransactionError {
     /// conflict: the correct response is to re-read the current fence and
     /// recompute a strictly-greater one, so it is non-retriable (maps to MCP
     /// `FAILED_PRECONDITION`, like `CasMismatch`).
+    ///
+    /// # Caveat: the fence rejection is runtime-only, not crash-durable
+    ///
+    /// The rejection is enforced only at commit time, under the historical
+    /// guard. A fenced claim's property map (its new fence + DB-computed
+    /// lease/owner) is serialized and fsync'd to the WAL *before* the
+    /// commit-guard fence re-check runs, and crash recovery replays WAL frames
+    /// without re-running the precondition check — so a claim correctly rejected
+    /// live with `FenceTooLow` is nonetheless **re-applied on crash recovery**,
+    /// resurrecting the stale-steal the fence exists to prevent. This is the
+    /// inherited #3413 WAL-abort-framing gap (the same accepted caveat as
+    /// `CasMismatch` and the #3416 write-skew checks), not a new defect and not
+    /// fixable in Phase 3e. Until #3413 lands, operators must not rely on the
+    /// fence for recovery / zombie fencing across a crash.
     #[error(
         "fenced claim rejected: supplied fence {new_fence} for key '{fence_key}' is not strictly \
          greater than the committed fence {stored}"

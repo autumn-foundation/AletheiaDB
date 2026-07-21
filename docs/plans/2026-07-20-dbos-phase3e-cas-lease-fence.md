@@ -110,12 +110,43 @@ A fence-precondition failure is reported as a **new** non-retriable
 recompute*, not blind retry — distinct enough from a lost-claim `CasMismatch`
 to warrant its own variant for debuggability, but the same non-retriable class).
 
+### Crash-recovery caveat (MAJOR — runtime-only, doc-only; no code fix in scope)
+
+The fence rejection is **runtime-only**, not crash-durable. A fenced claim's
+property map (its new fence + the DB-computed lease/owner) is serialized and
+fsync'd to the WAL **before** the commit-guard fence re-check
+(`detect_cas_precondition_violations`) runs (the §0 WAL-before-apply ordering).
+Crash recovery replays WAL frames **without** re-running that precondition
+check. So a claim correctly rejected live with `FenceTooLow` is nonetheless
+**re-applied on crash recovery** — resurrecting the stale-steal the fence
+exists to prevent.
+
+This is the **inherited #3413 WAL-abort-framing gap**: the same accepted caveat
+that already applies to `CasMismatch` and the #3416 write-skew re-checks (all of
+which likewise leave a durable, replayable frame for a transaction the guard
+aborts). It is **not a new defect** and **not fixable within Phase 3e** (a fix
+requires WAL abort/transaction framing, tracked as #3413). Until #3413 lands,
+operators **must not rely on the fence for recovery / zombie fencing across a
+crash** — the guarantee holds for a running server, not across a restart. This
+caveat is mirrored in the rustdoc of `TransactionError::FenceTooLow` and
+`claim_with_lease_fenced`.
+
 ### Backward compatibility
 
 Additive only. The existing `claim_with_lease` / `compare_and_set_node` keep
 their exact signatures and semantics (no fence). A **new** opt-in surface
 carries fencing (see Piece 2's method, which bundles both). Existing callers
 compile unchanged.
+
+**Trait-semver note.** Adding the required method
+`claim_with_lease_fenced_with_options` (no default body) to the public
+`WriteOps` trait is technically **semver-breaking for any external implementor**
+of the trait: an out-of-tree type that implements `WriteOps` would fail to
+compile until it adds the new method. There is **no in-tree impact** — only
+`WriteTransaction` implements `WriteOps` — and this mirrors the existing
+`claim_with_lease_with_options` pattern (the ergonomic `claim_with_lease_fenced`
+is a defaulted method that delegates to it, so callers, as opposed to
+implementors, are unaffected).
 
 ---
 
@@ -156,6 +187,18 @@ time, using the DB HLC. The executor's clock never enters the stored deadline.
 `create_snapshot` uses); taking it at buffer-build time holds no locks
 (buffer-build precedes the `current_timestamp → wal → historical` acquisition
 chain), so it introduces no lock-order concern.
+
+**Backward-host-clock liveness caveat.** `lease_until` is computed from the raw
+`time::now().wallclock()` at buffer-build time, while a later reader judges
+expiry against the HLC-adjusted `commit_timestamp.wallclock()`; a **backward**
+jump of the host system clock between the two can make a freshly-installed lease
+judged immediately-expired (its lease becomes stealable earlier than intended).
+This is a **liveness-only** effect — safety and the fence are unaffected (an
+over-early expiry only routes an honest claimant through the lease OR-branch,
+where the fence still serializes the winner) — and it is a **pre-existing
+host-fault class** (a monotonic-clock concern distinct from the *executor* skew
+Piece 2 removes; here the DB clock itself is the one that moved). No code
+change.
 
 ---
 

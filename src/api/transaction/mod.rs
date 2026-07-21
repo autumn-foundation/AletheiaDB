@@ -921,6 +921,17 @@ pub trait WriteOps: ReadOps {
     /// The `lease_owner_key` / `lease_until_key` / `fence_key` names are
     /// caller-supplied conventions, not a hardcoded schema. Delegates to
     /// [`claim_with_lease_fenced_with_options`](Self::claim_with_lease_fenced_with_options).
+    ///
+    /// # Caveat: the fence is runtime-only, not crash-durable
+    ///
+    /// The fence rejection is enforced only at commit time. A rejected claim's
+    /// property map is fsync'd to the WAL before the commit-guard fence re-check
+    /// runs, and crash recovery replays WAL frames without re-running that
+    /// check, so a claim correctly rejected live with
+    /// [`TransactionError::FenceTooLow`](crate::core::error::TransactionError::FenceTooLow)
+    /// is **re-applied on crash recovery** — the inherited #3413
+    /// WAL-abort-framing gap (same accepted caveat as `CasMismatch`). Until
+    /// #3413 lands, do not rely on the fence for zombie fencing across a crash.
     #[allow(clippy::too_many_arguments)]
     fn claim_with_lease_fenced(
         &mut self,
