@@ -124,6 +124,26 @@ Two properties matter:
    `WorkflowError::OrchestrationDivergence` instead (fail-loud, N6 / §8 #12).
    The guard cannot *repair* nondeterminism; it only refuses to compound it.
 
+#### The reserved-before-applied window (concurrent adopt-winner retry)
+
+Under a *real* concurrent duplicate-record race there is a narrow window where
+the `idem_key` UNIQUE **reservation** is already visible to the losing writer
+**before** the winner's `Step` node has been applied to current storage — the
+winner may be parked in a GroupCommit fsync wait at that instant. A naive
+re-read in that window would transiently return `None` and spuriously fail the
+§5.2 / §8 #1 idempotency contract.
+
+`record_step` therefore makes the adopt-winner re-read a **bounded retry loop**:
+it re-reads the winner up to a small fixed number of times with a short
+exponential backoff (the reserved winner is guaranteed to become visible
+shortly). If the winner *still* cannot be read after the bounded retries,
+`record_step` returns the **retriable** `WorkflowError::Contended` — never a
+terminal `Malformed` — so the caller simply retries the record. The
+name-divergence guard still runs the instant a record is found, so a genuine
+mismatch fails loud even under contention. The same `Contended` error is
+surfaced when the underlying write aborts with a transient serialization /
+write conflict; all other database errors pass through as `Database`.
+
 ### Why the library `db.write` transaction, not the MCP `apply_batch`
 
 The design describes recording "in one `apply_batch`", but `apply_batch` is an
@@ -229,15 +249,15 @@ always by `step_number`**, so a backdated record never reorders steps
 the crate-wide `aletheiadb::Error`). Underlying storage errors are carried
 transparently via `WorkflowError::Database`. Notable variants:
 
-| Variant | When |
-|---|---|
-| `RunAlreadyExists` | `create_run` with a `workflow_id` that already exists. |
-| `RunNotFound` | A run lookup that must exist did not. |
-| `OrchestrationDivergence` | Recorded step name ≠ expected name (fail-loud, §8 #12). |
-| `StepFailed` | `get_or_record_step` memo hit on a step recorded as `failed`. |
-| `StepExecutionFailed` | The user `exec` closure returned an error (step **not** recorded → a later retry re-executes). |
-| `Malformed` | A stored record is missing a required property / holds an unexpected type (external corruption). |
-| `Database` | Any error from the underlying store. |
+| Variant | When | Retriable |
+|---|---|---|
+| `RunAlreadyExists` | `create_run` with a `workflow_id` that already exists. | no |
+| `OrchestrationDivergence` | Recorded step name ≠ expected name (fail-loud, §8 #12). | no |
+| `StepFailed` | A memo hit (in `get_or_record_step`, on both the direct memo-hit path and the adopt-after-race path) on a step recorded as `failed`; its recorded error is propagated (never an empty success). | no |
+| `StepExecutionFailed` | The user `exec` closure returned an error (step **not** recorded → a later retry re-executes). | no |
+| `Contended` | Transient contention: a concurrent duplicate won the `idem_key` reservation but its `Step` node was not yet visible after the bounded adopt-retry, or the write aborted with a transient serialization / write conflict. **Retry the `record_step`.** | **yes** |
+| `Malformed` | A stored record is missing a required property / holds an unexpected type (external corruption). | no |
+| `Database` | Any other error from the underlying store. | no |
 
 ## Scope: what is (and is NOT) in 3a
 

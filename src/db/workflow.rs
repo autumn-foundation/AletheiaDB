@@ -183,11 +183,22 @@ pub enum WorkflowError {
         workflow_id: String,
     },
 
-    /// The requested run does not exist.
-    #[error("workflow run '{workflow_id}' not found")]
-    RunNotFound {
-        /// The `workflow_id` that was looked up.
+    /// A transient contention condition while adopting a concurrent
+    /// record-race winner: the `idem_key` UNIQUE reservation became visible to
+    /// this loser, but the winner's `Step` node had not yet been applied to
+    /// current storage when we re-read it (the reservation becomes visible
+    /// before the winner's node is applied — the winner may be parked in a
+    /// GroupCommit fsync wait). Also raised when the underlying write aborts
+    /// with a transient serialization / write conflict.
+    ///
+    /// This is **transient**: retry the `record_step` and the winner will be
+    /// visible.
+    #[error("workflow '{workflow_id}' step {step_number} is contended; retry the record")]
+    Contended {
+        /// The workflow whose step is contended.
         workflow_id: String,
+        /// The contended step number.
+        step_number: i64,
     },
 
     /// Two orchestrators disagree about what a given step *is*: the recorded
@@ -452,6 +463,7 @@ pub struct CreateRunSpec {
 
 impl CreateRunSpec {
     /// Start a spec for a run with the given UNIQUE `workflow_id` and name.
+    #[must_use]
     pub fn new(workflow_id: impl Into<String>, name: impl Into<String>) -> Self {
         CreateRunSpec {
             workflow_id: workflow_id.into(),
@@ -489,6 +501,7 @@ pub struct StepRecordSpec {
 
 impl StepRecordSpec {
     /// A spec for a **completed** step carrying `output`.
+    #[must_use]
     pub fn completed(
         step_number: i64,
         name: impl Into<String>,
@@ -505,6 +518,7 @@ impl StepRecordSpec {
     }
 
     /// A spec for a **failed** step carrying an error message.
+    #[must_use]
     pub fn failed(step_number: i64, name: impl Into<String>, error: impl Into<String>) -> Self {
         StepRecordSpec {
             step_number,
@@ -612,7 +626,7 @@ impl<'a> WorkflowJournal<'a> {
         let node_id = match self.db.create_node(LABEL_WORKFLOW_RUN, props) {
             Ok(id) => id,
             Err(e) => {
-                if is_unique_violation(&e, KEY_WORKFLOW_ID) {
+                if is_unique_violation(&e, LABEL_WORKFLOW_RUN, KEY_WORKFLOW_ID) {
                     return Err(WorkflowError::RunAlreadyExists {
                         workflow_id: spec.workflow_id,
                     });
@@ -677,8 +691,7 @@ impl<'a> WorkflowJournal<'a> {
         // idem_key UNIQUE constraint is checked at commit; a collision surfaces
         // here as an Err.
         let write_result = self.db.write(|tx| {
-            let step_id =
-                tx.create_node_with_valid_time(LABEL_STEP, step_props.clone(), valid_time)?;
+            let step_id = tx.create_node_with_valid_time(LABEL_STEP, step_props, valid_time)?;
             tx.create_edge_with_valid_time(
                 source,
                 step_id,
@@ -698,30 +711,51 @@ impl<'a> WorkflowJournal<'a> {
                     deduplicated: false,
                 })
             }
-            Err(e) if is_unique_violation(&e, KEY_IDEM_KEY) => {
+            Err(e) if is_unique_violation(&e, LABEL_STEP, KEY_IDEM_KEY) => {
                 // Someone already recorded this step. Adopt the winner, after
                 // asserting the recorded name matches what we intended to write.
-                let existing = self
-                    .get_step(&workflow_id, spec.step_number)?
-                    .ok_or_else(|| {
-                        WorkflowError::Malformed(format!(
-                            "idem_key '{key}' collided but no Step could be re-read"
-                        ))
-                    })?;
-                if existing.name() != spec.name {
-                    return Err(WorkflowError::OrchestrationDivergence {
-                        workflow_id,
-                        step_number: spec.step_number,
-                        expected: spec.name,
-                        found: existing.name().to_string(),
-                    });
+                //
+                // Reserved-before-applied window: under a real concurrent
+                // duplicate-record race the `idem_key` UNIQUE *reservation*
+                // becomes visible to this loser BEFORE the winner's `Step` node
+                // is applied to current storage — the winner may be parked in a
+                // GroupCommit fsync wait at that instant. So the re-read can
+                // transiently return `None` even though a winner is guaranteed
+                // to become visible shortly. Retry a bounded number of times with
+                // a short exponential backoff; only if the winner still cannot be
+                // re-read do we surface the retriable `Contended` error (never a
+                // terminal `Malformed`, which would spuriously break the §5.2/§8
+                // #1 idempotency contract).
+                const MAX_ADOPT_ATTEMPTS: u32 = 8;
+                let mut backoff = std::time::Duration::from_millis(1);
+                for attempt in 0..MAX_ADOPT_ATTEMPTS {
+                    if let Some(existing) = self.get_step(&workflow_id, spec.step_number)? {
+                        if existing.name() != spec.name {
+                            return Err(WorkflowError::OrchestrationDivergence {
+                                workflow_id,
+                                step_number: spec.step_number,
+                                expected: spec.name,
+                                found: existing.name().to_string(),
+                            });
+                        }
+                        return Ok(StepOutcome {
+                            record: existing,
+                            deduplicated: true,
+                        });
+                    }
+                    // Not yet visible; back off and retry (except after the last
+                    // attempt, where we fall through to `Contended`).
+                    if attempt + 1 < MAX_ADOPT_ATTEMPTS {
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(std::time::Duration::from_millis(4));
+                    }
                 }
-                Ok(StepOutcome {
-                    record: existing,
-                    deduplicated: true,
+                Err(WorkflowError::Contended {
+                    workflow_id,
+                    step_number: spec.step_number,
                 })
             }
-            Err(e) => Err(WorkflowError::Database(e)),
+            Err(e) => Err(classify_write_error(e, workflow_id, spec.step_number)),
         }
     }
 
@@ -814,12 +848,34 @@ impl<'a> WorkflowJournal<'a> {
             message: e.message,
         })?;
 
-        let spec = StepRecordSpec::completed(step_number, expected_name, output);
+        let spec = StepRecordSpec::completed(step_number, expected_name, output.clone());
         let outcome = self.record_step(run, spec)?;
+
+        if outcome.deduplicated {
+            // Adopt path: a concurrent writer won the record race, so its record
+            // is authoritative — not our just-executed `output`. Honour the
+            // winner's status: a *failed* winner must surface `StepFailed`, never
+            // an empty `Vec<u8>` presented as success (FIX 2).
+            return match outcome.record.status() {
+                StepStatus::Completed => Ok(StepValue {
+                    step_number,
+                    output: outcome.record.output().unwrap_or_default().to_vec(),
+                    from_memo: true,
+                }),
+                StepStatus::Failed => Err(WorkflowError::StepFailed {
+                    workflow_id,
+                    step_number,
+                    message: outcome.record.error().unwrap_or_default().to_string(),
+                }),
+            };
+        }
+
+        // Fresh write: return the executor's original output directly, avoiding a
+        // re-read of the just-written node and its re-allocation (FIX 6).
         Ok(StepValue {
             step_number,
-            output: outcome.record.output().unwrap_or_default().to_vec(),
-            from_memo: outcome.deduplicated,
+            output,
+            from_memo: false,
         })
     }
 }
@@ -871,12 +927,46 @@ fn opt_bytes(props: &PropertyMap, key: &str) -> Option<Vec<u8>> {
         .map(<[u8]>::to_vec)
 }
 
-/// Does `err` carry a UNIQUE-constraint violation on `property`?
-fn is_unique_violation(err: &crate::core::error::Error, property: &str) -> bool {
+/// Does `err` carry a UNIQUE-constraint violation on `(label, property)`?
+///
+/// Matching the label as well as the property prevents a future same-named
+/// property on another label from misrouting the adopt-winner / already-exists
+/// paths.
+fn is_unique_violation(err: &crate::core::error::Error, label: &str, property: &str) -> bool {
     matches!(
         err.as_constraint(),
-        Some(ConstraintError::UniqueViolation { property: p, .. }) if p == property
+        Some(ConstraintError::UniqueViolation { label: l, property: p, .. })
+            if l == label && p == property
     )
+}
+
+/// Classify a raw database error surfaced by the write path.
+///
+/// Transient write-write conflicts (snapshot-isolation serialization failures
+/// and write conflicts) become the retriable [`WorkflowError::Contended`]; every
+/// other error passes through opaquely as [`WorkflowError::Database`].
+/// `ValidationFailed` / `CasMismatch` are deliberately **not** reclassified —
+/// they are caller-fault precondition failures (e.g. the #3416 concurrent-orphan
+/// abort), not transient, so retrying cannot help.
+fn classify_write_error(
+    err: crate::core::error::Error,
+    workflow_id: String,
+    step_number: i64,
+) -> WorkflowError {
+    use crate::core::error::{Error as DbError, TransactionError};
+    if matches!(
+        err,
+        DbError::Transaction(
+            TransactionError::SerializationFailure { .. } | TransactionError::WriteConflict { .. }
+        )
+    ) {
+        WorkflowError::Contended {
+            workflow_id,
+            step_number,
+        }
+    } else {
+        WorkflowError::Database(err)
+    }
 }
 
 // A tiny sanity check that the module builds and the id/enum helpers are

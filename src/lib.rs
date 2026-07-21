@@ -151,7 +151,8 @@ pub use db::namespace_query::TraverseDirection;
 pub use db::{
     FusedHit, FusionBreakdown, FusionError, FusionPolicy, FusionPolicyBuilder, FusionPolicyError,
 };
-// Durable workflow-execution journal (DBOS Phase 3a, Issue #3a).
+// Durable workflow-execution journal (DBOS Phase 3a; design sketch
+// `docs/plans/2026-07-19-dbos-design-sketch.md`, Issue #3577).
 #[cfg(feature = "durable-execution")]
 pub use db::{
     CreateRunSpec, StepExecError, StepOutcome, StepRecord, StepRecordSpec, StepStatus, StepValue,
