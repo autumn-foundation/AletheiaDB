@@ -163,7 +163,9 @@ pub use index::{
     vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},
 };
 pub use storage::CurrentStorage;
+#[cfg(not(target_arch = "wasm32"))]
 pub use storage::backup::BackupError;
+#[cfg(not(target_arch = "wasm32"))]
 pub use storage::index_persistence::PersistenceConfig;
 pub use storage::wal::{DurabilityMode, WriteOptions};
 
