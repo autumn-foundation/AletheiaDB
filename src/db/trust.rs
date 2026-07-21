@@ -31,20 +31,33 @@
 //!   noisy-OR identity term, which would let a live sibling absorb it — Group 1
 //!   fix). The two are distinct [`ConfidenceSource`] variants (review-fix #2).
 //!
-//! # Valid-time terminality (wallclock-now approximation)
+//! # Valid-time-aware terminality (Issue #3382 follow-up)
 //!
-//! Terminality is keyed on the **valid-time reference `time::now()`** (wallclock
-//! now), independent of the transaction-time `AS OF` scope: a fact whose valid
-//! interval has *ended* as of now (`valid_to <= now`) is [`Retracted`], while a
-//! fact retracted **effective-future** or holding a naturally-bounded interval
-//! that currently **contains** now is still **live** and contributes its
-//! confidence. The transaction-time `AS OF` coordinate scopes tx-time only.
-//! Using wallclock now for both `computed_confidence` and
-//! `computed_confidence_as_of` is a **documented approximation** for the as-of
-//! path (a fully valid-time-scoped trust evaluation is a tracked follow-up).
+//! Terminality is keyed on an explicit **valid-time evaluation coordinate**,
+//! independent of the transaction-time `AS OF` scope (valid time and
+//! transaction time are orthogonal axes): a fact whose valid interval has
+//! *ended* at the coordinate (`valid_to <= valid_now`) is [`Retracted`], while a
+//! fact retracted **effective-after** the coordinate or holding a
+//! naturally-bounded interval that **contains** the coordinate is still **live**
+//! and contributes its confidence. The coordinate flows through the whole
+//! recursive lineage closure, so every upstream fact is judged terminal-or-not
+//! at the same valid time.
+//!
+//! The coordinate is supplied by
+//! [`computed_confidence_as_of_bitemporal`](AletheiaDB::computed_confidence_as_of_bitemporal)
+//! and by [`TrustOptions::as_of_valid_time`]. When it is omitted it defaults to
+//! wallclock `time::now()`, which reproduces the prior behavior **exactly**:
+//! [`computed_confidence`](AletheiaDB::computed_confidence) evaluates at
+//! `(now, now)` and
+//! [`computed_confidence_as_of`](AletheiaDB::computed_confidence_as_of)
+//! evaluates valid time at `now` while scoping transaction time to `tt`.
+//!
 //! A version that merely **predates** the as-of `tt` (not yet recorded at `T`)
 //! is Absent and contributes `0.0`, but is NOT a retraction and does not flag
-//! `has_retracted_inputs` (adversarial #7).
+//! `has_retracted_inputs` (adversarial #7) — this tx-time carve-out is
+//! unaffected by the valid-time coordinate.
+//!
+//! [`TrustOptions::as_of_valid_time`]: crate::experimental::reasoning::trust_propagation::TrustOptions::as_of_valid_time
 //!
 //! [`Retracted`]: ConfidenceSource::Retracted
 
@@ -215,16 +228,47 @@ impl AletheiaDB {
         reference: LineageRef,
         tt: Timestamp,
     ) -> Result<ComputedConfidence> {
+        // Default the valid-time evaluation coordinate to wallclock now, which
+        // reproduces the prior (single-axis `AS OF` tx-time) behavior exactly.
+        self.computed_confidence_as_of_bitemporal(reference, time::now(), tt)
+    }
+
+    /// The computed confidence of `reference` at the bi-temporal coordinate
+    /// `(valid_time, tt)` (Issue #3382 valid-time-aware follow-up).
+    ///
+    /// Valid time and transaction time are **independent** axes: `tt` scopes
+    /// *which recorded version* is visible ("how confident were we then?"),
+    /// while `valid_time` scopes *terminality* — a fact whose valid interval has
+    /// ended at `valid_time` is [`Retracted`](ConfidenceSource::Retracted),
+    /// whereas a future-dated retraction (or a naturally-bounded interval that
+    /// still contains `valid_time`) is live and contributes its confidence. The
+    /// coordinate flows through the whole recursive lineage closure, so every
+    /// upstream fact is judged terminal-or-not at the same `valid_time`.
+    ///
+    /// [`computed_confidence_as_of`](Self::computed_confidence_as_of) is exactly
+    /// this method with `valid_time = time::now()`, and
+    /// [`computed_confidence`](Self::computed_confidence) is `(now, now)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::VersionNotFound`] if `reference` does not resolve
+    /// to an existing version of its entity.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn computed_confidence_as_of_bitemporal(
+        &self,
+        reference: LineageRef,
+        valid_time: Timestamp,
+        tt: Timestamp,
+    ) -> Result<ComputedConfidence> {
         self.ensure_ref_exists(reference)?;
         let historical = self.historical.read();
 
-        // Valid-time terminality is keyed on wallclock now, independent of the
-        // transaction-time `tt` scope (the `as_of` bound scopes tx-time only): a
-        // fact retracted/bounded effective-future is still LIVE now, and a
-        // naturally-bounded interval that currently contains now still
-        // contributes (Group 2 fix). This is a documented approximation for the
-        // as-of path — see the module docs.
-        let valid_now = time::now();
+        // Valid-time terminality is keyed on the explicit `valid_time`
+        // coordinate, independent of the transaction-time `tt` scope (the two
+        // axes are orthogonal): a fact retracted/bounded effective-after
+        // `valid_time` is still LIVE at `valid_time`, and a naturally-bounded
+        // interval that contains `valid_time` still contributes.
+        let valid_now = valid_time;
         let resolved = self.resolve_ref(reference, tt, valid_now, &historical);
         let mut memo: HashMap<VersionId, ScalarEval> = HashMap::new();
         let mut stack: HashSet<VersionId> = HashSet::new();
@@ -435,7 +479,9 @@ impl AletheiaDB {
 
     /// Resolve a version-pinned reference to the fact version visible at
     /// transaction time `tt`, classifying its terminality against the
-    /// valid-time reference `valid_now` (wallclock now, independent of `tt`).
+    /// valid-time evaluation coordinate `valid_now` (the caller-supplied
+    /// valid-time at which trust is evaluated, defaulting to wallclock now when
+    /// unscoped; independent of `tt`).
     ///
     /// Walks the entity's version chain from its current head backward to the
     /// latest version whose transaction-time start `<= tt`. Its valid interval
@@ -719,9 +765,10 @@ impl AletheiaDB {
     #[must_use]
     pub fn trust_breakdown(&self, reference: LineageRef, options: &TrustOptions) -> TrustBreakdown {
         let tt = options.as_of.unwrap_or_else(time::now);
-        // Valid-time terminality is keyed on wallclock now, independent of the
-        // tx-time `as_of` scope (Group 2 fix), matching `computed_confidence`.
-        let valid_now = time::now();
+        // Valid-time terminality is keyed on the explicit valid-time coordinate
+        // when supplied (Issue #3382), independent of the tx-time `as_of` scope;
+        // omitting it defaults to wallclock now (prior behavior).
+        let valid_now = options.as_of_valid_time.unwrap_or_else(time::now);
         let historical = self.historical.read();
 
         // Compute the full-accuracy scalar values for the WHOLE closure ONCE
@@ -883,7 +930,8 @@ fn leaf_confidence_source(db: &AletheiaDB, resolved: &ResolvedRef) -> (f64, Conf
 }
 
 /// Classify a version's valid interval into a terminal source, if any, relative
-/// to the valid-time reference `valid_now` (wallclock now).
+/// to the valid-time evaluation coordinate `valid_now` (defaults to wallclock
+/// now).
 ///
 /// - An **empty** interval (`start == end`) is a delete tombstone
 ///   ([`ConfidenceSource::Absent`]).
@@ -896,6 +944,13 @@ fn leaf_confidence_source(db: &AletheiaDB, resolved: &ResolvedRef) -> (f64, Conf
 /// Group 2 fix: a fact retracted **effective-future** (still valid now) and a
 /// naturally-bounded interval that currently **contains** now are both LIVE, not
 /// scored `0.0`.
+///
+/// **v1: terminality is END-only.** A not-yet-valid input (`start > valid_now`,
+/// e.g. a #3221 future-dated create) is deliberately still classified live and
+/// contributes its confidence at a coordinate before it is valid — the inverse
+/// of the tx-time `not_yet_recorded` carve-out. This is a conscious v1 decision;
+/// symmetric not-yet-valid (Absent-class) handling that gates on interval START
+/// is a tracked follow-up.
 fn classify_valid_interval(
     start: Timestamp,
     end: Timestamp,
@@ -1332,6 +1387,259 @@ mod tests {
         assert!(
             !cc.has_retracted_inputs,
             "predates-T is not a retraction, must not flag has_retracted_inputs"
+        );
+    }
+
+    // ---- T1a..T1h: valid-time-AWARE terminality (#3382 follow-up) ----
+    //
+    // These exercise the explicit valid-time evaluation coordinate: terminality
+    // is keyed on the EVALUATION coordinate, not wallclock `time::now()`. A fact
+    // whose valid interval has ended at the coordinate is terminal; a
+    // future-dated retraction is NOT yet terminal at an earlier coordinate.
+
+    /// Microseconds in one day (valid-time offset unit for these fixtures).
+    const DAY_US: i64 = 86_400_000_000;
+
+    fn ts(micros: i64) -> Timestamp {
+        Timestamp::new_unchecked(micros, 0)
+    }
+
+    // Far-future transaction time: makes every recorded version (incl. the
+    // retraction) visible, so only the valid-time coordinate governs the result.
+    fn late_tt() -> Timestamp {
+        Timestamp::new_unchecked(i64::MAX / 2, 0)
+    }
+
+    // T1a / T1b: a future-dated retraction is terminal ONLY once the evaluation
+    // valid-time coordinate reaches the cutoff.
+    #[test]
+    fn t1a_t1b_future_retraction_terminal_only_after_cutoff() {
+        let db = AletheiaDB::new().unwrap(); // weakest-link default
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let d = mk(&db, "Merge", None, &[r, r2]);
+        let now = time::now().wallclock();
+        let cutoff = ts(now + DAY_US); // retract effective +1 day
+        if let EntityId::Node(nid) = r.entity {
+            db.retract_node_with_provenance(nid, cutoff, Some(prov(0.9)))
+                .unwrap();
+        }
+
+        // T1a: coordinate BEFORE the cutoff -> r still live -> not terminal.
+        let cc_before = db
+            .computed_confidence_as_of_bitemporal(d, ts(now), late_tt())
+            .unwrap();
+        approx(cc_before.computed, 0.8); // min(0.9 live, 0.8)
+        assert!(
+            !cc_before.has_retracted_inputs,
+            "T1a: future retraction is not terminal before its cutoff"
+        );
+
+        // T1b: coordinate AT/AFTER the cutoff -> r retracted -> terminal.
+        let cc_after = db
+            .computed_confidence_as_of_bitemporal(d, ts(now + 2 * DAY_US), late_tt())
+            .unwrap();
+        approx(cc_after.computed, 0.0);
+        assert!(
+            cc_after.has_retracted_inputs,
+            "T1b: retraction is terminal at/after its cutoff"
+        );
+    }
+
+    // T1c: a bounded-but-currently-valid interval [t0, t1) evaluated at a
+    // coordinate strictly before t1 is NOT terminal.
+    #[test]
+    fn t1c_bounded_currently_valid_not_terminal() {
+        let db = AletheiaDB::new().unwrap();
+        let now = time::now().wallclock();
+        let past = ts(now - DAY_US);
+        let (nid, vid) = db
+            .create_node_with_options_and_lineage(
+                "Doc",
+                PropertyMap::new(),
+                WriteRequestOptions::new()
+                    .with_valid_from(past)
+                    .with_provenance(prov(0.9)),
+                &[],
+            )
+            .unwrap();
+        let r = LineageRef::new(nid, vid);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let d = mk(&db, "Merge", None, &[r, r2]);
+        // Interval [now-1d, now+1d); coordinate now is strictly < t1.
+        db.retract_node_with_provenance(nid, ts(now + DAY_US), Some(prov(0.9)))
+            .unwrap();
+        let cc = db
+            .computed_confidence_as_of_bitemporal(d, ts(now), late_tt())
+            .unwrap();
+        approx(cc.computed, 0.8);
+        assert!(!cc.has_retracted_inputs);
+    }
+
+    // T1d: the exact bug the wallclock-now approximation had. A fact whose
+    // interval has ENDED relative to wallclock now, but had NOT ended at an
+    // earlier coordinate, is live at that earlier coordinate. Mirror: a fact
+    // live now but retracted in the future is terminal at a future coordinate.
+    #[test]
+    fn t1d_as_of_valid_time_differs_from_wallclock_now() {
+        let db = AletheiaDB::new().unwrap();
+        let now = time::now().wallclock();
+        let past_start = ts(now - 2 * DAY_US);
+        let (nid, vid) = db
+            .create_node_with_options_and_lineage(
+                "Doc",
+                PropertyMap::new(),
+                WriteRequestOptions::new()
+                    .with_valid_from(past_start)
+                    .with_provenance(prov(0.9)),
+                &[],
+            )
+            .unwrap();
+        let r = LineageRef::new(nid, vid);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let d = mk(&db, "Merge", None, &[r, r2]);
+        // Retract effective 1 day ago: interval becomes [now-2d, now-1d), which
+        // has ended as of wallclock now.
+        db.retract_node_with_provenance(nid, ts(now - DAY_US), Some(prov(0.9)))
+            .unwrap();
+
+        // At wallclock now r is terminal (unchanged legacy behavior).
+        let cc_now = db.computed_confidence(d).unwrap();
+        approx(cc_now.computed, 0.0);
+        assert!(cc_now.has_retracted_inputs);
+
+        // Evaluated 1.5 days ago the interval had NOT ended -> live (the fix).
+        let earlier = ts(now - DAY_US - DAY_US / 2);
+        let cc_earlier = db
+            .computed_confidence_as_of_bitemporal(d, earlier, late_tt())
+            .unwrap();
+        approx(cc_earlier.computed, 0.8);
+        assert!(
+            !cc_earlier.has_retracted_inputs,
+            "T1d: interval had not ended at the earlier coordinate"
+        );
+
+        // Mirror: a fact valid now but retracted at now+1d is terminal when
+        // evaluated at now+2d, live when evaluated at now.
+        let lr = mk(&db, "Doc", Some(0.7), &[]);
+        let dd = mk(&db, "Merge", None, &[lr]);
+        if let EntityId::Node(n) = lr.entity {
+            db.retract_node_with_provenance(n, ts(now + DAY_US), Some(prov(0.7)))
+                .unwrap();
+        }
+        let cc_future = db
+            .computed_confidence_as_of_bitemporal(dd, ts(now + 2 * DAY_US), late_tt())
+            .unwrap();
+        approx(cc_future.computed, 0.0);
+        assert!(
+            cc_future.has_retracted_inputs,
+            "T1d mirror: terminal at a future coordinate past the end"
+        );
+        let cc_live = db
+            .computed_confidence_as_of_bitemporal(dd, ts(now), late_tt())
+            .unwrap();
+        approx(cc_live.computed, 0.7);
+        assert!(!cc_live.has_retracted_inputs);
+    }
+
+    // T1e: back-compat. Omitting the valid-time coordinate reproduces prior
+    // behavior exactly (valid_now == wallclock now) across all entry points.
+    #[test]
+    fn t1e_back_compat_no_valid_coordinate_matches_now() {
+        let db = AletheiaDB::new().unwrap();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let d = mk(&db, "Merge", None, &[r]);
+        let cc_plain = db.computed_confidence(d).unwrap();
+        let cc_as_of = db.computed_confidence_as_of(d, time::now()).unwrap();
+        let cc_bi = db
+            .computed_confidence_as_of_bitemporal(d, time::now(), time::now())
+            .unwrap();
+        approx(cc_plain.computed, 0.9);
+        approx(cc_plain.computed, cc_as_of.computed);
+        approx(cc_plain.computed, cc_bi.computed);
+        // Default TrustOptions (no valid coordinate) also equals now.
+        let bd = db.trust_breakdown(d, &TrustOptions::new());
+        approx(bd.confidence, cc_plain.computed);
+    }
+
+    // T1f: carve-out preserved WITH a valid-time coordinate supplied. start==end
+    // is Absent; a version predating the as-of tt is Absent but NOT a retraction.
+    #[test]
+    fn t1f_carveout_preserved_with_valid_coordinate() {
+        let past = ts(time::now().wallclock() - DAY_US);
+        assert_eq!(
+            classify_valid_interval(past, past, past),
+            Some(ConfidenceSource::Absent),
+            "start==end is an Absent tombstone at any coordinate"
+        );
+
+        let db = AletheiaDB::new().unwrap();
+        let t_before = time::now(); // captured BEFORE the fact is recorded
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let cc = db
+            .computed_confidence_as_of_bitemporal(r, time::now(), t_before)
+            .unwrap();
+        approx(cc.computed, 0.0); // did not exist at tt
+        assert!(
+            !cc.has_retracted_inputs,
+            "T1f: predates-tt is not a retraction even with a valid coordinate"
+        );
+    }
+
+    // T1g: boundary — a coordinate exactly equal to the interval end is terminal
+    // (half-open [start, end)).
+    #[test]
+    fn t1g_boundary_coordinate_equals_end_is_terminal() {
+        let db = AletheiaDB::new().unwrap();
+        let now = time::now().wallclock();
+        let r = mk(&db, "Doc", Some(0.9), &[]);
+        let r2 = mk(&db, "Doc", Some(0.8), &[]);
+        let d = mk(&db, "Merge", None, &[r, r2]);
+        let cutoff = ts(now + DAY_US);
+        if let EntityId::Node(nid) = r.entity {
+            db.retract_node_with_provenance(nid, cutoff, Some(prov(0.9)))
+                .unwrap();
+        }
+        let cc = db
+            .computed_confidence_as_of_bitemporal(d, cutoff, late_tt())
+            .unwrap();
+        approx(cc.computed, 0.0);
+        assert!(
+            cc.has_retracted_inputs,
+            "T1g: coordinate == interval end is terminal (half-open)"
+        );
+    }
+
+    // T1h: the valid-time coordinate flows through the recursive closure so a
+    // deep input is judged terminal-or-not at the SAME coordinate.
+    #[test]
+    fn t1h_valid_coordinate_flows_through_recursive_closure() {
+        let db = AletheiaDB::new().unwrap();
+        let now = time::now().wallclock();
+        let r = mk(&db, "Doc", Some(0.9), &[]); // future-retracted, 2 levels down
+        let m = mk(&db, "Merge", None, &[r]); // intermediate pass-through
+        let sibling = mk(&db, "Doc", Some(0.8), &[]);
+        let top = mk(&db, "Merge", None, &[m, sibling]);
+        let cutoff = ts(now + DAY_US);
+        if let EntityId::Node(nid) = r.entity {
+            db.retract_node_with_provenance(nid, cutoff, Some(prov(0.9)))
+                .unwrap();
+        }
+        // Before cutoff: deep input r live -> not terminal.
+        let cc_before = db
+            .computed_confidence_as_of_bitemporal(top, ts(now), late_tt())
+            .unwrap();
+        approx(cc_before.computed, 0.8); // min(m=0.9, sibling=0.8)
+        assert!(!cc_before.has_retracted_inputs);
+        // After cutoff: deep input judged terminal at the SAME coordinate and
+        // dominates up the chain.
+        let cc_after = db
+            .computed_confidence_as_of_bitemporal(top, ts(now + 2 * DAY_US), late_tt())
+            .unwrap();
+        approx(cc_after.computed, 0.0);
+        assert!(
+            cc_after.has_retracted_inputs,
+            "T1h: deep retracted input dominates at the shared coordinate"
         );
     }
 

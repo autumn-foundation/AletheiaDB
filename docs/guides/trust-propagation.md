@@ -144,7 +144,7 @@ value, while `has_retracted_inputs` bubbles up the whole subtree. `Retracted` an
 `Absent` are **distinct** classifications so the explanation tells "we withdrew
 this as of a valid time" apart from "this is gone".
 
-## Bi-temporal AS OF (and the valid-time-now approximation)
+## Bi-temporal AS OF (transaction time and valid time are independent axes)
 
 `computed_confidence_as_of(reference, T)` evaluates the policy over lineage +
 confidences **as recorded at transaction time `T`**:
@@ -157,16 +157,40 @@ confidences **as recorded at transaction time `T`**:
 - **No-op AS OF:** with `T` at or after the latest transaction time, the result
   equals the unscoped `computed_confidence`.
 
-**Valid-time terminality is keyed on wallclock `time::now()`, not on `T`** — the
-`AS OF` coordinate scopes **transaction-time only**. A fact whose valid interval
-has *ended as of now* (`valid_to <= now`) is `Retracted`; a fact retracted
-**effective-future** (still valid now) or holding a naturally-bounded interval
-that currently **contains** now is **live** and contributes its confidence. Using
-wallclock now for both the now-eval and the as-of path is a **documented
-approximation** (a fully valid-time-scoped trust evaluation — replaying valid-time
-terminality as it stood at `T` — is a tracked follow-up). A version that merely
-**predates** `T` (not yet recorded at `T`) is `Absent` and contributes `0.0`, but
-is **not** a retraction and does not flag `has_retracted_inputs`.
+**Valid-time terminality is keyed on an explicit valid-time coordinate**
+(Issue #3382). Transaction time and valid time are **independent** axes: `T`
+scopes *which recorded version is visible*, while the valid-time coordinate
+scopes *terminality*. A fact whose valid interval has *ended at the coordinate*
+(`valid_to <= valid_now`) is `Retracted`; a fact retracted **effective-after**
+the coordinate (still valid there) or holding a naturally-bounded interval that
+**contains** the coordinate is **live** and contributes its confidence. The
+coordinate flows through the whole recursive lineage closure, so every upstream
+fact is judged terminal-or-not at the same valid time.
+
+Supply the coordinate via
+`computed_confidence_as_of_bitemporal(reference, valid_time, T)` (scalar) or
+`TrustOptions::with_as_of_valid_time(valid_time)` (breakdown). **Omitting it
+defaults the coordinate to wallclock `time::now()`, reproducing the prior
+behavior exactly:** `computed_confidence` evaluates at `(now, now)`, and
+`computed_confidence_as_of(reference, T)` evaluates valid time at `now` while
+scoping transaction time to `T`.
+
+```rust
+// Evaluate terminality as it stood at an earlier valid-time coordinate:
+// a fact whose interval has since ended is still live at `earlier`.
+let cc = db.computed_confidence_as_of_bitemporal(reference, earlier, tt)?;
+
+// Same axis in the explainable breakdown:
+let bd = db.trust_breakdown(
+    reference,
+    &TrustOptions::new().with_as_of_valid_time(earlier),
+);
+```
+
+A version that merely **predates** `T` (not yet recorded at `T`) is `Absent` and
+contributes `0.0`, but is **not** a retraction and does not flag
+`has_retracted_inputs` — this transaction-time carve-out is unaffected by the
+valid-time coordinate.
 
 ## Cycle & depth safety
 
