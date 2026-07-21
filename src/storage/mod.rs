@@ -21,7 +21,6 @@ pub(crate) mod cold_change_directory;
 pub mod compression;
 pub mod current;
 pub mod historical;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod index_persistence;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod migration;

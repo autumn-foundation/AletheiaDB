@@ -86,16 +86,20 @@ pub mod graph;
 pub mod loader;
 pub mod manifest;
 /// Persistence operations implementation.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod operations;
 /// Index-layer key-rotation re-encryption engine (Issue #488).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod reencrypt;
 pub mod strings;
 pub mod temporal;
 pub mod temporal_adjacency;
 /// Persistence mutation tracking.
 pub mod tracker;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod vector;
 /// Background persistence worker thread.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod worker;
 
 #[cfg(test)]
@@ -109,7 +113,9 @@ pub use api::{
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 pub use reencrypt::{IndexKeyRotation, RotationError, RotationProgress, RotationStatus};
 
 /// Current manifest format version.
@@ -372,6 +378,7 @@ pub(crate) fn fsync_dir(dir: &std::path::Path) {
 ///     vec![],
 /// )?;
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_indexes_parallel(
     graph_path: &std::path::Path,
     temporal_path: Option<&std::path::Path>,
@@ -391,6 +398,7 @@ pub fn load_indexes_parallel(
 /// directory is unaffected). Kept in lockstep with the cipher-aware loaders so
 /// this alternate parallel entry point never fails closed on an encrypted
 /// directory.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_indexes_parallel_with_cipher(
     graph_path: &std::path::Path,
     temporal_path: Option<&std::path::Path>,

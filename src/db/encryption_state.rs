@@ -355,7 +355,7 @@ pub(crate) fn write_encryption_state_durable(
 
     std::fs::create_dir_all(data_dir)
         .map_err(|e| StorageError::io_error(format!("Failed to create data dir: {e}")))?;
-    crate::db::rotation::write_durable(&encryption_state_path(data_dir), body.as_bytes())
+    crate::db::durable_write::write_durable(&encryption_state_path(data_dir), body.as_bytes())
 }
 
 /// Serialize the enabled authority's key SOURCE line(s).

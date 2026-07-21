@@ -13,8 +13,11 @@ use crate::query::planner::Statistics;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::tracker::PersistenceTracker;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::storage::index_persistence::worker::spawn_background_persistence_thread;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
@@ -468,6 +471,10 @@ impl AletheiaDB {
     ///
     /// Returns an error if the TOML file cannot be read or parsed, if WAL
     /// initialization fails, or if index loading fails.
+    ///
+    /// Durability entry point; absent on the wasm32 ephemeral profile (use
+    /// [`Self::new`]).
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn open_from_env() -> Result<Self> {
         if let Some(path) = crate::config::config_path_from_env() {
@@ -525,6 +532,10 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// Durability entry point; absent on the wasm32 ephemeral profile (use
+    /// [`Self::new`]).
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         Self::with_unified_config(crate::config::durable_config_for_data_dir(
@@ -745,6 +756,7 @@ impl AletheiaDB {
             // pending disable) reproduces prior behavior exactly. A ledger is either
             // an enable OR a disable ledger, never both, so this never collides with
             // the enable-resume path below.
+            #[cfg(not(target_arch = "wasm32"))]
             let disable_resume = if config.persistence.enabled && config.encryption.enabled {
                 crate::db::rotation::disable_resume_ciphers(
                     &config.persistence.data_dir,
@@ -753,6 +765,9 @@ impl AletheiaDB {
             } else {
                 None
             };
+            // Ephemeral wasm profile has no durable disk state to resume.
+            #[cfg(target_arch = "wasm32")]
+            let disable_resume: Option<()> = None;
             if disable_resume.is_some() {
                 // Force the plaintext (end-state) build; the resume read passes use
                 // the decrypt ciphers resolved above, and the authority is flipped to
@@ -771,6 +786,7 @@ impl AletheiaDB {
             // passes produce. The WAL is handled separately by the pre-read hook.
             // `None` on the common path (no pending enable) reproduces prior
             // behavior exactly.
+            #[cfg(not(target_arch = "wasm32"))]
             let enable_resume = if config.persistence.enabled && !config.encryption.enabled {
                 crate::db::rotation::enable_resume_ciphers(
                     &config.persistence.data_dir,
@@ -779,6 +795,9 @@ impl AletheiaDB {
             } else {
                 None
             };
+            // Ephemeral wasm profile has no durable disk state to resume.
+            #[cfg(target_arch = "wasm32")]
+            let enable_resume: Option<()> = None;
 
             // Create encryption manager if encryption is enabled
             let encryption_manager = if config.encryption.enabled {
@@ -813,6 +832,7 @@ impl AletheiaDB {
             // otherwise `None` reproduces prior behavior exactly. Computed here,
             // before the WAL is built, so both keyrings are provisioned in
             // lockstep. See `resolve_provisioned_key_version` for precedence.
+            #[cfg(not(target_arch = "wasm32"))]
             let provisioned_key_version = if config.encryption.enabled && config.persistence.enabled
             {
                 Some(crate::db::rotation::resolve_provisioned_key_version(
@@ -823,6 +843,9 @@ impl AletheiaDB {
             } else {
                 None
             };
+            // Ephemeral wasm profile: no durable on-disk key-version state.
+            #[cfg(target_arch = "wasm32")]
+            let provisioned_key_version: Option<u32> = None;
 
             let wal_system_config = ConcurrentWalSystemConfig {
                 wal_dir: config.wal.wal_dir,
@@ -860,6 +883,7 @@ impl AletheiaDB {
             // Without this the read below fails on new-DEK frames before
             // `resume_pending_rotation` (further down) can install the new
             // generation. Additive: a no-op when no rotation is pending.
+            #[cfg(not(target_arch = "wasm32"))]
             if config.encryption.enabled && config.persistence.enabled {
                 crate::db::rotation::install_pending_wal_generations(
                     &wal,
@@ -935,6 +959,7 @@ impl AletheiaDB {
                 // half-wrapped index dir loads and the resume wrap pass publishes
                 // `AEIX` the same open() then reads back. Otherwise the index cipher
                 // comes from the (enabled) encryption manager as before.
+                #[cfg(not(target_arch = "wasm32"))]
                 let index_cipher = enable_resume
                     .as_ref()
                     .map(|e| Arc::clone(&e.index))
@@ -943,6 +968,12 @@ impl AletheiaDB {
                             .as_ref()
                             .map(|mgr| Arc::clone(mgr.index_cipher()))
                     });
+                // Ephemeral wasm profile: no enable-resume ledger; index cipher
+                // (if any) comes solely from the encryption manager.
+                #[cfg(target_arch = "wasm32")]
+                let index_cipher = encryption_manager
+                    .as_ref()
+                    .map(|mgr| Arc::clone(mgr.index_cipher()));
                 // Issue #488 version-provisioning: build the index keyring at the
                 // resolved on-disk version so `index_rotation_status` /
                 // `encryption verify` classify rotated files correctly after a
@@ -1104,6 +1135,7 @@ impl AletheiaDB {
             // is loaded and the WAL is replayed into current state and captured by
             // a synchronous `persist_indexes()`. This pass still installs both WAL
             // generations so the replay read decrypts every segment.
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(ref manager) = persistence_manager
                 && config.encryption.enabled
             {
@@ -1122,6 +1154,7 @@ impl AletheiaDB {
             // has NOT yet flipped the encryption.state authority, so
             // `config.encryption.enabled` is still false and that gated path never
             // fires. A guarded no-op when no pending-enable ledger exists.
+            #[cfg(not(target_arch = "wasm32"))]
             db.resume_pending_enable()?;
 
             // Issue #3616 PR4: resume an interrupted encrypted → plaintext disable
@@ -1131,12 +1164,14 @@ impl AletheiaDB {
             // Distinct from the rotation/enable paths: a pending disable ledger forced
             // `config.encryption.enabled=false` above, so those gated paths never
             // fire. A guarded no-op when no pending-disable ledger exists.
+            #[cfg(not(target_arch = "wasm32"))]
             db.resume_pending_disable()?;
 
             // Load indexes on startup if enabled
             if let Some(ref manager) = persistence_manager
                 && config.persistence.load_on_startup
             {
+                #[cfg(not(target_arch = "wasm32"))]
                 let loaded_lsn =
                     crate::storage::index_persistence::operations::load_indexes_startup(
                         manager,
@@ -1146,6 +1181,9 @@ impl AletheiaDB {
                         &db.edge_id_gen,
                         &db.version_id_gen,
                     );
+                // Ephemeral wasm profile: no persisted indexes to load on startup.
+                #[cfg(target_arch = "wasm32")]
+                let loaded_lsn: Option<u64> = None;
 
                 // Issue #3420: the manifest LSN is a second durability floor for
                 // the allocator. Normally the segment scan above already seeded
@@ -1369,6 +1407,7 @@ impl AletheiaDB {
             // when no WAL rotation is pending. MUST run BEFORE the background
             // persistence thread starts, so the synchronous persist is the one
             // that closes the window (not a racy async checkpoint).
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(ref manager) = persistence_manager
                 && config.encryption.enabled
                 && config.persistence.load_on_startup
@@ -1395,6 +1434,7 @@ impl AletheiaDB {
             // with this running worker: the worker must NEVER run with a plaintext
             // manager while an enable ledger is pending. The `index_cipher`
             // (config.rs) and cold `with_cipher_versioned` (below) wiring enforce this.
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(ref tracker) = persistence_tracker
                 && let Some(ref manager) = persistence_manager
             {
@@ -1431,7 +1471,9 @@ impl AletheiaDB {
             wire_temporal_indexes(&db);
             reconcile_namespace_registry(&db);
 
-            // Initialize cold storage if enabled
+            // Initialize cold storage if enabled.
+            // The redb-backed cold tier is absent on the wasm32 ephemeral profile.
+            #[cfg(not(target_arch = "wasm32"))]
             if enable_cold_storage && let Some(cold_storage_path) = cold_storage_path {
                 // Create Redb cold storage backend, with optional encryption cipher
                 let mut cold_storage = RedbColdStorage::new(&cold_storage_path, RedbConfig::new())?;
@@ -1575,7 +1617,7 @@ impl AletheiaDB {
             // diagnostic, surface an actionable `FailedPrecondition` telling the
             // operator to reopen with the crypto-shred feature enabled. A guarded
             // no-op when no such pending re-wrap exists.
-            #[cfg(not(feature = "audit-export"))]
+            #[cfg(all(not(feature = "audit-export"), not(target_arch = "wasm32")))]
             if let Some(manager) = persistence_manager
                 .as_ref()
                 .filter(|_| config.encryption.enabled)

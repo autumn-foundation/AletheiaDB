@@ -1421,6 +1421,13 @@ impl HnswIndex {
         Ok(Self { config })
     }
 
+    /// Stub mirror of the native builder entry point (`HnswIndexBuilder::build`).
+    /// Construction succeeds; every add/search operation returns
+    /// `NotImplemented` on wasm.
+    pub(crate) fn new_internal(config: HnswConfig) -> Result<Self> {
+        Ok(Self { config })
+    }
+
     /// Return the configuration used to create this index.
     pub fn config(&self) -> HnswConfig {
         self.config.clone()

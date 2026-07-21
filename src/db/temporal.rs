@@ -608,6 +608,7 @@ impl AletheiaDB {
         // returns lightweight `RawChange`s (no label allocation), already filtered/resumed and
         // bounded. The cold-tier scan (disk I/O) happens after the lock is released using the
         // cloned tiered handle.
+        #[cfg(not(target_arch = "wasm32"))]
         let (mut changes, tiered) = {
             let hist = self.historical.read();
             (
@@ -615,12 +616,19 @@ impl AletheiaDB {
                 hist.tiered_storage_arc(),
             )
         };
+        // Ephemeral wasm profile is hot-only: no cold tier to merge.
+        #[cfg(target_arch = "wasm32")]
+        let mut changes = self
+            .historical
+            .read()
+            .collect_changes(&tx_window, valid, label, cursor, bound);
 
         // Include versions that have migrated out of the hot maps into cold storage, so the feed
         // is complete when tiered storage is enabled. The cold scan applies the same filter +
         // resume + bound; dedup against hot by (kind, version_id) covers a version transiently
         // present in both tiers during migration (its cursor is identical in both, so it survives
         // in the smaller-cursor region of each bounded set and dedup keeps the hot copy).
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(tiered) = tiered {
             let mut seen: std::collections::HashSet<(u8, u64)> = changes
                 .iter()

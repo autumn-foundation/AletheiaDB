@@ -42,9 +42,19 @@ pub mod constraint_builder;
 /// reuses the audit Ed25519 signing key, so the module needs `crate::audit`.
 #[cfg(feature = "audit-export")]
 pub mod crypto_shred;
+/// Crash-safe durable file write primitive (temp → fsync → rename → dir fsync).
+pub(crate) mod durable_write;
 /// Encrypted → plaintext migration engine — `encryption disable` (Issue #3616 PR4).
+///
+/// Disk/encryption migration engine (redb cold tier + index re-encryption);
+/// absent on the wasm32 ephemeral profile.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod encryption_disable;
 /// Plaintext → encrypted-at-rest migration engine — `encryption enable` (Issue #3616 PR3).
+///
+/// Disk/encryption migration engine (redb cold tier + index persistence worker);
+/// absent on the wasm32 ephemeral profile.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod encryption_enable;
 /// Durable encryption-state authority — `{data_dir}/encryption.state` (Issue #3616).
 pub(crate) mod encryption_state;
@@ -72,6 +82,11 @@ pub mod pitr;
 /// Query builder and executor hooks.
 pub mod query;
 /// Index-layer key rotation orchestration (Issue #488).
+///
+/// Disk/encryption key-rotation engine (redb cold tier + index re-encryption);
+/// absent on the wasm32 ephemeral profile. The shared crash-safe file-write
+/// primitive lives in [`durable_write`] so it stays available on all targets.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rotation;
 /// Graph schema discovery (labels, edge types, property keys).
 pub mod schema;
