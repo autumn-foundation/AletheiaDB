@@ -573,10 +573,14 @@ operations the batch carries.
 ```
 
 Supported `op` values: `create_node`, `create_edge`, `update_node`,
-`update_edge`, `delete_node`, `delete_edge`. Each mirrors its single-op
-tool's fields, including the optional #3221 `valid_time` (ISO 8601 or
-microseconds since epoch) and the optional #3224 `provenance` bundle on
-creates/updates.
+`update_edge`, `delete_node`, `delete_edge`, and `compare_and_set_node`. Each
+mirrors its single-op tool's fields, including the optional #3221 `valid_time`
+(ISO 8601 or microseconds since epoch) and the optional #3224 `provenance`
+bundle on creates/updates. `compare_and_set_node` is a version-precondition
+CAS on a committed node (full-replace property map + `expected_version`): if the
+node's committed head has moved off `expected_version`, the CAS fails at the
+commit guard and — like any batch failure — aborts the **whole** batch → zero
+writes, so a fenced step-record batch never lands a partial write.
 
 **Local refs.** A `create_node` may carry a `ref` alias (unique within the
 batch, must not start with `$`, must not be purely numeric). Later

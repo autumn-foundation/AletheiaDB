@@ -256,6 +256,43 @@ pub enum BatchOperation {
         )]
         valid_time: Option<String>,
     },
+    /// Compare-and-set a committed node's properties, conditional on its head
+    /// still being `expected_version` (DBOS Phase 3e). Full-replace semantics
+    /// (like the single-op `compare_and_set_node`): the provided map becomes the
+    /// node's entire property state. A stale version aborts the WHOLE batch
+    /// (all-or-nothing) with `FAILED_PRECONDITION` and zero writes — letting a
+    /// step-record batch be atomically fenced on the owning run's version.
+    CompareAndSetNode {
+        /// The committed node id to compare-and-set (local `$refs` are rejected
+        /// in v1, like update/delete).
+        #[schemars(
+            description = "The committed node id to compare-and-set. A node created in the same \
+                           batch ('$ref') is not supported in v1."
+        )]
+        node_id: BatchNodeRef,
+        /// The version the node's committed head must still be for the write to
+        /// apply.
+        #[schemars(
+            description = "The version id the node's committed head must still equal; if it has \
+                           advanced (e.g. a successor stole the run), the whole batch aborts."
+        )]
+        expected_version: u64,
+        /// Full-replacement properties (NOT a PATCH merge).
+        #[schemars(
+            description = "Full replacement property map (not merged): the node's entire property \
+                           state is replaced with these key-value pairs."
+        )]
+        properties: Option<HashMap<String, serde_json::Value>>,
+        /// Optional valid time (ISO 8601 or microseconds since epoch).
+        #[schemars(
+            description = "Optional valid time: when this update became true in the real world \
+                           (ISO 8601 / RFC 3339 or integer microseconds since epoch)"
+        )]
+        valid_time: Option<String>,
+        /// Optional write-time provenance bundle for this version.
+        #[schemars(description = "Optional write-time provenance bundle for this version")]
+        provenance: Option<ProvenanceRequest>,
+    },
 }
 
 // ============================================================================
@@ -313,6 +350,13 @@ enum PlannedOp {
     DeleteEdge {
         edge_id: EdgeId,
         valid_from: Option<Timestamp>,
+    },
+    CompareAndSetNode {
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+        provenance: Option<Provenance>,
     },
 }
 
@@ -684,6 +728,37 @@ impl AletheiaMcpServer {
                     PlannedOp::DeleteEdge {
                         edge_id,
                         valid_from: self.batch_valid_time(index, valid_time)?,
+                    }
+                }
+                BatchOperation::CompareAndSetNode {
+                    node_id,
+                    expected_version,
+                    properties,
+                    valid_time,
+                    provenance,
+                } => {
+                    // Committed node id only (local refs rejected), one write
+                    // per committed entity per batch — same as update/delete.
+                    let node_id = self.batch_committed_node(
+                        index,
+                        node_id,
+                        "compare-and-set",
+                        &mut written_nodes,
+                    )?;
+                    let expected_version = crate::core::id::VersionId::new(*expected_version)
+                        .map_err(|e| {
+                            self.batch_invalid(
+                                index,
+                                format!("Operation {index}: invalid expected_version: {e}"),
+                                serde_json::Map::new(),
+                            )
+                        })?;
+                    PlannedOp::CompareAndSetNode {
+                        node_id,
+                        expected_version,
+                        properties: self.batch_properties(index, properties.as_ref())?,
+                        valid_from: self.batch_valid_time(index, valid_time)?,
+                        provenance: self.batch_provenance(index, provenance.clone())?,
                     }
                 }
             };
@@ -1307,6 +1382,43 @@ impl AletheiaMcpServer {
                         "op": "delete_edge",
                         "index": index,
                         "edge_id": edge_id.as_u64()
+                    }));
+                }
+                PlannedOp::CompareAndSetNode {
+                    node_id,
+                    expected_version,
+                    properties,
+                    valid_from,
+                    provenance,
+                } => {
+                    // A CAS against a node CREATED earlier in this batch is a
+                    // guessed-id write against an uncommitted entity — the
+                    // documented v1-scope rejection (mirrors update/delete).
+                    if let Some(&created_at) = created_node_ids.get(&node_id.as_u64()) {
+                        return Err(BatchAbort::BatchCreatedRefWrite {
+                            index,
+                            entity: "node",
+                            id: node_id.as_u64(),
+                            created_at_index: created_at,
+                            verb: "compare-and-set",
+                        });
+                    }
+                    let options = write_options(*valid_from, provenance.clone());
+                    // A CasMismatch aborts the whole batch (all-or-nothing) via
+                    // op_err -> BatchAbort::Op -> FAILED_PRECONDITION.
+                    let version_id = tx
+                        .compare_and_set_node_with_options(
+                            *node_id,
+                            *expected_version,
+                            properties.clone(),
+                            options,
+                        )
+                        .map_err(op_err(index))?;
+                    results.push(json!({
+                        "op": "compare_and_set_node",
+                        "index": index,
+                        "node_id": node_id.as_u64(),
+                        "version_id": version_id.as_u64()
                     }));
                 }
             }
