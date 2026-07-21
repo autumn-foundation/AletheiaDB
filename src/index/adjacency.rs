@@ -16,6 +16,7 @@
 use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::hash::BuildHasherDefault;
 
@@ -254,9 +255,13 @@ impl AdjacencyIndex {
         let edge_count = edges.len();
 
         // Sort by source node, then target node for deterministic ordering.
-        // We use parallel sort for performance on large graphs.
+        // We use parallel sort for performance on large graphs (serial on wasm,
+        // which has no rayon); the total key yields identical ordering either way.
         // We include edge_id for canonical deterministic ordering.
+        #[cfg(not(target_arch = "wasm32"))]
         edges.par_sort_unstable_by_key(|(src, target, edge_id, _)| (*src, *target, *edge_id));
+        #[cfg(target_arch = "wasm32")]
+        edges.sort_unstable_by_key(|(src, target, edge_id, _)| (*src, *target, *edge_id));
 
         // Pre-allocate assuming some average degree > 1 to avoid resizing
         let estimated_nodes = (edge_count / 4).max(16);

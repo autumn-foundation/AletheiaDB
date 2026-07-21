@@ -15,6 +15,9 @@ pub mod backup;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod checkpoint;
 pub(crate) mod cold_change_directory;
+// Only reached from the (gated) cold-storage / index-persistence tiers, which
+// use zstd — unavailable on wasm32.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod compression;
 pub mod current;
 pub mod historical;
